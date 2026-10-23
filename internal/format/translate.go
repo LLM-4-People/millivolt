@@ -183,6 +183,16 @@ func validateUsage(u ir.Usage) error {
 	if _, err := metrics.SumCounts(u.InputTokens, u.OutputTokens); err != nil {
 		return fmt.Errorf("usage: %w", err)
 	}
+	// InputTokens is the full prompt count, so the cached subsets cannot
+	// exceed it. Anthropic's encoder subtracts them; keeping the invariant
+	// here makes that subtraction non-negative on every path.
+	cached, err := metrics.SumCounts(u.CacheReadTokens, u.CacheWriteTokens)
+	if err != nil {
+		return fmt.Errorf("usage: %w", err)
+	}
+	if cached > u.InputTokens {
+		return fmt.Errorf("usage: %w", metrics.ErrMetricRange)
+	}
 	return nil
 }
 

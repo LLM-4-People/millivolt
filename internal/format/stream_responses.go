@@ -145,7 +145,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.created = time.Now().Unix()
 			}
 			if resp.Usage != nil {
-				d.usage = responsesUsageToIR(resp.Usage)
+				usage := responsesUsageToIR(resp.Usage)
+				if err := validateUsage(usage); err != nil {
+					return nil, err
+				}
+				d.usage = usage
 			}
 			d.started = true
 			u := d.usage
@@ -298,7 +302,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 			if resp.Usage != nil {
-				d.usage = responsesUsageToIR(resp.Usage)
+				usage := responsesUsageToIR(resp.Usage)
+				if err := validateUsage(usage); err != nil {
+					return nil, err
+				}
+				d.usage = usage
 			}
 			d.terminal = true
 			d.closeAll(resp.Output)
@@ -455,15 +463,19 @@ func (e *ResponsesStreamEncoder) startStream() error {
 	if e.created == 0 {
 		e.created = time.Now().Unix()
 	}
+	response, err := e.responseObject("in_progress", nil)
+	if err != nil {
+		return err
+	}
 	if err := e.emit("response.created", map[string]any{
 		"type": "response.created", "sequence_number": e.nextSeq(),
-		"response": e.responseObject("in_progress", nil),
+		"response": response,
 	}); err != nil {
 		return err
 	}
 	return e.emit("response.in_progress", map[string]any{
 		"type": "response.in_progress", "sequence_number": e.nextSeq(),
-		"response": e.responseObject("in_progress", nil),
+		"response": response,
 	})
 }
 
@@ -477,6 +489,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 	switch ev.Type {
 	case ir.EventStart:
 		if ev.Response != nil {
+			if err := validateUsage(ev.Response.Usage); err != nil {
+				return err
+			}
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
 			e.usage = ev.Response.Usage
 		}
@@ -701,6 +716,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			e.finish = ev.Finish.Reason
 		}
 		if ev.Usage != nil {
+			if err := validateUsage(*ev.Usage); err != nil {
+				return err
+			}
 			e.usage = *ev.Usage
 		}
 	case ir.EventDone:
@@ -737,13 +755,17 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 	case e.finish == ir.FinishLength || e.finish == ir.FinishContentFilter || e.finish == ir.FinishOther:
 		status = "incomplete"
 	}
+	response, err := e.responseObject(status, e.outputItems())
+	if err != nil {
+		return err
+	}
 	return e.emit("response."+status, map[string]any{
 		"type": "response." + status, "sequence_number": e.nextSeq(),
-		"response": e.responseObject(status, e.outputItems()),
+		"response": response,
 	})
 }
 
-func (e *ResponsesStreamEncoder) responseObject(status string, output []map[string]any) map[string]any {
+func (e *ResponsesStreamEncoder) responseObject(status string, output []map[string]any) (map[string]any, error) {
 	if output == nil {
 		output = []map[string]any{}
 	}
@@ -776,9 +798,13 @@ func (e *ResponsesStreamEncoder) responseObject(status string, output []map[stri
 		obj["error"] = map[string]any{"code": code, "message": e.failed.Message}
 	}
 	if e.usage != (ir.Usage{}) {
-		obj["usage"] = encodeResponsesUsage(e.usage)
+		usage, err := encodeResponsesUsage(e.usage)
+		if err != nil {
+			return nil, err
+		}
+		obj["usage"] = usage
 	}
-	return obj
+	return obj, nil
 }
 
 func (e *ResponsesStreamEncoder) outputItems() []map[string]any {

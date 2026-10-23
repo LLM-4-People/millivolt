@@ -1223,7 +1223,11 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		StopSequence: in.StopSequence,
 		Warnings:     warns,
 	}
-	resp.Usage = anthropicUsageToIR(in.Usage)
+	usage, err := anthropicUsageToIR(in.Usage)
+	if err != nil {
+		return nil, err
+	}
+	resp.Usage = usage
 	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}
@@ -1234,18 +1238,26 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 	return resp, nil
 }
 
-func anthropicUsageToIR(u anthropicWireUsage) ir.Usage {
+func anthropicUsageToIR(u anthropicWireUsage) (ir.Usage, error) {
 	out := ir.Usage{
 		OutputTokens:     u.OutputTokens,
 		CacheReadTokens:  u.CacheReadInputTokens,
 		CacheWriteTokens: u.CacheCreationInputTokens,
 	}
-	out.InputTokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-	out.TotalTokens = out.InputTokens + out.OutputTokens
+	input, err := metrics.SumCounts(u.InputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	if err != nil {
+		return ir.Usage{}, fmt.Errorf("usage: %w", err)
+	}
+	total, err := metrics.SumCounts(input, u.OutputTokens)
+	if err != nil {
+		return ir.Usage{}, fmt.Errorf("usage: %w", err)
+	}
+	out.InputTokens = input
+	out.TotalTokens = total
 	if u.OutputTokensDetails != nil {
 		out.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
 	}
-	return out
+	return out, nil
 }
 
 func anthropicFinishReason(reason string) ir.FinishReason {
@@ -1271,6 +1283,9 @@ func anthropicFinishReason(reason string) ir.FinishReason {
 // Anthropic message.
 func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
+		return nil, err
+	}
+	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}
 	blocks := encodeAnthropicBlocks(resp.Blocks, ir.RoleAssistant, &resp.Warnings)

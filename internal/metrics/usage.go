@@ -174,12 +174,15 @@ var CanonicalUsageFields = []string{
 // prompt_tokens/completion_tokens; Anthropic uses input_tokens/output_tokens.
 // A per-provider override (config usage_keys) prepends a custom path.
 var usageKeyPaths = map[string][]string{
-	"input_tokens":       {"prompt_tokens", "input_tokens"},
-	"output_tokens":      {"completion_tokens", "output_tokens"},
-	"total_tokens":       {"total_tokens"},
-	"cache_read_tokens":  {"prompt_tokens_details.cached_tokens", "cache_read_input_tokens", "cache_read_tokens"},
-	"cache_write_tokens": {"prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.created_cache_tokens", "cache_creation_input_tokens", "cache_write_tokens"},
-	"reasoning_tokens":   {"completion_tokens_details.reasoning_tokens", "reasoning_tokens"},
+	"input_tokens":  {"prompt_tokens", "input_tokens"},
+	"output_tokens": {"completion_tokens", "output_tokens"},
+	"total_tokens":  {"total_tokens"},
+	"cache_read_tokens": {"prompt_tokens_details.cached_tokens", "input_tokens_details.cached_tokens",
+		"cache_read_input_tokens", "cache_read_tokens"},
+	"cache_write_tokens": {"prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.created_cache_tokens",
+		"input_tokens_details.cache_write_tokens", "cache_creation_input_tokens", "cache_write_tokens"},
+	"reasoning_tokens": {"completion_tokens_details.reasoning_tokens", "output_tokens_details.reasoning_tokens",
+		"reasoning_tokens"},
 }
 
 // ParseUsage extracts token usage from a decoded "usage" object (already

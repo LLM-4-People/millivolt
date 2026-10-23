@@ -1458,6 +1458,9 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		}
 		if in.Usage != nil {
 			resp.Usage = decodeChatUsage(in.Usage)
+			if err := validateUsage(resp.Usage); err != nil {
+				return nil, err
+			}
 		}
 		return resp, nil
 	}
@@ -1520,6 +1523,9 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	}
 	if in.Usage != nil {
 		resp.Usage = decodeChatUsage(in.Usage)
+		if err := validateUsage(resp.Usage); err != nil {
+			return nil, err
+		}
 	}
 	if len(in.Choices) > 1 {
 		resp.Warnings.Add(ir.WarningDropped, "choices", "only the first choice was translated")
@@ -1552,6 +1558,9 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
 		return nil, err
 	}
+	if err := validateUsage(resp.Usage); err != nil {
+		return nil, err
+	}
 	content, toolCalls, refusal, reasoning := encodeChatContent(resp.Blocks, ir.RoleAssistant, &resp.Warnings)
 	message := map[string]any{"role": "assistant", "content": content}
 	if len(toolCalls) > 0 {
@@ -1582,7 +1591,11 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 		}},
 	}
 	if resp.Usage != (ir.Usage{}) {
-		out["usage"] = encodeChatUsage(resp.Usage)
+		usage, err := encodeChatUsage(resp.Usage)
+		if err != nil {
+			return nil, err
+		}
+		out["usage"] = usage
 	}
 	if resp.StopSequence != "" {
 		resp.Warnings.Add(ir.WarningDropped, "stop_sequence", "Chat Completions has no matched stop sequence")
@@ -1590,10 +1603,14 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	return sse.MarshalWireJSON(out)
 }
 
-func encodeChatUsage(u ir.Usage) map[string]any {
+func encodeChatUsage(u ir.Usage) (map[string]any, error) {
 	total := u.TotalTokens
 	if total == 0 {
-		total = u.InputTokens + u.OutputTokens
+		sum, err := metrics.SumCounts(u.InputTokens, u.OutputTokens)
+		if err != nil {
+			return nil, fmt.Errorf("usage: %w", err)
+		}
+		total = sum
 	}
 	out := map[string]any{
 		"prompt_tokens":     u.InputTokens,
@@ -1607,7 +1624,7 @@ func encodeChatUsage(u ir.Usage) map[string]any {
 	if u.ReasoningTokens != 0 {
 		out["completion_tokens_details"] = map[string]any{"reasoning_tokens": u.ReasoningTokens}
 	}
-	return out
+	return out, nil
 }
 
 func ChatFinishReason(r ir.FinishReason) string {

@@ -194,7 +194,11 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			}
 		}
 		if chunk.Usage != nil {
-			d.usage = decodeChatUsage(chunk.Usage)
+			usage := decodeChatUsage(chunk.Usage)
+			if err := validateUsage(usage); err != nil {
+				return nil, err
+			}
+			d.usage = usage
 		}
 	}
 }
@@ -453,6 +457,9 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		}
 		if ev.Usage != nil {
 			u := *ev.Usage
+			if err := validateUsage(u); err != nil {
+				return err
+			}
 			e.usage = &u
 			if e.finishSent {
 				return e.emitUsage()
@@ -513,8 +520,12 @@ func (e *ChatStreamEncoder) emitUsage() error {
 		return nil
 	}
 	e.usageSent = true
+	usage, err := encodeChatUsage(*e.usage)
+	if err != nil {
+		return err
+	}
 	obj := sse.Chunk(e.id, e.created, e.model, []map[string]any{}, map[string]any{
-		"usage": encodeChatUsage(*e.usage),
+		"usage": usage,
 	})
 	return sse.EmitFrame(e.w, e.flusher, obj)
 }

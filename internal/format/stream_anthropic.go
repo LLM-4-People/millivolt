@@ -309,23 +309,36 @@ func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
 }
 
 func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
+	usage := d.usage
 	if u.InputTokens != nil {
-		d.usage.InputTokens = *u.InputTokens + valueOrZero(u.CacheReadInputTokens) + valueOrZero(u.CacheCreationInputTokens)
+		input, err := metrics.SumCounts(*u.InputTokens, valueOrZero(u.CacheReadInputTokens), valueOrZero(u.CacheCreationInputTokens))
+		if err != nil {
+			return fmt.Errorf("usage: %w", err)
+		}
+		usage.InputTokens = input
 	}
 	if u.OutputTokens != nil {
-		d.usage.OutputTokens = *u.OutputTokens
+		usage.OutputTokens = *u.OutputTokens
 	}
 	if u.CacheReadInputTokens != nil {
-		d.usage.CacheReadTokens = *u.CacheReadInputTokens
+		usage.CacheReadTokens = *u.CacheReadInputTokens
 	}
 	if u.CacheCreationInputTokens != nil {
-		d.usage.CacheWriteTokens = *u.CacheCreationInputTokens
+		usage.CacheWriteTokens = *u.CacheCreationInputTokens
 	}
 	if u.OutputTokensDetails != nil {
-		d.usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
+		usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
 	}
-	d.usage.TotalTokens = d.usage.InputTokens + d.usage.OutputTokens
-	return validateUsage(d.usage)
+	total, err := metrics.SumCounts(usage.InputTokens, usage.OutputTokens)
+	if err != nil {
+		return fmt.Errorf("usage: %w", err)
+	}
+	usage.TotalTokens = total
+	if err := validateUsage(usage); err != nil {
+		return err
+	}
+	d.usage = usage
+	return nil
 }
 
 func valueOrZero(p *int64) int64 {
@@ -428,6 +441,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 	switch ev.Type {
 	case ir.EventStart:
 		if ev.Response != nil {
+			if err := validateUsage(ev.Response.Usage); err != nil {
+				return err
+			}
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
 			e.usage = ev.Response.Usage
 		}
@@ -537,6 +553,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		})
 	case ir.EventMessageDelta:
 		if ev.Usage != nil {
+			if err := validateUsage(*ev.Usage); err != nil {
+				return err
+			}
 			e.usage = *ev.Usage
 		}
 		stopReason := "end_turn"

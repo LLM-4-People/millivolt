@@ -204,11 +204,20 @@ func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 	if u.OutputTokensDetails != nil {
 		a.anthropicThinking = u.OutputTokensDetails.ThinkingTokens
 	}
-	input := a.anthropicInput + a.anthropicCacheRead + a.anthropicCacheWrite
+	input, err := metrics.SumCounts(a.anthropicInput, a.anthropicCacheRead, a.anthropicCacheWrite)
+	if err != nil {
+		// Leave usage unreported rather than publishing a partial document;
+		// the chunk fallback can still recover it from the provider frame.
+		return
+	}
+	total, err := metrics.SumCounts(input, a.anthropicOutput)
+	if err != nil {
+		return
+	}
 	chat, err := json.Marshal(map[string]any{
 		"prompt_tokens":     input,
 		"completion_tokens": a.anthropicOutput,
-		"total_tokens":      input + a.anthropicOutput,
+		"total_tokens":      total,
 		"prompt_tokens_details": map[string]any{
 			"cached_tokens":      a.anthropicCacheRead,
 			"cache_write_tokens": a.anthropicCacheWrite,

@@ -1089,6 +1089,9 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	}
 	if in.Usage != nil {
 		resp.Usage = responsesUsageToIR(in.Usage)
+		if err := validateUsage(resp.Usage); err != nil {
+			return nil, err
+		}
 	}
 	if in.Status == "failed" {
 		e := &ir.Error{Message: "upstream response failed"}
@@ -1216,6 +1219,9 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
 		return nil, err
 	}
+	if err := validateUsage(resp.Usage); err != nil {
+		return nil, err
+	}
 	created := resp.Created
 	if created == 0 {
 		created = time.Now().Unix()
@@ -1278,7 +1284,11 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 		}
 	}
 	if resp.Usage != (ir.Usage{}) {
-		out["usage"] = encodeResponsesUsage(resp.Usage)
+		usage, err := encodeResponsesUsage(resp.Usage)
+		if err != nil {
+			return nil, err
+		}
+		out["usage"] = usage
 	}
 	if resp.StopSequence != "" {
 		resp.Warnings.Add(ir.WarningDropped, "stop_sequence", "Responses has no matched stop sequence")
@@ -1367,10 +1377,14 @@ func encodeResponsesOutputContent(blocks []ir.Block, warns *ir.Warnings) []map[s
 	return out
 }
 
-func encodeResponsesUsage(u ir.Usage) map[string]any {
+func encodeResponsesUsage(u ir.Usage) (map[string]any, error) {
 	total := u.TotalTokens
 	if total == 0 {
-		total = u.InputTokens + u.OutputTokens
+		sum, err := metrics.SumCounts(u.InputTokens, u.OutputTokens)
+		if err != nil {
+			return nil, fmt.Errorf("usage: %w", err)
+		}
+		total = sum
 	}
 	out := map[string]any{
 		"input_tokens":  u.InputTokens,
@@ -1382,7 +1396,7 @@ func encodeResponsesUsage(u ir.Usage) map[string]any {
 		},
 		"output_tokens_details": map[string]any{"reasoning_tokens": u.ReasoningTokens},
 	}
-	return out
+	return out, nil
 }
 
 // DecodeResponsesError decodes the standard OpenAI error envelope used by the
