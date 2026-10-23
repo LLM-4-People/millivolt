@@ -51,15 +51,33 @@ type chatWireRequest struct {
 	User        string                     `json:"user"`
 	Store       *bool                      `json:"store"`
 	N           *int                       `json:"n"`
+
+	// Legacy and provider-specific request fields that the canonical model
+	// does not carry. Present values are reported or converted below.
+	Functions        json.RawMessage `json:"functions"`
+	FunctionCall     json.RawMessage `json:"function_call"`
+	Prediction       json.RawMessage `json:"prediction"`
+	Audio            json.RawMessage `json:"audio"`
+	Modalities       []string        `json:"modalities"`
+	WebSearchOptions json.RawMessage `json:"web_search_options"`
 }
 
 type chatWireMessage struct {
-	Role       string             `json:"role"`
-	Content    json.RawMessage    `json:"content"`
-	Name       string             `json:"name"`
-	ToolCalls  []chatWireToolCall `json:"tool_calls"`
-	ToolCallID string             `json:"tool_call_id"`
-	Refusal    *string            `json:"refusal"`
+	Role         string             `json:"role"`
+	Content      json.RawMessage    `json:"content"`
+	Name         string             `json:"name"`
+	ToolCalls    []chatWireToolCall `json:"tool_calls"`
+	ToolCallID   string             `json:"tool_call_id"`
+	Refusal      *string            `json:"refusal"`
+	FunctionCall json.RawMessage    `json:"function_call"`
+}
+
+// chatLegacyFunction is one deprecated Chat "functions" entry: the function
+// object without the modern tools wrapper.
+type chatLegacyFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 type chatWireToolCall struct {
@@ -148,10 +166,43 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		}
 		req.Tools = tools
 	}
+	if rawPresent(in.Functions) {
+		tools, err := decodeLegacyChatFunctions(in.Functions)
+		if err != nil {
+			return nil, err
+		}
+		req.Tools = append(req.Tools, tools...)
+	}
 	if tc, err := decodeChatToolChoice(in.ToolChoice); err != nil {
 		return nil, err
 	} else if tc != nil {
 		req.ToolChoice = tc
+	}
+	if rawPresent(in.FunctionCall) {
+		if req.ToolChoice != nil {
+			req.Warnings.Add(ir.WarningDropped, "function_call", "ignored because tool_choice is present")
+		} else if tc, err := decodeLegacyFunctionCall(in.FunctionCall); err != nil {
+			return nil, err
+		} else {
+			req.ToolChoice = tc
+		}
+	}
+	if rawPresent(in.Prediction) {
+		req.Warnings.Add(ir.WarningDropped, "prediction", "predicted output has no cross-protocol equivalent")
+	}
+	if rawPresent(in.Audio) {
+		req.Warnings.Add(ir.WarningDropped, "audio", "audio output has no cross-protocol equivalent")
+	}
+	if len(in.Modalities) > 0 {
+		for _, m := range in.Modalities {
+			if m != "text" {
+				req.Warnings.Add(ir.WarningDropped, "modalities", "only text output has a cross-protocol equivalent")
+				break
+			}
+		}
+	}
+	if rawPresent(in.WebSearchOptions) {
+		req.Warnings.Add(ir.WarningDropped, "web_search_options", "provider-hosted web search has no cross-protocol equivalent")
 	}
 
 	msgs, msgWarns, err := decodeChatMessages(in.Messages)
@@ -312,6 +363,15 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 				warns = append(warns, w...)
 				blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 			}
+			if rawPresent(m.FunctionCall) {
+				if len(m.ToolCalls) > 0 {
+					warns.Add(ir.WarningDropped, "messages.function_call", "ignored because tool_calls is present")
+				} else if call, err := decodeLegacyMessageFunctionCall(m.FunctionCall); err != nil {
+					return nil, nil, fmt.Errorf("message %d: %w", i, err)
+				} else {
+					blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
+				}
+			}
 			out = append(out, ir.Message{Role: ir.RoleAssistant, Content: blocks, Name: m.Name})
 		case "tool", "function":
 			blocks, w, err := decodeChatContent(m.Content, ir.RoleUser)
@@ -339,6 +399,75 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 	}
 	flush()
 	return out, warns, nil
+}
+
+// rawPresent reports whether a JSON field was supplied with a non-null value.
+func rawPresent(raw json.RawMessage) bool {
+	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// decodeLegacyChatFunctions converts the deprecated top-level Chat "functions"
+// array through the same validator as modern tools.
+func decodeLegacyChatFunctions(raw json.RawMessage) ([]ir.Tool, error) {
+	var fns []chatLegacyFunction
+	if err := json.Unmarshal(raw, &fns); err != nil {
+		return nil, errParseOpenAIBody(fmt.Errorf("parse functions: %w", err))
+	}
+	tools := make([]chatWireTool, 0, len(fns))
+	for _, fn := range fns {
+		t := chatWireTool{Type: "function"}
+		t.Function.Name = fn.Name
+		t.Function.Description = fn.Description
+		t.Function.Parameters = fn.Parameters
+		tools = append(tools, t)
+	}
+	return decodeChatTools(tools)
+}
+
+// decodeLegacyFunctionCall converts the deprecated top-level Chat
+// "function_call" selector into the canonical tool choice.
+func decodeLegacyFunctionCall(raw json.RawMessage) (*ir.ToolChoice, error) {
+	var shorthand string
+	if err := json.Unmarshal(raw, &shorthand); err == nil {
+		switch shorthand {
+		case "auto":
+			return &ir.ToolChoice{Mode: ir.ToolChoiceAuto}, nil
+		case "none":
+			return &ir.ToolChoice{Mode: ir.ToolChoiceNone}, nil
+		case "required":
+			return &ir.ToolChoice{Mode: ir.ToolChoiceRequired}, nil
+		}
+		return nil, errParseOpenAIBody(fmt.Errorf("unsupported function_call %q", shorthand))
+	}
+	var obj struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil || strings.TrimSpace(obj.Name) == "" {
+		return nil, errParseOpenAIBody(errors.New("function_call needs a name"))
+	}
+	return &ir.ToolChoice{Mode: ir.ToolChoiceTool, Name: obj.Name}, nil
+}
+
+// decodeLegacyMessageFunctionCall converts the deprecated per-assistant
+// "function_call" object. The legacy protocol carried no call id, and the
+// matching role:"function" reply identifies the call by function name, so the
+// name is the id that pairs the two turns.
+func decodeLegacyMessageFunctionCall(raw json.RawMessage) (*ir.ToolCall, error) {
+	var obj struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, errParseOpenAIBody(fmt.Errorf("parse function_call: %w", err))
+	}
+	if strings.TrimSpace(obj.Name) == "" {
+		return nil, errParseOpenAIBody(errors.New("function_call needs a name"))
+	}
+	args, err := parseToolArguments(obj.Arguments)
+	if err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
+	return &ir.ToolCall{ID: obj.Name, Name: obj.Name, Arguments: args}, nil
 }
 
 func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int) (*ir.ToolCall, ir.Warnings, error) {

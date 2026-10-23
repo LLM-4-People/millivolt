@@ -764,6 +764,85 @@ func TestResponsesIncludeLogprobs(t *testing.T) {
 	}
 }
 
+func TestLegacyChatFunctionsTranslate(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
+		`"functions":[{"name":"lookup","description":"find","parameters":{"type":"object"}}],` +
+		`"function_call":{"name":"lookup"}}`
+	req, err := DecodeChatRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Tools) != 1 || req.Tools[0].Name != "lookup" || req.Tools[0].Description != "find" {
+		t.Fatalf("legacy functions = %+v", req.Tools)
+	}
+	if req.ToolChoice == nil || req.ToolChoice.Mode != ir.ToolChoiceTool || req.ToolChoice.Name != "lookup" {
+		t.Fatalf("legacy function_call = %+v", req.ToolChoice)
+	}
+	out, err := EncodeAnthropicRequest(req, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := decodeJSONMap(t, out)
+	tools, _ := doc["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "lookup" {
+		t.Fatalf("translated tools = %v", doc["tools"])
+	}
+	tc, _ := doc["tool_choice"].(map[string]any)
+	if tc["type"] != "tool" || tc["name"] != "lookup" {
+		t.Fatalf("translated tool_choice = %v", doc["tool_choice"])
+	}
+}
+
+func TestLegacyChatFunctionCallPairsWithResult(t *testing.T) {
+	in := `{"model":"m","messages":[` +
+		`{"role":"assistant","content":"","function_call":{"name":"lookup","arguments":"{\"q\":1}"}},` +
+		`{"role":"function","name":"lookup","content":"ok"}]}`
+	req, err := DecodeChatRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages = %+v", req.Messages)
+	}
+	call := req.Messages[0].Content[len(req.Messages[0].Content)-1]
+	if call.Type != ir.BlockToolCall || call.ToolCall.ID != "lookup" || call.ToolCall.Name != "lookup" {
+		t.Fatalf("legacy call = %+v", call)
+	}
+	result := req.Messages[1].Content[0]
+	if result.Type != ir.BlockToolResult || result.ToolResult.CallID != "lookup" {
+		t.Fatalf("legacy result = %+v", result)
+	}
+	if _, err := EncodeAnthropicRequest(req, 8, ""); err != nil {
+		t.Fatalf("paired legacy turns did not translate: %v", err)
+	}
+}
+
+func TestChatWarnsOnUnrepresentableFields(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		body  string
+		field string
+		want  bool
+	}{
+		{"prediction", `{"model":"m","messages":[{"role":"user","content":"hi"}],"prediction":{"type":"content","content":"x"}}`, "prediction", true},
+		{"audio output", `{"model":"m","messages":[{"role":"user","content":"hi"}],"audio":{"format":"wav","voice":"alloy"}}`, "audio", true},
+		{"audio modality", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":["text","audio"]}`, "modalities", true},
+		{"text modality only", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":["text"]}`, "modalities", false},
+		{"web search options", `{"model":"m","messages":[{"role":"user","content":"hi"}],"web_search_options":{}}`, "web_search_options", true},
+		{"tool choice beats legacy selector", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tool_choice":"none","function_call":"auto"}`, "function_call", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := DecodeChatRequest([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := warningField(req.Warnings, tc.field); got != tc.want {
+				t.Fatalf("%s warning = %v, want %v (%+v)", tc.field, got, tc.want, req.Warnings)
+			}
+		})
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {

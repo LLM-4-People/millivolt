@@ -74,6 +74,11 @@ target cannot consume them:
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
   translated responses do not carry provider logprob details.
+- Deprecated Chat `functions` and `function_call` are converted to the
+  canonical tool list and tool choice; a legacy per-assistant `function_call`
+  pairs with its `role: function` reply by function name. Chat `prediction`,
+  audio output, non-text `modalities`, and `web_search_options` have no target
+  equivalent and are dropped with a warning.
 - A non-function tool type and malformed tool arguments are rejected before any
   upstream send.
 

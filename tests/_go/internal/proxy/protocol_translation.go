@@ -801,7 +801,7 @@ func TestPreCommitErrorsUseTheClientProtocol(t *testing.T) {
 		cfg.TranslationLoss = config.TranslationLossReject
 		s := New(cfg, metrics.Noop{})
 		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
-		body := `{"model":"m","input":"hi","include":["message.output_text.logprobs"]}`
+		body := `{"model":"m","input":"hi","include":["reasoning.encrypted_content"]}`
 		w := proxyRequest(t, s, "/v1/responses", "anthropic", body)
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
