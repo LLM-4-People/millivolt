@@ -546,12 +546,21 @@ sub_conversations:
     strip: true
 
 # ---- Format translation ----
-# Anthropic defaults and Cursor agent.v1 bridging.
+# Cross-protocol translation policy, Anthropic defaults and Cursor agent.v1 bridging.
 # Injected into translated Anthropic requests when the client sent neither max_tokens nor
 # max_completion_tokens.
 # Hot-reload: yes.
 #   type: int (tokens) · range 1..1000000 · default 4096
 anthropic_default_max_tokens: 4096
+
+# What a cross-protocol translation does when the target cannot represent a client field.
+# warn (default) drops optional fields and reports them in X-Proxy-Warnings; reject fails
+# the request with 400 naming the fields before any upstream send. Structural features are
+# always rejected when they cannot be honored; response-side losses are always reported,
+# never fatal. Hot-reloads.
+# Hot-reload: yes.
+#   type: string · default warn
+translation_loss: "warn"
 
 # Optional context-window hint stamped onto every model in GET /v1/models when
 # X-Proxy-Format is cursor. 0 omits the field.

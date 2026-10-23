@@ -332,6 +332,14 @@ type Config struct {
 	// when the client sent neither max_tokens nor max_completion_tokens
 	// (Anthropic requires max_tokens).
 	AnthropicDefaultMaxTokens int `yaml:"anthropic_default_max_tokens" json:"anthropic_default_max_tokens"`
+	// TranslationLoss selects what a cross-protocol translation does when the
+	// target cannot represent a client field: warn (default) drops optional
+	// fields and reports them in X-Proxy-Warnings; reject fails the request
+	// with 400 naming the fields before any upstream send. Structural
+	// features are rejected in both modes when they cannot be honored; a
+	// response-side loss is always reported, never fatal, because the status
+	// line may already be committed. Hot-reloads.
+	TranslationLoss string `yaml:"translation_loss" json:"translation_loss"`
 	// CursorDefaultContextWindow is an optional context-window hint (tokens)
 	// stamped onto every model in the GET /v1/models listing when X-Proxy-Format
 	// is cursor. Cursor's agent.v1 GetUsableModels does not expose per-model
@@ -654,8 +662,9 @@ type RequestOverride struct {
 	// canonicalization as Headers). A name may not appear in both lists
 	// of one rule.
 	RemoveHeaders []string `yaml:"remove_headers" json:"remove_headers"`
-	// Body rewrites OpenAI-wire token fields on matching requests; a nil
-	// field leaves the request's own value untouched.
+	// Body rewrites token fields on a matching Chat or Anthropic client
+	// body before translation; a nil field leaves the request's own value
+	// untouched.
 	Body *OverrideBody `yaml:"body" json:"body"`
 }
 
@@ -962,6 +971,18 @@ const (
 	HeartbeatIntervalMax = 10 * time.Minute
 )
 
+// Translation loss policies (TranslationLoss values; exact lowercase strings).
+const (
+	// TranslationLossWarn drops an optional field the target cannot represent
+	// and reports it in X-Proxy-Warnings.
+	TranslationLossWarn = "warn"
+	// TranslationLossReject fails the request with 400 before any upstream
+	// send when a field cannot be represented.
+	TranslationLossReject = "reject"
+)
+
+func translationLossPolicies() string { return TranslationLossWarn + ", " + TranslationLossReject }
+
 // Quota pause modes (QuotaPauseMode values; exact lowercase strings).
 const (
 	QuotaPauseOff    = "off"
@@ -1057,6 +1078,7 @@ func Default() *Config {
 		ConversationMaxOpen: 64,
 
 		AnthropicDefaultMaxTokens:  4096,
+		TranslationLoss:            TranslationLossWarn,
 		CursorDefaultContextWindow: 0, // 0 = omit; let the client use its own default
 		CursorParkTTL:              3 * time.Hour,
 		CursorHeartbeatInterval:    5 * time.Second,
@@ -1326,6 +1348,11 @@ func (c *Config) Validate() error {
 	}
 	if c.AnthropicDefaultMaxTokens < 1 || c.AnthropicDefaultMaxTokens > 1_000_000 {
 		return fmt.Errorf("anthropic_default_max_tokens: must be 1..1000000, got %d", c.AnthropicDefaultMaxTokens)
+	}
+	switch c.TranslationLoss {
+	case TranslationLossWarn, TranslationLossReject:
+	default:
+		return fmt.Errorf("translation_loss: %q must be one of %s", c.TranslationLoss, translationLossPolicies())
 	}
 	if c.CursorDefaultContextWindow < 0 {
 		return fmt.Errorf("cursor_default_context_window: must be >= 0, got %d", c.CursorDefaultContextWindow)
