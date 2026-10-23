@@ -613,40 +613,80 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 		case "response.content_part.done":
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			if err := checkNativeIdentity("item id", ev.ItemID); err != nil {
+				return nil, err
+			}
+			itemID := ev.ItemID
+			if itemID == "" {
+				itemID = d.itemIDByOutput[ev.OutputIndex]
+			}
 			key := d.keyByPart[pos]
-			// A done payload that is empty must not materialize a deferred
-			// part. Keep the seed so terminal content can still fill it, and
-			// open no target block that would have no bytes.
-			if _, started := d.partBlockByKey[key]; !started && len(ev.Part) > 0 {
-				var part struct {
-					Type    string `json:"type"`
-					Text    string `json:"text"`
-					Refusal string `json:"refusal"`
-				}
-				if err := json.Unmarshal(ev.Part, &part); err != nil {
+			if key == "" {
+				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			}
+			var part struct {
+				Type    string `json:"type"`
+				Text    string `json:"text"`
+				Refusal string `json:"refusal"`
+			}
+			trimmed := bytes.TrimSpace(ev.Part)
+			hasPart := len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+			if hasPart {
+				if err := json.Unmarshal(trimmed, &part); err != nil {
 					return nil, err
 				}
-				value := part.Text
-				if part.Type == "refusal" {
-					value = part.Refusal
+			}
+			value := part.Text
+			blockType := ir.BlockText
+			if part.Type == "refusal" {
+				value = part.Refusal
+				blockType = ir.BlockRefusal
+			}
+			if value != "" {
+				if _, announced := d.announcedParts[key]; !announced {
+					admitted, err := d.announcePart(key)
+					if err != nil {
+						return nil, err
+					}
+					if !admitted {
+						continue
+					}
 				}
-				if value == "" {
-					continue
+				if _, owned := d.partOwner[key]; !owned {
+					d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+				}
+				if _, kind := d.partKind[key]; !kind {
+					d.partKind[key] = partChannelForBlock(blockType)
+				}
+				emit := pendingValueSuffix(d.emittedValue(key), value)
+				if emit != "" {
+					d.appendContentValue(channelPart{
+						key: key, value: emit, channel: partChannelForBlock(blockType),
+						block: ir.Block{Type: blockType},
+					}, &d.terminalPending)
+					if err := d.setEmittedText(key, value); err != nil {
+						return nil, err
+					}
 				}
 			}
-			idx, ok := d.startPartBlock(key)
-			if !ok {
-				continue
+			// A deferred part whose payload is absent or empty never starts a
+			// target block; a started part is closed here because done ends it.
+			delete(d.partSeed, key)
+			if idx, started := d.partBlockByKey[key]; started && d.open[idx] {
+				delete(d.partBlock, pos)
+				delete(d.open, idx)
+				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			}
-			delete(d.partBlock, pos)
-			delete(d.open, idx)
-			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		case "response.output_item.done":
 			var item responsesWireItem
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
 			}
-			if item.Type == "function_call" {
+			typ := item.Type
+			if typ == "" && item.Role != "" {
+				typ = "message"
+			}
+			if typ == "function_call" {
 				idx, ok := d.itemBlock[ev.OutputIndex]
 				if !ok {
 					continue
@@ -658,15 +698,21 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.clearToolState(key)
 				d.openToolItems--
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
-			} else if item.Type == "reasoning" {
+			} else if typ == "reasoning" {
 				idx, ok := d.itemBlock[ev.OutputIndex]
 				if !ok {
 					continue
 				}
+				if err := d.applyReasoningContent(item, d.keyByOutput[ev.OutputIndex], ev.OutputIndex, &d.terminalPending); err != nil {
+					return nil, err
+				}
 				delete(d.itemBlock, ev.OutputIndex)
 				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
-			} else if item.Type == "message" {
+			} else if typ == "message" {
+				if err := d.applyMessageContent(item, ev.OutputIndex, &d.terminalPending); err != nil {
+					return nil, err
+				}
 				// Some providers skip content_part.done; close any part block
 				// that is still open for this output item. A deferred empty part
 				// never reached the target, so discard its seed rather than
@@ -684,6 +730,40 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					delete(d.open, idx)
 					d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 				}
+			}
+		case "response.function_call_arguments.done":
+			idx, ok := d.itemBlock[ev.OutputIndex]
+			if !ok {
+				continue
+			}
+			d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments)
+		case "response.reasoning_summary_part.done":
+			var part struct {
+				Text string `json:"text"`
+			}
+			trimmed := bytes.TrimSpace(ev.Part)
+			if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+				if err := json.Unmarshal(trimmed, &part); err != nil {
+					return nil, err
+				}
+			}
+			text := part.Text
+			if text == "" {
+				text = ev.Text
+			}
+			key := d.keyByOutput[ev.OutputIndex]
+			idx, ok := d.itemBlock[ev.OutputIndex]
+			if text == "" || !ok || key == "" {
+				continue
+			}
+			partKey := summaryPartKey(key, ev.SummaryIndex)
+			d.partOwner[partKey] = key
+			emit := pendingValueSuffix(d.emittedValue(partKey), text)
+			if emit != "" {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+			}
+			if err := d.setEmittedText(partKey, text); err != nil {
+				return nil, err
 			}
 		case "response.completed", "response.incomplete", "response.failed", "response.cancelled":
 			var resp responsesWireResponse
@@ -1120,57 +1200,8 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				pending = append(pending, emission)
 			}
 		case "message":
-			if err := checkNativeIdentity("message id", item.ID); err != nil {
+			if err := d.applyMessageContent(item, i, &pending); err != nil {
 				return nil, err
-			}
-			parts, err := terminalMessageParts(item.Content)
-			if err != nil {
-				return nil, err
-			}
-			itemKey := d.terminalContentItemKey(item.ID, i)
-			var channels []partChannel
-			grouped := map[partChannel][]channelPart{}
-			for order, part := range parts {
-				channel := partChannelForBlock(part.block.Type)
-				if _, ok := grouped[channel]; !ok {
-					channels = append(channels, channel)
-				}
-				grouped[channel] = append(grouped[channel], channelPart{
-					key:     d.terminalPartKey(item.ID, i, part.contentIndex),
-					index:   part.contentIndex,
-					value:   part.delta.Text,
-					channel: channel,
-					block:   part.block,
-					order:   order,
-				})
-			}
-			var emit []channelPart
-			for _, channel := range channels {
-				rec := d.reconcileChannel("content_partition", d.emittedContentParts(itemKey, channel), grouped[channel])
-				emit = append(emit, rec.emit...)
-			}
-			sort.SliceStable(emit, func(a, b int) bool { return emit[a].order < emit[b].order })
-			for _, part := range emit {
-				if !d.announcedParts[part.key] {
-					admitted, err := d.announcePart(part.key)
-					if err != nil {
-						return nil, err
-					}
-					if !admitted {
-						continue
-					}
-				}
-				if _, owned := d.partOwner[part.key]; !owned {
-					d.partOwner[part.key] = itemKey
-				}
-				if _, kind := d.partKind[part.key]; !kind {
-					d.partKind[part.key] = part.channel
-				}
-				before := d.emittedValue(part.key)
-				d.appendContentValue(part, &pending)
-				if err := d.setEmittedText(part.key, before+part.value); err != nil {
-					return nil, err
-				}
 			}
 		case "reasoning":
 			key, announced := d.terminalAnnouncedItemKey(i, item.ID)
@@ -1191,74 +1222,144 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 				continue
 			}
-			// Summary parts are one concatenated reasoning channel; content
-			// parts are another. Reconcile each as a whole before emitting so
-			// a terminal re-partition cannot repeat streamed bytes.
-			var summaryTerminal []channelPart
-			for summaryIndex, summary := range item.Summary {
-				if summary.Text == "" {
-					continue
-				}
-				summaryTerminal = append(summaryTerminal, channelPart{
-					key:     summaryPartKey(key, summaryIndex),
-					index:   summaryIndex,
-					value:   summary.Text,
-					channel: partChannelReasoning,
-					order:   summaryIndex,
-				})
-			}
-			summaryRec := d.reconcileChannel("summary_partition", d.emittedSummaryParts(key), summaryTerminal)
-			for _, part := range summaryRec.emit {
-				before := d.emittedValue(part.key)
-				d.appendReasoningValue(item, key, part.value, &pending)
-				if err := d.setEmittedText(part.key, before+part.value); err != nil {
-					return nil, err
-				}
-			}
-			parts, err := terminalMessageParts(item.Content)
-			if err != nil {
+			if err := d.applyReasoningContent(item, key, i, &pending); err != nil {
 				return nil, err
-			}
-			var contentTerminal []channelPart
-			for order, part := range parts {
-				if part.block.Type != ir.BlockText {
-					continue
-				}
-				contentTerminal = append(contentTerminal, channelPart{
-					key:     d.terminalPartKey(item.ID, i, part.contentIndex),
-					index:   part.contentIndex,
-					value:   part.delta.Text,
-					channel: partChannelReasoning,
-					block:   reasoningTerminalBlock(item),
-					order:   order,
-				})
-			}
-			contentRec := d.reconcileChannel("reasoning_content_partition", d.emittedContentParts(key, partChannelReasoning), contentTerminal)
-			for _, part := range contentRec.emit {
-				if !d.announcedParts[part.key] {
-					admitted, err := d.announcePart(part.key)
-					if err != nil {
-						return nil, err
-					}
-					if !admitted {
-						continue
-					}
-				}
-				if _, owned := d.partOwner[part.key]; !owned {
-					d.partOwner[part.key] = key
-				}
-				if _, kind := d.partKind[part.key]; !kind {
-					d.partKind[part.key] = partChannelReasoning
-				}
-				before := d.emittedValue(part.key)
-				d.appendContentValue(part, &pending)
-				if err := d.setEmittedText(part.key, before+part.value); err != nil {
-					return nil, err
-				}
 			}
 		}
 	}
 	return pending, nil
+}
+
+// applyMessageContent reconciles one message item's content, whether it
+// arrived in output_item.done or in the terminal document. Open blocks receive
+// only the missing bytes; parts that never reached the target wire are queued
+// after every streamed block closes.
+func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, outputIndex int, pending *[]terminalEmission) error {
+	if err := checkNativeIdentity("message id", item.ID); err != nil {
+		return err
+	}
+	parts, err := terminalMessageParts(item.Content)
+	if err != nil {
+		return err
+	}
+	itemKey := d.terminalContentItemKey(item.ID, outputIndex)
+	var channels []partChannel
+	grouped := map[partChannel][]channelPart{}
+	for order, part := range parts {
+		channel := partChannelForBlock(part.block.Type)
+		if _, ok := grouped[channel]; !ok {
+			channels = append(channels, channel)
+		}
+		grouped[channel] = append(grouped[channel], channelPart{
+			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			index:   part.contentIndex,
+			value:   part.delta.Text,
+			channel: channel,
+			block:   part.block,
+			order:   order,
+		})
+	}
+	var emit []channelPart
+	for _, channel := range channels {
+		rec := d.reconcileChannel("content_partition", d.emittedContentParts(itemKey, channel), grouped[channel])
+		emit = append(emit, rec.emit...)
+	}
+	sort.SliceStable(emit, func(a, b int) bool { return emit[a].order < emit[b].order })
+	for _, part := range emit {
+		if !d.announcedParts[part.key] {
+			admitted, err := d.announcePart(part.key)
+			if err != nil {
+				return err
+			}
+			if !admitted {
+				continue
+			}
+		}
+		if _, owned := d.partOwner[part.key]; !owned {
+			d.partOwner[part.key] = itemKey
+		}
+		if _, kind := d.partKind[part.key]; !kind {
+			d.partKind[part.key] = part.channel
+		}
+		before := d.emittedValue(part.key)
+		d.appendContentValue(part, pending)
+		if err := d.setEmittedText(part.key, before+part.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyReasoningContent reconciles one reasoning item's summary and content
+// channels, whether the payload arrived in output_item.done or in the terminal
+// document. The open item block receives only the missing bytes.
+func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, key string, outputIndex int, pending *[]terminalEmission) error {
+	// Summary parts are one concatenated reasoning channel; content
+	// parts are another. Reconcile each as a whole before emitting so
+	// a terminal re-partition cannot repeat streamed bytes.
+	var summaryTerminal []channelPart
+	for summaryIndex, summary := range item.Summary {
+		if summary.Text == "" {
+			continue
+		}
+		summaryTerminal = append(summaryTerminal, channelPart{
+			key:     summaryPartKey(key, summaryIndex),
+			index:   summaryIndex,
+			value:   summary.Text,
+			channel: partChannelReasoning,
+			order:   summaryIndex,
+		})
+	}
+	summaryRec := d.reconcileChannel("summary_partition", d.emittedSummaryParts(key), summaryTerminal)
+	for _, part := range summaryRec.emit {
+		before := d.emittedValue(part.key)
+		d.appendReasoningValue(item, key, part.value, pending)
+		if err := d.setEmittedText(part.key, before+part.value); err != nil {
+			return err
+		}
+	}
+	parts, err := terminalMessageParts(item.Content)
+	if err != nil {
+		return err
+	}
+	var contentTerminal []channelPart
+	for order, part := range parts {
+		if part.block.Type != ir.BlockText {
+			continue
+		}
+		contentTerminal = append(contentTerminal, channelPart{
+			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			index:   part.contentIndex,
+			value:   part.delta.Text,
+			channel: partChannelReasoning,
+			block:   reasoningTerminalBlock(item),
+			order:   order,
+		})
+	}
+	contentRec := d.reconcileChannel("reasoning_content_partition", d.emittedContentParts(key, partChannelReasoning), contentTerminal)
+	for _, part := range contentRec.emit {
+		if !d.announcedParts[part.key] {
+			admitted, err := d.announcePart(part.key)
+			if err != nil {
+				return err
+			}
+			if !admitted {
+				continue
+			}
+		}
+		if _, owned := d.partOwner[part.key]; !owned {
+			d.partOwner[part.key] = key
+		}
+		if _, kind := d.partKind[part.key]; !kind {
+			d.partKind[part.key] = partChannelReasoning
+		}
+		before := d.emittedValue(part.key)
+		d.appendContentValue(part, pending)
+		if err := d.setEmittedText(part.key, before+part.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // terminalItemAnnounced reports whether a terminal item's stable identity was

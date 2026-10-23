@@ -1,0 +1,208 @@
+package format
+
+// Round 2 DUP-3/F6-2 regressions: done payloads are authoritative. A complete
+// part, item, summary part or function-call argument value arriving in a done
+// event must be emitted once, and an omitted part payload must not open an
+// empty target block.
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
+)
+
+func translateDoneFixture(t *testing.T, source string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, target := range terminalTargets {
+		var buf bytes.Buffer
+		if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+			t.Fatalf("%s: TranslateStreamBetween: %v", target.name, err)
+		}
+		out[target.name] = buf.String()
+	}
+	return out
+}
+
+func TestResponsesContentPartDoneCarriesValue(t *testing.T) {
+	t.Run("deferred part", func(t *testing.T) {
+		source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hello"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+		out := translateDoneFixture(t, source)
+		for _, target := range terminalTargets {
+			if got := strings.Join(textEmissionOrder(t, target.inbound, out[target.name]), ""); got != "hello" {
+				t.Fatalf("%s text = %q, want hello", target.name, got)
+			}
+			if target.inbound == ir.Anthropic {
+				if got := emptyAnthropicTextBlocks(t, out[target.name]); got != 0 {
+					t.Fatalf("anthropic empty text blocks = %d, want 0", got)
+				}
+			}
+		}
+	})
+
+	t.Run("started part receives only the suffix", func(t *testing.T) {
+		source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hel"}}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hello"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+		out := translateDoneFixture(t, source)
+		for _, target := range terminalTargets {
+			if got := strings.Join(textEmissionOrder(t, target.inbound, out[target.name]), ""); got != "hello" {
+				t.Fatalf("%s text = %q, want hello exactly once", target.name, got)
+			}
+		}
+	})
+}
+
+func TestResponsesContentPartDoneOmitsPartOpensNoBlock(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","output_index":0,"content_index":0}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	out := translateDoneFixture(t, source)
+	for _, target := range terminalTargets {
+		if got := textEmissionOrder(t, target.inbound, out[target.name]); len(got) != 0 {
+			t.Fatalf("%s text = %v, want none", target.name, got)
+		}
+		if target.inbound == ir.Anthropic {
+			if got := emptyAnthropicTextBlocks(t, out[target.name]); got != 0 {
+				t.Fatalf("anthropic empty text blocks = %d, want 0", got)
+			}
+		}
+	}
+}
+
+func TestResponsesOutputItemDoneCarriesContent(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	out := translateDoneFixture(t, source)
+	for _, target := range terminalTargets {
+		if got := strings.Join(textEmissionOrder(t, target.inbound, out[target.name]), ""); got != "hello" {
+			t.Fatalf("%s text = %q, want hello", target.name, got)
+		}
+		if target.inbound == ir.Anthropic {
+			if got := emptyAnthropicTextBlocks(t, out[target.name]); got != 0 {
+				t.Fatalf("anthropic empty text blocks = %d, want 0", got)
+			}
+		}
+	}
+}
+
+func TestResponsesReasoningSummaryPartDoneCarriesText(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}
+
+event: response.reasoning_summary_part.done
+data: {"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"think"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	out := translateDoneFixture(t, source)
+	for _, target := range terminalTargets {
+		if got := strings.Join(reasoningEmissionOrder(t, target.inbound, out[target.name]), ""); got != "think" {
+			t.Fatalf("%s reasoning = %q, want think", target.name, got)
+		}
+	}
+}
+
+func TestResponsesOutputItemDoneCarriesReasoningContent(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[],"content":[{"type":"reasoning_text","text":"deep"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	out := translateDoneFixture(t, source)
+	for _, target := range terminalTargets {
+		if got := strings.Join(reasoningEmissionOrder(t, target.inbound, out[target.name]), ""); got != "deep" {
+			t.Fatalf("%s reasoning = %q, want deep", target.name, got)
+		}
+	}
+}
+
+func TestResponsesFunctionCallArgumentsDoneWithoutDelta(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"q\":1}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	out := translateDoneFixture(t, source)
+	for _, target := range terminalTargets {
+		var got string
+		switch target.inbound {
+		case ir.Chat:
+			got = chatToolArguments(t, out[target.name])
+		case ir.Anthropic:
+			got = anthropicToolArguments(t, out[target.name])
+		case ir.Responses:
+			for _, payload := range mustResponsePayloads(t, out[target.name]) {
+				if payload["type"] == "response.function_call_arguments.delta" {
+					got += payload["delta"].(string)
+				}
+			}
+		}
+		if !strings.Contains(got, `"q":1`) {
+			t.Fatalf("%s arguments = %q, want the done value", target.name, got)
+		}
+	}
+}
