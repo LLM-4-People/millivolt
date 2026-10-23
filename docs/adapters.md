@@ -51,11 +51,12 @@ one decoder and one encoder; the IR is the single source of truth for roles,
 content blocks, tool calls and results, reasoning artifacts, stop reasons and
 usage. Same-protocol requests never enter the IR: they relay byte-for-byte.
 
-Mapped across every pair: text, images (URL, base64 or file id), documents,
-audio where the target accepts it, system/developer/user/assistant turns,
-function tools, tool choice, parallel tool use, tool calls and results,
-structured outputs, reasoning effort and summary, stop sequences, sampling
-parameters, metadata, usage and cache-token accounting.
+Carried wherever the target protocol represents them: text, images (URL,
+base64 or file id), documents, audio where the target accepts it,
+system/developer/user/assistant turns, function tools, tool choice, parallel
+tool use, tool calls and results, structured outputs, reasoning effort and
+summary, stop sequences, sampling parameters, metadata, usage and cache-token
+accounting.
 
 Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:
