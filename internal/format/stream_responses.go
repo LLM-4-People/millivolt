@@ -381,12 +381,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if d.payloadParts[key] || text == "" {
 				continue
 			}
-			admitted, err := d.announcePart(key)
-			if err != nil {
-				return nil, err
-			}
-			if !admitted {
-				continue
+			if _, announced := d.announcedParts[key]; !announced {
+				admitted, err := d.announcePart(key)
+				if err != nil {
+					return nil, err
+				}
+				if !admitted {
+					continue
+				}
 			}
 			if idx, ok := d.partBlock[pos]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: text}})
@@ -471,12 +473,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if d.payloadParts[key] || ev.Text == "" {
 				continue
 			}
-			admitted, err := d.announcePart(key)
-			if err != nil {
-				return nil, err
-			}
-			if !admitted {
-				continue
+			if _, announced := d.announcedParts[key]; !announced {
+				admitted, err := d.announcePart(key)
+				if err != nil {
+					return nil, err
+				}
+				if !admitted {
+					continue
+				}
 			}
 			if idx, ok := d.partBlock[pos]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})

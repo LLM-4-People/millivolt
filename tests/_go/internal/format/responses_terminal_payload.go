@@ -152,6 +152,33 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	}
 }
 
+func TestResponsesOutputTextDoneWithoutDelta(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","output_index":0,"content_index":0,"text":"hello"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			if got := textDeltaCount(t, target.inbound, buf.String(), "hello"); got != 1 {
+				t.Fatalf("done text emitted %d times, want once: %s", got, buf.String())
+			}
+		})
+	}
+}
+
 // responsesRecord analyzes the raw Responses source exactly like the proxy.
 func responsesRecord(t *testing.T, source string) metrics.Record {
 	t.Helper()
