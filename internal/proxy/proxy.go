@@ -611,7 +611,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
 	if rewriteBody {
-		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes)); why == "" {
+		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes), t.inbound); why == "" {
 			body = rewritten
 			if changed {
 				restampReqMaxTokens(body, rec)

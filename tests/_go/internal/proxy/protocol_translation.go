@@ -655,6 +655,31 @@ func TestClientBodyRewriteUsesTheInboundShape(t *testing.T) {
 		}
 	})
 
+	t.Run("anthropic body maps a completion-token override to max_tokens", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200,
+			`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+		cfg := config.Default()
+		cfg.RequestOverrides = []config.RequestOverride{{Model: "m", Body: &config.OverrideBody{MaxCompletionTokens: cap(88)}}}
+		s := New(cfg, metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+		body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+		w := proxyRequest(t, s, "/v1/messages", "openai", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+		}
+		var sent map[string]any
+		if err := json.Unmarshal(up.lastBody(), &sent); err != nil {
+			t.Fatal(err)
+		}
+		if sent["max_tokens"] != float64(88) {
+			t.Fatalf("max_tokens = %v, want the override 88", sent["max_tokens"])
+		}
+		if _, ok := sent["max_completion_tokens"]; ok {
+			t.Fatalf("Chat body carries max_completion_tokens from an Anthropic-body override: %v", sent)
+		}
+	})
+
 	t.Run("responses client override is not stamped as a chat cap", func(t *testing.T) {
 		up := newFixtureUpstream(t, "application/json", 200,
 			`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)

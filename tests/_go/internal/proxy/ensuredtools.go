@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -241,7 +242,7 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 			if satisfied == changed {
 				t.Fatalf("fast path satisfied=%v and general path changed=%v disagree", satisfied, changed)
 			}
-			out, rewrote, why := overrideRequestBody(body, nil, nil, names, maxBytes)
+			out, rewrote, why := overrideRequestBody(body, nil, nil, names, maxBytes, ir.Chat)
 			if why != "" {
 				t.Fatal(why)
 			}
@@ -280,7 +281,7 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 	if ensureToolsSatisfied(invalid, names) {
 		t.Fatal("invalid JSON must not report a satisfied ensure-tools body")
 	}
-	if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes); rewrote || why == "" || out != nil {
+	if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes, ir.Chat); rewrote || why == "" || out != nil {
 		t.Fatalf("invalid JSON rewrite = %q/%v/%q, want the fail-closed outcome", out, rewrote, why)
 	}
 }

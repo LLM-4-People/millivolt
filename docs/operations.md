@@ -154,7 +154,9 @@ Completions or Anthropic client body before translation. A Responses client
 body is not rewritten by the body action because its cap is
 `max_output_tokens`; header and removal rules still apply. A Chat client whose
 target is the Responses wire has the rewritten cap translated to
-`max_output_tokens`. The list is capped at 64 rules and validated like every
+`max_output_tokens`. Both override spellings address an Anthropic body's single
+`max_tokens` field, with `max_completion_tokens` winning when both are set. The
+list is capped at 64 rules and validated like every
 other setting: a rule needs at least one scope field and one action, duplicate
 scope triples are rejected, and one header name cannot be both set and removed
 in the same rule.

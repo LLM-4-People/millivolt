@@ -367,7 +367,7 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 // operator-actionable reason and the caller relays the ORIGINAL bytes
 // unchanged - when the body is not a JSON object or the rewritten result
 // would exceed the request byte budget.
-func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64) (out []byte, changed bool, why string) {
+func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64, inbound ir.Protocol) (out []byte, changed bool, why string) {
 	// Narrow fast path: when ensured tools are the only configured action and
 	// the body already carries every name, one struct decode proves the
 	// document needs no rewrite. The general path would materialize every
@@ -386,13 +386,27 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, e
 	}
 	changed = false
 	if ob != nil {
-		if ob.MaxTokens != nil {
-			doc["max_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxTokens))
-			changed = true
-		}
-		if ob.MaxCompletionTokens != nil {
-			doc["max_completion_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxCompletionTokens))
-			changed = true
+		if inbound == ir.Anthropic {
+			// Anthropic has one token field. Both override spellings address
+			// it, with the same precedence the Chat pair resolves in
+			// MergeTokenCaps so an operator can use either name.
+			cap := ob.MaxCompletionTokens
+			if cap == nil {
+				cap = ob.MaxTokens
+			}
+			if cap != nil {
+				doc["max_tokens"] = json.RawMessage(strconv.Itoa(*cap))
+				changed = true
+			}
+		} else {
+			if ob.MaxTokens != nil {
+				doc["max_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxTokens))
+				changed = true
+			}
+			if ob.MaxCompletionTokens != nil {
+				doc["max_completion_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxCompletionTokens))
+				changed = true
+			}
 		}
 	}
 	for _, name := range strip {
