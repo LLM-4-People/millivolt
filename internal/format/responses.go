@@ -877,6 +877,16 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if !utf8.Valid(body) {
 		return nil, errors.New("responses response body is not valid UTF-8")
 	}
+	// Bound the output array before the typed decode materializes it.
+	var probe struct {
+		Output json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return nil, fmt.Errorf("parse responses response: %w", err)
+	}
+	if !metrics.ContentPartsWithinLimit(probe.Output) {
+		return nil, fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
+	}
 	var in responsesWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse responses response: %w", err)

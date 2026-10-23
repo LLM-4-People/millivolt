@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 func decodeJSONMap(t *testing.T, b []byte) map[string]any {
@@ -1176,4 +1177,50 @@ func TestIRValidateRejectsUnknownRole(t *testing.T) {
 	if err := ir.ValidateRequest(req); err == nil {
 		t.Fatal("unknown role accepted")
 	}
+}
+
+// TestResponseArraysAreBoundedBeforeDecode pins the response-side array bound:
+// a provider body with an oversized choices/output array must be rejected
+// before the typed decode materializes it, while the exact limit still
+// decodes.
+func TestResponseArraysAreBoundedBeforeDecode(t *testing.T) {
+	array := func(n int) string {
+		var b strings.Builder
+		b.WriteByte('[')
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{}`)
+		}
+		b.WriteByte(']')
+		return b.String()
+	}
+
+	t.Run("chat choices at limit", func(t *testing.T) {
+		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax) + `}`
+		if _, err := DecodeChatResponse([]byte(body)); err != nil {
+			t.Fatalf("body at the limit was rejected: %v", err)
+		}
+	})
+	t.Run("chat choices over limit", func(t *testing.T) {
+		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax+1) + `}`
+		_, err := DecodeChatResponse([]byte(body))
+		if err == nil || !strings.Contains(err.Error(), "exceed") {
+			t.Fatalf("over-bound choices error = %v", err)
+		}
+	})
+	t.Run("responses output at limit", func(t *testing.T) {
+		body := `{"id":"r1","output":` + array(metrics.ContentPartMax) + `}`
+		if _, err := DecodeResponsesResponse([]byte(body)); err != nil {
+			t.Fatalf("body at the limit was rejected: %v", err)
+		}
+	})
+	t.Run("responses output over limit", func(t *testing.T) {
+		body := `{"id":"r1","output":` + array(metrics.ContentPartMax+1) + `}`
+		_, err := DecodeResponsesResponse([]byte(body))
+		if err == nil || !strings.Contains(err.Error(), "exceed") {
+			t.Fatalf("over-bound output error = %v", err)
+		}
+	})
 }

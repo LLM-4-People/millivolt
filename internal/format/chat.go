@@ -1149,6 +1149,18 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if !utf8.Valid(body) {
 		return nil, errors.New("chat response body is not valid UTF-8")
 	}
+	// Bound the choices array before the typed decode materializes it. Only
+	// the first choice is translated, and a body of tiny objects must not
+	// expand into an unbounded slice.
+	var probe struct {
+		Choices json.RawMessage `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return nil, fmt.Errorf("parse chat response: %w", err)
+	}
+	if !metrics.ContentPartsWithinLimit(probe.Choices) {
+		return nil, fmt.Errorf("chat response choices exceed %d items", metrics.ContentPartMax)
+	}
 	var in chatWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse chat response: %w", err)
