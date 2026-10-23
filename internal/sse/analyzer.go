@@ -223,7 +223,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// pretty-printed error JSON - which a per-line scan can never decode - is
 	// caught the same way the client's SSE parser sees it.
 	if isBlankLine(line) {
-		a.flushEvent()
+		a.flushEvent(now)
 		return
 	}
 
@@ -248,7 +248,46 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if a.feedAnthropic(payload, now) {
 		return
 	}
+	a.feedData(payload, "", now)
+}
 
+// FeedEvent ingests one complete SSE event whose data: lines were reassembled
+// at the blank-line boundary. eventType is the authoritative type resolved
+// from the event's data (or its terminal event name when the document omits
+// the type). It is the boundary twin of Feed, for events the relay buffers as
+// a unit; a single-line event already seen by Feed is not processed twice.
+func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
+	if len(data) == 0 {
+		return
+	}
+	if string(bytes.TrimRight(data, "\r")) == "[DONE]" {
+		a.terminatorSeen = true
+		return
+	}
+	// A terminal marker already signed the stream: a repeated terminal event
+	// is provider noise and must not rewrite the record.
+	if responsesTerminalEvent(eventType) && a.terminatorSeen {
+		a.flushEvent(now)
+		return
+	}
+	// Idempotence with line-oriented detection: the same payload already
+	// accumulated for this event was processed by Feed.
+	if len(a.eventData) > 0 && bytes.Equal(a.eventData, data) {
+		a.flushEvent(now)
+		return
+	}
+	if a.feedAnthropic(data, now) {
+		a.flushEvent(now)
+		return
+	}
+	a.feedData(data, eventType, now)
+	a.flushEvent(now)
+}
+
+// feedData classifies one data payload. forcedType supplies the Responses
+// event type when the document itself omits it (a terminal event named only
+// on the SSE event: line).
+func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// Accumulate this data: line into the current event buffer so a multi-line
 	// event (data split across lines per the SSE spec) can be parsed whole at
 	// the boundary. Joined with "\n" per spec; bounded by eventDataMax - past
@@ -283,6 +322,9 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Track first/last token of any kind (content, reasoning, or tool call).
 	// The first content-bearing chunk marks TTFT.
 	eventType := keys.responseEventType(payload)
+	if eventType == "" {
+		eventType = forcedType
+	}
 	hasContent := keys.contentStart() || keys.textStart() || responsesContentEvent(eventType, &keys)
 	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
@@ -479,12 +521,26 @@ func (a *Analyzer) extractCost(raw []byte) (float64, bool) {
 // covered here (its one data: line is the whole buffer); the per-line gate in
 // Feed already caught the common case, so this is the safety net for events
 // whose error JSON spans multiple data: lines.
-func (a *Analyzer) flushEvent() {
+func (a *Analyzer) flushEvent(now time.Time) {
 	if len(a.eventData) > 0 && a.errType == "" {
 		var keys frameKeys
 		keys.scan(a.eventData)
 		if keys.hasError {
 			a.captureStreamError(a.eventData)
+		}
+	}
+	// A Responses terminal document may itself span several data: lines (a
+	// pretty-printed or split JSON object). No single line is a complete
+	// terminal event, so resolve the reassembled document at its boundary.
+	// A terminal marker already seen by the line-oriented path is not
+	// processed twice.
+	if len(a.eventData) > 0 && !a.terminatorSeen {
+		var keys frameKeys
+		keys.scan(a.eventData)
+		if typ := keys.responseEventType(a.eventData); responsesTerminalEvent(typ) {
+			a.terminatorSeen = true
+			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			a.captureResponsesTerminalFinish(typ, a.eventData, now)
 		}
 	}
 	a.eventData = a.eventData[:0]
@@ -806,7 +862,7 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	// Flush a trailing event that ended at EOF without its blank-line
 	// terminator (a stream can close right after the last data: line). This
 	// surfaces an in-band error the provider sent as its final event.
-	a.flushEvent()
+	a.flushEvent(time.Now())
 
 	rec.FirstTokenAt = a.firstTokenAt
 	rec.LastTokenAt = a.lastTokenAt
@@ -986,7 +1042,7 @@ func (a *Analyzer) RetryableTruncation() bool {
 	if !a.chatlike || a.terminatorSeen || a.answerishSeen || a.responsesStream {
 		return false
 	}
-	a.flushEvent()
+	a.flushEvent(time.Now())
 	return a.firstTokenAt.IsZero() && a.errType == ""
 }
 
@@ -1013,7 +1069,7 @@ func (a *Analyzer) RetryableReasoningTruncation() bool {
 	// provider error that never saw its blank-line boundary is discovered
 	// only by the flush, and the provider's own failure statement must
 	// disqualify the rescue (mirrors RetryableTruncation's ordering).
-	a.flushEvent()
+	a.flushEvent(time.Now())
 	return !a.firstReasoningAt.IsZero() && a.firstAnswerAt.IsZero() && a.errType == ""
 }
 
