@@ -17,12 +17,20 @@ const ContentPartMax = 4096
 // caller must skip its typed decode when this returns false: content
 // composition is best effort here, not a reason to reject the request.
 func ContentPartsWithinLimit(raw []byte) bool {
+	return ArrayWithinLimit(raw, ContentPartMax)
+}
+
+// ArrayWithinLimit reports whether a raw JSON value is an array with at most
+// max members. A non-array value is accepted because the caller's decoder owns
+// its shape; the lexical scan stops once the bound is exceeded. It is the
+// shared counter for every decoded wire collection, not only content parts.
+func ArrayWithinLimit(raw []byte, max int) bool {
 	i := SkipSpace(raw, 0)
 	if i >= len(raw) || raw[i] != '[' {
 		return true
 	}
-	n, _, ok := CountJSONArrayBytes(raw, i, ContentPartMax)
-	return ok && n <= ContentPartMax
+	n, _, ok := CountJSONArrayBytes(raw, i, max)
+	return ok && n <= max
 }
 
 // CountJSONArrayBytes counts top-level members of a JSON array at i without

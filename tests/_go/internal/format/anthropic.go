@@ -734,7 +734,9 @@ func TestTranslateRequestSystemAllocationLinear(t *testing.T) {
 		return b.String()
 	}
 	var prev uint64
-	for _, n := range []int{4000, 8000, 16000} {
+	// The wire collection ceiling is 10_000 messages; doubling below it still
+	// proves the join's allocation is linear rather than quadratic.
+	for _, n := range []int{2000, 4000, 8000} {
 		body := mk(n)
 		var out []byte
 		var err error

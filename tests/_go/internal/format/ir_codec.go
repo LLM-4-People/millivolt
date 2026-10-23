@@ -1184,18 +1184,7 @@ func TestIRValidateRejectsUnknownRole(t *testing.T) {
 // before the typed decode materializes it, while the exact limit still
 // decodes.
 func TestResponseArraysAreBoundedBeforeDecode(t *testing.T) {
-	array := func(n int) string {
-		var b strings.Builder
-		b.WriteByte('[')
-		for i := 0; i < n; i++ {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(`{}`)
-		}
-		b.WriteByte(']')
-		return b.String()
-	}
+	array := emptyJSONArray
 
 	t.Run("chat choices at limit", func(t *testing.T) {
 		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax) + `}`
@@ -1223,4 +1212,82 @@ func TestResponseArraysAreBoundedBeforeDecode(t *testing.T) {
 			t.Fatalf("over-bound output error = %v", err)
 		}
 	})
+}
+
+// emptyJSONArray builds the cheapest amplifying array: n empty objects.
+func emptyJSONArray(n int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{}`)
+	}
+	b.WriteByte(']')
+	return b.String()
+}
+
+// TestWireCollectionsAreBoundedBeforeDecode pins every collection preflight
+// the codecs run themselves: they are reachable without the proxy's request
+// metadata scan, and a typed decode must never be the first size check.
+func TestWireCollectionsAreBoundedBeforeDecode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		body   string
+		decode func([]byte) error
+		want   string
+	}{
+		{
+			"chat request messages", `{"model":"m","messages":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "messages exceeds",
+		},
+		{
+			"chat request tools", `{"model":"m","messages":[],"tools":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "tools exceeds",
+		},
+		{
+			"chat request legacy functions", `{"model":"m","messages":[],"functions":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "functions exceeds",
+		},
+		{
+			"chat request stop", `{"model":"m","messages":[],"stop":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "stop exceeds",
+		},
+		{
+			"chat response tool calls", `{"id":"c1","choices":[{"message":{"role":"assistant","tool_calls":` + emptyJSONArray(metrics.ContentPartMax+1) + `}}]}`,
+			func(b []byte) error { _, err := DecodeChatResponse(b); return err }, "message.tool_calls exceeds",
+		},
+		{
+			"responses request tools", `{"model":"m","input":"hi","tools":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeResponsesRequest(b); return err }, "tools exceeds",
+		},
+		{
+			"responses request include", `{"model":"m","input":"hi","include":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeResponsesRequest(b); return err }, "include exceeds",
+		},
+		{
+			"responses input summary", `{"model":"m","input":[{"type":"reasoning","summary":` + emptyJSONArray(metrics.ContentPartMax+1) + `}]}`,
+			func(b []byte) error { _, err := DecodeResponsesRequest(b); return err }, "input.summary exceeds",
+		},
+		{
+			"responses output summary", `{"id":"r1","output":[{"type":"reasoning","summary":` + emptyJSONArray(metrics.ContentPartMax+1) + `}]}`,
+			func(b []byte) error { _, err := DecodeResponsesResponse(b); return err }, "output.summary exceeds",
+		},
+		{
+			"anthropic request messages", `{"model":"m","max_tokens":8,"messages":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeAnthropicRequest(b); return err }, "messages exceeds",
+		},
+		{
+			"anthropic stop sequences", `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"stop_sequences":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeAnthropicRequest(b); return err }, "stop_sequences exceeds",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.decode([]byte(tc.body))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
 }

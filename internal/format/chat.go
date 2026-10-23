@@ -109,6 +109,31 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	if !utf8.Valid(body) {
 		return nil, errParseOpenAIBody(errors.New("request body is not valid UTF-8"))
 	}
+	// Bound the collections before the typed decode materializes them. The
+	// proxy preflights the wire body too, but the codec is reachable on its
+	// own (and the preflight deliberately skips malformed documents).
+	var bounds struct {
+		Messages  json.RawMessage `json:"messages"`
+		Tools     json.RawMessage `json:"tools"`
+		Functions json.RawMessage `json:"functions"`
+		Stop      json.RawMessage `json:"stop"`
+	}
+	if err := json.Unmarshal(body, &bounds); err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
+	for _, b := range []struct {
+		raw   json.RawMessage
+		field string
+	}{
+		{bounds.Messages, "messages"},
+		{bounds.Tools, "tools"},
+		{bounds.Functions, "functions"},
+		{bounds.Stop, "stop"},
+	} {
+		if err := checkWireArray(b.raw, b.field, WireCollectionMax); err != nil {
+			return nil, errParseOpenAIBody(err)
+		}
+	}
 	var in chatWireRequest
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, errParseOpenAIBody(err)
@@ -1160,6 +1185,23 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Choices) {
 		return nil, fmt.Errorf("chat response choices exceed %d items", metrics.ContentPartMax)
+	}
+	// The first choice is the one translated; bound its tool_calls array with
+	// the same lexical gate so a single item cannot expand past the limit.
+	var choiceBounds struct {
+		Choices []struct {
+			Message struct {
+				ToolCalls json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &choiceBounds); err != nil {
+		return nil, fmt.Errorf("parse chat response: %w", err)
+	}
+	if len(choiceBounds.Choices) > 0 {
+		if err := checkWireArray(choiceBounds.Choices[0].Message.ToolCalls, "message.tool_calls", metrics.ContentPartMax); err != nil {
+			return nil, err
+		}
 	}
 	var in chatWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {

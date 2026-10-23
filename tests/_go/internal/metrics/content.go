@@ -63,6 +63,11 @@ func TestContentPartsWithinLimit(t *testing.T) {
 		})
 	}
 
+	small := []byte(`[1,2,3]`)
+	if !ArrayWithinLimit(small, 3) || ArrayWithinLimit(small, 2) {
+		t.Fatal("ArrayWithinLimit did not honor a custom bound")
+	}
+
 	heavy := metricsContentParts(1_000_000)
 	var within bool
 	alloc := contentAllocDelta(func() { within = ContentPartsWithinLimit(heavy) })

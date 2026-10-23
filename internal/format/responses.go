@@ -85,6 +85,21 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	if !utf8.Valid(body) {
 		return nil, errors.New("responses request body is not valid UTF-8")
 	}
+	// Bound the collections the typed decode materializes. Input has its own
+	// check in decodeResponsesInput, before that function's item decode.
+	var bounds struct {
+		Tools   json.RawMessage `json:"tools"`
+		Include json.RawMessage `json:"include"`
+	}
+	if err := json.Unmarshal(body, &bounds); err != nil {
+		return nil, fmt.Errorf("parse responses request: %w", err)
+	}
+	if err := checkWireArray(bounds.Tools, "tools", WireCollectionMax); err != nil {
+		return nil, err
+	}
+	if err := checkWireArray(bounds.Include, "include", WireCollectionMax); err != nil {
+		return nil, err
+	}
 	var in responsesWireRequest
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse responses request: %w", err)
@@ -190,6 +205,20 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 	}
 	if !metrics.ContentPartsWithinLimit(raw) {
 		return nil, nil, fmt.Errorf("responses input exceeds %d items", metrics.ContentPartMax)
+	}
+	// Reasoning items carry a summary array that the typed item decode would
+	// materialize unbounded. The enclosing item array is bounded above, so
+	// this probe slice is too.
+	var itemBounds []struct {
+		Summary json.RawMessage `json:"summary"`
+	}
+	if err := json.Unmarshal(raw, &itemBounds); err != nil {
+		return nil, nil, fmt.Errorf("responses input: %w", err)
+	}
+	for _, item := range itemBounds {
+		if err := checkWireArray(item.Summary, "input.summary", metrics.ContentPartMax); err != nil {
+			return nil, nil, err
+		}
 	}
 	var items []responsesWireItem
 	if err := json.Unmarshal(raw, &items); err != nil {
@@ -886,6 +915,23 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Output) {
 		return nil, fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
+	}
+	// A reasoning output item's summary array is materialized by the typed
+	// item decode; the bounded output array keeps this probe slice small. An
+	// absent or null output is a provider error envelope (or an empty
+	// response) and has no items to inspect.
+	if len(probe.Output) > 0 && !bytes.Equal(bytes.TrimSpace(probe.Output), []byte("null")) {
+		var itemBounds []struct {
+			Summary json.RawMessage `json:"summary"`
+		}
+		if err := json.Unmarshal(probe.Output, &itemBounds); err != nil {
+			return nil, fmt.Errorf("parse responses response: %w", err)
+		}
+		for _, item := range itemBounds {
+			if err := checkWireArray(item.Summary, "output.summary", metrics.ContentPartMax); err != nil {
+				return nil, err
+			}
+		}
 	}
 	var in responsesWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {

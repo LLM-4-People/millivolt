@@ -92,6 +92,32 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 	if !utf8.Valid(body) {
 		return nil, errors.New("anthropic request body is not valid UTF-8")
 	}
+	// Bound the collections before the typed decode materializes them. The
+	// proxy preflights messages, tools and system content for its own relay
+	// path; the codec owns the same guarantee for every caller, including the
+	// stop_sequences list no earlier layer bounds.
+	var bounds struct {
+		Messages      json.RawMessage `json:"messages"`
+		Tools         json.RawMessage `json:"tools"`
+		System        json.RawMessage `json:"system"`
+		StopSequences json.RawMessage `json:"stop_sequences"`
+	}
+	if err := json.Unmarshal(body, &bounds); err != nil {
+		return nil, fmt.Errorf("parse anthropic request: %w", err)
+	}
+	for _, b := range []struct {
+		raw   json.RawMessage
+		field string
+	}{
+		{bounds.Messages, "messages"},
+		{bounds.Tools, "tools"},
+		{bounds.System, "system"},
+		{bounds.StopSequences, "stop_sequences"},
+	} {
+		if err := checkWireArray(b.raw, b.field, WireCollectionMax); err != nil {
+			return nil, err
+		}
+	}
 	var in anthropicWireRequest
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
