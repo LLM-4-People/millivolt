@@ -832,6 +832,12 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 		if req.Reasoning.Display != "" {
 			req.Warnings.Add(ir.WarningDropped, "reasoning.display", "Chat Completions has no reasoning display mode")
 		}
+		if req.Reasoning.Context != "" {
+			req.Warnings.Add(ir.WarningDropped, "reasoning.context", "Chat Completions has no reasoning context")
+		}
+		if req.Reasoning.Mode != "" {
+			req.Warnings.Add(ir.WarningDropped, "reasoning.mode", "Chat Completions has no reasoning mode")
+		}
 	}
 	out := map[string]any{
 		"model":    req.Model,
@@ -847,7 +853,13 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 		out["top_p"] = *req.TopP
 	}
 	if len(req.Stop) > 0 {
-		out["stop"] = req.Stop
+		stops := req.Stop
+		if len(stops) > ChatMaxStopSequences {
+			// Chat documents at most four stop sequences.
+			stops = stops[:ChatMaxStopSequences]
+			req.Warnings.Add(ir.WarningApproximated, "stop", "Chat Completions accepts at most four stop sequences")
+		}
+		out["stop"] = stops
 	}
 	if req.Seed != nil {
 		out["seed"] = *req.Seed
@@ -885,8 +897,20 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if req.ResponseFormat != nil {
 		out["response_format"] = encodeChatResponseFormat(req.ResponseFormat)
 	}
-	if req.Reasoning != nil && req.Reasoning.Effort != "" {
-		out["reasoning_effort"] = req.Reasoning.Effort
+	if req.Reasoning != nil {
+		effort := req.Reasoning.Effort
+		if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
+			effort = "none"
+			if req.Reasoning.Effort != "" {
+				req.Warnings.Add(ir.WarningApproximated, "reasoning.effort", "disabled thinking supersedes the requested effort")
+			}
+		} else if effort == "" && req.Reasoning.BudgetTokens != nil {
+			effort = effortFromBudget(*req.Reasoning.BudgetTokens)
+			req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "mapped to reasoning_effort")
+		}
+		if effort != "" {
+			out["reasoning_effort"] = effort
+		}
 	}
 	if req.Stream {
 		out["stream"] = true
@@ -897,8 +921,10 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if len(req.Metadata) > 0 {
 		out["metadata"] = req.Metadata
 	}
-	if req.ServiceTier != "" {
-		out["service_tier"] = req.ServiceTier
+	tier, tierWarns := mapServiceTier(ir.Chat, req.ServiceTier)
+	req.Warnings = append(req.Warnings, tierWarns...)
+	if tier != "" {
+		out["service_tier"] = tier
 	}
 	if req.User != "" {
 		out["user"] = req.User
@@ -1156,15 +1182,29 @@ func encodeChatToolChoice(tc *ir.ToolChoice) any {
 	return "auto"
 }
 
+// ChatMaxStopSequences is the documented Chat Completions stop-list ceiling.
+const ChatMaxStopSequences = 4
+
+// defaultResponseFormatName is the stable valid name synthesized when a
+// source structured-output format carries none. Chat and Responses document
+// name as required for json_schema, while Anthropic has no name field.
+const defaultResponseFormatName = "response"
+
+// responseFormatName is the single owner of the json_schema name both Chat and
+// Responses encoders must emit.
+func responseFormatName(rf *ir.ResponseFormat) string {
+	if rf != nil && rf.Name != "" {
+		return rf.Name
+	}
+	return defaultResponseFormatName
+}
+
 func encodeChatResponseFormat(rf *ir.ResponseFormat) any {
 	switch rf.Type {
 	case "json_object":
 		return map[string]any{"type": "json_object"}
 	case "json_schema":
-		js := map[string]any{"schema": rf.Schema}
-		if rf.Name != "" {
-			js["name"] = rf.Name
-		}
+		js := map[string]any{"schema": rf.Schema, "name": responseFormatName(rf)}
 		if rf.Description != "" {
 			js["description"] = rf.Description
 		}

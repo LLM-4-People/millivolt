@@ -32,8 +32,11 @@ type responsesWireRequest struct {
 	ToolChoice        json.RawMessage     `json:"tool_choice"`
 	ParallelToolCalls *bool               `json:"parallel_tool_calls"`
 	Reasoning         *struct {
-		Effort  string `json:"effort"`
-		Summary string `json:"summary"`
+		Effort          string `json:"effort"`
+		Summary         string `json:"summary"`
+		GenerateSummary string `json:"generate_summary"`
+		Context         string `json:"context"`
+		Mode            string `json:"mode"`
 	} `json:"reasoning"`
 	Text *struct {
 		Format    json.RawMessage `json:"format"`
@@ -146,7 +149,16 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		}
 	}
 	if in.Reasoning != nil {
-		req.Reasoning = &ir.ReasoningConfig{Effort: in.Reasoning.Effort, Summary: in.Reasoning.Summary}
+		// generate_summary is the deprecated alias for summary; both spellings
+		// describe the same request, so the explicit summary wins.
+		summary := in.Reasoning.Summary
+		if summary == "" {
+			summary = in.Reasoning.GenerateSummary
+		}
+		req.Reasoning = &ir.ReasoningConfig{
+			Effort: in.Reasoning.Effort, Summary: summary,
+			Context: in.Reasoning.Context, Mode: in.Reasoning.Mode,
+		}
 	}
 	if in.Text != nil {
 		rf, warn, err := decodeResponsesFormat(in.Text.Format)
@@ -533,7 +545,12 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 		req.Warnings.Add(ir.WarningDropped, "top_k", "Responses has no top_k")
 	}
 	if req.Reasoning != nil {
-		if req.Reasoning.BudgetTokens != nil && req.Reasoning.Effort == "" {
+		if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
+			if req.Reasoning.Effort != "" {
+				req.Warnings.Add(ir.WarningApproximated, "reasoning.effort", "disabled thinking supersedes the requested effort")
+			}
+			req.Reasoning.Effort = "none"
+		} else if req.Reasoning.BudgetTokens != nil && req.Reasoning.Effort == "" {
 			req.Reasoning.Effort = effortFromBudget(*req.Reasoning.BudgetTokens)
 			req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "mapped to reasoning.effort")
 		}
@@ -583,6 +600,12 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 		if req.Reasoning.Summary != "" {
 			r["summary"] = req.Reasoning.Summary
 		}
+		if req.Reasoning.Context != "" {
+			r["context"] = req.Reasoning.Context
+		}
+		if req.Reasoning.Mode != "" {
+			r["mode"] = req.Reasoning.Mode
+		}
 		if len(r) > 0 {
 			out["reasoning"] = r
 		}
@@ -602,8 +625,10 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	if len(req.Metadata) > 0 {
 		out["metadata"] = req.Metadata
 	}
-	if req.ServiceTier != "" {
-		out["service_tier"] = req.ServiceTier
+	tier, tierWarns := mapServiceTier(ir.Responses, req.ServiceTier)
+	req.Warnings = append(req.Warnings, tierWarns...)
+	if tier != "" {
+		out["service_tier"] = tier
 	}
 	if req.User != "" {
 		out["user"] = req.User
@@ -852,10 +877,7 @@ func encodeResponsesFormat(rf *ir.ResponseFormat) map[string]any {
 	case "json_object":
 		return map[string]any{"type": "json_object"}
 	case "json_schema":
-		out := map[string]any{"type": "json_schema", "schema": rf.Schema}
-		if rf.Name != "" {
-			out["name"] = rf.Name
-		}
+		out := map[string]any{"type": "json_schema", "schema": rf.Schema, "name": responseFormatName(rf)}
 		if rf.Description != "" {
 			out["description"] = rf.Description
 		}

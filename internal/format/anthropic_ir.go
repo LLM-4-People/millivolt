@@ -459,7 +459,8 @@ func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warni
 		return &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: obj.BudgetTokens, Display: obj.Display}, nil, nil
 	case "adaptive":
 		enabled := true
-		return &ir.ReasoningConfig{Enabled: &enabled, Display: obj.Display}, nil, nil
+		warns.Add(ir.WarningApproximated, "thinking.type", "adaptive thinking has no cross-protocol equivalent")
+		return &ir.ReasoningConfig{Enabled: &enabled, Display: obj.Display}, warns, nil
 	case "disabled":
 		enabled := false
 		return &ir.ReasoningConfig{Enabled: &enabled}, nil, nil
@@ -586,8 +587,10 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.User != "" {
 		out["metadata"] = map[string]any{"user_id": req.User}
 	}
-	if req.ServiceTier != "" {
-		out["service_tier"] = req.ServiceTier
+	tier, tierWarns := mapServiceTier(ir.Anthropic, req.ServiceTier)
+	req.Warnings = append(req.Warnings, tierWarns...)
+	if tier != "" {
+		out["service_tier"] = tier
 	}
 	if promptCacheKey != "" {
 		out["prompt_cache_key"] = promptCacheKey
@@ -965,11 +968,21 @@ func encodeAnthropicThinking(r *ir.ReasoningConfig) map[string]any {
 	return nil
 }
 
+// anthropicEfforts is Anthropic's documented output_config.effort vocabulary.
+var anthropicEfforts = map[string]bool{
+	"low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+}
+
 func encodeAnthropicOutputConfig(rf *ir.ResponseFormat, reasoning *ir.ReasoningConfig, warns *ir.Warnings) map[string]any {
 	out := map[string]any{}
-	if reasoning != nil && reasoning.Effort != "" {
+	if reasoning != nil {
 		effort := reasoning.Effort
-		if effort == "minimal" {
+		if reasoning.Enabled != nil && !*reasoning.Enabled {
+			effort = ""
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "reasoning.effort", "disabled thinking has no Anthropic output_config spelling")
+			}
+		} else if effort == "minimal" {
 			// Anthropic's documented effort levels start at low; minimal has
 			// no exact spelling there, so the nearest level preserves the
 			// client's low-reasoning intent instead of failing the request.
@@ -978,10 +991,37 @@ func encodeAnthropicOutputConfig(rf *ir.ResponseFormat, reasoning *ir.ReasoningC
 				warns.Add(ir.WarningApproximated, "reasoning.effort", "Anthropic Messages has no minimal effort; mapped to low")
 			}
 		}
-		out["effort"] = effort
+		if effort != "" {
+			switch {
+			case anthropicEfforts[effort]:
+				out["effort"] = effort
+			case effort == "none":
+				// Anthropic represents no extended thinking by omitting the
+				// effort field, not by a "none" value.
+				if warns != nil {
+					warns.Add(ir.WarningApproximated, "reasoning.effort", "no effort field is emitted for none")
+				}
+			default:
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "reasoning.effort", "Anthropic Messages has no equivalent effort")
+				}
+			}
+		}
+		if reasoning.Summary != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "reasoning.summary", "Anthropic Messages has no reasoning summary")
+		}
+		if reasoning.Context != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "reasoning.context", "Anthropic Messages has no reasoning context")
+		}
+		if reasoning.Mode != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "reasoning.mode", "Anthropic Messages has no reasoning mode")
+		}
 	}
 	if rf != nil && rf.Type == "json_schema" && len(rf.Schema) > 0 {
 		out["format"] = map[string]any{"type": "json_schema", "schema": rf.Schema}
+		if rf.Name != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "response_format.name", "Anthropic output_config.format has no name")
+		}
 	}
 	if len(out) == 0 {
 		return nil

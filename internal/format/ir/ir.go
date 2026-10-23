@@ -286,8 +286,12 @@ type ReasoningConfig struct {
 	Effort       string `json:"effort,omitempty"` // minimal, low, medium, high, xhigh, max
 	BudgetTokens *int   `json:"budget_tokens,omitempty"`
 	Summary      string `json:"summary,omitempty"` // auto, concise, detailed
-	Enabled      *bool  `json:"enabled,omitempty"`
-	Display      string `json:"display,omitempty"` // summarized, omitted
+	// Context and Mode are Responses reasoning controls with no Chat or
+	// Anthropic spelling.
+	Context string `json:"context,omitempty"`
+	Mode    string `json:"mode,omitempty"`
+	Enabled *bool  `json:"enabled,omitempty"`
+	Display string `json:"display,omitempty"` // summarized, omitted
 }
 
 // Request is one normalized inference request.
