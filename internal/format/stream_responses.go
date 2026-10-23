@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -425,6 +426,20 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 			continue
 		}
 		d.flushToolArguments(i, idx, item.Arguments)
+	}
+	// A truncated stream can end before a terminal document supplies the full
+	// value. The buffered added payload is then the only argument bytes the
+	// source produced, so flush it before the block closes. The indexes are
+	// sorted so the emitted delta order is deterministic.
+	toolIndexes := make([]int, 0, len(d.itemBlock))
+	for i := range d.itemBlock {
+		if _, ok := d.initialArgs[i]; ok {
+			toolIndexes = append(toolIndexes, i)
+		}
+	}
+	sort.Ints(toolIndexes)
+	for _, i := range toolIndexes {
+		d.flushToolArguments(i, d.itemBlock[i], "")
 	}
 	// Close every block the source actually opened before starting synthetic
 	// terminal items, so a target block sequence never nests two lifecycles.

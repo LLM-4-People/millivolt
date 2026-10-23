@@ -458,3 +458,27 @@ func responsesToolArguments(t *testing.T, out string) string {
 	}
 	return ""
 }
+
+// TestResponsesInitialToolArgumentsSurviveTruncation pins the fallback half of
+// N10: when the source ends before a done/terminal value, the buffered
+// output_item.added payload is the only argument text to flush before the
+// truncation error closes the stream.
+func TestResponsesInitialToolArgumentsSurviveTruncation(t *testing.T) {
+	source := `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1"}}
+
+`
+	var buf bytes.Buffer
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+		t.Fatalf("TranslateStreamBetween: %v", err)
+	}
+	if got := chatToolArguments(t, buf.String()); got != `{"q":1` {
+		t.Fatalf("tool arguments = %q, want the buffered initial payload: %s", got, buf.String())
+	}
+	if !strings.Contains(buf.String(), `"code":"truncated"`) {
+		t.Fatalf("truncation was not reported in-band: %s", buf.String())
+	}
+}
