@@ -129,6 +129,14 @@ type Record struct {
 	// concurrency / requests-per-window / tokens-per-window cap. Never persisted.
 	Throttled bool `json:"throttled,omitempty"`
 
+	// UsageInvalid is a live-only accounting flag: the provider reported usage
+	// that cannot be represented, so the record has no trustworthy token
+	// count. It is independent of ErrorCode because a provider error already
+	// owns that field. Settlement retains the admitted reservation rather than
+	// refunding it, and source accounting must not repopulate the usage.
+	// Never persisted or rendered.
+	UsageInvalid bool `json:"-"`
+
 	// Debug is set when an operator debug session matched this request.
 	// The full capture (bodies, headers) lives in the request_debug sidecar,
 	// never on this record - the ring/SSE carry only this flag + session id.

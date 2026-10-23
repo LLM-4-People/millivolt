@@ -728,7 +728,7 @@ func settleTokens(rec *metrics.Record) int64 {
 	if rec == nil {
 		return 0
 	}
-	if rec.ErrorCode == metrics.CodeInvalidUsage {
+	if rec.UsageInvalid || rec.ErrorCode == metrics.CodeInvalidUsage {
 		return scheduler.TokensUnavailable
 	}
 	n, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens)
@@ -745,6 +745,7 @@ func settleTokens(rec *metrics.Record) int64 {
 // invalidateUsage owns the explicit unavailable signal shared by protocol
 // adapters and final quota settlement. Existing failure detail is preserved.
 func invalidateUsage(rec *metrics.Record, err error) {
+	rec.UsageInvalid = true
 	rec.Usage = metrics.Usage{}
 	rec.GenTokens, rec.AnswerTokens = 0, 0
 	// A provider error already recorded owns the type/code pair; stamping

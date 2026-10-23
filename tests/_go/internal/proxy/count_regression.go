@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -94,5 +95,34 @@ func TestNativeInvalidUsageCannotRefundReservation(t *testing.T) {
 		if rec.ErrorCode != metrics.CodeInvalidUsage || rec.Usage != (metrics.Usage{}) || rec.GenTokens != 0 || settleTokens(rec) != scheduler.TokensUnavailable {
 			t.Fatalf("stream=%v invalid usage not unavailable: %+v", stream, rec)
 		}
+	}
+}
+
+// TestInvalidUsageRetainsAdmissionOnProviderError pins TC6-9: impossible
+// provider usage must make settlement unavailable even when a provider error
+// already owns the record's code, and the transient flag must not change the
+// provider classification or leak into the record's JSON.
+func TestInvalidUsageRetainsAdmissionOnProviderError(t *testing.T) {
+	rec := &metrics.Record{
+		ErrorType: "rate_limit_error",
+		ErrorCode: "rate_limit_exceeded",
+		Usage:     metrics.Usage{InputTokens: 1 << 62, OutputTokens: 1 << 62},
+	}
+	invalidateUsage(rec, metrics.ErrMetricRange)
+	if rec.ErrorType != "rate_limit_error" || rec.ErrorCode != "rate_limit_exceeded" {
+		t.Fatalf("provider classification changed: %+v", rec)
+	}
+	if !rec.UsageInvalid || rec.Usage != (metrics.Usage{}) {
+		t.Fatalf("invalid usage was not marked unavailable: %+v", rec)
+	}
+	if got := settleTokens(rec); got != scheduler.TokensUnavailable {
+		t.Fatalf("invalid usage settled as %d, want unavailable", got)
+	}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("usage_invalid")) || bytes.Contains(raw, []byte("UsageInvalid")) {
+		t.Fatalf("transient usage flag leaked into record JSON: %s", raw)
 	}
 }

@@ -1954,7 +1954,11 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// translated analyzer refused provider overrides; stamp what the
 			// source actually reported after the client turn is finalized.
 			sourceAnalyzer.Fill(&sourceRec)
-			if sourceAnalyzer.UsageReported() {
+			// Invalid accounting is sticky: the source observer may have
+			// captured only the usage object that failed validation (or a
+			// later partial one), and copying it would restore a refundable
+			// count for a turn already marked unavailable.
+			if sourceAnalyzer.UsageReported() && !rec.UsageInvalid {
 				rec.Usage = sourceRec.Usage
 			}
 			if sourceCostReported {
