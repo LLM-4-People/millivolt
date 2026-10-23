@@ -37,6 +37,10 @@ type frameKeys struct {
 	eventType []byte
 
 	hasError bool
+	// hasResponse marks a top-level "response" key. A complete type-less
+	// object carrying it may be a Responses terminal document whose SSE name
+	// follows its data, even before the stream has established its shape.
+	hasResponse bool
 
 	deltaNonEmpty            bool
 	refusalNonEmpty          bool
@@ -138,6 +142,7 @@ const (
 	keyDeltaValue
 	keyUsage
 	keyModel
+	keyResponse
 	keyError
 	keyContent
 	keyText
@@ -168,6 +173,8 @@ func identifyFrameKey(key []byte) frameKey {
 		return keyUsage
 	case "model":
 		return keyModel
+	case "response":
+		return keyResponse
 	case "error":
 		return keyError
 	case "content":
@@ -323,6 +330,8 @@ func (k *frameKeys) observe(id frameKey, value []byte, top bool, depth int) {
 		if k.model == nil {
 			k.model = value
 		}
+	case keyResponse:
+		k.hasResponse = true
 	case keyError:
 		k.hasError = true
 	case keyContent:

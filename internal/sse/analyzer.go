@@ -378,14 +378,15 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// line as valid JSON. Skipping the copy keeps the buffer empty for the
 	// ordinary one-object-per-event stream, saving a frame-sized copy and a
 	// second scan per frame plus the largest-frame retention. A type-less
-	// complete object on a Responses-shaped stream is the exception: it may be
-	// a terminal document whose SSE name arrives after its data line, so its
-	// bytes are retained for the boundary classifier.
+	// complete object that carries a top-level "response" or arrives on an
+	// established Responses stream is the exception: it may be a terminal
+	// document whose SSE name follows its data, so its bytes are retained for
+	// the boundary classifier even when it is the first stream event.
 	firstDataFrame := !a.eventDataSeen
 	if firstDataFrame {
 		a.eventDataSeen = true
 		a.eventSkipAccum = completeJSONObject(payload) &&
-			!(a.responsesStream && keys.eventType == nil)
+			!(keys.eventType == nil && (a.responsesStream || keys.hasResponse))
 	}
 	if !a.eventSkipAccum && len(a.eventData)+len(payload)+1 <= eventDataMax {
 		if len(a.eventData) > 0 {
