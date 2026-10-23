@@ -153,8 +153,8 @@ Choose the upstream base URL, credentials, authentication header or prefix,
 path, and query on each request. Constrain accepted URL prefixes in
 configuration. Optional adapters translate between OpenAI Chat Completions,
 OpenAI Responses, Anthropic Messages, and Cursor Connect through one canonical
-model; coverage and limits are documented, not implied. There is no separate provider registry
-or API-key vault in the proxy.
+model; coverage and limits are documented, not implied. There is no separate
+provider registry or API-key vault in the proxy.
 
 See [routing, timing and discovery](docs/protocol.md) and
 [adapter support and limitations](docs/adapters.md).
