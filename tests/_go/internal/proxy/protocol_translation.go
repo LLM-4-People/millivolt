@@ -790,6 +790,45 @@ func (t rewriteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(clone)
 }
 
+// TestTranslationWarningsSurviveUpstreamHeader proves the proxy-owned warning
+// header survives an upstream header of the same name on a translated
+// response: the provider value is untrusted and must not erase or extend the
+// proxy's own translation record.
+func TestTranslationWarningsSurviveUpstreamHeader(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Proxy-Warnings", "upstream:spoofed")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(up.Close)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.URL}})
+
+	body := `{"model":"m","max_tokens":8,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`
+	w := proxyRequest(t, s, "/v1/messages", "openai", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+	}
+	got := w.Header().Get("X-Proxy-Warnings")
+	if !strings.Contains(got, "top_k") {
+		t.Fatalf("translation warning missing: %q", got)
+	}
+	if strings.Contains(got, "upstream:spoofed") {
+		t.Fatalf("untrusted upstream warning reached the client: %q", got)
+	}
+
+	// A byte-transparent request never produces translation warnings, and the
+	// provider's header of the same name is still not forwarded.
+	w = proxyRequest(t, s, "/v1/chat/completions", "", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("passthrough status = %d (body %s)", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Proxy-Warnings"); got != "" {
+		t.Fatalf("provider warning header reached a passthrough client: %q", got)
+	}
+}
+
 // TestPreCommitErrorsUseTheClientProtocol pins the failure-shape contract on a
 // translated Anthropic or Responses client path: a failure before the status
 // line is committed must answer in the client's own error envelope, not the

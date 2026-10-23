@@ -656,7 +656,6 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			}
 			// The translated response owns completion shape and normalized
 			// usage. Custom cost paths still address the ORIGINAL document.
-			setWarningsHeader(w.Header(), warnings)
 			analyzeNonStreamBytes(out, rec, s.usageKeysFor(rec.Provider), nil, s.cfg().CaptureBodyPreview)
 			if t.inbound != ir.Chat {
 				// The non-stream analyzer reads Chat-shaped choices. For an
@@ -669,6 +668,9 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				rec.Cost = cost
 			}
 			copyResponseHeaders(w.Header(), resp.Header)
+			// Set the translation warnings after the upstream copy so an
+			// upstream header of the same name cannot replace or mask them.
+			setWarningsHeader(w.Header(), warnings)
 			w.WriteHeader(clientStatus)
 			if _, werr := w.Write(out); werr != nil {
 				markClientGone(rec)

@@ -1086,6 +1086,12 @@ func copyResponseHeaders(dst, src http.Header) {
 		if isHopByHopCanonical(k) || nominated[k] || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Set-Cookie") {
 			continue
 		}
+		// X-Proxy-Warnings is proxy-owned: it describes translation losses.
+		// Never let an upstream header of that name reach the client or
+		// overwrite the warning the translation path already stamped.
+		if strings.EqualFold(k, hdrWarnings) {
+			continue
+		}
 		dst[k] = append([]string(nil), vs...)
 	}
 }

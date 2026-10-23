@@ -35,6 +35,7 @@ const (
 	hdrTimeout        = "X-Proxy-Timeout-Ms"
 	hdrFormat         = "X-Proxy-Format"
 	hdrInFormat       = "X-Proxy-In-Format"
+	hdrWarnings       = "X-Proxy-Warnings"
 	hdrMaxConcurrency = "X-Proxy-Max-Concurrency"
 	// hdrSession optionally pins a request to an explicit conversation/session
 	// id supplied by the client. When absent, the proxy auto-groups requests

@@ -231,7 +231,7 @@ func setWarningsHeader(h http.Header, warnings ir.Warnings) {
 		return
 	}
 	add := headerSafe(warnings.Header())
-	prev := h.Get("X-Proxy-Warnings")
+	prev := h.Get(hdrWarnings)
 	if prev != "" {
 		add = prev + "; " + add
 	}
@@ -244,7 +244,7 @@ func setWarningsHeader(h http.Header, warnings ir.Warnings) {
 		}
 		add = strings.ToValidUTF8(add[:cut], "") + "; truncated"
 	}
-	h.Set("X-Proxy-Warnings", add)
+	h.Set(hdrWarnings, add)
 }
 
 // headerSafe keeps a warning value printable ASCII. Warning fields can carry

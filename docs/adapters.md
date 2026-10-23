@@ -85,7 +85,8 @@ target cannot consume them:
 `translation_loss` selects the policy. `warn` (default) drops optional fields
 the target cannot represent and reports each one in `X-Proxy-Warnings`.
 `reject` fails the request with 400 naming the fields before any upstream send.
-Response-side warnings are never fatal; a non-streaming response reports them
+The header is proxy-owned: a provider response header of the same name is never
+forwarded. Response-side warnings are never fatal; a non-streaming response reports them
 in `X-Proxy-Warnings`, while a streaming response cannot add a header after the
 status line is committed. The field is described under
 [settings](operations.md#finding-a-setting).
