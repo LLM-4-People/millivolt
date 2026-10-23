@@ -71,6 +71,10 @@ type Analyzer struct {
 	// degenerate-outcome rules apply only to chatlike streams so a foreign SSE
 	// protocol proxied through never gets a synthetic error injected.
 	chatlike bool
+	// anthropicWire marks an Anthropic Messages feed. It owns the truncation
+	// classification (a stream without message_stop or a stop_reason) but never
+	// the OpenAI degenerate substitution or rescue rules.
+	anthropicWire bool
 
 	// responsesStream marks a Responses-API-shaped feed (typed "response.*"
 	// events). Those events carry a per-response monotonic sequence_number
@@ -661,10 +665,21 @@ func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
 // "" = healthy; otherwise the error code to surface (or, on the passthrough
 // path, the code whose in-band error chunk replaces the held terminal event).
 func (a *Analyzer) OutcomeCode() string {
+	if a.anthropicWire {
+		if !a.terminatorSeen {
+			return metrics.CodeTruncated
+		}
+		return ""
+	}
 	hadAnswer := !a.firstAnswerAt.IsZero() || a.answerishSeen
 	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
 		hadAnswer, !a.firstReasoningAt.IsZero(), a.toolCalls, a.chatlike)
 }
+
+// ChatLike reports whether the analyzed feed follows the Chat/Responses
+// completion contract. The relay uses it to keep OpenAI degenerate
+// substitution off foreign wires.
+func (a *Analyzer) ChatLike() bool { return a.chatlike }
 
 // RetryableTruncation reports whether the finished stream is a truncation
 // (metrics.CodeTruncated) the proxy may transparently re-send: a chatlike

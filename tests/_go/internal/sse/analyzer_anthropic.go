@@ -65,6 +65,38 @@ func TestAnalyzerAnthropicTextAndUsage(t *testing.T) {
 	}
 }
 
+// TestAnalyzerAnthropicPrettyJSON pins the discriminator probe against
+// whitespace: providers may pretty-print SSE data, and the Anthropic
+// taxonomy must still own those frames.
+func TestAnalyzerAnthropicPrettyJSON(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: { "type" : "message_start", "message" : { "id" : "msg_1", "model" : "claude", "usage" : { "input_tokens" : 4, "output_tokens" : 0 } } }`,
+		``,
+		`data: { "type" : "content_block_delta", "index" : 0, "delta" : { "type" : "text_delta", "text" : "hi" } }`,
+		``,
+		`data: { "type" : "message_delta", "delta" : { "stop_reason" : "end_turn" }, "usage" : { "output_tokens" : 2 } }`,
+		``,
+		`data: { "type" : "message_stop" }`,
+		``,
+	}, "\n")
+	var a Analyzer
+	feedAnthropicLines(t, &a, stream)
+	if !a.Terminated() {
+		t.Fatal("pretty message_stop did not terminate")
+	}
+	var rec metrics.Record
+	a.Fill(&rec)
+	if rec.ProviderRequestID != "msg_1" || rec.ProviderModel != "claude" {
+		t.Fatalf("identity = %q/%q", rec.ProviderRequestID, rec.ProviderModel)
+	}
+	if rec.FinishReason != "stop" || !rec.HadAnswerContent {
+		t.Fatalf("record = %+v", rec)
+	}
+	if rec.Usage.InputTokens != 4 || rec.Usage.OutputTokens != 2 {
+		t.Fatalf("usage = %+v", rec.Usage)
+	}
+}
+
 func TestAnalyzerAnthropicToolAndThinking(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{"input_tokens":1,"output_tokens":0}}}`,

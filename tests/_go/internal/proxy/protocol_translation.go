@@ -457,6 +457,45 @@ func TestAnthropicPassthroughKeepsDegenerateTurns(t *testing.T) {
 	}
 }
 
+// TestTruncatedAnthropicPassthroughRecordsTheFailure proves a byte-transparent
+// Anthropic stream that ends without message_stop or a stop_reason is recorded
+// as truncated while the client wire stays byte-identical: the OpenAI
+// degenerate substitution must not write an OpenAI error chunk into it.
+func TestTruncatedAnthropicPassthroughRecordsTheFailure(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{"input_tokens":3,"output_tokens":0}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+		``,
+		``,
+	}, "\n")
+	up := newFixtureUpstream(t, "text/event-stream", 200, stream)
+	buf := metrics.NewBuffer(8)
+	s := New(config.Default(), buf)
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	body := `{"model":"claude","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	w := proxyRequest(t, s, "/v1/messages", "", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+	}
+	if got := w.Body.String(); got != stream {
+		t.Fatalf("passthrough body changed:\n got %q\nwant %q", got, stream)
+	}
+	if strings.Contains(w.Body.String(), "[DONE]") || strings.Contains(w.Body.String(), `"choices"`) {
+		t.Fatalf("OpenAI frames were substituted into an Anthropic stream: %s", w.Body.String())
+	}
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	if recs[0].ErrorCode != "truncated" || recs[0].ErrorType == "" {
+		t.Fatalf("record does not carry the truncation: %+v", recs[0])
+	}
+}
+
 // TestCursorTargetRejectsNonChatClient pins the documented bridge limitation:
 // a Responses or Anthropic client targeting Cursor is rejected at the routing
 // boundary instead of receiving a Chat-shaped envelope.

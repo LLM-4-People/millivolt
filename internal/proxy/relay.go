@@ -2132,18 +2132,27 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		code := a.OutcomeCode()
 		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected {
-			// The stop rescue requires the terminal region still WITHHELD:
-			// once a finishHold call released it the outcome was already
-			// signed on the wire, and no re-send may append behind it.
-			// RetryableReasoningStop is the analyzer's wire-safety gate (no
-			// refusal/function_call bytes, not a Responses-shaped feed).
-			if holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
-				hold = hold[:0]
-				holding = false
-				rescueRequested = rescueReasoningStop
-				return true
+			if !a.ChatLike() {
+				// A foreign wire such as Anthropic Messages has its own
+				// terminal contract but no OpenAI degenerate substitution:
+				// record the truncation without writing OpenAI frames into it.
+				rec.ErrorType = sse.TypeUpstreamError
+				rec.ErrorCode = code
+				rec.ErrorMsg = metrics.DegenerateMessage(code)
+			} else {
+				// The stop rescue requires the terminal region still WITHHELD:
+				// once a finishHold call released it the outcome was already
+				// signed on the wire, and no re-send may append behind it.
+				// RetryableReasoningStop is the analyzer's wire-safety gate (no
+				// refusal/function_call bytes, not a Responses-shaped feed).
+				if holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
+					hold = hold[:0]
+					holding = false
+					rescueRequested = rescueReasoningStop
+					return true
+				}
+				emitDegenerateSSE(w, &a, time.Now(), code, rec)
 			}
-			emitDegenerateSSE(w, &a, time.Now(), code, rec)
 		} else if len(hold) > 0 {
 			if _, werr := w.Write(hold); werr != nil {
 				clientGone()

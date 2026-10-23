@@ -53,8 +53,9 @@ type anthropicAnalyzerEvent struct {
 func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 	// Cheap rejection: every Anthropic event carries a typed discriminator.
 	// A Chat chunk has no top-level "type"; a Responses event's type starts
-	// with "response.".
-	if !bytes.Contains(payload, []byte(`"type":"`)) {
+	// with "response.". The probe ignores whitespace so pretty-printed SSE
+	// still reaches the decode; the decoded type is the real discriminator.
+	if !bytes.Contains(payload, []byte(`"type"`)) {
 		return false
 	}
 	var ev anthropicAnalyzerEvent
@@ -63,6 +64,10 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 	}
 	switch ev.Type {
 	case "message_start":
+		// Every real Anthropic stream opens with message_start; marking the
+		// wire here (not on a stray later event) keeps an isolated payload in
+		// the corpus from being classified as a truncated stream.
+		a.anthropicWire = true
 		// The caller owns the chatlike seed: an Anthropic wire is not a
 		// Chat/Responses feed, so its legitimate empty or thinking-only turn
 		// must never enter the OpenAI degenerate substitution rules. Token,
