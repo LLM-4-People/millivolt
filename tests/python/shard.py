@@ -20,6 +20,11 @@ class ShardTests(unittest.TestCase):
         self.assertEqual(sorted(name for task in tasks for name in task.names), names)
         self.assertEqual(len({name for task in tasks for name in task.names}), len(names))
 
+    def test_package_without_tests_produces_no_task(self):
+        tasks = shard.tasks_for_package(
+            "github.com/LLM-4-People/millivolt/internal/format/ir", [])
+        self.assertEqual(tasks, [])
+
     def test_fixed_port_packages_stay_serial(self):
         for package in shard.SERIAL_PACKAGES:
             tasks = shard.tasks_for_package(package, ["TestA", "TestB", "TestC"])

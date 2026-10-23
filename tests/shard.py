@@ -218,7 +218,10 @@ def tasks_for_package(package: str, names: list[str]) -> list[Task]:
     else:
         shards = SHARD_COUNTS.get(package, 1)
     if not names:
-        return [Task(package, (), 0, 1)]
+        # go test -c emits no binary for a package with no test files. Keep
+        # the package out of the build entirely: launching a task with an
+        # absent binary is not a test result.
+        return []
     shards = min(shards, len(names))
     buckets = shard_names(names, shards, package_weights(package))
     tasks = [
