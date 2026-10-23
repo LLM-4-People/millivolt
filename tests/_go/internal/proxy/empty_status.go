@@ -1,0 +1,61 @@
+package proxy
+
+// N1 regression: an accepted 202 and the status-only 204/205 are not
+// completions. They relay verbatim on both the native and translated paths
+// instead of entering completion classification or inventing an empty body.
+
+import (
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
+)
+
+func TestAcceptedAndEmptyStatusesRelayVerbatim(t *testing.T) {
+	routes := []struct {
+		name   string
+		path   string
+		format string
+		body   string
+	}{
+		{"native chat", "/v1/chat/completions", "", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`},
+		{"native responses", "/v1/responses", "", `{"model":"m","input":"hi"}`},
+		{"translated chat", "/v1/chat/completions", "anthropic", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`},
+		{"translated responses", "/v1/responses", "anthropic", `{"model":"m","input":"hi"}`},
+	}
+	for _, route := range routes {
+		for _, status := range []int{http.StatusAccepted, http.StatusNoContent, http.StatusResetContent} {
+			t.Run(route.name+"/"+http.StatusText(status), func(t *testing.T) {
+				response := ""
+				if status == http.StatusAccepted {
+					response = `{"status":"accepted","note":"async"}`
+				}
+				up := newFixtureUpstream(t, "application/json", status, response)
+				buf := metrics.NewBuffer(8)
+				s := New(config.Default(), buf)
+				s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+				w := proxyRequest(t, s, route.path, route.format, route.body)
+				if w.Code != status {
+					t.Fatalf("status = %d, want %d (body %s)", w.Code, status, w.Body.String())
+				}
+				if got := w.Body.String(); got != response {
+					t.Fatalf("body = %q, want %q", got, response)
+				}
+				if strings.Contains(w.Body.String(), "empty_completion") || strings.Contains(w.Body.String(), `"choices"`) {
+					t.Fatalf("status %d was classified as a completion: %s", status, w.Body.String())
+				}
+				recs := waitForRecord(t, buf, 1)
+				if len(recs) != 1 {
+					t.Fatalf("records = %d, want 1", len(recs))
+				}
+				rec := recs[0]
+				if rec.StatusCode != status || rec.ErrorType != "" || rec.ErrorCode != "" {
+					t.Fatalf("record = %+v, want status %d with no error", rec, status)
+				}
+			})
+		}
+	}
+}

@@ -572,17 +572,34 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 
+		// 204/205 carry no document and 202 is an accepted asynchronous
+		// response, not a completion. Relay all three verbatim for every
+		// protocol before the translation and quality branches so neither
+		// path invents an empty completion or translates a non-completion
+		// acknowledgement body.
+		if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+			copyResponseHeaders(w.Header(), resp.Header)
+			w.WriteHeader(resp.StatusCode)
+			return
+		}
+		if resp.StatusCode == http.StatusAccepted {
+			copyResponseHeaders(w.Header(), resp.Header)
+			w.WriteHeader(resp.StatusCode)
+			if isEventStream(resp.Header.Get("Content-Type")) {
+				flusher, _ := w.(http.Flusher)
+				if cerr := copyFlushing(disconnectWriter{w, rec}, resp.Body, flusher); cerr != nil {
+					markStreamErr(ctx, rec, cerr)
+				}
+			} else {
+				s.nonStreamBody(ctx, w, resp.Body, rec)
+			}
+			return
+		}
+
 		// Format translation is fully buffered by design; the status line is
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
 		if t.translate {
-			// 204/205 carry no document. Return the status without inventing
-			// a completion: encoding an empty body would fabricate one.
-			if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
-				copyResponseHeaders(w.Header(), resp.Header)
-				w.WriteHeader(resp.StatusCode)
-				return
-			}
 			// Reserve the whole-document buffer process-wide before reading.
 			// The reservation is held until this branch has written the
 			// translated body, so concurrent translations cannot multiply the
