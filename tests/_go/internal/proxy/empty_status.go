@@ -6,7 +6,9 @@ package proxy
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -100,5 +102,55 @@ func TestTranslatedStreamingNonCompletionKeepsUpstreamType(t *testing.T) {
 				t.Fatalf("record = %+v, want status %d with no error", recs, tc.status)
 			}
 		})
+	}
+}
+
+// TestStreamingRetryNonCompletionStatusStaysInBand pins N18: a quality retry
+// that answers 202 cannot restore the status line, but its JSON body must not
+// be scanned as SSE input. One protocol-native in-band error replaces it.
+func TestStreamingRetryNonCompletionStatusStaysInBand(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"accepted","note":"async"}`))
+	}))
+	defer upstream.Close()
+	buf := metrics.NewBuffer(8)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequestTo(t, srv, upstream, "/v1/chat/completions",
+		`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", status, got)
+	}
+	if strings.Contains(got, `"status":"accepted"`) {
+		t.Fatalf("202 JSON body was injected into the SSE stream: %s", got)
+	}
+	if strings.Count(got, `"code":"truncated"`) != 1 {
+		t.Fatalf("want exactly one in-band truncated error: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("want exactly one [DONE]: %s", got)
+	}
+	if strings.Contains(got, `"role":"assistant"`) &&
+		strings.Index(got, `"role":"assistant"`) > strings.Index(got, `"code":"truncated"`) {
+		t.Fatalf("error must follow the already relayed role chunk: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.StatusCode != http.StatusAccepted || rec.ErrorType != "upstream_error" ||
+		rec.ErrorCode != metrics.CodeTruncated || rec.Retries != 1 {
+		t.Fatalf("record = %+v, want status 202 with one truncated retry", rec)
 	}
 }

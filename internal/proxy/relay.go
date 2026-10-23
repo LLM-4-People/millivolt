@@ -1048,6 +1048,22 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		defer next.Body.Close()
 		rec.StatusCode = resp.StatusCode
 		captureUpstreamHeaders(resp, rec, t.authHeader)
+		if isNonCompletionStatus(resp.StatusCode) {
+			// The retry answered with an asynchronous acceptance or a
+			// status-only response, not a completion stream. The first
+			// attempt's 200 SSE status line is already committed, so the 202
+			// body must never be relayed raw as SSE input. Surface one
+			// protocol-native in-band error - the same truncated class an
+			// exhausted empty retry would report - and stop before streamBody
+			// can scan the JSON body as event-stream bytes.
+			rec.ErrorType = sse.TypeUpstreamError
+			rec.ErrorCode = metrics.CodeTruncated
+			rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, rec.ErrorType, rec.ErrorCode, rec.ErrorMsg); werr != nil {
+				markClientGone(rec)
+			}
+			return
+		}
 		if resp.StatusCode >= 400 {
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
