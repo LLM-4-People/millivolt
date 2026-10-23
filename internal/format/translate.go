@@ -265,11 +265,24 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 			break
 		}
 		if err != nil {
-			// Close the client stream with the protocol-native error event so
-			// a truncated upstream never leaves the client waiting. A
-			// truncation is a completed translation with an in-band error, not
-			// a translator failure: the caller must not append a second error.
+			// Close every block the decoder still holds before the abnormal
+			// terminal event: a target client must never receive an error or
+			// terminal frame for a block that is still open. A hard decoder
+			// failure (for example a safety budget) is not flushed: emitting
+			// retained payload after fail-closed validation would defeat the
+			// bound, and the proxy's protocol-native error frame terminates
+			// the stream.
 			if errors.Is(err, ErrTruncatedStream) {
+				for _, pending := range dec.FlushBlocks() {
+					if writeErr := enc.Write(pending); writeErr != nil {
+						return writeErr
+					}
+				}
+				// Close the client stream with the protocol-native error event
+				// so a truncated upstream never leaves the client waiting. A
+				// truncation is a completed translation with an in-band error,
+				// not a translator failure: the caller must not append a second
+				// error.
 				_ = enc.Write(&ir.Event{Type: ir.EventError, Error: &ir.Error{
 					Type: sse.TypeUpstreamError, Code: metrics.CodeTruncated,
 					Message: metrics.DegenerateMessage(metrics.CodeTruncated),

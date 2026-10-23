@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -19,6 +20,10 @@ var ErrTruncatedStream = errors.New("upstream stream ended before a terminal eve
 // StreamDecoder yields canonical events from one upstream SSE stream.
 type StreamDecoder interface {
 	Next() (*ir.Event, error)
+	// FlushBlocks closes every block the decoder still holds open. The
+	// translation facade calls it before it emits an abnormal terminal event,
+	// so a target encoder never has to close an unclosed block itself.
+	FlushBlocks() []*ir.Event
 }
 
 // StreamEncoder writes one client-facing SSE stream from canonical events.
@@ -103,4 +108,22 @@ func (q *eventQueue) pop() (*ir.Event, bool) {
 	ev := q.pending[0]
 	q.pending = q.pending[1:]
 	return ev, true
+}
+
+// drainQueue returns every queued event and empties the queue.
+func drainQueue(q *eventQueue) []*ir.Event {
+	out := append([]*ir.Event(nil), q.pending...)
+	q.pending = nil
+	return out
+}
+
+// sortedKeys returns the keys of a set in ascending order so decoder-emitted
+// block closings are deterministic.
+func sortedKeys(set map[int]bool) []int {
+	out := make([]int, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Ints(out)
+	return out
 }

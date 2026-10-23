@@ -278,22 +278,37 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 
 func (d *ChatStreamDecoder) closeText() {
 	if d.textIndex >= 0 {
-		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: d.textIndex})
+		idx := d.textIndex
 		d.textIndex = -1
+		d.closeOpen(idx)
 	}
 }
 
 func (d *ChatStreamDecoder) closeReasoning() {
 	if d.reasoningIndex >= 0 {
-		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: d.reasoningIndex})
+		idx := d.reasoningIndex
 		d.reasoningIndex = -1
+		d.closeOpen(idx)
 	}
 }
 
 func (d *ChatStreamDecoder) closeRefusal() {
 	if d.refusalIndex >= 0 {
-		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: d.refusalIndex})
+		idx := d.refusalIndex
 		d.refusalIndex = -1
+		d.closeOpen(idx)
+	}
+}
+
+// closeOpen emits one BlockEnd for an index this decoder opened and removes it
+// from the open set, so closeAll can never emit a second stop for that index.
+func (d *ChatStreamDecoder) closeOpen(idx int) {
+	d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
+	for i, open := range d.open {
+		if open == idx {
+			d.open = append(d.open[:i], d.open[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -302,13 +317,18 @@ func (d *ChatStreamDecoder) closeAll() {
 	d.closeReasoning()
 	d.closeRefusal()
 	for _, idx := range d.open {
-		if idx == d.textIndex || idx == d.reasoningIndex || idx == d.refusalIndex {
-			continue
-		}
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	d.open = nil
 	d.toolBlocks = map[int]int{}
+}
+
+// FlushBlocks closes every block this decoder still holds open. The
+// translation facade calls it when an upstream stream fails so a client never
+// receives an error or terminal event with an unclosed block.
+func (d *ChatStreamDecoder) FlushBlocks() []*ir.Event {
+	d.closeAll()
+	return drainQueue(&d.q)
 }
 
 // ChatStreamEncoder renders canonical events as Chat Completions SSE.

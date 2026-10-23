@@ -300,6 +300,14 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks() {
 	d.toolInitialBytes = 0
 }
 
+// FlushBlocks closes every block this decoder still holds open. The
+// translation facade calls it when an upstream stream fails so a client never
+// receives an error or terminal event with an unclosed block.
+func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
+	d.closeOpenBlocks()
+	return drainQueue(&d.q)
+}
+
 func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	if u.InputTokens != nil {
 		d.usage.InputTokens = *u.InputTokens + valueOrZero(u.CacheReadInputTokens) + valueOrZero(u.CacheCreationInputTokens)

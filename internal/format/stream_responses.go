@@ -177,8 +177,6 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Part, &part); err != nil {
 				return nil, err
 			}
-			idx := d.newBlock()
-			d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}] = idx
 			var block ir.Block
 			switch part.Type {
 			case "output_text", "input_text", "text":
@@ -188,9 +186,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			case "reasoning_text":
 				block = ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: part.Text, Provider: ir.Responses}}
 			default:
+				// Allocate the block only after the part type is accepted: an
+				// unsupported part must not consume an index or leave an open
+				// block whose stop would reach the client without a start.
 				d.warnings.Add(ir.WarningDropped, "content."+part.Type, "unsupported content part")
 				continue
 			}
+			idx := d.newBlock()
+			d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}] = idx
 			d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &block})
 		case "response.output_text.delta", "response.refusal.delta":
 			idx, ok := d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}]
@@ -205,8 +208,18 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			d.argsSeen[ev.OutputIndex] = true
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Arguments: ev.Delta}})
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		case "response.reasoning_summary_text.delta":
 			idx, ok := d.itemBlock[ev.OutputIndex]
+			if !ok {
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
+		case "response.reasoning_text.delta":
+			// reasoning_text is a content part of the reasoning item, so its
+			// deltas belong to the part block the added event opened (C12).
+			// reasoning_summary_text has no content part and stays on the item
+			// block.
+			idx, ok := d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}]
 			if !ok {
 				continue
 			}
@@ -289,6 +302,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.q.push(&ir.Event{Type: ir.EventDone})
 		case "error":
 			d.terminal = true
+			d.closeAll(nil)
 			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
 				Type: "api_error", Code: ev.Code, Message: ev.Message,
 			}})
@@ -317,12 +331,20 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) {
 		d.argsSeen[i] = true
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Arguments: item.Arguments}})
 	}
-	for idx := range d.open {
+	for _, idx := range sortedKeys(d.open) {
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		delete(d.open, idx)
 	}
 	clear(d.partBlock)
 	clear(d.itemBlock)
+}
+
+// FlushBlocks closes every block this decoder still holds open. The
+// translation facade calls it when an upstream stream fails so a client never
+// receives an error or terminal event with an unclosed block.
+func (d *ResponsesStreamDecoder) FlushBlocks() []*ir.Event {
+	d.closeAll(nil)
+	return drainQueue(&d.q)
 }
 
 func (d *ResponsesStreamDecoder) newBlock() int {
