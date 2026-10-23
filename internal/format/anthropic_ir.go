@@ -379,8 +379,14 @@ func decodeAnthropicDocument(p anthropicWireBlock) ([]ir.Block, ir.Warnings, err
 		file := &ir.File{FileData: p.Source.Data, MediaType: p.Source.MediaType, Filename: p.Title}
 		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
 	case "text":
-		// A plain-text document's data is the text itself, not base64.
-		return []ir.Block{ir.TextBlock(string(p.Source.Data))}, nil, nil
+		// A plain-text document's data is the text itself, not base64. The
+		// title has no text-block field on any target, so a non-empty one is a
+		// recorded loss instead of a silent drop.
+		var warns ir.Warnings
+		if p.Title != "" {
+			warns.Add(ir.WarningDropped, "document.title", "plain-text document title has no cross-protocol equivalent")
+		}
+		return []ir.Block{ir.TextBlock(string(p.Source.Data))}, warns, nil
 	case "url":
 		file := &ir.File{FileURL: p.Source.URL, Filename: p.Title}
 		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
