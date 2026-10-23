@@ -90,7 +90,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
-| Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
+| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
 | Backup | Size cap for one Settings backup download or restore upload. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
@@ -149,9 +149,13 @@ display group. Debug's native-model normalization is separate from these rules.
 before relay; the default empty list leaves every request untouched. Each rule
 has a scope and at least one action: `headers` sets or replaces upstream
 headers, `remove_headers` deletes them, and `body` sets the output-token
-ceilings `max_tokens` / `max_completion_tokens` (1..1000000) on the OpenAI
-wire body. The list is capped at 64 rules and validated like every other
-setting: a rule needs at least one scope field and one action, duplicate
+ceilings `max_tokens` / `max_completion_tokens` (1..1000000) on a Chat
+Completions or Anthropic client body before translation. A Responses client
+body is not rewritten by the body action because its cap is
+`max_output_tokens`; header and removal rules still apply. A Chat client whose
+target is the Responses wire has the rewritten cap translated to
+`max_output_tokens`. The list is capped at 64 rules and validated like every
+other setting: a rule needs at least one scope field and one action, duplicate
 scope triples are rejected, and one header name cannot be both set and removed
 in the same rule.
 

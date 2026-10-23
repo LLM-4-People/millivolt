@@ -8,21 +8,32 @@ See [protocol](protocol.md) for routing/auth headers and
 
 ## Client and upstream compatibility
 
-Your client connects to millivolt using an OpenAI-compatible API. millivolt
-then relays or translates the request according to the selected upstream format:
+millivolt accepts three client wire families and translates between any of
+them and the supported upstream families. The client protocol is selected by
+the request path, or explicitly by `X-Proxy-In-Format`; the upstream protocol
+is selected by `X-Proxy-Format`. Translation runs only when both are known and
+differ. An absent `X-Proxy-Format` is always a byte-transparent passthrough,
+and an explicit format equal to the client protocol is also passthrough.
 
-| Client → millivolt | millivolt → upstream | `X-Proxy-Format` |
-| --- | --- | --- |
-| OpenAI-compatible requests | OpenAI, xAI/Grok and other hosted or local OpenAI-compatible APIs | `openai` (default) |
-| Supported OpenAI Chat Completions | [Anthropic-compatible Messages](#anthropic-compatible-messages) | `anthropic` |
-| Supported OpenAI Chat Completions with text and tools | [Cursor agent.v1 Connect/protobuf](#cursor-connect-bridge) | `cursor` |
+| Client path | Client protocol | `X-Proxy-Format` | Upstream protocol |
+| --- | --- | --- | --- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | `openai` or absent | OpenAI Chat Completions, passthrough when both are Chat |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | `openai-responses` | OpenAI Responses |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | `anthropic` | Anthropic Messages |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | `cursor` | Cursor agent.v1 |
+| `POST /v1/responses` | OpenAI Responses | `openai` | OpenAI Chat Completions |
+| `POST /v1/responses` | OpenAI Responses | `openai-responses` or absent | OpenAI Responses, passthrough when both are Responses |
+| `POST /v1/responses` | OpenAI Responses | `anthropic` | Anthropic Messages |
+| `POST /v1/messages` | Anthropic Messages | `openai` | OpenAI Chat Completions |
+| `POST /v1/messages` | Anthropic Messages | `openai-responses` | OpenAI Responses |
+| `POST /v1/messages` | Anthropic Messages | `anthropic` or absent | Anthropic Messages, passthrough when both are Anthropic |
 
 xAI/Grok uses the ordinary OpenAI-compatible relay, not a separate native
 adapter. Other providers and local model servers can use that same path when
 they expose a compatible API; there is no fixed provider registry. Native
-translation is limited to the implemented adapters and their supported fields,
-not every OpenAI endpoint or arbitrary provider protocol. Translated responses
-and stream events are returned in OpenAI-compatible shapes.
+translation covers the fields listed under
+[cross-protocol translation](#cross-protocol-translation), not every endpoint
+or arbitrary provider protocol.
 
 Clients must support custom routing headers or middleware that adds them.
 For native formats, supply the adapter selection and the upstream's required
@@ -31,6 +42,52 @@ authentication, version and path headers; the
 [Cursor login setup](#cursor-login) show these choices. Provider profiles enrich
 headers, metadata and ensured tool signatures but do not select an adapter or
 grant provider access.
+
+## Cross-protocol translation
+
+Cross-protocol translation goes through one canonical request, response and
+stream model in [format/ir](../internal/format/ir/ir.go). Each wire family has
+one decoder and one encoder; the IR is the single source of truth for roles,
+content blocks, tool calls and results, reasoning artifacts, stop reasons and
+usage. Same-protocol requests never enter the IR: they relay byte-for-byte.
+
+Mapped across every pair: text, images (URL, base64 or file id), documents,
+audio where the target accepts it, system/developer/user/assistant turns,
+function tools, tool choice, parallel tool use, tool calls and results,
+structured outputs, reasoning effort and summary, stop sequences, sampling
+parameters, metadata, usage and cache-token accounting.
+
+Protocol-only artifacts are preserved for the same family and reported when a
+target cannot consume them:
+
+- Anthropic thinking and redacted-thinking blocks keep their opaque signatures.
+- OpenAI Responses reasoning items keep `encrypted_content` and item ids.
+  A cross-family encrypted reasoning artifact is never replayed into another
+  provider's field; it is dropped with a warning.
+- Provider-executed blocks such as server tool use and web search results have
+  no cross-protocol equivalent and are dropped with a warning.
+- `previous_response_id`, `item_reference`, `background`, `conversation`,
+  `store: true` and prompt templates require provider-side state and are
+  rejected when the target cannot honor them.
+- Responses `include` options and a non-string Chat metadata value have no
+  target equivalent and are dropped with a warning.
+- A non-function tool type and malformed tool arguments are rejected before any
+  upstream send.
+
+`translation_loss` selects the policy. `warn` (default) drops optional fields
+the target cannot represent and reports each one in `X-Proxy-Warnings`.
+`reject` fails the request with 400 naming the fields before any upstream send.
+Response-side warnings are never fatal; a non-streaming response reports them
+in `X-Proxy-Warnings`, while a streaming response cannot add a header after the
+status line is committed. The field is described under
+[settings](operations.md#finding-a-setting).
+
+Streaming translation is event-driven and bounded. Each target encoder owns its
+protocol's ordering invariants: Anthropic opens a block before any delta and
+closes it before `message_delta`; Responses emits `response.created`, per-item
+lifecycle events and one terminal event; Chat emits the role chunk, deltas, one
+`finish_reason` chunk and one `[DONE]`. A truncated upstream is closed with the
+client protocol's own error event, never a fabricated clean finish.
 
 ## Bundled compatibility profiles
 
@@ -78,7 +135,9 @@ the `bash` and `read` tool names, the gated free models served even under
 the anonymous `public` bearer. `ensure_tools` injects missing names as inert
 stubs and adds `tool_choice: none` when the client sent no tools of its own,
 so the stubs can never be invoked; a body that already satisfies the
-signature relays byte-identical, and non-chat bodies are never rewritten.
+signature relays byte-identical. The stubs are Chat-shaped, so they are
+injected only into an OpenAI Chat client body on a Chat outbound wire; an
+Anthropic, Responses, Cursor, or arbitrary body is never rewritten.
 The same check found the signature also requires a streaming request
 (`"stream": true`): non-streaming requests to the gated free models get the
 provider's `FreeTierError` 403, so clients of those models must stream (the
@@ -103,9 +162,12 @@ not a hardcoded mechanism.
 
 ## Anthropic-compatible Messages
 
-`anthropic` translates common OpenAI chat requests/responses: message history,
-system text, tools/results, selected parameters, usage and streaming events.
-It is not complete preservation of every provider-specific field. A configured
+`anthropic` works in both directions: as an upstream selector for a Chat,
+Responses or Anthropic client, and as the inbound protocol for
+`POST /v1/messages`. Translation covers message history, system text,
+images, tools and results, thinking blocks, cache control, selected parameters,
+usage and streaming events. Fields with no target representation follow the
+[translation loss policy](#cross-protocol-translation). A configured
 [sub-conversation tracking](operations.md#sub-conversation-tracking) value is
 injected as the native top-level `prompt_cache_key`; the client's own spelling
 of the tracked field is otherwise dropped by the allowlist. The caller
@@ -147,7 +209,9 @@ Owners: [format/anthropic.go](../internal/format/anthropic.go),
 ## Cursor Connect bridge
 
 `cursor` is a text/tool bridge from OpenAI chat to the native agent.v1
-bidirectional Connect/protobuf protocol. It is not a general multimodal bridge
+bidirectional Connect/protobuf protocol. It currently requires an OpenAI Chat
+client: a Responses or Anthropic client targeting `cursor` is rejected with a
+clear 400 instead of receiving the wrong response shape. It is not a general multimodal bridge
 or a promise of a stable public provider API. Check the provider's current
 access terms and supported integration options before using account credentials;
 the project does not establish permission on your behalf.

@@ -64,8 +64,10 @@ For isolated development and checks, see [Contributing](CONTRIBUTING.md).
 
 ### Connect a client
 
-Point an OpenAI-compatible client at the proxy. The upstream URL and key stay
-yours; the proxy does not register providers or keys.
+Point an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages
+client at the proxy. The upstream URL and key stay yours; the proxy does not
+register providers or keys. The request path selects the client protocol, and
+`X-Proxy-Format` selects the upstream protocol.
 
 - **API base URL:** `http://127.0.0.1:8080/v1`
 - **API key:** your upstream key. It is forwarded through `Authorization`; it
@@ -84,9 +86,11 @@ curl -sS http://127.0.0.1:8080/v1/chat/completions \
 
 A JSON response means the relay worked. The request should appear in the
 dashboard within a second or two. On a shared Compose network, use
-`http://millivolt:8080/v1` instead of loopback. For Anthropic Messages, Cursor
-Connect, and other adapters, read
-[upstream compatibility](docs/adapters.md#client-and-upstream-compatibility).
+`http://millivolt:8080/v1` instead of loopback. `/v1/chat/completions`,
+`/v1/responses` and `/v1/messages` are all available; any of them can target a
+different upstream protocol. Read
+[upstream compatibility](docs/adapters.md#client-and-upstream-compatibility)
+and [cross-protocol translation](docs/adapters.md#cross-protocol-translation).
 
 Normal relay paths preserve request and response content, with documented
 exceptions for buffering, retries, SSE keepalives, format translation, and
@@ -147,9 +151,10 @@ inference.
 
 Choose the upstream base URL, credentials, authentication header or prefix,
 path, and query on each request. Constrain accepted URL prefixes in
-configuration. Optional adapters translate supported chat and tool workflows to
-Anthropic Messages and Cursor Connect; coverage and limits are documented, not
-implied. There is no separate provider registry or API-key vault in the proxy.
+configuration. Optional adapters translate between OpenAI Chat Completions,
+OpenAI Responses, Anthropic Messages, and Cursor Connect through one canonical
+model; coverage and limits are documented, not implied. There is no separate provider registry
+or API-key vault in the proxy.
 
 See [routing, timing and discovery](docs/protocol.md) and
 [adapter support and limitations](docs/adapters.md).
