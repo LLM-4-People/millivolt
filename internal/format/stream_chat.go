@@ -65,9 +65,10 @@ type ChatStreamDecoder struct {
 	toolBlocks     map[int]int
 	open           []int
 
-	finishSent bool
-	usage      ir.Usage
-	warnings   ir.Warnings
+	finishSeen    bool
+	pendingFinish *ir.Finish
+	usage         ir.Usage
+	warnings      ir.Warnings
 }
 
 // NewChatStreamDecoder builds a decoder over one upstream body.
@@ -95,10 +96,20 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 		}
 		raw, err := d.r.Next()
 		if err == io.EOF {
-			if !d.terminal {
-				return nil, ErrTruncatedStream
+			if d.terminal {
+				return nil, io.EOF
 			}
-			return nil, io.EOF
+			// A finish_reason is the documented end of a Chat completion. A
+			// provider may close the connection without the optional [DONE]
+			// sentinel; that is a complete stream, not a truncation.
+			if d.finishSeen {
+				d.closeAll()
+				d.flushFinish()
+				d.terminal = true
+				d.q.push(&ir.Event{Type: ir.EventDone})
+				continue
+			}
+			return nil, ErrTruncatedStream
 		}
 		if err != nil {
 			return nil, err
@@ -108,6 +119,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 		}
 		if strings.TrimSpace(string(raw.Data)) == "[DONE]" {
 			d.closeAll()
+			d.flushFinish()
 			d.terminal = true
 			d.q.push(&ir.Event{Type: ir.EventDone})
 			continue
@@ -161,19 +173,30 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				d.closeAll()
-				finish := &ir.Finish{Reason: irFinishReason(*choice.FinishReason)}
-				d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: finish})
-				d.finishSent = true
+				d.finishSeen = true
+				d.pendingFinish = &ir.Finish{Reason: irFinishReason(*choice.FinishReason)}
 			}
 		}
 		if chunk.Usage != nil {
 			d.usage = decodeChatUsage(chunk.Usage)
-			if d.finishSent {
-				u := d.usage
-				d.q.push(&ir.Event{Type: ir.EventMessageDelta, Usage: &u})
-			}
 		}
 	}
+}
+
+// flushFinish emits the single terminal MessageDelta. Finish and usage may
+// arrive in separate chunks (opaque providers do not guarantee their order),
+// so both are held until the stream's terminal marker and delivered once.
+func (d *ChatStreamDecoder) flushFinish() {
+	if d.pendingFinish == nil && d.usage == (ir.Usage{}) {
+		return
+	}
+	ev := &ir.Event{Type: ir.EventMessageDelta, Finish: d.pendingFinish}
+	if d.usage != (ir.Usage{}) {
+		u := d.usage
+		ev.Usage = &u
+	}
+	d.pendingFinish = nil
+	d.q.push(ev)
 }
 
 func stringifyCode(v any) string {

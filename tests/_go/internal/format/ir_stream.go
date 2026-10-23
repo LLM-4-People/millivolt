@@ -298,6 +298,40 @@ data: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_1"
 // TestStreamRefusalKeepsItsOwnChannel pins refusal deltas across both
 // directions: a refusal is never re-labeled as ordinary assistant content, and
 // a Chat refusal stream reaches the Responses refusal event (not output_text).
+// TestChatStreamUsagePositions pins one terminal MessageDelta regardless of
+// where the provider puts usage, and treats a finish_reason followed by EOF
+// as a complete stream (the [DONE] sentinel is optional in practice).
+func TestChatStreamUsagePositions(t *testing.T) {
+	const (
+		head   = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}` + "\n\n"
+		usage  = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}` + "\n\n"
+		finish = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	)
+	cases := map[string]string{
+		"usage before finish":   head + usage + finish + "data: [DONE]\n\n",
+		"usage after finish":    head + finish + usage + "data: [DONE]\n\n",
+		"usage in finish":       head + `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}` + "\n\n" + "data: [DONE]\n\n",
+		"finish then eof":       head + finish,
+		"usage then finish eof": head + usage + finish,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			collectStream(t, NewChatStreamDecoder(strings.NewReader(in)), NewAnthropicStreamEncoder(&buf, nil))
+			out := buf.String()
+			if n := strings.Count(out, "event: message_delta"); n != 1 {
+				t.Fatalf("message_delta count = %d, want 1:\n%s", n, out)
+			}
+			if strings.Contains(in, `"completion_tokens":5`) && !strings.Contains(out, `"output_tokens":5`) {
+				t.Fatalf("usage lost:\n%s", out)
+			}
+			if !strings.Contains(out, `"stop_reason":"end_turn"`) || !strings.Contains(out, "event: message_stop") {
+				t.Fatalf("missing terminal:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestStreamRefusalKeepsItsOwnChannel(t *testing.T) {
 	t.Run("responses to chat", func(t *testing.T) {
 		in := `event: response.created
