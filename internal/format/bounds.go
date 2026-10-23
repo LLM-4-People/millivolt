@@ -19,6 +19,20 @@ import (
 // single content-part array keeps the smaller ContentPartMax.
 const WireCollectionMax = 10_000
 
+// toolBlocksMax bounds the concurrent tool blocks a native stream decoder
+// tracks while translating one response. Each open block may retain its
+// initial JSON until its stop; real parallel tool calls are single-digit, so
+// 1024 leaves ample headroom while failing a stream that opens unique blocks
+// without ever closing them. Internal safety guardrail, not user-tunable.
+const toolBlocksMax = 1024
+
+// toolInitialBytesMax bounds the total initial tool JSON retained by the
+// currently open tool blocks of one native stream. Each start may carry up to
+// one SSE line, so the block count alone would allow a gigabyte of retained
+// strings; normal starts carry {} or a small inline object and large arguments
+// stream through deltas. Internal safety guardrail, not user-tunable.
+const toolInitialBytesMax = 4 << 20
+
 // WireNestedCollectionMax bounds an aggregate of nested collections that a
 // single top-level bound cannot cover, such as every reasoning summary array in
 // an output list or every citation array in a content list.

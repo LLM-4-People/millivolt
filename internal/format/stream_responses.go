@@ -87,6 +87,11 @@ type ResponsesStreamDecoder struct {
 	// emitted yet. A partial prefix must not reach the target before the
 	// first delta or the full done/terminal value decides the continuation.
 	initialArgs map[int]string
+	// initialArgsBytes bounds the total buffered initial arguments retained
+	// across open tool blocks, and openToolItems bounds how many such blocks
+	// can be open at once.
+	initialArgsBytes int
+	openToolItems    int
 	// argsEmitted marks that at least one argument payload was emitted for an
 	// output index, so a done/terminal full value must not repeat it.
 	argsEmitted map[int]bool
@@ -193,6 +198,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.sawToolCall = true
+				d.openToolItems++
+				if d.openToolItems > toolBlocksMax {
+					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", toolBlocksMax)
+				}
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
@@ -205,7 +214,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				// be invalid JSON when no delta follows. The first delta or the
 				// done/terminal value decides the continuation.
 				if args := item.Arguments; args != "" && args != "{}" {
+					if len(args) > toolInitialBytesMax-d.initialArgsBytes {
+						return nil, fmt.Errorf("responses stream exceeds %d retained initial tool bytes", toolInitialBytesMax)
+					}
 					d.initialArgs[ev.OutputIndex] = args
+					d.initialArgsBytes += len(args)
 				}
 			case "reasoning":
 				if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
@@ -307,8 +320,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.flushToolArguments(ev.OutputIndex, idx, item.Arguments)
 				delete(d.itemBlock, ev.OutputIndex)
 				delete(d.open, idx)
-				delete(d.initialArgs, ev.OutputIndex)
-				delete(d.argsEmitted, ev.OutputIndex)
+				d.clearToolState(ev.OutputIndex)
+				d.openToolItems--
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if item.Type == "reasoning" {
 				idx, ok := d.itemBlock[ev.OutputIndex]
@@ -421,6 +434,10 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	}
 	clear(d.partBlock)
 	clear(d.itemBlock)
+	clear(d.initialArgs)
+	d.initialArgsBytes = 0
+	clear(d.argsEmitted)
+	d.openToolItems = 0
 	// Synthesize terminal-only items in document order.
 	for i, item := range output {
 		typ := item.Type
@@ -584,7 +601,7 @@ func (d *ResponsesStreamDecoder) toolArgumentsDelta(outputIndex, blockIndex int,
 				delta = delta[len(initial):]
 			}
 		}
-		delete(d.initialArgs, outputIndex)
+		d.dropInitialArgs(outputIndex)
 		d.argsEmitted[outputIndex] = true
 	}
 	if delta != "" {
@@ -604,10 +621,25 @@ func (d *ResponsesStreamDecoder) flushToolArguments(outputIndex, blockIndex int,
 		args = d.initialArgs[outputIndex]
 	}
 	d.argsEmitted[outputIndex] = true
-	delete(d.initialArgs, outputIndex)
+	d.dropInitialArgs(outputIndex)
 	if args != "" && args != "{}" {
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: args}})
 	}
+}
+
+// dropInitialArgs releases the buffered output_item.added arguments for one
+// output index and its share of the initial-arguments bound.
+func (d *ResponsesStreamDecoder) dropInitialArgs(outputIndex int) {
+	if args, ok := d.initialArgs[outputIndex]; ok {
+		d.initialArgsBytes -= len(args)
+		delete(d.initialArgs, outputIndex)
+	}
+}
+
+// clearToolState releases every per-call entry once a function call closes.
+func (d *ResponsesStreamDecoder) clearToolState(outputIndex int) {
+	d.dropInitialArgs(outputIndex)
+	delete(d.argsEmitted, outputIndex)
 }
 
 func (d *ResponsesStreamDecoder) announceItem(outputIndex int) error {

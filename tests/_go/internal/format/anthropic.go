@@ -1037,12 +1037,12 @@ func TestNativeIdentityBound(t *testing.T) {
 // without stops fail closed, while a terminal event closes the stream so a
 // later start cannot emit behind the terminal marker.
 func TestNativeToolBlockCap(t *testing.T) {
-	if nativeToolBlocksMax != 1024 {
-		t.Fatalf("nativeToolBlocksMax = %d; the pinned bound is 1024", nativeToolBlocksMax)
+	if toolBlocksMax != 1024 {
+		t.Fatalf("toolBlocksMax = %d; the pinned bound is 1024", toolBlocksMax)
 	}
 	var stream strings.Builder
 	stream.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
-	for i := 0; i <= nativeToolBlocksMax; i++ {
+	for i := 0; i <= toolBlocksMax; i++ {
 		fmt.Fprintf(&stream, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
 	}
 	var out strings.Builder
@@ -1061,7 +1061,7 @@ func TestNativeToolBlockCap(t *testing.T) {
 		t.Run("ignored after "+terminal.name, func(t *testing.T) {
 			var s strings.Builder
 			s.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
-			for i := 0; i < nativeToolBlocksMax; i++ {
+			for i := 0; i < toolBlocksMax; i++ {
 				fmt.Fprintf(&s, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
 			}
 			s.WriteString("data: " + terminal.event + "\n\n")

@@ -30,21 +30,6 @@ const (
 	// multiply across a stream. Internal safety guardrail, not user-tunable.
 	nativeIdentityMaxBytes = 512
 
-	// nativeToolBlocksMax bounds the concurrent tool_use blocks tracked while
-	// translating one Anthropic stream. Each open block retains its initial
-	// JSON until its stop; real parallel tool calls are single-digit, so 1024
-	// leaves ample headroom while failing a stream that opens unique blocks
-	// without ever closing them. Internal safety guardrail, not user-tunable.
-	nativeToolBlocksMax = 1024
-
-	// nativeToolInitialBytesMax bounds the total initial input JSON retained
-	// by the currently open tool blocks. Each start may carry up to one SSE
-	// line (sseLineBufMax), so the block count alone would allow a gigabyte of
-	// retained strings; normal starts carry {} or a small inline object and
-	// large arguments stream through input_json_delta. Internal safety
-	// guardrail, not user-tunable.
-	nativeToolInitialBytesMax = 4 << 20
-
 	// wireJSONSourceByteMax is the largest encoded size of one accepted
 	// source byte after translation: a raw invalid UTF-8 byte becomes the
 	// three-byte U+FFFD replacement, U+2028/U+2029 expand from three bytes to
@@ -84,10 +69,10 @@ var (
 	// over-bound provider identity field.
 	errNativeIdentityTooLong = errors.New("anthropic: identity field exceeds limit")
 	// errNativeToolBlocks is the stable fail-closed reason for opening more
-	// concurrent tool blocks than nativeToolBlocksMax.
+	// concurrent tool blocks than toolBlocksMax.
 	errNativeToolBlocks = errors.New("anthropic: concurrent tool block limit exceeded")
 	// errNativeToolInitialBytes is the stable fail-closed reason for retaining
-	// more initial tool input than nativeToolInitialBytesMax across open blocks.
+	// more initial tool input than toolInitialBytesMax across open blocks.
 	errNativeToolInitialBytes = errors.New("anthropic: retained tool input limit exceeded")
 	// errNativeContentParts is the stable fail-closed reason for a response
 	// content-block array over metrics.ContentPartMax.

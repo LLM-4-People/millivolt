@@ -147,7 +147,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				return nil, fmt.Errorf("duplicate native tool index %d", ev.Index)
 			}
 			d.openBlocks[ev.Index] = true
-			if len(ev.ContentBlock.Input) > nativeToolInitialBytesMax-d.toolInitialBytes {
+			if len(ev.ContentBlock.Input) > toolInitialBytesMax-d.toolInitialBytes {
 				return nil, errNativeToolInitialBytes
 			}
 			block := ev.ContentBlock
@@ -159,12 +159,12 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.openToolBlocks++
-				if d.openToolBlocks > nativeToolBlocksMax {
+				if d.openToolBlocks > toolBlocksMax {
 					return nil, errNativeToolBlocks
 				}
 				d.toolInitial[ev.Index] = len(block.Input)
 				d.toolInitialBytes += len(block.Input)
-				if d.toolInitialBytes > nativeToolInitialBytesMax {
+				if d.toolInitialBytes > toolInitialBytesMax {
 					return nil, errNativeToolInitialBytes
 				}
 			}
