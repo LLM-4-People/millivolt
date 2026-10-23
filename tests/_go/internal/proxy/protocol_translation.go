@@ -352,6 +352,97 @@ func TestTranslationLossPolicy(t *testing.T) {
 	})
 }
 
+// TestAnthropicDefaultMaxTokensInjection pins the configured default boundary:
+// the value is injected only when the client sent no output-limit spelling,
+// and the Responses max_output_tokens spelling suppresses it like the two Chat
+// spellings do.
+func TestAnthropicDefaultMaxTokensInjection(t *testing.T) {
+	const anthropicResponse = `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	cases := []struct {
+		name       string
+		path       string
+		defaultMax int
+		body       string
+		want       int
+	}{
+		{"chat no cap", "/v1/chat/completions", 4096,
+			`{"model":"m","messages":[{"role":"user","content":"hi"}]}`, 4096},
+		{"chat configured default", "/v1/chat/completions", 1234,
+			`{"model":"m","messages":[{"role":"user","content":"hi"}]}`, 1234},
+		{"chat max_tokens", "/v1/chat/completions", 4096,
+			`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, 64},
+		{"chat max_completion_tokens", "/v1/chat/completions", 4096,
+			`{"model":"m","max_completion_tokens":32,"messages":[{"role":"user","content":"hi"}]}`, 32},
+		{"responses max_output_tokens", "/v1/responses", 4096,
+			`{"model":"m","input":"hi","max_output_tokens":48}`, 48},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "application/json", 200, anthropicResponse)
+			cfg := config.Default()
+			cfg.AnthropicDefaultMaxTokens = tc.defaultMax
+			s := New(cfg, metrics.Noop{})
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+			w := proxyRequest(t, s, tc.path, "anthropic", tc.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+			}
+			if got := up.lastPath(); got != "/v1/messages" {
+				t.Fatalf("upstream path = %q, want /v1/messages", got)
+			}
+			var sent map[string]any
+			if err := json.Unmarshal(up.lastBody(), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if sent["max_tokens"] != float64(tc.want) {
+				t.Fatalf("upstream max_tokens = %v, want %d (body %s)", sent["max_tokens"], tc.want, up.lastBody())
+			}
+		})
+	}
+}
+
+// TestResponseSideTranslationWarningsReachTheHeader pins the non-streaming
+// response-side path: a loss recorded while encoding the translated response
+// reaches X-Proxy-Warnings, and an upstream header of the same name cannot
+// spoof or mask it.
+func TestResponseSideTranslationWarningsReachTheHeader(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Proxy-Warnings", "upstream:spoofed")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"done"}],"stop_reason":"stop_sequence","stop_sequence":"END","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	t.Cleanup(up.Close)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.URL}})
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"stop":["END"]}`
+	w := proxyRequest(t, s, "/v1/chat/completions", "anthropic", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+	}
+	got := w.Header().Get("X-Proxy-Warnings")
+	if !strings.Contains(got, "stop_sequence") {
+		t.Fatalf("response-side warning missing: %q", got)
+	}
+	if strings.Contains(got, "upstream:spoofed") {
+		t.Fatalf("untrusted upstream warning reached the client: %q", got)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	choices, _ := out["choices"].([]any)
+	if len(choices) != 1 {
+		t.Fatalf("translated response = %v", out)
+	}
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	if message["content"] != "done" {
+		t.Fatalf("translated content = %v", message["content"])
+	}
+}
+
 // TestTerminalFrameForOnlyReadsTheEventLine pins the terminal detector against
 // provider-controlled data: a text delta that happens to contain a terminal
 // event name must not suppress the real terminal frame after a failure.
@@ -466,7 +557,8 @@ func TestAnthropicPassthroughKeepsDegenerateTurns(t *testing.T) {
 	for name, stream := range streams {
 		t.Run(name, func(t *testing.T) {
 			up := newFixtureUpstream(t, "text/event-stream", 200, stream)
-			s := New(config.Default(), metrics.Noop{})
+			buf := metrics.NewBuffer(8)
+			s := New(config.Default(), buf)
 			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
 
 			body := `{"model":"claude","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
@@ -482,6 +574,26 @@ func TestAnthropicPassthroughKeepsDegenerateTurns(t *testing.T) {
 			}
 			if strings.Contains(w.Body.String(), "[DONE]") || strings.Contains(w.Body.String(), `"choices"`) {
 				t.Fatalf("Anthropic passthrough gained OpenAI frames: %s", w.Body.String())
+			}
+			recs := waitForRecord(t, buf, 1)
+			if len(recs) != 1 {
+				t.Fatalf("records = %d, want 1", len(recs))
+			}
+			rec := recs[0]
+			if rec.StatusCode != http.StatusOK || rec.ErrorType != "" || rec.ErrorCode != "" || rec.ErrorMsg != "" {
+				t.Fatalf("legitimate turn was recorded as a failure: %+v", rec)
+			}
+			if rec.FinishReason != "stop" {
+				t.Fatalf("finish reason = %q, want stop", rec.FinishReason)
+			}
+			if rec.HadAnswerContent {
+				t.Fatalf("degenerate turn gained answer content: %+v", rec)
+			}
+			if want := rec.Usage.OutputTokens - rec.Usage.ReasoningTokens; rec.AnswerTokens != want {
+				t.Fatalf("answer tokens = %d, want output minus reasoning = %d", rec.AnswerTokens, want)
+			}
+			if rec.Usage.InputTokens != 3 {
+				t.Fatalf("input tokens = %d, want 3", rec.Usage.InputTokens)
 			}
 		})
 	}

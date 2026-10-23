@@ -4,6 +4,7 @@ package format
 // matched stop sequences are decoded or explicitly reported.
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -273,5 +274,222 @@ func TestEmptyReasoningBlockWarnsAnthropic(t *testing.T) {
 	}
 	if !warningField(resp.Warnings, "reasoning") {
 		t.Fatalf("empty reasoning block was not reported: %+v", resp.Warnings)
+	}
+}
+
+// TestEncodeResponsesResponseTable pins the terminal mapping and every output
+// item shape the Responses encoder can emit. A status regression (failed,
+// incomplete, cancelled) or a misplaced usage block would otherwise pass the
+// happy-path integration test.
+func TestEncodeResponsesResponseTable(t *testing.T) {
+	usage := ir.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}
+	status := func(doc map[string]any) string {
+		s, _ := doc["status"].(string)
+		return s
+	}
+	output := func(doc map[string]any) []any {
+		items, _ := doc["output"].([]any)
+		return items
+	}
+	cases := []struct {
+		name   string
+		resp   *ir.Response
+		verify func(t *testing.T, doc map[string]any)
+	}{
+		{
+			name: "completed text with usage",
+			resp: &ir.Response{
+				ID: "r1", Model: "m", Finish: ir.FinishStop, Usage: usage,
+				Blocks: []ir.Block{{Type: ir.BlockText, Text: "hello"}},
+			},
+			verify: func(t *testing.T, doc map[string]any) {
+				if status(doc) != "completed" {
+					t.Fatalf("status = %v", doc["status"])
+				}
+				if doc["error"] != nil || doc["incomplete_details"] != nil {
+					t.Fatalf("completed response carries a failure: %v", doc)
+				}
+				items := output(doc)
+				if len(items) != 1 {
+					t.Fatalf("output = %v", items)
+				}
+				message := items[0].(map[string]any)
+				if message["type"] != "message" || message["status"] != "completed" {
+					t.Fatalf("message item = %v", message)
+				}
+				part := message["content"].([]any)[0].(map[string]any)
+				if part["type"] != "output_text" || part["text"] != "hello" {
+					t.Fatalf("content part = %v", part)
+				}
+				u := doc["usage"].(map[string]any)
+				if u["input_tokens"] != float64(3) || u["output_tokens"] != float64(2) || u["total_tokens"] != float64(5) {
+					t.Fatalf("usage = %v", u)
+				}
+			},
+		},
+		{
+			name: "failed error",
+			resp: &ir.Response{
+				ID: "r1", Model: "m", Finish: ir.FinishStop,
+				Error: &ir.Error{Code: "server_error", Message: "boom"},
+			},
+			verify: func(t *testing.T, doc map[string]any) {
+				if status(doc) != "failed" {
+					t.Fatalf("status = %v", doc["status"])
+				}
+				failure := doc["error"].(map[string]any)
+				if failure["code"] != "server_error" || failure["message"] != "boom" {
+					t.Fatalf("error = %v", failure)
+				}
+				if items := output(doc); len(items) != 0 {
+					t.Fatalf("failed response output = %v", items)
+				}
+				if _, present := doc["usage"]; present {
+					t.Fatalf("failed response carries usage: %v", doc["usage"])
+				}
+			},
+		},
+		{
+			name: "incomplete length",
+			resp: &ir.Response{
+				ID: "r1", Model: "m", Finish: ir.FinishLength,
+				Blocks: []ir.Block{{Type: ir.BlockText, Text: "cut"}},
+			},
+			verify: func(t *testing.T, doc map[string]any) {
+				if status(doc) != "incomplete" {
+					t.Fatalf("status = %v", doc["status"])
+				}
+				details := doc["incomplete_details"].(map[string]any)
+				if details["reason"] != "max_output_tokens" {
+					t.Fatalf("incomplete_details = %v", details)
+				}
+			},
+		},
+		{
+			name: "incomplete content filter",
+			resp: &ir.Response{ID: "r1", Model: "m", Finish: ir.FinishContentFilter},
+			verify: func(t *testing.T, doc map[string]any) {
+				details := doc["incomplete_details"].(map[string]any)
+				if details["reason"] != "content_filter" {
+					t.Fatalf("incomplete_details = %v", details)
+				}
+			},
+		},
+		{
+			name: "incomplete explicit reason",
+			resp: &ir.Response{ID: "r1", Model: "m", Finish: ir.FinishOther, IncompleteReason: "custom_reason"},
+			verify: func(t *testing.T, doc map[string]any) {
+				details := doc["incomplete_details"].(map[string]any)
+				if details["reason"] != "custom_reason" {
+					t.Fatalf("incomplete_details = %v", details)
+				}
+			},
+		},
+		{
+			name: "cancelled",
+			resp: &ir.Response{ID: "r1", Model: "m", Finish: ir.FinishCancelled},
+			verify: func(t *testing.T, doc map[string]any) {
+				if status(doc) != "cancelled" {
+					t.Fatalf("status = %v", doc["status"])
+				}
+			},
+		},
+		{
+			name: "explicit source status",
+			resp: &ir.Response{ID: "r1", Model: "m", Finish: ir.FinishStop, Status: "in_progress",
+				Blocks: []ir.Block{{Type: ir.BlockText, Text: "partial"}}},
+			verify: func(t *testing.T, doc map[string]any) {
+				if status(doc) != "in_progress" {
+					t.Fatalf("status = %v", doc["status"])
+				}
+			},
+		},
+		{
+			name: "tool call",
+			resp: &ir.Response{
+				ID: "r1", Model: "m", Finish: ir.FinishToolCalls,
+				Blocks: []ir.Block{{
+					Type: ir.BlockToolCall,
+					ToolCall: &ir.ToolCall{
+						ID: "call_1", Name: "f", Arguments: json.RawMessage(`{"a":1}`),
+					},
+				}},
+			},
+			verify: func(t *testing.T, doc map[string]any) {
+				items := output(doc)
+				if len(items) != 1 {
+					t.Fatalf("output = %v", items)
+				}
+				call := items[0].(map[string]any)
+				if call["type"] != "function_call" || call["call_id"] != "call_1" || call["name"] != "f" {
+					t.Fatalf("function_call = %v", call)
+				}
+				if call["arguments"] != `{"a":1}` {
+					t.Fatalf("arguments = %v", call["arguments"])
+				}
+			},
+		},
+		{
+			name: "reasoning",
+			resp: &ir.Response{
+				ID: "r1", Model: "m", Finish: ir.FinishStop,
+				Blocks: []ir.Block{{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: "think"}}},
+			},
+			verify: func(t *testing.T, doc map[string]any) {
+				items := output(doc)
+				if len(items) != 1 || items[0].(map[string]any)["type"] != "reasoning" {
+					t.Fatalf("output = %v", items)
+				}
+				summary := items[0].(map[string]any)["summary"].([]any)
+				if len(summary) != 1 || summary[0].(map[string]any)["text"] != "think" {
+					t.Fatalf("reasoning summary = %v", summary)
+				}
+			},
+		},
+		{
+			name: "refusal",
+			resp: &ir.Response{
+				ID: "r1", Model: "m", Finish: ir.FinishStop,
+				Blocks: []ir.Block{{Type: ir.BlockRefusal, Refusal: "no"}},
+			},
+			verify: func(t *testing.T, doc map[string]any) {
+				items := output(doc)
+				if len(items) != 1 || items[0].(map[string]any)["type"] != "message" {
+					t.Fatalf("output = %v", items)
+				}
+				part := items[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+				if part["type"] != "refusal" || part["refusal"] != "no" {
+					t.Fatalf("refusal part = %v", part)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := EncodeResponsesResponse(tc.resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.verify(t, decodeJSONMap(t, body))
+		})
+	}
+}
+
+// TestResponsesRequestRejectsUnsupportedState pins the decoder's fail-closed
+// boundary for fields that need provider-side state or a stored prompt: each
+// must name the rejected feature instead of being dropped or forwarded.
+func TestResponsesRequestRejectsUnsupportedState(t *testing.T) {
+	cases := []struct{ name, body, field string }{
+		{"background", `{"model":"m","input":"hi","background":true}`, "background"},
+		{"conversation", `{"model":"m","input":"hi","conversation":"c1"}`, "conversation"},
+		{"prompt", `{"model":"m","prompt":{"id":"p1"}}`, "prompt"},
+		{"item_reference", `{"model":"m","input":[{"type":"item_reference","id":"ref_1"}]}`, "item_reference"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := DecodeResponsesRequest([]byte(tc.body)); err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("DecodeResponsesRequest() = %v, want a rejection naming %q", err, tc.field)
+			}
+		})
 	}
 }

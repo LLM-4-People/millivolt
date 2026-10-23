@@ -18,6 +18,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 func anthropicErrorEnvelope(t *testing.T, body string) map[string]any {
@@ -398,6 +399,49 @@ func TestTranslationRejectionEchoBounded(t *testing.T) {
 	}
 	if rec.Body.Len() > 2*protocolErrorEchoMax {
 		t.Fatalf("rejection body = %d bytes, want <= %d", rec.Body.Len(), 2*protocolErrorEchoMax)
+	}
+}
+
+// TestDegenerateResponsesFailureWireShape pins the synthetic terminal frame a
+// Responses client receives when the upstream ends without a terminal event:
+// exactly one response.failed event with a stable failure shape, no Chat
+// sentinel, and exact byte accounting.
+func TestDegenerateResponsesFailureWireShape(t *testing.T) {
+	rec := &metrics.Record{ID: "req_1"}
+	var a sse.Analyzer
+	w := httptest.NewRecorder()
+	emitDegenerateResponses(w, &a, time.Now(), metrics.CodeTruncated, rec)
+	body := w.Body.String()
+	if !strings.HasPrefix(body, "event: response.failed\ndata: ") || !strings.HasSuffix(body, "\n\n") {
+		t.Fatalf("frame framing = %q", body)
+	}
+	if strings.Count(body, "event: response.failed") != 1 {
+		t.Fatalf("response.failed count = %d: %q", strings.Count(body, "event: response.failed"), body)
+	}
+	if strings.Contains(body, "[DONE]") || strings.Contains(body, `"choices"`) {
+		t.Fatalf("Responses client received a Chat frame: %q", body)
+	}
+	payload := strings.TrimSuffix(strings.TrimPrefix(body, "event: response.failed\ndata: "), "\n\n")
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+		t.Fatalf("payload %q: %v", payload, err)
+	}
+	if doc["type"] != "response.failed" {
+		t.Fatalf("event type = %v", doc["type"])
+	}
+	response, _ := doc["response"].(map[string]any)
+	if response["object"] != "response" || response["status"] != "failed" || response["id"] != "req_1" {
+		t.Fatalf("response = %v", response)
+	}
+	failure, _ := response["error"].(map[string]any)
+	if failure["code"] != metrics.CodeTruncated || failure["message"] != metrics.DegenerateMessage(metrics.CodeTruncated) {
+		t.Fatalf("error = %v", failure)
+	}
+	if output, ok := response["output"].([]any); !ok || len(output) != 0 {
+		t.Fatalf("output = %v, want an empty array", response["output"])
+	}
+	if rec.ResponseBytes != int64(len(body)) {
+		t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
 	}
 }
 
