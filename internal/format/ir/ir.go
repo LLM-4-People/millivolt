@@ -333,10 +333,6 @@ type Request struct {
 	Store              *bool  `json:"store,omitempty"`
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 
-	// Ext carries protocol-only fields that a same-protocol passthrough would
-	// preserve. Cross-protocol encoders ignore it and warn.
-	Ext map[string]json.RawMessage `json:"ext,omitempty"`
-
 	Warnings Warnings `json:"warnings,omitempty"`
 }
 
@@ -362,17 +358,6 @@ type Usage struct {
 	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 	ReasoningTokens  int64 `json:"reasoning_tokens,omitempty"`
 	TotalTokens      int64 `json:"total_tokens,omitempty"`
-}
-
-// Add accumulates another usage snapshot. Later snapshots are authoritative
-// for fields they set; this helper is for cumulative deltas.
-func (u *Usage) Add(other Usage) {
-	u.InputTokens += other.InputTokens
-	u.OutputTokens += other.OutputTokens
-	u.CacheReadTokens += other.CacheReadTokens
-	u.CacheWriteTokens += other.CacheWriteTokens
-	u.ReasoningTokens += other.ReasoningTokens
-	u.TotalTokens += other.TotalTokens
 }
 
 // Response is one normalized completion.

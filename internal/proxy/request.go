@@ -1267,35 +1267,6 @@ func errJSONCode(typ, msg, code string) string {
 	return string(b)
 }
 
-// translateRequest converts an OpenAI Chat Completions body into the target
-// upstream format. Currently only "anthropic" is supported. defaultMaxTokens
-// (from config) is injected when the client sent no token cap. promptCacheKey
-// (the extracted sub-conversations value, "" when untracked) is injected as
-// Anthropic's native prompt_cache_key when non-empty.
-func translateRequest(format string, body []byte, defaultMaxTokens int, promptCacheKey string) ([]byte, error) {
-	switch format {
-	case "anthropic":
-		return providerformat.TranslateRequest(body, defaultMaxTokens, promptCacheKey)
-	default:
-		// Note: "cursor" is intentionally not here - serveCursorBidi translates
-		// the body itself (it needs the history blobs for the KV channel and a
-		// bare, unframed run_request).
-		return nil, fmt.Errorf("unsupported format %q", format)
-	}
-}
-
-// translateResponse converts an upstream response body from the provider
-// format back to OpenAI Chat Completions.
-func translateResponse(format string, body []byte) ([]byte, error) {
-	switch format {
-	case "anthropic":
-		return providerformat.TranslateResponse(body)
-	default:
-		// "cursor" is served by serveCursorBidi, never translateResponse.
-		return nil, fmt.Errorf("unsupported format %q", format)
-	}
-}
-
 // requestBodyReadInit is the initial capacity of the growable request-body
 // scratch. It is a read granularity, not a request-size limit: the scratch
 // grows only as bytes actually arrive.

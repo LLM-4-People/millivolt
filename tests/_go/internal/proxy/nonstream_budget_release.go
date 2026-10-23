@@ -77,7 +77,7 @@ func (w *holdWriteResponseWriter) Write(p []byte) (int, error) {
 
 // TestTranslatedNonStreamResponseBudgetRelease pins the whole-document
 // reservation around translated non-streaming responses: it must survive
-// translateResponse and only be released when the branch exits, on the failure
+// TranslateResponseBetweenIR and only be released when the branch exits, on the failure
 // paths as well as success.
 //
 // A missing final release leaves bytes held after a translation failure. A

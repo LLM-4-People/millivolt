@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -587,7 +588,7 @@ func TestRequestMetadataTranslatedBodyOwnership(t *testing.T) {
 	r.Header.Set(hdrFormat, "anthropic")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
-	want, err := translateRequest("anthropic", []byte(body), cfg.AnthropicDefaultMaxTokens, "")
+	want, err := providerformat.TranslateRequest([]byte(body), cfg.AnthropicDefaultMaxTokens, "")
 	if err != nil || !bytes.Equal(upstream, want) || w.Code != http.StatusOK {
 		t.Fatalf("translation changed: code=%d upstream=%s want=%s err=%v", w.Code, upstream, want, err)
 	}

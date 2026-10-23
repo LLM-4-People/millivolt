@@ -176,7 +176,7 @@ func TestRequestOverridesRewriteBodyAcrossRetriesAndResends(t *testing.T) {
 }
 
 // TestRequestOverridesTranslatedAnthropicCarriesThrough pins the translated
-// path: the rewrite lands on the OpenAI body BEFORE translateRequest, the
+// path: the rewrite lands on the OpenAI body BEFORE TranslateRequest, the
 // anthropic translator carries the effective ceiling (max_completion_tokens
 // wins its precedence) into the upstream body as max_tokens, and the fresh
 // record the translated body re-decodes into carries the same value.

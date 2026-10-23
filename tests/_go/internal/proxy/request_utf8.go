@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -385,9 +386,9 @@ func TestRequestValidUnicodeAndEscapesAccepted(t *testing.T) {
 			if rec.CharsUser != len(tc.want) || rec.PromptPreview != tc.want {
 				t.Fatalf("metadata = chars %d preview %q, want %d/%q", rec.CharsUser, rec.PromptPreview, len(tc.want), tc.want)
 			}
-			out, err := translateRequest("anthropic", body, 64, "")
+			out, err := providerformat.TranslateRequest(body, 64, "")
 			if err != nil {
-				t.Fatalf("translateRequest error = %v, want accepted", err)
+				t.Fatalf("TranslateRequest error = %v, want accepted", err)
 			}
 			var got struct {
 				Messages []struct {

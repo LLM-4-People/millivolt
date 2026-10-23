@@ -143,7 +143,7 @@ func TestTranslatedRequestOutputCapFailsClosed(t *testing.T) {
 	if len(body) > int(cfg.MaxRequestBytes) {
 		t.Fatalf("fixture body = %d bytes, want within the %d-byte cap", len(body), cfg.MaxRequestBytes)
 	}
-	translated, err := translateRequest("anthropic", body, cfg.AnthropicDefaultMaxTokens, "")
+	translated, err := providerformat.TranslateRequest(body, cfg.AnthropicDefaultMaxTokens, "")
 	if err != nil {
 		t.Fatal(err)
 	}

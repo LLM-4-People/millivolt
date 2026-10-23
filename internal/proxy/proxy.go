@@ -889,7 +889,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Cursor's agent.v1 Run is a bidirectional HTTP/2 stream (the server writes
 	// requests back on the same open stream and blocks for replies). That can't
 	// ride the write-body-then-read-response doWithRetry path, so it gets a
-	// dedicated full-duplex handler. Cursor is excluded from translateRequest
+	// dedicated full-duplex handler. Cursor is excluded from request translation
 	// (which would error on format cursor); the bidi handler translates to the
 	// enveloped run_request.
 	if t.format == "cursor" {
