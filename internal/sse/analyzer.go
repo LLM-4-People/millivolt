@@ -147,6 +147,20 @@ type Analyzer struct {
 	// x_nanogpt_pricing) rather than inside usage itself. The usage object
 	// stays the fallback root so paths written against it keep resolving.
 	usageChunk []byte
+	// usageSeen records that the source actually reported usage (a usage
+	// object or a provider usage-key path), so Fill's chunk-count fallback is
+	// distinguishable from a reported zero.
+	usageSeen bool
+
+	// Anthropic streams split usage across message_start and message_delta.
+	// Custom usage/cost keys may live beside the standard usage object on
+	// different events, so they are folded across every usage-bearing payload
+	// instead of only the last chunk root.
+	anthropicCustomUsage metrics.Usage
+	anthropicCustomTotal int64
+	anthropicCustomSeen  bool
+	anthropicCost        float64
+	anthropicCostSeen    bool
 
 	// CostKeys are optional per-provider JSON key paths for the per-request
 	// cost, checked before the built-in candidates (metrics.ExtractCost). Set
@@ -406,6 +420,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if raw := extractObject(keys.usage); raw != nil {
 		a.usage = append(a.usage[:0], raw...)
 		a.usageChunk = append(a.usageChunk[:0], payload...)
+		a.usageSeen = true
 	}
 
 	// Capture an in-band error payload. Providers and gateways signal failures
@@ -677,11 +692,39 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	// chunk-count fallbacks above with zeros; when real counts land the
 	// GenTokens fallback yields to FinalizeRecord's usage-based finalization
 	// (the same contract as a present usage object).
+	fallbackOutput := rec.Usage.OutputTokens
 	if a.usage != nil {
 		decodeUsage(a.usage, rec, a.UsageKeys)
+		// A present-but-all-zero usage object is the translated wire's
+		// placeholder. Keep the chunk fallback rather than publishing zero.
+		if rec.Usage == (metrics.Usage{}) && fallbackOutput > 0 {
+			rec.Usage.OutputTokens = fallbackOutput
+		}
+		// Provider usage-key paths may live beside the usage object in the
+		// raw chunk root; merge them without clobbering normalized counts.
+		if len(a.usageChunk) > 0 && mergeChunkUsage(a.usageChunk, rec, a.UsageKeys) {
+			rec.GenTokens = 0
+			a.usageSeen = true
+		}
 	} else if len(a.usageChunk) > 0 {
 		if mergeChunkUsage(a.usageChunk, rec, a.UsageKeys) {
 			rec.GenTokens = 0
+			a.usageSeen = true
+		}
+	}
+	if a.anthropicCustomSeen {
+		mergeUsageValues(&rec.Usage, a.anthropicCustomUsage)
+		if a.anthropicCustomTotal > 0 {
+			rec.Usage.TotalTokens = a.anthropicCustomTotal
+			rec.GenTokens = 0
+			a.usageSeen = true
+		} else if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
+			rec.Usage = metrics.Usage{}
+			a.usageSeen = false
+		} else {
+			rec.Usage.TotalTokens = total
+			rec.GenTokens = 0
+			a.usageSeen = true
 		}
 	}
 	// Cost is read straight from the provider's response (dynamic), so it
@@ -695,6 +738,9 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 		rec.Cost = cost
 	} else if cost, ok := a.extractCost(a.usage); ok {
 		rec.Cost = cost
+	}
+	if a.anthropicCostSeen {
+		rec.Cost = a.anthropicCost
 	}
 	if a.preview != nil && rec.ResponsePreview == "" {
 		rec.ResponsePreview = string(a.preview)
@@ -721,6 +767,12 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 
 // Terminated reports whether a documented end-of-stream marker was seen.
 func (a *Analyzer) Terminated() bool { return a.terminatorSeen }
+
+// UsageReported reports whether the source actually supplied usage, including
+// a custom usage-key path beside the usage object. It distinguishes an
+// unreported stream (whose output count is the chunk fallback) from a
+// provider-reported zero.
+func (a *Analyzer) UsageReported() bool { return a.usageSeen }
 
 // HasInBandError reports whether an in-band error payload was observed (a
 // provider failure streamed inside a 200 - no synthetic stream-outcome
@@ -904,18 +956,26 @@ func mergeChunkUsage(raw []byte, rec *metrics.Record, usageKeys map[string]strin
 	if json.Unmarshal(raw, &obj) != nil {
 		return false
 	}
-	parsed := metrics.ParseUsage(obj, usageKeys)
+	return mergeUsageValues(&rec.Usage, metrics.ParseUsage(obj, usageKeys))
+}
+
+// mergeUsageValues folds only positive counts into dst. A custom path that
+// resolves to zero never clobbers a standard count or the chunk fallback.
+func mergeUsageValues(dst *metrics.Usage, src metrics.Usage) bool {
 	merged := false
-	for _, f := range []struct{ got, dst *int64 }{
-		{&parsed.InputTokens, &rec.Usage.InputTokens},
-		{&parsed.OutputTokens, &rec.Usage.OutputTokens},
-		{&parsed.TotalTokens, &rec.Usage.TotalTokens},
-		{&parsed.CacheReadTokens, &rec.Usage.CacheReadTokens},
-		{&parsed.CacheWrite, &rec.Usage.CacheWrite},
-		{&parsed.ReasoningTokens, &rec.Usage.ReasoningTokens},
+	for _, f := range []struct {
+		got int64
+		dst *int64
+	}{
+		{src.InputTokens, &dst.InputTokens},
+		{src.OutputTokens, &dst.OutputTokens},
+		{src.TotalTokens, &dst.TotalTokens},
+		{src.CacheReadTokens, &dst.CacheReadTokens},
+		{src.CacheWrite, &dst.CacheWrite},
+		{src.ReasoningTokens, &dst.ReasoningTokens},
 	} {
-		if *f.got > 0 {
-			*f.dst = *f.got
+		if f.got > 0 {
+			*f.dst = f.got
 			merged = true
 		}
 	}

@@ -237,6 +237,24 @@ func ParseUsage(usageObj any, overrides map[string]string) Usage {
 	return u
 }
 
+// ParseUsageBody extracts the top-level usage object from a provider response
+// body and parses it with the provider's overrides. The source document is
+// authoritative for accounting even when a translated client wire no longer
+// carries the provider's custom paths.
+func ParseUsageBody(body []byte, usageKeys map[string]string) (Usage, bool) {
+	var root struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal(body, &root) != nil || !rawValuePresent(root.Usage) {
+		return Usage{}, false
+	}
+	var usage map[string]any
+	if json.Unmarshal(root.Usage, &usage) != nil || usage == nil {
+		return Usage{}, false
+	}
+	return ParseUsage(usage, usageKeys), true
+}
+
 // ExtractCostFromValue is ExtractCost over an already-decoded JSON value. It
 // also tolerates being handed the bare "usage" object (as the SSE analyzer
 // captures it): a leading "usage." segment that doesn't resolve is retried

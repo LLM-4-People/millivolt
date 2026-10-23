@@ -89,7 +89,9 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 				a.model = msg.Model
 			}
 			if msg.Usage != nil {
+				a.usageChunk = append(a.usageChunk[:0], payload...)
 				a.setAnthropicUsage(msg.Usage)
+				a.captureAnthropicCustomUsage(payload)
 			}
 		}
 		return true
@@ -124,7 +126,9 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		return true
 	case "message_delta":
 		if ev.Usage != nil {
+			a.usageChunk = append(a.usageChunk[:0], payload...)
 			a.setAnthropicUsage(ev.Usage)
+			a.captureAnthropicCustomUsage(payload)
 		}
 		if ev.Delta.StopReason != "" {
 			a.finishReason = anthropicAnalyzerFinish(ev.Delta.StopReason)
@@ -185,6 +189,27 @@ func (a *Analyzer) recordAnthropicToolToken(now time.Time) {
 	a.toolChunks++
 }
 
+// captureAnthropicCustomUsage folds provider usage/cost key paths that live
+// beside the standard usage object. Anthropic splits usage across events, so
+// the contribution from each usage-bearing payload is merged independently
+// instead of reading only the final chunk root.
+func (a *Analyzer) captureAnthropicCustomUsage(payload []byte) {
+	var root any
+	if json.Unmarshal(payload, &root) != nil {
+		return
+	}
+	parsed := metrics.ParseUsage(root, a.UsageKeys)
+	if mergeUsageValues(&a.anthropicCustomUsage, parsed) {
+		a.anthropicCustomSeen = true
+	}
+	if parsed.TotalTokens > 0 {
+		a.anthropicCustomTotal = parsed.TotalTokens
+	}
+	if cost, ok := metrics.ExtractCostFromValue(root, a.CostKeys); ok {
+		a.anthropicCost, a.anthropicCostSeen = cost, true
+	}
+}
+
 // setAnthropicUsage folds Anthropic's split cache accounting into the
 // Chat-shaped usage document Fill already understands. InputTokens is the
 // total (input after the last breakpoint plus cache read and write).
@@ -228,6 +253,7 @@ func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 		return
 	}
 	a.usage = chat
+	a.usageSeen = true
 }
 
 func anthropicAnalyzerFinish(reason string) string {

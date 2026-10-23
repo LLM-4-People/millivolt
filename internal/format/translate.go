@@ -227,16 +227,18 @@ func EncodeResponse(p ir.Protocol, resp *ir.Response) ([]byte, error) {
 // TranslateResponseBetween converts one non-streaming response body between
 // two protocols.
 func TranslateResponseBetween(inbound, outbound ir.Protocol, body []byte) ([]byte, ir.Warnings, error) {
-	out, _, warnings, err := TranslateResponseBetweenIR(inbound, outbound, body)
+	out, _, warnings, err := TranslateResponseBetweenIR(inbound, outbound, body, nil)
 	return out, warnings, err
 }
 
 // TranslateResponseBetweenIR converts one non-streaming response body between
 // two protocols and returns the canonical response so the caller can stamp
 // record fields the client-facing wire no longer exposes as Chat-shaped
-// choices. A provider error envelope returns a nil response: the encoded
-// error body is the whole result.
-func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte) ([]byte, *ir.Response, ir.Warnings, error) {
+// choices. sourceUsage, when non-nil, is the source document's accounting
+// (parsed with the provider's custom keys) and replaces the usage the target
+// codec could decode from standard names alone. A provider error envelope
+// returns a nil response: the encoded error body is the whole result.
+func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sourceUsage *ir.Usage) ([]byte, *ir.Response, ir.Warnings, error) {
 	if outbound == ir.Anthropic {
 		if e, err := DecodeAnthropicError(body); err == nil {
 			out, err := EncodeError(inbound, e)
@@ -250,6 +252,9 @@ func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte) ([]b
 	if resp.Error != nil {
 		out, err := EncodeError(inbound, resp.Error)
 		return out, nil, resp.Warnings, err
+	}
+	if sourceUsage != nil {
+		resp.Usage = *sourceUsage
 	}
 	out, err := EncodeResponse(inbound, resp)
 	return out, resp, resp.Warnings, err

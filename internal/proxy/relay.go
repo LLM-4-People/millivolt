@@ -107,6 +107,15 @@ func (s *Server) analyzerFor(rec *metrics.Record) sse.Analyzer {
 	return a
 }
 
+// translatedAnalyzer reads the normalized client wire produced by a
+// translation. Provider usage/cost overrides address the source document, so
+// they must not be applied to this wire.
+func (s *Server) translatedAnalyzer() sse.Analyzer {
+	var a sse.Analyzer
+	a.CapturePreview = s.cfg().CaptureBodyPreview
+	return a
+}
+
 // markClientGone records the LOCAL client disappearing mid-relay (a write to
 // it failed on a broken pipe, or its request context canceled): the client's
 // own cancellation - client_disconnected, the documented `cancel` bucket,
@@ -622,7 +631,15 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					rec.ErrorType, rec.ErrorCode, rec.ErrorMsg = typ, code, msg
 				}
 			}
-			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full)
+			// Source usage is authoritative even when the codec cannot read
+			// the provider's custom keys. Parse it before encoding so the
+			// client wire and the canonical response carry the real counts.
+			sourceUsage, sourceHasUsage, usageErr := providerformat.SourceUsage(t.outbound, full, s.usageKeysFor(rec.Provider))
+			var usageOverride *ir.Usage
+			if usageErr == nil && sourceHasUsage {
+				usageOverride = &sourceUsage
+			}
+			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full, usageOverride)
 			if terr != nil {
 				rec.StatusCode = http.StatusBadGateway
 				// Keep a provider error already parsed from the upstream document;
@@ -665,15 +682,28 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					rec.ErrorMsg = "upstream returned an in-band error"
 				}
 			}
-			// The translated response owns completion shape and normalized
-			// usage. Custom cost paths still address the ORIGINAL document.
-			analyzeNonStreamBytes(out, rec, s.usageKeysFor(rec.Provider), nil, s.cfg().CaptureBodyPreview)
+			// The source document owns usage and cost accounting; provider
+			// usage_keys address its shape, not the normalized translated
+			// wire. Read the translated output for completion structure only.
+			analyzeNonStreamBytes(out, rec, nil, nil, s.cfg().CaptureBodyPreview)
 			if t.inbound != ir.Chat {
 				// The non-stream analyzer reads Chat-shaped choices. For an
 				// Anthropic or Responses client those fields live only in the
 				// canonical response, so stamp the structure the translated
 				// wire no longer exposes in that shape.
 				applyTranslatedStructure(rec, respIR, s.cfg().CaptureBodyPreview)
+			}
+			if usageErr != nil {
+				invalidateUsage(rec, usageErr)
+			} else if sourceHasUsage {
+				rec.Usage = metrics.Usage{
+					InputTokens:     sourceUsage.InputTokens,
+					OutputTokens:    sourceUsage.OutputTokens,
+					TotalTokens:     sourceUsage.TotalTokens,
+					CacheReadTokens: sourceUsage.CacheReadTokens,
+					CacheWrite:      sourceUsage.CacheWriteTokens,
+					ReasoningTokens: sourceUsage.ReasoningTokens,
+				}
 			}
 			if cost, ok := metrics.ExtractCost(full, s.costKeysFor(rec.Provider)); ok {
 				rec.Cost = cost
@@ -1824,6 +1854,10 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			pr, pw := io.Pipe()
 			tracked := &translatedStreamWriter{dst: pw, terminal: terminalFrameFor(t.inbound)}
 			costKeys := s.costKeysFor(rec.Provider)
+			// The source analyzer owns provider usage/cost keys; the
+			// translated wire is normalized and must not be read with them.
+			sourceAnalyzer := s.analyzerFor(rec)
+			var sourceRec metrics.Record
 			var sourceCost float64
 			var sourceCostReported bool
 			var translationErr error
@@ -1839,6 +1873,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				// tracking writer records the translator's terminal frames so
 				// the handler can close an incomplete stream exactly once.
 				translationErr = providerformat.TranslateStreamBetween(t.inbound, t.outbound, tracked, resp.Body, nil, func(payload []byte) {
+					sourceAnalyzer.Feed(payload, time.Now())
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}
@@ -1862,8 +1897,17 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			if translationErr != nil && !tracked.done && !rec.ClientDisconnected {
 				closeFailedTranslation(w, flusher, rec, t.inbound, tracked.errorFrame)
 			}
+			// Source accounting is authoritative for translated streams. The
+			// translated analyzer refused provider overrides; stamp what the
+			// source actually reported after the client turn is finalized.
+			sourceAnalyzer.Fill(&sourceRec)
+			if sourceAnalyzer.UsageReported() {
+				rec.Usage = sourceRec.Usage
+			}
 			if sourceCostReported {
 				rec.Cost = sourceCost
+			} else if sourceRec.Cost != 0 {
+				rec.Cost = sourceRec.Cost
 			}
 			return
 		}
@@ -1891,7 +1935,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	}
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, sseScannerBufInit), translatedFrameBufMax)
-	a := s.analyzerFor(rec)
+	a := s.translatedAnalyzer()
 	// Frames are accumulated until their blank-line terminator, then written
 	// and flushed once: the transformer always emits "data: ...\n\n", so this
 	// is one Write and one Flush per event instead of two of each, and the
