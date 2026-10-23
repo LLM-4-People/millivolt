@@ -962,11 +962,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.relayNonCompletionBody(ctx, w, resp, rec)
 			return
 		}
-		// A translated stream always speaks SSE, whatever Content-Type the
-		// upstream used. The translated encoder frames the body itself, so the
-		// upstream type cannot describe it and must not be copied.
+		// A translated 200 stream speaks SSE, whatever Content-Type the
+		// upstream used. A translated non-200 is spooled and rendered as a
+		// JSON error body, so its declared type must stay JSON and the pacer
+		// must not add keepalive comments while it is read.
 		if t.translate {
-			resp.Header.Set("Content-Type", "text/event-stream")
+			if resp.StatusCode == http.StatusOK {
+				resp.Header.Set("Content-Type", "text/event-stream")
+			} else {
+				resp.Header.Set("Content-Type", "application/json")
+			}
 		}
 		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode != http.StatusOK {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)

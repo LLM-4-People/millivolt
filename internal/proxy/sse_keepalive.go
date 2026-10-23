@@ -29,9 +29,9 @@ var _ http.Flusher = (*ssePacer)(nil)
 // ResponseWriter itself. Queue wait, operator hold, upstream TTFB, retry
 // backoff, and mid-stream reasoning gaps all go silent here. A ticker
 // writes `: keepalive` whenever the socket has been idle for
-// sseKeepaliveInterval. Start() commits SSE immediately (known wait);
-// Arm() only runs the ticker (first comment after one idle interval, so
-// a fast stream still gets the real upstream status).
+// sseKeepaliveInterval. Start() commits SSE immediately for a known wait;
+// Arm() only runs the ticker, which stays silent until an actual event-stream
+// body has committed, so a slow JSON response never gets SSE comments.
 //
 // Non-stream requests cannot be pinged without committing a JSON body -
 // their sockets stay open on this server (no WriteTimeout) but a client
@@ -166,8 +166,11 @@ func (p *ssePacer) ensureArmedLocked() {
 	go p.loop()
 }
 
-// Arm starts the idle ticker without committing headers, so a fast stream
-// still writes the real upstream status.
+// Arm starts the idle ticker without committing headers. The body type is
+// unknown until upstream headers arrive, so an idle ticker never commits SSE
+// on its own: a slow JSON body must keep its real status and type. Queue and
+// operator hold call Start explicitly because those waits are known stream
+// holds.
 func (p *ssePacer) Arm() {
 	if p == nil {
 		return
@@ -220,14 +223,7 @@ func (p *ssePacer) loop() {
 			sse := p.sse
 			stopped := p.stopped
 			p.mu.Unlock()
-			if stopped || !idle {
-				continue
-			}
-			if !started {
-				p.Start()
-				continue
-			}
-			if !sse {
+			if stopped || !idle || !started || !sse {
 				continue
 			}
 			if !p.writeComment(false) {
@@ -299,9 +295,10 @@ func (p *ssePacer) applyUpstream(hdr http.Header, status int) (alreadySSE bool) 
 		copyResponseHeaders(p.w.Header(), hdr)
 	}
 	p.started = true
-	if status < 400 {
-		p.sse = true
-	}
+	// The pacer's SSE mode describes the committed body, not the status
+	// class. A slow 200/201 JSON body must never receive SSE comments while
+	// the relay spools it.
+	p.sse = isEventStream(p.w.Header().Get("Content-Type"))
 	p.lastWrite = time.Now()
 	p.w.WriteHeader(status)
 	return false
