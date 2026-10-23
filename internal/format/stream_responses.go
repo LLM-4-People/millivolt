@@ -1046,11 +1046,10 @@ func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel par
 // emittedSummaryParts returns the non-empty streamed summary bytes for one
 // reasoning item, ordered by summary index.
 func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
-	prefix := "summary:" + itemKey + ":"
 	var out []channelPart
 	for key, builder := range d.emittedText {
 		value := builder.String()
-		if value == "" || !strings.HasPrefix(key, prefix) {
+		if value == "" || d.partOwner[key] != itemKey {
 			continue
 		}
 		index, ok := partKeyIndex(key)
