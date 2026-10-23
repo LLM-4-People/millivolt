@@ -284,6 +284,51 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 	a.flushEvent(now)
 }
 
+// FeedBufferedEvent ingests the raw lines of one incomplete SSE event that the
+// relay had to release verbatim at its hold bound. It preserves the
+// reassembled data for a later FlushEventWithName, then classifies each line
+// without adding it twice. Later data lines of the same event append normally
+// until the real blank-line boundary.
+func (a *Analyzer) FeedBufferedEvent(raw []byte, now time.Time) {
+	data := EventData(raw)
+	if len(data) > eventDataMax {
+		data = data[:eventDataMax]
+	}
+	a.eventData = append(a.eventData[:0], data...)
+	a.eventDataSeen = true
+	a.eventSkipAccum = true
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\n' {
+			continue
+		}
+		a.Feed(raw[start:i], now)
+		start = i + 1
+	}
+	if start < len(raw) {
+		a.Feed(raw[start:], now)
+	}
+	a.eventDataSeen = true
+	a.eventSkipAccum = false
+}
+
+// FlushEventWithName resolves the current event at its blank-line boundary
+// using the given SSE event name. A document that omits its top-level type is
+// classified by that name; a document that carries a type uses its own type.
+// It never re-feeds the event's data lines.
+func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
+	if len(a.eventData) > 0 && !a.terminatorSeen {
+		typ, _ := ResolveResponsesTerminal(name, a.eventData)
+		if typ != "" {
+			a.terminatorSeen = true
+			a.responsesStream = true
+			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			a.captureResponsesTerminalFinish(typ, a.eventData, now)
+		}
+	}
+	a.flushEvent(now)
+}
+
 // feedData classifies one data payload. forcedType supplies the Responses
 // event type when the document itself omits it (a terminal event named only
 // on the SSE event: line).

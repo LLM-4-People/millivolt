@@ -2171,7 +2171,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// failure. Non-terminal events keep the ordinary line path.
 		eventName []byte
 		eventBody []byte
-		buf       [4096]byte
+		// pendingName is the terminal event name for a buffered event that
+		// was released verbatim at the hold bound. It classifies the
+		// reassembled document at the real blank-line boundary.
+		pendingName string
+		buf         [4096]byte
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
 		// the terminalHoldMax overflow): the stream then COMMITS to verbatim
 		// relay - no degenerate classification may substitute anything (a
@@ -2243,7 +2247,18 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		if holdAborted {
 			// Commit-to-verbatim mode: the overflow already released the
-			// terminal bytes - nothing may be substituted, ever.
+			// terminal bytes - nothing may be substituted, ever. Bytes held
+			// after the overflow (a later marker opened a fresh hold) are
+			// still part of the verbatim stream.
+			if len(hold) > 0 {
+				if _, werr := w.Write(hold); werr != nil {
+					clientGone()
+					return false
+				}
+				rec.ResponseBytes += int64(len(hold))
+				hold = hold[:0]
+			}
+			holding = false
 			flusher.Flush()
 			return true
 		}
@@ -2333,19 +2348,18 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	}
 	// abandonEventBuffer releases a buffered terminal-named event verbatim
 	// when it outgrows the hold bound. Nothing may be substituted after that
-	// commit, exactly like a hold overflow.
+	// commit, exactly like a hold overflow. The buffered prefix stays one
+	// event for the analyzer: its reassembled data is preserved for the real
+	// blank-line boundary, and the event name is remembered so a type-less
+	// document can still be classified there. No artificial blank line is
+	// fed at the overflow point - that would split the document mid-event.
 	abandonEventBuffer := func(now time.Time) {
 		raw := make([]byte, 0, len(eventName)+len(eventBody))
 		raw = append(raw, eventName...)
 		raw = append(raw, eventBody...)
 		out.Write(raw)
-		start := 0
-		for i := 0; i <= len(raw); i++ {
-			if i == len(raw) || raw[i] == '\n' {
-				a.Feed(raw[start:i], now)
-				start = i + 1
-			}
-		}
+		pendingName = string(sse.EventName(eventName))
+		a.FeedBufferedEvent(raw, now)
 		eventName = eventName[:0]
 		eventBody = eventBody[:0]
 		holdAborted = true
@@ -2397,8 +2411,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					}
 					continue
 				}
+				blank := len(bytes.TrimSpace(line)) == 0
 				prev := a.Terminated()
-				a.Feed(line, now)
+				if blank && pendingName != "" {
+					name := pendingName
+					pendingName = ""
+					a.FlushEventWithName(name, now)
+				} else {
+					a.Feed(line, now)
+				}
 				switch {
 				case holding:
 					hold = append(hold, line...)
@@ -2561,6 +2582,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					out.Write(b)
 				}
 				lineBuf.Reset()
+			}
+			// An event released at the hold bound may also end at EOF without
+			// its blank-line boundary. The buffered prefix and every later
+			// data line are already reassembled; apply the remembered event
+			// name now so a type-less terminal document still classifies.
+			if pendingName != "" {
+				name := pendingName
+				pendingName = ""
+				a.FlushEventWithName(name, now)
 			}
 			if err != io.EOF {
 				// A mid-thinking death by read error (connection reset,

@@ -6,6 +6,7 @@ package proxy
 // contradicts the document is dropped instead of relabelling it.
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,5 +176,79 @@ func TestResponsesMismatchedTerminalNameOverFailedData(t *testing.T) {
 	recs := waitForRecord(t, buf, 1)
 	if len(recs) != 1 || recs[0].ErrorCode != "server_error" || recs[0].ErrorCode == "truncated" {
 		t.Fatalf("record = %+v, want the provider failure", recs)
+	}
+}
+
+// responsesOverBoundTerminal builds one pretty-printed terminal event whose
+// size exceeds the relay's terminal hold bound. The event carries usage and
+// ends with an answer text after the overflow point, so the test proves the
+// buffered prefix and the later data lines stay one reassembled document.
+func responsesOverBoundTerminal(typed bool) string {
+	const filler = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	var b strings.Builder
+	b.WriteString("event: response.completed\n")
+	b.WriteString("data: {\n")
+	if typed {
+		b.WriteString("data:   \"type\": \"response.completed\",\n")
+	}
+	b.WriteString("data:   \"response\": {\"id\": \"resp_1\", \"model\": \"m\", \"status\": \"completed\", \"output\": [\n")
+	for i := 0; i < 90; i++ {
+		fmt.Fprintf(&b, "data:     {\"type\": \"message\", \"id\": \"msg_%d\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"%s\"}]},\n", i, filler)
+	}
+	b.WriteString("data:     {\"type\": \"message\", \"id\": \"msg_last\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"hello\"}]}\n")
+	b.WriteString("data:   ]},\n")
+	b.WriteString("data:   \"usage\": {\"input_tokens\": 3, \"output_tokens\": 5, \"total_tokens\": 8}\n")
+	b.WriteString("data: }\n\n")
+	return responsesCreatedFrame + b.String()
+}
+
+// TestResponsesOverBoundTerminalResolves pins R4-4: above terminalHoldMax a
+// multi-line terminal event is released verbatim without an artificial blank
+// boundary, and its reassembled document still supplies the finish reason,
+// answer presence, TTFT and usage. Both a typed document and a document that
+// omits its type (classified by the buffered event name) are covered.
+func TestResponsesOverBoundTerminalResolves(t *testing.T) {
+	for _, typed := range []bool{true, false} {
+		name := "type-less"
+		if typed {
+			name = "typed"
+		}
+		t.Run(name, func(t *testing.T) {
+			stream := responsesOverBoundTerminal(typed)
+			if len(stream) <= 64*1024 {
+				t.Fatalf("fixture is %d bytes, want above the 64 KiB hold bound", len(stream))
+			}
+			upstream := streamUpstream(t, stream)
+			defer upstream.Close()
+			buf := metrics.NewBuffer(8)
+			srv := httptest.NewServer(New(config.Default(), buf))
+			defer srv.Close()
+
+			status, got := streamRequestTo(t, srv, upstream, "/v1/responses",
+				`{"model":"m","stream":true,"input":"hi"}`)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", status, got)
+			}
+			if got != stream {
+				t.Fatalf("over-bound wire changed:\nIN =%q\nOUT=%q", stream, got)
+			}
+			if strings.Contains(got, "response.failed") || strings.Contains(got, `"code":"truncated"`) {
+				t.Fatalf("over-bound terminal was followed by a synthetic failure: %s", got)
+			}
+			recs := waitForRecord(t, buf, 1)
+			if len(recs) != 1 {
+				t.Fatalf("records = %d, want 1", len(recs))
+			}
+			rec := recs[0]
+			if rec.FinishReason != "stop" || !rec.HadAnswerContent || rec.TTFTMs <= 0 ||
+				rec.ErrorType != "" || rec.ErrorCode != "" {
+				t.Fatalf("record = %+v, want a clean stop with an answer and TTFT", rec)
+			}
+			if rec.Usage.InputTokens != 3 || rec.Usage.OutputTokens != 5 ||
+				rec.AnswerTokens != 5 || rec.GenTokens != 5 {
+				t.Fatalf("usage = %+v answer/gen = %d/%d, want 3 input and 5/5 from the terminal document",
+					rec.Usage, rec.AnswerTokens, rec.GenTokens)
+			}
+		})
 	}
 }
