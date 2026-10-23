@@ -14,12 +14,25 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
-// ResponsesStreamRetainedMaxBytes bounds the text, arguments, reasoning and
-// refusal one synthesized Responses item retains for its done and terminal
-// events. The wire requires those events to carry the full value, so the
-// encoder buffers it; the relay sizes its translated-frame scanner from this
-// bound. Internal safety guardrail, not user-tunable.
+// ResponsesStreamRetainedMaxBytes bounds the total text, arguments, reasoning
+// and refusal the encoder retains across ALL synthesized Responses items for
+// their done and terminal events. The wire requires those events to carry the
+// full value, so the encoder buffers it; the relay sizes its translated-frame
+// scanner from this one aggregate bound and the maximum JSON escape expansion.
+// A per-item value is subordinate: the total can never exceed this. Internal
+// safety guardrail, not user-tunable.
 const ResponsesStreamRetainedMaxBytes = 8 << 20
+
+// WireJSONEscapeExpansion is the largest number of bytes MarshalWireJSON emits
+// per retained byte: a control byte becomes the six-byte \u00XX escape. The
+// relay's translated-frame bound must cover it.
+const WireJSONEscapeExpansion = 6
+
+// ResponsesStreamFrameMaxBytes bounds one frame the Responses stream encoder
+// can emit from its enforced aggregate retention: the retained bytes after the
+// maximum JSON escape expansion plus the fixed frame envelope. The proxy sizes
+// its translated relay scanner from this bound.
+const ResponsesStreamFrameMaxBytes = WireJSONEscapeExpansion*ResponsesStreamRetainedMaxBytes + nativeStreamFrameEnvelopeMax
 
 // OpenAI Responses streaming codec.
 
@@ -121,6 +134,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Response, &resp); err != nil {
 				return nil, err
 			}
+			if err := checkNativeIdentity("id", resp.ID); err != nil {
+				return nil, err
+			}
+			if err := checkNativeIdentity("model", resp.Model); err != nil {
+				return nil, err
+			}
 			d.id, d.model, d.created = resp.ID, resp.Model, resp.CreatedAt
 			if d.created == 0 {
 				d.created = time.Now().Unix()
@@ -140,6 +159,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			switch item.Type {
 			case "function_call":
+				if err := checkNativeIdentity("tool id", item.CallID); err != nil {
+					return nil, err
+				}
+				if err := checkNativeIdentity("tool name", item.Name); err != nil {
+					return nil, err
+				}
 				d.sawToolCall = true
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
@@ -153,6 +178,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					},
 				}})
 			case "reasoning":
+				if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
+					return nil, err
+				}
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
@@ -388,6 +416,7 @@ type ResponsesStreamEncoder struct {
 	finish      ir.FinishReason
 	usage       ir.Usage
 	failed      *ir.Error
+	retained    int
 	doneSent    bool
 }
 
@@ -498,6 +527,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 				item.name = tc.Name
 				item.callID = tc.ID
 				if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
+					if err := e.retain(len(tc.Arguments), "function arguments"); err != nil {
+						return err
+					}
 					item.args.Write(tc.Arguments)
 				}
 			}
@@ -548,8 +580,8 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			}
 		case ev.Delta.Arguments != "":
 			if item.kind == "function_call" {
-				if item.args.Len()+len(ev.Delta.Arguments) > ResponsesStreamRetainedMaxBytes {
-					return fmt.Errorf("responses function arguments exceed %d bytes", ResponsesStreamRetainedMaxBytes)
+				if err := e.retain(len(ev.Delta.Arguments), "function arguments"); err != nil {
+					return err
 				}
 				item.args.WriteString(ev.Delta.Arguments)
 				return e.emit("response.function_call_arguments.delta", map[string]any{
@@ -813,6 +845,20 @@ func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) *respon
 	return item
 }
 
+// retain books bytes the terminal frame must carry. One aggregate budget
+// covers every item, so the terminal document cannot exceed the relay's
+// derived frame bound however many items the source opened.
+func (e *ResponsesStreamEncoder) retain(n int, field string) error {
+	if n <= 0 {
+		return nil
+	}
+	if e.retained+n > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses %s exceeds %d retained bytes", field, ResponsesStreamRetainedMaxBytes)
+	}
+	e.retained += n
+	return nil
+}
+
 // appendText retains and emits one message text or refusal delta. A block-start
 // payload and later deltas share the same path, so an initial value is never
 // dropped when no delta follows.
@@ -821,8 +867,8 @@ func (e *ResponsesStreamEncoder) appendText(item *responsesItemState, delta stri
 		return nil
 	}
 	if item.partType == "refusal" {
-		if item.refusal.Len()+len(delta) > ResponsesStreamRetainedMaxBytes {
-			return fmt.Errorf("responses refusal exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+		if err := e.retain(len(delta), "refusal"); err != nil {
+			return err
 		}
 		item.refusal.WriteString(delta)
 		return e.emit("response.refusal.delta", map[string]any{
@@ -831,8 +877,8 @@ func (e *ResponsesStreamEncoder) appendText(item *responsesItemState, delta stri
 			"delta": delta,
 		})
 	}
-	if item.text.Len()+len(delta) > ResponsesStreamRetainedMaxBytes {
-		return fmt.Errorf("responses output text exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+	if err := e.retain(len(delta), "output text"); err != nil {
+		return err
 	}
 	item.text.WriteString(delta)
 	return e.emit("response.output_text.delta", map[string]any{
@@ -857,8 +903,8 @@ func (e *ResponsesStreamEncoder) appendReasoning(item *responsesItemState, delta
 			return err
 		}
 	}
-	if item.reasoning.Len()+len(delta) > ResponsesStreamRetainedMaxBytes {
-		return fmt.Errorf("responses reasoning exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+	if err := e.retain(len(delta), "reasoning"); err != nil {
+		return err
 	}
 	item.reasoning.WriteString(delta)
 	return e.emit("response.reasoning_summary_text.delta", map[string]any{

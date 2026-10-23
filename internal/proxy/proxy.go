@@ -81,7 +81,7 @@ const (
 	// relayable frame instead of failing a legitimate chunk as
 	// translation_error. Safety guardrail, not user-tunable.
 	translatedFrameBufMax = max(providerformat.NativeStreamFrameMaxBytes,
-		4*providerformat.ResponsesStreamRetainedMaxBytes+2*1024)
+		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
 	// nonStreamCaptureMax bounds the prefix of a non-streaming response body
 	// kept for usage/cost parsing. Documents exceeding this capture can have
 	// unavailable accounting; their original bytes are still relayed in full.

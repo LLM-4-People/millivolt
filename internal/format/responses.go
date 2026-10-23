@@ -290,6 +290,9 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 				CallID: item.CallID, Content: content,
 			}})
 		case "reasoning":
+			if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
+				return nil, nil, err
+			}
 			var summary []string
 			for _, s := range item.Summary {
 				if s.Text != "" {
@@ -411,6 +414,12 @@ func decodeResponsesFunctionCall(item responsesWireItem) (*ir.ToolCall, ir.Warni
 	}
 	if id == "" {
 		return nil, nil, errors.New("function_call has no call_id")
+	}
+	if err := checkNativeIdentity("tool id", id); err != nil {
+		return nil, nil, err
+	}
+	if err := checkNativeIdentity("tool name", item.Name); err != nil {
+		return nil, nil, err
 	}
 	return &ir.ToolCall{ID: id, Name: item.Name, Arguments: args}, warns, nil
 }
@@ -945,6 +954,12 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse responses response: %w", err)
 	}
+	if err := checkNativeIdentity("id", in.ID); err != nil {
+		return nil, err
+	}
+	if err := checkNativeIdentity("model", in.Model); err != nil {
+		return nil, err
+	}
 	switch in.Status {
 	case "completed", "incomplete", "failed", "cancelled":
 	case "":
@@ -1008,6 +1023,9 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			resp.Blocks = append(resp.Blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 			resp.Warnings = append(resp.Warnings, warns...)
 		case "reasoning":
+			if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
+				return nil, err
+			}
 			var summary []string
 			for _, s := range item.Summary {
 				if s.Text != "" {

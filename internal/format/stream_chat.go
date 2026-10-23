@@ -145,6 +145,12 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 		if !d.started {
+			if err := checkNativeIdentity("id", chunk.ID); err != nil {
+				return nil, err
+			}
+			if err := checkNativeIdentity("model", chunk.Model); err != nil {
+				return nil, err
+			}
 			d.started = true
 			d.id, d.model, d.created = chunk.ID, chunk.Model, chunk.Created
 			if d.created == 0 {
@@ -177,7 +183,9 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: d.refusalIndex, Delta: &ir.Delta{Text: *delta.Refusal}})
 			}
 			for _, tc := range delta.ToolCalls {
-				d.toolCall(tc.Index, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments)
+				if err := d.toolCall(tc.Index, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+					return nil, err
+				}
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				d.closeAll()
@@ -257,9 +265,15 @@ func (d *ChatStreamDecoder) ensureRefusal() {
 	d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: d.refusalIndex, Block: &ir.Block{Type: ir.BlockRefusal}})
 }
 
-func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) {
+func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) error {
 	irIndex, ok := d.toolBlocks[chatIndex]
 	if !ok {
+		if err := checkNativeIdentity("tool id", id); err != nil {
+			return err
+		}
+		if err := checkNativeIdentity("tool name", name); err != nil {
+			return err
+		}
 		d.closeText()
 		d.closeReasoning()
 		d.closeRefusal()
@@ -274,6 +288,7 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 	if args != "" {
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: irIndex, Delta: &ir.Delta{Arguments: args}})
 	}
+	return nil
 }
 
 func (d *ChatStreamDecoder) closeText() {
@@ -422,12 +437,13 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 				if args == "" {
 					args = "{}"
 				}
-				e.argsEmitted[ev.Index] = true
+				e.releaseBlock(ev.Index)
 				return e.emit(map[string]any{"tool_calls": []any{map[string]any{
 					"index": idx, "function": map[string]any{"arguments": args},
 				}}}, nil, nil)
 			}
 		}
+		e.releaseBlock(ev.Index)
 	case ir.EventMessageDelta:
 		if ev.Finish != nil && !e.finishSent {
 			e.finishSent = true
@@ -476,6 +492,15 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		return e.done()
 	}
 	return nil
+}
+
+// releaseBlock drops every per-block entry once the block is closed: a long
+// stream of tool blocks must not grow encoder state for the whole request.
+func (e *ChatStreamEncoder) releaseBlock(index int) {
+	delete(e.toolIndex, index)
+	delete(e.blockTypes, index)
+	delete(e.blockArgs, index)
+	delete(e.argsEmitted, index)
 }
 
 func (e *ChatStreamEncoder) emit(delta map[string]any, finish any, extra map[string]any) error {

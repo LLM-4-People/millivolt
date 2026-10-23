@@ -554,8 +554,14 @@ func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int) (*ir.ToolC
 		id = fmt.Sprintf("call_%d_%d", msgIndex, callIndex)
 		warns.Add(ir.WarningApproximated, "tool_calls.id", "generated a missing call id")
 	}
+	if err := checkNativeIdentity("tool id", id); err != nil {
+		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+	}
 	if tc.Function.Name == "" {
 		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: function name is required", msgIndex, callIndex))
+	}
+	if err := checkNativeIdentity("tool name", tc.Function.Name); err != nil {
+		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
 	}
 	return &ir.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args}, warns, nil
 }
@@ -1244,6 +1250,12 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		if err := json.Unmarshal(in.Choices[0], &choice); err != nil {
 			return nil, fmt.Errorf("parse chat response: %w", err)
 		}
+	}
+	if err := checkNativeIdentity("id", in.ID); err != nil {
+		return nil, err
+	}
+	if err := checkNativeIdentity("model", in.Model); err != nil {
+		return nil, err
 	}
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
 		// A gateway can return an error envelope on HTTP 200. ParseErrorEnvelope
