@@ -1237,6 +1237,10 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		StopSequence: in.StopSequence,
 		Warnings:     warns,
 	}
+	if in.StopReason == "model_context_window_exceeded" {
+		resp.Warnings.Add(ir.WarningApproximated, "stop_reason",
+			"model context window exhaustion is represented as a length finish")
+	}
 	usage, err := anthropicUsageToIR(in.Usage)
 	if err != nil {
 		return nil, err

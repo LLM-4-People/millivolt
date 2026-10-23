@@ -1235,17 +1235,20 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	if created == 0 {
 		created = time.Now().Unix()
 	}
-	status := resp.Status
-	if status == "" {
-		status = "completed"
+	status, incompleteReason, approximated := responsesTerminalStatus(resp.Finish, resp.IncompleteReason)
+	if resp.Status != "" {
+		// A Responses source's own lifecycle status is authoritative.
+		status = resp.Status
 	}
-	switch {
-	case resp.Error != nil:
+	if resp.Error != nil {
 		status = "failed"
-	case resp.Finish == ir.FinishCancelled:
-		status = "cancelled"
-	case resp.Finish == ir.FinishLength || resp.Finish == ir.FinishContentFilter || resp.Finish == ir.FinishOther:
-		status = "incomplete"
+	}
+	if status != "incomplete" {
+		incompleteReason = ""
+	}
+	if approximated && resp.Status == "" {
+		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
+			fmt.Sprintf("finish reason %q is represented as Responses status %q", string(resp.Finish), status))
 	}
 	out := map[string]any{
 		"id":                   resp.ID,
@@ -1279,18 +1282,8 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 			"message": resp.Error.Message,
 		}
 	}
-	if status == "incomplete" {
-		reason := resp.IncompleteReason
-		switch {
-		case reason != "":
-		case resp.Finish == ir.FinishContentFilter:
-			reason = "content_filter"
-		case resp.Finish == ir.FinishLength:
-			reason = "max_output_tokens"
-		}
-		if reason != "" {
-			out["incomplete_details"] = map[string]any{"reason": reason}
-		}
+	if status == "incomplete" && incompleteReason != "" {
+		out["incomplete_details"] = map[string]any{"reason": incompleteReason}
 	}
 	if resp.Usage != (ir.Usage{}) {
 		usage, err := encodeResponsesUsage(resp.Usage)
@@ -1303,6 +1296,39 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 		resp.Warnings.Add(ir.WarningDropped, "stop_sequence", "Responses has no matched stop sequence")
 	}
 	return sse.MarshalWireJSON(out)
+}
+
+// responsesTerminalStatus maps one canonical finish reason onto the Responses
+// lifecycle status and incomplete reason. A raw provider reason with no exact
+// Responses equivalent (pause_turn, refusal, an unknown value) is an
+// incomplete response and reports an approximation. refusal maps to
+// content_filter because Responses has no refusal terminal reason. A source
+// Responses reason is already authoritative and is preserved.
+func responsesTerminalStatus(finish ir.FinishReason, incompleteReason string) (status, reason string, approximated bool) {
+	switch finish {
+	case ir.FinishStop, ir.FinishToolCalls:
+		return "completed", "", false
+	case ir.FinishLength:
+		return "incomplete", "max_output_tokens", false
+	case ir.FinishContentFilter:
+		return "incomplete", "content_filter", false
+	case ir.FinishCancelled:
+		return "cancelled", "", false
+	case ir.FinishError:
+		return "failed", "", false
+	case ir.FinishOther:
+		if incompleteReason != "" {
+			return "incomplete", incompleteReason, false
+		}
+		return "incomplete", "", false
+	case "refusal":
+		return "incomplete", "content_filter", true
+	default:
+		if incompleteReason != "" {
+			return "incomplete", incompleteReason, false
+		}
+		return "incomplete", "", true
+	}
 }
 
 func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]any {

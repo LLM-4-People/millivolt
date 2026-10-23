@@ -1920,7 +1920,7 @@ func (e *ResponsesStreamEncoder) startStream() error {
 	if err := e.retain(len(e.id)+len(e.model), "response identity"); err != nil {
 		return err
 	}
-	response, err := e.responseObject("in_progress", nil)
+	response, err := e.responseObject("in_progress", "", nil)
 	if err != nil {
 		return err
 	}
@@ -2127,16 +2127,11 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 		return err
 	}
 	e.doneSent = true
-	status := "completed"
-	switch {
-	case e.failed != nil:
+	status, incompleteReason, _ := responsesTerminalStatus(e.finish, "")
+	if e.failed != nil {
 		status = "failed"
-	case e.finish == ir.FinishCancelled:
-		status = "cancelled"
-	case e.finish == ir.FinishLength || e.finish == ir.FinishContentFilter || e.finish == ir.FinishOther:
-		status = "incomplete"
 	}
-	response, err := e.responseObject(status, e.outputItems())
+	response, err := e.responseObject(status, incompleteReason, e.outputItems())
 	if err != nil {
 		return err
 	}
@@ -2146,7 +2141,7 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 	})
 }
 
-func (e *ResponsesStreamEncoder) responseObject(status string, output []map[string]any) (map[string]any, error) {
+func (e *ResponsesStreamEncoder) responseObject(status, incompleteReason string, output []map[string]any) (map[string]any, error) {
 	if output == nil {
 		output = []map[string]any{}
 	}
@@ -2159,17 +2154,8 @@ func (e *ResponsesStreamEncoder) responseObject(status string, output []map[stri
 		"text":        map[string]any{"format": map[string]any{"type": "text"}},
 		"tool_choice": "auto", "tools": []any{}, "top_p": nil, "truncation": "disabled",
 	}
-	if status == "incomplete" {
-		reason := ""
-		switch e.finish {
-		case ir.FinishContentFilter:
-			reason = "content_filter"
-		case ir.FinishLength:
-			reason = "max_output_tokens"
-		}
-		if reason != "" {
-			obj["incomplete_details"] = map[string]any{"reason": reason}
-		}
+	if status == "incomplete" && incompleteReason != "" {
+		obj["incomplete_details"] = map[string]any{"reason": incompleteReason}
 	}
 	if status == "failed" && e.failed != nil {
 		code := e.failed.Code
