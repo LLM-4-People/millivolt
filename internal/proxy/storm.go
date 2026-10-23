@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"net/http"
 	"slices"
 	"strconv"
@@ -195,7 +196,8 @@ func isStormQueueRejection(err error) bool {
 // stormQueueErrorRecord is the single owner of the envelope's type and
 // message: writeStormQueueError writes it as an HTTP error (pre-commit
 // sockets), while relay failure paths on an already committed socket emit it
-// in-band via emitErrorSSE. ok=false when err is not a storm-queue rejection.
+// in-band via writeProtocolStreamError. ok=false when err is not a
+// storm-queue rejection.
 func (s *Server) stormQueueErrorRecord(rec *metrics.Record, err error) (typ, msg string, ok bool) {
 	if !isStormQueueRejection(err) {
 		return "", "", false
@@ -206,12 +208,12 @@ func (s *Server) stormQueueErrorRecord(rec *metrics.Record, err error) (typ, msg
 	return "rate_limit_error", "error storm protection: " + err.Error(), true
 }
 
-func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record, err error) bool {
+func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, err error) bool {
 	typ, msg, ok := s.stormQueueErrorRecord(rec, err)
 	if !ok {
 		return false
 	}
-	writeClientErrorHdr(w, rec, typ, msg, http.StatusTooManyRequests, s.retryAfterHeader())
+	writeClientErrorHdr(w, rec, inbound, typ, msg, http.StatusTooManyRequests, s.retryAfterHeader())
 	return true
 }
 
@@ -227,11 +229,11 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 // the client with an api_error JSON http.Error; the streaming loop's status
 // line is already committed, so it emits the same upstream_unreachable
 // classification in-band on the SSE socket (relay.go).
-func (s *Server) writeTransportFailure(w http.ResponseWriter, rec *metrics.Record, err error) {
-	if s.writeStormQueueError(w, rec, err) {
+func (s *Server) writeTransportFailure(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, err error) {
+	if s.writeStormQueueError(w, rec, inbound, err) {
 		return
 	}
-	writeClientError(w, rec, typeUpstreamUnreachable, "upstream error: "+transportErrText(err), http.StatusBadGateway)
+	writeClientError(w, rec, inbound, typeUpstreamUnreachable, "upstream error: "+transportErrText(err), http.StatusBadGateway)
 }
 
 // StormSnapshot shares scheduler-authoritative status with embedded bootstrap

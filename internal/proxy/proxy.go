@@ -648,7 +648,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if hostileTokenCap(rec.ReqMaxTokens) {
+	if hostileTokenCap(rec.ReqMaxTokens) || hostileTokenCapInBody(body) {
 		writeHostileTokenCap(w, t.inbound)
 		return
 	}
@@ -712,7 +712,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// anything consumes the record. A decoy type error can keep the
 		// original decode's ReqMaxTokens nil while the translator still
 		// carries the hostile cap into the translated body.
-		if hostileTokenCap(rec.ReqMaxTokens) {
+		if hostileTokenCap(rec.ReqMaxTokens) || hostileTokenCapInBody(body) {
 			writeHostileTokenCap(w, t.inbound)
 			return
 		}
@@ -863,7 +863,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				markClientGone(rec)
 				return
 			}
-			s.writeStormQueueError(w, rec, err)
+			s.writeStormQueueError(w, rec, t.inbound, err)
 			return
 		}
 	}
@@ -876,7 +876,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rec.ErrorType = "queue_full"
 		rec.ErrorMsg = err.Error()
-		writeClientErrorHdr(w, rec, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
+		writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
 		return
 	}
 	rec.QueueWaitMs += time.Since(queueStart).Milliseconds()
@@ -910,7 +910,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			markClientGone(rec)
 			return
 		}
-		s.writeTransportFailure(w, rec, err)
+		s.writeTransportFailure(w, rec, t.inbound, err)
 		return
 	}
 	// The per-send deadline's cancel is owned here: it must survive until the
@@ -945,9 +945,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if pacer == nil {
 			pacer = s.newSSEPacerFor(w)
 		}
-		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode >= 400 {
+		// A translated stream always speaks SSE, whatever Content-Type the
+		// upstream used. The translated encoder frames the body itself, so the
+		// upstream type cannot describe it and must not be copied.
+		if t.translate {
+			resp.Header.Set("Content-Type", "text/event-stream")
+		}
+		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode != http.StatusOK {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
-			if err := emitErrorSSE(w, rec.ID, typ, msg); err != nil {
+			if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
 				// The in-band error hit a dead socket: the client is gone.
 				// The decided error status stays on the record (markClientGone
 				// stamps 499 only when no error outcome is decided).

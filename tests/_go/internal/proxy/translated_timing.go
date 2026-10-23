@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -36,7 +37,7 @@ func TestTranslatedStreamTimestampsBeforeClientWrite(t *testing.T) {
 
 	start := time.Now()
 	rec := &metrics.Record{Start: start, FinalAttemptAt: start, End: start.Add(time.Second)}
-	s.streamBodyTranslated(context.Background(), w, body, rec, w)
+	s.streamBodyTranslated(context.Background(), w, body, rec, w, ir.Chat)
 	rec.End = time.Now()
 	metrics.FinalizeRecord(rec)
 

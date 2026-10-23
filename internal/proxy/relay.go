@@ -469,10 +469,10 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 		case stormQueue:
 			// Already classified: the sink owner stamps the record and writes
 			// the 429 + Retry-After.
-			s.writeStormQueueError(w, rec, err)
+			s.writeStormQueueError(w, rec, t.inbound, err)
 			return nil, nil, false
 		}
-		http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError, "upstream error: "+transportErrText(err))
 		return nil, nil, false
 	}
 	rec.StatusCode = next.StatusCode
@@ -512,7 +512,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// relays raw - the status itself already carries the failure, so the
 		// terminal-hold substitution never injects a synthetic in-band error
 		// into an error stream.
-		if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			if t.translate {
 				// The upstream error body is in the target protocol; the
 				// client expects its own. Translate the envelope, keep the
@@ -567,13 +567,20 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
 		if t.translate {
+			// 204/205 carry no document. Return the status without inventing
+			// a completion: encoding an empty body would fabricate one.
+			if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+				copyResponseHeaders(w.Header(), resp.Header)
+				w.WriteHeader(resp.StatusCode)
+				return
+			}
 			// Reserve the whole-document buffer process-wide before reading.
 			// The reservation is held until this branch has written the
 			// translated body, so concurrent translations cannot multiply the
 			// per-document cap without bound.
 			reserve := responseReadReserve(resp.ContentLength, maxTranslateBodyBytes+1)
 			if !s.respBudget.acquire(reserve) {
-				writeResponseBufferBudget(w, rec)
+				writeResponseBufferBudget(w, rec, t.inbound)
 				return
 			}
 			defer s.respBudget.release(reserve)
@@ -668,6 +675,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				rec.Cost = cost
 			}
 			copyResponseHeaders(w.Header(), resp.Header)
+			// The translated body is JSON regardless of the upstream type.
+			w.Header().Set("Content-Type", "application/json")
 			// Set the translation warnings after the upstream copy so an
 			// upstream header of the same name cannot replace or mask them.
 			setWarningsHeader(w.Header(), warnings)
@@ -690,7 +699,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// one attempt.
 		reserve := qualitySpoolReserve(resp.ContentLength)
 		if !s.respBudget.acquire(reserve) {
-			writeResponseBufferBudget(w, rec)
+			writeResponseBufferBudget(w, rec, t.inbound)
 			return
 		}
 		spooled, over, spoolErr := spoolBody(resp.Body)
@@ -726,7 +735,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				return
 			}
 			rec.StatusCode = http.StatusBadGateway
-			writeClientError(w, rec, errStreamRead, "upstream error: "+transportErrText(spoolErr), http.StatusBadGateway)
+			writeClientError(w, rec, t.inbound, errStreamRead, "upstream error: "+transportErrText(spoolErr), http.StatusBadGateway)
 			resp.Body.Close()
 			return
 		}
@@ -943,13 +952,13 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				// The status line is committed (applyUpstream ran before this
 				// loop): the rejection goes in-band on the SSE socket.
 				if typ, msg, ok := s.stormQueueErrorRecord(rec, err); ok {
-					if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
+					if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 						markClientGone(rec)
 					}
 				}
 				return
 			}
-			if werr := emitErrorSSE(w, rec.ID, typeUpstreamUnreachable, rec.ErrorMsg); werr != nil {
+			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typeUpstreamUnreachable, "", rec.ErrorMsg); werr != nil {
 				markClientGone(rec)
 			}
 			return
@@ -974,7 +983,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			// committed-SSE contract), never as raw JSON on the stream.
 			captureErrorFromResponse(resp, rec)
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
-			if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
+			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 				markClientGone(rec)
 			}
 			return
@@ -1834,7 +1843,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			}()
 			// Re-run the SSE analyzer over the transformed stream.
 			resetTurnMetrics(rec)
-			s.streamBodyTranslated(ctx, w, pr, rec, flusher)
+			s.streamBodyTranslated(ctx, w, pr, rec, flusher, t.inbound)
 			// Close both ends of upstream work on early client failure, then
 			// join before reading source accounting or finalizing the record.
 			pr.Close()
@@ -1869,7 +1878,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 // A scanner error here is the transformer's failure propagated through the
 // pipe: a genuine translation/upstream error - unless the client disconnected,
 // in which case the loop above already exited via a failed write to w.
-func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, flusher http.Flusher) {
+func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, flusher http.Flusher, inbound ir.Protocol) {
 	if flusher == nil {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
 			markStreamErr(ctx, rec, err)
@@ -1884,6 +1893,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	// is one Write and one Flush per event instead of two of each, and the
 	// buffer is reused across events with no per-line allocation.
 	var frame []byte
+	isTerminal := terminalFrameFor(inbound)
 	terminal := false
 	writeFrame := func() bool {
 		if len(frame) == 0 {
@@ -1910,7 +1920,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			}
 			a.Feed(line, now)
 		}
-		terminal = bytes.Equal(frame, []byte(sse.DoneFrame))
+		terminal = isTerminal(frame)
 		frame = frame[:0]
 		flusher.Flush()
 		return true

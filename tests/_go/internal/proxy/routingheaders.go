@@ -6,6 +6,7 @@ package proxy
 // between its callers.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,9 +94,9 @@ func TestHeaderValueGrammarSplit(t *testing.T) {
 
 // TestInvalidRoutingHeaderRejectionWording pins the 400 wire contract for a
 // malformed routing header served through ServeHTTP: errInvalidHeader's
-// "invalid <header> <value>" wording inside the OpenAI error envelope,
-// byte-exact. SDKs and the docs match on this shape; errJSON marshals the
-// message before the type (sorted keys) and http.Error appends one newline.
+// "invalid <header> <value>" wording inside the OpenAI JSON error envelope.
+// The sink is the canonical EncodeOpenAIError envelope (message/type plus the
+// nullable param/code fields); the wording is the contract SDKs and docs match.
 func TestInvalidRoutingHeaderRejectionWording(t *testing.T) {
 	s := New(config.Default(), metrics.Noop{})
 	r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions",
@@ -107,9 +108,21 @@ func TestInvalidRoutingHeaderRejectionWording(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	want := `{"error":{"message":"invalid X-Proxy-Timeout-Ms \"abc\"","type":"invalid_request_error"}}`
-	if got := strings.TrimSpace(rec.Body.String()); got != want {
-		t.Fatalf("body = %s, want %s", got, want)
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body %q is not a JSON error envelope: %v", rec.Body.String(), err)
+	}
+	if envelope.Error.Message != `invalid X-Proxy-Timeout-Ms "abc"` ||
+		envelope.Error.Type != "invalid_request_error" {
+		t.Fatalf("body = %s, want invalid_request_error / %q", rec.Body.String(), `invalid X-Proxy-Timeout-Ms "abc"`)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -1752,7 +1753,7 @@ func (failingSSEWriter) WriteHeader(int)           {}
 // error emission was accounted as if it had received the failure.
 func TestEmitErrorSSEWriteFailureMarksCursorDisconnect(t *testing.T) {
 	// The emitter itself must report the dead socket.
-	if err := emitErrorSSE(failingSSEWriter{}, "id-1", "stream_read_error", "boom"); err == nil {
+	if err := writeProtocolStreamError(failingSSEWriter{}, new(metrics.Record), ir.Chat, "id-1", "", "stream_read_error", "", "boom"); err == nil {
 		t.Fatal("emitErrorSSE must return the failed client write")
 	}
 

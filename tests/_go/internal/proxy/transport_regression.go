@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -160,7 +161,7 @@ func TestDebugWrappedPacerKeepsErrorFraming(t *testing.T) {
 	defer p.Stop()
 	tap := &debugTap{respBody: &cappedWriter{limit: 1024}}
 	rec := new(metrics.Record)
-	writeClientError(tap.wrapWriter(p), rec, "upstream_unreachable", "failed", 502)
+	writeClientError(tap.wrapWriter(p), rec, ir.Chat, "upstream_unreachable", "failed", 502)
 	if !strings.Contains(w.Body.String(), "data: ") || !strings.Contains(w.Body.String(), "data: [DONE]") {
 		t.Fatalf("debug wrapper lost SSE framing: %s", w.Body.String())
 	}

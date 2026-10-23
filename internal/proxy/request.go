@@ -762,13 +762,13 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		}
 		t.translate = false
 	}
-	if t.inbound != "" && t.outbound != "" && t.path == "" {
-		// A known client protocol reaches the target protocol's own endpoint.
-		// This matches the client path for a same-protocol request and fixes
-		// two cases: a translated request (the client's path names the inbound
-		// protocol), and an explicit X-Proxy-In-Format override on a path that
-		// names a different protocol. An unknown inbound path keeps the
-		// client's chosen endpoint.
+	if t.inbound != "" && t.outbound != "" && t.path == "" && (t.translate || pathProtocol(r.URL.Path) != "") {
+		// A translated request reaches the target protocol's own endpoint: the
+		// client's path names the inbound protocol, so forwarding it verbatim
+		// would address the wrong wire. A same-protocol request on one of the
+		// three known endpoints normalizes to the canonical spelling of that
+		// same endpoint. An unknown path on a same-protocol passthrough is
+		// preserved: the client chose an upstream route the proxy does not own.
 		t.path = protocolPath(t.outbound)
 	}
 	if ms := r.Header.Get(hdrTimeout); ms != "" {
@@ -1558,6 +1558,27 @@ const maxRequestOutputTokens = 1_000_000
 // translated body re-decodes into.
 func hostileTokenCap(v *int) bool {
 	return v != nil && *v > maxRequestOutputTokens
+}
+
+// hostileTokenCapInBody applies the hostile-cap bound to EVERY token-ceiling
+// spelling a body carries, not only the one that wins the record precedence.
+// A Responses body can carry both max_tokens and max_output_tokens; checking
+// only the winner let the other spelling reach the upstream unbounded.
+func hostileTokenCapInBody(body []byte) bool {
+	var caps struct {
+		MaxTokens       *int `json:"max_tokens"`
+		MaxCompTokens   *int `json:"max_completion_tokens"`
+		MaxOutputTokens *int `json:"max_output_tokens"`
+	}
+	if json.Unmarshal(body, &caps) != nil {
+		return false
+	}
+	for _, v := range []*int{caps.MaxTokens, caps.MaxCompTokens, caps.MaxOutputTokens} {
+		if hostileTokenCap(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeHostileTokenCap rejects a hostile token cap with the shared 400

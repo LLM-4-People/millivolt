@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -129,32 +130,6 @@ func sseEmitter(w http.ResponseWriter, id, model string, flusher http.Flusher) f
 	}
 }
 
-// emitErrorSSE emits an OpenAI error object in-band on an already-committed
-// SSE stream, then [DONE] so SDKs stop waiting. typ/msg are public strings
-// (never a raw *url.Error - that embeds the upstream URL). The returned
-// error is the failed client write, if any: the caller owns the record and
-// marks the disconnect per its own path's contract - cursor keeps its
-// documented committed-200 exception (rec.ClientDisconnected only, never
-// markClientGone's 499), the passthrough paths markClientGone.
-func emitErrorSSE(w http.ResponseWriter, id, typ, msg string) error {
-	if typ == "" {
-		typ = sse.TypeUpstreamError
-	}
-	var wErr error
-	if b, mErr := sse.ErrorEnvelope(id, typ, nil, msg); mErr == nil {
-		if _, e := w.Write(sse.DataFrame(b)); e != nil {
-			wErr = e
-		}
-	}
-	if _, e := io.WriteString(w, sse.DoneFrame); e != nil && wErr == nil {
-		wErr = e
-	}
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-	return wErr
-}
-
 func pacerOf(w http.ResponseWriter) *ssePacer {
 	for w != nil {
 		if p, ok := w.(*ssePacer); ok {
@@ -169,10 +144,11 @@ func pacerOf(w http.ResponseWriter) *ssePacer {
 	return nil
 }
 
-// writeClientError writes a JSON HTTP error if headers are still open, or
-// an in-band SSE error+[DONE] if the idle pacer already committed 200.
-func writeClientError(w http.ResponseWriter, rec *metrics.Record, typ, msg string, code int) {
-	writeClientErrorHdr(w, rec, typ, msg, code, nil)
+// writeClientError writes a JSON HTTP error if headers are still open, or the
+// inbound protocol's in-band error + terminal pair if the idle pacer already
+// committed 200.
+func writeClientError(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, typ, msg string, code int) {
+	writeClientErrorHdr(w, rec, inbound, typ, msg, code, nil)
 }
 
 // retryAfterHeader builds the single extra-header shape shared by every 429
@@ -189,7 +165,7 @@ func (s *Server) retryAfterHeader() http.Header {
 	return h
 }
 
-func writeClientErrorHdr(w http.ResponseWriter, rec *metrics.Record, typ, msg string, code int, extra http.Header) {
+func writeClientErrorHdr(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, typ, msg string, code int, extra http.Header) {
 	if rec != nil {
 		if rec.StatusCode == 0 {
 			rec.StatusCode = code
@@ -201,13 +177,13 @@ func writeClientErrorHdr(w http.ResponseWriter, rec *metrics.Record, typ, msg st
 			rec.ErrorMsg = msg
 		}
 	}
-	id := ""
+	id, model := "", ""
 	if rec != nil {
-		id = rec.ID
+		id, model = rec.ID, rec.Model
 	}
 	if p := pacerOf(w); p != nil {
 		if p.commitError(extra, code, errJSON(typ, msg)) {
-			if err := emitErrorSSE(w, id, typ, msg); err != nil && rec != nil {
+			if err := writeProtocolStreamError(w, rec, inbound, id, model, typ, "", msg); err != nil && rec != nil {
 				// The in-band error hit a dead socket: the LOCAL client is
 				// gone. Safe for every caller of this helper - the status is
 				// the just-stamped error code (≥400), so markClientGone only
@@ -217,10 +193,7 @@ func writeClientErrorHdr(w http.ResponseWriter, rec *metrics.Record, typ, msg st
 		}
 		return
 	}
-	if extra != nil {
-		copyResponseHeaders(w.Header(), extra)
-	}
-	http.Error(w, errJSON(typ, msg), code)
+	writeProtocolHTTPErrorHdr(w, inbound, code, typ, msg, extra)
 }
 
 // cursorAgentContextBaseTokens is the fixed agent-context overhead Cursor's
