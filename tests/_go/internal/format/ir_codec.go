@@ -608,6 +608,29 @@ func TestCodecWarnsOnUnrepresentableFields(t *testing.T) {
 	}
 }
 
+// TestCodecReportsMetadataLossOnce pins the single-emit contract for Chat
+// metadata warnings: the decoder used to append them inside the metadata
+// branch and again with the shared warning accumulator.
+func TestCodecReportsMetadataLossOnce(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"u1","attempts":3}}`
+	req, err := DecodeChatRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	for _, w := range req.Warnings {
+		if w.Field == "metadata.attempts" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("metadata.attempts warnings = %d, want 1 (%+v)", count, req.Warnings)
+	}
+	if req.Metadata["user_id"] != "u1" {
+		t.Fatalf("metadata = %v", req.Metadata)
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {

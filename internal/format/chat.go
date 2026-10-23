@@ -119,8 +119,10 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		req.StreamIncludeUsage = in.StreamOptions.IncludeUsage
 	}
 	if len(in.Metadata) > 0 {
+		// Keep these warnings in the shared accumulator so the single final
+		// append below emits each one once; metadata is decoded before the
+		// message and parameter warnings share the same slice.
 		req.Metadata, warns = decodeChatMetadata(in.Metadata)
-		req.Warnings = append(req.Warnings, warns...)
 	}
 	if stops := parseStop(in.Stop); len(stops) > 0 {
 		req.Stop = stops
