@@ -695,17 +695,33 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			}
 			out = append(out, block)
 		case ir.BlockImage:
-			out = append(out, map[string]any{"type": "image", "source": encodeAnthropicImage(b.Image)})
+			block := map[string]any{"type": "image", "source": encodeAnthropicImage(b.Image)}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			out = append(out, block)
 		case ir.BlockFile:
-			out = append(out, map[string]any{"type": "document", "source": encodeAnthropicFile(b.File)})
+			block := map[string]any{"type": "document", "source": encodeAnthropicFile(b.File)}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			out = append(out, block)
+		case ir.BlockAudio:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "audio", "Anthropic Messages has no audio input")
+			}
 		case ir.BlockToolCall:
 			input := b.ToolCall.Arguments
 			if len(input) == 0 {
 				input = json.RawMessage(`{}`)
 			}
-			out = append(out, map[string]any{
+			block := map[string]any{
 				"type": "tool_use", "id": b.ToolCall.ID, "name": b.ToolCall.Name, "input": input,
-			})
+			}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			out = append(out, block)
 		case ir.BlockToolResult:
 			content := encodeAnthropicToolResultContent(b.ToolResult.Content)
 			block := map[string]any{
@@ -714,8 +730,14 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			if b.ToolResult.IsError {
 				block["is_error"] = true
 			}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
 			out = append(out, block)
 		case ir.BlockReasoning:
+			if b.CacheControl != nil && warns != nil {
+				warns.Add(ir.WarningDropped, "reasoning.cache_control", "Anthropic thinking blocks have no cache breakpoint")
+			}
 			if b.Reasoning.Signature != "" || b.Reasoning.Provider == ir.Anthropic {
 				out = append(out, map[string]any{
 					"type": "thinking", "thinking": b.Reasoning.Text, "signature": b.Reasoning.Signature,

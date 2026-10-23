@@ -563,6 +563,51 @@ func TestCodecPreservesInlineMedia(t *testing.T) {
 	}
 }
 
+func warningField(warnings ir.Warnings, field string) bool {
+	for _, w := range warnings {
+		if w.Field == field {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCodecWarnsOnUnrepresentableFields(t *testing.T) {
+	in := `{"model":"m","max_tokens":8,"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"c","name":"f","input":{}}]},` +
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"c","is_error":true,"content":"x"}]}]}`
+	req, err := DecodeAnthropicRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EncodeChatRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(req.Warnings, "cache_control") || !warningField(req.Warnings, "tool_result.is_error") {
+		t.Fatalf("chat warnings = %+v", req.Warnings)
+	}
+
+	audio := &ir.Request{Model: "m", Messages: []ir.Message{{
+		Role:    ir.RoleUser,
+		Content: []ir.Block{{Type: ir.BlockAudio, Audio: &ir.Audio{Data: "AAAA", Format: "wav"}}},
+	}}}
+	if _, err := EncodeAnthropicRequest(audio, 8, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(audio.Warnings, "audio") {
+		t.Fatalf("anthropic warnings = %+v", audio.Warnings)
+	}
+
+	budget := 1024
+	reasoning := &ir.Request{Model: "m", Reasoning: &ir.ReasoningConfig{BudgetTokens: &budget, Display: "omitted"}}
+	if _, err := EncodeChatRequest(reasoning); err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(reasoning.Warnings, "reasoning.budget_tokens") || !warningField(reasoning.Warnings, "reasoning.display") {
+		t.Fatalf("reasoning warnings = %+v", reasoning.Warnings)
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {

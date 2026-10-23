@@ -608,8 +608,16 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if req.TopK != nil {
 		req.Warnings.Add(ir.WarningDropped, "top_k", "Chat Completions has no top_k")
 	}
-	if req.Reasoning != nil && req.Reasoning.Summary != "" {
-		req.Warnings.Add(ir.WarningDropped, "reasoning.summary", "Chat Completions has no reasoning summary")
+	if req.Reasoning != nil {
+		if req.Reasoning.Summary != "" {
+			req.Warnings.Add(ir.WarningDropped, "reasoning.summary", "Chat Completions has no reasoning summary")
+		}
+		if req.Reasoning.BudgetTokens != nil {
+			req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "Chat Completions carries only reasoning_effort")
+		}
+		if req.Reasoning.Display != "" {
+			req.Warnings.Add(ir.WarningDropped, "reasoning.display", "Chat Completions has no reasoning display mode")
+		}
 	}
 	out := map[string]any{
 		"model":    req.Model,
@@ -649,7 +657,7 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 		out["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
 	if len(req.Tools) > 0 {
-		out["tools"] = encodeChatTools(req.Tools)
+		out["tools"] = encodeChatTools(req.Tools, &req.Warnings)
 	}
 	if req.ToolChoice != nil {
 		out["tool_choice"] = encodeChatToolChoice(req.ToolChoice)
@@ -695,6 +703,9 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 		}
 		for _, b := range toolResults {
 			tr := b.ToolResult
+			if tr.IsError && warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result.is_error", "Chat Completions tool messages have no is_error flag")
+			}
 			msg := map[string]any{
 				"role":         "tool",
 				"tool_call_id": tr.CallID,
@@ -741,6 +752,12 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 		hasPart   bool
 	)
 	for _, b := range blocks {
+		if b.CacheControl != nil && warns != nil {
+			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
+		}
+		if len(b.Citations) > 0 && warns != nil {
+			warns.Add(ir.WarningDropped, "citations", "Chat Completions input has no citations")
+		}
 		switch b.Type {
 		case ir.BlockText:
 			texts = append(texts, b.Text)
@@ -825,6 +842,12 @@ func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
 	var parts []map[string]any
 	hasPart := false
 	for _, b := range blocks {
+		if b.CacheControl != nil && warns != nil {
+			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
+		}
+		if len(b.Citations) > 0 && warns != nil {
+			warns.Add(ir.WarningDropped, "citations", "Chat Completions input has no citations")
+		}
 		switch b.Type {
 		case ir.BlockText:
 			texts = append(texts, b.Text)
@@ -872,9 +895,12 @@ func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
 	return strings.Join(texts, "")
 }
 
-func encodeChatTools(in []ir.Tool) []map[string]any {
+func encodeChatTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, t := range in {
+		if t.CacheControl != nil && warns != nil {
+			warns.Add(ir.WarningDropped, "tools.cache_control", "Chat Completions has no tool cache breakpoints")
+		}
 		fn := map[string]any{"name": t.Name}
 		if t.Description != "" {
 			fn["description"] = t.Description

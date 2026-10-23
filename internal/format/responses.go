@@ -520,7 +520,7 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 		out["parallel_tool_calls"] = *req.ParallelToolCalls
 	}
 	if len(req.Tools) > 0 {
-		out["tools"] = encodeResponsesTools(req.Tools)
+		out["tools"] = encodeResponsesTools(req.Tools, &req.Warnings)
 	}
 	if req.ToolChoice != nil {
 		out["tool_choice"] = encodeResponsesToolChoice(req.ToolChoice)
@@ -622,7 +622,7 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 			if len(textBlocks) > 0 {
 				out = append(out, map[string]any{
 					"type": "message", "role": "assistant",
-					"content": encodeResponsesContent(textBlocks, ir.RoleAssistant),
+					"content": encodeResponsesContent(textBlocks, ir.RoleAssistant, &req.Warnings),
 				})
 			}
 		case ir.RoleUser:
@@ -636,22 +636,25 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 				}
 			}
 			for _, b := range results {
+				if b.ToolResult.IsError {
+					req.Warnings.Add(ir.WarningDropped, "tool_result.is_error", "Responses function_call_output has no is_error flag")
+				}
 				out = append(out, map[string]any{
 					"type":    "function_call_output",
 					"call_id": b.ToolResult.CallID,
-					"output":  encodeResponsesContent(b.ToolResult.Content, ir.RoleUser),
+					"output":  encodeResponsesContent(b.ToolResult.Content, ir.RoleUser, &req.Warnings),
 				})
 			}
 			if len(rest) > 0 {
 				out = append(out, map[string]any{
 					"type": "message", "role": "user",
-					"content": encodeResponsesContent(rest, ir.RoleUser),
+					"content": encodeResponsesContent(rest, ir.RoleUser, &req.Warnings),
 				})
 			}
 		case ir.RoleSystem, ir.RoleDeveloper:
 			out = append(out, map[string]any{
 				"type": "message", "role": string(m.Role),
-				"content": encodeResponsesContent(m.Content, m.Role),
+				"content": encodeResponsesContent(m.Content, m.Role, &req.Warnings),
 			})
 		}
 	}
@@ -661,9 +664,15 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 	return out
 }
 
-func encodeResponsesContent(blocks []ir.Block, role ir.Role) []map[string]any {
+func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(blocks))
 	for _, b := range blocks {
+		if b.CacheControl != nil && warns != nil {
+			warns.Add(ir.WarningDropped, "cache_control", "Responses input has no cache breakpoints")
+		}
+		if len(b.Citations) > 0 && warns != nil {
+			warns.Add(ir.WarningDropped, "citations", "Responses input has no citations")
+		}
 		switch b.Type {
 		case ir.BlockText:
 			textType := "input_text"
@@ -751,7 +760,7 @@ func encodeResponsesFunctionCall(c *ir.ToolCall) map[string]any {
 	}
 }
 
-func encodeResponsesTools(in []ir.Tool) []map[string]any {
+func encodeResponsesTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, t := range in {
 		tool := map[string]any{"type": "function", "name": t.Name}
@@ -1031,11 +1040,17 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 		}
 		out = append(out, map[string]any{
 			"type": "message", "role": "assistant", "status": "completed",
-			"content": encodeResponsesOutputContent(textBlocks),
+			"content": encodeResponsesOutputContent(textBlocks, warns),
 		})
 		textBlocks = nil
 	}
 	for _, b := range blocks {
+		if b.CacheControl != nil && warns != nil {
+			warns.Add(ir.WarningDropped, "cache_control", "Responses output has no cache breakpoints")
+		}
+		if len(b.Citations) > 0 && warns != nil {
+			warns.Add(ir.WarningDropped, "citations", "Responses output has no citation mapping")
+		}
 		switch b.Type {
 		case ir.BlockText, ir.BlockRefusal:
 			textBlocks = append(textBlocks, b)
@@ -1057,7 +1072,7 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 	return out
 }
 
-func encodeResponsesOutputContent(blocks []ir.Block) []map[string]any {
+func encodeResponsesOutputContent(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Type {
