@@ -430,7 +430,7 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 		t.Fatalf("event type = %v", doc["type"])
 	}
 	response, _ := doc["response"].(map[string]any)
-	if response["object"] != "response" || response["status"] != "failed" || response["id"] != "req_1" {
+	if response["object"] != "response" || response["status"] != "failed" || response["id"] != "resp_req_1" {
 		t.Fatalf("response = %v", response)
 	}
 	failure, _ := response["error"].(map[string]any)
@@ -442,6 +442,22 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 	}
 	if rec.ResponseBytes != int64(len(body)) {
 		t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
+	}
+
+	// A terminal document owns the identity when it supplied one.
+	var withID sse.Analyzer
+	withID.Feed([]byte(`data: {"type":"response.completed","response":{"id":"resp_terminal","status":"completed","output":[]}}`), time.Now())
+	withID.Feed([]byte(""), time.Now())
+	rec2 := &metrics.Record{ID: "req_2"}
+	w2 := httptest.NewRecorder()
+	emitDegenerateResponses(w2, &withID, time.Now(), metrics.CodeTruncated, rec2)
+	var doc2 map[string]any
+	payload2 := strings.TrimSuffix(strings.TrimPrefix(w2.Body.String(), "event: response.failed\ndata: "), "\n\n")
+	if err := json.Unmarshal([]byte(payload2), &doc2); err != nil {
+		t.Fatalf("payload %q: %v", payload2, err)
+	}
+	if got := doc2["response"].(map[string]any)["id"]; got != "resp_terminal" {
+		t.Fatalf("synthetic failure id = %v, want the terminal response id", got)
 	}
 }
 

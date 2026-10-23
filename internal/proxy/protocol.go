@@ -219,6 +219,19 @@ func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, i
 	return writeCounted(w, rec, frame)
 }
 
+// responsesWireID shapes a synthetic Responses identity. Encoder-created
+// responses use the resp_ prefix; a proxy request id must not leak into the
+// Responses envelope as a non-conforming id.
+func responsesWireID(id string) string {
+	if strings.HasPrefix(id, "resp_") {
+		return id
+	}
+	if id == "" {
+		return "resp_proxy"
+	}
+	return "resp_" + id
+}
+
 // writeProtocolTerminal writes the inbound protocol's terminal frame.
 func writeProtocolTerminal(w io.Writer, rec *metrics.Record, inbound ir.Protocol, id, model string, typ, code, msg string) error {
 	var frame []byte
@@ -229,7 +242,7 @@ func writeProtocolTerminal(w io.Writer, rec *metrics.Record, inbound ir.Protocol
 		obj := map[string]any{
 			"type": "response.failed",
 			"response": map[string]any{
-				"id": id, "object": "response", "status": "failed",
+				"id": responsesWireID(id), "object": "response", "status": "failed",
 				"error":  map[string]any{"code": code, "message": msg},
 				"output": []any{},
 			},

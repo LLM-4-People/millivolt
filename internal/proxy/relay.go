@@ -2473,10 +2473,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 // sentinel and no choices, so the Chat substitution would leave it without a
 // terminal signal.
 func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Time, code string, rec *metrics.Record) {
+	id := a.ResponseID()
+	if id == "" {
+		id = rec.ID
+	}
 	obj := map[string]any{
 		"type": "response.failed",
 		"response": map[string]any{
-			"id": rec.ID, "object": "response", "status": "failed",
+			"id": responsesWireID(id), "object": "response", "status": "failed",
 			"error":  map[string]any{"code": code, "message": metrics.DegenerateMessage(code)},
 			"output": []any{},
 		},

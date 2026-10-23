@@ -95,3 +95,36 @@ func TestResponsesTerminalMapsFinishReason(t *testing.T) {
 		})
 	}
 }
+
+// TestResponsesTerminalOnlyFunctionCall pins N5: a function_call that appears
+// only in response.completed.output is a real tool turn, counted once per
+// call_id with its name retained, not an empty completion.
+func TestResponsesTerminalOnlyFunctionCall(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	lines := []string{
+		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]}}`,
+		``,
+	}
+	var a Analyzer
+	for _, line := range lines {
+		a.Feed([]byte(line), now)
+	}
+	var rec metrics.Record
+	a.Fill(&rec)
+	if a.finishReason != "tool_calls" || rec.FinishReason != "tool_calls" {
+		t.Fatalf("finish = %q/%q, want tool_calls", a.finishReason, rec.FinishReason)
+	}
+	if a.toolCalls != 1 || rec.ToolCalls != 1 {
+		t.Fatalf("tool calls = %d/%d, want 1", a.toolCalls, rec.ToolCalls)
+	}
+	if len(rec.ToolNames) != 1 || rec.ToolNames[0] != "lookup" {
+		t.Fatalf("tool names = %v, want [lookup]", rec.ToolNames)
+	}
+	if code := a.OutcomeCode(); code != "" {
+		t.Fatalf("outcome = %q, want no degenerate class", code)
+	}
+	if got := a.ResponseID(); got != "resp_1" {
+		t.Fatalf("response id = %q, want resp_1", got)
+	}
+}

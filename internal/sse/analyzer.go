@@ -62,6 +62,10 @@ type Analyzer struct {
 	toolNameSet  map[string]struct{}
 	toolCallIDs  map[string]struct{}
 	finishReason string
+	// responseID is the Responses terminal document's id, retained so a
+	// synthetic failure frame uses a resp_-shaped identity instead of the
+	// proxy request id.
+	responseID string
 
 	// terminatorSeen records that the stream's documented end-of-stream marker
 	// arrived: a [DONE] line, a non-empty finish_reason chunk, or a Responses
@@ -584,6 +588,30 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 			a.finishReason = string(ir.FinishOther)
 		}
 	default: // response.completed
+		// A provider may send only the terminal document: its output is then
+		// the sole place a function call appears. Count those calls before
+		// deciding finish so a legitimate tool turn is never classified as an
+		// empty completion and replaced with a synthetic failure.
+		var ev struct {
+			Response struct {
+				ID     string `json:"id"`
+				Output []struct {
+					Type   string `json:"type"`
+					CallID string `json:"call_id"`
+					Name   string `json:"name"`
+				} `json:"output"`
+			} `json:"response"`
+		}
+		if json.Unmarshal(payload, &ev) == nil {
+			if ev.Response.ID != "" {
+				a.responseID = ev.Response.ID
+			}
+			for _, item := range ev.Response.Output {
+				if item.Type == "function_call" {
+					a.countResponsesToolCall(item.CallID, item.Name)
+				}
+			}
+		}
 		if a.toolCalls > 0 {
 			a.finishReason = string(ir.FinishToolCalls)
 		} else {
@@ -596,6 +624,10 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 // A Responses stream needs its own terminal substitution rather than the
 // OpenAI Chat error chunk.
 func (a *Analyzer) ResponsesStream() bool { return a.responsesStream }
+
+// ResponseID returns the Responses terminal document's id, or "" when the
+// feed carried none.
+func (a *Analyzer) ResponseID() string { return a.responseID }
 
 // Responses event types are top-level, unlike the nested type fields in
 // content/tool objects. The frame key probe records that top-level value once;
