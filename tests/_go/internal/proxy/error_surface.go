@@ -520,3 +520,50 @@ func TestArmedPacerPreCommitUsesInboundErrorShape(t *testing.T) {
 		})
 	}
 }
+
+// TestQualityExhaustedSinkUsesProtocolEnvelope pins N3: the final degenerate
+// completion error is a protocol-aware JSON envelope with the machine code,
+// not an OpenAI text/plain body from http.Error.
+func TestQualityExhaustedSinkUsesProtocolEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+	}{
+		{"chat", "/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`},
+		{"responses", "/v1/responses", `{"model":"m","input":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "application/json", http.StatusOK, "")
+			cfg := config.Default()
+			cfg.QualityRetries = 0
+			buf := metrics.NewBuffer(8)
+			s := New(cfg, buf)
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+			w := proxyRequest(t, s, tc.path, "", tc.body)
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("body %q is not JSON: %v", w.Body.String(), err)
+			}
+			failure, _ := doc["error"].(map[string]any)
+			if failure["type"] != "api_error" || failure["code"] != "empty_completion" || failure["message"] == "" {
+				t.Fatalf("error = %v", failure)
+			}
+			recs := waitForRecord(t, buf, 1)
+			if len(recs) != 1 || recs[0].StatusCode != http.StatusBadGateway ||
+				recs[0].ErrorCode != "empty_completion" {
+				t.Fatalf("record = %+v", recs)
+			}
+		})
+	}
+}

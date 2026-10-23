@@ -288,17 +288,26 @@ const (
 // known Anthropic or Responses client gets its own shape. The message is
 // bounded at this one sink because decoders interpolate body-controlled names.
 func writeProtocolHTTPError(w http.ResponseWriter, inbound ir.Protocol, status int, typ, msg string) {
-	writeProtocolHTTPErrorHdr(w, inbound, status, typ, msg, nil)
+	writeProtocolHTTPErrorCode(w, inbound, status, typ, "", msg)
 }
 
-// writeProtocolHTTPErrorHdr writes one protocol-native JSON error response and
-// returns the number of body bytes written. The pacer counts that body on the
-// record; HTTP writers that already account the response elsewhere ignore it.
+func writeProtocolHTTPErrorCode(w http.ResponseWriter, inbound ir.Protocol, status int, typ, code, msg string) {
+	writeProtocolHTTPErrorCodeHdr(w, inbound, status, typ, code, msg, nil)
+}
+
 func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, msg string, extra http.Header) int {
+	return writeProtocolHTTPErrorCodeHdr(w, inbound, status, typ, "", msg, extra)
+}
+
+// writeProtocolHTTPErrorCodeHdr is the one owner of a pre-commit HTTP error:
+// it renders the client protocol's envelope (carrying the optional machine
+// code), sets the proxy-owned content type and nosniff fence, preserves extra
+// headers, and returns the body byte count for callers that book it.
+func writeProtocolHTTPErrorCodeHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, code, msg string, extra http.Header) int {
 	msg = retainedText(msg, protocolErrorEchoMax)
-	body, err := providerformat.EncodeError(inbound, &ir.Error{Type: typ, Message: msg, Status: status})
+	body, err := providerformat.EncodeError(inbound, &ir.Error{Type: typ, Code: code, Message: msg, Status: status})
 	if err != nil {
-		body = []byte(errJSON(typ, msg))
+		body = []byte(errJSONCode(typ, msg, code))
 	}
 	if extra != nil {
 		copyResponseHeaders(w.Header(), extra)

@@ -900,7 +900,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			rec.ErrorCode = code
 			rec.ErrorMsg = metrics.DegenerateMessage(code)
 			rec.StatusCode = http.StatusBadGateway
-			http.Error(w, errJSONCode(typeAPIError, metrics.DegenerateMessage(code), code), http.StatusBadGateway)
+			writeProtocolHTTPErrorCode(w, t.inbound, http.StatusBadGateway, typeAPIError, code, metrics.DegenerateMessage(code))
 			s.respBudget.release(reserve)
 			return
 		}

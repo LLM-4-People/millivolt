@@ -190,7 +190,7 @@ func writeModelsError(w http.ResponseWriter, err error) {
 		writeResponseBufferBudget(w, nil, ir.Chat)
 		return
 	}
-	http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
+	writeProtocolHTTPError(w, ir.Chat, http.StatusBadGateway, typeAPIError, err.Error())
 }
 
 // fetchModelsUpstream GETs one upstream models URL with the target's auth
