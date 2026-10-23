@@ -165,10 +165,10 @@ func TestCursorAssistantBlobArgsNeverNull(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			call := openaiToolCall{ID: "c1"}
+			call := chatWireToolCall{ID: "c1"}
 			call.Function.Name = "read"
 			call.Function.Arguments = tc.args
-			blob := cursorAssistantBlob("", []openaiToolCall{call})
+			blob := cursorAssistantBlob("", []chatWireToolCall{call})
 			b, err := json.Marshal(blob)
 			if err != nil {
 				t.Fatal(err)
@@ -288,7 +288,7 @@ func TestCursorModelBase(t *testing.T) {
 }
 
 func TestCursorMessageTextArray(t *testing.T) {
-	m := openaiMessage{Content: json.RawMessage(`"plain"`)}
+	m := chatWireMessage{Content: json.RawMessage(`"plain"`)}
 	if s := cursorMessageText(m); s != "plain" {
 		t.Fatalf("string content = %q", s)
 	}

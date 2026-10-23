@@ -141,7 +141,7 @@ func CursorModelsPath() string { return cursorModelsPath }
 // never silently vanishes. Array content is what clients send for multipart
 // messages; dropping it meant the model never saw those turns. An array over
 // metrics.ContentPartMax is skipped rather than decoded.
-func cursorMessageText(m openaiMessage) string {
+func cursorMessageText(m chatWireMessage) string {
 	if !metrics.ContentPartsWithinLimit(m.Content) {
 		return ""
 	}
@@ -175,7 +175,7 @@ func cursorMessageText(m openaiMessage) string {
 	return sb.String()
 }
 
-func cursorAssistantBlob(text string, calls []openaiToolCall) map[string]any {
+func cursorAssistantBlob(text string, calls []chatWireToolCall) map[string]any {
 	var parts []map[string]any
 	if text != "" {
 		parts = append(parts, map[string]any{"type": "text", "text": text})
@@ -255,10 +255,10 @@ func TranslateCursorRunRequestFreshUser(openaiBody []byte) (clientMessage []byte
 // forceUserTurn overrides the resume-action decision for the one-shot re-ask.
 func translateCursorRunRequest(openaiBody []byte, conversationID string, forceUserTurn bool) (clientMessage []byte, blobs *KVBlobStore, resume bool, err error) {
 	var in struct {
-		Model    string          `json:"model"`
-		Messages []openaiMessage `json:"messages"`
-		Stream   bool            `json:"stream"`
-		Tools    []openaiTool    `json:"tools"`
+		Model    string            `json:"model"`
+		Messages []chatWireMessage `json:"messages"`
+		Stream   bool              `json:"stream"`
+		Tools    []chatWireTool    `json:"tools"`
 	}
 	if err := json.Unmarshal(openaiBody, &in); err != nil {
 		return nil, nil, false, errParseOpenAIBody(err)
@@ -423,7 +423,7 @@ func encodeUserMessageAction(text string) []byte {
 // message still steers meaningful text. Never parses a parallel/ weaker shape.
 func CursorTrailingUserText(openaiBody []byte) string {
 	var in struct {
-		Messages []openaiMessage `json:"messages"`
+		Messages []chatWireMessage `json:"messages"`
 	}
 	if json.Unmarshal(openaiBody, &in) != nil || len(in.Messages) == 0 {
 		return ""
@@ -439,7 +439,7 @@ func CursorTrailingUserText(openaiBody []byte) string {
 // McpTools message (McpTools.mcp_tools = repeated McpToolDefinition). The JSON
 // schema goes in input_schema_json (field 6); name/tool_name/provider follow
 // the captured real-client shape.
-func cursorMcpTools(tools []openaiTool) []byte {
+func cursorMcpTools(tools []chatWireTool) []byte {
 	var mcpTools []byte
 	for _, t := range tools {
 		if t.Function.Name == "" {

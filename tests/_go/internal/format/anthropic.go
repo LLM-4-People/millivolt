@@ -549,17 +549,39 @@ func (r *pausingReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func TestMapFinishReasonPassthrough(t *testing.T) {
+// TestAnthropicStopReasonToChatFinishReason pins the public Anthropic-to-Chat
+// mapping. Canonical reasons get the documented Chat spelling; a provider-only
+// reason keeps its source spelling rather than being collapsed into "stop".
+func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 	for reason, want := range map[string]string{
-		"end_turn":      "stop",
-		"stop_sequence": "stop",
-		"max_tokens":    "length",
-		"tool_use":      "tool_calls",
-		"pause_turn":    "pause_turn",
-		"refusal":       "refusal",
+		"end_turn":                      "stop",
+		"stop_sequence":                 "stop",
+		"max_tokens":                    "length",
+		"model_context_window_exceeded": "length",
+		"tool_use":                      "tool_calls",
+		"pause_turn":                    "pause_turn",
+		"refusal":                       "refusal",
 	} {
-		if got := mapFinishReason(reason); got != want {
-			t.Errorf("mapFinishReason(%q) = %q, want %q", reason, got, want)
+		body := `{"id":"msg_1","type":"message","role":"assistant","model":"m",` +
+			`"content":[{"type":"text","text":"ok"}],"stop_reason":"` + reason + `",` +
+			`"usage":{"input_tokens":1,"output_tokens":1}}`
+		out, err := TranslateResponse([]byte(body))
+		if err != nil {
+			t.Fatalf("TranslateResponse(%q): %v", reason, err)
+		}
+		var got struct {
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("decode translated response: %v", err)
+		}
+		if len(got.Choices) != 1 {
+			t.Fatalf("stop_reason %q: choices = %d", reason, len(got.Choices))
+		}
+		if got.Choices[0].FinishReason != want {
+			t.Errorf("stop_reason %q -> finish_reason %q, want %q", reason, got.Choices[0].FinishReason, want)
 		}
 	}
 }

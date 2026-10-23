@@ -164,6 +164,16 @@ type Analyzer struct {
 	// model and requestID from the streaming chunk, captured once.
 	model string
 	reqID string
+
+	// Anthropic usage accumulates across message_start (input/cache) and
+	// message_delta (cumulative output); the synthesized Chat-shaped usage
+	// document is rebuilt after each update so Fill's decoder stays the one
+	// usage owner.
+	anthropicInput      int64
+	anthropicOutput     int64
+	anthropicCacheRead  int64
+	anthropicCacheWrite int64
+	anthropicThinking   int64
 }
 
 // SetChatLike seeds the chat-completions shape from the request body before
@@ -200,6 +210,12 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// through to the normal JSON scan.
 	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" {
 		a.terminatorSeen = true
+		return
+	}
+
+	// Anthropic Messages events have their own taxonomy; classify them before
+	// the Chat/Responses lexical scan so one analyzer owns every wire family.
+	if a.feedAnthropic(payload, now) {
 		return
 	}
 
@@ -295,18 +311,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 					continue
 				}
 				a.toolCalls++
-				name := call.Function.Name
-				if name == "" || len(a.toolNames) >= metrics.RetainedToolNamesMax {
-					continue
-				}
-				if a.toolNameSet == nil {
-					a.toolNameSet = make(map[string]struct{}, metrics.RetainedToolNamesMax)
-				}
-				if _, duplicate := a.toolNameSet[name]; duplicate {
-					continue
-				}
-				a.toolNameSet[name] = struct{}{}
-				a.toolNames = append(a.toolNames, name)
+				a.retainToolName(call.Function.Name)
 			}
 		}
 	}
@@ -521,6 +526,23 @@ func TerminalLine(line []byte) bool {
 
 // Fill populates rec with the analyzer's accumulated state. Call after the
 // stream has ended.
+// retainToolName records one distinct tool name in first-seen order. The
+// retained list and its dedupe set are bounded by RetainedToolNamesMax, so a
+// hostile stream cannot grow either; every wire family feeds this owner.
+func (a *Analyzer) retainToolName(name string) {
+	if name == "" || len(a.toolNames) >= metrics.RetainedToolNamesMax {
+		return
+	}
+	if a.toolNameSet == nil {
+		a.toolNameSet = make(map[string]struct{}, metrics.RetainedToolNamesMax)
+	}
+	if _, duplicate := a.toolNameSet[name]; duplicate {
+		return
+	}
+	a.toolNameSet[name] = struct{}{}
+	a.toolNames = append(a.toolNames, name)
+}
+
 func (a *Analyzer) Fill(rec *metrics.Record) {
 	// Flush a trailing event that ended at EOF without its blank-line
 	// terminator (a stream can close right after the last data: line). This

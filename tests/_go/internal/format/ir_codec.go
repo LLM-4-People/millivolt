@@ -1,0 +1,654 @@
+package format
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
+)
+
+func decodeJSONMap(t *testing.T, b []byte) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, b)
+	}
+	return out
+}
+
+func TestChatToAnthropicRequestCodec(t *testing.T) {
+	in := `{
+		"model":"m",
+		"messages":[
+			{"role":"system","content":"be nice"},
+			{"role":"user","content":[{"type":"text","text":"weather?"},{"type":"image_url","image_url":{"url":"https://example.com/a.png","detail":"high"}}]},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"NY\"}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"sunny"}
+		],
+		"tools":[{"type":"function","function":{"name":"get_weather","description":"d","parameters":{"type":"object"},"strict":true}}],
+		"tool_choice":{"type":"function","function":{"name":"get_weather"}},
+		"parallel_tool_calls":false,
+		"max_completion_tokens":100,
+		"temperature":0.7,
+		"top_p":0.9,
+		"stop":["END"],
+		"reasoning_effort":"medium",
+		"response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"},"strict":true}}
+	}`
+	req, err := DecodeChatRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicRequest(req, 4096, "cache-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["system"] != "be nice" {
+		t.Fatalf("system = %v", got["system"])
+	}
+	if got["max_tokens"] != float64(100) {
+		t.Fatalf("max_tokens = %v", got["max_tokens"])
+	}
+	if got["temperature"] != 0.7 || got["top_p"] != 0.9 {
+		t.Fatalf("sampling = %v %v", got["temperature"], got["top_p"])
+	}
+	if got["prompt_cache_key"] != "cache-key" {
+		t.Fatalf("prompt_cache_key = %v", got["prompt_cache_key"])
+	}
+	stops := got["stop_sequences"].([]any)
+	if len(stops) != 1 || stops[0] != "END" {
+		t.Fatalf("stop_sequences = %v", stops)
+	}
+	tc := got["tool_choice"].(map[string]any)
+	if tc["type"] != "tool" || tc["name"] != "get_weather" {
+		t.Fatalf("tool_choice = %v", tc)
+	}
+	if tc["disable_parallel_tool_use"] != true {
+		t.Fatalf("disable_parallel_tool_use = %v", tc["disable_parallel_tool_use"])
+	}
+	tools := got["tools"].([]any)
+	tool := tools[0].(map[string]any)
+	if tool["name"] != "get_weather" || tool["input_schema"] == nil || tool["strict"] != true {
+		t.Fatalf("tool = %v", tool)
+	}
+	oc := got["output_config"].(map[string]any)
+	if oc["effort"] != "medium" {
+		t.Fatalf("output_config.effort = %v", oc["effort"])
+	}
+	format := oc["format"].(map[string]any)
+	if format["type"] != "json_schema" {
+		t.Fatalf("output_config.format = %v", format)
+	}
+	msgs := got["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages len = %d: %v", len(msgs), msgs)
+	}
+	assistant := msgs[1].(map[string]any)
+	blocks := assistant["content"].([]any)
+	if blocks[0].(map[string]any)["type"] != "tool_use" {
+		t.Fatalf("assistant block = %v", blocks[0])
+	}
+	toolResult := msgs[2].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if toolResult["type"] != "tool_result" || toolResult["tool_use_id"] != "call_1" || toolResult["content"] != "sunny" {
+		t.Fatalf("tool_result = %v", toolResult)
+	}
+}
+
+func TestAnthropicToChatRequestCodec(t *testing.T) {
+	in := `{
+		"model":"claude",
+		"max_tokens":512,
+		"system":[{"type":"text","text":"be careful","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]},
+			{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"},{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"NY"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"sunny","is_error":false}]}
+		],
+		"tools":[{"name":"get_weather","description":"d","input_schema":{"type":"object"},"strict":true}],
+		"tool_choice":{"type":"tool","name":"get_weather","disable_parallel_tool_use":true},
+		"thinking":{"type":"enabled","budget_tokens":2048},
+		"stop_sequences":["END"],
+		"metadata":{"user_id":"u1"},
+		"output_config":{"effort":"high","format":{"type":"json_schema","schema":{"type":"object"}}}
+	}`
+	req, err := DecodeAnthropicRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["max_tokens"] != float64(512) {
+		t.Fatalf("max_tokens = %v", got["max_tokens"])
+	}
+	if got["user"] != "u1" {
+		t.Fatalf("user = %v", got["user"])
+	}
+	if got["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %v", got["parallel_tool_calls"])
+	}
+	if got["reasoning_effort"] != "high" {
+		t.Fatalf("reasoning_effort = %v", got["reasoning_effort"])
+	}
+	if got["response_format"].(map[string]any)["type"] != "json_schema" {
+		t.Fatalf("response_format = %v", got["response_format"])
+	}
+	msgs := got["messages"].([]any)
+	if len(msgs) != 4 {
+		t.Fatalf("messages len = %d: %v", len(msgs), msgs)
+	}
+	if msgs[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("first message = %v", msgs[0])
+	}
+	user := msgs[1].(map[string]any)
+	parts := user["content"].([]any)
+	if parts[1].(map[string]any)["type"] != "image_url" {
+		t.Fatalf("image part = %v", parts[1])
+	}
+	assistant := msgs[2].(map[string]any)
+	if assistant["reasoning_content"] != "hmm" {
+		t.Fatalf("reasoning_content = %v", assistant["reasoning_content"])
+	}
+	calls := assistant["tool_calls"].([]any)
+	call := calls[0].(map[string]any)
+	if call["id"] != "toolu_1" || call["function"].(map[string]any)["name"] != "get_weather" {
+		t.Fatalf("tool call = %v", call)
+	}
+	tool := msgs[3].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "toolu_1" || tool["content"] != "sunny" {
+		t.Fatalf("tool message = %v", tool)
+	}
+}
+
+func TestResponsesToChatRequestCodec(t *testing.T) {
+	in := `{
+		"model":"gpt",
+		"instructions":"be brief",
+		"input":[
+			{"role":"user","content":[{"type":"input_text","text":"weather?"}]},
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"thinking"}],"encrypted_content":"enc"},
+			{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"NY\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"sunny"}
+		],
+		"max_output_tokens":256,
+		"tools":[{"type":"function","name":"get_weather","description":"d","parameters":{"type":"object"},"strict":true}],
+		"tool_choice":"required",
+		"reasoning":{"effort":"low","summary":"auto"},
+		"text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object"},"strict":true}}
+	}`
+	req, err := DecodeResponsesRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["max_tokens"] != float64(256) {
+		t.Fatalf("max_tokens = %v", got["max_tokens"])
+	}
+	if got["tool_choice"] != "required" {
+		t.Fatalf("tool_choice = %v", got["tool_choice"])
+	}
+	if got["reasoning_effort"] != "low" {
+		t.Fatalf("reasoning_effort = %v", got["reasoning_effort"])
+	}
+	msgs := got["messages"].([]any)
+	if len(msgs) != 4 {
+		t.Fatalf("messages len = %d: %v", len(msgs), msgs)
+	}
+	if msgs[0].(map[string]any)["role"] != "system" || msgs[0].(map[string]any)["content"] != "be brief" {
+		t.Fatalf("instructions message = %v", msgs[0])
+	}
+	assistant := msgs[2].(map[string]any)
+	if assistant["reasoning_content"] != "thinking" {
+		t.Fatalf("reasoning_content = %v", assistant["reasoning_content"])
+	}
+	calls := assistant["tool_calls"].([]any)
+	if calls[0].(map[string]any)["id"] != "call_1" {
+		t.Fatalf("tool call = %v", calls[0])
+	}
+	tool := msgs[3].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call_1" {
+		t.Fatalf("tool message = %v", tool)
+	}
+}
+
+func TestChatToResponsesRequestCodec(t *testing.T) {
+	in := `{
+		"model":"m",
+		"messages":[
+			{"role":"system","content":"be nice"},
+			{"role":"user","content":"hi"},
+			{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		],
+		"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],
+		"max_tokens":64,
+		"stop":["END"],
+		"seed":7,
+		"response_format":{"type":"json_schema","json_schema":{"name":"a","schema":{"type":"object"}}}
+	}`
+	req, err := DecodeChatRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["instructions"] != "be nice" {
+		t.Fatalf("instructions = %v", got["instructions"])
+	}
+	if got["max_output_tokens"] != float64(64) {
+		t.Fatalf("max_output_tokens = %v", got["max_output_tokens"])
+	}
+	if got["text"].(map[string]any)["format"].(map[string]any)["type"] != "json_schema" {
+		t.Fatalf("text.format = %v", got["text"])
+	}
+	tools := got["tools"].([]any)
+	if tools[0].(map[string]any)["name"] != "f" {
+		t.Fatalf("tools = %v", tools)
+	}
+	input := got["input"].([]any)
+	if len(input) != 3 {
+		t.Fatalf("input len = %d: %v", len(input), input)
+	}
+	if input[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("input[0] = %v", input[0])
+	}
+	if input[1].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("input[1] = %v", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "function_call_output" {
+		t.Fatalf("input[2] = %v", input[2])
+	}
+	if !strings.Contains(req.Warnings.Header(), "seed") || !strings.Contains(req.Warnings.Header(), "stop") {
+		t.Fatalf("warnings = %v", req.Warnings)
+	}
+}
+
+func TestResponsesResponseToChat(t *testing.T) {
+	in := `{
+		"id":"resp_1","object":"response","created_at":123,"status":"completed","model":"gpt",
+		"output":[
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"enc"},
+			{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[],"logprobs":[]}]},
+			{"type":"function_call","id":"fc_1","call_id":"call_1","name":"f","arguments":"{\"a\":1}","status":"completed"}
+		],
+		"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,"input_tokens_details":{"cached_tokens":2,"cache_write_tokens":1},"output_tokens_details":{"reasoning_tokens":3}}
+	}`
+	resp, err := DecodeResponsesResponse([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeChatResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	choice := got["choices"].([]any)[0].(map[string]any)
+	msg := choice["message"].(map[string]any)
+	if msg["content"] != "hello" || msg["reasoning_content"] != "think" {
+		t.Fatalf("message = %v", msg)
+	}
+	calls := msg["tool_calls"].([]any)
+	if calls[0].(map[string]any)["id"] != "call_1" {
+		t.Fatalf("tool_calls = %v", calls)
+	}
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %v", choice["finish_reason"])
+	}
+	usage := got["usage"].(map[string]any)
+	if usage["prompt_tokens"] != float64(10) || usage["completion_tokens"] != float64(5) {
+		t.Fatalf("usage = %v", usage)
+	}
+	details := usage["prompt_tokens_details"].(map[string]any)
+	if details["cached_tokens"] != float64(2) || details["cache_write_tokens"] != float64(1) {
+		t.Fatalf("prompt details = %v", details)
+	}
+}
+
+func TestAnthropicResponseToChatUsage(t *testing.T) {
+	in := `{
+		"id":"msg_1","type":"message","role":"assistant","model":"claude",
+		"content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"toolu_1","name":"f","input":{"a":1}}],
+		"stop_reason":"tool_use","stop_sequence":null,
+		"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens_details":{"thinking_tokens":1}}
+	}`
+	resp, err := DecodeAnthropicResponse([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeChatResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	choice := got["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "tool_calls" {
+		t.Fatalf("finish_reason = %v", choice["finish_reason"])
+	}
+	usage := got["usage"].(map[string]any)
+	if usage["prompt_tokens"] != float64(15) {
+		t.Fatalf("prompt_tokens = %v, want 15 (input + cache read + cache write)", usage["prompt_tokens"])
+	}
+	if usage["total_tokens"] != float64(20) {
+		t.Fatalf("total_tokens = %v", usage["total_tokens"])
+	}
+}
+
+func TestChatResponseToAnthropicUsage(t *testing.T) {
+	in := `{
+		"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",
+		"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":15,"completion_tokens":5,"total_tokens":20,"prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":2}}
+	}`
+	resp, err := DecodeChatResponse([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicResponse(resp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	usage := got["usage"].(map[string]any)
+	if usage["input_tokens"] != float64(10) {
+		t.Fatalf("input_tokens = %v, want 10 (total minus cache)", usage["input_tokens"])
+	}
+	if usage["cache_read_input_tokens"] != float64(3) || usage["cache_creation_input_tokens"] != float64(2) {
+		t.Fatalf("cache usage = %v", usage)
+	}
+	if got["stop_reason"] != "end_turn" {
+		t.Fatalf("stop_reason = %v", got["stop_reason"])
+	}
+}
+
+func TestResponsesToAnthropicRequestCodec(t *testing.T) {
+	in := `{
+		"model":"gpt",
+		"instructions":"be brief",
+		"input":[
+			{"role":"user","content":"hi"},
+			{"type":"function_call","call_id":"call_1","name":"f","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":"ok"}
+		],
+		"max_output_tokens":128,
+		"reasoning":{"effort":"high"}
+	}`
+	req, err := DecodeResponsesRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicRequest(req, 4096, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["system"] != "be brief" {
+		t.Fatalf("system = %v", got["system"])
+	}
+	if got["max_tokens"] != float64(128) {
+		t.Fatalf("max_tokens = %v", got["max_tokens"])
+	}
+	oc := got["output_config"].(map[string]any)
+	if oc["effort"] != "high" {
+		t.Fatalf("effort = %v", oc["effort"])
+	}
+	msgs := got["messages"].([]any)
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %v", msgs)
+	}
+	assistant := msgs[1].(map[string]any)
+	if assistant["content"].([]any)[0].(map[string]any)["type"] != "tool_use" {
+		t.Fatalf("assistant = %v", assistant)
+	}
+	toolResult := msgs[2].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if toolResult["type"] != "tool_result" || toolResult["tool_use_id"] != "call_1" {
+		t.Fatalf("tool_result = %v", toolResult)
+	}
+}
+
+func TestAnthropicToResponsesRequestCodec(t *testing.T) {
+	in := `{
+		"model":"claude","max_tokens":128,
+		"system":"be brief",
+		"messages":[
+			{"role":"user","content":"hi"},
+			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"f","input":{"a":1}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}
+		],
+		"thinking":{"type":"enabled","budget_tokens":6000}
+	}`
+	req, err := DecodeAnthropicRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["instructions"] != "be brief" {
+		t.Fatalf("instructions = %v", got["instructions"])
+	}
+	if got["max_output_tokens"] != float64(128) {
+		t.Fatalf("max_output_tokens = %v", got["max_output_tokens"])
+	}
+	reasoning := got["reasoning"].(map[string]any)
+	if reasoning["effort"] != "medium" {
+		t.Fatalf("reasoning.effort = %v", reasoning["effort"])
+	}
+	input := got["input"].([]any)
+	if input[1].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("input[1] = %v", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "function_call_output" {
+		t.Fatalf("input[2] = %v", input[2])
+	}
+}
+
+func TestCodecRejectsStatefulReplay(t *testing.T) {
+	in := `{"model":"gpt","input":"hi","previous_response_id":"resp_1"}`
+	req, err := DecodeResponsesRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EncodeChatRequest(req); err == nil {
+		t.Fatal("chat target accepted previous_response_id")
+	}
+	if _, err := EncodeAnthropicRequest(req, 4096, ""); err == nil {
+		t.Fatal("anthropic target accepted previous_response_id")
+	}
+	stored := `{"model":"gpt","input":"hi","store":true}`
+	req, err = DecodeResponsesRequest([]byte(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EncodeChatRequest(req); err == nil {
+		t.Fatal("chat target accepted store=true")
+	}
+	if _, err := EncodeAnthropicRequest(req, 4096, ""); err == nil {
+		t.Fatal("anthropic target accepted store=true")
+	}
+}
+
+func TestCodecRejectsInvalidToolArguments(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"not json"}}]}]}`
+	if _, err := DecodeChatRequest([]byte(in)); err == nil {
+		t.Fatal("invalid tool arguments were accepted")
+	}
+	in = `{"model":"m","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"[1,2]"}}]}]}`
+	if _, err := DecodeChatRequest([]byte(in)); err == nil {
+		t.Fatal("non-object tool arguments were accepted")
+	}
+	in = `{"model":"m","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"f","input":[1,2]}]}]}`
+	if _, err := DecodeAnthropicRequest([]byte(in)); err == nil {
+		t.Fatal("non-object anthropic tool input was accepted")
+	}
+	if _, err := EncodeChatRequest(&ir.Request{
+		Model: "m",
+		Messages: []ir.Message{{Role: ir.RoleAssistant, Content: []ir.Block{{
+			Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{Name: "f", Arguments: json.RawMessage(`[1,2]`)},
+		}}}},
+	}); err == nil {
+		t.Fatal("IR validation accepted non-object tool arguments")
+	}
+}
+
+func TestCodecRejectsNonFunctionTool(t *testing.T) {
+	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
+	if _, err := DecodeChatRequest([]byte(chat)); err == nil {
+		t.Fatal("chat non-function tool was accepted")
+	}
+	anthropic := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search_20250305","name":"ws"}]}`
+	if _, err := DecodeAnthropicRequest([]byte(anthropic)); err == nil {
+		t.Fatal("anthropic provider tool was accepted")
+	}
+	responses := `{"model":"m","input":"hi","tools":[{"type":"web_search"}]}`
+	if _, err := DecodeResponsesRequest([]byte(responses)); err == nil {
+		t.Fatal("responses provider tool was accepted")
+	}
+}
+
+func TestErrorEnvelopes(t *testing.T) {
+	anthropicErr := []byte(`{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
+	e, err := DecodeAnthropicError(anthropicErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicError(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	if got["type"] != "error" || got["error"].(map[string]any)["type"] != "overloaded_error" {
+		t.Fatalf("anthropic error = %v", got)
+	}
+
+	openaiErr := []byte(`{"error":{"message":"bad","type":"invalid_request_error","code":"x"}}`)
+	e, err = DecodeResponsesError(openaiErr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Code != "x" || e.Message != "bad" {
+		t.Fatalf("openai error = %+v", e)
+	}
+}
+
+func TestErrorTypeTranslation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		from ir.Protocol
+		to   ir.Protocol
+		want string
+	}{
+		// OpenAI-family clients historically receive the provider's own type;
+		// only the new inbound Anthropic contract maps into Anthropic's
+		// documented vocabulary.
+		{"anthropic overloaded to openai", `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`, ir.Anthropic, ir.Chat, "overloaded_error"},
+		{"anthropic billing to responses", `{"type":"error","error":{"type":"billing_error","message":"pay"}}`, ir.Anthropic, ir.Responses, "billing_error"},
+		{"openai quota to anthropic", `{"error":{"type":"insufficient_quota","message":"pay"}}`, ir.Chat, ir.Anthropic, "billing_error"},
+		{"openai server to anthropic", `{"error":{"type":"server_error","message":"boom"}}`, ir.Chat, ir.Anthropic, "api_error"},
+		{"shared rate limit passes through", `{"error":{"type":"rate_limit_error","message":"slow"}}`, ir.Chat, ir.Anthropic, "rate_limit_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var e *ir.Error
+			var err error
+			if tc.from == ir.Anthropic {
+				e, err = DecodeAnthropicError([]byte(tc.in))
+			} else {
+				e, err = DecodeResponsesError([]byte(tc.in))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out []byte
+			if tc.to == ir.Anthropic {
+				out, err = EncodeAnthropicError(e)
+			} else {
+				out, err = EncodeOpenAIError(e)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := decodeJSONMap(t, out)
+			if got["error"].(map[string]any)["type"] != tc.want {
+				t.Fatalf("type = %v, want %q (body %s)", got["error"], tc.want, out)
+			}
+		})
+	}
+}
+
+func TestAnthropicThinkingRoundTrip(t *testing.T) {
+	in := `{
+		"model":"claude","max_tokens":1024,
+		"messages":[
+			{"role":"user","content":"hi"},
+			{"role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"sig"},{"type":"redacted_thinking","data":"enc"},{"type":"text","text":"hello"}]}
+		]
+	}`
+	req, err := DecodeAnthropicRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicRequest(req, 4096, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	msgs := got["messages"].([]any)
+	assistant := msgs[1].(map[string]any)
+	blocks := assistant["content"].([]any)
+	if blocks[0].(map[string]any)["type"] != "thinking" || blocks[0].(map[string]any)["signature"] != "sig" {
+		t.Fatalf("thinking block = %v", blocks[0])
+	}
+	if blocks[1].(map[string]any)["type"] != "redacted_thinking" || blocks[1].(map[string]any)["data"] != "enc" {
+		t.Fatalf("redacted block = %v", blocks[1])
+	}
+}
+
+func TestAnthropicCacheControlPreserved(t *testing.T) {
+	in := `{
+		"model":"claude","max_tokens":1024,
+		"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral","ttl":"1h"}}],
+		"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}],
+		"tools":[{"name":"f","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]
+	}`
+	req, err := DecodeAnthropicRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicRequest(req, 4096, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeJSONMap(t, out)
+	system := got["system"].([]any)[0].(map[string]any)
+	if system["cache_control"].(map[string]any)["ttl"] != "1h" {
+		t.Fatalf("system cache_control = %v", system)
+	}
+	msg := got["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if msg["cache_control"].(map[string]any)["type"] != "ephemeral" {
+		t.Fatalf("message cache_control = %v", msg)
+	}
+	tool := got["tools"].([]any)[0].(map[string]any)
+	if tool["cache_control"].(map[string]any)["type"] != "ephemeral" {
+		t.Fatalf("tool cache_control = %v", tool)
+	}
+}
+
+func TestIRValidateRejectsUnknownRole(t *testing.T) {
+	req := &ir.Request{Model: "m", Messages: []ir.Message{{Role: "robot"}}}
+	if err := ir.ValidateRequest(req); err == nil {
+		t.Fatal("unknown role accepted")
+	}
+}

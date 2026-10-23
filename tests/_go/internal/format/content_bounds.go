@@ -43,7 +43,7 @@ func TestContentTextBoundsPartArrays(t *testing.T) {
 		{"empty array yields no text", `[]`, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := openaiMessage{Content: json.RawMessage(tc.content)}
+			msg := chatWireMessage{Content: json.RawMessage(tc.content)}
 			got, ok := msg.ContentText()
 			if got != tc.want || ok != tc.ok {
 				t.Fatalf("ContentText() = (%q, %v), want (%q, %v)", got, ok, tc.want, tc.ok)
@@ -52,7 +52,7 @@ func TestContentTextBoundsPartArrays(t *testing.T) {
 	}
 
 	heavy := heavyContentParts(1_000_000)
-	msg := openaiMessage{Content: heavy}
+	msg := chatWireMessage{Content: heavy}
 	var got string
 	var ok bool
 	alloc := allocDelta(func() { got, ok = msg.ContentText() })
@@ -131,7 +131,7 @@ func TestCursorMessageTextBoundsPartArrays(t *testing.T) {
 		{"empty array", `[]`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := openaiMessage{Content: json.RawMessage(tc.content)}
+			msg := chatWireMessage{Content: json.RawMessage(tc.content)}
 			if got := cursorMessageText(msg); got != tc.want {
 				t.Fatalf("cursorMessageText() = %q, want %q", got, tc.want)
 			}
@@ -139,7 +139,7 @@ func TestCursorMessageTextBoundsPartArrays(t *testing.T) {
 	}
 
 	heavy := heavyContentParts(1_000_000)
-	msg := openaiMessage{Content: heavy}
+	msg := chatWireMessage{Content: heavy}
 	var got string
 	alloc := allocDelta(func() { got = cursorMessageText(msg) })
 	if got != "" {

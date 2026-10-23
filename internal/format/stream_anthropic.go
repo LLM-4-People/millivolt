@@ -1,0 +1,542 @@
+package format
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
+)
+
+// Anthropic Messages streaming codec.
+
+type anthropicStreamEvent struct {
+	Type         string                `json:"type"`
+	Index        int                   `json:"index"`
+	Message      json.RawMessage       `json:"message"`
+	ContentBlock anthropicWireBlock    `json:"content_block"`
+	Delta        json.RawMessage       `json:"delta"`
+	Usage        *anthropicStreamUsage `json:"usage"`
+	Error        *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+type anthropicStreamUsage struct {
+	InputTokens              *int64 `json:"input_tokens"`
+	OutputTokens             *int64 `json:"output_tokens"`
+	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+	OutputTokensDetails      *struct {
+		ThinkingTokens int64 `json:"thinking_tokens"`
+	} `json:"output_tokens_details"`
+}
+
+type anthropicStreamMessage struct {
+	ID      string                `json:"id"`
+	Model   string                `json:"model"`
+	Usage   *anthropicStreamUsage `json:"usage"`
+	Content []anthropicWireBlock  `json:"content"`
+}
+
+// AnthropicStreamDecoder converts Anthropic SSE events into canonical events.
+type AnthropicStreamDecoder struct {
+	r        *sseReader
+	q        eventQueue
+	started  bool
+	terminal bool
+
+	id      string
+	model   string
+	created int64
+
+	usage         ir.Usage
+	warnings      ir.Warnings
+	skipped       map[int]bool
+	observe       func([]byte)
+	sawStopReason bool
+
+	openToolBlocks   int
+	toolInitialBytes int
+	toolInitial      map[int]int
+	openBlocks       map[int]bool
+}
+
+// NewAnthropicStreamDecoder builds a decoder over one upstream body. observe,
+// when non-nil, receives every raw data payload synchronously.
+func NewAnthropicStreamDecoder(r io.Reader, observe func([]byte)) *AnthropicStreamDecoder {
+	return &AnthropicStreamDecoder{
+		r:           newSSEReader(r),
+		skipped:     map[int]bool{},
+		observe:     observe,
+		toolInitial: map[int]int{},
+		openBlocks:  map[int]bool{},
+	}
+}
+
+// Warnings returns the decode-time translation warnings.
+func (d *AnthropicStreamDecoder) Warnings() ir.Warnings { return d.warnings }
+
+// Next returns the next canonical event.
+func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
+	for {
+		if ev, ok := d.q.pop(); ok {
+			return ev, nil
+		}
+		if d.terminal {
+			return nil, io.EOF
+		}
+		raw, err := d.r.Next()
+		if err == io.EOF {
+			if !d.terminal {
+				// A stop_reason delivered without message_stop is the server
+				// closing the turn; only a stream with neither is truncated.
+				if d.sawStopReason {
+					d.terminal = true
+					d.q.push(&ir.Event{Type: ir.EventDone})
+					continue
+				}
+				return nil, ErrTruncatedStream
+			}
+			return nil, io.EOF
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(raw.Data) == 0 {
+			continue
+		}
+		if d.observe != nil {
+			d.observe(raw.Data)
+		}
+		var ev anthropicStreamEvent
+		if err := json.Unmarshal(raw.Data, &ev); err != nil {
+			return nil, err
+		}
+		typ := ev.Type
+		if typ == "" {
+			typ = raw.Name
+		}
+		switch typ {
+		case "message_start":
+			var msg anthropicStreamMessage
+			if err := json.Unmarshal(ev.Message, &msg); err != nil {
+				return nil, err
+			}
+			if err := checkNativeIdentity("id", msg.ID); err != nil {
+				return nil, err
+			}
+			if err := checkNativeIdentity("model", msg.Model); err != nil {
+				return nil, err
+			}
+			d.id, d.model = msg.ID, msg.Model
+			d.created = time.Now().Unix()
+			if msg.Usage != nil {
+				if err := d.mergeUsage(msg.Usage); err != nil {
+					return nil, err
+				}
+			}
+			d.started = true
+			u := d.usage
+			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
+				ID: d.id, Model: d.model, Created: d.created, Usage: u,
+			}})
+		case "content_block_start":
+			if d.openBlocks[ev.Index] {
+				return nil, fmt.Errorf("duplicate native tool index %d", ev.Index)
+			}
+			d.openBlocks[ev.Index] = true
+			if len(ev.ContentBlock.Input) > nativeToolInitialBytesMax-d.toolInitialBytes {
+				return nil, errNativeToolInitialBytes
+			}
+			block := ev.ContentBlock
+			if block.Type == "tool_use" {
+				if err := checkNativeIdentity("tool id", block.ID); err != nil {
+					return nil, err
+				}
+				if err := checkNativeIdentity("tool name", block.Name); err != nil {
+					return nil, err
+				}
+				d.openToolBlocks++
+				if d.openToolBlocks > nativeToolBlocksMax {
+					return nil, errNativeToolBlocks
+				}
+				d.toolInitial[ev.Index] = len(block.Input)
+				d.toolInitialBytes += len(block.Input)
+				if d.toolInitialBytes > nativeToolInitialBytesMax {
+					return nil, errNativeToolInitialBytes
+				}
+			}
+			irBlock, ok := anthropicStreamBlock(block)
+			if !ok {
+				d.skipped[ev.Index] = true
+				d.warnings.Add(ir.WarningDropped, "content."+block.Type, "provider-executed block has no cross-protocol equivalent")
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: ev.Index, Block: &irBlock})
+		case "content_block_delta":
+			if d.skipped[ev.Index] {
+				continue
+			}
+			var delta struct {
+				Type        string       `json:"type"`
+				Text        string       `json:"text"`
+				PartialJSON string       `json:"partial_json"`
+				Thinking    string       `json:"thinking"`
+				Signature   string       `json:"signature"`
+				Citation    *ir.Citation `json:"citation"`
+			}
+			if err := json.Unmarshal(ev.Delta, &delta); err != nil {
+				return nil, err
+			}
+			out := &ir.Delta{}
+			switch delta.Type {
+			case "text_delta":
+				out.Text = delta.Text
+			case "input_json_delta":
+				out.Arguments = delta.PartialJSON
+			case "thinking_delta":
+				out.Reasoning = delta.Thinking
+			case "signature_delta":
+				out.Signature = delta.Signature
+			case "citations_delta":
+				out.Citation = delta.Citation
+			default:
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: ev.Index, Delta: out})
+		case "content_block_stop":
+			delete(d.openBlocks, ev.Index)
+			if n, ok := d.toolInitial[ev.Index]; ok {
+				d.openToolBlocks--
+				d.toolInitialBytes -= n
+				delete(d.toolInitial, ev.Index)
+			}
+			if d.skipped[ev.Index] {
+				delete(d.skipped, ev.Index)
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: ev.Index})
+		case "message_delta":
+			var delta struct {
+				StopReason   string  `json:"stop_reason"`
+				StopSequence *string `json:"stop_sequence"`
+			}
+			if len(ev.Delta) > 0 {
+				if err := json.Unmarshal(ev.Delta, &delta); err != nil {
+					return nil, err
+				}
+			}
+			if ev.Usage != nil {
+				if err := d.mergeUsage(ev.Usage); err != nil {
+					return nil, err
+				}
+			}
+			if delta.StopReason != "" {
+				d.sawStopReason = true
+			}
+			finish := &ir.Finish{Reason: anthropicFinishReason(delta.StopReason)}
+			if delta.StopSequence != nil {
+				finish.StopSequence = *delta.StopSequence
+			}
+			u := d.usage
+			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: finish, Usage: &u})
+		case "message_stop":
+			d.terminal = true
+			d.openToolBlocks = 0
+			d.toolInitialBytes = 0
+			d.toolInitial = map[int]int{}
+			d.openBlocks = map[int]bool{}
+			d.q.push(&ir.Event{Type: ir.EventDone})
+		case "ping":
+			continue
+		case "error":
+			d.terminal = true
+			d.openToolBlocks = 0
+			d.toolInitialBytes = 0
+			d.toolInitial = map[int]int{}
+			d.openBlocks = map[int]bool{}
+			if ev.Error == nil || (ev.Error.Type == "" && ev.Error.Message == "") {
+				// An empty error object is not a provider statement; treat it
+				// exactly like a missing completion marker.
+				d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
+					Type: sse.TypeUpstreamError, Code: metrics.CodeTruncated,
+					Message: metrics.DegenerateMessage(metrics.CodeTruncated),
+				}})
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
+				Type: ev.Error.Type, Message: ev.Error.Message,
+			}})
+		default:
+			continue
+		}
+	}
+}
+
+func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
+	if u.InputTokens != nil {
+		d.usage.InputTokens = *u.InputTokens + valueOrZero(u.CacheReadInputTokens) + valueOrZero(u.CacheCreationInputTokens)
+	}
+	if u.OutputTokens != nil {
+		d.usage.OutputTokens = *u.OutputTokens
+	}
+	if u.CacheReadInputTokens != nil {
+		d.usage.CacheReadTokens = *u.CacheReadInputTokens
+	}
+	if u.CacheCreationInputTokens != nil {
+		d.usage.CacheWriteTokens = *u.CacheCreationInputTokens
+	}
+	if u.OutputTokensDetails != nil {
+		d.usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
+	}
+	d.usage.TotalTokens = d.usage.InputTokens + d.usage.OutputTokens
+	return validateUsage(d.usage)
+}
+
+func valueOrZero(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func anthropicStreamBlock(b anthropicWireBlock) (ir.Block, bool) {
+	switch b.Type {
+	case "text":
+		return ir.Block{Type: ir.BlockText, Text: b.Text}, true
+	case "tool_use":
+		args := b.Input
+		if len(args) == 0 || string(args) == "null" {
+			args = json.RawMessage(`{}`)
+		}
+		return ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
+			ID: b.ID, Name: b.Name, Arguments: args,
+		}}, true
+	case "thinking":
+		return ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
+			Text: b.Thinking, Signature: b.Signature, Provider: ir.Anthropic,
+		}}, true
+	case "redacted_thinking":
+		return ir.Block{Type: ir.BlockRedactedReasoning, Reasoning: &ir.Reasoning{
+			Encrypted: b.Data, Provider: ir.Anthropic,
+		}}, true
+	default:
+		return ir.Block{}, false
+	}
+}
+
+// AnthropicStreamEncoder renders canonical events as Anthropic SSE.
+type AnthropicStreamEncoder struct {
+	w       io.Writer
+	flusher http.Flusher
+
+	id      string
+	model   string
+	created int64
+
+	started    bool
+	skipped    map[int]bool
+	unopened   map[int]bool
+	finishSent bool
+	usage      ir.Usage
+	doneSent   bool
+}
+
+// NewAnthropicStreamEncoder builds an encoder over one client response writer.
+func NewAnthropicStreamEncoder(w io.Writer, flusher http.Flusher) *AnthropicStreamEncoder {
+	return &AnthropicStreamEncoder{w: w, flusher: flusher, skipped: map[int]bool{}, unopened: map[int]bool{}}
+}
+
+// Write renders one canonical event.
+func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
+	switch ev.Type {
+	case ir.EventStart:
+		if ev.Response != nil {
+			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			e.usage = ev.Response.Usage
+		}
+		if e.created == 0 {
+			e.created = time.Now().Unix()
+		}
+		e.started = true
+		return e.emit("message_start", map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id": e.id, "type": "message", "role": "assistant", "content": []any{},
+				"model": e.model, "stop_reason": nil, "stop_sequence": nil,
+				"usage": map[string]any{
+					"input_tokens":                nonNegative(e.usage.InputTokens - e.usage.CacheReadTokens - e.usage.CacheWriteTokens),
+					"output_tokens":               e.usage.OutputTokens,
+					"cache_creation_input_tokens": e.usage.CacheWriteTokens,
+					"cache_read_input_tokens":     e.usage.CacheReadTokens,
+				},
+			},
+		})
+	case ir.EventBlockStart:
+		if ev.Block == nil {
+			return nil
+		}
+		switch ev.Block.Type {
+		case ir.BlockText, ir.BlockRefusal:
+			return e.emit("content_block_start", map[string]any{
+				"type": "content_block_start", "index": ev.Index,
+				"content_block": map[string]any{"type": "text", "text": ""},
+			})
+		case ir.BlockToolCall:
+			tc := ev.Block.ToolCall
+			return e.emit("content_block_start", map[string]any{
+				"type": "content_block_start", "index": ev.Index,
+				"content_block": map[string]any{
+					"type": "tool_use", "id": tc.ID, "name": tc.Name, "input": map[string]any{},
+				},
+			})
+		case ir.BlockReasoning:
+			return e.emit("content_block_start", map[string]any{
+				"type": "content_block_start", "index": ev.Index,
+				"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
+			})
+		case ir.BlockRedactedReasoning:
+			data := ""
+			if ev.Block.Reasoning != nil {
+				data = ev.Block.Reasoning.Encrypted
+			}
+			e.skipped[ev.Index] = true
+			return e.emit("content_block_start", map[string]any{
+				"type": "content_block_start", "index": ev.Index,
+				"content_block": map[string]any{"type": "redacted_thinking", "data": data},
+			})
+		default:
+			// No Anthropic block shape exists for this assistant block. Do
+			// not open one; the matching EventBlockEnd must not emit a stop
+			// for an index the client never saw opened.
+			e.unopened[ev.Index] = true
+			return nil
+		}
+	case ir.EventBlockDelta:
+		if ev.Delta == nil || e.skipped[ev.Index] {
+			return nil
+		}
+		switch {
+		case ev.Delta.Text != "":
+			return e.emit("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": ev.Index,
+				"delta": map[string]any{"type": "text_delta", "text": ev.Delta.Text},
+			})
+		case ev.Delta.Reasoning != "":
+			return e.emit("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": ev.Index,
+				"delta": map[string]any{"type": "thinking_delta", "thinking": ev.Delta.Reasoning},
+			})
+		case ev.Delta.Signature != "":
+			return e.emit("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": ev.Index,
+				"delta": map[string]any{"type": "signature_delta", "signature": ev.Delta.Signature},
+			})
+		case ev.Delta.Arguments != "":
+			return e.emit("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": ev.Index,
+				"delta": map[string]any{"type": "input_json_delta", "partial_json": ev.Delta.Arguments},
+			})
+		case ev.Delta.Citation != nil:
+			return e.emit("content_block_delta", map[string]any{
+				"type": "content_block_delta", "index": ev.Index,
+				"delta": map[string]any{"type": "citations_delta", "citation": ev.Delta.Citation},
+			})
+		}
+	case ir.EventBlockEnd:
+		if e.unopened[ev.Index] {
+			delete(e.unopened, ev.Index)
+			return nil
+		}
+		delete(e.skipped, ev.Index)
+		return e.emit("content_block_stop", map[string]any{
+			"type": "content_block_stop", "index": ev.Index,
+		})
+	case ir.EventMessageDelta:
+		if ev.Usage != nil {
+			e.usage = *ev.Usage
+		}
+		stopReason := "end_turn"
+		var stopSequence any
+		if ev.Finish != nil {
+			stopReason = anthropicStopReason(ev.Finish.Reason)
+			if ev.Finish.StopSequence != "" {
+				stopSequence = ev.Finish.StopSequence
+			}
+		}
+		e.finishSent = true
+		return e.emit("message_delta", map[string]any{
+			"type":  "message_delta",
+			"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": stopSequence},
+			"usage": map[string]any{
+				"output_tokens": e.usage.OutputTokens,
+				"input_tokens":  nonNegative(e.usage.InputTokens - e.usage.CacheReadTokens - e.usage.CacheWriteTokens),
+			},
+		})
+	case ir.EventDone:
+		if !e.finishSent {
+			e.finishSent = true
+			if err := e.emit("message_delta", map[string]any{
+				"type":  "message_delta",
+				"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
+				"usage": map[string]any{"output_tokens": e.usage.OutputTokens},
+			}); err != nil {
+				return err
+			}
+		}
+		return e.finish()
+	case ir.EventError:
+		if ev.Error != nil {
+			typ := ev.Error.Type
+			if typ == "" {
+				typ = "api_error"
+			}
+			if err := e.emit("error", map[string]any{
+				"type":  "error",
+				"error": map[string]any{"type": typ, "message": ev.Error.Message},
+			}); err != nil {
+				return err
+			}
+		}
+		return e.finish()
+	}
+	return nil
+}
+
+func (e *AnthropicStreamEncoder) emit(name string, obj any) error {
+	payload, err := sse.MarshalWireJSON(obj)
+	if err != nil {
+		return err
+	}
+	frame := make([]byte, 0, len(name)+len(payload)+16)
+	frame = append(frame, "event: "...)
+	frame = append(frame, name...)
+	frame = append(frame, '\n')
+	frame = append(frame, "data: "...)
+	frame = append(frame, payload...)
+	frame = append(frame, '\n', '\n')
+	if _, err := e.w.Write(frame); err != nil {
+		return err
+	}
+	if e.flusher != nil {
+		e.flusher.Flush()
+	}
+	return nil
+}
+
+func (e *AnthropicStreamEncoder) finish() error {
+	if e.doneSent {
+		return nil
+	}
+	e.doneSent = true
+	return e.emit("message_stop", map[string]any{"type": "message_stop"})
+}
+
+// Close finishes the stream if the caller did not deliver EventDone.
+func (e *AnthropicStreamEncoder) Close() error { return e.finish() }
