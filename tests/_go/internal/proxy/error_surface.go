@@ -455,3 +455,68 @@ func protocolForTest(name string) ir.Protocol {
 		return ir.Chat
 	}
 }
+
+// TestArmedPacerPreCommitUsesInboundErrorShape pins N2: an armed pacer that
+// has not committed SSE is still a plain HTTP response, so its error must be
+// the client protocol's own JSON envelope with the proxy-owned content type
+// and the caller's extra headers.
+func TestArmedPacerPreCommitUsesInboundErrorShape(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inbound string
+	}{
+		{"anthropic", "anthropic"},
+		{"responses", "openai-responses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			pacer := newSSEPacer(recorder, time.Hour, 0)
+			pacer.Arm()
+			defer pacer.Stop()
+			rec := &metrics.Record{ID: "req_1", Model: "m"}
+			extra := http.Header{"Retry-After": []string{"7"}}
+			writeClientErrorHdr(pacer, rec, protocolForTest(tc.inbound), "rate_limit_error", "slow down", http.StatusTooManyRequests, extra)
+
+			if recorder.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want 429", recorder.Code)
+			}
+			if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got)
+			}
+			if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+				t.Fatalf("X-Content-Type-Options = %q, want nosniff", got)
+			}
+			if got := recorder.Header().Get("Retry-After"); got != "7" {
+				t.Fatalf("Retry-After = %q, want 7", got)
+			}
+			body := recorder.Body.String()
+			if strings.Contains(body, "[DONE]") || strings.Contains(body, `"choices"`) {
+				t.Fatalf("%s client received an OpenAI stream: %s", tc.name, body)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(body), &doc); err != nil {
+				t.Fatalf("body %q is not JSON: %v", body, err)
+			}
+			if tc.inbound == "anthropic" {
+				if doc["type"] != "error" {
+					t.Fatalf("Anthropic envelope = %v", doc)
+				}
+				failure, _ := doc["error"].(map[string]any)
+				if failure["type"] != "rate_limit_error" || failure["message"] != "slow down" {
+					t.Fatalf("Anthropic error = %v", failure)
+				}
+			} else {
+				failure, _ := doc["error"].(map[string]any)
+				if failure["type"] != "rate_limit_error" || failure["message"] != "slow down" {
+					t.Fatalf("Responses error = %v", failure)
+				}
+			}
+			if rec.StatusCode != http.StatusTooManyRequests || rec.ErrorType != "rate_limit_error" {
+				t.Fatalf("record = %+v", rec)
+			}
+			if rec.ResponseBytes != int64(len(body)) {
+				t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
+			}
+		})
+	}
+}

@@ -291,7 +291,10 @@ func writeProtocolHTTPError(w http.ResponseWriter, inbound ir.Protocol, status i
 	writeProtocolHTTPErrorHdr(w, inbound, status, typ, msg, nil)
 }
 
-func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, msg string, extra http.Header) {
+// writeProtocolHTTPErrorHdr writes one protocol-native JSON error response and
+// returns the number of body bytes written. The pacer counts that body on the
+// record; HTTP writers that already account the response elsewhere ignore it.
+func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, msg string, extra http.Header) int {
 	msg = retainedText(msg, protocolErrorEchoMax)
 	body, err := providerformat.EncodeError(inbound, &ir.Error{Type: typ, Message: msg, Status: status})
 	if err != nil {
@@ -303,7 +306,8 @@ func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, statu
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	_, _ = w.Write(body)
+	n, _ := w.Write(body)
+	return n
 }
 
 func setWarningsHeader(h http.Header, warnings ir.Warnings) {

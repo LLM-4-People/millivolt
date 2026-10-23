@@ -182,7 +182,7 @@ func writeClientErrorHdr(w http.ResponseWriter, rec *metrics.Record, inbound ir.
 		id, model = rec.ID, rec.Model
 	}
 	if p := pacerOf(w); p != nil {
-		if p.commitError(extra, code, errJSON(typ, msg)) {
+		if p.commitError(extra, rec, inbound, code, typ, msg) {
 			if err := writeProtocolStreamError(w, rec, inbound, id, model, typ, "", msg); err != nil && rec != nil {
 				// The in-band error hit a dead socket: the LOCAL client is
 				// gone. Safe for every caller of this helper - the status is

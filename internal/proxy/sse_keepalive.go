@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 const sseKeepaliveComment = ": keepalive\n\n"
@@ -282,9 +285,10 @@ func (p *ssePacer) applyUpstream(hdr http.Header, status int) (alreadySSE bool) 
 	return false
 }
 
-// commitError writes a JSON HTTP error under p.mu if headers are still
-// open. Returns true when SSE was already committed (caller emits in-band).
-func (p *ssePacer) commitError(extra http.Header, code int, body string) (alreadySSE bool) {
+// commitError writes a protocol-native JSON HTTP error under p.mu if headers
+// are still open, and books the body bytes on the record. Returns true when
+// SSE was already committed (caller emits in-band).
+func (p *ssePacer) commitError(extra http.Header, rec *metrics.Record, inbound ir.Protocol, code int, typ, msg string) (alreadySSE bool) {
 	if p == nil {
 		return false
 	}
@@ -299,10 +303,10 @@ func (p *ssePacer) commitError(extra http.Header, code int, body string) (alread
 	if p.started {
 		return false
 	}
-	if extra != nil {
-		copyResponseHeaders(p.w.Header(), extra)
+	n := writeProtocolHTTPErrorHdr(p.w, inbound, code, typ, msg, extra)
+	if rec != nil {
+		rec.ResponseBytes += int64(n)
 	}
-	http.Error(p.w, body, code)
 	p.started = true
 	p.lastWrite = time.Now()
 	return false
