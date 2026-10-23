@@ -537,7 +537,7 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if len(req.Stop) > 0 {
 		out["stop_sequences"] = req.Stop
 	}
-	if system := encodeAnthropicSystem(req.Messages, req.Instructions); system != nil {
+	if system := encodeAnthropicSystem(req.Messages, req.Instructions, &req.Warnings); system != nil {
 		out["system"] = system
 	}
 	if len(req.Tools) > 0 {
@@ -567,14 +567,27 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 // encodeAnthropicSystem lifts the Responses instructions and leading
 // system/developer messages into the top-level system field. Mid-conversation
 // system messages stay in messages.
-func encodeAnthropicSystem(messages []ir.Message, instructions *string) any {
+func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *ir.Warnings) any {
 	var blocks []map[string]any
 	if instructions != nil && *instructions != "" {
 		blocks = append(blocks, map[string]any{"type": "text", "text": *instructions})
 	}
+	seenNonSystem := false
+	moved := false
 	for _, m := range messages {
 		if m.Role != ir.RoleSystem && m.Role != ir.RoleDeveloper {
-			break
+			seenNonSystem = true
+			continue
+		}
+		// Anthropic Messages has one top-level system prompt and no system
+		// turn inside the conversation. Lift a late system/developer message
+		// to that prompt rather than emitting an invalid role; the positional
+		// change is reported.
+		if seenNonSystem && !moved {
+			moved = true
+			if warns != nil {
+				warns.Add(ir.WarningApproximated, "system", "Anthropic Messages only supports a top-level system prompt; a later system message was moved before the conversation")
+			}
 		}
 		for _, b := range m.Content {
 			if b.Type != ir.BlockText {
@@ -612,17 +625,14 @@ type anthropicOutMessage struct {
 }
 
 func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOutMessage {
-	// Drop the leading system/developer run: it is rendered at the top level.
-	start := 0
-	for start < len(in) && (in[start].Role == ir.RoleSystem || in[start].Role == ir.RoleDeveloper) {
-		start++
-	}
 	var out []anthropicOutMessage
-	for _, m := range in[start:] {
-		role := string(m.Role)
-		if m.Role == ir.RoleDeveloper {
-			role = "system"
+	for _, m := range in {
+		// Every system/developer message is rendered at the top level; none
+		// may appear as a role inside the conversation.
+		if m.Role == ir.RoleSystem || m.Role == ir.RoleDeveloper {
+			continue
 		}
+		role := string(m.Role)
 		content := encodeAnthropicContent(m.Content, warns)
 		if content == nil {
 			continue

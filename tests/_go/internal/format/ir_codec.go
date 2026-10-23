@@ -676,6 +676,39 @@ func TestCodecReportsMetadataLossOnce(t *testing.T) {
 	}
 }
 
+func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
+	in := `{"model":"m","messages":[` +
+		`{"role":"user","content":"hi"},` +
+		`{"role":"system","content":"late rules"},` +
+		`{"role":"user","content":"more"}]}`
+	req, err := DecodeChatRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := EncodeAnthropicRequest(req, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := decodeJSONMap(t, out)
+	if doc["system"] != "late rules" {
+		t.Fatalf("system = %v, want the lifted text", doc["system"])
+	}
+	msgs, _ := doc["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %v, want the two adjacent user turns merged", doc["messages"])
+	}
+	if msgs[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("non-user role reached Anthropic messages: %v", doc["messages"])
+	}
+	content, _ := msgs[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("merged content = %v, want both user texts", content)
+	}
+	if !warningField(req.Warnings, "system") {
+		t.Fatalf("missing late-system warning: %+v", req.Warnings)
+	}
+}
+
 func TestAnthropicTemperatureClamp(t *testing.T) {
 	temp := 1.7
 	req := &ir.Request{Model: "m", Temperature: &temp,
