@@ -119,6 +119,12 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 			return nil, err
 		}
 	}
+	// System citations and every nested tool_result/document content array
+	// share one aggregate: bounded parent arrays alone multiply through
+	// nesting. This runs before the typed request decode.
+	if err := checkAnthropicRequestCollections(bounds.System, bounds.Messages); err != nil {
+		return nil, err
+	}
 	var in anthropicWireRequest
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
@@ -218,7 +224,9 @@ func decodeAnthropicSystem(raw json.RawMessage) ([]ir.Block, ir.Warnings, error)
 			warns.Add(ir.WarningDropped, "system."+p.Type, "unsupported system block")
 			continue
 		}
-		blocks = append(blocks, ir.Block{Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl})
+		blocks = append(blocks, ir.Block{
+			Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: p.Citations,
+		})
 	}
 	return blocks, warns, nil
 }

@@ -238,16 +238,20 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 	// per-item cap cannot multiply.
 	var itemBounds []struct {
 		Summary json.RawMessage `json:"summary"`
+		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &itemBounds); err != nil {
 		return nil, nil, fmt.Errorf("responses input: %w", err)
 	}
-	summaryTotal := 0
-	for _, item := range itemBounds {
+	summaryTotal, annotationTotal := 0, 0
+	for i, item := range itemBounds {
 		if err := checkWireArray(item.Summary, "input.summary", metrics.ContentPartMax); err != nil {
 			return nil, nil, err
 		}
 		if err := addWireArray(&summaryTotal, item.Summary, "input.summary", WireNestedCollectionMax); err != nil {
+			return nil, nil, err
+		}
+		if err := addResponsesContentAnnotations(&annotationTotal, item.Content, fmt.Sprintf("input[%d].content", i)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1045,16 +1049,20 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if len(probe.Output) > 0 && !bytes.Equal(bytes.TrimSpace(probe.Output), []byte("null")) {
 		var itemBounds []struct {
 			Summary json.RawMessage `json:"summary"`
+			Content json.RawMessage `json:"content"`
 		}
 		if err := json.Unmarshal(probe.Output, &itemBounds); err != nil {
 			return nil, fmt.Errorf("parse responses response: %w", err)
 		}
-		summaryTotal := 0
-		for _, item := range itemBounds {
+		summaryTotal, annotationTotal := 0, 0
+		for i, item := range itemBounds {
 			if err := checkWireArray(item.Summary, "output.summary", metrics.ContentPartMax); err != nil {
 				return nil, err
 			}
 			if err := addWireArray(&summaryTotal, item.Summary, "output.summary", WireNestedCollectionMax); err != nil {
+				return nil, err
+			}
+			if err := addResponsesContentAnnotations(&annotationTotal, item.Content, fmt.Sprintf("output[%d].content", i)); err != nil {
 				return nil, err
 			}
 		}

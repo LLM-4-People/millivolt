@@ -81,24 +81,150 @@ func checkWireObject(raw json.RawMessage, field string, max int) error {
 	return fmt.Errorf("%s exceeds %d members", field, max)
 }
 
-// checkAnthropicCitations bounds every citations array in one Anthropic
-// content-block list before the typed decode materializes the citations. A
-// block list is already bounded by ContentPartMax, but one text block can carry
-// an unbounded citation list.
+// checkAnthropicCitations bounds every citations array and nested content
+// array in one Anthropic content-block list before the typed decode
+// materializes them. A block list is already bounded by ContentPartMax, but
+// one text block can carry an unbounded citation list and nested
+// tool_result/document content can multiply block arrays.
 func checkAnthropicCitations(content json.RawMessage, field string) error {
+	budget := anthropicNestedBudget{}
+	return checkAnthropicBlockList(content, field, 0, &budget)
+}
+
+// anthropicNestedBudget accumulates the citation members and nested content
+// blocks of one Anthropic request or response. Top-level block lists keep
+// their per-array ContentPartMax; the aggregate covers the arrays those
+// elements can nest, which one bounded array cannot.
+type anthropicNestedBudget struct {
+	citations int
+	blocks    int
+}
+
+// checkAnthropicBlockList walks one Anthropic content array without
+// materializing its typed form. Every citations array keeps ContentPartMax and
+// every nested content array contributes to one WireNestedCollectionMax
+// aggregate. depth 0 is the caller's own block list; deeper arrays are the
+// nested tool_result/document content that can multiply through their parents.
+func checkAnthropicBlockList(raw json.RawMessage, field string, depth int, budget *anthropicNestedBudget) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil
+	}
+	if !metrics.ArrayWithinLimit(trimmed, metrics.ContentPartMax) {
+		return fmt.Errorf("%s exceeds %d blocks", field, metrics.ContentPartMax)
+	}
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(trimmed, &blocks); err != nil {
+		return fmt.Errorf("parse %s: %w", field, err)
+	}
+	if depth > 0 {
+		budget.blocks += len(blocks)
+		if budget.blocks > WireNestedCollectionMax {
+			return fmt.Errorf("%s exceeds %d nested blocks", field, WireNestedCollectionMax)
+		}
+	}
+	for i, rawBlock := range blocks {
+		var block struct {
+			Citations json.RawMessage `json:"citations"`
+			Content   json.RawMessage `json:"content"`
+			Source    *struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"source"`
+		}
+		if err := json.Unmarshal(rawBlock, &block); err != nil {
+			return fmt.Errorf("parse %s block %d: %w", field, i, err)
+		}
+		citationsField := fmt.Sprintf("%s block %d citations", field, i)
+		if err := checkWireArray(block.Citations, citationsField, metrics.ContentPartMax); err != nil {
+			return err
+		}
+		if err := addWireArray(&budget.citations, block.Citations, citationsField, WireNestedCollectionMax); err != nil {
+			return err
+		}
+		if err := checkAnthropicBlockList(block.Content, fmt.Sprintf("%s block %d content", field, i), depth+1, budget); err != nil {
+			return err
+		}
+		if block.Source != nil {
+			if err := checkAnthropicBlockList(block.Source.Content, fmt.Sprintf("%s block %d source content", field, i), depth+1, budget); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkAnthropicRequestCollections applies one aggregate nested budget across
+// a system block list and every message content list before the typed request
+// decode.
+func checkAnthropicRequestCollections(system, messages json.RawMessage) error {
+	var budget anthropicNestedBudget
+	if err := checkAnthropicBlockList(system, "system", 0, &budget); err != nil {
+		return err
+	}
+	if len(messages) == 0 || bytes.Equal(bytes.TrimSpace(messages), []byte("null")) {
+		return nil
+	}
+	var items []struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(messages, &items); err != nil {
+		return fmt.Errorf("parse messages: %w", err)
+	}
+	for i, item := range items {
+		if err := checkAnthropicBlockList(item.Content, fmt.Sprintf("messages[%d].content", i), 0, &budget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkChatMessageAnnotations bounds the message-level annotation arrays of
+// one decoded Chat message array, per array and in aggregate.
+func checkChatMessageAnnotations(messages json.RawMessage, field string) error {
+	if len(messages) == 0 || bytes.Equal(bytes.TrimSpace(messages), []byte("null")) {
+		return nil
+	}
+	var items []struct {
+		Annotations json.RawMessage `json:"annotations"`
+	}
+	if err := json.Unmarshal(messages, &items); err != nil {
+		return fmt.Errorf("parse %s: %w", field, err)
+	}
+	total := 0
+	for i, item := range items {
+		annotationField := fmt.Sprintf("%s[%d].annotations", field, i)
+		if err := checkWireArray(item.Annotations, annotationField, metrics.ContentPartMax); err != nil {
+			return err
+		}
+		if err := addWireArray(&total, item.Annotations, annotationField, WireNestedCollectionMax); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addResponsesContentAnnotations bounds every annotation array of one
+// Responses content-part list and adds its members to the shared aggregate.
+func addResponsesContentAnnotations(total *int, content json.RawMessage, field string) error {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return nil
 	}
-	var blocks []struct {
-		Citations json.RawMessage `json:"citations"`
+	if !metrics.ArrayWithinLimit(trimmed, metrics.ContentPartMax) {
+		return fmt.Errorf("%s exceeds %d parts", field, metrics.ContentPartMax)
 	}
-	if err := json.Unmarshal(trimmed, &blocks); err != nil {
+	var parts []struct {
+		Annotations json.RawMessage `json:"annotations"`
+	}
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
 		return fmt.Errorf("parse %s: %w", field, err)
 	}
-	total := 0
-	for i, block := range blocks {
-		if err := addWireArray(&total, block.Citations, fmt.Sprintf("%s block %d citations", field, i), WireNestedCollectionMax); err != nil {
+	for i, part := range parts {
+		annotationField := fmt.Sprintf("%s[%d].annotations", field, i)
+		if err := checkWireArray(part.Annotations, annotationField, metrics.ContentPartMax); err != nil {
+			return err
+		}
+		if err := addWireArray(total, part.Annotations, annotationField, WireNestedCollectionMax); err != nil {
 			return err
 		}
 	}

@@ -177,6 +177,11 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 			}
 		}
 	}
+	// Message-level citation annotations are decoded into IR citations, so
+	// every array keeps ContentPartMax and all arrays share one aggregate.
+	if err := checkChatMessageAnnotations(bounds.Messages, "messages"); err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
 	var in chatWireRequest
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, errParseOpenAIBody(err)
@@ -1437,13 +1442,17 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if len(in.Choices) > 0 {
 		var choiceBounds struct {
 			Message struct {
-				ToolCalls json.RawMessage `json:"tool_calls"`
+				ToolCalls   json.RawMessage `json:"tool_calls"`
+				Annotations json.RawMessage `json:"annotations"`
 			} `json:"message"`
 		}
 		if err := json.Unmarshal(in.Choices[0], &choiceBounds); err != nil {
 			return nil, fmt.Errorf("parse chat response: %w", err)
 		}
 		if err := checkWireArray(choiceBounds.Message.ToolCalls, "message.tool_calls", metrics.ContentPartMax); err != nil {
+			return nil, err
+		}
+		if err := checkWireArray(choiceBounds.Message.Annotations, "message.annotations", metrics.ContentPartMax); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(in.Choices[0], &choice); err != nil {

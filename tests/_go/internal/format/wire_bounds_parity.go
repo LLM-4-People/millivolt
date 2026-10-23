@@ -81,10 +81,10 @@ func TestAnthropicCitationBound(t *testing.T) {
 		return `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[` +
 			`{"type":"text","text":"hi","citations":` + citations(n) + `}]}]}`
 	}
-	if _, err := DecodeAnthropicRequest([]byte(request(WireNestedCollectionMax))); err != nil {
-		t.Fatalf("request citations at the limit rejected: %v", err)
+	if _, err := DecodeAnthropicRequest([]byte(request(metrics.ContentPartMax))); err != nil {
+		t.Fatalf("request citations at the per-array limit rejected: %v", err)
 	}
-	if _, err := DecodeAnthropicRequest([]byte(request(WireNestedCollectionMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
+	if _, err := DecodeAnthropicRequest([]byte(request(metrics.ContentPartMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
 		t.Fatalf("request citation over-bound error = %v", err)
 	}
 	response := func(n int) string {
@@ -92,10 +92,10 @@ func TestAnthropicCitationBound(t *testing.T) {
 			`{"type":"text","text":"hi","citations":` + citations(n) + `}],"stop_reason":"end_turn",` +
 			`"usage":{"input_tokens":1,"output_tokens":1}}`
 	}
-	if _, err := DecodeAnthropicResponse([]byte(response(WireNestedCollectionMax))); err != nil {
-		t.Fatalf("response citations at the limit rejected: %v", err)
+	if _, err := DecodeAnthropicResponse([]byte(response(metrics.ContentPartMax))); err != nil {
+		t.Fatalf("response citations at the per-array limit rejected: %v", err)
 	}
-	if _, err := DecodeAnthropicResponse([]byte(response(WireNestedCollectionMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
+	if _, err := DecodeAnthropicResponse([]byte(response(metrics.ContentPartMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
 		t.Fatalf("response citation over-bound error = %v", err)
 	}
 }
