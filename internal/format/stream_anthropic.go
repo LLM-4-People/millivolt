@@ -305,13 +305,6 @@ func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
 	return drainQueue(&d.q)
 }
 
-// AbortBlocks closes every open block for a hard decoder failure without
-// flushing queued payload events.
-func (d *AnthropicStreamDecoder) AbortBlocks() []*ir.Event {
-	d.closeOpenBlocks()
-	return drainAbortBlocks(&d.q)
-}
-
 // mergeUsage folds one Anthropic usage object into the stream total. The wire
 // reports non-cached input_tokens separately, so the decoder retains the base
 // count and the cache totals independently and recomputes the full prompt
@@ -388,6 +381,7 @@ type AnthropicStreamEncoder struct {
 	created int64
 
 	started    bool
+	open       map[int]bool
 	skipped    map[int]bool
 	unopened   map[int]bool
 	blockArgs  map[int]json.RawMessage
@@ -401,6 +395,7 @@ type AnthropicStreamEncoder struct {
 func NewAnthropicStreamEncoder(w io.Writer, flusher http.Flusher) *AnthropicStreamEncoder {
 	return &AnthropicStreamEncoder{
 		w: w, flusher: flusher,
+		open:      map[int]bool{},
 		skipped:   map[int]bool{},
 		unopened:  map[int]bool{},
 		blockArgs: map[int]json.RawMessage{},
@@ -470,6 +465,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		}
 		switch ev.Block.Type {
 		case ir.BlockText, ir.BlockRefusal:
+			e.open[ev.Index] = true
 			if err := e.emit("content_block_start", map[string]any{
 				"type": "content_block_start", "index": ev.Index,
 				"content_block": map[string]any{"type": "text", "text": ""},
@@ -486,6 +482,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				e.unopened[ev.Index] = true
 				return nil
 			}
+			e.open[ev.Index] = true
 			if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
 				e.blockArgs[ev.Index] = tc.Arguments
 			}
@@ -496,6 +493,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				},
 			})
 		case ir.BlockReasoning:
+			e.open[ev.Index] = true
 			if err := e.emit("content_block_start", map[string]any{
 				"type": "content_block_start", "index": ev.Index,
 				"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
@@ -518,6 +516,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			if ev.Block.Reasoning != nil {
 				data = ev.Block.Reasoning.Encrypted
 			}
+			e.open[ev.Index] = true
 			e.skipped[ev.Index] = true
 			return e.emit("content_block_start", map[string]any{
 				"type": "content_block_start", "index": ev.Index,
@@ -555,14 +554,6 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			delete(e.unopened, ev.Index)
 			return nil
 		}
-		if ev.Abort {
-			delete(e.blockArgs, ev.Index)
-			delete(e.argSent, ev.Index)
-			delete(e.skipped, ev.Index)
-			return e.emit("content_block_stop", map[string]any{
-				"type": "content_block_stop", "index": ev.Index,
-			})
-		}
 		if args, ok := e.blockArgs[ev.Index]; ok && !e.argSent[ev.Index] {
 			e.argSent[ev.Index] = true
 			if err := e.emitJSONDelta(ev.Index, string(args)); err != nil {
@@ -572,6 +563,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		delete(e.blockArgs, ev.Index)
 		delete(e.argSent, ev.Index)
 		delete(e.skipped, ev.Index)
+		delete(e.open, ev.Index)
 		return e.emit("content_block_stop", map[string]any{
 			"type": "content_block_stop", "index": ev.Index,
 		})
@@ -688,3 +680,22 @@ func (e *AnthropicStreamEncoder) finish() error {
 
 // Close finishes the stream if the caller did not deliver EventDone.
 func (e *AnthropicStreamEncoder) Close() error { return e.finish() }
+
+// Abort closes every content block this encoder opened without flushing any
+// retained tool input. The proxy terminates the committed stream with its
+// protocol-native error frame immediately afterwards.
+func (e *AnthropicStreamEncoder) Abort() error {
+	for _, idx := range sortedKeys(e.open) {
+		if err := e.emit("content_block_stop", map[string]any{
+			"type": "content_block_stop", "index": idx,
+		}); err != nil {
+			return err
+		}
+		delete(e.open, idx)
+	}
+	clear(e.blockArgs)
+	clear(e.argSent)
+	clear(e.skipped)
+	clear(e.unopened)
+	return nil
+}

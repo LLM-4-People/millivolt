@@ -21,19 +21,22 @@ var ErrTruncatedStream = errors.New("upstream stream ended before a terminal eve
 type StreamDecoder interface {
 	Next() (*ir.Event, error)
 	// FlushBlocks closes every block the decoder still holds open. The
-	// translation facade calls it before it emits an abnormal terminal event,
-	// so a target encoder never has to close an unclosed block itself.
+	// translation facade calls it when an upstream stream is truncated so a
+	// client never receives an error or terminal event with an unclosed block.
+	// Payload retained by the source is flushed because it passed validation.
 	FlushBlocks() []*ir.Event
-	// AbortBlocks closes every open block for a hard decoder failure. The
-	// returned BlockEnds are marked Abort so the target encoder does not flush
-	// payload it retained for the block; queued payload events are discarded.
-	AbortBlocks() []*ir.Event
 }
 
 // StreamEncoder writes one client-facing SSE stream from canonical events.
 type StreamEncoder interface {
 	Write(*ir.Event) error
 	Close() error
+	// Abort closes every target block, item and content part this encoder
+	// actually opened, without emitting any payload it retained for them. It
+	// is called only after Write or Close failed; the proxy then terminates the
+	// committed stream with its protocol-native error frame. Protocols with no
+	// block lifecycle (Chat Completions) need no close frame.
+	Abort() error
 }
 
 // sseEvent is one parsed SSE event.
@@ -117,24 +120,6 @@ func (q *eventQueue) pop() (*ir.Event, bool) {
 // drainQueue returns every queued event and empties the queue.
 func drainQueue(q *eventQueue) []*ir.Event {
 	out := append([]*ir.Event(nil), q.pending...)
-	q.pending = nil
-	return out
-}
-
-// drainAbortBlocks returns only queued block closings, marked Abort, and drops
-// every buffered payload event. A hard decoder failure is fail-closed: the
-// target must see the block closed without the encoder flushing retained data
-// that the same failure budget refused.
-func drainAbortBlocks(q *eventQueue) []*ir.Event {
-	var out []*ir.Event
-	for _, ev := range q.pending {
-		if ev.Type != ir.EventBlockEnd {
-			continue
-		}
-		aborted := *ev
-		aborted.Abort = true
-		out = append(out, &aborted)
-	}
 	q.pending = nil
 	return out
 }

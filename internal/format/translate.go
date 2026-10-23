@@ -290,6 +290,13 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	default:
 		return fmt.Errorf("unsupported inbound protocol %q", inbound)
 	}
+	abort := func(failure error) error {
+		// A target-side failure may have opened blocks, items or content
+		// parts. The encoder knows exactly what it opened; close only those
+		// without flushing retained payload, then report the original error.
+		_ = enc.Abort()
+		return failure
+	}
 	for {
 		ev, err := dec.Next()
 		if errors.Is(err, io.EOF) {
@@ -302,7 +309,7 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 			if errors.Is(err, ErrTruncatedStream) {
 				for _, pending := range dec.FlushBlocks() {
 					if writeErr := enc.Write(pending); writeErr != nil {
-						return writeErr
+						return abort(writeErr)
 					}
 				}
 				// Close the client stream with the protocol-native error event
@@ -317,22 +324,21 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 				_ = enc.Close()
 				return nil
 			}
-			// A hard decoder failure is fail-closed: close the target blocks
-			// with the abort flag so the encoder does not flush payload that
-			// the same failure budget refused. The proxy's protocol-native
-			// error frame terminates the stream.
-			for _, pending := range dec.AbortBlocks() {
-				if writeErr := enc.Write(pending); writeErr != nil {
-					return writeErr
-				}
-			}
+			// A hard decoder failure is fail-closed: the encoder closes the
+			// target blocks it opened without flushing payload that the same
+			// failure budget refused. The proxy's protocol-native error frame
+			// terminates the stream.
+			_ = enc.Abort()
 			return err
 		}
 		if err := enc.Write(ev); err != nil {
-			return err
+			return abort(err)
 		}
 	}
-	return enc.Close()
+	if err := enc.Close(); err != nil {
+		return abort(err)
+	}
+	return nil
 }
 
 // DecodeError decodes one upstream error body.

@@ -640,13 +640,6 @@ func (d *ResponsesStreamDecoder) FlushBlocks() []*ir.Event {
 	return drainQueue(&d.q)
 }
 
-// AbortBlocks closes every open block for a hard decoder failure without
-// flushing queued payload events.
-func (d *ResponsesStreamDecoder) AbortBlocks() []*ir.Event {
-	_ = d.closeAll(nil)
-	return drainAbortBlocks(&d.q)
-}
-
 func (d *ResponsesStreamDecoder) newBlock() int {
 	idx := d.nextIndex
 	d.nextIndex++
@@ -677,6 +670,7 @@ type ResponsesStreamEncoder struct {
 	started     bool
 	outputIndex int
 	items       map[int]*responsesItemState
+	open        map[int]bool
 	order       []int
 	finish      ir.FinishReason
 	usage       ir.Usage
@@ -698,12 +692,17 @@ type responsesItemState struct {
 	args         strings.Builder
 	reasoning    strings.Builder
 	refusal      strings.Builder
+	partOpen     bool
 	summaryOpen  bool
 }
 
 // NewResponsesStreamEncoder builds an encoder over one client response writer.
 func NewResponsesStreamEncoder(w io.Writer, flusher http.Flusher) *ResponsesStreamEncoder {
-	return &ResponsesStreamEncoder{w: w, flusher: flusher, items: map[int]*responsesItemState{}}
+	return &ResponsesStreamEncoder{
+		w: w, flusher: flusher,
+		items: map[int]*responsesItemState{},
+		open:  map[int]bool{},
+	}
 }
 
 // startStream emits the mandatory response.created/response.in_progress pair
@@ -792,6 +791,7 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			}); err != nil {
 				return err
 			}
+			item.partOpen = true
 			initial := ev.Block.Text
 			if item.partType == "refusal" {
 				initial = ev.Block.Refusal
@@ -889,106 +889,11 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 		if item == nil {
 			return nil
 		}
-		if ev.Abort {
-			return e.emitAbortedItem(ev.Index, item)
+		if err := e.closeItem(item); err != nil {
+			return err
 		}
-		switch item.kind {
-		case "message":
-			if item.partType == "refusal" {
-				text := item.refusal.String()
-				if err := e.emit("response.refusal.done", map[string]any{
-					"type": "response.refusal.done", "sequence_number": e.nextSeq(),
-					"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
-					"refusal": text,
-				}); err != nil {
-					return err
-				}
-				if err := e.emit("response.content_part.done", map[string]any{
-					"type": "response.content_part.done", "sequence_number": e.nextSeq(),
-					"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
-					"part": map[string]any{"type": "refusal", "refusal": text},
-				}); err != nil {
-					return err
-				}
-				return e.emit("response.output_item.done", map[string]any{
-					"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-					"output_index": item.outputIndex,
-					"item": map[string]any{
-						"type": "message", "id": item.id, "status": "completed",
-						"role":    "assistant",
-						"content": []any{map[string]any{"type": "refusal", "refusal": text}},
-					},
-				})
-			}
-			text := item.text.String()
-			if err := e.emit("response.output_text.done", map[string]any{
-				"type": "response.output_text.done", "sequence_number": e.nextSeq(),
-				"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
-				"text": text, "logprobs": []any{},
-			}); err != nil {
-				return err
-			}
-			if err := e.emit("response.content_part.done", map[string]any{
-				"type": "response.content_part.done", "sequence_number": e.nextSeq(),
-				"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
-				"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}},
-			}); err != nil {
-				return err
-			}
-			return e.emit("response.output_item.done", map[string]any{
-				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-				"output_index": item.outputIndex,
-				"item": map[string]any{
-					"type": "message", "id": item.id, "status": "completed",
-					"role": "assistant",
-					"content": []any{map[string]any{
-						"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{},
-					}},
-				},
-			})
-		case "function_call":
-			args := item.args.String()
-			if args == "" {
-				args = "{}"
-			}
-			if err := e.emit("response.function_call_arguments.done", map[string]any{
-				"type": "response.function_call_arguments.done", "sequence_number": e.nextSeq(),
-				"item_id": item.id, "output_index": item.outputIndex, "arguments": args,
-			}); err != nil {
-				return err
-			}
-			return e.emit("response.output_item.done", map[string]any{
-				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-				"output_index": item.outputIndex,
-				"item": map[string]any{
-					"type": "function_call", "id": item.id, "call_id": item.callID,
-					"name": item.name, "arguments": args, "status": "completed",
-				},
-			})
-		case "reasoning":
-			text := item.reasoning.String()
-			if item.summaryOpen {
-				if err := e.emit("response.reasoning_summary_text.done", map[string]any{
-					"type": "response.reasoning_summary_text.done", "sequence_number": e.nextSeq(),
-					"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
-					"text": text,
-				}); err != nil {
-					return err
-				}
-				if err := e.emit("response.reasoning_summary_part.done", map[string]any{
-					"type": "response.reasoning_summary_part.done", "sequence_number": e.nextSeq(),
-					"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
-					"part": map[string]any{"type": "summary_text", "text": text},
-				}); err != nil {
-					return err
-				}
-			}
-			return e.emit("response.output_item.done", map[string]any{
-				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-				"output_index": item.outputIndex,
-				"item":         reasoningItem(item, text),
-			})
-		}
+		delete(e.open, ev.Index)
+		return nil
 	case ir.EventMessageDelta:
 		if ev.Finish != nil {
 			e.finish = ev.Finish.Reason
@@ -1118,11 +1023,144 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 	return out
 }
 
-// emitAbortedItem closes one Responses item for a fail-closed decoder flush
-// without emitting any retained content. The item keeps its identity and is
-// marked incomplete; the proxy's protocol error frame then terminates the
-// stream.
-func (e *ResponsesStreamEncoder) emitAbortedItem(index int, item *responsesItemState) error {
+// closeItem emits the normal completion frames for one open Responses item.
+// The caller removes the item from the open set only after every frame lands.
+func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
+	switch item.kind {
+	case "message":
+		if item.partType == "refusal" {
+			text := item.refusal.String()
+			if err := e.emit("response.refusal.done", map[string]any{
+				"type": "response.refusal.done", "sequence_number": e.nextSeq(),
+				"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+				"refusal": text,
+			}); err != nil {
+				return err
+			}
+			if err := e.emit("response.content_part.done", map[string]any{
+				"type": "response.content_part.done", "sequence_number": e.nextSeq(),
+				"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+				"part": map[string]any{"type": "refusal", "refusal": text},
+			}); err != nil {
+				return err
+			}
+			item.partOpen = false
+			return e.emit("response.output_item.done", map[string]any{
+				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+				"output_index": item.outputIndex,
+				"item": map[string]any{
+					"type": "message", "id": item.id, "status": "completed",
+					"role":    "assistant",
+					"content": []any{map[string]any{"type": "refusal", "refusal": text}},
+				},
+			})
+		}
+		text := item.text.String()
+		if err := e.emit("response.output_text.done", map[string]any{
+			"type": "response.output_text.done", "sequence_number": e.nextSeq(),
+			"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+			"text": text, "logprobs": []any{},
+		}); err != nil {
+			return err
+		}
+		if err := e.emit("response.content_part.done", map[string]any{
+			"type": "response.content_part.done", "sequence_number": e.nextSeq(),
+			"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{}},
+		}); err != nil {
+			return err
+		}
+		item.partOpen = false
+		return e.emit("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+			"output_index": item.outputIndex,
+			"item": map[string]any{
+				"type": "message", "id": item.id, "status": "completed",
+				"role": "assistant",
+				"content": []any{map[string]any{
+					"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{},
+				}},
+			},
+		})
+	case "function_call":
+		args := item.args.String()
+		if args == "" {
+			args = "{}"
+		}
+		if err := e.emit("response.function_call_arguments.done", map[string]any{
+			"type": "response.function_call_arguments.done", "sequence_number": e.nextSeq(),
+			"item_id": item.id, "output_index": item.outputIndex, "arguments": args,
+		}); err != nil {
+			return err
+		}
+		return e.emit("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+			"output_index": item.outputIndex,
+			"item": map[string]any{
+				"type": "function_call", "id": item.id, "call_id": item.callID,
+				"name": item.name, "arguments": args, "status": "completed",
+			},
+		})
+	case "reasoning":
+		text := item.reasoning.String()
+		if item.summaryOpen {
+			if err := e.emit("response.reasoning_summary_text.done", map[string]any{
+				"type": "response.reasoning_summary_text.done", "sequence_number": e.nextSeq(),
+				"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
+				"text": text,
+			}); err != nil {
+				return err
+			}
+			if err := e.emit("response.reasoning_summary_part.done", map[string]any{
+				"type": "response.reasoning_summary_part.done", "sequence_number": e.nextSeq(),
+				"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
+				"part": map[string]any{"type": "summary_text", "text": text},
+			}); err != nil {
+				return err
+			}
+			item.summaryOpen = false
+		}
+		return e.emit("response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+			"output_index": item.outputIndex,
+			"item":         reasoningItem(item, text),
+		})
+	}
+	return nil
+}
+
+// abortItem closes one Responses item after a target-side failure. It emits an
+// empty close for a content part or reasoning summary the encoder opened, then
+// the item done frame, and never flushes retained text, arguments or reasoning.
+func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
+	switch item.kind {
+	case "message":
+		if item.partOpen {
+			part := map[string]any{"type": "output_text", "text": "", "annotations": []any{}, "logprobs": []any{}}
+			if item.partType == "refusal" {
+				part = map[string]any{"type": "refusal", "refusal": ""}
+			}
+			if err := e.emit("response.content_part.done", map[string]any{
+				"type": "response.content_part.done", "sequence_number": e.nextSeq(),
+				"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+				"part": part,
+			}); err != nil {
+				return err
+			}
+			item.partOpen = false
+		}
+	case "reasoning":
+		if item.summaryOpen {
+			if err := e.emit("response.reasoning_summary_part.done", map[string]any{
+				"type": "response.reasoning_summary_part.done", "sequence_number": e.nextSeq(),
+				"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
+				"part": map[string]any{"type": "summary_text", "text": ""},
+			}); err != nil {
+				return err
+			}
+			item.summaryOpen = false
+		}
+	}
 	closed := map[string]any{"type": item.kind, "id": item.id, "status": "incomplete"}
 	switch item.kind {
 	case "message":
@@ -1135,11 +1173,31 @@ func (e *ResponsesStreamEncoder) emitAbortedItem(index int, item *responsesItemS
 	case "reasoning":
 		closed["summary"] = []any{}
 	}
-	delete(e.items, index)
 	return e.emit("response.output_item.done", map[string]any{
 		"type": "response.output_item.done", "sequence_number": e.nextSeq(),
 		"output_index": item.outputIndex, "item": closed,
 	})
+}
+
+// Abort closes every item this encoder opened after a target-side failure,
+// without flushing retained payload. Chat completions need no close frame;
+// Anthropic emits a content_block_stop; Responses emits an empty part done
+// (when the part was opened) followed by an incomplete item done.
+func (e *ResponsesStreamEncoder) Abort() error {
+	for _, idx := range e.order {
+		if !e.open[idx] {
+			continue
+		}
+		item := e.items[idx]
+		if item == nil {
+			continue
+		}
+		if err := e.abortItem(item); err != nil {
+			return err
+		}
+		delete(e.open, idx)
+	}
+	return nil
 }
 
 // reasoningItem renders one completed Responses reasoning item. An opaque
@@ -1178,6 +1236,7 @@ func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*respo
 	}
 	e.outputIndex++
 	e.items[index] = item
+	e.open[index] = true
 	e.order = append(e.order, index)
 	return item, nil
 }
@@ -1231,7 +1290,6 @@ func (e *ResponsesStreamEncoder) appendReasoning(item *responsesItemState, delta
 		return nil
 	}
 	if !item.summaryOpen {
-		item.summaryOpen = true
 		if err := e.emit("response.reasoning_summary_part.added", map[string]any{
 			"type": "response.reasoning_summary_part.added", "sequence_number": e.nextSeq(),
 			"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
@@ -1239,6 +1297,7 @@ func (e *ResponsesStreamEncoder) appendReasoning(item *responsesItemState, delta
 		}); err != nil {
 			return err
 		}
+		item.summaryOpen = true
 	}
 	if err := e.retain(len(delta), "reasoning"); err != nil {
 		return err

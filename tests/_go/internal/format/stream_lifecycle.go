@@ -334,22 +334,34 @@ data: not-json
 			t.Fatalf("hard failure emitted a clean terminal frame: %s", out)
 		}
 		frames := parseWireFrames(t, out)
-		done := -1
+		done, partDone := -1, -1
 		for i, frame := range frames {
-			if frame.event != "response.output_item.done" {
-				continue
+			switch frame.event {
+			case "response.content_part.done":
+				partDone = i
+				part, _ := frame.data["part"].(map[string]any)
+				if text, _ := part["text"].(string); text != "" {
+					t.Fatalf("aborted part flushed retained content: %v", part)
+				}
+			case "response.output_item.done":
+				done = i
+				item, _ := frame.data["item"].(map[string]any)
+				if item["status"] != "incomplete" {
+					t.Fatalf("aborted item status = %v: %v", item["status"], frame.data)
+				}
+				if content, _ := item["content"].([]any); len(content) != 0 {
+					t.Fatalf("aborted item flushed retained content: %v", content)
+				}
 			}
-			done = i
-			item, _ := frame.data["item"].(map[string]any)
-			if item["status"] != "incomplete" {
-				t.Fatalf("aborted item status = %v: %v", item["status"], frame.data)
-			}
-			if content, _ := item["content"].([]any); len(content) != 0 {
-				t.Fatalf("aborted item flushed retained content: %v", content)
-			}
+		}
+		if partDone < 0 {
+			t.Fatalf("no content_part.done for the aborted part: %s", out)
 		}
 		if done < 0 {
 			t.Fatalf("no output_item.done for the aborted block: %s", out)
+		}
+		if partDone > done {
+			t.Fatalf("content part closed after its item: part=%d item=%d", partDone, done)
 		}
 	})
 }
