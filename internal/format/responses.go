@@ -901,10 +901,11 @@ func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]an
 	if r.Text != "" && len(summary) == 0 {
 		summary = append(summary, map[string]any{"type": "summary_text", "text": r.Text})
 	}
-	item := map[string]any{"type": "reasoning", "summary": summary}
-	if r.ID != "" {
-		item["id"] = r.ID
+	id := r.ID
+	if id == "" {
+		id = newResponsesItemID(ir.BlockReasoning)
 	}
+	item := map[string]any{"type": "reasoning", "summary": summary, "id": id}
 	if r.Encrypted != "" {
 		if r.Provider == "" || r.Provider == ir.Responses {
 			item["encrypted_content"] = r.Encrypted
@@ -1312,8 +1313,8 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 			return
 		}
 		out = append(out, map[string]any{
-			"type": "message", "role": "assistant", "status": "completed",
-			"content": encodeResponsesOutputContent(textBlocks, warns),
+			"id": newResponsesItemID(ir.BlockText), "type": "message", "role": "assistant",
+			"status": "completed", "content": encodeResponsesOutputContent(textBlocks, warns),
 		})
 		textBlocks = nil
 	}

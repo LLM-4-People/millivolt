@@ -2328,7 +2328,7 @@ func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*respo
 		return nil, err
 	}
 	item := &responsesItemState{
-		id:          e.newItemID(kind),
+		id:          newResponsesItemID(kind),
 		outputIndex: e.outputIndex,
 		kind:        string(kind),
 	}
@@ -2416,7 +2416,10 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func (e *ResponsesStreamEncoder) newItemID(kind ir.BlockType) string {
+// newResponsesItemID builds one Responses output item identity. The stream
+// encoder and the non-stream encoder share it so every item carries the
+// type-appropriate required id.
+func newResponsesItemID(kind ir.BlockType) string {
 	switch kind {
 	case ir.BlockToolCall:
 		return "fc_" + randomID()
