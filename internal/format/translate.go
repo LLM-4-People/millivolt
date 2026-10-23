@@ -17,6 +17,22 @@ import (
 // other. Same-protocol requests never reach here: the proxy relays them
 // byte-transparently.
 
+// imageDataURL renders a canonical inline image as a data URL for wire
+// families whose image part accepts a URL. URL wins when present; otherwise the
+// validated inline payload is encoded with its declared media type.
+func imageDataURL(img *ir.Image) string {
+	if img == nil {
+		return ""
+	}
+	if img.URL != "" {
+		return img.URL
+	}
+	if img.Data == "" {
+		return ""
+	}
+	return "data:" + img.MediaType + ";base64," + img.Data
+}
+
 // DecodeRequest decodes one inbound request body.
 func DecodeRequest(p ir.Protocol, body []byte) (*ir.Request, error) {
 	switch p {

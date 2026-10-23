@@ -533,6 +533,9 @@ func validateBlock(b Block) error {
 		if b.Image.URL == "" && b.Image.FileID == "" && b.Image.Data == "" {
 			return fmt.Errorf("image block has no url, file_id or data")
 		}
+		if b.Image.Data != "" && b.Image.MediaType == "" {
+			return fmt.Errorf("inline image data has no media_type")
+		}
 	case BlockFile:
 		if b.File == nil {
 			return fmt.Errorf("file block has no file payload")

@@ -696,7 +696,7 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 			msg := map[string]any{
 				"role":         "tool",
 				"tool_call_id": tr.CallID,
-				"content":      encodeChatContentText(tr.Content),
+				"content":      encodeChatContentText(tr.Content, warns),
 			}
 			out = append(out, msg)
 		}
@@ -744,15 +744,28 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 			texts = append(texts, b.Text)
 			parts = append(parts, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
+			url := imageDataURL(b.Image)
+			if url == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "image", "Chat Completions cannot reference a provider image file id")
+				}
+				continue
+			}
 			hasPart = true
 			part := map[string]any{"type": "image_url"}
-			img := map[string]any{"url": b.Image.URL}
+			img := map[string]any{"url": url}
 			if b.Image.Detail != "" {
 				img["detail"] = b.Image.Detail
 			}
 			part["image_url"] = img
 			parts = append(parts, part)
 		case ir.BlockFile:
+			if b.File.FileID == "" && b.File.FileData == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "file", "Chat Completions has no file URL part")
+				}
+				continue
+			}
 			hasPart = true
 			file := map[string]any{}
 			if b.File.FileID != "" {
@@ -805,7 +818,7 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 	return strings.Join(texts, ""), toolCalls, refusal, reasoning.String()
 }
 
-func encodeChatContentText(blocks []ir.Block) any {
+func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
 	var texts []string
 	var parts []map[string]any
 	hasPart := false
@@ -815,15 +828,28 @@ func encodeChatContentText(blocks []ir.Block) any {
 			texts = append(texts, b.Text)
 			parts = append(parts, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
+			url := imageDataURL(b.Image)
+			if url == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "tool_result.image", "Chat Completions cannot reference a provider image file id")
+				}
+				continue
+			}
 			hasPart = true
 			part := map[string]any{"type": "image_url"}
-			img := map[string]any{"url": b.Image.URL}
+			img := map[string]any{"url": url}
 			if b.Image.Detail != "" {
 				img["detail"] = b.Image.Detail
 			}
 			part["image_url"] = img
 			parts = append(parts, part)
 		case ir.BlockFile:
+			if b.File.FileID == "" && b.File.FileData == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "tool_result.file", "Chat Completions has no file URL part")
+				}
+				continue
+			}
 			hasPart = true
 			file := map[string]any{}
 			if b.File.FileID != "" {

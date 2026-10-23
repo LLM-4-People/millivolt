@@ -677,8 +677,10 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role) []map[string]any {
 			part := map[string]any{"type": "input_image"}
 			if b.Image.FileID != "" {
 				part["file_id"] = b.Image.FileID
+			} else if url := imageDataURL(b.Image); url != "" {
+				part["image_url"] = url
 			} else {
-				part["image_url"] = b.Image.URL
+				continue
 			}
 			if b.Image.Detail != "" {
 				part["detail"] = b.Image.Detail

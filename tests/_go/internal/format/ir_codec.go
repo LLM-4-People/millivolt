@@ -503,6 +503,51 @@ func TestCodecRejectsInvalidToolArguments(t *testing.T) {
 	}
 }
 
+func TestCodecPreservesInlineMedia(t *testing.T) {
+	in := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"look"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}`
+	req, err := DecodeAnthropicRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatDoc := decodeJSONMap(t, chat)
+	parts := chatDoc["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	img := parts[1].(map[string]any)["image_url"].(map[string]any)
+	if img["url"] != "data:image/png;base64,AAAA" {
+		t.Fatalf("chat image url = %v", img["url"])
+	}
+
+	responses, err := EncodeResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respDoc := decodeJSONMap(t, responses)
+	items := respDoc["input"].([]any)
+	content := items[0].(map[string]any)["content"].([]any)
+	part := content[1].(map[string]any)
+	if part["type"] != "input_image" || part["image_url"] != "data:image/png;base64,AAAA" {
+		t.Fatalf("responses image = %v", part)
+	}
+
+	// A provider file id has no Chat image_url equivalent: the block is
+	// dropped with a warning rather than emitted as an empty URL.
+	fileReq := &ir.Request{Model: "m", Messages: []ir.Message{{
+		Role:    ir.RoleUser,
+		Content: []ir.Block{{Type: ir.BlockImage, Image: &ir.Image{FileID: "file_1"}}},
+	}}}
+	if _, err := EncodeChatRequest(fileReq); err != nil {
+		t.Fatal(err)
+	}
+	if len(fileReq.Warnings) == 0 || fileReq.Warnings[0].Kind != ir.WarningDropped {
+		t.Fatalf("missing image file-id warning: %+v", fileReq.Warnings)
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {
