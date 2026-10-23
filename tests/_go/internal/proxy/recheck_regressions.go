@@ -200,7 +200,18 @@ func TestResponsesTruncationNotRetried(t *testing.T) {
 	if n := strings.Count(got, "response.created"); n != 1 {
 		t.Fatalf("response.created frames = %d, want 1: %q", n, got)
 	}
-	waitForRecord(t, buf, 1)
+	// H1: a truncated Responses stream closes with exactly one Responses
+	// terminal, never an OpenAI error chunk or the [DONE] sentinel.
+	if n := strings.Count(got, "event: response.failed"); n != 1 {
+		t.Fatalf("response.failed frames = %d, want exactly 1: %q", n, got)
+	}
+	if strings.Contains(got, "data: [DONE]") || strings.Contains(got, `"choices"`) {
+		t.Fatalf("truncated Responses stream leaked a Chat frame: %q", got)
+	}
+	rec := waitForRecord(t, buf, 1)[0]
+	if !rec.IsError() && rec.ErrorType == "" && rec.ErrorCode == "" {
+		t.Fatalf("truncated Responses stream recorded no failure: %+v", rec)
+	}
 }
 
 // TestTranslatedPostTerminalDebrisStaysSuccess pins ADV-C: debris after the

@@ -16,6 +16,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -33,6 +34,8 @@ const (
 	hdrRefreshToken   = "X-Proxy-Refresh-Token"
 	hdrTimeout        = "X-Proxy-Timeout-Ms"
 	hdrFormat         = "X-Proxy-Format"
+	hdrInFormat       = "X-Proxy-In-Format"
+	hdrWarnings       = "X-Proxy-Warnings"
 	hdrMaxConcurrency = "X-Proxy-Max-Concurrency"
 	// hdrSession optionally pins a request to an explicit conversation/session
 	// id supplied by the client. When absent, the proxy auto-groups requests
@@ -77,7 +80,8 @@ const (
 	// that fact with the translator means every source line it accepts has a
 	// relayable frame instead of failing a legitimate chunk as
 	// translation_error. Safety guardrail, not user-tunable.
-	translatedFrameBufMax = providerformat.NativeStreamFrameMaxBytes
+	translatedFrameBufMax = max(providerformat.NativeStreamFrameMaxBytes,
+		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
 	// nonStreamCaptureMax bounds the prefix of a non-streaming response body
 	// kept for usage/cost parsing. Documents exceeding this capture can have
 	// unavailable accounting; their original bytes are still relayed in full.
@@ -200,14 +204,20 @@ func (s *Server) retryableUpstreamErrorClass(typ, code string) bool {
 
 // target is the resolved upstream destination for one request.
 type target struct {
-	baseURL     string
-	authHeader  string
-	authPrefix  string
-	path        string
-	query       string
-	provider    string
-	timeout     time.Duration
-	format      string
+	baseURL    string
+	authHeader string
+	authPrefix string
+	path       string
+	query      string
+	provider   string
+	timeout    time.Duration
+	format     string
+	// inbound is the client's wire protocol (path-derived or overridden);
+	// outbound is the protocol selected by X-Proxy-Format. translate is true
+	// only when both are known and differ.
+	inbound     ir.Protocol
+	outbound    ir.Protocol
+	translate   bool
 	extraHeader http.Header
 	// override is the request_overrides merge resolved for THIS request
 	// (nil when none are configured or nothing matched - the feature-off
@@ -462,6 +472,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// terminal 429/502, validation 4xx, storm queue 429s) carries it through
 	// one owner instead of per-sink calls.
 	w = &clientRetryDirective{ResponseWriter: w, srv: s}
+	// The client protocol is a property of the path and its explicit override.
+	// Resolve it before target validation so an early failure on a known
+	// Anthropic or Responses path still answers in that protocol's envelope;
+	// resolveTarget calls the same owner for the authoritative value.
+	inbound, _ := inboundProtocol(r)
 	// Reserve the declared upload now. A chunked body has no length yet, so it
 	// reserves the configured request cap; admission therefore bounds both the
 	// handler set and the heap those bodies can occupy before routing.
@@ -480,18 +495,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// what a client would otherwise control. The directive writer above
 		// carries the no-retry header like every other error sink.
 		w.Header().Set("Retry-After", "1")
-		http.Error(w, errJSON(typeAPIError, "proxy is at its in-flight request limit"), http.StatusServiceUnavailable)
+		writeProtocolHTTPError(w, inbound, http.StatusServiceUnavailable, typeAPIError,
+			"proxy is at its in-flight request limit")
 		return
 	}
 	defer s.inflight.release(reserve)
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+		writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 	session, parentSession, err := requestConversation(r.Header)
 	if err != nil {
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
@@ -504,7 +520,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// record, and request-overrides matching: classify once, use everywhere.
 	client := classifyClient(r)
 	if err := s.applyThrottleHeaders(r, t.provider, client); err != nil {
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
@@ -522,7 +538,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &overflow) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), status)
+		writeProtocolHTTPError(w, t.inbound, status, typeInvalidRequestError, err.Error())
 		return
 	}
 	// Hold the inbound body size readRequest captured: the rewrite engine
@@ -576,18 +592,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// one that supplied the tracked value.
 		stripParams = subEntry.Params
 	}
-	// The provider's ensured tool names are a third actor of the same engine,
-	// but only on the OpenAI wire: the stubs are chat/completions-shaped, so
-	// a translated-anthropic or cursor body must not receive them. Token
-	// ceilings and strip keep their wider wire reach.
+	// ensure_tools is a third actor of the same engine. Its stubs are
+	// Chat-shaped, so they are injected only into a Chat client body on a Chat
+	// outbound wire; any other combination is already a different tool schema
+	// or not a Chat body at all.
 	var ensureTools []string
-	if isOpenAIWire(t.format) {
+	if isOpenAIWire(t.format) && t.inbound == ir.Chat {
 		if prof, ok := s.cfg().Providers[t.provider]; ok {
 			ensureTools = prof.EnsureTools
 		}
 	}
-	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) || len(ensureTools) > 0 {
-		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes)); why == "" {
+	// Each rewrite action reads the client body shape, not the upstream one:
+	// token ceilings exist only on a Chat or Anthropic body, while the
+	// sub-conversation strip is a top-level field removal valid on any JSON
+	// body. Cursor's Run translator owns its own envelope, so its body
+	// section stays skipped (header rules still apply).
+	if !overrideBodyInbound(t.inbound) {
+		overrideBody = nil
+	}
+	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
+	if rewriteBody {
+		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes), t.inbound); why == "" {
 			body = rewritten
 			if changed {
 				restampReqMaxTokens(body, rec)
@@ -615,16 +640,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The Chat and Responses cap spellings are different wire families; a
+	// body carrying both is ambiguous and must not let decode precedence pick
+	// the recorded ceiling.
+	if conflictingTokenCapSpellings(body) {
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
+			"max_output_tokens cannot be combined with max_tokens or max_completion_tokens")
+		return
+	}
+
 	// Deny a hostile token cap at the trust boundary: the decoded value
 	// feeds the Acquire-time token estimate with no further range check, so
 	// an unbounded cap could wrap the estimate negative (skipping the
 	// reservation) or debit the provider token bucket by the attacker-chosen
-	// amount. max_tokens and max_completion_tokens both decode into
-	// ReqMaxTokens, so one bound covers every spelling. Only the top end:
+	// amount. Every accepted token-ceiling spelling decodes into ReqMaxTokens,
+	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if hostileTokenCap(rec.ReqMaxTokens) {
-		writeHostileTokenCap(w)
+	if hostileTokenCap(rec.ReqMaxTokens) || hostileTokenCapInBody(body) {
+		writeHostileTokenCap(w, t.inbound)
 		return
 	}
 	stream, model := rec.Stream, rec.Model
@@ -634,14 +668,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return // handback response already written; nothing proxied
 	}
 
-	// Optional format translation (e.g. OpenAI -> Anthropic). The default is
-	// byte-transparent passthrough. Cursor is excluded here: its Run RPC is
-	// bidirectional, so serveCursorBidi translates the body itself into the
-	// enveloped run_request (and keeps the history blobs for the KV channel).
-	if !isOpenAIWire(t.format) && t.format != "cursor" {
-		translated, err := translateRequest(t.format, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
+	// Optional protocol translation. The default is byte-transparent
+	// passthrough; translation runs only when the client's path protocol and
+	// the X-Proxy-Format target are both known and differ. Cursor is excluded
+	// here: its Run RPC is bidirectional, so serveCursorBidi translates the
+	// body itself into the enveloped run_request (and keeps the history blobs
+	// for the KV channel).
+	if t.translate && t.format != "cursor" {
+		req, translated, warnings, err := providerformat.TranslateRequestBetweenIR(
+			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
 		if err != nil {
-			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 			return
 		}
 		// The inbound cap covered the client's body, not the translated wire
@@ -649,26 +686,43 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fragments, tool-result blocks) and a map/raw re-marshal must not
 		// silently bypass max_request_bytes. Fail closed before any send.
 		if int64(len(translated)) > int64(s.cfg().MaxRequestBytes) {
-			http.Error(w, errJSON(typeInvalidRequestError,
-				"translated request body exceeds "+config.FormatByteSize(int64(s.cfg().MaxRequestBytes))),
-				http.StatusRequestEntityTooLarge)
+			writeProtocolHTTPError(w, t.inbound, http.StatusRequestEntityTooLarge, typeInvalidRequestError,
+				"translated request body exceeds "+config.FormatByteSize(int64(s.cfg().MaxRequestBytes)))
 			return
+		}
+		if s.cfg().TranslationLoss == config.TranslationLossReject {
+			if fields := translationLossFields(warnings); len(fields) > 0 {
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
+					"translation cannot represent: "+strings.Join(fields, ", "))
+				return
+			}
 		}
 		body = translated
-		// Parameter/composition metrics describe the translated upstream body,
-		// while routing keeps the client's original model and stream choice.
-		rec = &metrics.Record{Start: rec.Start}
-		if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
-			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
-			return
+		setWarningsHeader(w.Header(), warnings)
+		// Parameter/composition metrics describe the translated upstream body
+		// for the two wire shapes the metadata decoder understands. A
+		// Responses target carries item lists the Chat-oriented decoder does
+		// not model yet; keep the inbound record there and stamp only the
+		// fields the IR owns.
+		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
+			rec = &metrics.Record{Start: rec.Start}
+			if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+				return
+			}
+		} else {
+			rec.Model = req.Model
+			rec.Stream = req.Stream
+			if req.MaxOutputTokens != nil {
+				rec.ReqMaxTokens = req.MaxOutputTokens
+			}
 		}
 		// Re-apply the token-cap bound at this second trust boundary before
-		// anything consumes the fresh record. A decoy type error can keep the
-		// original decode's ReqMaxTokens nil (the split-decode early return)
-		// while the translator still carries the hostile cap into the
-		// translated body, so the first check alone does not cover this path.
-		if hostileTokenCap(rec.ReqMaxTokens) {
-			writeHostileTokenCap(w)
+		// anything consumes the record. A decoy type error can keep the
+		// original decode's ReqMaxTokens nil while the translator still
+		// carries the hostile cap into the translated body.
+		if hostileTokenCap(rec.ReqMaxTokens) || hostileTokenCapInBody(body) {
+			writeHostileTokenCap(w, t.inbound)
 			return
 		}
 	}
@@ -748,8 +802,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// silently defaulted (same contract as X-Proxy-Timeout-Ms).
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			http.Error(w, errJSON(typeInvalidRequestError,
-				errInvalidHeader(hdrMaxConcurrency, v).Error()), http.StatusBadRequest)
+			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
+				errInvalidHeader(hdrMaxConcurrency, v).Error())
 			return
 		}
 		maxConc = n
@@ -818,7 +872,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				markClientGone(rec)
 				return
 			}
-			s.writeStormQueueError(w, rec, err)
+			s.writeStormQueueError(w, rec, t.inbound, err)
 			return
 		}
 	}
@@ -831,7 +885,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rec.ErrorType = "queue_full"
 		rec.ErrorMsg = err.Error()
-		writeClientErrorHdr(w, rec, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
+		writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
 		return
 	}
 	rec.QueueWaitMs += time.Since(queueStart).Milliseconds()
@@ -845,7 +899,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Cursor's agent.v1 Run is a bidirectional HTTP/2 stream (the server writes
 	// requests back on the same open stream and blocks for replies). That can't
 	// ride the write-body-then-read-response doWithRetry path, so it gets a
-	// dedicated full-duplex handler. Cursor is excluded from translateRequest
+	// dedicated full-duplex handler. Cursor is excluded from request translation
 	// (which would error on format cursor); the bidi handler translates to the
 	// enveloped run_request.
 	if t.format == "cursor" {
@@ -865,7 +919,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			markClientGone(rec)
 			return
 		}
-		s.writeTransportFailure(w, rec, err)
+		s.writeTransportFailure(w, rec, t.inbound, err)
 		return
 	}
 	// The per-send deadline's cancel is owned here: it must survive until the
@@ -900,9 +954,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if pacer == nil {
 			pacer = s.newSSEPacerFor(w)
 		}
-		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode >= 400 {
+		// A 202 acceptance or a status-only 204/205 is not an SSE stream, even
+		// when the request asked for one and a target format is configured.
+		// Commit its real status and content type before the translated-SSE
+		// override, atomically against a pacer keepalive commit.
+		if isNonCompletionStatus(resp.StatusCode) && pacer.applyStatus(resp.Header, resp.StatusCode) {
+			s.relayNonCompletionBody(ctx, w, resp, rec)
+			return
+		}
+		// A translated stream always speaks SSE, whatever Content-Type the
+		// upstream used. The translated encoder frames the body itself, so the
+		// upstream type cannot describe it and must not be copied.
+		if t.translate {
+			resp.Header.Set("Content-Type", "text/event-stream")
+		}
+		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode != http.StatusOK {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
-			if err := emitErrorSSE(w, rec.ID, typ, msg); err != nil {
+			if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
 				// The in-band error hit a dead socket: the client is gone.
 				// The decided error status stays on the record (markClientGone
 				// stamps 499 only when no error outcome is decided).
@@ -917,8 +985,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 			return
 		}
-		if !isOpenAIWire(t.format) {
-			s.transformResponse(ctx, w, resp, rec, t.format, stream)
+		if t.translate {
+			s.transformResponse(ctx, w, resp, rec, t, stream)
 			return
 		}
 

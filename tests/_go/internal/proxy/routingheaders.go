@@ -6,6 +6,7 @@ package proxy
 // between its callers.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,7 +23,7 @@ func TestRoutingControlConstantsAreStripped(t *testing.T) {
 	for _, h := range []string{
 		hdrBaseURL, hdrAuthHeader, hdrAuthPrefix, hdrPath, hdrQuery,
 		hdrHeaders, hdrKey, hdrRefreshToken, hdrProvider, hdrAccessToken,
-		hdrTimeout, hdrFormat, hdrMaxConcurrency, hdrSession,
+		hdrTimeout, hdrFormat, hdrInFormat, hdrMaxConcurrency, hdrSession,
 		hdrParentSession, hdrClient,
 		hdrLimitConcurrency, hdrLimitRequests, hdrLimitTokens,
 	} {
@@ -44,6 +45,77 @@ func TestRoutingControlConstantsAreStripped(t *testing.T) {
 	for _, h := range []string{"X-Custom-Header", "User-Agent", "Accept", "X-Stainless-Lang", "X-Request-Id"} {
 		if isProxyControlHeader(h) {
 			t.Errorf("unrelated header %q must not be stripped", h)
+		}
+	}
+}
+
+func TestUnknownPathSameProtocolKeepsPath(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://proxy/openai/deployments/foo/chat/completions", nil)
+	r.Header.Set(hdrBaseURL, "https://api.example")
+	r.Header.Set(hdrInFormat, "openai")
+	r.Header.Set(hdrFormat, "openai")
+	tgt, err := resolveTarget(r, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.translate {
+		t.Fatalf("same-protocol request was marked translated: %+v", tgt)
+	}
+	if tgt.path != "" {
+		t.Fatalf("unknown same-protocol path was rewritten to %q", tgt.path)
+	}
+}
+
+func TestUnknownPathTranslatedUsesTargetPath(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://proxy/openai/deployments/foo/chat/completions", nil)
+	r.Header.Set(hdrBaseURL, "https://api.example")
+	r.Header.Set(hdrInFormat, "openai")
+	r.Header.Set(hdrFormat, "anthropic")
+	tgt, err := resolveTarget(r, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tgt.translate {
+		t.Fatalf("translated request was not marked translated: %+v", tgt)
+	}
+	if tgt.path != "/v1/messages" {
+		t.Fatalf("translated path = %q, want /v1/messages", tgt.path)
+	}
+}
+
+// TestResponsesHostileMaxOutputTokensRejected proves the hostile bound covers
+// the Responses spelling and that mixing cap families fails closed before any
+// upstream send.
+func TestResponsesHostileMaxOutputTokensRejected(t *testing.T) {
+	for name, body := range map[string]string{
+		"hostile max_output_tokens": `{"model":"m","input":"hi","max_output_tokens":1000001}`,
+		"conflicting spellings":     `{"model":"m","input":"hi","max_tokens":1,"max_output_tokens":1000001}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "application/json", 200, `{}`)
+			s := New(config.Default(), metrics.Noop{})
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+			w := proxyRequest(t, s, "/v1/responses", "anthropic", body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+			}
+			if up.calls.Load() != 0 {
+				t.Fatalf("upstream was called %d times before the cap rejection", up.calls.Load())
+			}
+			if !strings.Contains(w.Body.String(), "max_tokens") {
+				t.Fatalf("rejection does not name a cap field: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// TestInFormatStripFence pins the client-protocol override in the same strip
+// set as every other routing control header: it selects the inbound wire and
+// must never reach the upstream.
+func TestInFormatStripFence(t *testing.T) {
+	for _, spelling := range []string{hdrInFormat, "x-proxy-in-format", "X-PROXY-IN-FORMAT"} {
+		if !isProxyControlHeader(spelling) {
+			t.Fatalf("client-protocol override %q is not stripped", spelling)
 		}
 	}
 }
@@ -93,9 +165,9 @@ func TestHeaderValueGrammarSplit(t *testing.T) {
 
 // TestInvalidRoutingHeaderRejectionWording pins the 400 wire contract for a
 // malformed routing header served through ServeHTTP: errInvalidHeader's
-// "invalid <header> <value>" wording inside the OpenAI error envelope,
-// byte-exact. SDKs and the docs match on this shape; errJSON marshals the
-// message before the type (sorted keys) and http.Error appends one newline.
+// "invalid <header> <value>" wording inside the OpenAI JSON error envelope.
+// The sink is the canonical EncodeOpenAIError envelope (message/type plus the
+// nullable param/code fields); the wording is the contract SDKs and docs match.
 func TestInvalidRoutingHeaderRejectionWording(t *testing.T) {
 	s := New(config.Default(), metrics.Noop{})
 	r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions",
@@ -107,9 +179,21 @@ func TestInvalidRoutingHeaderRejectionWording(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
-	want := `{"error":{"message":"invalid X-Proxy-Timeout-Ms \"abc\"","type":"invalid_request_error"}}`
-	if got := strings.TrimSpace(rec.Body.String()); got != want {
-		t.Fatalf("body = %s, want %s", got, want)
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body %q is not a JSON error envelope: %v", rec.Body.String(), err)
+	}
+	if envelope.Error.Message != `invalid X-Proxy-Timeout-Ms "abc"` ||
+		envelope.Error.Type != "invalid_request_error" {
+		t.Fatalf("body = %s, want invalid_request_error / %q", rec.Body.String(), `invalid X-Proxy-Timeout-Ms "abc"`)
 	}
 }
 

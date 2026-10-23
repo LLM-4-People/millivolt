@@ -711,6 +711,7 @@ func TestControlHeadersNeverLeakUpstream(t *testing.T) {
 		"X-Proxy-Query":             "x=1",
 		"X-Proxy-Timeout-Ms":        "1000",
 		"X-Proxy-Format":            "openai",
+		"X-Proxy-In-Format":         "openai",
 		"X-Proxy-Max-Concurrency":   "2",
 		"X-Proxy-Limit-Concurrency": "2",
 		"X-Proxy-Limit-Requests":    "10/1m",
@@ -733,7 +734,7 @@ func TestControlHeadersNeverLeakUpstream(t *testing.T) {
 	for _, h := range []string{
 		"X-Proxy-Client", "X-Proxy-Session", "X-Proxy-Provider",
 		"X-Proxy-Auth-Header", "X-Proxy-Auth-Prefix", "X-Proxy-Path",
-		"X-Proxy-Query", "X-Proxy-Timeout-Ms", "X-Proxy-Format",
+		"X-Proxy-Query", "X-Proxy-Timeout-Ms", "X-Proxy-Format", "X-Proxy-In-Format",
 		"X-Proxy-Max-Concurrency", "X-Proxy-Limit-Concurrency",
 		"X-Proxy-Limit-Requests", "X-Proxy-Limit-Tokens",
 		"X-Proxy-Refresh-Token", "X-Proxy-Access-Token",

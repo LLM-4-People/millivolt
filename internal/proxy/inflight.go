@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"net/http"
 	"sync/atomic"
 
@@ -104,14 +105,15 @@ var errResponseBufferBudget = errors.New("proxy is at its in-flight response buf
 // writeResponseBufferBudget is the one 503 sink for response-buffer
 // admission, shared by the translated non-streaming relay, model discovery,
 // and the non-streaming quality spool.
-func writeResponseBufferBudget(w http.ResponseWriter, rec *metrics.Record) {
+func writeResponseBufferBudget(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol) {
 	if rec != nil {
 		rec.StatusCode = http.StatusServiceUnavailable
 		rec.ErrorType = "response_buffer_budget"
 		rec.ErrorMsg = errResponseBufferBudget.Error()
 	}
-	w.Header().Set("Retry-After", "1")
-	http.Error(w, errJSON(typeAPIError, errResponseBufferBudget.Error()), http.StatusServiceUnavailable)
+	extra := http.Header{}
+	extra.Set("Retry-After", "1")
+	writeProtocolHTTPErrorHdr(w, inbound, http.StatusServiceUnavailable, typeAPIError, errResponseBufferBudget.Error(), extra)
 }
 
 // responseReadReserve returns the bytes a whole-document read can hold.

@@ -257,6 +257,10 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 			// An exact-match enum: alternate with another member.
 			return QuotaPauseRetry
 		}
+		if f.Key == "translation_loss" {
+			// An exact-match enum: alternate with another member.
+			return TranslationLossReject
+		}
 		return "alt-" + base.fieldValue(f.Key).(string)
 	case KindInt:
 		n := base.fieldValue(f.Key).(int)

@@ -130,9 +130,11 @@ func wireHTMLLiteralForProxy(n int) string {
 // though the client's own body fit under the cap.
 func TestTranslatedRequestOutputCapFailsClosed(t *testing.T) {
 	cfg := config.Default()
-	cfg.MaxRequestBytes = 1024
+	// The documented minimum is the boundary this test pins: validation accepts
+	// it, so the fixture must not rely on a below-minimum direct assignment.
+	cfg.MaxRequestBytes = config.MaxRequestBytesMin
 	var messages strings.Builder
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 19; i++ {
 		if i > 0 {
 			messages.WriteByte(',')
 		}
@@ -143,7 +145,7 @@ func TestTranslatedRequestOutputCapFailsClosed(t *testing.T) {
 	if len(body) > int(cfg.MaxRequestBytes) {
 		t.Fatalf("fixture body = %d bytes, want within the %d-byte cap", len(body), cfg.MaxRequestBytes)
 	}
-	translated, err := translateRequest("anthropic", body, cfg.AnthropicDefaultMaxTokens, "")
+	translated, err := providerformat.TranslateRequest(body, cfg.AnthropicDefaultMaxTokens, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ package proxy
 // and empty error fields.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -43,9 +44,24 @@ func TestUpstreamErrorDefaultsSurfaces(t *testing.T) {
 		if rec.Code != 500 {
 			t.Fatalf("status = %d, want 500 (the cursor rejection keeps the upstream status)", rec.Code)
 		}
-		want := `{"error":{"message":"upstream HTTP 500","type":"api_error"}}`
-		if got := strings.TrimSpace(rec.Body.String()); got != want {
-			t.Fatalf("body = %s, want %s (upstreamErrorFields default, byte-exact)", got, want)
+		// The sink owns a JSON error envelope (the upstreamErrorFields
+		// defaulting is the contract here, not the envelope's incidental
+		// whitespace).
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Fatalf("Content-Type = %q, want application/json", got)
+		}
+		var envelope struct {
+			Error struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("body %q is not a JSON error envelope: %v", rec.Body.String(), err)
+		}
+		if envelope.Error.Message != "upstream HTTP 500" || envelope.Error.Type != "api_error" {
+			t.Fatalf("body = %s, want message %q type %q (upstreamErrorFields default)",
+				rec.Body.String(), "upstream HTTP 500", "api_error")
 		}
 		got := waitForRecord(t, buf, 1)[0]
 		if got.StatusCode != 500 || got.ErrorType != "api_error" || got.ErrorMsg != "upstream HTTP 500" {

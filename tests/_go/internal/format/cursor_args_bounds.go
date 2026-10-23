@@ -40,10 +40,10 @@ func heavyToolCallArguments(n int) string {
 // args in an assistant blob.
 func assistantArgsJSON(t *testing.T, raw string) string {
 	t.Helper()
-	call := openaiToolCall{ID: "c1"}
+	call := chatWireToolCall{ID: "c1"}
 	call.Function.Name = "read"
 	call.Function.Arguments = raw
-	blob := cursorAssistantBlob("", []openaiToolCall{call})
+	blob := cursorAssistantBlob("", []chatWireToolCall{call})
 	b, err := json.Marshal(blob)
 	if err != nil {
 		t.Fatal(err)

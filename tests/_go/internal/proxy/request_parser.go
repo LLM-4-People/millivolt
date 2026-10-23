@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -292,16 +293,21 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 	body.WriteString(`}}`)
 	raw := []byte(body.String())
 	var rec metrics.Record
-	parseLLMRequest(raw, &rec, false)
-	if rec.ReqMetadataKeys != requestMetadataKeysMax {
-		t.Fatalf("hostile metadata count = %d, want the %d-key cap", rec.ReqMetadataKeys, requestMetadataKeysMax)
+	err := parseLLMRequest(raw, &rec, false)
+	if err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Fatalf("hostile metadata error = %v, want the metadata preflight rejection", err)
+	}
+	if rec.ReqMetadataKeys != 0 {
+		t.Fatalf("hostile metadata decoded %d keys before rejection", rec.ReqMetadataKeys)
 	}
 	res := testing.Benchmark(func(b *testing.B) {
 		for b.Loop() {
 			var rec metrics.Record
-			parseLLMRequest(raw, &rec, false)
-			if rec.ReqMetadataKeys != requestMetadataKeysMax {
-				b.Fatalf("ReqMetadataKeys = %d, want the cap", rec.ReqMetadataKeys)
+			if err := parseLLMRequest(raw, &rec, false); err == nil {
+				b.Fatal("hostile metadata accepted")
+			}
+			if rec.ReqMetadataKeys != 0 {
+				b.Fatalf("ReqMetadataKeys = %d, want no typed decode", rec.ReqMetadataKeys)
 			}
 		}
 	})
@@ -587,7 +593,7 @@ func TestRequestMetadataTranslatedBodyOwnership(t *testing.T) {
 	r.Header.Set(hdrFormat, "anthropic")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
-	want, err := translateRequest("anthropic", []byte(body), cfg.AnthropicDefaultMaxTokens, "")
+	want, err := providerformat.TranslateRequest([]byte(body), cfg.AnthropicDefaultMaxTokens, "")
 	if err != nil || !bytes.Equal(upstream, want) || w.Code != http.StatusOK {
 		t.Fatalf("translation changed: code=%d upstream=%s want=%s err=%v", w.Code, upstream, want, err)
 	}
@@ -619,7 +625,10 @@ func TestMaxCompletionTokensPrecedence(t *testing.T) {
 		{"both fields: max_completion_tokens wins", `{"model":"m","max_tokens":100,"max_completion_tokens":200}`, 200},
 		{"max_tokens only", `{"model":"m","max_tokens":100}`, 100},
 		{"max_completion_tokens only", `{"model":"m","max_completion_tokens":200}`, 200},
-		{"null controls: both present but null decode to nil", `{"model":"m","max_tokens":null,"max_completion_tokens":null}`, 0},
+		{"max_output_tokens only (Responses spelling)", `{"model":"m","max_output_tokens":300}`, 300},
+		{"Chat spelling wins over max_output_tokens", `{"model":"m","max_tokens":100,"max_output_tokens":300}`, 100},
+		{"max_completion_tokens wins over both others", `{"model":"m","max_tokens":100,"max_completion_tokens":200,"max_output_tokens":300}`, 200},
+		{"null controls: all present but null decode to nil", `{"model":"m","max_tokens":null,"max_completion_tokens":null,"max_output_tokens":null}`, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record

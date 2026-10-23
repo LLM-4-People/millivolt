@@ -549,17 +549,39 @@ func (r *pausingReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func TestMapFinishReasonPassthrough(t *testing.T) {
+// TestAnthropicStopReasonToChatFinishReason pins the public Anthropic-to-Chat
+// mapping. Canonical reasons get the documented Chat spelling; a provider-only
+// reason keeps its source spelling rather than being collapsed into "stop".
+func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 	for reason, want := range map[string]string{
-		"end_turn":      "stop",
-		"stop_sequence": "stop",
-		"max_tokens":    "length",
-		"tool_use":      "tool_calls",
-		"pause_turn":    "pause_turn",
-		"refusal":       "refusal",
+		"end_turn":                      "stop",
+		"stop_sequence":                 "stop",
+		"max_tokens":                    "length",
+		"model_context_window_exceeded": "length",
+		"tool_use":                      "tool_calls",
+		"pause_turn":                    "pause_turn",
+		"refusal":                       "refusal",
 	} {
-		if got := mapFinishReason(reason); got != want {
-			t.Errorf("mapFinishReason(%q) = %q, want %q", reason, got, want)
+		body := `{"id":"msg_1","type":"message","role":"assistant","model":"m",` +
+			`"content":[{"type":"text","text":"ok"}],"stop_reason":"` + reason + `",` +
+			`"usage":{"input_tokens":1,"output_tokens":1}}`
+		out, err := TranslateResponse([]byte(body))
+		if err != nil {
+			t.Fatalf("TranslateResponse(%q): %v", reason, err)
+		}
+		var got struct {
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatalf("decode translated response: %v", err)
+		}
+		if len(got.Choices) != 1 {
+			t.Fatalf("stop_reason %q: choices = %d", reason, len(got.Choices))
+		}
+		if got.Choices[0].FinishReason != want {
+			t.Errorf("stop_reason %q -> finish_reason %q, want %q", reason, got.Choices[0].FinishReason, want)
 		}
 	}
 }
@@ -712,7 +734,9 @@ func TestTranslateRequestSystemAllocationLinear(t *testing.T) {
 		return b.String()
 	}
 	var prev uint64
-	for _, n := range []int{4000, 8000, 16000} {
+	// The wire collection ceiling is 10_000 messages; doubling below it still
+	// proves the join's allocation is linear rather than quadratic.
+	for _, n := range []int{2000, 4000, 8000} {
 		body := mk(n)
 		var out []byte
 		var err error
@@ -805,33 +829,35 @@ func TestTranslateResponseContentAllocationLinear(t *testing.T) {
 }
 
 // TestTranslateRequestToolChoiceShapes pins every accepted and rejected
-// tool_choice shape at the translator owner. Object cases compare the emitted
-// tool_choice document byte-for-byte against fixed fixtures, including the
-// established absent-name null and non-string-name pass-through behavior.
+// tool_choice shape at the translator owner. A restriction the target cannot
+// represent (allowed_tools, an unknown type, a missing or non-string name)
+// fails closed: dropping it would broaden tool access.
 func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		raw  string // empty means the key is absent
-		want string // empty means the translated request carries no tool_choice
+		name    string
+		raw     string // empty means the key is absent
+		want    string // empty means the translated request carries no tool_choice
+		wantErr bool
 	}{
-		{"absent", "", ""},
-		{"null", "null", ""},
-		{"auto", `"auto"`, `{"type":"auto"}`},
-		{"none", `"none"`, `{"type":"none"}`},
-		{"required", `"required"`, `{"type":"any"}`},
-		{"unknown shorthand", `"sometimes"`, ""},
-		{"function object", `{"type":"function","function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`},
-		{"object without type", `{"function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`},
-		{"empty name", `{"function":{"name":""}}`, `{"name":"","type":"tool"}`},
-		{"function without name", `{"function":{}}`, `{"name":null,"type":"tool"}`},
-		{"null name", `{"function":{"name":null}}`, `{"name":null,"type":"tool"}`},
-		{"non-string name", `{"function":{"name":7}}`, `{"name":7,"type":"tool"}`},
-		{"null function", `{"function":null}`, ""},
-		{"string function", `{"function":"weather"}`, ""},
-		{"array", `[1,2]`, ""},
-		{"number", `7`, ""},
-		{"boolean", `true`, ""},
-		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`},
+		{"absent", "", "", false},
+		{"null", "null", "", false},
+		{"auto", `"auto"`, `{"type":"auto"}`, false},
+		{"none", `"none"`, `{"type":"none"}`, false},
+		{"required", `"required"`, `{"type":"any"}`, false},
+		{"unknown shorthand", `"sometimes"`, "", true},
+		{"function object", `{"type":"function","function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`, false},
+		{"object without type", `{"function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`, false},
+		{"empty name", `{"function":{"name":""}}`, "", true},
+		{"function without name", `{"function":{}}`, "", true},
+		{"null name", `{"function":{"name":null}}`, "", true},
+		{"non-string name", `{"function":{"name":7}}`, "", true},
+		{"null function", `{"function":null}`, "", true},
+		{"string function", `{"function":"weather"}`, "", true},
+		{"array", `[1,2]`, "", true},
+		{"number", `7`, "", true},
+		{"boolean", `true`, "", true},
+		{"allowed tools", `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, "", true},
+		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
@@ -840,6 +866,12 @@ func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 			}
 			body += `}`
 			out, err := TranslateRequest([]byte(body), 64, "")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("tool_choice %s was accepted: %s", tc.raw, out)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1005,12 +1037,12 @@ func TestNativeIdentityBound(t *testing.T) {
 // without stops fail closed, while a terminal event closes the stream so a
 // later start cannot emit behind the terminal marker.
 func TestNativeToolBlockCap(t *testing.T) {
-	if nativeToolBlocksMax != 1024 {
-		t.Fatalf("nativeToolBlocksMax = %d; the pinned bound is 1024", nativeToolBlocksMax)
+	if toolBlocksMax != 1024 {
+		t.Fatalf("toolBlocksMax = %d; the pinned bound is 1024", toolBlocksMax)
 	}
 	var stream strings.Builder
 	stream.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
-	for i := 0; i <= nativeToolBlocksMax; i++ {
+	for i := 0; i <= toolBlocksMax; i++ {
 		fmt.Fprintf(&stream, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
 	}
 	var out strings.Builder
@@ -1029,7 +1061,7 @@ func TestNativeToolBlockCap(t *testing.T) {
 		t.Run("ignored after "+terminal.name, func(t *testing.T) {
 			var s strings.Builder
 			s.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
-			for i := 0; i < nativeToolBlocksMax; i++ {
+			for i := 0; i < toolBlocksMax; i++ {
 				fmt.Fprintf(&s, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
 			}
 			s.WriteString("data: " + terminal.event + "\n\n")

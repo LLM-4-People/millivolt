@@ -17,12 +17,67 @@ const ContentPartMax = 4096
 // caller must skip its typed decode when this returns false: content
 // composition is best effort here, not a reason to reject the request.
 func ContentPartsWithinLimit(raw []byte) bool {
+	return ArrayWithinLimit(raw, ContentPartMax)
+}
+
+// ArrayWithinLimit reports whether a raw JSON value is an array with at most
+// max members. A non-array value is accepted because the caller's decoder owns
+// its shape; the lexical scan stops once the bound is exceeded. It is the
+// shared counter for every decoded wire collection, not only content parts.
+func ArrayWithinLimit(raw []byte, max int) bool {
 	i := SkipSpace(raw, 0)
 	if i >= len(raw) || raw[i] != '[' {
 		return true
 	}
-	n, _, ok := CountJSONArrayBytes(raw, i, ContentPartMax)
-	return ok && n <= ContentPartMax
+	n, _, ok := CountJSONArrayBytes(raw, i, max)
+	return ok && n <= max
+}
+
+// ObjectWithinLimit reports whether a raw JSON value is an object with at most
+// max members. A non-object value is accepted because the caller's decoder owns
+// its shape. Keys are located lexically: a string at the root object's depth
+// followed by a colon, so nested objects and array elements never count.
+func ObjectWithinLimit(raw []byte, max int) bool {
+	i := SkipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '{' {
+		return true
+	}
+	depth := 0
+	count := 0
+	for i < len(raw) {
+		switch raw[i] {
+		case '"':
+			if depth == 1 {
+				next := SkipJSONString(raw, i)
+				if next < 0 {
+					return false
+				}
+				if j := SkipSpace(raw, next); j < len(raw) && raw[j] == ':' {
+					count++
+					if count > max {
+						return false
+					}
+				}
+				i = next
+				continue
+			}
+			next := SkipJSONString(raw, i)
+			if next < 0 {
+				return false
+			}
+			i = next
+			continue
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return true
+			}
+		}
+		i++
+	}
+	return false
 }
 
 // CountJSONArrayBytes counts top-level members of a JSON array at i without

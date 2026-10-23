@@ -27,6 +27,7 @@ import (
 	"time"
 
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 	"github.com/LLM-4-People/millivolt/internal/sse"
@@ -308,7 +309,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// History travels content-addressed, so recall never depends on the id.
 	clientMessage, blobs, resumeRequest, err := providerformat.TranslateCursorRunRequestWithConversation(body, "")
 	if err != nil {
-		writeClientError(w, rec, typeInvalidRequestError, err.Error(), http.StatusBadRequest)
+		writeClientError(w, rec, ir.Chat, typeInvalidRequestError, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -325,7 +326,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 			markClientGone(rec)
 			return
 		}
-		s.writeTransportFailure(w, rec, err)
+		s.writeTransportFailure(w, rec, ir.Chat, err)
 		return
 	}
 
@@ -346,7 +347,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		// cannot leak the stream.
 		resp.Body.Close()
 		typ, msg := upstreamErrorFields(rec, resp.StatusCode)
-		writeClientError(w, rec, typ, msg, resp.StatusCode)
+		writeClientError(w, rec, ir.Chat, typ, msg, resp.StatusCode)
 		return
 	}
 	// Build and start the resumable run over the live stream
@@ -950,7 +951,7 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 		rec.ErrorType = errStreamRead
 		msg := cursorTurnErrorText(result.Err)
 		rec.ErrorMsg = msg
-		markPostCommitGone(rec, emitErrorSSE(w, id, errStreamRead, msg))
+		markPostCommitGone(rec, writeProtocolStreamError(w, rec, ir.Chat, id, rec.Model, errStreamRead, "", msg))
 		return
 
 	case providerformat.TurnParked:

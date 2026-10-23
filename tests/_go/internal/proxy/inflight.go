@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -119,7 +120,7 @@ func TestResponseReadReserveUsesDeclaredLengthOrCap(t *testing.T) {
 func TestWriteResponseBufferBudgetIsRetryable503(t *testing.T) {
 	w := httptest.NewRecorder()
 	rec := new(metrics.Record)
-	writeResponseBufferBudget(w, rec)
+	writeResponseBufferBudget(w, rec, ir.Chat)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", w.Code)
 	}

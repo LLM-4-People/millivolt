@@ -16,7 +16,7 @@ import (
 // on its two live adapter paths: a client body that is not JSON must surface
 // as 400 invalid_request_error with the "parse openai body: " prefix (the
 // single wording owner in format/models.go), never an opaque 502 - through
-// the anthropic request translator (translateRequest) and the cursor run
+// the anthropic request translator (TranslateRequest) and the cursor run
 // translator (serveCursorBidi) alike. The upstream is never contacted: both
 // adapters decode before any upstream send.
 func TestFormatParseOpenAIBodyIsAWire400(t *testing.T) {

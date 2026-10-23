@@ -420,6 +420,28 @@ func TestCursorDefaultContextWindowNegativeRejected(t *testing.T) {
 	}
 }
 
+// TestInvalidTranslationLossRejected pins the enum boundary at both the
+// reload admission path and Validate: a misspelled policy must fail closed
+// instead of silently falling back to warn, because the two policies have
+// different upstream-send behavior.
+func TestInvalidTranslationLossRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte("translation_loss: strict\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _, err := LoadFileStrict(path); err == nil || cfg != nil || !strings.Contains(err.Error(), "translation_loss") {
+		t.Fatalf("LoadFileStrict() = %+v, %v; want a translation_loss rejection", cfg, err)
+	}
+	// The boot repair/overlay path drops an invalid recognized value instead of
+	// applying it; the running policy keeps the default.
+	assertOverlaySkipped(t, "translation_loss: strict\n", "translation_loss")
+	c := Default()
+	c.TranslationLoss = "strict"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "translation_loss") {
+		t.Fatalf("Validate() = %v, want a translation_loss rejection", err)
+	}
+}
+
 // quality_retries is the second field where an explicit 0 is meaningful
 // (disables the degenerate-200 quality retry / cursor re-ask): the presence
 // probe must let a written 0 override the default 1.

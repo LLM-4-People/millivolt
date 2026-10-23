@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -19,7 +20,7 @@ import (
 
 func TestEmittedSSEErrorFramesAreByteExact(t *testing.T) {
 	rec := httptest.NewRecorder()
-	if err := emitErrorSSE(rec, "req-1", "stream_read_error", "boom"); err != nil {
+	if err := writeProtocolStreamError(rec, new(metrics.Record), ir.Chat, "req-1", "", "stream_read_error", "", "boom"); err != nil {
 		t.Fatal(err)
 	}
 	want := "data: {\"error\":{\"code\":null,\"message\":\"boom\",\"param\":null,\"type\":\"stream_read_error\"},\"id\":\"req-1\"}\n\n" +
@@ -30,7 +31,7 @@ func TestEmittedSSEErrorFramesAreByteExact(t *testing.T) {
 
 	// Empty type defaults to upstream_error; no id means no root id field.
 	rec2 := httptest.NewRecorder()
-	if err := emitErrorSSE(rec2, "", "", "gone"); err != nil {
+	if err := writeProtocolStreamError(rec2, new(metrics.Record), ir.Chat, "", "", "", "", "gone"); err != nil {
 		t.Fatal(err)
 	}
 	want2 := "data: {\"error\":{\"code\":null,\"message\":\"gone\",\"param\":null,\"type\":\"upstream_error\"}}\n\n" +

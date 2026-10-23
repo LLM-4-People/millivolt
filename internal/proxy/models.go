@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"net/http"
 	"net/url"
 	"strings"
@@ -186,10 +187,10 @@ func (s *Server) emitModelsList(d *modelsDiscovery, w http.ResponseWriter, r *ht
 // so it carries the same 503 + Retry-After as the translated relay.
 func writeModelsError(w http.ResponseWriter, err error) {
 	if errors.Is(err, errResponseBufferBudget) {
-		writeResponseBufferBudget(w, nil)
+		writeResponseBufferBudget(w, nil, ir.Chat)
 		return
 	}
-	http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
+	writeProtocolHTTPError(w, ir.Chat, http.StatusBadGateway, typeAPIError, err.Error())
 }
 
 // fetchModelsUpstream GETs one upstream models URL with the target's auth

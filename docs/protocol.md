@@ -1,10 +1,12 @@
 # Protocol and client integration
 
-The client-facing interface is OpenAI-compatible; the upstream-facing protocol
-can differ. Per-request headers select the destination, credentials and optional
+The client-facing interface accepts OpenAI Chat Completions, OpenAI Responses
+and Anthropic Messages. The upstream-facing protocol can differ from any of
+them. Per-request headers select the destination, credentials and optional
 native adapter. The [compatibility matrix](adapters.md#client-and-upstream-compatibility)
-maps the default OpenAI-compatible relay and supported native translations.
-No endpoint/API-key registry is required. Read
+maps the supported combinations; [cross-protocol translation](adapters.md#cross-protocol-translation)
+documents the canonical model and its loss policy. No endpoint/API-key registry
+is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
 ([operator access](operations.md#operator-access)); only `/healthz`,
@@ -17,9 +19,22 @@ The dashboard, embedded assets, `/admin/*` actions, `/healthz`, the `/session`
 login handshake, the `/mcp` MCP endpoint and registered `/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
 [operations](operations.md#operator-and-data-routes). `GET /v1/models` and
-`GET /models` use the discovery path described below. Other paths reach the
-relay catch-all and require valid routing headers; the client chooses the
-upstream endpoint and model.
+`GET /models` use the discovery path described below. `POST /v1/chat/completions`,
+`POST /v1/responses` and `POST /v1/messages` select the client wire protocol.
+Other paths reach the relay catch-all and require valid routing headers; the
+client chooses the upstream endpoint and model.
+
+A known client path is translated only when `X-Proxy-Format` selects a
+different upstream protocol. An absent `X-Proxy-Format` is byte-transparent
+passthrough, and an explicit format equal to the client protocol is also
+passthrough. `X-Proxy-In-Format` overrides the protocol named by the path, so an
+otherwise unknown path is translated when that header names the inbound wire;
+without the override, paths outside the three known endpoints are never
+translated. A translated request addresses the outbound protocol's canonical
+endpoint (`/v1/chat/completions`, `/v1/responses` or `/v1/messages`) instead of
+forwarding the client's path. A same-protocol request on one of those three
+endpoints normalizes to the same canonical spelling, while one on any other path
+keeps the path the client chose.
 
 Forwarding a body is not the same as understanding every field in it. The normal
 relay does not rewrite an unfamiliar JSON shape just to observe it, but usage,
@@ -43,7 +58,8 @@ Routing validation and request construction live in
 | `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Cursor and model discovery ignore both. |
 | `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. Not applied to model discovery or the Cursor bridge. |
 | `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
-| `X-Proxy-Format` | Upstream format: `openai` (default relay), `anthropic`, or `cursor`. The client-facing interface remains OpenAI-compatible; see [supported combinations](adapters.md#client-and-upstream-compatibility). |
+| `X-Proxy-Format` | Upstream format: `openai` (Chat Completions), `openai-responses` (Responses), `anthropic` (Messages), or `cursor` (agent.v1). Absent means byte-transparent passthrough. See [supported combinations](adapters.md#client-and-upstream-compatibility). |
+| `X-Proxy-In-Format` | Optional client-protocol override: `openai`, `openai-chat` or `chat` (Chat Completions), `openai-responses` or `responses` (Responses), or `anthropic` (Messages). Aliases normalize to the canonical wire. Normally unnecessary because the request path selects the protocol. |
 | `X-Proxy-Client` | Observability/client label; one that only repeats the user agent's product name records the fuller user-agent identity instead. Otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise a configured tracked body param or automatic grouping applies. |
 | `X-Proxy-Parent-Session` | Direct declared parent; requires an explicit own session on the same request. |
@@ -133,16 +149,22 @@ to `max_request_bytes` before metadata extraction and sending. Larger requests
 are rejected with HTTP 413 without an upstream send. A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
-the re-decode of a translated body - for either spelling (`max_tokens` or
-`max_completion_tokens`). A valid request is also rejected with HTTP 400 before
-an upstream send when it carries more than 10,000 entries in a `messages`,
-`tools` or `stop` array, more than 1,024 aggregate `tool_calls` members across
-every message, more than 10,000 distinct top-level members, or more
-than 10,000 distinct `logit_bias` keys merged across duplicate top-level
-objects. Content composition has two independent limits. A content array above
+the re-decode of a translated body - for any spelling (`max_tokens`,
+`max_completion_tokens` or `max_output_tokens`). A valid request is also
+rejected with HTTP 400 before an upstream send when it carries more than 10,000
+entries in a `messages`, `tools`, `functions`, `input` or `stop` array, more
+than 10,000 members in a `metadata` object, more than 1,024 aggregate
+`tool_calls` members across every message, more than 10,000 distinct top-level
+members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
+top-level objects. Content composition has two independent limits. A content
+array above
 4,096 parts is not rejected for that reason: within the aggregate budget it
 still relays unchanged, but composition skips it, so it contributes no
-dashboard composition counts. Separately, the aggregate content-part count over
+dashboard composition counts. Composition reads the Chat `messages`/`system`
+and Anthropic `messages`/`system` shapes; a byte-transparent Responses body's
+`input`/`instructions` items contribute no composition counts (their model,
+stream flag and output cap are still recorded). Separately, the aggregate
+content-part count over
 every message content array and a top-level `system` array is capped at 16,384;
 a valid request above that aggregate is rejected with HTTP 400 before an
 upstream send. Invalid JSON is passed through on the nontranslated path.

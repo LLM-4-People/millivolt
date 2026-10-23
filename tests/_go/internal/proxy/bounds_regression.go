@@ -150,14 +150,19 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 		t.Errorf("in-range body mutated:\n got %q\nwant %q", upstreamBody, payload)
 	}
 
-	// Transparency control for the tools decoy: the decoy body is valid JSON
-	// whose type error lives outside the cap fields, so a SANE cap still
-	// proxies verbatim (translated upstream with format anthropic). The
-	// invariant protects forwarding; a recoverable cap must not blind the
-	// bound check, and an in-range one must not be rejected.
+	// Transparency controls: the decoy body is valid JSON whose type error
+	// lives outside the cap fields, so the passthrough path still proxies it
+	// verbatim; a translated body needs a target-valid tool schema (an
+	// object), which is a separate structural rule. The invariant here is
+	// that a recoverable cap must not blind the bound check and an in-range
+	// one must not be rejected.
 	decoy := `{"model":"m","max_tokens":100,"tools":[{"type":"function","function":{"name":"f","parameters":1e400}}]}`
-	if status, _ := post(decoy, "anthropic"); status != http.StatusOK {
-		t.Errorf("in-range cap with tools decoy: status = %d, want 200", status)
+	if status, _ := post(decoy, ""); status != http.StatusOK {
+		t.Errorf("in-range cap with tools decoy (passthrough): status = %d, want 200", status)
+	}
+	translatable := `{"model":"m","max_tokens":100,"tools":[{"type":"function","function":{"name":"f","parameters":{"x":1}}}]}`
+	if status, _ := post(translatable, "anthropic"); status != http.StatusOK {
+		t.Errorf("in-range cap with valid tools: status = %d, want 200", status)
 	}
 }
 

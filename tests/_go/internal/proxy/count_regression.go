@@ -87,9 +87,9 @@ func TestNativeInvalidUsageCannotRefundReservation(t *testing.T) {
 		}
 		resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 		if stream {
-			s.transformResponse(t.Context(), w, resp, rec, "anthropic", true)
+			s.transformResponse(t.Context(), w, resp, rec, anthropicTarget(), true)
 		} else {
-			s.serveNonStreaming(t.Context(), w, resp, httptest.NewRequest("POST", "http://proxy.example/", nil), &target{format: "anthropic"}, "", nil, rec, "", scheduler.WaiterHooks{})
+			s.serveNonStreaming(t.Context(), w, resp, httptest.NewRequest("POST", "http://proxy.example/", nil), anthropicTarget(), "", nil, rec, "", scheduler.WaiterHooks{})
 		}
 		if rec.ErrorCode != metrics.CodeInvalidUsage || rec.Usage != (metrics.Usage{}) || rec.GenTokens != 0 || settleTokens(rec) != scheduler.TokensUnavailable {
 			t.Fatalf("stream=%v invalid usage not unavailable: %+v", stream, rec)

@@ -423,6 +423,63 @@ func TestQuotaPauseSkipsNonOpenAIWireTargets(t *testing.T) {
 	}
 }
 
+// TestQuotaPauseCoversResponsesWire pins the extension in
+// isOpenAICompatibleWire: a Responses target returns the same durable quota
+// envelope family, so its 429 must arm the pause just like the Chat wire.
+func TestQuotaPauseCoversResponsesWire(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, quotaBody)
+			return
+		}
+		io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed","model":"m","output":[]}`)
+	}))
+	defer up.Close()
+	provider := providerOfURL(up.URL)
+	s := New(quotaPauseTestConfig(config.QuotaPauseManual), metrics.Noop{})
+
+	request := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi"}`))
+		r.Header.Set(hdrBaseURL, up.URL)
+		r.Header.Set(hdrFormat, "openai-responses")
+		r.Header.Set("Authorization", "Bearer key-a")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+
+	triggerDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { triggerDone <- request() }()
+	quotaPollCond(t, "trigger never hit upstream", func() bool { return calls.Load() >= 1 })
+	quotaPollCond(t, "quota hold never appeared for the Responses wire", func() bool {
+		holds, _ := s.PauseSnapshot()["holds"].([]map[string]any)
+		for _, h := range holds {
+			providers, _ := h["providers"].([]string)
+			if len(providers) == 1 && providers[0] == provider && h["reason"] == "insufficient_quota" {
+				return true
+			}
+		}
+		return false
+	})
+
+	if err := s.applyHolds(nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case w := <-triggerDone:
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"object":"response"`) {
+			t.Fatalf("resumed trigger = %d/%s", w.Code, w.Body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("trigger never resumed after operator unpause")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls.Load())
+	}
+}
+
 // TestQuotaPauseRetriesDoNotBurnTransientBudget pins the budget separation:
 // quota re-sends are unbounded by the transient budget, so a later ordinary
 // rate limit still gets its full shared retry allowance after the pause.

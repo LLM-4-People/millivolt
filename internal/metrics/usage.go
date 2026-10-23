@@ -174,12 +174,15 @@ var CanonicalUsageFields = []string{
 // prompt_tokens/completion_tokens; Anthropic uses input_tokens/output_tokens.
 // A per-provider override (config usage_keys) prepends a custom path.
 var usageKeyPaths = map[string][]string{
-	"input_tokens":       {"prompt_tokens", "input_tokens"},
-	"output_tokens":      {"completion_tokens", "output_tokens"},
-	"total_tokens":       {"total_tokens"},
-	"cache_read_tokens":  {"prompt_tokens_details.cached_tokens", "cache_read_input_tokens", "cache_read_tokens"},
-	"cache_write_tokens": {"prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.created_cache_tokens", "cache_creation_input_tokens", "cache_write_tokens"},
-	"reasoning_tokens":   {"completion_tokens_details.reasoning_tokens", "reasoning_tokens"},
+	"input_tokens":  {"prompt_tokens", "input_tokens"},
+	"output_tokens": {"completion_tokens", "output_tokens"},
+	"total_tokens":  {"total_tokens"},
+	"cache_read_tokens": {"prompt_tokens_details.cached_tokens", "input_tokens_details.cached_tokens",
+		"cache_read_input_tokens", "cache_read_tokens"},
+	"cache_write_tokens": {"prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.created_cache_tokens",
+		"input_tokens_details.cache_write_tokens", "cache_creation_input_tokens", "cache_write_tokens"},
+	"reasoning_tokens": {"completion_tokens_details.reasoning_tokens", "output_tokens_details.reasoning_tokens",
+		"reasoning_tokens"},
 }
 
 // ParseUsage extracts token usage from a decoded "usage" object (already
@@ -232,6 +235,24 @@ func ParseUsage(usageObj any, overrides map[string]string) Usage {
 	set("cache_write_tokens", &u.CacheWrite)
 	set("reasoning_tokens", &u.ReasoningTokens)
 	return u
+}
+
+// ParseUsageBody extracts the top-level usage object from a provider response
+// body and parses it with the provider's overrides. The source document is
+// authoritative for accounting even when a translated client wire no longer
+// carries the provider's custom paths.
+func ParseUsageBody(body []byte, usageKeys map[string]string) (Usage, bool) {
+	var root struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if json.Unmarshal(body, &root) != nil || !rawValuePresent(root.Usage) {
+		return Usage{}, false
+	}
+	var usage map[string]any
+	if json.Unmarshal(root.Usage, &usage) != nil || usage == nil {
+		return Usage{}, false
+	}
+	return ParseUsage(usage, usageKeys), true
 }
 
 // ExtractCostFromValue is ExtractCost over an already-decoded JSON value. It

@@ -747,13 +747,32 @@ func settleTokens(rec *metrics.Record) int64 {
 func invalidateUsage(rec *metrics.Record, err error) {
 	rec.Usage = metrics.Usage{}
 	rec.GenTokens, rec.AnswerTokens = 0, 0
-	rec.ErrorCode = metrics.CodeInvalidUsage
-	if rec.ErrorType == "" {
-		rec.ErrorType = metrics.CodeInvalidUsage
+	// A provider error already recorded owns the type/code pair; stamping
+	// invalid_usage over its code would produce a mismatched classification.
+	// A proxy-local failure has no provider code to preserve, so the
+	// invalid-usage code still describes the accounting outcome.
+	if localErrorType(rec.ErrorType) {
+		if rec.ErrorType == "" {
+			rec.ErrorType = metrics.CodeInvalidUsage
+		}
+		rec.ErrorCode = metrics.CodeInvalidUsage
+		if rec.ErrorMsg == "" {
+			rec.ErrorMsg = err.Error()
+		}
 	}
-	if rec.ErrorMsg == "" {
-		rec.ErrorMsg = err.Error()
+}
+
+// localErrorType reports whether an error type was minted by the proxy rather
+// than parsed from a provider envelope. Provider classifications keep their
+// own code when usage is invalidated after the failure.
+func localErrorType(t string) bool {
+	switch t {
+	case "", "transform_error", errStreamRead, "response_too_large",
+		"response_buffer_budget", "queue_full", "storm_queue_full",
+		typeUpstreamUnreachable:
+		return true
 	}
+	return false
 }
 
 // HandleThrottle is GET/POST /admin/throttle. GET returns every active
