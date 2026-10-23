@@ -676,6 +676,35 @@ func TestCodecReportsMetadataLossOnce(t *testing.T) {
 	}
 }
 
+func TestAnthropicTemperatureClamp(t *testing.T) {
+	temp := 1.7
+	req := &ir.Request{Model: "m", Temperature: &temp,
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}}}
+	out, err := EncodeAnthropicRequest(req, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeJSONMap(t, out)["temperature"]; got != float64(1) {
+		t.Fatalf("temperature = %v, want the Anthropic ceiling 1", got)
+	}
+	if !warningField(req.Warnings, "temperature") {
+		t.Fatalf("missing clamp warning: %+v", req.Warnings)
+	}
+	temp = 1
+	req = &ir.Request{Model: "m", Temperature: &temp,
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}}}
+	out, err = EncodeAnthropicRequest(req, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeJSONMap(t, out)["temperature"]; got != float64(1) {
+		t.Fatalf("temperature = %v, want 1 unchanged", got)
+	}
+	if len(req.Warnings) != 0 {
+		t.Fatalf("exact ceiling warned: %+v", req.Warnings)
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {

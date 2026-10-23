@@ -518,7 +518,15 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	}
 	out["stream"] = req.Stream
 	if req.Temperature != nil {
-		out["temperature"] = *req.Temperature
+		// Chat and Responses accept 0..2; Anthropic Messages accepts 0..1.
+		// Clamping preserves the client's intent as closely as the target can
+		// represent it instead of sending a value Anthropic rejects.
+		temperature := *req.Temperature
+		if temperature > 1 {
+			temperature = 1
+			req.Warnings.Add(ir.WarningApproximated, "temperature", "Anthropic Messages accepts 0..1")
+		}
+		out["temperature"] = temperature
 	}
 	if req.TopP != nil {
 		out["top_p"] = *req.TopP
