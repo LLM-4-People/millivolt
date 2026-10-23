@@ -55,7 +55,7 @@ func TestResponsesStreamControlByteEscapeWithinRelayCap(t *testing.T) {
 	if err := enc.Write(&ir.Event{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText}}); err != nil {
 		t.Fatal(err)
 	}
-	control := strings.Repeat("\x01", ResponsesStreamRetainedMaxBytes)
+	control := strings.Repeat("\x01", ResponsesStreamRetainedMaxBytes-ResponsesStreamItemEnvelopeBytes-8)
 	if err := enc.Write(&ir.Event{Type: ir.EventBlockDelta, Index: 0, Delta: &ir.Delta{Text: control}}); err != nil {
 		t.Fatalf("control-byte delta at the retained budget rejected: %v", err)
 	}

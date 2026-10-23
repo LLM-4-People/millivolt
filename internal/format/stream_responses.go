@@ -14,14 +14,22 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
-// ResponsesStreamRetainedMaxBytes bounds the total text, arguments, reasoning
-// and refusal the encoder retains across ALL synthesized Responses items for
-// their done and terminal events. The wire requires those events to carry the
-// full value, so the encoder buffers it; the relay sizes its translated-frame
-// scanner from this one aggregate bound and the maximum JSON escape expansion.
-// A per-item value is subordinate: the total can never exceed this. Internal
-// safety guardrail, not user-tunable.
+// ResponsesStreamRetainedMaxBytes bounds the total text, arguments, reasoning,
+// refusal, provider identity and per-item envelope bytes the encoder retains
+// across ALL synthesized Responses items for their done and terminal events.
+// The wire requires those events to carry the full value, so the encoder
+// buffers it; the relay sizes its translated-frame scanner from this one
+// aggregate bound and the maximum JSON escape expansion. A per-item value is
+// subordinate: the total can never exceed this. Internal safety guardrail, not
+// user-tunable.
 const ResponsesStreamRetainedMaxBytes = 8 << 20
+
+// ResponsesStreamItemEnvelopeBytes is the conservative fixed cost charged for
+// one synthesized item's terminal envelope: its type, generated id, status,
+// role and map keys. Provider-controlled call ids and names are charged
+// separately at their actual length. Internal safety guardrail, not
+// user-tunable.
+const ResponsesStreamItemEnvelopeBytes = 512
 
 // WireJSONEscapeExpansion is the largest number of bytes MarshalWireJSON emits
 // per retained byte: a control byte becomes the six-byte \u00XX escape. The
@@ -475,6 +483,9 @@ func (e *ResponsesStreamEncoder) startStream() error {
 	if e.created == 0 {
 		e.created = time.Now().Unix()
 	}
+	if err := e.retain(len(e.id)+len(e.model), "response identity"); err != nil {
+		return err
+	}
 	response, err := e.responseObject("in_progress", nil)
 	if err != nil {
 		return err
@@ -514,7 +525,10 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 		}
 		switch ev.Block.Type {
 		case ir.BlockText, ir.BlockRefusal:
-			item := e.startItem(ev.Index, ev.Block.Type)
+			item, err := e.startItem(ev.Index, ev.Block.Type)
+			if err != nil {
+				return err
+			}
 			item.kind = "message"
 			item.partType = "output_text"
 			if ev.Block.Type == ir.BlockRefusal {
@@ -548,11 +562,17 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			return e.appendText(item, initial)
 		case ir.BlockToolCall:
 			tc := ev.Block.ToolCall
-			item := e.startItem(ev.Index, ev.Block.Type)
+			item, err := e.startItem(ev.Index, ev.Block.Type)
+			if err != nil {
+				return err
+			}
 			item.kind = "function_call"
 			if tc != nil {
 				item.name = tc.Name
 				item.callID = tc.ID
+				if err := e.retain(len(tc.ID)+len(tc.Name), "function identity"); err != nil {
+					return err
+				}
 				if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
 					if err := e.retain(len(tc.Arguments), "function arguments"); err != nil {
 						return err
@@ -569,11 +589,17 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 				},
 			})
 		case ir.BlockReasoning, ir.BlockRedactedReasoning:
-			item := e.startItem(ev.Index, ev.Block.Type)
+			item, err := e.startItem(ev.Index, ev.Block.Type)
+			if err != nil {
+				return err
+			}
 			item.kind = "reasoning"
 			initial := ""
 			if ev.Block.Reasoning != nil {
 				item.encrypted = ev.Block.Reasoning.Encrypted
+				if err := e.retain(len(item.encrypted), "reasoning artifact"); err != nil {
+					return err
+				}
 				initial = ev.Block.Reasoning.Text
 				if initial == "" && len(ev.Block.Reasoning.Summary) > 0 {
 					initial = strings.Join(ev.Block.Reasoning.Summary, "\n")
@@ -897,8 +923,17 @@ func reasoningItem(item *responsesItemState, text string) map[string]any {
 }
 
 // startItem allocates the next contiguous Responses output index for one
-// canonical block. Only a block whose target shape exists may call it.
-func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) *responsesItemState {
+// canonical block. Only a block whose target shape exists may call it. The
+// shared item bound and the per-item envelope charge keep the terminal
+// document within ResponsesStreamFrameMaxBytes even when the source opens
+// thousands of empty items.
+func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*responsesItemState, error) {
+	if len(e.order) >= WireCollectionMax {
+		return nil, fmt.Errorf("responses stream exceeds %d items", WireCollectionMax)
+	}
+	if err := e.retain(ResponsesStreamItemEnvelopeBytes, "item envelope"); err != nil {
+		return nil, err
+	}
 	item := &responsesItemState{
 		id:          e.newItemID(kind),
 		outputIndex: e.outputIndex,
@@ -907,7 +942,7 @@ func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) *respon
 	e.outputIndex++
 	e.items[index] = item
 	e.order = append(e.order, index)
-	return item
+	return item, nil
 }
 
 // retain books bytes the terminal frame must carry. One aggregate budget
@@ -1016,6 +1051,9 @@ func (e *ResponsesStreamEncoder) emit(name string, obj any) error {
 	frame = append(frame, "data: "...)
 	frame = append(frame, payload...)
 	frame = append(frame, '\n', '\n')
+	if len(frame) > ResponsesStreamFrameMaxBytes {
+		return fmt.Errorf("responses frame exceeds %d bytes", ResponsesStreamFrameMaxBytes)
+	}
 	if _, err := e.w.Write(frame); err != nil {
 		return err
 	}
