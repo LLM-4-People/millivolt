@@ -788,6 +788,9 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 			if b.File.Filename != "" {
 				part["filename"] = b.File.Filename
 			}
+			if b.File.Detail != "" {
+				part["detail"] = b.File.Detail
+			}
 			out = append(out, part)
 		case ir.BlockAudio:
 			out = append(out, map[string]any{

@@ -77,6 +77,22 @@ func normalizeFileData(file *ir.File) {
 	}
 }
 
+// fileMediaType resolves an inline file's media type from its declared field
+// or from a data-URL prefix. It is the shared owner of that question for both
+// the Chat and Anthropic document allowlists.
+func fileMediaType(file *ir.File) string {
+	if file == nil {
+		return ""
+	}
+	if file.MediaType != "" {
+		return file.MediaType
+	}
+	if media, _, ok := splitBase64DataURL(file.FileData); ok {
+		return media
+	}
+	return ""
+}
+
 // fileDataURL renders canonical inline file bytes in the data-URL spelling
 // Chat and Responses accept. A value that already carries the prefix passes
 // through unchanged, as does raw base64 with no declared media type.

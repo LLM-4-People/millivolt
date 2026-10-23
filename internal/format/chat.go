@@ -665,6 +665,11 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 			}
 			file := &ir.File{FileID: p.File.FileID, FileData: p.File.FileData, Filename: p.File.Filename}
 			normalizeFileData(file)
+			// Chat documents inline file_data as raw base64 and supports PDF
+			// file parts only, so a value with no data-URL media type is a PDF.
+			if file.FileData != "" && file.MediaType == "" {
+				file.MediaType = "application/pdf"
+			}
 			out = append(out, ir.Block{Type: ir.BlockFile, File: file})
 		default:
 			warns.Add(ir.WarningDropped, "content."+p.Type, "unsupported content part")
@@ -960,7 +965,7 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 			msg := map[string]any{
 				"role":         "tool",
 				"tool_call_id": tr.CallID,
-				"content":      encodeChatContentText(tr.Content, warns),
+				"content":      encodeChatToolResultContent(tr.Content, warns),
 			}
 			out = append(out, msg)
 		}
@@ -971,7 +976,7 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 		if m.Name != "" {
 			msg["name"] = m.Name
 		}
-		content, toolCalls, refusal, reasoning := encodeChatContent(rest, warns)
+		content, toolCalls, refusal, reasoning := encodeChatContent(rest, m.Role, warns)
 		if m.Role == ir.RoleAssistant {
 			msg["content"] = content
 			if len(toolCalls) > 0 {
@@ -992,8 +997,12 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 }
 
 // encodeChatContent returns the Chat content value (string or part array),
-// tool calls, refusal text and reasoning text from canonical blocks.
-func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string]any, string, string) {
+// tool calls, refusal text and reasoning text from canonical blocks. Each Chat
+// role accepts a documented subset of content parts: system and developer
+// messages are text-only, assistant messages carry text and refusal parts, and
+// user messages carry the full input vocabulary. A block the role cannot
+// represent is dropped with a warning rather than emitted as an invalid part.
+func encodeChatContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) (any, []map[string]any, string, string) {
 	var (
 		texts     []string
 		parts     []map[string]any
@@ -1002,6 +1011,15 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 		reasoning strings.Builder
 		hasPart   bool
 	)
+	roleDetail := "this Chat role has no such content part"
+	switch role {
+	case ir.RoleSystem:
+		roleDetail = "system messages are text-only"
+	case ir.RoleDeveloper:
+		roleDetail = "developer messages are text-only"
+	case ir.RoleAssistant:
+		roleDetail = "assistant messages carry text and refusal content only"
+	}
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
 			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
@@ -1014,6 +1032,12 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 			texts = append(texts, b.Text)
 			parts = append(parts, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
+			if role != ir.RoleUser {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.image_url", roleDetail)
+				}
+				continue
+			}
 			url := imageDataURL(b.Image)
 			if url == "" {
 				if warns != nil {
@@ -1030,31 +1054,72 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 			part["image_url"] = img
 			parts = append(parts, part)
 		case ir.BlockFile:
-			if b.File.FileID == "" && b.File.FileData == "" {
+			if role != ir.RoleUser {
 				if warns != nil {
-					warns.Add(ir.WarningDropped, "file", "Chat Completions has no file URL part")
+					warns.Add(ir.WarningDropped, "content.file", roleDetail)
 				}
 				continue
 			}
-			hasPart = true
+			if b.File == nil {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "file", "file block has no payload")
+				}
+				continue
+			}
+			if b.File.Detail != "" && warns != nil {
+				warns.Add(ir.WarningDropped, "file.detail", "Chat Completions file parts have no detail level")
+			}
 			file := map[string]any{}
 			if b.File.FileID != "" {
 				file["file_id"] = b.File.FileID
 			}
-			if data := fileDataURL(b.File); data != "" {
-				file["file_data"] = data
+			data := fileDataURL(b.File)
+			if data != "" {
+				// Chat Completions file parts accept PDF data only.
+				if fileMediaType(b.File) != "application/pdf" {
+					if warns != nil {
+						warns.Add(ir.WarningDropped, "file.media_type", "Chat Completions accepts only PDF file data")
+					}
+				} else {
+					file["file_data"] = data
+				}
+			}
+			if _, ok := file["file_id"]; !ok {
+				if _, ok := file["file_data"]; !ok {
+					if warns != nil {
+						if b.File.FileURL != "" {
+							warns.Add(ir.WarningDropped, "file", "Chat Completions has no file URL part")
+						} else if data == "" {
+							warns.Add(ir.WarningDropped, "file", "file block has no payload")
+						}
+					}
+					continue
+				}
 			}
 			if b.File.Filename != "" {
 				file["filename"] = b.File.Filename
 			}
+			hasPart = true
 			parts = append(parts, map[string]any{"type": "file", "file": file})
 		case ir.BlockAudio:
+			if role != ir.RoleUser {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.input_audio", roleDetail)
+				}
+				continue
+			}
 			hasPart = true
 			parts = append(parts, map[string]any{
 				"type":        "input_audio",
 				"input_audio": map[string]any{"data": b.Audio.Data, "format": b.Audio.Format},
 			})
 		case ir.BlockToolCall:
+			if role != ir.RoleAssistant {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.tool_call", "Chat tool calls belong to assistant messages")
+				}
+				continue
+			}
 			tc := b.ToolCall
 			toolCalls = append(toolCalls, map[string]any{
 				"id":   tc.ID,
@@ -1065,8 +1130,20 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 				},
 			})
 		case ir.BlockRefusal:
+			if role != ir.RoleAssistant {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.refusal", roleDetail)
+				}
+				continue
+			}
 			refusal = b.Refusal
 		case ir.BlockReasoning:
+			if role != ir.RoleAssistant {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.reasoning", roleDetail)
+				}
+				continue
+			}
 			if b.Reasoning.Text != "" {
 				reasoning.WriteString(b.Reasoning.Text)
 			}
@@ -1077,6 +1154,12 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 				warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Chat Completions")
 			}
 		case ir.BlockRedactedReasoning:
+			if role != ir.RoleAssistant {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.reasoning", roleDetail)
+				}
+				continue
+			}
 			if warns != nil {
 				warns.Add(ir.WarningOpaque, "reasoning", "redacted reasoning cannot be replayed on Chat Completions")
 			}
@@ -1088,10 +1171,12 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 	return strings.Join(texts, ""), toolCalls, refusal, reasoning.String()
 }
 
-func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
+// encodeChatToolResultContent flattens a tool result to the text the Chat tool
+// role accepts. Tool messages have a text-only content vocabulary, so images,
+// files and audio are dropped with a warning instead of becoming invalid
+// content parts.
+func encodeChatToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {
 	var texts []string
-	var parts []map[string]any
-	hasPart := false
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
 			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
@@ -1102,50 +1187,23 @@ func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
 		switch b.Type {
 		case ir.BlockText:
 			texts = append(texts, b.Text)
-			parts = append(parts, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
-			url := imageDataURL(b.Image)
-			if url == "" {
-				if warns != nil {
-					warns.Add(ir.WarningDropped, "tool_result.image", "Chat Completions cannot reference a provider image file id")
-				}
-				continue
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result.image_url", "Chat Completions tool messages are text-only")
 			}
-			hasPart = true
-			part := map[string]any{"type": "image_url"}
-			img := map[string]any{"url": url}
-			if b.Image.Detail != "" {
-				img["detail"] = b.Image.Detail
-			}
-			part["image_url"] = img
-			parts = append(parts, part)
 		case ir.BlockFile:
-			if b.File.FileID == "" && b.File.FileData == "" {
-				if warns != nil {
-					warns.Add(ir.WarningDropped, "tool_result.file", "Chat Completions has no file URL part")
-				}
-				continue
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result.file", "Chat Completions tool messages are text-only")
 			}
-			hasPart = true
-			file := map[string]any{}
-			if b.File.FileID != "" {
-				file["file_id"] = b.File.FileID
+		case ir.BlockAudio:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result.audio", "Chat Completions tool messages are text-only")
 			}
-			if data := fileDataURL(b.File); data != "" {
-				file["file_data"] = data
-			}
-			if b.File.Filename != "" {
-				file["filename"] = b.File.Filename
-			}
-			parts = append(parts, map[string]any{"type": "file", "file": file})
 		default:
 			if warns != nil {
 				warns.Add(ir.WarningDropped, "tool_result."+string(b.Type), "block has no Chat tool-result equivalent")
 			}
 		}
-	}
-	if hasPart {
-		return parts
 	}
 	return strings.Join(texts, "")
 }
@@ -1391,7 +1449,7 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
 		return nil, err
 	}
-	content, toolCalls, refusal, reasoning := encodeChatContent(resp.Blocks, &resp.Warnings)
+	content, toolCalls, refusal, reasoning := encodeChatContent(resp.Blocks, ir.RoleAssistant, &resp.Warnings)
 	message := map[string]any{"role": "assistant", "content": content}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls

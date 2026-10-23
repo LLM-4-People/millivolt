@@ -277,15 +277,20 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			}
 			blocks = append(blocks, ir.Block{Type: ir.BlockImage, Image: img, CacheControl: p.CacheControl})
 		case "document":
-			file, text, err := decodeAnthropicDocument(p)
+			docBlocks, w, err := decodeAnthropicDocument(p)
 			if err != nil {
 				return nil, nil, err
 			}
-			if text != "" {
-				blocks = append(blocks, ir.Block{Type: ir.BlockText, Text: text, CacheControl: p.CacheControl})
-			} else {
-				blocks = append(blocks, ir.Block{Type: ir.BlockFile, File: file, CacheControl: p.CacheControl})
+			warns = append(warns, w...)
+			// The document's cache breakpoint covers everything through its
+			// final decoded block.
+			if p.CacheControl != nil && len(docBlocks) > 0 {
+				last := &docBlocks[len(docBlocks)-1]
+				if last.CacheControl == nil {
+					last.CacheControl = p.CacheControl
+				}
 			}
+			blocks = append(blocks, docBlocks...)
 		case "tool_use":
 			if p.Input != nil && !json.Valid(p.Input) {
 				return nil, nil, errors.New("anthropic tool_use input is not valid JSON")
@@ -354,34 +359,38 @@ func decodeAnthropicImage(src *struct {
 	}
 }
 
-func decodeAnthropicDocument(p anthropicWireBlock) (*ir.File, string, error) {
+// decodeAnthropicDocument returns the canonical blocks a document contributes
+// to its message. A content-source document carries nested text and images;
+// keeping them as blocks preserves the images and avoids manufacturing an
+// empty file block. The document boundary (title/context/citations) has no
+// cross-protocol equivalent and is reported.
+func decodeAnthropicDocument(p anthropicWireBlock) ([]ir.Block, ir.Warnings, error) {
 	if p.Source == nil {
-		return nil, "", errors.New("anthropic document block has no source")
+		return nil, nil, errors.New("anthropic document block has no source")
 	}
 	switch p.Source.Type {
 	case "base64":
-		return &ir.File{FileData: p.Source.Data, MediaType: p.Source.MediaType, Filename: p.Title}, "", nil
+		file := &ir.File{FileData: p.Source.Data, MediaType: p.Source.MediaType, Filename: p.Title}
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
 	case "text":
 		// A plain-text document's data is the text itself, not base64.
-		return nil, string(p.Source.Data), nil
+		return []ir.Block{ir.TextBlock(string(p.Source.Data))}, nil, nil
 	case "url":
-		return &ir.File{FileURL: p.Source.URL, Filename: p.Title}, "", nil
+		file := &ir.File{FileURL: p.Source.URL, Filename: p.Title}
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
 	case "file":
-		return &ir.File{FileID: p.Source.FileID, Filename: p.Title}, "", nil
+		file := &ir.File{FileID: p.Source.FileID, Filename: p.Title}
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
 	case "content":
-		blocks, _, err := decodeAnthropicContent(p.Source.Content)
+		blocks, warns, err := decodeAnthropicContent(p.Source.Content)
 		if err != nil {
-			return nil, "", err
+			return nil, nil, err
 		}
-		var b strings.Builder
-		for _, block := range blocks {
-			if block.Type == ir.BlockText {
-				b.WriteString(block.Text)
-			}
-		}
-		return nil, b.String(), nil
+		warns.Add(ir.WarningApproximated, "document.content",
+			"nested document content was inlined and its title, context and citations are not preserved")
+		return blocks, warns, nil
 	default:
-		return nil, "", fmt.Errorf("unsupported anthropic document source %q", p.Source.Type)
+		return nil, nil, fmt.Errorf("unsupported anthropic document source %q", p.Source.Type)
 	}
 }
 
@@ -625,7 +634,13 @@ func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *i
 		}
 		for _, b := range m.Content {
 			if b.Type != ir.BlockText {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "system."+string(b.Type), "Anthropic system prompts are text-only")
+				}
 				continue
+			}
+			if len(b.Citations) > 0 && warns != nil {
+				warns.Add(ir.WarningDropped, "system.citations", "Anthropic system blocks have no citations")
 			}
 			block := map[string]any{"type": "text", "text": b.Text}
 			if b.CacheControl != nil {
@@ -747,13 +762,21 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			}
 			out = append(out, block)
 		case ir.BlockImage:
-			block := map[string]any{"type": "image", "source": encodeAnthropicImage(b.Image)}
+			source := encodeAnthropicImage(b.Image, warns)
+			if source == nil {
+				continue
+			}
+			block := map[string]any{"type": "image", "source": source}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
 			}
 			out = append(out, block)
 		case ir.BlockFile:
-			block := map[string]any{"type": "document", "source": encodeAnthropicFile(b.File)}
+			source := encodeAnthropicFile(b.File, warns)
+			if source == nil {
+				continue
+			}
+			block := map[string]any{"type": "document", "source": source}
 			if b.File != nil && b.File.Filename != "" {
 				block["title"] = b.File.Filename
 			}
@@ -821,18 +844,35 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 	return out
 }
 
-func encodeAnthropicImage(img *ir.Image) map[string]any {
+func encodeAnthropicImage(img *ir.Image, warns *ir.Warnings) map[string]any {
+	if img == nil {
+		return nil
+	}
+	var source map[string]any
 	switch {
 	case img.FileID != "":
-		return map[string]any{"type": "file", "file_id": img.FileID}
+		source = map[string]any{"type": "file", "file_id": img.FileID}
 	case img.Data != "":
-		return map[string]any{"type": "base64", "media_type": img.MediaType, "data": img.Data}
+		source = map[string]any{"type": "base64", "media_type": img.MediaType, "data": img.Data}
+	case img.URL != "":
+		source = map[string]any{"type": "url", "url": img.URL}
 	default:
-		return map[string]any{"type": "url", "url": img.URL}
+		return nil
 	}
+	if img.Detail != "" && warns != nil {
+		warns.Add(ir.WarningDropped, "image.detail", "Anthropic images have no detail level")
+	}
+	return source
 }
 
-func encodeAnthropicFile(f *ir.File) map[string]any {
+// encodeAnthropicFile maps a document to an Anthropic source that the target
+// accepts: application/pdf bytes or URL, text/plain bytes, or a provider file
+// id. Other text media types are approximated as plain text; a document the
+// target cannot read is dropped with a warning.
+func encodeAnthropicFile(f *ir.File, warns *ir.Warnings) map[string]any {
+	if f == nil {
+		return nil
+	}
 	mediaType, data := f.MediaType, f.FileData
 	if media, raw, ok := splitBase64DataURL(f.FileData); ok {
 		data = raw
@@ -840,17 +880,44 @@ func encodeAnthropicFile(f *ir.File) map[string]any {
 			mediaType = media
 		}
 	}
+	var source map[string]any
 	switch {
 	case f.FileID != "":
-		return map[string]any{"type": "file", "file_id": f.FileID}
+		source = map[string]any{"type": "file", "file_id": f.FileID}
 	case f.FileURL != "":
-		return map[string]any{"type": "url", "url": f.FileURL}
-	case strings.HasPrefix(mediaType, "text/"):
-		if decoded, err := base64.StdEncoding.DecodeString(data); err == nil {
-			return map[string]any{"type": "text", "media_type": mediaType, "data": string(decoded)}
+		if mediaType != "" && mediaType != "application/pdf" {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "file.media_type", "Anthropic document URLs must be PDFs")
+			}
+			return nil
 		}
+		source = map[string]any{"type": "url", "url": f.FileURL}
+	case data == "":
+		return nil
+	case mediaType == "application/pdf":
+		source = map[string]any{"type": "base64", "media_type": mediaType, "data": data}
+	case strings.HasPrefix(mediaType, "text/"):
+		decoded, err := base64.StdEncoding.DecodeString(data)
+		if err != nil {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "file.media_type", "inline plain-text document data is not valid base64")
+			}
+			return nil
+		}
+		if mediaType != "text/plain" && warns != nil {
+			warns.Add(ir.WarningApproximated, "file.media_type", "Anthropic plain-text documents accept text/plain only")
+		}
+		source = map[string]any{"type": "text", "media_type": "text/plain", "data": string(decoded)}
+	default:
+		if warns != nil {
+			warns.Add(ir.WarningDropped, "file.media_type", "Anthropic documents accept PDF or plain-text data")
+		}
+		return nil
 	}
-	return map[string]any{"type": "base64", "media_type": mediaType, "data": data}
+	if f.Detail != "" && warns != nil {
+		warns.Add(ir.WarningDropped, "file.detail", "Anthropic documents have no detail level")
+	}
+	return source
 }
 
 func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {
@@ -875,9 +942,13 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 		case ir.BlockText:
 			out = append(out, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
-			out = append(out, map[string]any{"type": "image", "source": encodeAnthropicImage(b.Image)})
+			if source := encodeAnthropicImage(b.Image, warns); source != nil {
+				out = append(out, map[string]any{"type": "image", "source": source})
+			}
 		case ir.BlockFile:
-			out = append(out, map[string]any{"type": "document", "source": encodeAnthropicFile(b.File)})
+			if source := encodeAnthropicFile(b.File, warns); source != nil {
+				out = append(out, map[string]any{"type": "document", "source": source})
+			}
 		case ir.BlockAudio:
 			if warns != nil {
 				warns.Add(ir.WarningDropped, "tool_result.audio", "Anthropic tool results have no audio part")
