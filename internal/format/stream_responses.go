@@ -60,6 +60,7 @@ type responsesStreamEvent struct {
 	ItemID         string          `json:"item_id"`
 	Delta          string          `json:"delta"`
 	Text           string          `json:"text"`
+	Refusal        string          `json:"refusal"`
 	Arguments      string          `json:"arguments"`
 	Code           string          `json:"code"`
 	Message        string          `json:"message"`
@@ -110,7 +111,17 @@ type ResponsesStreamDecoder struct {
 	keyByOutput      map[int]string
 	keyByPart        map[[2]int]string
 	itemIDByOutput   map[int]string
-	open             map[int]bool
+	// payloadParts and payloadSummary record that an announced channel
+	// actually emitted bytes. Terminal payload is applied only to
+	// announced-but-empty blocks, so an empty announcement cannot suppress
+	// the authoritative terminal value (N14).
+	payloadParts   map[string]bool
+	payloadSummary map[string]bool
+	// terminalPending holds authoritative done-event values whose target block
+	// already ended or was never opened. They are emitted after every streamed
+	// block closes (closeAll), so target lifecycles never nest.
+	terminalPending []terminalEmission
+	open            map[int]bool
 
 	usage       ir.Usage
 	finish      ir.FinishReason
@@ -133,6 +144,8 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		keyByOutput:      map[int]string{},
 		keyByPart:        map[[2]int]string{},
 		itemIDByOutput:   map[int]string{},
+		payloadParts:     map[string]bool{},
+		payloadSummary:   map[string]bool{},
 		open:             map[int]bool{},
 	}
 }
@@ -275,6 +288,13 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 						ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
 					},
 				}})
+				// The added item may already carry summary text. Emit it as
+				// the block's first reasoning delta so the value is not lost
+				// when no summary delta follows.
+				if summary := responsesSummaryText(item.Summary); summary != "" {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: summary}})
+					d.payloadSummary[key] = true
+				}
 			case "message":
 				// Content parts arrive in response.content_part.added. The
 				// item id is still announced so a terminal document that
@@ -331,11 +351,52 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.itemIDByOutput[ev.OutputIndex] = itemID
 			d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &block})
 		case "response.output_text.delta", "response.refusal.delta":
-			idx, ok := d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}]
+			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			idx, ok := d.partBlock[pos]
 			if !ok {
 				continue
 			}
-			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: ev.Delta}})
+			if ev.Delta != "" {
+				if key, ok := d.keyByPart[pos]; ok {
+					d.payloadParts[key] = true
+				}
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: ev.Delta}})
+			}
+		case "response.output_text.done", "response.refusal.done":
+			// The done payload is the authoritative full part value. Emit it
+			// only when no delta carried bytes; repeating streamed text would
+			// duplicate the answer.
+			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			itemID := d.itemIDByOutput[ev.OutputIndex]
+			key, ok := d.keyByPart[pos]
+			if !ok {
+				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			}
+			text := ev.Text
+			block := ir.Block{Type: ir.BlockText}
+			if ev.Type == "response.refusal.done" {
+				text = ev.Refusal
+				block = ir.Block{Type: ir.BlockRefusal}
+			}
+			if d.payloadParts[key] || text == "" {
+				continue
+			}
+			admitted, err := d.announcePart(key)
+			if err != nil {
+				return nil, err
+			}
+			if !admitted {
+				continue
+			}
+			if idx, ok := d.partBlock[pos]; ok && d.open[idx] {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: text}})
+			} else {
+				d.terminalPending = append(d.terminalPending, terminalEmission{
+					block: block,
+					delta: &ir.Delta{Text: text},
+				})
+			}
+			d.payloadParts[key] = true
 		case "response.function_call_arguments.delta":
 			idx, ok := d.itemBlock[ev.OutputIndex]
 			if !ok {
@@ -347,17 +408,87 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
+			if ev.Delta != "" {
+				if key := d.keyByOutput[ev.OutputIndex]; key != "" {
+					d.payloadSummary[key] = true
+				}
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
+			}
+		case "response.reasoning_summary_part.added":
+			// Some providers put the summary text in the part-start payload
+			// and stream no delta for it.
+			var part struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(ev.Part, &part); err != nil {
+				return nil, err
+			}
+			key := d.keyByOutput[ev.OutputIndex]
+			idx, ok := d.itemBlock[ev.OutputIndex]
+			if part.Text == "" || !ok || key == "" || d.payloadSummary[key] {
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
+			d.payloadSummary[key] = true
+		case "response.reasoning_summary_text.done":
+			// The done payload is authoritative. Emit it only when no delta
+			// carried summary bytes.
+			key := d.keyByOutput[ev.OutputIndex]
+			idx, ok := d.itemBlock[ev.OutputIndex]
+			if ev.Text == "" || !ok || key == "" || d.payloadSummary[key] {
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})
+			d.payloadSummary[key] = true
 		case "response.reasoning_text.delta":
 			// reasoning_text is a content part of the reasoning item, so its
 			// deltas belong to the part block the added event opened (C12).
 			// reasoning_summary_text has no content part and stays on the item
 			// block.
-			idx, ok := d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}]
+			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			idx, ok := d.partBlock[pos]
 			if !ok {
 				continue
 			}
-			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
+			if ev.Delta != "" {
+				if key, ok := d.keyByPart[pos]; ok {
+					d.payloadParts[key] = true
+				}
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
+			}
+		case "response.reasoning_text.done":
+			// The done payload is authoritative. Emit it only when no delta
+			// carried the part's bytes. A provider may omit the part-start
+			// event entirely, so the reasoning item block is the fallback
+			// channel; the part identity is still recorded so the terminal
+			// document cannot repeat the value.
+			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			itemID := d.itemIDByOutput[ev.OutputIndex]
+			key, ok := d.keyByPart[pos]
+			if !ok {
+				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			}
+			if d.payloadParts[key] || ev.Text == "" {
+				continue
+			}
+			admitted, err := d.announcePart(key)
+			if err != nil {
+				return nil, err
+			}
+			if !admitted {
+				continue
+			}
+			if idx, ok := d.partBlock[pos]; ok && d.open[idx] {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})
+			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})
+			} else {
+				d.terminalPending = append(d.terminalPending, terminalEmission{
+					block: ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}},
+					delta: &ir.Delta{Reasoning: ev.Text},
+				})
+			}
+			d.payloadParts[key] = true
 		case "response.content_part.done":
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			idx, ok := d.partBlock[pos]
@@ -366,10 +497,6 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			delete(d.partBlock, pos)
 			delete(d.open, idx)
-			if key, ok := d.keyByPart[pos]; ok {
-				delete(d.partBlockByKey, key)
-				delete(d.keyByPart, pos)
-			}
 			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		case "response.output_item.done":
 			var item responsesWireItem
@@ -514,6 +641,17 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 			d.flushToolArguments(key, idx, "")
 		}
 	}
+	// Apply the authoritative terminal payload to announced channels that
+	// emitted no bytes. Values are written into still-open blocks before the
+	// close below; channels whose block already ended are emitted as a fresh
+	// block after it. Done-event payloads queued earlier share that tail.
+	pending := d.terminalPending
+	d.terminalPending = nil
+	more, err := d.fillAnnouncedTerminal(output)
+	if err != nil {
+		return err
+	}
+	pending = append(pending, more...)
 	// Close every block the source actually opened before starting synthetic
 	// terminal items, so a target block sequence never nests two lifecycles.
 	for _, idx := range sortedKeys(d.open) {
@@ -528,6 +666,9 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	clear(d.keyByOutput)
 	clear(d.keyByPart)
 	d.openToolItems = 0
+	for _, block := range pending {
+		d.syntheticBlock(block.block, block.delta)
+	}
 	// Synthesize terminal-only items in document order. Identity keys keep a
 	// repeated or renumbered terminal entry from allocating a second block.
 	for i, item := range output {
@@ -608,6 +749,127 @@ func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, con
 		return posKey
 	}
 	return key
+}
+
+// terminalEmission is a terminal value that belongs to a block which has
+// already ended, or to a terminal-only channel. It is emitted after every
+// streamed block has closed so target lifecycles never nest.
+type terminalEmission struct {
+	block ir.Block
+	delta *ir.Delta
+}
+
+// terminalAnnouncedItemKey resolves the announcement identity of a terminal
+// reasoning item. The output position is a fallback only when both sides agree
+// on the item id (or one side has none).
+func (d *ResponsesStreamDecoder) terminalAnnouncedItemKey(outputIndex int, itemID string) (string, bool) {
+	key := reasoningItemKey(itemID, outputIndex)
+	if _, ok := d.itemBlockByKey[key]; ok {
+		return key, true
+	}
+	fallback, ok := d.keyByOutput[outputIndex]
+	if !ok {
+		return key, false
+	}
+	announcedID := d.itemIDByOutput[outputIndex]
+	if itemID != "" && announcedID != "" && announcedID != itemID {
+		return key, false
+	}
+	return fallback, true
+}
+
+// fillAnnouncedTerminal applies terminal text, refusal and reasoning payload
+// to blocks that were announced but never emitted bytes. The terminal document
+// is authoritative; skipping an announced channel merely because it was
+// announced would lose the whole answer. Returned emissions belong to blocks
+// that already closed.
+func (d *ResponsesStreamDecoder) fillAnnouncedTerminal(output []responsesWireItem) ([]terminalEmission, error) {
+	var pending []terminalEmission
+	for i, item := range output {
+		switch item.Type {
+		case "message":
+			parts, err := terminalMessageParts(item.Content)
+			if err != nil {
+				return nil, err
+			}
+			for _, part := range parts {
+				key := d.terminalPartKey(item.ID, i, part.contentIndex)
+				if !d.announcedParts[key] || d.payloadParts[key] {
+					continue
+				}
+				if idx, ok := d.partBlockByKey[key]; ok && d.open[idx] {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: part.delta})
+				} else {
+					pending = append(pending, terminalEmission{block: part.block, delta: part.delta})
+				}
+				d.payloadParts[key] = true
+			}
+		case "reasoning":
+			key, announced := d.terminalAnnouncedItemKey(i, item.ID)
+			if !announced {
+				// A terminal-only reasoning item is synthesized whole below.
+				continue
+			}
+			if summary := responsesSummaryText(item.Summary); summary != "" && !d.payloadSummary[key] {
+				if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: summary}})
+				} else {
+					pending = append(pending, terminalEmission{
+						block: reasoningTerminalBlock(item),
+						delta: &ir.Delta{Reasoning: summary},
+					})
+				}
+				d.payloadSummary[key] = true
+			}
+			parts, err := terminalMessageParts(item.Content)
+			if err != nil {
+				return nil, err
+			}
+			for _, part := range parts {
+				if part.block.Type != ir.BlockText {
+					continue
+				}
+				partKey := d.terminalPartKey(item.ID, i, part.contentIndex)
+				if d.payloadParts[partKey] {
+					continue
+				}
+				if d.announcedParts[partKey] {
+					if idx, ok := d.partBlockByKey[partKey]; ok && d.open[idx] {
+						d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.delta.Text}})
+					} else {
+						pending = append(pending, terminalEmission{
+							block: reasoningTerminalBlock(item),
+							delta: &ir.Delta{Reasoning: part.delta.Text},
+						})
+					}
+					d.payloadParts[partKey] = true
+					continue
+				}
+				// The item was announced but this content part was not; the
+				// terminal document is the only source for it.
+				admitted, err := d.announcePart(partKey)
+				if err != nil {
+					return nil, err
+				}
+				if admitted {
+					pending = append(pending, terminalEmission{
+						block: reasoningTerminalBlock(item),
+						delta: &ir.Delta{Reasoning: part.delta.Text},
+					})
+					d.payloadParts[partKey] = true
+				}
+			}
+		}
+	}
+	return pending, nil
+}
+
+// reasoningTerminalBlock builds the canonical reasoning block for a terminal
+// reasoning item.
+func reasoningTerminalBlock(item responsesWireItem) ir.Block {
+	return ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
+		ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
+	}}
 }
 
 // syntheticBlock emits a complete canonical block lifecycle for terminal-only
@@ -757,14 +1019,11 @@ func (d *ResponsesStreamDecoder) synthesizeReasoning(item responsesWireItem) err
 	if text.Len() == 0 && item.EncryptedContent == "" {
 		return nil
 	}
-	block := ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
-		ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
-	}}
 	var delta *ir.Delta
 	if text.Len() > 0 {
 		delta = &ir.Delta{Reasoning: text.String()}
 	}
-	d.syntheticBlock(block, delta)
+	d.syntheticBlock(reasoningTerminalBlock(item), delta)
 	return nil
 }
 
@@ -860,6 +1119,20 @@ func contentPartKey(itemID string, outputIndex, contentIndex int) string {
 		return "part:" + itemID + ":" + strconv.Itoa(contentIndex)
 	}
 	return "output:" + strconv.Itoa(outputIndex) + ":part:" + strconv.Itoa(contentIndex)
+}
+
+// responsesSummaryText joins the non-empty text parts of a Responses
+// reasoning summary. The value may arrive in output_item.added or in a
+// summary part event; both paths consume it once.
+func responsesSummaryText(parts []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}) string {
+	var b strings.Builder
+	for _, part := range parts {
+		b.WriteString(part.Text)
+	}
+	return b.String()
 }
 
 func (d *ResponsesStreamDecoder) announceOutput(outputIndex int) (bool, error) {
