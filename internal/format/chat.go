@@ -651,6 +651,12 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.Logprobs != nil {
 		out["logprobs"] = *req.Logprobs
+		if *req.Logprobs {
+			// The request side maps, but the canonical response does not retain
+			// provider logprob details, so the translated output cannot carry
+			// the item the client asked for.
+			req.Warnings.Add(ir.WarningApproximated, "logprobs", "translated responses do not carry logprob details")
+		}
 	}
 	if req.TopLogprobs != nil {
 		out["top_logprobs"] = *req.TopLogprobs

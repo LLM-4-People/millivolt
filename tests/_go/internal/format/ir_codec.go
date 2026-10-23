@@ -734,6 +734,36 @@ func TestAnthropicEffortMapping(t *testing.T) {
 	}
 }
 
+func TestResponsesIncludeLogprobs(t *testing.T) {
+	in := `{"model":"m","input":"hi","include":["message.output_text.logprobs"]}`
+	req, err := DecodeResponsesRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warningField(req.Warnings, "include") {
+		t.Fatalf("a mapped logprobs include was reported as dropped: %+v", req.Warnings)
+	}
+	out, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeJSONMap(t, out)["logprobs"]; got != true {
+		t.Fatalf("chat logprobs = %v, want true", got)
+	}
+	if !warningField(req.Warnings, "logprobs") {
+		t.Fatalf("missing response-side logprobs warning: %+v", req.Warnings)
+	}
+
+	in = `{"model":"m","input":"hi","include":["message.output_text.logprobs","reasoning.encrypted_content"]}`
+	req, err = DecodeResponsesRequest([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(req.Warnings, "include") {
+		t.Fatalf("an unmapped include was not reported: %+v", req.Warnings)
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {

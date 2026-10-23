@@ -117,7 +117,18 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		User:               in.User,
 	}
 	if len(in.Include) > 0 {
-		req.Warnings.Add(ir.WarningDropped, "include", "Responses include options have no cross-protocol equivalent")
+		otherInclude := false
+		for _, inc := range in.Include {
+			if inc == "message.output_text.logprobs" {
+				v := true
+				req.Logprobs = &v
+				continue
+			}
+			otherInclude = true
+		}
+		if otherInclude {
+			req.Warnings.Add(ir.WarningDropped, "include", "include options other than message.output_text.logprobs have no cross-protocol mapping")
+		}
 	}
 	if in.Reasoning != nil {
 		req.Reasoning = &ir.ReasoningConfig{Effort: in.Reasoning.Effort, Summary: in.Reasoning.Summary}
@@ -140,12 +151,6 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	}
 	if in.MaxToolCalls != nil {
 		req.Warnings.Add(ir.WarningDropped, "max_tool_calls", "no cross-protocol equivalent")
-	}
-	for _, inc := range in.Include {
-		if inc == "message.output_text.logprobs" {
-			v := true
-			req.Logprobs = &v
-		}
 	}
 	if len(in.Tools) > 0 {
 		tools, warns, err := decodeResponsesTools(in.Tools)
@@ -560,6 +565,10 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.Logprobs != nil && *req.Logprobs {
 		out["include"] = []string{"message.output_text.logprobs"}
+		// The request side maps, but the canonical response does not retain
+		// provider logprob details, so the translated output cannot carry the
+		// item the client asked for.
+		req.Warnings.Add(ir.WarningApproximated, "logprobs", "translated responses do not carry logprob details")
 	}
 	return sse.MarshalWireJSON(out)
 }

@@ -70,8 +70,10 @@ target cannot consume them:
 - `previous_response_id`, `item_reference`, `background`, `conversation`,
   `store: true` and prompt templates require provider-side state and are
   rejected when the target cannot honor them.
-- Responses `include` options and a non-string Chat metadata value have no
-  target equivalent and are dropped with a warning.
+- Responses `include` options other than `message.output_text.logprobs` and a
+  non-string Chat metadata value have no target equivalent and are dropped
+  with a warning. The logprobs include maps to the target's request field, but
+  translated responses do not carry provider logprob details.
 - A non-function tool type and malformed tool arguments are rejected before any
   upstream send.
 
