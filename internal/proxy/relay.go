@@ -640,6 +640,20 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					"translated response too large")
 				return
 			}
+			// A nil canonical response means the 200 body was a provider error
+			// envelope. A translated client would read a 200 as success and
+			// ignore the translated error object, so the status line carries
+			// the failure (the same 502 the non-streaming quality path uses
+			// for a failure surfaced from a 200).
+			clientStatus := resp.StatusCode
+			if respIR == nil {
+				clientStatus = http.StatusBadGateway
+				rec.StatusCode = clientStatus
+				if rec.ErrorType == "" {
+					rec.ErrorType = "upstream_error"
+					rec.ErrorMsg = "upstream returned an in-band error"
+				}
+			}
 			// The translated response owns completion shape and normalized
 			// usage. Custom cost paths still address the ORIGINAL document.
 			setWarningsHeader(w.Header(), warnings)
@@ -655,7 +669,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				rec.Cost = cost
 			}
 			copyResponseHeaders(w.Header(), resp.Header)
-			w.WriteHeader(resp.StatusCode)
+			w.WriteHeader(clientStatus)
 			if _, werr := w.Write(out); werr != nil {
 				markClientGone(rec)
 			} else {

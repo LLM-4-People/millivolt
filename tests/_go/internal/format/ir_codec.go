@@ -455,6 +455,51 @@ func TestAnthropicToResponsesRequestCodec(t *testing.T) {
 	}
 }
 
+// TestDecodeChatResponseErrorEnvelope pins how a Chat body's top-level error
+// key is classified: real object/string envelopes become a canonical error,
+// while a null or empty object is the decoy that must not mask a valid
+// completion (the same rules metrics.ParseErrorEnvelope owns for every wire).
+func TestDecodeChatResponseErrorEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+		typ     string
+		code    string
+	}{
+		{"object envelope", `{"error":{"message":"quota","type":"insufficient_quota","code":"insufficient_quota"}}`, true, "insufficient_quota", "insufficient_quota"},
+		{"code only", `{"error":{"message":"boom","code":"server_error"}}`, true, "provider_error", "server_error"},
+		{"string envelope", `{"error":"plain failure"}`, true, "provider_error", ""},
+		{"null decoy", `{"error":null,"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`, false, "", ""},
+		{"empty object decoy", `{"error":{},"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`, false, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := DecodeChatResponse([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantErr {
+				if resp.Error == nil {
+					t.Fatalf("missing canonical error: %+v", resp)
+				}
+				if resp.Error.Type != tc.typ || resp.Error.Code != tc.code {
+					t.Fatalf("error = %+v, want type %q code %q", resp.Error, tc.typ, tc.code)
+				}
+				if resp.Finish != ir.FinishError {
+					t.Fatalf("finish = %q, want error", resp.Finish)
+				}
+				return
+			}
+			if resp.Error != nil {
+				t.Fatalf("decoy produced an error: %+v", resp.Error)
+			}
+			if resp.Finish != ir.FinishStop || len(resp.Blocks) != 1 {
+				t.Fatalf("decoy completion = %+v", resp)
+			}
+		})
+	}
+}
+
 func TestCodecRejectsStatefulReplay(t *testing.T) {
 	in := `{"model":"gpt","input":"hi","previous_response_id":"resp_1"}`
 	req, err := DecodeResponsesRequest([]byte(in))

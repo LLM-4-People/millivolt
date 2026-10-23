@@ -992,6 +992,21 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse chat response: %w", err)
 	}
+	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
+		// A gateway can return an error envelope on HTTP 200. ParseErrorEnvelope
+		// owns the shared decoy/null and string/object rules, so the canonical
+		// response carries the provider's real failure instead of a generic
+		// decode error from the missing choices.
+		resp := &ir.Response{
+			ID: in.ID, Model: in.Model, Created: in.Created,
+			Error:  &ir.Error{Type: typ, Code: code, Message: msg},
+			Finish: ir.FinishError,
+		}
+		if in.Usage != nil {
+			resp.Usage = decodeChatUsage(in.Usage)
+		}
+		return resp, nil
+	}
 	if len(in.Choices) == 0 {
 		return nil, errors.New("chat response has no choices")
 	}

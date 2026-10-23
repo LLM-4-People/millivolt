@@ -852,3 +852,68 @@ func TestPreCommitErrorsUseTheClientProtocol(t *testing.T) {
 		}
 	})
 }
+
+// TestTranslatedInBandErrorIsAFailure pins the client status for a provider
+// error envelope that arrived on HTTP 200 and had to be translated: the
+// client-facing status becomes 502, and the error body keeps the provider's
+// type and message in the client protocol. A byte-transparent response keeps
+// the historical 200 (metrics.go pins that separately).
+func TestTranslatedInBandErrorIsAFailure(t *testing.T) {
+	t.Run("chat upstream to anthropic client", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200,
+			`{"error":{"message":"quota exhausted","type":"insufficient_quota","code":"insufficient_quota"}}`)
+		buf := metrics.NewBuffer(8)
+		s := New(config.Default(), buf)
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+		body := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+		w := proxyRequest(t, s, "/v1/messages", "openai", body)
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
+		}
+		var doc struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("decode body %q: %v", w.Body.String(), err)
+		}
+		if doc.Type != "error" || doc.Error.Type != "billing_error" || doc.Error.Message != "quota exhausted" {
+			t.Fatalf("error envelope = %+v (body %s)", doc, w.Body.String())
+		}
+		recs := waitForRecord(t, buf, 1)
+		if len(recs) != 1 || recs[0].StatusCode != http.StatusBadGateway || recs[0].ErrorType != "insufficient_quota" {
+			t.Fatalf("record = %+v", recs)
+		}
+	})
+
+	t.Run("responses upstream to chat client", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200,
+			`{"id":"resp_1","object":"response","status":"failed","error":{"code":"server_error","message":"boom"}}`)
+		s := New(config.Default(), metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+		body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+		w := proxyRequest(t, s, "/v1/chat/completions", "openai-responses", body)
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
+		}
+		var doc struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("decode body %q: %v", w.Body.String(), err)
+		}
+		// The Responses error object carries only a code, so the canonical type
+		// has no source spelling and the OpenAI envelope uses api_error while
+		// preserving the code.
+		if doc.Error.Type != "api_error" || doc.Error.Message != "boom" || doc.Error.Code != "server_error" {
+			t.Fatalf("error envelope = %+v (body %s)", doc, w.Body.String())
+		}
+	})
+}

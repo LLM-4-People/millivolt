@@ -83,6 +83,12 @@ in `X-Proxy-Warnings`, while a streaming response cannot add a header after the
 status line is committed. The field is described under
 [settings](operations.md#finding-a-setting).
 
+A provider error envelope that arrives inside HTTP 200 is translated too, but
+the client status becomes 502: a translated client would read 200 as a
+successful completion. Pre-commit failures (routing, request validation,
+translation, or an oversized translated body) answer in the client protocol's
+own error envelope.
+
 Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and
 closes it before `message_delta`; Responses emits `response.created`, per-item
