@@ -94,7 +94,8 @@ as a clamped temperature, a moved system message, a generated tool-call id or
 a `json_object` response format, not only a field the target cannot represent
 at all. The header is proxy-owned: a provider response header of the same name
 is never forwarded. Its whole value is bounded at 1024 bytes; an over-cap list
-is cut at a field boundary and ends with `; truncated`. Response-side warnings
+is cut at the byte budget, possibly inside the final field, and ends with
+`; truncated`. Response-side warnings
 are never fatal; a non-streaming response reports them in `X-Proxy-Warnings`,
 while a streaming response cannot add a header after the status line is
 committed and drops them. The field is described under

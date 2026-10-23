@@ -342,8 +342,9 @@ func setWarningsHeader(h http.Header, warnings ir.Warnings) {
 		add = prev + "; " + add
 	}
 	if len(add) > warningsHeaderMax {
-		// Keep the value valid UTF-8 and leave room for the marker: a field
-		// boundary is more useful than a cut mid-rune.
+		// Keep the value valid UTF-8 and leave room for the marker. The cut
+		// may land inside the final field; the marker, not a field boundary,
+		// is the contract.
 		cut := warningsHeaderMax - len("; truncated")
 		if cut < 0 {
 			cut = 0
