@@ -124,6 +124,16 @@ type ResponsesStreamDecoder struct {
 	// an identical or shorter value is never re-emitted. Keyed by the part
 	// identity (and summary index), never by wire position.
 	emittedText map[string]string
+	// partOwner maps a content or summary part key to the logical item it
+	// belongs to, and partKind maps a content part key to its target channel.
+	// Terminal reconciliation compares the whole emitted channel with the
+	// whole terminal channel, so a provider that merges or splits parts cannot
+	// duplicate streamed bytes.
+	partOwner map[string]string
+	partKind  map[string]partChannel
+	// warnings records streaming approximations that cannot be represented on
+	// the committed target wire.
+	warnings ir.Warnings
 	// terminalPending holds authoritative done-event values whose target block
 	// already ended or was never opened. They are emitted after every streamed
 	// block closes (closeAll), so target lifecycles never nest.
@@ -154,6 +164,8 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		partSeed:         map[string]ir.Block{},
 		partPosition:     map[string][2]int{},
 		emittedText:      map[string]string{},
+		partOwner:        map[string]string{},
+		partKind:         map[string]partChannel{},
 		open:             map[int]bool{},
 	}
 }
@@ -303,8 +315,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					if part.Text == "" {
 						continue
 					}
+					partKey := summaryPartKey(key, summaryIndex)
+					d.partOwner[partKey] = key
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
-					d.emittedText[summaryPartKey(key, summaryIndex)] = part.Text
+					d.emittedText[partKey] = part.Text
 				}
 			case "message":
 				// Content parts arrive in response.content_part.added. The
@@ -359,6 +373,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.keyByPart[pos] = key
 			d.partPosition[key] = pos
 			d.itemIDByOutput[ev.OutputIndex] = itemID
+			d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+			d.partKind[key] = partChannelForBlock(block.Type)
 			start := ""
 			switch block.Type {
 			case ir.BlockText:
@@ -435,6 +451,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 			}
+			if _, owned := d.partOwner[key]; !owned {
+				d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+			}
+			if _, kind := d.partKind[key]; !kind {
+				d.partKind[key] = partChannelForBlock(block.Type)
+			}
 			if idx, ok := d.startPartBlock(key); ok {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
 			} else {
@@ -458,6 +480,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			key := d.keyByOutput[ev.OutputIndex]
 			if ev.Delta != "" && key != "" {
 				partKey := summaryPartKey(key, ev.SummaryIndex)
+				d.partOwner[partKey] = key
 				emit, coverage := pendingDeltaSuffix(d.emittedText[partKey], ev.Delta)
 				d.emittedText[partKey] = coverage
 				if emit != "" {
@@ -479,6 +502,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
+			d.partOwner[partKey] = key
 			emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
 			if emit == "" {
 				continue
@@ -494,6 +518,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
+			d.partOwner[partKey] = key
 			emit := pendingValueSuffix(d.emittedText[partKey], ev.Text)
 			if emit == "" {
 				continue
@@ -542,6 +567,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if !admitted {
 					continue
 				}
+			}
+			if _, owned := d.partOwner[key]; !owned {
+				d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+			}
+			if _, kind := d.partKind[key]; !kind {
+				d.partKind[key] = partChannelReasoning
 			}
 			emit := pendingValueSuffix(d.emittedText[key], ev.Text)
 			if emit == "" {
@@ -753,6 +784,270 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	return nil
 }
 
+// partChannel is one independently concatenated content channel of an item.
+// Terminal reconciliation never compares text bytes with refusal or reasoning
+// bytes, and reasoning summary parts form their own channel.
+type partChannel uint8
+
+const (
+	partChannelText partChannel = iota
+	partChannelRefusal
+	partChannelReasoning
+)
+
+func partChannelForBlock(t ir.BlockType) partChannel {
+	switch t {
+	case ir.BlockRefusal:
+		return partChannelRefusal
+	case ir.BlockReasoning:
+		return partChannelReasoning
+	}
+	return partChannelText
+}
+
+// channelPart is one part of a concatenated channel. key is the target part
+// identity (content part key or summary part key), index is its source order,
+// and order is its terminal-document position.
+type channelPart struct {
+	key     string
+	index   int
+	value   string
+	channel partChannel
+	block   ir.Block
+	order   int
+}
+
+// channelReconciliation is the terminal channel tail that still has to be
+// emitted. approximated reports that the terminal partition or text differs
+// from what was streamed, so the target wire is a best-effort representation.
+type channelReconciliation struct {
+	emit         []channelPart
+	approximated bool
+}
+
+// reconcileChannel compares the concatenated bytes already emitted for one
+// channel with the concatenated terminal bytes. A terminal document that only
+// re-partitions the same text contributes nothing; a longer terminal
+// contributes only the missing tail once, preserving the terminal partition
+// for the new bytes. A shorter or diverged terminal never repeats a visible
+// prefix; only a strict continuation of the same part or a genuinely new part
+// contributes bytes, and the mismatch is recorded as an approximation.
+func reconcileChannel(emitted, terminal []channelPart) channelReconciliation {
+	var res channelReconciliation
+	if len(terminal) == 0 {
+		return res
+	}
+	var emittedBuilder, terminalBuilder strings.Builder
+	for _, part := range emitted {
+		emittedBuilder.WriteString(part.value)
+	}
+	for _, part := range terminal {
+		terminalBuilder.WriteString(part.value)
+	}
+	emittedTotal, terminalTotal := emittedBuilder.String(), terminalBuilder.String()
+	if emittedTotal == terminalTotal {
+		return res
+	}
+	if strings.HasPrefix(terminalTotal, emittedTotal) {
+		covered := len(emittedTotal)
+		offset := 0
+		for _, part := range terminal {
+			start := offset
+			offset += len(part.value)
+			if offset <= covered {
+				continue
+			}
+			if start < covered {
+				part.value = part.value[covered-start:]
+			}
+			if part.value != "" {
+				res.emit = append(res.emit, part)
+			}
+		}
+		return res
+	}
+	res.approximated = true
+	// A partition-only difference in whitespace is already represented by the
+	// streamed words; emitting the terminal form would repeat them.
+	if strings.Join(strings.Fields(emittedTotal), "") == strings.Join(strings.Fields(terminalTotal), "") {
+		return res
+	}
+	emittedByIndex := make(map[int]string, len(emitted))
+	for _, part := range emitted {
+		emittedByIndex[part.index] = part.value
+	}
+	for _, part := range terminal {
+		if part.value == "" {
+			continue
+		}
+		if emittedValue, ok := emittedByIndex[part.index]; ok {
+			// Only a strict continuation of the same streamed part is a
+			// genuinely new tail. A shorter, reordered or diverged value is
+			// not representable without repeating visible bytes.
+			if strings.HasPrefix(part.value, emittedValue) {
+				suffix := part.value[len(emittedValue):]
+				if suffix != "" && !strings.Contains(emittedTotal, suffix) {
+					part.value = suffix
+					res.emit = append(res.emit, part)
+				}
+			}
+			continue
+		}
+		if strings.Contains(emittedTotal, part.value) {
+			continue
+		}
+		res.emit = append(res.emit, part)
+	}
+	return res
+}
+
+// partKeyIndex parses the trailing integer identity from a content or summary
+// part key. The key owner appends it last, so an item id containing colons is
+// harmless.
+func partKeyIndex(key string) (int, bool) {
+	i := strings.LastIndexByte(key, ':')
+	if i < 0 || i == len(key)-1 {
+		return 0, false
+	}
+	index, err := strconv.Atoi(key[i+1:])
+	if err != nil || index < 0 {
+		return 0, false
+	}
+	return index, true
+}
+
+// emittedContentParts returns the non-empty streamed bytes for one item and
+// content channel, ordered by the part index the client saw.
+func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel partChannel) []channelPart {
+	var out []channelPart
+	for key, value := range d.emittedText {
+		if value == "" || d.partOwner[key] != itemKey || d.partKind[key] != channel {
+			continue
+		}
+		index, ok := partKeyIndex(key)
+		if !ok {
+			continue
+		}
+		out = append(out, channelPart{key: key, index: index, value: value, channel: channel, block: d.partSeed[key]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].index != out[j].index {
+			return out[i].index < out[j].index
+		}
+		return out[i].key < out[j].key
+	})
+	return out
+}
+
+// emittedSummaryParts returns the non-empty streamed summary bytes for one
+// reasoning item, ordered by summary index.
+func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
+	prefix := "summary:" + itemKey + ":"
+	var out []channelPart
+	for key, value := range d.emittedText {
+		if value == "" || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		index, ok := partKeyIndex(key)
+		if !ok {
+			continue
+		}
+		out = append(out, channelPart{key: key, index: index, value: value, channel: partChannelReasoning})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].index < out[j].index })
+	return out
+}
+
+// hasEmittedParts reports whether any part of an item already reached the
+// target wire. A terminal item that was announced with only empty parts still
+// needs the announced identity, so this only gates the aggregate owner key.
+func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
+	for key := range d.emittedText {
+		if d.partOwner[key] == itemKey {
+			return true
+		}
+	}
+	return false
+}
+
+// terminalContentItemKey resolves the aggregate item identity of a terminal
+// content item. The item id is stable across renumbering; when one side has no
+// id, the announced output position identifies the same logical item.
+func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int) string {
+	primary := streamItemKey(itemID, outputIndex)
+	if d.hasEmittedParts(primary) {
+		return primary
+	}
+	announcedID := d.itemIDByOutput[outputIndex]
+	if itemID == "" || announcedID == "" || announcedID == itemID {
+		positional := streamItemKey(announcedID, outputIndex)
+		if d.hasEmittedParts(positional) {
+			return positional
+		}
+	}
+	return primary
+}
+
+// warnApproximated records one streaming approximation per field. The decoder
+// runs before the target status line is committed for non-streaming bodies,
+// but a streamed status is already sent, so this is decoder-owned diagnostic
+// state rather than a header.
+func (d *ResponsesStreamDecoder) warnApproximated(field, detail string) {
+	for _, warning := range d.warnings {
+		if warning.Field == field && warning.Detail == detail {
+			return
+		}
+	}
+	d.warnings.Add(ir.WarningApproximated, field, detail)
+}
+
+func (d *ResponsesStreamDecoder) reconcileChannel(field string, emitted, terminal []channelPart) channelReconciliation {
+	res := reconcileChannel(emitted, terminal)
+	if res.approximated {
+		d.warnApproximated(field, "terminal partition differs from the streamed parts; emitted only non-overlapping bytes")
+	}
+	return res
+}
+
+func contentChannelDelta(channel partChannel, value string) *ir.Delta {
+	if channel == partChannelReasoning {
+		return &ir.Delta{Reasoning: value}
+	}
+	return &ir.Delta{Text: value}
+}
+
+// appendContentValue emits one reconciled content tail. It prefers the open
+// block the client already has. A part that never reached the target wire,
+// including a deferred announcement, is queued so it starts after every
+// streamed block has closed; starting it here would fix its position ahead of
+// an earlier terminal-only part.
+func (d *ResponsesStreamDecoder) appendContentValue(part channelPart, pending *[]terminalEmission) {
+	if part.value == "" {
+		return
+	}
+	if idx, ok := d.partBlockByKey[part.key]; ok && d.open[idx] {
+		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: contentChannelDelta(part.channel, part.value)})
+		return
+	}
+	*pending = append(*pending, terminalEmission{
+		block: part.block,
+		delta: contentChannelDelta(part.channel, part.value),
+	})
+}
+
+// appendReasoningValue emits one reconciled summary or reasoning-content tail
+// on the open item block, or queues a fresh reasoning block after it closes.
+func (d *ResponsesStreamDecoder) appendReasoningValue(item responsesWireItem, itemKey, value string, pending *[]terminalEmission) {
+	if value == "" {
+		return
+	}
+	if idx, ok := d.itemBlockByKey[itemKey]; ok && d.open[idx] {
+		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: value}})
+		return
+	}
+	*pending = append(*pending, terminalEmission{block: reasoningTerminalBlock(item), delta: &ir.Delta{Reasoning: value}})
+}
+
 // collectTerminalOutput walks the terminal document in its own order. It
 // fills announced blocks that are still open, queues every block that must
 // start fresh (unannounced parts/items and deferred empty announcements), and
@@ -804,31 +1099,48 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			if err != nil {
 				return nil, err
 			}
-			for _, part := range parts {
-				key := d.terminalPartKey(item.ID, i, part.contentIndex)
-				value := part.delta.Text
-				if !d.announcedParts[key] {
-					admitted, err := d.announcePart(key)
+			itemKey := d.terminalContentItemKey(item.ID, i)
+			var channels []partChannel
+			grouped := map[partChannel][]channelPart{}
+			for order, part := range parts {
+				channel := partChannelForBlock(part.block.Type)
+				if _, ok := grouped[channel]; !ok {
+					channels = append(channels, channel)
+				}
+				grouped[channel] = append(grouped[channel], channelPart{
+					key:     d.terminalPartKey(item.ID, i, part.contentIndex),
+					index:   part.contentIndex,
+					value:   part.delta.Text,
+					channel: channel,
+					block:   part.block,
+					order:   order,
+				})
+			}
+			var emit []channelPart
+			for _, channel := range channels {
+				rec := d.reconcileChannel("content_partition", d.emittedContentParts(itemKey, channel), grouped[channel])
+				emit = append(emit, rec.emit...)
+			}
+			sort.SliceStable(emit, func(a, b int) bool { return emit[a].order < emit[b].order })
+			for _, part := range emit {
+				if !d.announcedParts[part.key] {
+					admitted, err := d.announcePart(part.key)
 					if err != nil {
 						return nil, err
 					}
 					if !admitted {
 						continue
 					}
-					pending = append(pending, terminalEmission{block: part.block, delta: &ir.Delta{Text: value}})
-					d.emittedText[key] = value
-					continue
 				}
-				emit := pendingValueSuffix(d.emittedText[key], value)
-				if emit == "" {
-					continue
+				if _, owned := d.partOwner[part.key]; !owned {
+					d.partOwner[part.key] = itemKey
 				}
-				if idx, ok := d.partBlockByKey[key]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
-				} else {
-					pending = append(pending, terminalEmission{block: part.block, delta: &ir.Delta{Text: emit}})
+				if _, kind := d.partKind[part.key]; !kind {
+					d.partKind[part.key] = part.channel
 				}
-				d.emittedText[key] = value
+				before := d.emittedText[part.key]
+				d.appendContentValue(part, &pending)
+				d.emittedText[part.key] = before + part.value
 			}
 		case "reasoning":
 			key, announced := d.terminalAnnouncedItemKey(i, item.ID)
@@ -849,63 +1161,66 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 				continue
 			}
-			for summaryIndex, part := range item.Summary {
-				if part.Text == "" {
+			// Summary parts are one concatenated reasoning channel; content
+			// parts are another. Reconcile each as a whole before emitting so
+			// a terminal re-partition cannot repeat streamed bytes.
+			var summaryTerminal []channelPart
+			for summaryIndex, summary := range item.Summary {
+				if summary.Text == "" {
 					continue
 				}
-				partKey := summaryPartKey(key, summaryIndex)
-				emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
-				if emit == "" {
-					continue
-				}
-				if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-				} else {
-					pending = append(pending, terminalEmission{
-						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: emit},
-					})
-				}
-				d.emittedText[partKey] = part.Text
+				summaryTerminal = append(summaryTerminal, channelPart{
+					key:     summaryPartKey(key, summaryIndex),
+					index:   summaryIndex,
+					value:   summary.Text,
+					channel: partChannelReasoning,
+					order:   summaryIndex,
+				})
+			}
+			summaryRec := d.reconcileChannel("summary_partition", d.emittedSummaryParts(key), summaryTerminal)
+			for _, part := range summaryRec.emit {
+				before := d.emittedText[part.key]
+				d.appendReasoningValue(item, key, part.value, &pending)
+				d.emittedText[part.key] = before + part.value
 			}
 			parts, err := terminalMessageParts(item.Content)
 			if err != nil {
 				return nil, err
 			}
-			for _, part := range parts {
+			var contentTerminal []channelPart
+			for order, part := range parts {
 				if part.block.Type != ir.BlockText {
 					continue
 				}
-				partKey := d.terminalPartKey(item.ID, i, part.contentIndex)
-				value := part.delta.Text
-				if !d.announcedParts[partKey] {
-					admitted, err := d.announcePart(partKey)
+				contentTerminal = append(contentTerminal, channelPart{
+					key:     d.terminalPartKey(item.ID, i, part.contentIndex),
+					index:   part.contentIndex,
+					value:   part.delta.Text,
+					channel: partChannelReasoning,
+					block:   reasoningTerminalBlock(item),
+					order:   order,
+				})
+			}
+			contentRec := d.reconcileChannel("reasoning_content_partition", d.emittedContentParts(key, partChannelReasoning), contentTerminal)
+			for _, part := range contentRec.emit {
+				if !d.announcedParts[part.key] {
+					admitted, err := d.announcePart(part.key)
 					if err != nil {
 						return nil, err
 					}
 					if !admitted {
 						continue
 					}
-					pending = append(pending, terminalEmission{
-						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: value},
-					})
-					d.emittedText[partKey] = value
-					continue
 				}
-				emit := pendingValueSuffix(d.emittedText[partKey], value)
-				if emit == "" {
-					continue
+				if _, owned := d.partOwner[part.key]; !owned {
+					d.partOwner[part.key] = key
 				}
-				if idx, ok := d.partBlockByKey[partKey]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-				} else {
-					pending = append(pending, terminalEmission{
-						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: emit},
-					})
+				if _, kind := d.partKind[part.key]; !kind {
+					d.partKind[part.key] = partChannelReasoning
 				}
-				d.emittedText[partKey] = value
+				before := d.emittedText[part.key]
+				d.appendContentValue(part, &pending)
+				d.emittedText[part.key] = before + part.value
 			}
 		}
 	}
@@ -1210,11 +1525,18 @@ func functionCallKey(callID, itemID string, outputIndex int) string {
 	}
 }
 
-func reasoningItemKey(itemID string, outputIndex int) string {
+// streamItemKey identifies one logical item across its announcement and the
+// terminal document. Item ids are stable across renumbering; the output
+// position is the fallback only when no id was supplied.
+func streamItemKey(itemID string, outputIndex int) string {
 	if itemID != "" {
 		return "item:" + itemID
 	}
 	return "output:" + strconv.Itoa(outputIndex)
+}
+
+func reasoningItemKey(itemID string, outputIndex int) string {
+	return streamItemKey(itemID, outputIndex)
 }
 
 func messageItemKey(itemID string, outputIndex int) string {
@@ -1330,6 +1652,13 @@ func (d *ResponsesStreamDecoder) announcePart(key string) (bool, error) {
 func (d *ResponsesStreamDecoder) FlushBlocks() []*ir.Event {
 	_ = d.closeAll(nil)
 	return drainQueue(&d.q)
+}
+
+// Warnings returns the streaming approximations recorded so far. A streamed
+// response cannot add X-Proxy-Warnings after its status line is committed, so
+// this is decoder diagnostic state rather than a client header.
+func (d *ResponsesStreamDecoder) Warnings() ir.Warnings {
+	return append(ir.Warnings(nil), d.warnings...)
 }
 
 func (d *ResponsesStreamDecoder) newBlock() int {
