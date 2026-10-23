@@ -64,6 +64,20 @@ type responsesWireTool struct {
 	Strict      *bool           `json:"strict"`
 }
 
+// responsesWireAnnotation is one output_text annotation. The flat url shape
+// is also the source field set for a Chat url_citation, so both decoders
+// share the same IR mapping.
+type responsesWireAnnotation struct {
+	Type       string `json:"type"`
+	URL        string `json:"url"`
+	Title      string `json:"title"`
+	StartIndex int    `json:"start_index"`
+	EndIndex   int    `json:"end_index"`
+	FileID     string `json:"file_id"`
+	Filename   string `json:"filename"`
+	Index      int    `json:"index"`
+}
+
 type responsesWireItem struct {
 	Type    string          `json:"type"`
 	Role    string          `json:"role"`
@@ -315,16 +329,18 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 				ID: item.ID, Summary: summary, Encrypted: item.EncryptedContent, Provider: ir.Responses,
 			}
 			if len(item.Content) > 0 {
-				blocks, _, err := decodeResponsesContent(item.Content, ir.RoleAssistant)
-				if err == nil {
-					var b strings.Builder
-					for _, block := range blocks {
-						if block.Type == ir.BlockText {
-							b.WriteString(block.Text)
-						}
-					}
-					reasoning.Text = b.String()
+				blocks, w, err := decodeResponsesContent(item.Content, ir.RoleAssistant)
+				if err != nil {
+					return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
 				}
+				warns = append(warns, w...)
+				var b strings.Builder
+				for _, block := range blocks {
+					if block.Type == ir.BlockText {
+						b.WriteString(block.Text)
+					}
+				}
+				reasoning.Text = b.String()
 			}
 			appendAssistant(ir.Block{Type: ir.BlockReasoning, Reasoning: reasoning})
 		case "item_reference":
@@ -372,6 +388,7 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 			Data   string `json:"data"`
 			Format string `json:"format"`
 		} `json:"input_audio"`
+		Annotations []responsesWireAnnotation `json:"annotations"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, nil, err
@@ -382,8 +399,12 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 	)
 	for _, p := range parts {
 		switch p.Type {
-		case "input_text", "output_text", "text":
-			out = append(out, ir.TextBlock(p.Text))
+		case "input_text", "output_text", "text", "reasoning_text":
+			block := ir.TextBlock(p.Text)
+			citations, w := decodeResponsesAnnotations(p.Annotations)
+			block.Citations = citations
+			warns = append(warns, w...)
+			out = append(out, block)
 		case "refusal":
 			out = append(out, ir.Block{Type: ir.BlockRefusal, Refusal: p.Refusal})
 		case "input_image":
@@ -409,6 +430,34 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 	}
 	_ = role
 	return out, warns, nil
+}
+
+// decodeResponsesAnnotations maps the annotation shapes the IR can represent.
+// A url_citation becomes a citation on its text block; a type whose source
+// identity cannot be carried is reported rather than silently discarded.
+func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir.Warnings) {
+	var (
+		out   []ir.Citation
+		warns ir.Warnings
+	)
+	for _, a := range in {
+		switch a.Type {
+		case "url_citation":
+			if a.URL == "" {
+				warns.Add(ir.WarningDropped, "annotations.url_citation", "url_citation has no url")
+				continue
+			}
+			out = append(out, ir.Citation{
+				Type: "url_citation", URL: a.URL, Title: a.Title,
+				StartIndex: a.StartIndex, EndIndex: a.EndIndex,
+			})
+		case "":
+			warns.Add(ir.WarningDropped, "annotations", "annotation has no type")
+		default:
+			warns.Add(ir.WarningDropped, "annotations."+a.Type, "annotation has no cross-protocol equivalent")
+		}
+	}
+	return out, warns
 }
 
 func decodeResponsesFunctionCall(item responsesWireItem) (*ir.ToolCall, ir.Warnings, error) {
@@ -835,6 +884,9 @@ func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]an
 	if r == nil {
 		return map[string]any{"type": "reasoning", "summary": []any{}}
 	}
+	if r.Signature != "" && warns != nil {
+		warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning signature cannot be replayed on Responses")
+	}
 	summary := make([]map[string]any, 0, len(r.Summary)+1)
 	for _, s := range r.Summary {
 		summary = append(summary, map[string]any{"type": "summary_text", "text": s})
@@ -1089,8 +1141,22 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 					summary = append(summary, s.Text)
 				}
 			}
+			var reasoningText strings.Builder
+			if len(item.Content) > 0 {
+				blocks, warns, err := decodeResponsesContent(item.Content, ir.RoleAssistant)
+				if err != nil {
+					return nil, fmt.Errorf("responses output item %d: %w", i, err)
+				}
+				resp.Warnings = append(resp.Warnings, warns...)
+				for _, block := range blocks {
+					if block.Type == ir.BlockText {
+						reasoningText.WriteString(block.Text)
+					}
+				}
+			}
 			resp.Blocks = append(resp.Blocks, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
-				ID: item.ID, Summary: summary, Encrypted: item.EncryptedContent, Provider: ir.Responses,
+				ID: item.ID, Text: reasoningText.String(), Summary: summary,
+				Encrypted: item.EncryptedContent, Provider: ir.Responses,
 			}})
 		default:
 			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
@@ -1214,6 +1280,9 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	if resp.Usage != (ir.Usage{}) {
 		out["usage"] = encodeResponsesUsage(resp.Usage)
 	}
+	if resp.StopSequence != "" {
+		resp.Warnings.Add(ir.WarningDropped, "stop_sequence", "Responses has no matched stop sequence")
+	}
 	return sse.MarshalWireJSON(out)
 }
 
@@ -1233,9 +1302,6 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
 			warns.Add(ir.WarningDropped, "cache_control", "Responses output has no cache breakpoints")
-		}
-		if len(b.Citations) > 0 && warns != nil {
-			warns.Add(ir.WarningDropped, "citations", "Responses output has no citation mapping")
 		}
 		switch b.Type {
 		case ir.BlockText, ir.BlockRefusal:
@@ -1258,15 +1324,43 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 	return out
 }
 
+// responsesAnnotations maps the citations an output_text part can carry. The
+// Responses url_citation spelling is flat, unlike Chat's wrapper. A citation
+// with no URL (for example an Anthropic character location) cannot be
+// represented and is reported.
+func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[string]any {
+	var out []map[string]any
+	for _, c := range citations {
+		if c.URL == "" {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "citations", "citation type has no Responses annotation equivalent")
+			}
+			continue
+		}
+		out = append(out, map[string]any{
+			"type": "url_citation", "url": c.URL, "title": c.Title,
+			"start_index": c.StartIndex, "end_index": c.EndIndex,
+		})
+	}
+	return out
+}
+
 func encodeResponsesOutputContent(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Type {
 		case ir.BlockText:
-			out = append(out, map[string]any{
+			part := map[string]any{
 				"type": "output_text", "text": b.Text, "annotations": []any{}, "logprobs": []any{},
-			})
+			}
+			if annotations := responsesAnnotations(b.Citations, warns); len(annotations) > 0 {
+				part["annotations"] = annotations
+			}
+			out = append(out, part)
 		case ir.BlockRefusal:
+			if len(b.Citations) > 0 && warns != nil {
+				warns.Add(ir.WarningDropped, "citations", "refusal parts have no citation mapping")
+			}
 			out = append(out, map[string]any{"type": "refusal", "refusal": b.Refusal})
 		}
 	}

@@ -750,6 +750,31 @@ func mergeAnthropicContent(prev, next any) any {
 	return append(toBlocks(prev), toBlocks(next)...)
 }
 
+// isAnthropicCitation reports whether a citation carries a shape Anthropic's
+// text block accepts. Chat and Responses annotations are url_citation only.
+func isAnthropicCitation(c ir.Citation) bool {
+	switch c.Type {
+	case "char_location", "page_location", "content_block_location",
+		"web_search_result_location", "search_result_location":
+		return true
+	}
+	return false
+}
+
+func anthropicCitations(in []ir.Citation, warns *ir.Warnings) []ir.Citation {
+	var out []ir.Citation
+	for _, c := range in {
+		if !isAnthropicCitation(c) {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "citations", "citation type has no Anthropic equivalent")
+			}
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) []map[string]any {
 	// Tool results must come first in a user turn.
 	var results, rest []ir.Block
@@ -770,7 +795,9 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 				block["cache_control"] = b.CacheControl
 			}
 			if len(b.Citations) > 0 {
-				block["citations"] = b.Citations
+				if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
+					block["citations"] = citations
+				}
 			}
 			out = append(out, block)
 		case ir.BlockImage:
@@ -839,8 +866,12 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning was emitted as visible text")
 				}
 				out = append(out, map[string]any{"type": "text", "text": b.Reasoning.Text})
-			} else if warns != nil && b.Reasoning.Encrypted != "" {
-				warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
+			} else if b.Reasoning.Encrypted != "" {
+				if warns != nil {
+					warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
+				}
+			} else if warns != nil {
+				warns.Add(ir.WarningDropped, "reasoning", "reasoning block has no representable content")
 			}
 		case ir.BlockRedactedReasoning:
 			if b.Reasoning.Provider == ir.Anthropic && b.Reasoning.Encrypted != "" {
@@ -952,6 +983,9 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 	for _, b := range blocks {
 		switch b.Type {
 		case ir.BlockText:
+			if len(b.Citations) > 0 && warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result.citations", "Anthropic tool-result text blocks have no citations")
+			}
 			out = append(out, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
 			if source := encodeAnthropicImage(b.Image, warns); source != nil {

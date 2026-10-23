@@ -63,15 +63,28 @@ type chatWireRequest struct {
 }
 
 type chatWireMessage struct {
-	Role             string             `json:"role"`
-	Content          json.RawMessage    `json:"content"`
-	Name             string             `json:"name"`
-	ToolCalls        []chatWireToolCall `json:"tool_calls"`
-	ToolCallID       string             `json:"tool_call_id"`
-	Refusal          *string            `json:"refusal"`
-	FunctionCall     json.RawMessage    `json:"function_call"`
-	ReasoningContent string             `json:"reasoning_content"`
-	Reasoning        string             `json:"reasoning"`
+	Role             string               `json:"role"`
+	Content          json.RawMessage      `json:"content"`
+	Name             string               `json:"name"`
+	ToolCalls        []chatWireToolCall   `json:"tool_calls"`
+	ToolCallID       string               `json:"tool_call_id"`
+	Refusal          *string              `json:"refusal"`
+	FunctionCall     json.RawMessage      `json:"function_call"`
+	ReasoningContent string               `json:"reasoning_content"`
+	Reasoning        string               `json:"reasoning"`
+	Annotations      []chatWireAnnotation `json:"annotations"`
+}
+
+// chatWireAnnotation is the Chat message-level url_citation wrapper. Responses
+// spells the same fields flat on the output_text part.
+type chatWireAnnotation struct {
+	Type        string `json:"type"`
+	URLCitation *struct {
+		URL        string `json:"url"`
+		Title      string `json:"title"`
+		StartIndex int    `json:"start_index"`
+		EndIndex   int    `json:"end_index"`
+	} `json:"url_citation"`
 }
 
 // chatLegacyFunction is one deprecated Chat "functions" entry: the function
@@ -678,6 +691,34 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 	return out, warns, nil
 }
 
+// decodeChatAnnotations maps the message-level URL citation wrapper onto the
+// IR citation fields. Other annotation types have no IR representation.
+func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings) {
+	var (
+		out   []ir.Citation
+		warns ir.Warnings
+	)
+	for _, a := range in {
+		if a.Type != "url_citation" || a.URLCitation == nil {
+			field := "annotations"
+			if a.Type != "" {
+				field += "." + a.Type
+			}
+			warns.Add(ir.WarningDropped, field, "annotation has no cross-protocol equivalent")
+			continue
+		}
+		if a.URLCitation.URL == "" {
+			warns.Add(ir.WarningDropped, "annotations.url_citation", "url_citation has no url")
+			continue
+		}
+		out = append(out, ir.Citation{
+			Type: "url_citation", URL: a.URLCitation.URL, Title: a.URLCitation.Title,
+			StartIndex: a.URLCitation.StartIndex, EndIndex: a.URLCitation.EndIndex,
+		})
+	}
+	return out, warns
+}
+
 func decodeChatImage(raw json.RawMessage) (*ir.Image, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, errors.New("image_url part has no image_url")
@@ -965,6 +1006,9 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 			if b.CacheControl != nil && warns != nil {
 				warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
 			}
+			if len(b.Citations) > 0 && warns != nil {
+				warns.Add(ir.WarningDropped, "citations", "Chat Completions input has no citations")
+			}
 			if tr.IsError && warns != nil {
 				warns.Add(ir.WarningDropped, "tool_result.is_error", "Chat Completions tool messages have no is_error flag")
 			}
@@ -981,6 +1025,11 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 		msg := map[string]any{"role": string(m.Role)}
 		if m.Name != "" {
 			msg["name"] = m.Name
+		}
+		for _, b := range rest {
+			if len(b.Citations) > 0 && warns != nil {
+				warns.Add(ir.WarningDropped, "citations", "Chat Completions input has no citations")
+			}
 		}
 		content, toolCalls, refusal, reasoning := encodeChatContent(rest, m.Role, warns)
 		if m.Role == ir.RoleAssistant {
@@ -1029,9 +1078,6 @@ func encodeChatContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) (any
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
 			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
-		}
-		if len(b.Citations) > 0 && warns != nil {
-			warns.Add(ir.WarningDropped, "citations", "Chat Completions input has no citations")
 		}
 		switch b.Type {
 		case ir.BlockText:
@@ -1214,6 +1260,40 @@ func encodeChatToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {
 	return strings.Join(texts, "")
 }
 
+// chatMessageAnnotations maps IR url citations to the Chat message-level
+// annotation wrapper. Chat accepts url_citation only, so a citation without a
+// URL has no representation and is reported.
+func chatMessageAnnotations(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
+	var out []map[string]any
+	for _, b := range blocks {
+		if len(b.Citations) == 0 {
+			continue
+		}
+		if b.Type != ir.BlockText {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "citations", "citation is not attached to a text block")
+			}
+			continue
+		}
+		for _, c := range b.Citations {
+			if c.URL == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "citations", "citation has no Chat url_citation equivalent")
+				}
+				continue
+			}
+			out = append(out, map[string]any{
+				"type": "url_citation",
+				"url_citation": map[string]any{
+					"url": c.URL, "title": c.Title,
+					"start_index": c.StartIndex, "end_index": c.EndIndex,
+				},
+			})
+		}
+	}
+	return out
+}
+
 func encodeChatTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, t := range in {
@@ -1388,6 +1468,23 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(choice.Message.Annotations) > 0 {
+		citations, w := decodeChatAnnotations(choice.Message.Annotations)
+		warns = append(warns, w...)
+		if len(citations) > 0 {
+			attached := false
+			for i := len(blocks) - 1; i >= 0; i-- {
+				if blocks[i].Type == ir.BlockText {
+					blocks[i].Citations = append(blocks[i].Citations, citations...)
+					attached = true
+					break
+				}
+			}
+			if !attached {
+				warns.Add(ir.WarningDropped, "annotations", "Chat annotations have no text block to attach to")
+			}
+		}
+	}
 	if reasoning := choice.Message.reasoningText(); reasoning != "" {
 		blocks = append([]ir.Block{{
 			Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
@@ -1466,6 +1563,9 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
 	}
+	if annotations := chatMessageAnnotations(resp.Blocks, &resp.Warnings); len(annotations) > 0 {
+		message["annotations"] = annotations
+	}
 	created := resp.Created
 	if created == 0 {
 		created = time.Now().Unix()
@@ -1483,6 +1583,9 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	}
 	if resp.Usage != (ir.Usage{}) {
 		out["usage"] = encodeChatUsage(resp.Usage)
+	}
+	if resp.StopSequence != "" {
+		resp.Warnings.Add(ir.WarningDropped, "stop_sequence", "Chat Completions has no matched stop sequence")
 	}
 	return sse.MarshalWireJSON(out)
 }
