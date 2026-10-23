@@ -301,6 +301,43 @@ data: {"type":"response.completed","sequence_number":6,"response":{"id":"resp_1"
 // TestChatStreamUsagePositions pins one terminal MessageDelta regardless of
 // where the provider puts usage, and treats a finish_reason followed by EOF
 // as a complete stream (the [DONE] sentinel is optional in practice).
+// TestResponsesTerminalClosesOpenBlocks pins the Anthropic ordering invariant
+// when a Responses provider omits item/content done events and carries the
+// function arguments only in the terminal response.
+func TestResponsesTerminalClosesOpenBlocks(t *testing.T) {
+	in := `event: response.created
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","model":"m","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","status":"in_progress","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"delta":"hi"}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":4,"output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"","status":"in_progress"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}
+
+`
+	var buf bytes.Buffer
+	collectStream(t, NewResponsesStreamDecoder(strings.NewReader(in)), NewAnthropicStreamEncoder(&buf, nil))
+	out := buf.String()
+	if n := strings.Count(out, "event: content_block_stop"); n != 2 {
+		t.Fatalf("content_block_stop count = %d, want 2:\n%s", n, out)
+	}
+	if !strings.Contains(out, `"partial_json":"{\"q\":1}"`) {
+		t.Fatalf("terminal function arguments were not flushed:\n%s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"tool_use"`) {
+		t.Fatalf("finish reason = not tool_use:\n%s", out)
+	}
+}
+
 func TestChatStreamUsagePositions(t *testing.T) {
 	const (
 		head   = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}` + "\n\n"

@@ -52,9 +52,10 @@ type ResponsesStreamDecoder struct {
 	argsSeen  map[int]bool
 	open      map[int]bool
 
-	usage    ir.Usage
-	warnings ir.Warnings
-	finish   ir.FinishReason
+	usage       ir.Usage
+	warnings    ir.Warnings
+	finish      ir.FinishReason
+	sawToolCall bool
 }
 
 // NewResponsesStreamDecoder builds a decoder over one upstream body.
@@ -127,6 +128,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.itemType[ev.OutputIndex] = item.Type
 			switch item.Type {
 			case "function_call":
+				d.sawToolCall = true
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
 				args := item.Arguments
@@ -200,6 +202,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			delete(d.partBlock, [2]int{ev.OutputIndex, ev.ContentIndex})
+			delete(d.open, idx)
 			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		case "response.output_item.done":
 			var item responsesWireItem
@@ -215,6 +218,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Arguments: item.Arguments}})
 				}
 				delete(d.itemBlock, ev.OutputIndex)
+				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if item.Type == "reasoning" {
 				idx, ok := d.itemBlock[ev.OutputIndex]
@@ -222,6 +226,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				delete(d.itemBlock, ev.OutputIndex)
+				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if item.Type == "message" {
 				// Some providers skip content_part.done; close any part
@@ -229,6 +234,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				for key, idx := range d.partBlock {
 					if key[0] == ev.OutputIndex {
 						delete(d.partBlock, key)
+						delete(d.open, idx)
 						d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 					}
 				}
@@ -242,6 +248,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.usage = responsesUsageToIR(resp.Usage)
 			}
 			d.terminal = true
+			d.closeAll(resp.Output)
 			if ev.Type == "response.failed" {
 				e := &ir.Error{Message: "upstream response failed"}
 				if resp.Error != nil {
@@ -259,7 +266,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason == "content_filter" {
 					finish = ir.FinishContentFilter
 				}
-			} else if hasToolCall(d.blocksFromItems(resp.Output)) {
+			} else if d.sawToolCall || hasToolCall(d.blocksFromItems(resp.Output)) {
 				finish = ir.FinishToolCalls
 			}
 			u := d.usage
@@ -277,6 +284,30 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 	}
+}
+
+// closeAll closes every block still open at a terminal event. The terminal
+// response may be the only place a function call's arguments appear, so flush
+// them before closing its block. Anthropic requires a content_block_stop for
+// every opened block before message_delta.
+func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) {
+	for i, item := range output {
+		if item.Type != "function_call" || d.argsSeen[i] || item.Arguments == "" {
+			continue
+		}
+		idx, ok := d.itemBlock[i]
+		if !ok {
+			continue
+		}
+		d.argsSeen[i] = true
+		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Arguments: item.Arguments}})
+	}
+	for idx := range d.open {
+		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
+		delete(d.open, idx)
+	}
+	clear(d.partBlock)
+	clear(d.itemBlock)
 }
 
 func (d *ResponsesStreamDecoder) newBlock() int {
