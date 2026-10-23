@@ -992,6 +992,7 @@ type anthropicWireResponse struct {
 	Content      []anthropicWireBlock `json:"content"`
 	StopReason   string               `json:"stop_reason"`
 	StopSequence string               `json:"stop_sequence"`
+	StopDetails  json.RawMessage      `json:"stop_details"`
 	Usage        anthropicWireUsage   `json:"usage"`
 }
 
@@ -1064,6 +1065,10 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}
+	if len(in.StopDetails) > 0 && !bytes.Equal(bytes.TrimSpace(in.StopDetails), []byte("null")) {
+		resp.Warnings.Add(ir.WarningDropped, "stop_details",
+			"the cross-protocol terminal has no stop-details equivalent")
+	}
 	return resp, nil
 }
 
@@ -1089,6 +1094,9 @@ func anthropicFinishReason(reason string) ir.FinishReason {
 		return ir.FinishLength
 	case "tool_use":
 		return ir.FinishToolCalls
+	case "":
+		// A missing stop_reason is not a clean end_turn.
+		return ir.FinishOther
 	default:
 		// Keep the source spelling for reasons Chat Completions can echo
 		// verbatim (pause_turn, refusal) and for unknown provider values,
@@ -1125,6 +1133,10 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	}
 	if resp.StopSequence != "" {
 		out["stop_sequence"] = resp.StopSequence
+	}
+	if resp.Finish == ir.FinishOther || resp.Finish == ir.FinishCancelled {
+		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
+			"Anthropic Messages has no equivalent terminal reason")
 	}
 	return sse.MarshalWireJSON(out)
 }

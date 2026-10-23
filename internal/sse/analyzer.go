@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -59,6 +60,7 @@ type Analyzer struct {
 	// before Fill; every tool call is counted independently.
 	toolNames    []string
 	toolNameSet  map[string]struct{}
+	toolCallIDs  map[string]struct{}
 	finishReason string
 
 	// terminatorSeen records that the stream's documented end-of-stream marker
@@ -261,10 +263,29 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
+	// Responses tool activity: a function call is announced by
+	// response.output_item.added and its arguments stream through
+	// response.function_call_arguments.delta. Both are tool activity, never
+	// answer content (the latter used to set HadAnswerContent and TTFT for the
+	// wrong channel).
+	hasToolDelta := eventType == "response.function_call_arguments.delta" && keys.deltaNonEmpty
+	if eventType == "response.output_item.added" {
+		var ev struct {
+			Item struct {
+				Type   string `json:"type"`
+				CallID string `json:"call_id"`
+				Name   string `json:"name"`
+			} `json:"item"`
+		}
+		if json.Unmarshal(payload, &ev) == nil && ev.Item.Type == "function_call" {
+			a.countResponsesToolCall(ev.Item.CallID, ev.Item.Name)
+			hasToolDelta = true
+		}
+	}
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
 	// or a tool call) - not on the empty role chunk.
-	if hasContent || hasReasoning || hasToolCall {
+	if hasContent || hasReasoning || hasToolCall || hasToolDelta {
 		if a.firstTokenAt.IsZero() {
 			a.firstTokenAt = now
 		}
@@ -273,7 +294,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 		// A chunk that carries ONLY a tool call (no content, no reasoning) is
 		// not a generation token - track it separately so the output-token
 		// fallback can exclude tool-call argument chunks from gen TPS.
-		if hasToolCall && !hasContent && !hasReasoning {
+		if (hasToolCall || hasToolDelta) && !hasContent && !hasReasoning {
 			a.toolChunks++
 		}
 	}
@@ -347,6 +368,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if responsesTerminalEvent(eventType) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
+		a.captureResponsesTerminalFinish(eventType, payload)
 	}
 	// A Responses failure states its provider error under response.error, not
 	// the top-level error key the frame gate looks for. Decode it only on the
@@ -502,11 +524,58 @@ func (a *Analyzer) setStreamError(typ, code, msg string) {
 
 func responsesTerminalEvent(eventType string) bool {
 	switch eventType {
-	case "response.completed", "response.failed", "response.incomplete":
+	case "response.completed", "response.failed", "response.incomplete", "response.cancelled":
 		return true
 	}
 	return false
 }
+
+// captureResponsesTerminalFinish maps the Responses terminal event onto the
+// canonical finish vocabulary the record and the degenerate classifier read.
+// Without it, a legitimate response.incomplete on a short max_output_tokens was
+// classified as an empty completion and a completed answer kept no reason.
+func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte) {
+	if a.finishReason != "" {
+		return
+	}
+	switch eventType {
+	case "response.failed":
+		a.finishReason = string(ir.FinishError)
+	case "response.cancelled":
+		a.finishReason = string(ir.FinishCancelled)
+	case "response.incomplete":
+		var ev struct {
+			Response struct {
+				IncompleteDetails *struct {
+					Reason string `json:"reason"`
+				} `json:"incomplete_details"`
+			} `json:"response"`
+		}
+		reason := ""
+		if json.Unmarshal(payload, &ev) == nil && ev.Response.IncompleteDetails != nil {
+			reason = ev.Response.IncompleteDetails.Reason
+		}
+		switch reason {
+		case "content_filter":
+			a.finishReason = string(ir.FinishContentFilter)
+		case "max_output_tokens":
+			a.finishReason = string(ir.FinishLength)
+		default:
+			a.finishReason = string(ir.FinishOther)
+		}
+	default: // response.completed
+		if a.toolCalls > 0 {
+			a.finishReason = string(ir.FinishToolCalls)
+		} else {
+			a.finishReason = string(ir.FinishStop)
+		}
+	}
+}
+
+// ResponsesStream reports whether the feed carried Responses-API typed events.
+// A Responses stream needs its own terminal substitution rather than the
+// OpenAI Chat error chunk.
+func (a *Analyzer) ResponsesStream() bool { return a.responsesStream }
 
 // Responses event types are top-level, unlike the nested type fields in
 // content/tool objects. The frame key probe records that top-level value once;
@@ -868,10 +937,26 @@ func responsesReasoningEvent(eventType string, keys *frameKeys) bool {
 // as a void (its terminal events carry no finish_reason at all).
 func responsesContentEvent(eventType string, keys *frameKeys) bool {
 	switch eventType {
-	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta", "response.function_call_arguments.delta":
+	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta":
 		return keys.deltaNonEmpty
 	}
 	return false
+}
+
+// countResponsesToolCall records one Responses function_call item exactly once
+// per call id. The name is retained in first-seen order like the Chat path.
+func (a *Analyzer) countResponsesToolCall(callID, name string) {
+	if callID != "" {
+		if a.toolCallIDs == nil {
+			a.toolCallIDs = make(map[string]struct{}, 4)
+		}
+		if _, seen := a.toolCallIDs[callID]; seen {
+			return
+		}
+		a.toolCallIDs[callID] = struct{}{}
+	}
+	a.toolCalls++
+	a.retainToolName(name)
 }
 
 // jsonValueString extracts the string text from a raw JSON value (the probe's

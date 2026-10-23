@@ -155,7 +155,7 @@ func terminalFrameFor(inbound ir.Protocol) func([]byte) bool {
 	case ir.Responses:
 		return func(p []byte) bool {
 			switch sseFrameName(p) {
-			case "response.completed", "response.incomplete", "response.failed":
+			case "response.completed", "response.incomplete", "response.failed", "response.cancelled":
 				return true
 			}
 			return false

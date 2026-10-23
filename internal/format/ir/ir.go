@@ -345,6 +345,7 @@ const (
 	FinishToolCalls     FinishReason = "tool_calls"
 	FinishContentFilter FinishReason = "content_filter"
 	FinishPause         FinishReason = "pause"
+	FinishCancelled     FinishReason = "cancelled"
 	FinishError         FinishReason = "error"
 	FinishOther         FinishReason = "other"
 )

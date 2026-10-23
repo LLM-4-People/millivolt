@@ -264,7 +264,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					}
 				}
 			}
-		case "response.completed", "response.incomplete", "response.failed":
+		case "response.completed", "response.incomplete", "response.failed", "response.cancelled":
 			var resp responsesWireResponse
 			if err := json.Unmarshal(ev.Response, &resp); err != nil {
 				return nil, err
@@ -286,13 +286,23 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			finish := ir.FinishStop
-			if ev.Type == "response.incomplete" {
-				finish = ir.FinishLength
-				if resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason == "content_filter" {
-					finish = ir.FinishContentFilter
+			switch ev.Type {
+			case "response.cancelled":
+				finish = ir.FinishCancelled
+			case "response.incomplete":
+				finish = ir.FinishOther
+				if resp.IncompleteDetails != nil {
+					switch resp.IncompleteDetails.Reason {
+					case "max_output_tokens":
+						finish = ir.FinishLength
+					case "content_filter":
+						finish = ir.FinishContentFilter
+					}
 				}
-			} else if d.sawToolCall || hasToolCall(d.blocksFromItems(resp.Output)) {
-				finish = ir.FinishToolCalls
+			default:
+				if d.sawToolCall || hasToolCall(d.blocksFromItems(resp.Output)) {
+					finish = ir.FinishToolCalls
+				}
 			}
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: finish}, Usage: &u})
@@ -687,11 +697,13 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 	}
 	e.doneSent = true
 	status := "completed"
-	if e.finish == ir.FinishLength || e.finish == ir.FinishContentFilter {
-		status = "incomplete"
-	}
-	if e.failed != nil {
+	switch {
+	case e.failed != nil:
 		status = "failed"
+	case e.finish == ir.FinishCancelled:
+		status = "cancelled"
+	case e.finish == ir.FinishLength || e.finish == ir.FinishContentFilter || e.finish == ir.FinishOther:
+		status = "incomplete"
 	}
 	return e.emit("response."+status, map[string]any{
 		"type": "response." + status, "sequence_number": e.nextSeq(),
@@ -713,11 +725,16 @@ func (e *ResponsesStreamEncoder) responseObject(status string, output []map[stri
 		"tool_choice": "auto", "tools": []any{}, "top_p": nil, "truncation": "disabled",
 	}
 	if status == "incomplete" {
-		reason := "max_output_tokens"
-		if e.finish == ir.FinishContentFilter {
+		reason := ""
+		switch e.finish {
+		case ir.FinishContentFilter:
 			reason = "content_filter"
+		case ir.FinishLength:
+			reason = "max_output_tokens"
 		}
-		obj["incomplete_details"] = map[string]any{"reason": reason}
+		if reason != "" {
+			obj["incomplete_details"] = map[string]any{"reason": reason}
+		}
 	}
 	if status == "failed" && e.failed != nil {
 		code := e.failed.Code

@@ -1200,7 +1200,7 @@ func TestResponseArraysAreBoundedBeforeDecode(t *testing.T) {
 		}
 	})
 	t.Run("responses output at limit", func(t *testing.T) {
-		body := `{"id":"r1","output":` + array(metrics.ContentPartMax) + `}`
+		body := `{"id":"r1","status":"completed","output":` + array(metrics.ContentPartMax) + `}`
 		if _, err := DecodeResponsesResponse([]byte(body)); err != nil {
 			t.Fatalf("body at the limit was rejected: %v", err)
 		}

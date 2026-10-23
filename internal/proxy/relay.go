@@ -625,8 +625,12 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full)
 			if terr != nil {
 				rec.StatusCode = http.StatusBadGateway
-				rec.ErrorType = "transform_error"
-				rec.ErrorMsg = terr.Error()
+				// Keep a provider error already parsed from the upstream document;
+				// the translation failure must not overwrite its classification.
+				if rec.ErrorType == "" {
+					rec.ErrorType = "transform_error"
+					rec.ErrorMsg = terr.Error()
+				}
 				if errors.Is(terr, metrics.ErrMetricRange) {
 					invalidateUsage(rec, terr)
 				}
@@ -2159,7 +2163,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					rescueRequested = rescueReasoningStop
 					return true
 				}
-				emitDegenerateSSE(w, &a, time.Now(), code, rec)
+				if a.ResponsesStream() {
+					emitDegenerateResponses(w, &a, time.Now(), code, rec)
+				} else {
+					emitDegenerateSSE(w, &a, time.Now(), code, rec)
+				}
 			}
 		} else if len(hold) > 0 {
 			if _, werr := w.Write(hold); werr != nil {
@@ -2397,6 +2405,33 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return rescueNone
 		}
 	}
+}
+
+// emitDegenerateResponses replaces a withheld Responses terminal region with a
+// Responses-shaped response.failed event. A Responses client has no [DONE]
+// sentinel and no choices, so the Chat substitution would leave it without a
+// terminal signal.
+func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Time, code string, rec *metrics.Record) {
+	obj := map[string]any{
+		"type": "response.failed",
+		"response": map[string]any{
+			"id": rec.ID, "object": "response", "status": "failed",
+			"error":  map[string]any{"code": code, "message": metrics.DegenerateMessage(code)},
+			"output": []any{},
+		},
+	}
+	payload, err := sse.MarshalWireJSON(obj)
+	if err != nil {
+		return
+	}
+	frame := append([]byte("event: response.failed\ndata: "), payload...)
+	frame = append(frame, '\n', '\n')
+	a.Feed(append([]byte("data: "), payload...), now)
+	if _, werr := w.Write(frame); werr != nil {
+		markClientGone(rec)
+		return
+	}
+	rec.ResponseBytes += int64(len(frame))
 }
 
 // emitDegenerateSSE writes the in-band OpenAI error chunk + closing [DONE] in

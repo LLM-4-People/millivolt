@@ -1269,6 +1269,9 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if len(in.Choices) > 1 {
 		resp.Warnings.Add(ir.WarningDropped, "choices", "only the first choice was translated")
 	}
+	if choice.Finish == "" {
+		resp.Warnings.Add(ir.WarningApproximated, "finish_reason", "provider omitted the completion marker")
+	}
 	return resp, nil
 }
 
@@ -1359,8 +1362,10 @@ func ChatFinishReason(r ir.FinishReason) string {
 	case ir.FinishError:
 		return "error"
 	case ir.FinishOther:
-		// No source spelling was available; Chat has no "other" reason.
-		return "stop"
+		// No source spelling was available. Chat Completions accepts an
+		// arbitrary finish_reason string, so "other" keeps the terminal
+		// non-clean instead of fabricating a stop.
+		return "other"
 	default:
 		// A raw provider reason (for example Anthropic's pause_turn or
 		// refusal) has no canonical equivalent. Chat Completions clients
@@ -1372,7 +1377,7 @@ func ChatFinishReason(r ir.FinishReason) string {
 
 func irFinishReason(s string) ir.FinishReason {
 	switch s {
-	case "stop", "":
+	case "stop":
 		return ir.FinishStop
 	case "length":
 		return ir.FinishLength
@@ -1380,6 +1385,11 @@ func irFinishReason(s string) ir.FinishReason {
 		return ir.FinishToolCalls
 	case "content_filter":
 		return ir.FinishContentFilter
+	case "cancelled":
+		return ir.FinishCancelled
+	case "":
+		// A missing completion marker is not a clean stop.
+		return ir.FinishOther
 	default:
 		return ir.FinishOther
 	}

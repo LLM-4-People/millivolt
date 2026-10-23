@@ -937,6 +937,18 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse responses response: %w", err)
 	}
+	switch in.Status {
+	case "completed", "incomplete", "failed", "cancelled":
+	case "":
+		// A provider error envelope may legitimately omit status; anything
+		// else without a terminal status is an unfinished response that must
+		// not be rendered as a completed one.
+		if typ, _, _ := metrics.ParseErrorEnvelope(body); typ == "" {
+			return nil, errors.New("responses response has no terminal status")
+		}
+	default:
+		return nil, fmt.Errorf("responses response is not terminal (status %q)", in.Status)
+	}
 	resp := &ir.Response{
 		ID:      in.ID,
 		Model:   in.Model,
@@ -946,7 +958,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if in.Usage != nil {
 		resp.Usage = responsesUsageToIR(in.Usage)
 	}
-	if in.Status == "failed" || in.Error != nil {
+	if in.Status == "failed" {
 		e := &ir.Error{Message: "upstream response failed"}
 		if in.Error != nil {
 			e.Code = in.Error.Code
@@ -956,6 +968,14 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			}
 		}
 		resp.Error = e
+		resp.Finish = ir.FinishError
+		return resp, nil
+	}
+	// An in-band provider error on a nominally completed response is decoded
+	// through the shared decoy-aware parser: an empty error object is not a
+	// failure, while a string or numeric-code envelope still classifies.
+	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
+		resp.Error = &ir.Error{Type: typ, Code: code, Message: msg}
 		resp.Finish = ir.FinishError
 		return resp, nil
 	}
@@ -993,7 +1013,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
 		}
 	}
-	if in.IncompleteDetails != nil {
+	if in.IncompleteDetails != nil && in.IncompleteDetails.Reason != "" {
 		resp.IncompleteReason = in.IncompleteDetails.Reason
 		switch in.IncompleteDetails.Reason {
 		case "max_output_tokens":
@@ -1001,8 +1021,14 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		case "content_filter":
 			resp.Finish = ir.FinishContentFilter
 		default:
+			// max_tool_calls, steered and provider-specific reasons are not a
+			// clean stop and have no exact cross-protocol equivalent.
 			resp.Finish = ir.FinishOther
 		}
+	} else if in.Status == "incomplete" {
+		resp.Finish = ir.FinishOther
+	} else if in.Status == "cancelled" {
+		resp.Finish = ir.FinishCancelled
 	} else if hasToolCall(resp.Blocks) {
 		resp.Finish = ir.FinishToolCalls
 	} else {
@@ -1045,12 +1071,17 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	if created == 0 {
 		created = time.Now().Unix()
 	}
-	status := "completed"
-	if resp.Status != "" {
-		status = resp.Status
+	status := resp.Status
+	if status == "" {
+		status = "completed"
 	}
-	if resp.Error != nil {
+	switch {
+	case resp.Error != nil:
 		status = "failed"
+	case resp.Finish == ir.FinishCancelled:
+		status = "cancelled"
+	case resp.Finish == ir.FinishLength || resp.Finish == ir.FinishContentFilter || resp.Finish == ir.FinishOther:
+		status = "incomplete"
 	}
 	out := map[string]any{
 		"id":                   resp.ID,
@@ -1084,13 +1115,18 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 			"message": resp.Error.Message,
 		}
 	}
-	if resp.Finish == ir.FinishLength || resp.Finish == ir.FinishContentFilter {
-		out["status"] = "incomplete"
-		reason := "max_output_tokens"
-		if resp.Finish == ir.FinishContentFilter {
+	if status == "incomplete" {
+		reason := resp.IncompleteReason
+		switch {
+		case reason != "":
+		case resp.Finish == ir.FinishContentFilter:
 			reason = "content_filter"
+		case resp.Finish == ir.FinishLength:
+			reason = "max_output_tokens"
 		}
-		out["incomplete_details"] = map[string]any{"reason": reason}
+		if reason != "" {
+			out["incomplete_details"] = map[string]any{"reason": reason}
+		}
 	}
 	if resp.Usage != (ir.Usage{}) {
 		out["usage"] = encodeResponsesUsage(resp.Usage)
@@ -1173,25 +1209,12 @@ func encodeResponsesUsage(u ir.Usage) map[string]any {
 }
 
 // DecodeResponsesError decodes the standard OpenAI error envelope used by the
-// Responses HTTP surface.
+// Responses HTTP surface. The shared decoy-aware parser owns string error
+// values and numeric codes, so a provider envelope this proxy can record is
+// never rejected by a narrower local shape.
 func DecodeResponsesError(body []byte) (*ir.Error, error) {
-	var in struct {
-		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    any    `json:"code"`
-		} `json:"error"`
+	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
+		return &ir.Error{Type: typ, Code: code, Message: msg}, nil
 	}
-	if err := json.Unmarshal(body, &in); err != nil {
-		return nil, err
-	}
-	if in.Error.Message == "" && in.Error.Type == "" {
-		return nil, errors.New("not an OpenAI error envelope")
-	}
-	code := ""
-	switch v := in.Error.Code.(type) {
-	case string:
-		code = v
-	}
-	return &ir.Error{Type: in.Error.Type, Code: code, Message: in.Error.Message}, nil
+	return nil, errors.New("not an OpenAI error envelope")
 }
