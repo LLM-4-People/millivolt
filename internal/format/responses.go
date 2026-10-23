@@ -544,6 +544,9 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	if req.TopK != nil {
 		req.Warnings.Add(ir.WarningDropped, "top_k", "Responses has no top_k")
 	}
+	if req.CacheControl != nil {
+		req.Warnings.Add(ir.WarningDropped, "cache_control", "Responses has no request-level cache breakpoint")
+	}
 	if req.Reasoning != nil {
 		if req.Reasoning.Enabled != nil && !*req.Reasoning.Enabled {
 			if req.Reasoning.Effort != "" {
@@ -564,7 +567,7 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	}
 	instructions := req.Instructions
 	if instructions == nil {
-		if folded := foldLeadingSystem(req.Messages); folded != "" {
+		if folded := foldLeadingSystem(req.Messages, &req.Warnings); folded != "" {
 			instructions = &folded
 		}
 	}
@@ -660,15 +663,32 @@ func effortFromBudget(budget int) string {
 }
 
 // foldLeadingSystem joins the leading system/developer text run for the
-// Responses instructions field.
-func foldLeadingSystem(messages []ir.Message) string {
+// Responses instructions field. Folding bypasses the normal content encoder,
+// so this owner reports every block and message attribute that the
+// instructions string cannot carry.
+func foldLeadingSystem(messages []ir.Message, warns *ir.Warnings) string {
 	var parts []string
 	for _, m := range messages {
 		if m.Role != ir.RoleSystem && m.Role != ir.RoleDeveloper {
 			break
 		}
+		if m.Name != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "messages.name", "Responses instructions have no participant name")
+		}
 		for _, b := range m.Content {
-			if b.Type == ir.BlockText && b.Text != "" {
+			if b.CacheControl != nil && warns != nil {
+				warns.Add(ir.WarningDropped, "system.cache_control", "Responses instructions have no cache breakpoint")
+			}
+			if len(b.Citations) > 0 && warns != nil {
+				warns.Add(ir.WarningDropped, "system.citations", "Responses instructions have no citations")
+			}
+			if b.Type != ir.BlockText {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "system."+string(b.Type), "Responses instructions are text-only")
+				}
+				continue
+			}
+			if b.Text != "" {
 				parts = append(parts, b.Text)
 			}
 		}
@@ -685,6 +705,9 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 	}
 	var out []map[string]any
 	for _, m := range req.Messages[start:] {
+		if m.Name != "" {
+			req.Warnings.Add(ir.WarningDropped, "messages.name", "Responses input messages have no participant name")
+		}
 		switch m.Role {
 		case ir.RoleAssistant:
 			var textBlocks []ir.Block
@@ -693,6 +716,9 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 				case ir.BlockReasoning, ir.BlockRedactedReasoning:
 					out = append(out, encodeResponsesReasoning(b.Reasoning, &req.Warnings))
 				case ir.BlockToolCall:
+					if b.CacheControl != nil {
+						req.Warnings.Add(ir.WarningDropped, "cache_control", "Responses has no cache breakpoints")
+					}
 					out = append(out, encodeResponsesFunctionCall(b.ToolCall))
 				case ir.BlockText, ir.BlockRefusal:
 					textBlocks = append(textBlocks, b)
@@ -715,6 +741,9 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 				}
 			}
 			for _, b := range results {
+				if b.CacheControl != nil {
+					req.Warnings.Add(ir.WarningDropped, "cache_control", "Responses has no cache breakpoints")
+				}
 				if b.ToolResult.IsError {
 					req.Warnings.Add(ir.WarningDropped, "tool_result.is_error", "Responses function_call_output has no is_error flag")
 				}
@@ -845,6 +874,9 @@ func encodeResponsesFunctionCall(c *ir.ToolCall) map[string]any {
 func encodeResponsesTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(in))
 	for _, t := range in {
+		if t.CacheControl != nil && warns != nil {
+			warns.Add(ir.WarningDropped, "tools.cache_control", "Responses function tools have no cache breakpoint")
+		}
 		tool := map[string]any{"type": "function", "name": t.Name}
 		if t.Description != "" {
 			tool["description"] = t.Description

@@ -35,6 +35,7 @@ type anthropicWireRequest struct {
 	Tools         []anthropicWireTool `json:"tools"`
 	ToolChoice    json.RawMessage     `json:"tool_choice"`
 	Thinking      json.RawMessage     `json:"thinking"`
+	CacheControl  *ir.CacheControl    `json:"cache_control"`
 	Metadata      *struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
@@ -137,6 +138,7 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 		Stop:            in.StopSequences,
 		Stream:          in.Stream,
 		ServiceTier:     in.ServiceTier,
+		CacheControl:    in.CacheControl,
 	}
 	if in.Metadata != nil {
 		req.User = in.Metadata.UserID
@@ -302,18 +304,22 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			if args[0] != '{' {
 				return nil, nil, errors.New("anthropic tool_use input must be a JSON object")
 			}
-			blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
-				ID: p.ID, Name: p.Name, Arguments: args,
-			}})
+			blocks = append(blocks, ir.Block{
+				Type: ir.BlockToolCall, CacheControl: p.CacheControl, ToolCall: &ir.ToolCall{
+					ID: p.ID, Name: p.Name, Arguments: args,
+				},
+			})
 		case "tool_result":
 			content, w, err := decodeAnthropicContent(p.Content)
 			if err != nil {
 				return nil, nil, err
 			}
 			warns = append(warns, w...)
-			blocks = append(blocks, ir.Block{Type: ir.BlockToolResult, ToolResult: &ir.ToolResult{
-				CallID: p.ToolUseID, Content: content, IsError: p.IsError,
-			}})
+			blocks = append(blocks, ir.Block{
+				Type: ir.BlockToolResult, CacheControl: p.CacheControl, ToolResult: &ir.ToolResult{
+					CallID: p.ToolUseID, Content: content, IsError: p.IsError,
+				},
+			})
 		case "thinking":
 			blocks = append(blocks, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
 				Text: p.Thinking, Signature: p.Signature, Provider: ir.Anthropic,
@@ -601,6 +607,9 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if tier != "" {
 		out["service_tier"] = tier
 	}
+	if req.CacheControl != nil {
+		out["cache_control"] = req.CacheControl
+	}
 	if promptCacheKey != "" {
 		out["prompt_cache_key"] = promptCacheKey
 	}
@@ -676,6 +685,9 @@ type anthropicOutMessage struct {
 func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOutMessage {
 	var out []anthropicOutMessage
 	for _, m := range in {
+		if m.Name != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
+		}
 		// Every system/developer message is rendered at the top level; none
 		// may appear as a role inside the conversation.
 		if m.Role == ir.RoleSystem || m.Role == ir.RoleDeveloper {

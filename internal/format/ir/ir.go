@@ -301,6 +301,10 @@ type Request struct {
 	// and Responses carry it directly; Anthropic carries its inverse on
 	// tool_choice.
 	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+	// CacheControl is an Anthropic request-level automatic cache marker that
+	// applies to the last cacheable block. Chat and Responses have no
+	// request-level equivalent.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 
 	MaxOutputTokens  *int               `json:"max_output_tokens,omitempty"`
 	Temperature      *float64           `json:"temperature,omitempty"`

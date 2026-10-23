@@ -832,6 +832,9 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if req.TopK != nil {
 		req.Warnings.Add(ir.WarningDropped, "top_k", "Chat Completions has no top_k")
 	}
+	if req.CacheControl != nil {
+		req.Warnings.Add(ir.WarningDropped, "cache_control", "Chat Completions has no request-level cache breakpoint")
+	}
 	if req.Reasoning != nil {
 		if req.Reasoning.Summary != "" {
 			req.Warnings.Add(ir.WarningDropped, "reasoning.summary", "Chat Completions has no reasoning summary")
@@ -959,6 +962,9 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 		}
 		for _, b := range toolResults {
 			tr := b.ToolResult
+			if b.CacheControl != nil && warns != nil {
+				warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
+			}
 			if tr.IsError && warns != nil {
 				warns.Add(ir.WarningDropped, "tool_result.is_error", "Chat Completions tool messages have no is_error flag")
 			}
