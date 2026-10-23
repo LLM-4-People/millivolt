@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,21 +88,29 @@ type ResponsesStreamDecoder struct {
 	// initialArgs holds output_item.added item.arguments that have not been
 	// emitted yet. A partial prefix must not reach the target before the
 	// first delta or the full done/terminal value decides the continuation.
-	initialArgs map[int]string
+	// It is keyed by the item's stable identity, not its wire position.
+	initialArgs map[string]string
 	// initialArgsBytes bounds the total buffered initial arguments retained
 	// across open tool blocks, and openToolItems bounds how many such blocks
 	// can be open at once.
 	initialArgsBytes int
 	openToolItems    int
 	// argsEmitted marks that at least one argument payload was emitted for an
-	// output index, so a done/terminal full value must not repeat it.
-	argsEmitted map[int]bool
-	// announcedItems and announcedParts dedupe terminal-only synthesis against
-	// items and content parts that already streamed added/delta events. Both
-	// are bounded by the shared collection cap.
-	announcedItems map[int]bool
-	announcedParts map[[2]int]bool
-	open           map[int]bool
+	// item identity, so a done/terminal full value must not repeat it.
+	argsEmitted map[string]bool
+	// Announcement identity. A provider's terminal output array is not
+	// required to preserve output_index positions, so dedupe and terminal
+	// completion use stable identities (call id, item id, content index) and
+	// fall back to a position only when the source supplied no identity.
+	announcedOutputs map[int]bool
+	announcedItems   map[string]bool
+	announcedParts   map[string]bool
+	itemBlockByKey   map[string]int
+	partBlockByKey   map[string]int
+	keyByOutput      map[int]string
+	keyByPart        map[[2]int]string
+	itemIDByOutput   map[int]string
+	open             map[int]bool
 
 	usage       ir.Usage
 	finish      ir.FinishReason
@@ -111,14 +120,20 @@ type ResponsesStreamDecoder struct {
 // NewResponsesStreamDecoder builds a decoder over one upstream body.
 func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 	return &ResponsesStreamDecoder{
-		r:              newSSEReader(r),
-		itemBlock:      map[int]int{},
-		partBlock:      map[[2]int]int{},
-		initialArgs:    map[int]string{},
-		argsEmitted:    map[int]bool{},
-		announcedItems: map[int]bool{},
-		announcedParts: map[[2]int]bool{},
-		open:           map[int]bool{},
+		r:                newSSEReader(r),
+		itemBlock:        map[int]int{},
+		partBlock:        map[[2]int]int{},
+		initialArgs:      map[string]string{},
+		argsEmitted:      map[string]bool{},
+		announcedOutputs: map[int]bool{},
+		announcedItems:   map[string]bool{},
+		announcedParts:   map[string]bool{},
+		itemBlockByKey:   map[string]int{},
+		partBlockByKey:   map[string]int{},
+		keyByOutput:      map[int]string{},
+		keyByPart:        map[[2]int]string{},
+		itemIDByOutput:   map[int]string{},
+		open:             map[int]bool{},
 	}
 }
 
@@ -187,6 +202,15 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
 			}
+			admitted, err := d.announceOutput(ev.OutputIndex)
+			if err != nil {
+				return nil, err
+			}
+			if !admitted {
+				// A duplicate announcement for one output index must not
+				// allocate a second target block.
+				continue
+			}
 			switch item.Type {
 			case "function_call":
 				if err := checkNativeIdentity("tool id", item.CallID); err != nil {
@@ -195,8 +219,13 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkNativeIdentity("tool name", item.Name); err != nil {
 					return nil, err
 				}
-				if err := d.announceItem(ev.OutputIndex); err != nil {
+				key := functionCallKey(item.CallID, item.ID, ev.OutputIndex)
+				admitted, err := d.announceItem(key)
+				if err != nil {
 					return nil, err
+				}
+				if !admitted {
+					continue
 				}
 				d.sawToolCall = true
 				d.openToolItems++
@@ -205,6 +234,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
+				d.itemBlockByKey[key] = idx
+				d.keyByOutput[ev.OutputIndex] = key
+				d.itemIDByOutput[ev.OutputIndex] = item.ID
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
 						ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
@@ -218,25 +250,39 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					if len(args) > toolInitialBytesMax-d.initialArgsBytes {
 						return nil, fmt.Errorf("responses stream exceeds %d retained initial tool bytes", toolInitialBytesMax)
 					}
-					d.initialArgs[ev.OutputIndex] = args
+					d.initialArgs[key] = args
 					d.initialArgsBytes += len(args)
 				}
 			case "reasoning":
 				if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
 					return nil, err
 				}
-				if err := d.announceItem(ev.OutputIndex); err != nil {
+				key := reasoningItemKey(item.ID, ev.OutputIndex)
+				admitted, err := d.announceItem(key)
+				if err != nil {
 					return nil, err
+				}
+				if !admitted {
+					continue
 				}
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
+				d.itemBlockByKey[key] = idx
+				d.keyByOutput[ev.OutputIndex] = key
+				d.itemIDByOutput[ev.OutputIndex] = item.ID
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
 						ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
 					},
 				}})
 			case "message":
-				// Content parts arrive in response.content_part.added.
+				// Content parts arrive in response.content_part.added. The
+				// item id is still announced so a terminal document that
+				// repeats the item at another array position is recognized.
+				if _, err := d.announceItem(messageItemKey(item.ID, ev.OutputIndex)); err != nil {
+					return nil, err
+				}
+				d.itemIDByOutput[ev.OutputIndex] = item.ID
 			default:
 				// A provider-specific item has no cross-protocol equivalent.
 				// Streaming cannot report the loss (the status line is already
@@ -266,11 +312,23 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				// Streaming cannot report the loss, so it is dropped silently.
 				continue
 			}
-			if err := d.announcePart([2]int{ev.OutputIndex, ev.ContentIndex}); err != nil {
+			itemID := ev.ItemID
+			if itemID == "" {
+				itemID = d.itemIDByOutput[ev.OutputIndex]
+			}
+			key := contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			admitted, err := d.announcePart(key)
+			if err != nil {
 				return nil, err
+			}
+			if !admitted {
+				continue
 			}
 			idx := d.newBlock()
 			d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}] = idx
+			d.partBlockByKey[key] = idx
+			d.keyByPart[[2]int{ev.OutputIndex, ev.ContentIndex}] = key
+			d.itemIDByOutput[ev.OutputIndex] = itemID
 			d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &block})
 		case "response.output_text.delta", "response.refusal.delta":
 			idx, ok := d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}]
@@ -283,7 +341,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			d.toolArgumentsDelta(ev.OutputIndex, idx, ev.Delta)
+			d.toolArgumentsDelta(d.keyByOutput[ev.OutputIndex], idx, ev.Delta)
 		case "response.reasoning_summary_text.delta":
 			idx, ok := d.itemBlock[ev.OutputIndex]
 			if !ok {
@@ -301,12 +359,17 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
 		case "response.content_part.done":
-			idx, ok := d.partBlock[[2]int{ev.OutputIndex, ev.ContentIndex}]
+			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			idx, ok := d.partBlock[pos]
 			if !ok {
 				continue
 			}
-			delete(d.partBlock, [2]int{ev.OutputIndex, ev.ContentIndex})
+			delete(d.partBlock, pos)
 			delete(d.open, idx)
+			if key, ok := d.keyByPart[pos]; ok {
+				delete(d.partBlockByKey, key)
+				delete(d.keyByPart, pos)
+			}
 			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		case "response.output_item.done":
 			var item responsesWireItem
@@ -318,10 +381,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if !ok {
 					continue
 				}
-				d.flushToolArguments(ev.OutputIndex, idx, item.Arguments)
+				key := d.keyByOutput[ev.OutputIndex]
+				d.flushToolArguments(key, idx, item.Arguments)
 				delete(d.itemBlock, ev.OutputIndex)
 				delete(d.open, idx)
-				d.clearToolState(ev.OutputIndex)
+				d.clearToolState(key)
 				d.openToolItems--
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if item.Type == "reasoning" {
@@ -415,31 +479,40 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 // function call in response.completed.output; a translated client must still
 // receive those blocks exactly once.
 func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
-	// First complete the arguments of items that were announced but whose
-	// final value arrived only in the terminal document.
+	// First complete the arguments of announced calls whose final value
+	// arrived only in the terminal document. The terminal array position is
+	// not an identity: a shortened output array, or one that starts above
+	// zero, must still match the announced call by call id/item id.
 	for i, item := range output {
 		if item.Type != "function_call" {
 			continue
 		}
-		idx, ok := d.itemBlock[i]
-		if !ok {
-			continue
+		key := functionCallKey(item.CallID, item.ID, i)
+		idx, ok := d.itemBlockByKey[key]
+		if !ok && item.CallID == "" && item.ID == "" {
+			// Positional fallback only when the terminal item carries no
+			// identity to match against.
+			if fallback, ok := d.keyByOutput[i]; ok {
+				key, idx, ok = fallback, d.itemBlockByKey[fallback], true
+			}
 		}
-		d.flushToolArguments(i, idx, item.Arguments)
+		if ok && d.open[idx] {
+			d.flushToolArguments(key, idx, item.Arguments)
+		}
 	}
 	// A truncated stream can end before a terminal document supplies the full
 	// value. The buffered added payload is then the only argument bytes the
-	// source produced, so flush it before the block closes. The indexes are
+	// source produced, so flush it before the block closes. The identities are
 	// sorted so the emitted delta order is deterministic.
-	toolIndexes := make([]int, 0, len(d.itemBlock))
-	for i := range d.itemBlock {
-		if _, ok := d.initialArgs[i]; ok {
-			toolIndexes = append(toolIndexes, i)
-		}
+	toolKeys := make([]string, 0, len(d.initialArgs))
+	for key := range d.initialArgs {
+		toolKeys = append(toolKeys, key)
 	}
-	sort.Ints(toolIndexes)
-	for _, i := range toolIndexes {
-		d.flushToolArguments(i, d.itemBlock[i], "")
+	sort.Strings(toolKeys)
+	for _, key := range toolKeys {
+		if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
+			d.flushToolArguments(key, idx, "")
+		}
 	}
 	// Close every block the source actually opened before starting synthetic
 	// terminal items, so a target block sequence never nests two lifecycles.
@@ -452,8 +525,11 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	clear(d.initialArgs)
 	d.initialArgsBytes = 0
 	clear(d.argsEmitted)
+	clear(d.keyByOutput)
+	clear(d.keyByPart)
 	d.openToolItems = 0
-	// Synthesize terminal-only items in document order.
+	// Synthesize terminal-only items in document order. Identity keys keep a
+	// repeated or renumbered terminal entry from allocating a second block.
 	for i, item := range output {
 		typ := item.Type
 		if typ == "" && item.Role != "" {
@@ -461,7 +537,15 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 		}
 		switch typ {
 		case "function_call":
-			if d.announcedItems[i] {
+			key := functionCallKey(item.CallID, item.ID, i)
+			if d.terminalItemAnnounced(key, i, item.ID) {
+				continue
+			}
+			admitted, err := d.announceItem(key)
+			if err != nil {
+				return err
+			}
+			if !admitted {
 				continue
 			}
 			if err := d.synthesizeFunctionCall(item); err != nil {
@@ -472,7 +556,15 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 				return err
 			}
 		case "reasoning":
-			if d.announcedItems[i] {
+			key := reasoningItemKey(item.ID, i)
+			if d.terminalItemAnnounced(key, i, item.ID) {
+				continue
+			}
+			admitted, err := d.announceItem(key)
+			if err != nil {
+				return err
+			}
+			if !admitted {
 				continue
 			}
 			if err := d.synthesizeReasoning(item); err != nil {
@@ -481,6 +573,41 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 		}
 	}
 	return nil
+}
+
+// terminalItemAnnounced reports whether a terminal item's stable identity was
+// already announced by a streamed item event. A positional fallback is used
+// only when the stream and terminal item share an item id (or one side has no
+// id), never to relabel a different item that happens to occupy the position.
+func (d *ResponsesStreamDecoder) terminalItemAnnounced(key string, outputIndex int, itemID string) bool {
+	if d.announcedItems[key] {
+		return true
+	}
+	fallback, ok := d.keyByOutput[outputIndex]
+	if !ok || !d.announcedItems[fallback] {
+		return false
+	}
+	announcedID := d.itemIDByOutput[outputIndex]
+	return itemID == "" || announcedID == "" || announcedID == itemID
+}
+
+// terminalPartKey resolves the announcement identity of one terminal content
+// part. The content index is the part identity; the output position is used
+// only when both sides agree on the item id (or one side has none).
+func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, contentIndex int) string {
+	key := contentPartKey(itemID, outputIndex, contentIndex)
+	if d.announcedParts[key] {
+		return key
+	}
+	posKey, ok := d.keyByPart[[2]int{outputIndex, contentIndex}]
+	if !ok {
+		return key
+	}
+	announcedID := d.itemIDByOutput[outputIndex]
+	if itemID == "" || announcedID == "" || announcedID == itemID {
+		return posKey
+	}
+	return key
 }
 
 // syntheticBlock emits a complete canonical block lifecycle for terminal-only
@@ -516,52 +643,92 @@ func (d *ResponsesStreamDecoder) synthesizeFunctionCall(item responsesWireItem) 
 	return nil
 }
 
-// synthesizeMessage emits the content parts of one message item that appeared
-// only in the terminal document. Parts already announced by content_part.added
-// are skipped by their original content index.
-func (d *ResponsesStreamDecoder) synthesizeMessage(outputIndex int, item responsesWireItem) error {
-	if len(item.Content) == 0 || string(bytes.TrimSpace(item.Content)) == "null" {
-		return nil
+// terminalContentPart is one content part of a terminal message item with the
+// content index that identifies it against the announced parts.
+type terminalContentPart struct {
+	contentIndex int
+	block        ir.Block
+	delta        *ir.Delta
+}
+
+// terminalMessageParts decodes a terminal message content value into the parts
+// the target can carry, preserving each part's content index.
+func terminalMessageParts(raw json.RawMessage) ([]terminalContentPart, error) {
+	if len(raw) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil, nil
 	}
 	var text string
-	if err := json.Unmarshal(item.Content, &text); err == nil {
-		if text == "" || d.announcedParts[[2]int{outputIndex, 0}] {
-			return nil
+	if err := json.Unmarshal(raw, &text); err == nil {
+		if text == "" {
+			return nil, nil
 		}
-		d.syntheticBlock(ir.Block{Type: ir.BlockText}, &ir.Delta{Text: text})
-		return nil
+		return []terminalContentPart{{
+			block: ir.Block{Type: ir.BlockText},
+			delta: &ir.Delta{Text: text},
+		}}, nil
 	}
-	if !metrics.ContentPartsWithinLimit(item.Content) {
-		return fmt.Errorf("responses terminal content exceeds %d parts", metrics.ContentPartMax)
+	if !metrics.ContentPartsWithinLimit(raw) {
+		return nil, fmt.Errorf("responses terminal content exceeds %d parts", metrics.ContentPartMax)
 	}
 	var parts []json.RawMessage
-	if err := json.Unmarshal(item.Content, &parts); err != nil {
-		return err
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil, err
 	}
+	out := make([]terminalContentPart, 0, len(parts))
 	for contentIndex, part := range parts {
-		if d.announcedParts[[2]int{outputIndex, contentIndex}] {
-			continue
-		}
 		wrapped := make([]byte, 0, len(part)+2)
 		wrapped = append(wrapped, '[')
 		wrapped = append(wrapped, part...)
 		wrapped = append(wrapped, ']')
 		blocks, _, err := decodeResponsesContent(wrapped, ir.RoleAssistant)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, block := range blocks {
 			switch block.Type {
 			case ir.BlockText:
 				if block.Text != "" {
-					d.syntheticBlock(ir.Block{Type: ir.BlockText}, &ir.Delta{Text: block.Text})
+					out = append(out, terminalContentPart{
+						contentIndex: contentIndex,
+						block:        ir.Block{Type: ir.BlockText},
+						delta:        &ir.Delta{Text: block.Text},
+					})
 				}
 			case ir.BlockRefusal:
 				if block.Refusal != "" {
-					d.syntheticBlock(ir.Block{Type: ir.BlockRefusal}, &ir.Delta{Text: block.Refusal})
+					out = append(out, terminalContentPart{
+						contentIndex: contentIndex,
+						block:        ir.Block{Type: ir.BlockRefusal},
+						delta:        &ir.Delta{Text: block.Refusal},
+					})
 				}
 			}
 		}
+	}
+	return out, nil
+}
+
+// synthesizeMessage emits the content parts of one message item that appeared
+// only in the terminal document. Parts already announced by content_part.added
+// are skipped by their stable identity.
+func (d *ResponsesStreamDecoder) synthesizeMessage(outputIndex int, item responsesWireItem) error {
+	parts, err := terminalMessageParts(item.Content)
+	if err != nil {
+		return err
+	}
+	for _, part := range parts {
+		key := d.terminalPartKey(item.ID, outputIndex, part.contentIndex)
+		if d.announcedParts[key] {
+			continue
+		}
+		admitted, err := d.announcePart(key)
+		if err != nil {
+			return err
+		}
+		if !admitted {
+			continue
+		}
+		d.syntheticBlock(part.block, part.delta)
 	}
 	return nil
 }
@@ -601,82 +768,131 @@ func (d *ResponsesStreamDecoder) synthesizeReasoning(item responsesWireItem) err
 	return nil
 }
 
-// toolArgumentsDelta applies the first streamed arguments delta. The buffered
-// output_item.added payload is emitted first; when the delta already repeats
-// that prefix only its suffix is emitted. No delta means no emission, so the
-// done or terminal full value can still replace the initial payload.
-func (d *ResponsesStreamDecoder) toolArgumentsDelta(outputIndex, blockIndex int, delta string) {
-	if delta == "" {
+// toolArgumentsDelta applies the first streamed arguments delta for one item
+// identity. The buffered output_item.added payload is emitted first; when the
+// delta already repeats that prefix only its suffix is emitted. No delta means
+// no emission, so the done or terminal full value can still replace the
+// initial payload.
+func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, delta string) {
+	if delta == "" || key == "" {
 		return
 	}
-	if !d.argsEmitted[outputIndex] {
-		if initial := d.initialArgs[outputIndex]; initial != "" {
+	if !d.argsEmitted[key] {
+		if initial := d.initialArgs[key]; initial != "" {
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: initial}})
 			if strings.HasPrefix(delta, initial) {
 				delta = delta[len(initial):]
 			}
 		}
-		d.dropInitialArgs(outputIndex)
-		d.argsEmitted[outputIndex] = true
+		d.dropInitialArgs(key)
+		d.argsEmitted[key] = true
 	}
 	if delta != "" {
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: delta}})
 	}
 }
 
-// flushToolArguments emits the full done/terminal arguments for an output
-// index that never streamed a delta. When the completion carries no value at
-// all, the buffered output_item.added payload is the only available value.
-func (d *ResponsesStreamDecoder) flushToolArguments(outputIndex, blockIndex int, full string) {
-	if d.argsEmitted[outputIndex] {
+// flushToolArguments emits the full done/terminal arguments for an item
+// identity that never streamed a delta. When the completion carries no value
+// at all, the buffered output_item.added payload is the only available value.
+func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string) {
+	if key == "" || d.argsEmitted[key] {
 		return
 	}
 	args := full
 	if args == "" {
-		args = d.initialArgs[outputIndex]
+		args = d.initialArgs[key]
 	}
-	d.argsEmitted[outputIndex] = true
-	d.dropInitialArgs(outputIndex)
+	d.argsEmitted[key] = true
+	d.dropInitialArgs(key)
 	if args != "" && args != "{}" {
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: args}})
 	}
 }
 
 // dropInitialArgs releases the buffered output_item.added arguments for one
-// output index and its share of the initial-arguments bound.
-func (d *ResponsesStreamDecoder) dropInitialArgs(outputIndex int) {
-	if args, ok := d.initialArgs[outputIndex]; ok {
+// item identity and its share of the initial-arguments bound.
+func (d *ResponsesStreamDecoder) dropInitialArgs(key string) {
+	if args, ok := d.initialArgs[key]; ok {
 		d.initialArgsBytes -= len(args)
-		delete(d.initialArgs, outputIndex)
+		delete(d.initialArgs, key)
 	}
 }
 
 // clearToolState releases every per-call entry once a function call closes.
-func (d *ResponsesStreamDecoder) clearToolState(outputIndex int) {
-	d.dropInitialArgs(outputIndex)
-	delete(d.argsEmitted, outputIndex)
+func (d *ResponsesStreamDecoder) clearToolState(key string) {
+	d.dropInitialArgs(key)
+	delete(d.argsEmitted, key)
 }
 
-func (d *ResponsesStreamDecoder) announceItem(outputIndex int) error {
-	if d.announcedItems[outputIndex] {
-		return nil
+// Item and content-part identities. A provider's terminal output array is not
+// required to preserve output_index positions, so dedupe and terminal
+// completion match on the wire identity the target correlates with: call id
+// for function calls, item id for messages/reasoning, then content index for a
+// part. A source that supplies no identity falls back to its wire position.
+func functionCallKey(callID, itemID string, outputIndex int) string {
+	switch {
+	case callID != "":
+		return "call:" + callID
+	case itemID != "":
+		return "item:" + itemID
+	default:
+		return "output:" + strconv.Itoa(outputIndex)
+	}
+}
+
+func reasoningItemKey(itemID string, outputIndex int) string {
+	if itemID != "" {
+		return "item:" + itemID
+	}
+	return "output:" + strconv.Itoa(outputIndex)
+}
+
+func messageItemKey(itemID string, outputIndex int) string {
+	if itemID != "" {
+		return "message:" + itemID
+	}
+	return "output:" + strconv.Itoa(outputIndex)
+}
+
+func contentPartKey(itemID string, outputIndex, contentIndex int) string {
+	if itemID != "" {
+		return "part:" + itemID + ":" + strconv.Itoa(contentIndex)
+	}
+	return "output:" + strconv.Itoa(outputIndex) + ":part:" + strconv.Itoa(contentIndex)
+}
+
+func (d *ResponsesStreamDecoder) announceOutput(outputIndex int) (bool, error) {
+	if d.announcedOutputs[outputIndex] {
+		return false, nil
+	}
+	if len(d.announcedOutputs) >= WireCollectionMax {
+		return false, fmt.Errorf("responses stream exceeds %d announced output items", WireCollectionMax)
+	}
+	d.announcedOutputs[outputIndex] = true
+	return true, nil
+}
+
+func (d *ResponsesStreamDecoder) announceItem(key string) (bool, error) {
+	if d.announcedItems[key] {
+		return false, nil
 	}
 	if len(d.announcedItems) >= WireCollectionMax {
-		return fmt.Errorf("responses stream exceeds %d announced items", WireCollectionMax)
+		return false, fmt.Errorf("responses stream exceeds %d announced items", WireCollectionMax)
 	}
-	d.announcedItems[outputIndex] = true
-	return nil
+	d.announcedItems[key] = true
+	return true, nil
 }
 
-func (d *ResponsesStreamDecoder) announcePart(key [2]int) error {
+func (d *ResponsesStreamDecoder) announcePart(key string) (bool, error) {
 	if d.announcedParts[key] {
-		return nil
+		return false, nil
 	}
 	if len(d.announcedParts) >= WireNestedCollectionMax {
-		return fmt.Errorf("responses stream exceeds %d announced content parts", WireNestedCollectionMax)
+		return false, fmt.Errorf("responses stream exceeds %d announced content parts", WireNestedCollectionMax)
 	}
 	d.announcedParts[key] = true
-	return nil
+	return true, nil
 }
 
 // FlushBlocks closes every block this decoder still holds open. The
