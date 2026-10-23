@@ -223,7 +223,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// pretty-printed error JSON - which a per-line scan can never decode - is
 	// caught the same way the client's SSE parser sees it.
 	if isBlankLine(line) {
-		a.flushEvent()
+		a.flushEvent(now)
 		return
 	}
 
@@ -238,7 +238,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Fast-path: check for the [DONE] sentinel. Tolerate "data:[DONE]" (no
 	// space) and a trailing \r. Anything else (e.g. "[DONE]extra") falls
 	// through to the normal JSON scan.
-	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" {
+	if isDonePayload(payload) {
 		a.terminatorSeen = true
 		return
 	}
@@ -248,6 +248,117 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if a.feedAnthropic(payload, now) {
 		return
 	}
+	a.feedData(payload, "", now)
+}
+
+// FeedEvent ingests one complete SSE event whose data: lines were reassembled
+// at the blank-line boundary. eventType is the authoritative type resolved
+// from the event's data (or its terminal event name when the document omits
+// the type). It is the boundary twin of Feed, for events the relay buffers as
+// a unit; a single-line event already seen by Feed is not processed twice.
+func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
+	if len(data) == 0 {
+		return
+	}
+	if isDonePayload(data) {
+		a.terminatorSeen = true
+		return
+	}
+	// A terminal marker already signed the stream: a repeated terminal event
+	// is provider noise and must not rewrite the record.
+	if responsesTerminalEvent(eventType) && a.terminatorSeen {
+		a.flushEvent(now)
+		return
+	}
+	// Idempotence with line-oriented detection: the same payload already
+	// accumulated for this event was processed by Feed.
+	if len(a.eventData) > 0 && bytes.Equal(a.eventData, data) {
+		a.flushEvent(now)
+		return
+	}
+	if a.feedAnthropic(data, now) {
+		a.flushEvent(now)
+		return
+	}
+	a.feedData(data, eventType, now)
+	a.flushEvent(now)
+}
+
+// FeedBufferedEvent ingests the raw lines of one incomplete SSE event that the
+// relay had to release verbatim at its hold bound. It preserves the
+// reassembled data for a later FlushEventWithName, then classifies each line
+// without adding it twice. Later data lines of the same event append normally
+// until the real blank-line boundary.
+func (a *Analyzer) FeedBufferedEvent(raw []byte, now time.Time) {
+	data := EventData(raw)
+	if len(data) > eventDataMax {
+		data = data[:eventDataMax]
+	}
+	a.eventData = append(a.eventData[:0], data...)
+	a.eventDataSeen = true
+	a.eventSkipAccum = true
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\n' {
+			continue
+		}
+		a.Feed(raw[start:i], now)
+		start = i + 1
+	}
+	if start < len(raw) {
+		a.Feed(raw[start:], now)
+	}
+	a.eventDataSeen = true
+	a.eventSkipAccum = false
+}
+
+// FlushEventWithName resolves the current event at its blank-line boundary
+// using the given SSE event name. A document that omits its top-level type is
+// classified by that name; a document that carries a type uses its own type.
+// It never re-feeds the event's data lines.
+func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
+	if len(a.eventData) > 0 && !a.terminatorSeen {
+		typ, _ := ResolveResponsesTerminal(name, a.eventData)
+		if typ != "" {
+			a.terminatorSeen = true
+			a.responsesStream = true
+			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			// The reassembled document is the whole event, so its usage
+			// object may span several data: lines that no per-line scan could
+			// parse. Capture it here exactly like feedData does for a
+			// single-line document.
+			var keys frameKeys
+			keys.scan(a.eventData)
+			a.captureUsage(&keys, a.eventData)
+			a.captureResponsesTerminalFinish(typ, a.eventData, now)
+		}
+	}
+	a.flushEvent(now)
+}
+
+// captureUsage records the last usage object of one payload. The enclosing
+// chunk is kept too (copied - payload aliases the reused line buffer):
+// cost_keys paths are relative to the response root, and cost or token counts
+// may live in a sibling of usage.
+func (a *Analyzer) captureUsage(keys *frameKeys, payload []byte) {
+	raw := extractObject(keys.usage)
+	if raw == nil {
+		return
+	}
+	a.usage = append(a.usage[:0], raw...)
+	a.usageChunk = append(a.usageChunk[:0], payload...)
+	a.usageSeen = true
+}
+
+// feedData classifies one data payload. forcedType supplies the Responses
+// event type when the document itself omits it (a terminal event named only
+// on the SSE event: line).
+func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
+	// One escape-aware pass records every key this frame classifies; the
+	// predicates below read that result instead of rescanning the payload per
+	// key. Results are per-frame only - nothing is cached across frames.
+	var keys frameKeys
+	keys.scan(payload)
 
 	// Accumulate this data: line into the current event buffer so a multi-line
 	// event (data split across lines per the SSE spec) can be parsed whole at
@@ -259,11 +370,15 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// in-band error, and a complete object cannot continue into a later data
 	// line as valid JSON. Skipping the copy keeps the buffer empty for the
 	// ordinary one-object-per-event stream, saving a frame-sized copy and a
-	// second scan per frame plus the largest-frame retention.
+	// second scan per frame plus the largest-frame retention. A type-less
+	// complete object on a Responses-shaped stream is the exception: it may be
+	// a terminal document whose SSE name arrives after its data line, so its
+	// bytes are retained for the boundary classifier.
 	firstDataFrame := !a.eventDataSeen
 	if firstDataFrame {
 		a.eventDataSeen = true
-		a.eventSkipAccum = completeJSONObject(payload)
+		a.eventSkipAccum = completeJSONObject(payload) &&
+			!(a.responsesStream && keys.eventType == nil)
 	}
 	if !a.eventSkipAccum && len(a.eventData)+len(payload)+1 <= eventDataMax {
 		if len(a.eventData) > 0 {
@@ -274,15 +389,12 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// We only inspect content-bearing data: lines. We look for key patterns
 	// within the JSON payload without fully decoding.
 
-	// One escape-aware pass records every key this frame classifies; the
-	// predicates below read that result instead of rescanning the payload per
-	// key. Results are per-frame only - nothing is cached across frames.
-	var keys frameKeys
-	keys.scan(payload)
-
 	// Track first/last token of any kind (content, reasoning, or tool call).
 	// The first content-bearing chunk marks TTFT.
 	eventType := keys.responseEventType(payload)
+	if eventType == "" {
+		eventType = forcedType
+	}
 	hasContent := keys.contentStart() || keys.textStart() || responsesContentEvent(eventType, &keys)
 	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
@@ -397,7 +509,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if responsesTerminalEvent(eventType) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
-		a.captureResponsesTerminalFinish(eventType, payload)
+		a.captureResponsesTerminalFinish(eventType, payload, now)
 	}
 	// A Responses failure states its provider error under response.error, not
 	// the top-level error key the frame gate looks for. Decode it only on the
@@ -424,14 +536,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 
 	// Capture the usage blob from the final chunk. Usage appears as
 	// "usage":{...} near the end of the payload. Only the last one wins.
-	// The enclosing chunk is kept too (copied - payload aliases the reused
-	// line buffer): cost_keys paths are relative to the response root, and
-	// the cost / token counts may live in a sibling of usage.
-	if raw := extractObject(keys.usage); raw != nil {
-		a.usage = append(a.usage[:0], raw...)
-		a.usageChunk = append(a.usageChunk[:0], payload...)
-		a.usageSeen = true
-	}
+	a.captureUsage(&keys, payload)
 
 	// Capture an in-band error payload. Providers and gateways signal failures
 	// mid-stream under a top-level "error" key in several shapes, all sharing
@@ -479,12 +584,26 @@ func (a *Analyzer) extractCost(raw []byte) (float64, bool) {
 // covered here (its one data: line is the whole buffer); the per-line gate in
 // Feed already caught the common case, so this is the safety net for events
 // whose error JSON spans multiple data: lines.
-func (a *Analyzer) flushEvent() {
+func (a *Analyzer) flushEvent(now time.Time) {
 	if len(a.eventData) > 0 && a.errType == "" {
 		var keys frameKeys
 		keys.scan(a.eventData)
 		if keys.hasError {
 			a.captureStreamError(a.eventData)
+		}
+	}
+	// A Responses terminal document may itself span several data: lines (a
+	// pretty-printed or split JSON object). No single line is a complete
+	// terminal event, so resolve the reassembled document at its boundary.
+	// A terminal marker already seen by the line-oriented path is not
+	// processed twice.
+	if len(a.eventData) > 0 && !a.terminatorSeen {
+		var keys frameKeys
+		keys.scan(a.eventData)
+		if typ := keys.responseEventType(a.eventData); responsesTerminalEvent(typ) {
+			a.terminatorSeen = true
+			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			a.captureResponsesTerminalFinish(typ, a.eventData, now)
 		}
 	}
 	a.eventData = a.eventData[:0]
@@ -566,7 +685,7 @@ func responsesTerminalEvent(eventType string) bool {
 // classified as an empty completion and a completed answer kept no reason.
 // The terminal document may also be the only place the turn's output appears,
 // so text, refusal and reasoning presence are recorded here before classifying.
-func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte) {
+func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte, now time.Time) {
 	var ev struct {
 		Response struct {
 			ID                string `json:"id"`
@@ -586,6 +705,8 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 		} `json:"response"`
 	}
 	parsed := json.Unmarshal(payload, &ev) == nil
+	terminalUnits := 0
+	hadStreamedAnswer := !a.firstAnswerAt.IsZero()
 	if parsed {
 		if ev.Response.ID != "" {
 			a.responseID = ev.Response.ID
@@ -602,10 +723,27 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				// is never classified as empty and replaced by a failure.
 				a.countResponsesToolCall(item.CallID, item.Name)
 			case "message":
-				if text := terminalMessageText(item.Content); text != "" {
+				text, refusal := terminalMessageText(item.Content)
+				if text != "" {
 					a.answerishSeen = true
+					// The terminal document is the whole stream for a
+					// terminal-only answer: count every non-empty text unit so
+					// the no-usage fallback matches the streamed equivalent.
+					// A streamed text delta already owns the chunk count; the
+					// terminal document merely repeats its value.
+					if !hadStreamedAnswer {
+						terminalUnits += terminalTextUnits(item.Content)
+					}
 					if a.CapturePreview && a.preview == nil {
 						a.preview = []byte(metrics.TruncatePreview(text))
+					}
+				} else if refusal != "" {
+					// A refusal is answer-shaped output but not answer
+					// content, exactly like a refusal delta: presence for
+					// classification/rescue gates, never HadAnswerContent.
+					a.answerishSeen = true
+					if a.CapturePreview && a.preview == nil {
+						a.preview = []byte(metrics.TruncatePreview(refusal))
 					}
 				}
 			case "reasoning":
@@ -614,6 +752,9 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				}
 			}
 		}
+	}
+	if terminalUnits > 0 {
+		a.recordTerminalAnswerUnits(now, terminalUnits)
 	}
 	if a.finishReason != "" {
 		return
@@ -645,19 +786,74 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 }
 
-// terminalMessageText returns the first non-empty answer or refusal text in a
-// message item's terminal content. The value may be a plain string or the
-// documented part array.
-func terminalMessageText(raw json.RawMessage) string {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return ""
+// recordTerminalAnswerUnits records the content-bearing units of a
+// terminal-only Responses document. The terminal event is the chunk that
+// carried them, so it feeds the same TTFT/chunk-count accounting as the
+// equivalent streamed output_text deltas. units is already the count of
+// non-empty message text parts, so a no-usage record keeps one chunk per unit.
+func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
+	if units <= 0 {
+		return
 	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
+	}
+	a.lastTokenAt = now
+	a.chunkCount += int64(units)
+	a.firstAnswerAt = now
+}
+
+// terminalTextUnits counts the non-empty answer text units in a message item's
+// terminal content: one per output_text/input_text/text part, or one for a
+// plain string. Refusal parts are answer-shaped but not content and never
+// count.
+func terminalTextUnits(raw json.RawMessage) int {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		if plain != "" {
+			return 1
+		}
+		return 0
 	}
 	if !metrics.ContentPartsWithinLimit(raw) {
-		return ""
+		return 0
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return 0
+	}
+	units := 0
+	for _, part := range parts {
+		switch part.Type {
+		case "output_text", "input_text", "text":
+			if part.Text != "" {
+				units++
+			}
+		}
+	}
+	return units
+}
+
+// terminalMessageText returns the first non-empty answer text and refusal text
+// in a message item's terminal content. The value may be a plain string or the
+// documented part array. The two kinds stay separate: only text is answer
+// content, while a refusal is answer-shaped bytes.
+func terminalMessageText(raw json.RawMessage) (text, refusal string) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return plain, ""
+	}
+	if !metrics.ContentPartsWithinLimit(raw) {
+		return "", ""
 	}
 	var parts []struct {
 		Type    string `json:"type"`
@@ -665,21 +861,21 @@ func terminalMessageText(raw json.RawMessage) string {
 		Refusal string `json:"refusal"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
-		return ""
+		return "", ""
 	}
 	for _, part := range parts {
 		switch part.Type {
 		case "output_text", "input_text", "text":
-			if part.Text != "" {
-				return part.Text
+			if part.Text != "" && text == "" {
+				text = part.Text
 			}
 		case "refusal":
-			if part.Refusal != "" {
-				return part.Refusal
+			if part.Refusal != "" && refusal == "" {
+				refusal = part.Refusal
 			}
 		}
 	}
-	return ""
+	return text, refusal
 }
 
 // terminalReasoningPresent reports non-empty summary or reasoning_text content
@@ -738,7 +934,7 @@ func TerminalLine(line []byte) bool {
 	if !ok {
 		return false
 	}
-	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" || responsesTerminalEvent(responseEventType(payload)) {
+	if isDonePayload(payload) || responsesTerminalEvent(responseEventType(payload)) {
 		return true
 	}
 	// Anthropic Messages closes with message_stop. A content string that
@@ -776,7 +972,7 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	// Flush a trailing event that ended at EOF without its blank-line
 	// terminator (a stream can close right after the last data: line). This
 	// surfaces an in-band error the provider sent as its final event.
-	a.flushEvent()
+	a.flushEvent(time.Now())
 
 	rec.FirstTokenAt = a.firstTokenAt
 	rec.LastTokenAt = a.lastTokenAt
@@ -956,7 +1152,7 @@ func (a *Analyzer) RetryableTruncation() bool {
 	if !a.chatlike || a.terminatorSeen || a.answerishSeen || a.responsesStream {
 		return false
 	}
-	a.flushEvent()
+	a.flushEvent(time.Now())
 	return a.firstTokenAt.IsZero() && a.errType == ""
 }
 
@@ -983,7 +1179,7 @@ func (a *Analyzer) RetryableReasoningTruncation() bool {
 	// provider error that never saw its blank-line boundary is discovered
 	// only by the flush, and the provider's own failure statement must
 	// disqualify the rescue (mirrors RetryableTruncation's ordering).
-	a.flushEvent()
+	a.flushEvent(time.Now())
 	return !a.firstReasoningAt.IsZero() && a.firstAnswerAt.IsZero() && a.errType == ""
 }
 

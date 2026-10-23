@@ -88,6 +88,22 @@ func ErrorEnvelope(id, typ string, code any, msg string) (json.RawMessage, error
 	return json.Marshal(obj)
 }
 
+// DoneLine reports whether one raw SSE line carries the [DONE] sentinel.
+// The sentinel ends an OpenAI-compatible stream at the line itself: no later
+// field can belong to it, so the relay resolves its hold without waiting for
+// the blank-line boundary. A Responses terminal document is different - its
+// event may still name itself on a later line - and is never a DoneLine.
+func DoneLine(line []byte) bool {
+	payload, ok := DataPayload(line)
+	return ok && isDonePayload(payload)
+}
+
+// isDonePayload reports whether one data payload is the [DONE] sentinel,
+// tolerating a trailing CR.
+func isDonePayload(payload []byte) bool {
+	return string(bytes.TrimRight(payload, "\r")) == "[DONE]"
+}
+
 // EventName returns the name declared by one raw SSE line ("event: name"), or
 // "" when the line is not an event field. The name is trimmed like the SSE
 // parser trims it.
@@ -102,6 +118,57 @@ func EventName(line []byte) string {
 // ResponsesTerminalEventName reports whether name is one of the Responses API
 // terminal event names.
 func ResponsesTerminalEventName(name string) bool { return responsesTerminalEvent(name) }
+
+// ResolveResponsesTerminal resolves one Responses terminal event from its SSE
+// event name and reassembled data payload. The document's own top-level type
+// is authoritative; a terminal event name is authoritative only when the
+// document omits the type. keepName is false when the buffered name
+// contradicts the document and must be dropped so the client never sees a
+// completed document labelled incomplete (or the reverse). A non-terminal
+// document under a terminal name resolves to "" and keepName false.
+func ResolveResponsesTerminal(name string, data []byte) (typ string, keepName bool) {
+	dataType := responseEventType(data)
+	if dataType != "" {
+		if responsesTerminalEvent(dataType) {
+			return dataType, dataType == name
+		}
+		return "", false
+	}
+	if !responsesTerminalEvent(name) || !completeJSONObject(data) {
+		return "", false
+	}
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(data, &probe) != nil || probe.Type != "" {
+		return "", false
+	}
+	return name, true
+}
+
+// EventData reassembles the data: payloads of one complete SSE event, joined
+// with "\n" per the SSE spec. Non-data fields (event:/id:/retry:) and blank
+// separators are ignored. The caller owns the bound on raw.
+func EventData(raw []byte) []byte {
+	var out []byte
+	for len(raw) > 0 {
+		line := raw
+		if i := bytes.IndexByte(raw, '\n'); i >= 0 {
+			line, raw = raw[:i], raw[i+1:]
+		} else {
+			raw = nil
+		}
+		payload, ok := DataPayload(line)
+		if !ok {
+			continue
+		}
+		if len(out) > 0 {
+			out = append(out, '\n')
+		}
+		out = append(out, payload...)
+	}
+	return out
+}
 
 // DataPayload extracts the payload of one raw SSE line: ok is false when the
 // line is not a data line - the full "data:" prefix is required (never just a

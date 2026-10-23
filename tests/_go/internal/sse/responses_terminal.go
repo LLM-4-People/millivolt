@@ -152,13 +152,21 @@ func TestResponsesTerminalOnlyOutputPresence(t *testing.T) {
 		wantPreview   string
 		wantTools     int
 		wantToolNames []string
+		wantHadAnswer bool
+		wantTTFT      bool
+		wantAnswerTok int64
+		wantGenTokens int64
 	}{
 		{
-			name:        "text",
-			output:      `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]`,
-			wantFinish:  "stop",
-			wantOutcome: "",
-			wantPreview: "hello",
+			name:          "text",
+			output:        `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]`,
+			wantFinish:    "stop",
+			wantOutcome:   "",
+			wantPreview:   "hello",
+			wantHadAnswer: true,
+			wantTTFT:      true,
+			wantAnswerTok: 2,
+			wantGenTokens: 2,
 		},
 		{
 			name:        "refusal",
@@ -188,6 +196,10 @@ func TestResponsesTerminalOnlyOutputPresence(t *testing.T) {
 			wantPreview:   "hello",
 			wantTools:     1,
 			wantToolNames: []string{"lookup"},
+			wantHadAnswer: true,
+			wantTTFT:      true,
+			wantAnswerTok: 2,
+			wantGenTokens: 2,
 		},
 	}
 	for _, tc := range cases {
@@ -195,10 +207,12 @@ func TestResponsesTerminalOnlyOutputPresence(t *testing.T) {
 			var a Analyzer
 			a.CapturePreview = true
 			a.Feed([]byte(`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`), now)
-			a.Feed([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":`+tc.output+`}}`), now)
+			a.Feed([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5},"output":`+tc.output+`}}`), now)
 			a.Feed([]byte(""), now)
 			var rec metrics.Record
+			rec.FinalAttemptAt = now.Add(-time.Millisecond)
 			a.Fill(&rec)
+			metrics.FinalizeRecord(&rec)
 			if a.finishReason != tc.wantFinish || rec.FinishReason != tc.wantFinish {
 				t.Fatalf("finish = %q/%q, want %q", a.finishReason, rec.FinishReason, tc.wantFinish)
 			}
@@ -219,6 +233,111 @@ func TestResponsesTerminalOnlyOutputPresence(t *testing.T) {
 					t.Fatalf("tool names = %v, want %v", rec.ToolNames, tc.wantToolNames)
 				}
 			}
+			if rec.HadAnswerContent != tc.wantHadAnswer {
+				t.Fatalf("had answer content = %v, want %v", rec.HadAnswerContent, tc.wantHadAnswer)
+			}
+			if tc.wantTTFT && rec.TTFTMs != 1 {
+				t.Fatalf("TTFT = %dms, want 1ms", rec.TTFTMs)
+			}
+			if tc.wantTTFT && (rec.AnswerTokens != tc.wantAnswerTok || rec.GenTokens != tc.wantGenTokens) {
+				t.Fatalf("answer/gen tokens = %d/%d, want %d/%d", rec.AnswerTokens, rec.GenTokens, tc.wantAnswerTok, tc.wantGenTokens)
+			}
 		})
 	}
+}
+
+// TestResponsesTerminalTextMatchesStreamed pins the N17 invariant: a terminal
+// document that carries text (alone or beside a function call) records the
+// same answer presence, token counts and TTFT as the streamed equivalent.
+func TestResponsesTerminalTextMatchesStreamed(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	run := func(lines []string) metrics.Record {
+		var a Analyzer
+		a.CapturePreview = true
+		for _, line := range lines {
+			a.Feed([]byte(line), now)
+		}
+		var rec metrics.Record
+		rec.FinalAttemptAt = now.Add(-time.Millisecond)
+		a.Fill(&rec)
+		metrics.FinalizeRecord(&rec)
+		return rec
+	}
+	terminal := run([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5},"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]}}`,
+	})
+	streamed := run([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`,
+	})
+	if terminal.HadAnswerContent != streamed.HadAnswerContent ||
+		terminal.AnswerTokens != streamed.AnswerTokens ||
+		terminal.GenTokens != streamed.GenTokens ||
+		terminal.TTFTMs != streamed.TTFTMs {
+		t.Fatalf("terminal record %+v does not match streamed %+v", terminal, streamed)
+	}
+	if !terminal.HadAnswerContent || terminal.TTFTMs != 1 {
+		t.Fatalf("terminal text did not record answer content and TTFT: %+v", terminal)
+	}
+}
+
+// TestResponsesTerminalMultiTextUnitsMatchStreamed pins R4-6: each non-empty
+// terminal text unit counts as a chunk for the no-usage fallback, matching the
+// streamed equivalent. Provider usage remains the owner when present.
+func TestResponsesTerminalMultiTextUnitsMatchStreamed(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	run := func(lines []string) metrics.Record {
+		var a Analyzer
+		for _, line := range lines {
+			a.Feed([]byte(line), now)
+		}
+		var rec metrics.Record
+		rec.FinalAttemptAt = now.Add(-time.Millisecond)
+		a.Fill(&rec)
+		metrics.FinalizeRecord(&rec)
+		return rec
+	}
+	twoItems := []string{
+		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"one"}]},{"type":"message","id":"msg_2","role":"assistant","content":[{"type":"output_text","text":"two"}]}]}}`,
+	}
+	twoParts := []string{
+		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"one"},{"type":"output_text","text":"two"}]}]}}`,
+	}
+	streamed := []string{
+		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"one"}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":"two"}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`,
+	}
+	want := run(streamed)
+	for name, lines := range map[string][]string{"two items": twoItems, "two parts": twoParts} {
+		t.Run(name, func(t *testing.T) {
+			got := run(lines)
+			if !got.HadAnswerContent || got.Chunks != want.Chunks ||
+				got.AnswerTokens != want.AnswerTokens || got.GenTokens != want.GenTokens ||
+				got.TTFTMs != want.TTFTMs {
+				t.Fatalf("terminal record = %+v, want streamed %+v", got, want)
+			}
+			if got.Chunks != 2 || got.AnswerTokens != 2 || got.GenTokens != 2 || got.TTFTMs != 1 {
+				t.Fatalf("terminal chunks/tokens/ttft = %d/%d/%d/%d, want 2/2/2/1ms",
+					got.Chunks, got.AnswerTokens, got.GenTokens, got.TTFTMs)
+			}
+		})
+	}
+
+	t.Run("usage remains authoritative", func(t *testing.T) {
+		withUsage := []string{
+			`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":3,"output_tokens":7,"total_tokens":10},"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"one"},{"type":"output_text","text":"two"}]}]}}`,
+		}
+		got := run(withUsage)
+		if got.AnswerTokens != 7 || got.GenTokens != 7 {
+			t.Fatalf("answer/gen tokens = %d/%d, want provider usage 7/7", got.AnswerTokens, got.GenTokens)
+		}
+	})
 }
