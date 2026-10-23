@@ -2302,7 +2302,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						hold = append(hold, pendingEvent...)
 						pendingEvent = pendingEvent[:0]
 					} else {
-						out.Write(pendingEvent)
+						// A terminal event name whose data line is not the
+						// matching terminal event is malformed framing. Drop
+						// the name instead of letting it re-label unrelated
+						// data as a completed response.
 						pendingEvent = pendingEvent[:0]
 					}
 				}
