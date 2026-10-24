@@ -155,9 +155,13 @@ type ResponsesStreamDecoder struct {
 	warnings ir.Warnings
 	// terminalPending holds authoritative done-event values whose target block
 	// already ended or was never opened. They are emitted after every streamed
-	// block closes (closeAll), so target lifecycles never nest.
-	terminalPending []terminalEmission
-	open            map[int]bool
+	// block closes (closeAll), so target lifecycles never nest. Entries are
+	// keyed by part identity and coalesced: repeated unannounced deltas for one
+	// part append into the existing emission instead of growing one entry per
+	// delta. terminalPendingByKey records the first-seen position for each key.
+	terminalPending      []terminalEmission
+	terminalPendingByKey map[string]int
+	open                 map[int]bool
 
 	usage       ir.Usage
 	finish      ir.FinishReason
@@ -167,25 +171,26 @@ type ResponsesStreamDecoder struct {
 // NewResponsesStreamDecoder builds a decoder over one upstream body.
 func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 	return &ResponsesStreamDecoder{
-		r:                newSSEReader(r),
-		itemBlock:        map[int]int{},
-		partBlock:        map[[2]int]int{},
-		initialArgs:      map[string]string{},
-		argsEmitted:      map[string]*toolArgumentCoverage{},
-		announcedOutputs: map[int]bool{},
-		announcedItems:   map[string]bool{},
-		announcedParts:   map[string]bool{},
-		itemBlockByKey:   map[string]int{},
-		partBlockByKey:   map[string]int{},
-		keyByOutput:      map[int]string{},
-		keyByPart:        map[[2]int]string{},
-		itemIDByOutput:   map[int]string{},
-		partSeed:         map[string]ir.Block{},
-		partPosition:     map[string][2]int{},
-		emittedText:      map[string]*strings.Builder{},
-		partOwner:        map[string]string{},
-		partKind:         map[string]partChannel{},
-		open:             map[int]bool{},
+		r:                    newSSEReader(r),
+		itemBlock:            map[int]int{},
+		partBlock:            map[[2]int]int{},
+		initialArgs:          map[string]string{},
+		argsEmitted:          map[string]*toolArgumentCoverage{},
+		announcedOutputs:     map[int]bool{},
+		announcedItems:       map[string]bool{},
+		announcedParts:       map[string]bool{},
+		itemBlockByKey:       map[string]int{},
+		partBlockByKey:       map[string]int{},
+		keyByOutput:          map[int]string{},
+		keyByPart:            map[[2]int]string{},
+		terminalPendingByKey: map[string]int{},
+		itemIDByOutput:       map[int]string{},
+		partSeed:             map[string]ir.Block{},
+		partPosition:         map[string][2]int{},
+		emittedText:          map[string]*strings.Builder{},
+		partOwner:            map[string]string{},
+		partKind:             map[string]partChannel{},
+		open:                 map[int]bool{},
 	}
 }
 
@@ -503,11 +508,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if idx, ok := d.startPartBlock(key); ok {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
-			} else {
-				d.terminalPending = append(d.terminalPending, terminalEmission{
-					block: block,
-					delta: &ir.Delta{Text: emit},
-				})
+			} else if err := d.queueTerminal(key, block, &ir.Delta{Text: emit}); err != nil {
+				return nil, err
 			}
 			if err := d.setEmittedText(key, text); err != nil {
 				return nil, err
@@ -626,11 +628,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
 			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
-			} else {
-				d.terminalPending = append(d.terminalPending, terminalEmission{
-					block: ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}},
-					delta: &ir.Delta{Reasoning: delta},
-				})
+			} else if err := d.queueTerminal(key, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}, &ir.Delta{Reasoning: delta}); err != nil {
+				return nil, err
 			}
 		case "response.reasoning_text.done":
 			// The done payload is authoritative. Emit it only when no delta
@@ -667,11 +666,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			} else {
-				d.terminalPending = append(d.terminalPending, terminalEmission{
-					block: ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}},
-					delta: &ir.Delta{Reasoning: emit},
-				})
+			} else if err := d.queueTerminal(key, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}, &ir.Delta{Reasoning: emit}); err != nil {
+				return nil, err
 			}
 			if err := d.setEmittedText(key, ev.Text); err != nil {
 				return nil, err
@@ -942,6 +938,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	// close. Done-event payloads queued earlier share that tail.
 	pending := d.terminalPending
 	d.terminalPending = nil
+	clear(d.terminalPendingByKey)
 	more, err := d.collectTerminalOutput(output)
 	if err != nil {
 		return err
@@ -1563,6 +1560,38 @@ func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, con
 		return posKey
 	}
 	return key
+}
+
+// queueTerminal coalesces one authoritative terminal value into the pending
+// queue by part identity. A repeated delta for the same unopened part appends
+// its bytes to the existing emission, so a stream cannot turn the 8 MiB text
+// bound into one entry per delta. The key set is bounded by the same announced
+// part cap.
+func (d *ResponsesStreamDecoder) queueTerminal(key string, block ir.Block, delta *ir.Delta) error {
+	if idx, ok := d.terminalPendingByKey[key]; ok {
+		mergeTerminalDelta(d.terminalPending[idx].delta, delta)
+		return nil
+	}
+	if len(d.terminalPending) >= WireNestedCollectionMax {
+		return fmt.Errorf("responses stream exceeds %d pending terminal parts", WireNestedCollectionMax)
+	}
+	d.terminalPendingByKey[key] = len(d.terminalPending)
+	d.terminalPending = append(d.terminalPending, terminalEmission{block: block, delta: delta})
+	return nil
+}
+
+// mergeTerminalDelta appends the incremental bytes of one delta into a queued
+// emission. Only the field the queued emission carries is populated.
+func mergeTerminalDelta(dst, src *ir.Delta) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.Text += src.Text
+	dst.Reasoning += src.Reasoning
+	dst.Arguments += src.Arguments
+	if src.Citation != nil {
+		dst.Citation = src.Citation
+	}
 }
 
 // terminalEmission is a terminal value that belongs to a block which has
