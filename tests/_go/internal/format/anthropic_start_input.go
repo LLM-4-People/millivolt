@@ -72,6 +72,24 @@ func TestAnthropicStreamToolInputShapes(t *testing.T) {
 			deltas: []string{`{"b":`, `2}`},
 			want:   `{"b":2}`,
 		},
+		{
+			name:   "whitespace empty start with delta",
+			input:  `{ }`,
+			deltas: []string{`{"b":2}`},
+			want:   `{"b":2}`,
+		},
+		{
+			name:   "whitespace empty start with empty delta",
+			input:  `{ }`,
+			deltas: []string{``},
+			want:   `{ }`,
+		},
+		{
+			name:   "non-empty start with empty delta",
+			input:  `{"a":1}`,
+			deltas: []string{``},
+			want:   `{"a":1}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

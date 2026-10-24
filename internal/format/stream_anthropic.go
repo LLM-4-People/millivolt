@@ -247,7 +247,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if err := validateStreamedToolArguments(string(block.Input)); err != nil {
 					return nil, fmt.Errorf("anthropic stream tool %q: %w", boundedEcho(block.Name), err)
 				}
-				if input := strings.TrimSpace(string(block.Input)); input != "" && input != "{}" {
+				if !emptyToolInputObject(block.Input) {
 					d.toolStartNonEmpty[ev.Index] = true
 				}
 			}
@@ -280,7 +280,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			case "text_delta":
 				out.Text = delta.Text
 			case "input_json_delta":
-				if d.toolStartNonEmpty[ev.Index] {
+				if delta.PartialJSON != "" && d.toolStartNonEmpty[ev.Index] {
 					// The official start input is {}. A complete object at
 					// start plus a delta is not a prefix continuation, and
 					// concatenating them yields invalid arguments no target
@@ -528,6 +528,20 @@ func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	}
 	d.usage = usage
 	return nil
+}
+
+// emptyToolInputObject reports whether an already-validated tool input is
+// absent, null or an object with no members. JSON whitespace is insignificant,
+// so "{ }" is the same empty object as "{}".
+func emptyToolInputObject(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return true
+	}
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+		return false
+	}
+	return strings.TrimSpace(trimmed[1:len(trimmed)-1]) == ""
 }
 
 func anthropicStreamBlock(b anthropicWireBlock) (ir.Block, bool) {
