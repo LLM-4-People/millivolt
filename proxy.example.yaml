@@ -821,10 +821,11 @@ provider_aliases: {}
 # headers (such as authorization, cookie, host, content-type, and the whole x-proxy-
 # control prefix) are rejected at load. The override applies after provider headers and
 # the client's X-Proxy-Headers map and wins over both; it covers inference sends only,
-# never model discovery or token refresh. Body rewrites apply to passthrough and
-# translated-anthropic requests and re-stamp the recorded request cap; the Cursor bridge
-# reads no body fields, so body is skipped for cursor targets while header rules still
-# apply. An empty list leaves every request untouched. Hot-reloads.
+# never model discovery or token refresh. Body rewrites apply to Chat Completions or
+# Anthropic client bodies before translation, whatever the target (a Responses client body
+# is not rewritten), and re-stamp the recorded request cap; the Cursor bridge reads no
+# body fields, so body is skipped for cursor targets while header rules still apply. An
+# empty list leaves every request untouched. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
 request_overrides: []

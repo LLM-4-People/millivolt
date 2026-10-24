@@ -190,8 +190,9 @@ config validation and is denied at send time by the runtime belt. Header
 names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
 
-The body rewrite is fail closed. It applies to passthrough and translated
-Anthropic requests; when the body is not a JSON object, or the rewritten
+The body rewrite is fail closed. It applies to Chat Completions or Anthropic
+client bodies before translation, whatever the target (a Responses client body
+is not rewritten); when the body is not a JSON object, or the rewritten
 result would exceed `max_request_bytes`, nothing is written: the original
 bytes are used unchanged by the rewrite stage and are still translated when
 translation is active, with one process log line recording the reason. Only a
@@ -1120,9 +1121,12 @@ two features also retain different request bytes: on the passthrough wire
 the record's prompt preview is the client's original body, captured at the
 metadata decode before `request_overrides` or the sub-conversations strip
 rewrites it, while a debug capture's request body is the rewritten upstream
-body sent after any rewrite; on translated targets both follow the translated
-body. Both features can retain sensitive content even when credential headers
-are redacted.
+body sent after any rewrite. A translated Chat Completions or Anthropic target
+re-decodes the translated body for its prompt preview; a translated Responses
+target keeps the client-body prompt preview, because the generated item list is
+not re-decoded for preview. The response preview follows the client-facing
+response content on every target. Both features can retain sensitive content
+even when credential headers are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
 

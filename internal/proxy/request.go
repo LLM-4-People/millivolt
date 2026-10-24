@@ -2961,11 +2961,18 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
 }
 
 // parseGeneratedLLMRequest decodes the proxy's own translated request body.
-// Translation can legitimately add structured content blocks beyond the
-// inbound content-part count (for example one tool result becomes a block and
-// media parts split), so the client-facing aggregate must not reject a body
-// the codec just built. UTF-8 expansion, the typed metadata decode and the
-// token-cap recheck remain active.
+// It passes bound=false, so parseLLMRequestSlow skips ALL of
+// boundRequestMetadata: the messages/tools/stop array limits, the logit_bias,
+// metadata and distinct top-level-member counts, the aggregate content-part
+// and annotation counts, and the 1,024 aggregate tool-call bound. That is
+// deliberate: translation legitimately changes composition (one tool result
+// becomes a content block, media parts split, lifted system fragments add
+// members), and re-applying the client-facing aggregate would reject a body
+// the codec just built. The broad skip is safe because the source body was
+// already bounded by parseLLMRequest, the codec validates the IR and its own
+// wire collections, and the translated document is capped by
+// max_request_bytes before this decode runs. UTF-8 expansion, the typed
+// metadata decode and the token-cap recheck remain active.
 func parseGeneratedLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
 	if !preview && parseLLMRequestFast(body, rec) {
 		return nil

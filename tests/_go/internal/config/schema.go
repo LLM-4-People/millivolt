@@ -691,8 +691,9 @@ func TestSchemaHelpStatesTranslationScope(t *testing.T) {
 		want    string
 		notWant string
 	}{
-		{"providers", "on a Chat outbound wire", "Anthropic client bodies"},
+		{"providers", "on a Chat outbound wire", "relayed Chat Completions or Anthropic client bodies missing them"},
 		{"request_overrides", "on a Chat Completions or Anthropic client body", "on the OpenAI wire"},
+		{"request_overrides", "Responses client body is not rewritten", "translated-anthropic requests"},
 		{"sub_conversations", "a duplicate top-level key drops the identity", "resolve by their first occurrence"},
 	}
 	for _, tc := range cases {
@@ -737,4 +738,32 @@ func exampleHelpText(example string) string {
 		}
 	}
 	return strings.Join(joined, " ")
+}
+
+// TestSettingsHintsStateTranslationScope pins the dashboard hints to the same
+// runtime gates as the schema: request-override body fields read the inbound
+// Chat/Anthropic body before translation, and ensured tools require a Chat
+// client body on a Chat outbound wire.
+func TestSettingsHintsStateTranslationScope(t *testing.T) {
+	source := string(settingsJSSource(t))
+	for _, tc := range []struct {
+		want    string
+		notWant string
+	}{
+		{
+			want:    "on Chat Completions or Anthropic client bodies, before translation",
+			notWant: "on the OpenAI wire",
+		},
+		{
+			want:    "relayed Chat Completions client bodies on a Chat outbound wire",
+			notWant: "every chat request's tools array",
+		},
+	} {
+		if !strings.Contains(source, tc.want) {
+			t.Errorf("settings.js omits %q", tc.want)
+		}
+		if strings.Contains(source, tc.notWant) {
+			t.Errorf("settings.js still states %q", tc.notWant)
+		}
+	}
 }

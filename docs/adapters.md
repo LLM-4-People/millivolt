@@ -12,8 +12,13 @@ millivolt accepts three client wire families and translates between any of
 them and the supported upstream families. The client protocol is selected by
 the request path, or explicitly by `X-Proxy-In-Format`; the upstream protocol
 is selected by `X-Proxy-Format`. Translation runs only when both are known and
-differ. An absent `X-Proxy-Format` is always a byte-transparent passthrough,
-and an explicit format equal to the client protocol is also passthrough.
+differ. An absent `X-Proxy-Format` never enters the IR, and an explicit format
+equal to the client protocol also stays passthrough. Passthrough is not an
+unconditional byte-identity promise: configured `request_overrides`, a
+`sub_conversations` strip, or ensured tools can still rewrite the upstream
+body before it is sent (see
+[request overrides](operations.md#request-overrides)). Without any of those
+configured, the body bytes are relayed unchanged.
 
 | Client path | Client protocol | `X-Proxy-Format` | Upstream protocol |
 | --- | --- | --- | --- |
@@ -49,7 +54,9 @@ Cross-protocol translation goes through one canonical request, response and
 stream model in [format/ir](../internal/format/ir/ir.go). Each wire family has
 one decoder and one encoder; the IR is the single source of truth for roles,
 content blocks, tool calls and results, reasoning artifacts, stop reasons and
-usage. Same-protocol requests never enter the IR: they relay byte-for-byte.
+usage. Same-protocol requests never enter the IR: they relay unchanged unless
+a configured request override, sub-conversation strip or ensured-tools rule
+rewrites the upstream body first.
 
 Carried wherever the target protocol represents them: text, images (URL,
 base64 or file id), documents, audio where the target accepts it,
@@ -67,9 +74,10 @@ target cannot consume them:
   provider's field; it is dropped with a warning.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
-- `previous_response_id`, `item_reference`, `background`, `conversation`,
-  `store: true` and prompt templates require provider-side state and are
-  rejected when the target cannot honor them.
+- `previous_response_id`, `item_reference`, `background`, `conversation` and
+  prompt templates require provider-side state and are rejected when the
+  target cannot honor them. `store: true` is honored by Chat Completions and
+  Responses targets and rejected by Anthropic.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
@@ -126,6 +134,11 @@ target does not emit citations or annotations; non-streaming responses do carry
 url citations. A citation stream event is a separate feature, not a silent
 claim of streaming parity.
 
+Translated Responses message items always carry `status: "completed"`. The
+response-level `status` owns lifecycle and can be `incomplete` or `failed` even
+when individual items completed; a truncated tool turn is reported there, not
+by rewriting an item's status.
+
 ## Bundled compatibility profiles
 
 The generated [configuration example](../proxy.example.yaml) enables the Grok,
@@ -172,8 +185,9 @@ the `bash` and `read` tool names, the gated free models served even under
 the anonymous `public` bearer. `ensure_tools` injects missing names as inert
 stubs and adds `tool_choice: none` when the client sent no tools of its own,
 so the stubs can never be invoked; a body that already satisfies the
-signature relays byte-identical. The stubs are Chat-shaped, so they are
-injected only into an OpenAI Chat client body on a Chat outbound wire; an
+signature is relayed unchanged, apart from any configured request override or
+sub-conversation strip that runs before it. The stubs are Chat-shaped, so they
+are injected only into an OpenAI Chat client body on a Chat outbound wire; an
 Anthropic, Responses, Cursor, or arbitrary body is never rewritten.
 The same check found the signature also requires a streaming request
 (`"stream": true`): non-streaming requests to the gated free models get the

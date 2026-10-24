@@ -69,6 +69,11 @@ Routing validation and request construction live in
 | `X-Proxy-Limit-Tokens` | Sticky provider-wide token rate as `COUNT/WINDOW`. |
 | `X-Proxy-Refresh-Token` | Opt-in stateless expired-token refresh for supported mechanisms. See [refresh](adapters.md#token-refresh). |
 
+Every `X-Proxy-*` routing, limit and format header is read with first-value
+semantics: when a request carries the header more than once, the first value is
+authoritative and later values are ignored. The rule is deterministic across
+the whole control prefix, including `X-Proxy-Query` and `X-Proxy-Headers`.
+
 Client identity labels are retention-bounded before the record enters the live
 ring, analytics or durable store: classified client and language 256 bytes,
 user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
@@ -175,8 +180,11 @@ array and every Responses `input` item's nested `content`/`output` array is
 capped at 16,384. Each Responses annotation array is capped at 4,096 members,
 and their aggregate inside those content parts is capped at 10,000. Anthropic
 citation arrays are capped at 10,000 members per array, and every citation
-array plus nested content array in one document shares a 10,000-member
-aggregate. A document block's citations configuration object is reported as a
+array in one document shares a 10,000-member aggregate. Each nested content
+array is capped at 4,096 blocks, and the nested content blocks of one document
+share a separate 10,000-block aggregate; the citation and nested-block
+aggregates are independent, so their combined total can reach 20,000. A
+document block's citations configuration object is reported as a
 dropped field instead of being decoded into text citations. A valid request
 above any of these limits is rejected with HTTP 400 before an upstream send.
 Invalid JSON is passed through on the nontranslated path.
@@ -250,7 +258,8 @@ Before relay or translation, the upstream request is subject to the configured
 `request_overrides` (see [request overrides](operations.md#request-overrides)):
 matching rules set, replace or remove upstream headers as the last header
 stage, and their body fields set `max_tokens` / `max_completion_tokens` on
-OpenAI-wire and translated Anthropic targets, fail closed. A configured
+Chat Completions or Anthropic client bodies before translation, whatever the
+target (a Responses client body is not rewritten), fail closed. A configured
 `sub_conversations` strip also removes tracked body fields before relay
 ([tracked body params](#tracked-body-params)). Only the upstream request
 changes; the client-visible contract is unchanged.

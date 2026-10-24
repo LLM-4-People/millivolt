@@ -911,7 +911,7 @@ function providerCardHTML(label, p) {
     `<div class="prov-mmap">${Object.entries(modelsKeys).map(([f, path]) => modelRowHTML(f, path, mfields)).join('')}</div>` +
     (mfree.length ? `<div class="prov-add prov-add-m"><select class="sp-mfield-new" aria-label="canonical model field">${mfree.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')}</select><button type="button" class="btn prov-addbtn" data-prov-add-model aria-label="add model mapping">+ map</button></div>` : '') +
     `</div>` +
-    `<div class="prov-sec"><div class="prov-lb"><span>ensured tools</span><span class="prov-sub">tool names every chat request's tools array must carry - missing names are injected as inert stubs upstream</span></div>` +
+    `<div class="prov-sec"><div class="prov-lb"><span>ensured tools</span><span class="prov-sub">tool names relayed Chat Completions client bodies on a Chat outbound wire must carry - missing names are injected as inert stubs upstream</span></div>` +
     `<div class="prov-add"><input class="sp-etools" value="${escapeHtml(ensureTools.join(', '))}" placeholder="tool names, comma-separated - e.g. bash, read" aria-label="ensured tool names"></div>` +
     `</div>` +
     `<div class="prov-sec"><div class="prov-lb"><span>upstream headers</span><span class="prov-sub">extra headers sent upstream - {{uuid4}} / {{platform}} / {{opencode-msg-id}} / {{opencode-ses-id}} expand per request</span></div>` +
@@ -1737,7 +1737,7 @@ function roRuleCardHTML(r, i, expanded = false) {
     `<div class="prov-lb"><span>remove headers</span><span class="prov-sub">delete upstream headers by name - e.g. User-Agent</span></div>` +
     `<div class="prov-chips">${removes.map(n => roRemoveChipHTML(String(n == null ? '' : n))).join('')}</div>` +
     `<div class="prov-add"><input class="ro-rh-in" placeholder="header name to remove… ↵" aria-label="add header to remove"><button type="button" class="btn prov-addbtn" data-ro-rh-add aria-label="add header to remove">+</button></div>` +
-    `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on the OpenAI wire - empty leaves the request's own value</span></div>` +
+    `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on Chat Completions or Anthropic client bodies, before translation - empty leaves the request's own value</span></div>` +
     `<div class="st-ctl-line ro-body">` +
     `<label class="ro-field"><span>max_tokens</span><input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max_tokens ceiling')}></label>` +
     `<label class="ro-field"><span>max_completion_tokens</span><input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max_completion_tokens ceiling')}></label>` +
