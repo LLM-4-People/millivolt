@@ -617,11 +617,7 @@ type cursorCountWriter struct {
 }
 
 func (c cursorCountWriter) Write(p []byte) (int, error) {
-	n, err := c.ResponseWriter.Write(p)
-	if err == nil {
-		c.rec.ResponseBytes += int64(n)
-	}
-	return n, err
+	return writeCounted(c.ResponseWriter, c.rec, p)
 }
 
 func (c cursorCountWriter) Flush() {

@@ -99,9 +99,10 @@ func TestOpenCursorStreamOpeningDeltaDisconnect(t *testing.T) {
 // synthesized-output count: the wrapper applied at the two drive entries
 // accumulates every body byte the surface writes (streamed frames, [DONE],
 // the JSON completion) into ResponseBytes, while header and status writes
-// are not body bytes, and a failed write delivered nothing so it counts
-// nothing. The bridge synthesizes the client's whole response, so these
-// written bytes ARE the response body.
+// are not body bytes. A failed write counts only the bytes the writer
+// accepted: zero for a dead socket, a partial count otherwise. The bridge
+// synthesizes the client's whole response, so these accepted bytes ARE the
+// response body.
 func TestCursorCountWriterCountsBodyBytes(t *testing.T) {
 	rec := &metrics.Record{}
 	inner := httptest.NewRecorder()
@@ -124,5 +125,13 @@ func TestCursorCountWriterCountsBodyBytes(t *testing.T) {
 	}
 	if rec.ResponseBytes != want {
 		t.Errorf("ResponseBytes = %d after a failed write, want %d (unchanged)", rec.ResponseBytes, want)
+	}
+	// A partial write delivered the bytes the writer accepted.
+	partial := &partialResponseWriter{n: 2, err: io.ErrClosedPipe}
+	if _, err := (cursorCountWriter{ResponseWriter: partial, rec: rec}).Write([]byte("data: more\n\n")); err == nil {
+		t.Fatal("the partial writer must report the write error")
+	}
+	if rec.ResponseBytes != want+2 {
+		t.Errorf("ResponseBytes = %d after a partial write, want %d", rec.ResponseBytes, want+2)
 	}
 }

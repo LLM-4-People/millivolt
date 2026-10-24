@@ -690,10 +690,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				copyResponseHeaders(w.Header(), resp.Header)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
-				if _, werr := w.Write(out); werr != nil {
+				if _, werr := writeCounted(w, rec, out); werr != nil {
 					markClientGone(rec)
-				} else {
-					rec.ResponseBytes += int64(len(out))
 				}
 				return
 			}

@@ -129,3 +129,24 @@ func TestDegenerateEmittersCountPartialWrite(t *testing.T) {
 		})
 	}
 }
+
+// TestTranslatedUpstreamErrorCountsPartialWrite is the R31-NEW-1 regression:
+// the translated non-2xx body is a relayed upstream error document and counts
+// the bytes a client accepts before disconnecting, like every other client
+// write.
+func TestTranslatedUpstreamErrorCountsPartialWrite(t *testing.T) {
+	s := New(config.Default(), metrics.Noop{})
+	rec := &metrics.Record{StatusCode: http.StatusInternalServerError}
+	w := &partialResponseWriter{n: 2, err: io.ErrClosedPipe}
+	body := `{"error":{"message":"upstream exploded","type":"api_error"}}`
+	resp := &http.Response{StatusCode: http.StatusInternalServerError, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	target := &target{format: "openai", inbound: ir.Anthropic, outbound: ir.Chat, translate: true}
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.example/", nil)
+	s.serveNonStreaming(t.Context(), w, resp, req, target, "", nil, rec, "", scheduler.WaiterHooks{})
+	if rec.ResponseBytes != 2 {
+		t.Fatalf("ResponseBytes = %d, want the 2 delivered bytes", rec.ResponseBytes)
+	}
+	if !rec.ClientDisconnected || rec.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("record = %+v, want a 500 client disconnect", rec)
+	}
+}
