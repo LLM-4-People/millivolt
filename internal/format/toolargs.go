@@ -8,8 +8,9 @@ import (
 
 // errToolArgumentsJSON, errToolArgumentsObject and errToolArgumentsMissing
 // mark an argument value the source never completed. A non-clean non-stream
-// terminal drops only the call carrying one of these; a clean terminal and the
-// request path stay strict.
+// terminal drops only the call carrying one of these. A clean terminal and the
+// request path stay strict on invalid JSON or a non-object value; a clean
+// completion may still omit arguments as the empty object.
 var (
 	errToolArgumentsJSON    = errors.New("tool call arguments must be valid JSON")
 	errToolArgumentsObject  = errors.New("tool call arguments must be a JSON object")

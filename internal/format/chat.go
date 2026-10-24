@@ -774,6 +774,8 @@ func (c *chatToolCalls) consumeEmpty() (string, error) {
 // decodeChatToolCall decodes one assistant tool call. The bool reports that the
 // wire id was missing and synthesized, so the request decoder can reconcile a
 // later tool reply that names the call instead of carrying that id.
+// requireEvidence rejects a missing, null or whitespace argument value; the
+// response decoder sets it for a non-clean terminal.
 func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int, requireEvidence bool) (*ir.ToolCall, bool, ir.Warnings, error) {
 	var warns ir.Warnings
 	if requireEvidence && toolArgumentsMissing(tc.Function.Arguments) {

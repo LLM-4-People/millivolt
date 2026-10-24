@@ -567,6 +567,10 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 	return out, warns
 }
 
+// decodeResponsesFunctionCall decodes one function-call item. requireEvidence
+// rejects a missing, null or whitespace argument value; the response decoder
+// sets it for a non-clean terminal, while request history keeps the empty
+// object.
 func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool) (*ir.ToolCall, ir.Warnings, error) {
 	var warns ir.Warnings
 	if item.Name == "" {
