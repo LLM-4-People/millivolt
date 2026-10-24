@@ -925,6 +925,12 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 	return out
 }
 
+// anthropicImageMediaTypes is the Base64ImageSource media-type allowlist from
+// the Anthropic Messages schema.
+var anthropicImageMediaTypes = map[string]bool{
+	"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
+}
+
 func encodeAnthropicImage(img *ir.Image, warns *ir.Warnings) map[string]any {
 	if img == nil {
 		return nil
@@ -934,6 +940,13 @@ func encodeAnthropicImage(img *ir.Image, warns *ir.Warnings) map[string]any {
 	case img.FileID != "":
 		source = map[string]any{"type": "file", "file_id": img.FileID}
 	case img.Data != "":
+		if !anthropicImageMediaTypes[img.MediaType] {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "image.media_type",
+					"Anthropic base64 images must be jpeg, png, gif or webp")
+			}
+			return nil
+		}
 		source = map[string]any{"type": "base64", "media_type": img.MediaType, "data": img.Data}
 	case img.URL != "":
 		source = map[string]any{"type": "url", "url": img.URL}
