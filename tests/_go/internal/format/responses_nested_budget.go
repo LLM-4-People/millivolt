@@ -1,11 +1,13 @@
 package format
 
-// Round 2 correction NEW-1 regressions: every Responses content-part array is
-// charged to one aggregate budget, including function-call output and the
-// response output side, so many per-array-limit lists cannot multiply into an
-// unbounded typed decode or warning list.
+// Round 2 correction NEW-1 and round 3 R3-1 regressions: every Responses
+// content-part array is charged to one aggregate budget, including
+// function-call output and the response output side, at exactly the shared
+// boundary the proxy preflight and docs use.
 
 import (
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +52,26 @@ func responsesOutputPartsTestBody(items []int) []byte {
 	return []byte(b.String())
 }
 
+func responsesFunctionCallOutputPartsTestBody(items []int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"model":"m","input":[`)
+	for i, parts := range items {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"type":"function_call_output","call_id":"c1","output":[`)
+		for j := 0; j < parts; j++ {
+			if j > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{"type":"input_text","text":"x"}`)
+		}
+		b.WriteString(`]}`)
+	}
+	b.WriteString(`]}`)
+	return []byte(b.String())
+}
+
 func responsesAnnotationTestBody(parts []int) []byte {
 	var b strings.Builder
 	b.WriteString(`{"model":"m","input":[{"type":"function_call_output","call_id":"c1","output":[`)
@@ -71,14 +93,26 @@ func responsesAnnotationTestBody(parts []int) []byte {
 }
 
 func TestResponsesInputContentPartsAggregateBounded(t *testing.T) {
-	atLimit := []int{4096, 4096, WireNestedCollectionMax - 2*4096}
+	atLimit := []int{4096, 4096, 4096, 4096}
+	if total := 4 * 4096; total != WireContentPartsMax {
+		t.Fatalf("fixture total = %d, want the shared limit %d", total, WireContentPartsMax)
+	}
 	if _, err := DecodeResponsesRequest(responsesInputPartsTestBody(atLimit)); err != nil {
 		t.Fatalf("at-limit input rejected: %v", err)
 	}
-	over := []int{4096, 4096, WireNestedCollectionMax - 2*4096 + 1}
-	_, err := DecodeResponsesRequest(responsesInputPartsTestBody(over))
-	if err == nil || !strings.Contains(err.Error(), "nested content parts exceed") {
-		t.Fatalf("over-limit input error = %v", err)
+
+	body := responsesInputPartsTestBody([]int{4096, 4096, 4096, 4096, 1})
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := DecodeResponsesRequest(body)
+	runtime.ReadMemStats(&after)
+	want := fmt.Sprintf("nested content parts exceed %d", WireContentPartsMax)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("over-limit input error = %v, want %q", err, want)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
+		t.Fatalf("over-limit input allocated %d bytes, want a bounded <64 MiB", alloc)
 	}
 }
 
@@ -104,14 +138,24 @@ func TestResponsesFunctionCallOutputAnnotationsBounded(t *testing.T) {
 }
 
 func TestResponsesOutputContentPartsAggregateBounded(t *testing.T) {
-	atLimit := []int{4096, 4096, WireNestedCollectionMax - 2*4096}
-	if _, err := DecodeResponsesResponse(responsesOutputPartsTestBody(atLimit)); err != nil {
+	if _, err := DecodeResponsesResponse(responsesOutputPartsTestBody([]int{4096, 4096, 4096, 4096})); err != nil {
 		t.Fatalf("at-limit response output rejected: %v", err)
 	}
-	over := []int{4096, 4096, WireNestedCollectionMax - 2*4096 + 1}
-	_, err := DecodeResponsesResponse(responsesOutputPartsTestBody(over))
-	if err == nil || !strings.Contains(err.Error(), "nested content parts exceed") {
-		t.Fatalf("over-limit response output error = %v", err)
+	_, err := DecodeResponsesResponse(responsesOutputPartsTestBody([]int{4096, 4096, 4096, 4096, 1}))
+	want := fmt.Sprintf("nested content parts exceed %d", WireContentPartsMax)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("over-limit response output error = %v, want %q", err, want)
+	}
+}
+
+func TestResponsesFunctionCallOutputContentPartsBounded(t *testing.T) {
+	if _, err := DecodeResponsesRequest(responsesFunctionCallOutputPartsTestBody([]int{4096, 4096, 4096, 4096})); err != nil {
+		t.Fatalf("at-limit function-call output rejected: %v", err)
+	}
+	_, err := DecodeResponsesRequest(responsesFunctionCallOutputPartsTestBody([]int{4096, 4096, 4096, 4096, 1}))
+	want := fmt.Sprintf("nested content parts exceed %d", WireContentPartsMax)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("over-limit function-call output error = %v, want %q", err, want)
 	}
 }
 

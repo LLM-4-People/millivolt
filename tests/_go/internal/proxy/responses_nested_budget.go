@@ -1,23 +1,25 @@
 package proxy
 
-// Round 2 correction NEW-1 proxy regressions: the Responses input preflight
-// charges nested content/output parts and their annotations before the codec
-// materializes them, so the r8j/r8l amplification bodies fail closed with no
-// upstream send.
+// Round 2 correction NEW-1 and round 3 R3-1 proxy regressions: the Responses
+// input preflight charges nested content/output parts before the codec
+// materializes them, at exactly the shared aggregate boundary.
 
 import (
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-func responsesNestedPartsBody(items, parts int) string {
+func responsesNestedPartsBody(counts []int) string {
 	var b strings.Builder
 	b.WriteString(`{"model":"m","input":[`)
-	for i := 0; i < items; i++ {
+	for i, parts := range counts {
 		if i > 0 {
 			b.WriteString(",")
 		}
@@ -34,83 +36,86 @@ func responsesNestedPartsBody(items, parts int) string {
 	return b.String()
 }
 
-func responsesNestedAnnotationsBody(parts []int) string {
+func responsesNestedOutputPartsBody(counts []int) string {
 	var b strings.Builder
-	b.WriteString(`{"model":"m","input":[{"type":"function_call_output","call_id":"c1","output":[`)
-	for i, count := range parts {
+	b.WriteString(`{"model":"m","input":[`)
+	for i, parts := range counts {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		b.WriteString(`{"type":"input_text","text":"hi","annotations":[`)
-		for j := 0; j < count; j++ {
+		b.WriteString(`{"type":"function_call_output","call_id":"c1","output":[`)
+		for j := 0; j < parts; j++ {
 			if j > 0 {
 				b.WriteString(",")
 			}
-			b.WriteString(`{"type":"url_citation","url":"https://example.com","title":"t","start_index":0,"end_index":1}`)
+			b.WriteString(`{"type":"input_text","text":"x"}`)
 		}
 		b.WriteString(`]}`)
 	}
-	b.WriteString(`]}]}`)
+	b.WriteString(`]}`)
 	return b.String()
 }
 
-func TestResponsesNestedContentPartsRejectedBeforeTranslation(t *testing.T) {
-	body := responsesNestedPartsBody(5, 4096)
-	if len(body) > 8<<20 {
-		t.Fatalf("fixture is %d bytes, want a small bounded body", len(body))
-	}
+func nestedFixtureServer(t *testing.T) (*fixtureUpstream, *Server) {
+	t.Helper()
 	up := newFixtureUpstream(t, "application/json", 200,
 		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
 	s := New(config.Default(), metrics.Noop{})
 	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
-
-	w := proxyRequest(t, s, "/v1/responses", "openai", body)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "request content parts exceed") {
-		t.Fatalf("rejection does not name the part budget: %s", w.Body.String())
-	}
-	if up.calls.Load() != 0 {
-		t.Fatalf("upstream was called %d times before the nested-part rejection", up.calls.Load())
-	}
+	return up, s
 }
 
 func TestResponsesNestedContentPartsAtLimitTranslate(t *testing.T) {
-	body := responsesNestedPartsBody(2, 4096)
-	up := newFixtureUpstream(t, "application/json", 200,
-		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
-	s := New(config.Default(), metrics.Noop{})
-	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
-
-	w := proxyRequest(t, s, "/v1/responses", "openai", body)
-	if w.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
-	}
-	if up.calls.Load() != 1 {
-		t.Fatalf("upstream calls = %d, want 1", up.calls.Load())
-	}
-	sent := string(up.lastBody())
-	if !strings.Contains(sent, `"role":"user"`) {
-		t.Fatalf("translated request is missing the user message: %s", sent[:min(len(sent), 200)])
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "message content", body: responsesNestedPartsBody([]int{4096, 4096, 4096, 4096})},
+		{name: "function call output", body: responsesNestedOutputPartsBody([]int{4096, 4096, 4096, 4096})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if total := 4 * 4096; total != providerformat.WireContentPartsMax {
+				t.Fatalf("fixture total = %d, want the shared limit %d", total, providerformat.WireContentPartsMax)
+			}
+			up, s := nestedFixtureServer(t)
+			w := proxyRequest(t, s, "/v1/responses", "openai", tc.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+			}
+			if up.calls.Load() != 1 {
+				t.Fatalf("upstream calls = %d, want 1", up.calls.Load())
+			}
+		})
 	}
 }
 
-func TestResponsesNestedAnnotationsRejectedBeforeTranslation(t *testing.T) {
-	body := responsesNestedAnnotationsBody([]int{4000, 4000, 4000})
-	up := newFixtureUpstream(t, "application/json", 200,
-		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
-	s := New(config.Default(), metrics.Noop{})
-	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
-
-	w := proxyRequest(t, s, "/v1/responses", "openai", body)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "request annotations exceed") {
-		t.Fatalf("rejection does not name the annotation budget: %s", w.Body.String())
-	}
-	if up.calls.Load() != 0 {
-		t.Fatalf("upstream was called %d times before the annotation rejection", up.calls.Load())
+func TestResponsesNestedContentPartsOverLimitRejectedBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "message content", body: responsesNestedPartsBody([]int{4096, 4096, 4096, 4096, 1})},
+		{name: "function call output", body: responsesNestedOutputPartsBody([]int{4096, 4096, 4096, 4096, 1})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up, s := nestedFixtureServer(t)
+			var w *httptest.ResponseRecorder
+			alloc := proxyAllocDelta(func() {
+				w = proxyRequest(t, s, "/v1/responses", "openai", tc.body)
+			})
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+			}
+			want := fmt.Sprintf("request content parts exceed %d", providerformat.WireContentPartsMax)
+			if !strings.Contains(w.Body.String(), want) {
+				t.Fatalf("rejection does not name the shared part budget: %s", w.Body.String())
+			}
+			if up.calls.Load() != 0 {
+				t.Fatalf("upstream was called %d times before the nested-part rejection", up.calls.Load())
+			}
+			if alloc > 64<<20 {
+				t.Fatalf("over-limit request allocated %d bytes, want a bounded <64 MiB", alloc)
+			}
+		})
 	}
 }

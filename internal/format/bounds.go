@@ -39,6 +39,14 @@ const toolInitialBytesMax = 4 << 20
 // an output list or every citation array in a content list.
 const WireNestedCollectionMax = 10_000
 
+// WireContentPartsMax bounds the aggregate content-part members over every
+// message content array, the top-level system content and every nested
+// Responses input content/output array. It is the proxy's request content-part
+// ceiling too, so the preflight admits exactly the translated documents the
+// codec accepts. The per-array metrics.ContentPartMax keeps one list bounded;
+// this aggregate stops many lists at that cap from multiplying.
+const WireContentPartsMax = 16_384
+
 // WireToolCallsMax bounds the aggregate tool-call members over every message.
 // The proxy's request preflight and the Chat codec share this one value so the
 // translated wire cannot accept a document the passthrough path rejects.
@@ -251,8 +259,8 @@ func checkResponsesContent(budget *responsesNestedBudget, content json.RawMessag
 	if err := json.Unmarshal(trimmed, &parts); err != nil {
 		return fmt.Errorf("parse %s: %w", field, err)
 	}
-	if len(parts) > WireNestedCollectionMax-budget.parts {
-		return fmt.Errorf("%s: nested content parts exceed %d", field, WireNestedCollectionMax)
+	if len(parts) > WireContentPartsMax-budget.parts {
+		return fmt.Errorf("%s: nested content parts exceed %d", field, WireContentPartsMax)
 	}
 	budget.parts += len(parts)
 	for i, part := range parts {

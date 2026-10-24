@@ -1798,12 +1798,14 @@ func (m *requestMetadataKeys) count() int { return len(m.keys) }
 const requestMetadataMaxElements = providerformat.WireCollectionMax
 
 // requestContentPartsMax bounds the aggregate content-part arrays over every
-// message plus the top-level system content. The per-array
-// metrics.ContentPartMax keeps one message from expanding a typed slice, but
-// thousands of messages at that per-array cap still compose a request-sized
-// slice of empty parts. Internal DoS guardrail, not a wire-format or
-// user-tunable limit; text length never counts against it.
-const requestContentPartsMax = 16_384
+// message, the top-level system content and every nested Responses input
+// content/output array. The per-array metrics.ContentPartMax keeps one message
+// from expanding a typed slice, but thousands of messages at that per-array cap
+// still compose a request-sized slice of empty parts. It reuses the format
+// owner so the preflight and the translated codec accept the same aggregate.
+// Internal DoS guardrail, not a wire-format or user-tunable limit; text length
+// never counts against it.
+const requestContentPartsMax = providerformat.WireContentPartsMax
 
 // requestAnnotationsMax bounds the aggregate annotation members over every
 // Responses content part. Each annotation becomes a typed citation and a
