@@ -2389,10 +2389,10 @@ const analyzerCorpusGolden = `{
     "usage_raw": "",
     "usage_chunk": "{\"type\":\"response.failed\"}",
     "preview": "",
-    "error_type": "",
+    "error_type": "upstream_error",
     "error_code": "",
     "error_msg": "",
-    "has_in_band_error": false,
+    "has_in_band_error": true,
     "outcome": "",
     "record_usage": {
       "input_tokens": 0,

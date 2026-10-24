@@ -854,6 +854,14 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	// error wins like every other in-band path.
 	if eventType == "response.failed" {
 		a.captureResponseFailedError(payload)
+		// The failed terminal is itself the failure statement. A missing,
+		// null, or empty error object therefore still classifies as an
+		// upstream lifecycle failure; a provider type or a code-only object
+		// already set its own classification above. The client body stays
+		// untouched - this is the record view only.
+		if a.errType == "" {
+			a.errType = TypeUpstreamError
+		}
 	}
 	var ev struct {
 		Response struct {
