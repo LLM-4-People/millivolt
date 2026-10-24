@@ -164,7 +164,11 @@ the re-decode of a translated body - for any spelling (`max_tokens`,
 `max_completion_tokens` or `max_output_tokens`). A body that combines the
 Responses `max_output_tokens` spelling with a Chat `max_tokens` or
 `max_completion_tokens` spelling is rejected with HTTP 400 before an upstream
-send because the wire families are ambiguous. A valid request is also
+send because the wire families are ambiguous. More than one top-level member
+that folds to the same cap name is also rejected with HTTP 400 before an
+upstream send, including case variants and escaped spellings: the relay sends
+every occurrence, so accepting duplicates would let the validated and recorded
+value differ from the bytes the upstream reads. A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
 entries in a `messages`, `tools`, `functions`, `input` or `stop` array, more
 than 10,000 members in a `metadata` object, more than 1,024 aggregate
@@ -232,7 +236,10 @@ SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTT
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion
 with an error. Non-streaming quality retries may make another upstream request;
-a stream truncated before any generation content was relayed is re-sent on the
+the adopted attempt's response is spooled under the fixed 1 MiB quality buffer
+before the client status line commits, so the retry is delivered as one
+ordinary response with no post-commit keepalive gap or partial payload. A
+stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
 the in-band error for the client to retry. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was

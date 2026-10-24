@@ -119,6 +119,34 @@ target cannot consume them:
   in `messages` as a `system` turn at its original position. A later developer
   turn has no Anthropic role and is lifted to the prompt with an approximation
   warning, which reports the positional change.
+- An Anthropic target drops leading assistant turns because the first message
+  must use the user role, reporting one `messages.leading_assistant` warning.
+  A tool result that answered a dropped leading call is dropped with one
+  `messages.orphan_tool_result` warning, so an orphan result never reaches the
+  wire. Pairing happens before the drop: a result that names a dropped call
+  stays paired to it and is dropped with that call rather than retargeted to a
+  later same-name call, because the name may answer the dropped call and
+  retargeting could answer the wrong tool. A system or developer turn before
+  the first emitted turn is still lifted to the top-level prompt even when a
+  dropped assistant or an empty user turn preceded it.
+- A non-clean non-streaming terminal can carry the prefix of a tool-call
+  argument value the source never finished: a Chat finish other than `stop`,
+  `tool_calls` or `function_call`, or a Responses status other than `completed`
+  with no incomplete reason. The proxy drops only the unparseable call with one
+  `tool_calls.arguments` or `function_call.arguments` warning and keeps the
+  text, refusal and source finish. A clean terminal fails closed on the same
+  bytes, and structural failures such as a missing name or id remain fatal on
+  every terminal.
+- A streamed Responses `function_call` that omits `call_id` uses its item id as
+  the target tool id. When both identities are absent, the block starts with a
+  stable `call_proxy_<output index>` id instead of an empty id, so Chat does not
+  write an empty tool call and Anthropic does not reject the block. The
+  non-streaming decoder still rejects a call with both identities absent.
+- A legacy Chat `message.function_call` is treated as answer-shaped for retry
+  safety because the deprecated shape can represent either a tool invocation or
+  a final answer, and it is not counted as a tool call. A Chat source that uses
+  only that shape therefore records no tool-call count even though the call
+  translates.
 - Anthropic `metadata.user_id` is limited to 512 characters. A longer Chat or
   Responses `user` value is rejected before any upstream send rather than
   truncated, because truncation can collide two distinct identifiers.
@@ -212,7 +240,10 @@ Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and
 closes it before `message_delta`; Responses emits `response.created`, per-item
 lifecycle events and one terminal event; Chat emits the role chunk, deltas, one
-`finish_reason` chunk and one `[DONE]`. A truncated upstream is closed with the
+`finish_reason` chunk and one `[DONE]`. The official Anthropic event flow closes
+every content block before `message_delta`. A nonconforming source that sends a
+content delta after `message_delta` is not given a runtime special case, because
+the terminal contract and the target encoder ordering still own the turn. A truncated upstream is closed with the
 client protocol's own error event, never a fabricated clean finish. The
 Responses encoder can emit `response.cancelled` for a canonical cancelled
 finish. The current `ResponseStreamEvent` union lists completed, failed and

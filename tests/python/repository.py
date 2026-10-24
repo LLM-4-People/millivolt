@@ -728,6 +728,26 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("dashboard and inference share the operator boundary", landing)
         self.assertNotIn("dashboard and the inference listener", landing)
 
+    def test_adapters_pin_round8_contracts(self):
+        adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
+        for phrase in (
+            "messages.leading_assistant",
+            "messages.orphan_tool_result",
+            "Pairing happens before the drop",
+            "A non-clean non-streaming terminal",
+            "`call_proxy_<output index>`",
+            "legacy Chat `message.function_call`",
+            "content delta after `message_delta`",
+            "one `output.phase` warning",
+            "`output.<type>` warning",
+            "fixed 32 MiB cap each",
+        ):
+            self.assertIn(phrase, adapters)
+
+        protocol = re.sub(r"\s+", " ", self.read("docs/protocol.md"))
+        self.assertIn("More than one top-level member that folds to the same cap name", protocol)
+        self.assertIn("fixed 1 MiB quality buffer", protocol)
+
     def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
         operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
         self.assertIn("fixed 32 MiB cap each", operations)
