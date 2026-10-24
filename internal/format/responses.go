@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -219,11 +220,35 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		req.Warnings.Add(ir.WarningDropped, "access_programs", "provider access programs have no cross-protocol equivalent")
 	}
 	if wireValuePresent(in.StreamOptions) {
-		var opts struct {
-			IncludeObfuscation *bool `json:"include_obfuscation"`
+		// stream_options is an object. A non-object or a wrong-typed
+		// include_obfuscation is malformed input, not a translatable option:
+		// fail closed at the trust boundary. Every other present member is a
+		// loss the target cannot carry, so record it (reject mode turns the
+		// warning into a 400). Names are visited in sorted order so warning
+		// order is deterministic.
+		var options map[string]json.RawMessage
+		if err := json.Unmarshal(in.StreamOptions, &options); err != nil {
+			return nil, errors.New("responses request: stream_options must be a JSON object")
 		}
-		if err := json.Unmarshal(in.StreamOptions, &opts); err == nil && opts.IncludeObfuscation != nil {
-			req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation", "stream obfuscation settings have no cross-protocol equivalent")
+		names := make([]string, 0, len(options))
+		for name := range options {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			raw := options[name]
+			if !wireValuePresent(raw) {
+				continue
+			}
+			if name == "include_obfuscation" {
+				var include bool
+				if err := json.Unmarshal(raw, &include); err != nil {
+					return nil, errors.New("responses request: stream_options.include_obfuscation must be a boolean")
+				}
+				req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation", "stream obfuscation settings have no cross-protocol equivalent")
+				continue
+			}
+			req.Warnings.Add(ir.WarningDropped, "stream_options."+name, "stream option has no cross-protocol equivalent")
 		}
 	}
 	if len(in.Tools) > 0 {

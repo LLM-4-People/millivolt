@@ -136,3 +136,62 @@ func TestResponsesAccessProgramsAndObfuscationWarn(t *testing.T) {
 		t.Fatalf("absent knobs warned: %+v", req.Warnings)
 	}
 }
+
+func TestResponsesMalformedStreamOptionsFailsClosed(t *testing.T) {
+	for _, raw := range []string{
+		`5`,
+		`"x"`,
+		`[true]`,
+		`true`,
+		`{"include_obfuscation":"yes"}`,
+		`{"include_obfuscation":1}`,
+	} {
+		body := `{"model":"m","input":"hi","stream_options":` + raw + `}`
+		if _, err := DecodeResponsesRequest([]byte(body)); err == nil || !strings.Contains(err.Error(), "stream_options") {
+			t.Fatalf("stream_options %s error = %v, want a stream_options rejection", raw, err)
+		}
+	}
+}
+
+func TestResponsesUnknownStreamOptionWarns(t *testing.T) {
+	req, err := DecodeResponsesRequest([]byte(`{"model":"m","input":"hi","stream_options":{"include_usage":true}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(req.Warnings, "stream_options.include_usage") {
+		t.Fatalf("unknown stream option recorded no warning: %+v", req.Warnings)
+	}
+	if warningField(req.Warnings, "stream_options.include_obfuscation") {
+		t.Fatalf("absent include_obfuscation warned: %+v", req.Warnings)
+	}
+
+	for _, control := range []string{
+		`{"model":"m","input":"hi","stream_options":{"include_usage":null}}`,
+		`{"model":"m","input":"hi","stream_options":{}}`,
+	} {
+		req, err := DecodeResponsesRequest([]byte(control))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if warningField(req.Warnings, "stream_options.include_usage") {
+			t.Fatalf("null/absent member warned: %+v", req.Warnings)
+		}
+	}
+}
+
+func TestResponsesStreamOptionWarningsAreSorted(t *testing.T) {
+	req, err := DecodeResponsesRequest([]byte(`{"model":"m","input":"hi","stream_options":{"zeta":true,"alpha":true}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields []string
+	for _, warning := range req.Warnings {
+		if strings.HasPrefix(warning.Field, "stream_options.") {
+			fields = append(fields, warning.Field)
+		}
+	}
+	want := []string{"stream_options.alpha", "stream_options.zeta"}
+	if len(fields) != len(want) || fields[0] != want[0] || fields[1] != want[1] {
+		t.Fatalf("stream_options warnings = %v, want %v", fields, want)
+	}
+}
