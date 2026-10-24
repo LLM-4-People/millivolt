@@ -25,6 +25,10 @@ func TestAnthropicStopReasonErrorSynthesizesFailure(t *testing.T) {
 	if resp.Error == nil || resp.Error.Type != "upstream_error" || resp.Error.Message == "" {
 		t.Fatalf("error = %+v, want a synthesized upstream_error", resp.Error)
 	}
+	// The canonical encoder renders the synthesized failure as a failed
+	// Responses document. The proxy never sends this body for a translated
+	// error: it short-circuits through EncodeError with a 502, which the proxy
+	// regression asserts. This case keeps the encoder's own contract covered.
 	encoded, err := EncodeResponse(ir.Responses, resp)
 	if err != nil {
 		t.Fatal(err)

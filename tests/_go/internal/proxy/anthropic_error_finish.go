@@ -6,6 +6,7 @@ package proxy
 // translated error envelope is a failure status, never a clean stop.
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -17,11 +18,12 @@ const anthropicErrorFinishBody = `{"id":"msg_1","type":"message","role":"assista
 
 func TestAnthropicStopReasonErrorRecordsFailure(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		path   string
-		format string
-		body   string
-		status int
+		name      string
+		path      string
+		format    string
+		body      string
+		status    int
+		wantError bool
 	}{
 		{
 			name:   "native anthropic",
@@ -30,11 +32,12 @@ func TestAnthropicStopReasonErrorRecordsFailure(t *testing.T) {
 			status: http.StatusOK,
 		},
 		{
-			name:   "translated chat",
-			path:   "/v1/chat/completions",
-			format: "anthropic",
-			body:   `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
-			status: http.StatusBadGateway,
+			name:      "translated chat",
+			path:      "/v1/chat/completions",
+			format:    "anthropic",
+			body:      `{"model":"m","messages":[{"role":"user","content":"hi"}]}`,
+			status:    http.StatusBadGateway,
+			wantError: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -48,6 +51,21 @@ func TestAnthropicStopReasonErrorRecordsFailure(t *testing.T) {
 			w := proxyRequest(t, s, tc.path, tc.format, tc.body)
 			if w.Code != tc.status {
 				t.Fatalf("status = %d, want %d (body %s)", w.Code, tc.status, w.Body.String())
+			}
+			if tc.wantError {
+				var envelope struct {
+					Error struct {
+						Type    string `json:"type"`
+						Message string `json:"message"`
+					} `json:"error"`
+					Choices []any `json:"choices"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+					t.Fatalf("client body is not an error envelope: %v (%s)", err, w.Body.String())
+				}
+				if envelope.Error.Type != "upstream_error" || envelope.Error.Message == "" || len(envelope.Choices) != 0 {
+					t.Fatalf("client envelope = %+v, want an upstream_error with no choices", envelope)
+				}
 			}
 			recs := waitForRecord(t, buf, 1)
 			if len(recs) != 1 {
