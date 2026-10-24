@@ -7,6 +7,8 @@ package jsonnum
 import (
 	"encoding/json"
 	"errors"
+	"math/big"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -87,4 +89,172 @@ func TestOptionalIntPresence(t *testing.T) {
 		!strings.Contains(err.Error(), "max_tokens") || !strings.Contains(err.Error(), "must be an integer") {
 		t.Fatalf("fractional member error = %v, want the field-named rejection", err)
 	}
+}
+
+// TestParseRejectsLeadingZero pins the JSON number grammar at the one place
+// that accepts a literal character by character: an integer part may be a
+// single zero, never a zero followed by more digits. Zero with a fraction or
+// exponent stays valid.
+func TestParseRejectsLeadingZero(t *testing.T) {
+	for _, literal := range []string{"00", "01", "-00", "-01", "00.1", "01e2", "-00e1"} {
+		t.Run(literal, func(t *testing.T) {
+			var num json.Number
+			if json.Unmarshal([]byte(literal), &num) == nil {
+				t.Fatalf("encoding/json accepted %q as a number; fixture is invalid", literal)
+			}
+			if got, err := Parse([]byte(literal)); !errors.Is(err, ErrNotNumber) {
+				t.Fatalf("Parse(%s) = %d, %v; want ErrNotNumber", literal, got, err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		literal string
+		want    int
+	}{
+		{"0", 0}, {"-0", 0}, {"0.0", 0}, {"0e1", 0}, {"-0.000", 0},
+	} {
+		t.Run("valid "+tc.literal, func(t *testing.T) {
+			got, err := Parse([]byte(tc.literal))
+			if err != nil || got != tc.want {
+				t.Fatalf("Parse(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// jsonNumberLiteral reports whether the trimmed input is a valid JSON number,
+// the grammar Parse must follow. json.Unmarshal into json.Number is not a
+// grammar oracle: it accepts null and string values for that Go type.
+func jsonNumberLiteral(literal string) bool {
+	trimmed := strings.TrimSpace(literal)
+	if trimmed == "" || !json.Valid([]byte(trimmed)) {
+		return false
+	}
+	first := trimmed[0]
+	return first == '-' || (first >= '0' && first <= '9')
+}
+
+// literalRat builds an exact decimal rational for a JSON number whose exponent
+// is small enough to materialize. It is the independent oracle for Parse.
+func literalRat(literal string) (*big.Rat, bool) {
+	lit := strings.TrimSpace(literal)
+	mantissa := lit
+	exp := 0
+	if i := strings.IndexAny(lit, "eE"); i >= 0 {
+		parsed, err := strconv.Atoi(lit[i+1:])
+		if err != nil || parsed < -1000 || parsed > 1000 {
+			return nil, false
+		}
+		mantissa, exp = lit[:i], parsed
+	}
+	r, ok := new(big.Rat).SetString(mantissa)
+	if !ok {
+		return nil, false
+	}
+	if exp != 0 {
+		pow := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(absInt(exp))), nil)
+		if exp > 0 {
+			r.Mul(r, new(big.Rat).SetInt(pow))
+		} else {
+			r.Quo(r, new(big.Rat).SetInt(pow))
+		}
+	}
+	return r, true
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// TestParseMatchesRatOracle checks the accept/reject verdict and the exact
+// value against an independent big.Rat decimal parser. The table mixes valid,
+// fractional, overflowing and non-number spellings.
+func TestParseMatchesRatOracle(t *testing.T) {
+	for _, literal := range []string{
+		"0", "-0", "0.0", "0e1", "-0.000", "1", "-1", "10", "123",
+		"1e6", "1E+6", "1000000.0", "1000000.000", "10000e2", "1.2300e2",
+		"123.000", "-1000000", "1e-1", "0.5", "1.0000001", "1e99",
+		"9223372036854775807", "9223372036854775808", "-9223372036854775808",
+		"00", "01", "-01", "1.", ".5", "1e", "null", "true", `"1"`,
+	} {
+		t.Run(literal, func(t *testing.T) {
+			grammarOK := jsonNumberLiteral(literal)
+			got, err := Parse([]byte(literal))
+			if !grammarOK {
+				if !errors.Is(err, ErrNotNumber) {
+					t.Fatalf("Parse(%s) = %d, %v; want ErrNotNumber", literal, got, err)
+				}
+				return
+			}
+			if errors.Is(err, ErrNotNumber) {
+				t.Fatalf("Parse(%s) rejected valid JSON number as not a number", literal)
+			}
+			r, ok := literalRat(literal)
+			if !ok {
+				t.Fatalf("oracle could not parse valid number %s", literal)
+			}
+			switch {
+			case !r.IsInt():
+				if !errors.Is(err, ErrNotInteger) {
+					t.Fatalf("Parse(%s) = %d, %v; want ErrNotInteger", literal, got, err)
+				}
+			case !r.Num().IsInt64() || int64(int(r.Num().Int64())) != r.Num().Int64():
+				if !errors.Is(err, ErrOutOfRange) {
+					t.Fatalf("Parse(%s) = %d, %v; want ErrOutOfRange", literal, got, err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("Parse(%s) error = %v, want %d", literal, err, r.Num().Int64())
+				}
+				if big.NewInt(int64(got)).Cmp(r.Num()) != 0 {
+					t.Fatalf("Parse(%s) = %d, want %s", literal, got, r.Num())
+				}
+			}
+		})
+	}
+}
+
+// FuzzParseNumberGrammar checks that Parse accepts a literal only when
+// encoding/json recognizes a JSON number and that an accepted value matches
+// the rational oracle. The seeds cover the leading-zero regression and the
+// valid, fractional and overflow boundaries.
+func FuzzParseNumberGrammar(f *testing.F) {
+	for _, seed := range []string{
+		"0", "-0", "0.0", "0e1", "1", "1e6", "1000000.0", "123.000",
+		"1.5", "1e-1", "1e99", "9223372036854775808",
+		"00", "01", "-01", "", "null", "1.", ".5", "1e",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, literal string) {
+		if len(literal) > 64 {
+			return
+		}
+		grammarOK := jsonNumberLiteral(literal)
+		got, err := Parse([]byte(literal))
+		if err != nil {
+			if grammarOK && errors.Is(err, ErrNotNumber) {
+				t.Fatalf("valid JSON number %q rejected as not a number", literal)
+			}
+			return
+		}
+		if !grammarOK {
+			t.Fatalf("Parse(%q) = %d accepted a non-number literal", literal, got)
+		}
+		r, ok := literalRat(literal)
+		if !ok {
+			// A zero literal with a huge exponent is valid and integral; its
+			// rational has no materializable denominator, so skip the oracle.
+			if got != 0 {
+				t.Fatalf("Parse(%q) = %d without an oracle", literal, got)
+			}
+			return
+		}
+		if !r.IsInt() || !r.Num().IsInt64() || int64(got) != r.Num().Int64() {
+			t.Fatalf("Parse(%q) = %d, want the exact rational %s", literal, got, r)
+		}
+	})
 }

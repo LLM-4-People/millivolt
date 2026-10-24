@@ -66,12 +66,16 @@ func Parse(raw []byte) (int, error) {
 		}
 		sig += strings.Repeat("0", scale)
 	}
-	n, err := strconv.ParseInt(sig, 10, 0)
+	// Parse the sign with the magnitude so the minimum int value (for
+	// example -9223372036854775808 on a 64-bit platform) is accepted: its
+	// magnitude overflows int64 before negation.
+	signed := sig
+	if negative {
+		signed = "-" + sig
+	}
+	n, err := strconv.ParseInt(signed, 10, 0)
 	if err != nil {
 		return 0, ErrOutOfRange
-	}
-	if negative {
-		n = -n
 	}
 	return int(n), nil
 }
@@ -111,6 +115,11 @@ func decimalParts(lit string) (digits string, scale int, negative, ok bool) {
 		return "", 0, false, false
 	}
 	digits = lit[start:i]
+	// JSON allows zero as a single integer digit only: 0, -0, 0.1 and 0e1
+	// are valid, while 00, 01 and -01 are not JSON numbers at all.
+	if len(digits) > 1 && digits[0] == '0' {
+		return "", 0, false, false
+	}
 	if i < len(lit) && lit[i] == '.' {
 		i++
 		fracStart := i
