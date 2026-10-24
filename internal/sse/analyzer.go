@@ -720,8 +720,11 @@ func (a *Analyzer) flushEvent(now time.Time) {
 	// its single-line twin. The summary-part announcement keeps its text under
 	// "part", which the flat key probe cannot see, so a reassembled
 	// announcement needs this boundary owner to record reasoning presence.
-	// A complete single-line event never reaches here with accumulated bytes.
-	if len(a.eventData) > 0 {
+	// Only a genuine multi-line document reaches this twin: a single-line
+	// event is already classified by feedData, including the one that
+	// FeedBufferedEvent seeds on overflow, and counting it here would record
+	// the same presence twice.
+	if len(a.eventData) > 0 && bytes.IndexByte(a.eventData, '\n') >= 0 {
 		var keys frameKeys
 		keys.scan(a.eventData)
 		if typ := keys.responseEventType(a.eventData); responsesReasoningSummaryPart(typ, a.eventData) {
