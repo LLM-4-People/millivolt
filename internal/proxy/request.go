@@ -1576,33 +1576,49 @@ func conflictingTokenCapSpellings(body []byte) bool {
 	return caps.MaxOutputTokens != nil && (caps.MaxTokens != nil || caps.MaxCompTokens != nil)
 }
 
-// hostileTokenCapInBody applies the hostile-cap bound to EVERY token-ceiling
-// spelling a body carries, not only the one that wins the record precedence.
-// A Responses body can carry both max_tokens and max_output_tokens; checking
-// only the winner let the other spelling reach the upstream unbounded.
-func hostileTokenCapInBody(body []byte) bool {
+// offendingTokenCapField names the token-ceiling spelling that exceeds the
+// hostile bound. It checks EVERY spelling the body carries, not only the one
+// that wins the record precedence: a Responses body can carry both max_tokens
+// and max_output_tokens, and checking only the winner let the other spelling
+// reach the upstream unbounded. The body is authoritative because it carries
+// the client's actual field names; the record's effective ceiling is a
+// fallback for a body whose cap fields did not decode. The empty string means
+// no hostile cap.
+func offendingTokenCapField(body []byte, rec *metrics.Record) string {
 	var caps struct {
 		MaxTokens       *int `json:"max_tokens"`
 		MaxCompTokens   *int `json:"max_completion_tokens"`
 		MaxOutputTokens *int `json:"max_output_tokens"`
 	}
-	if json.Unmarshal(body, &caps) != nil {
-		return false
-	}
-	for _, v := range []*int{caps.MaxTokens, caps.MaxCompTokens, caps.MaxOutputTokens} {
-		if hostileTokenCap(v) {
-			return true
+	if json.Unmarshal(body, &caps) == nil {
+		// Decode precedence, so the named field is the one the record and
+		// the upstream would actually use when several are present.
+		for _, cap := range []struct {
+			name  string
+			value *int
+		}{
+			{"max_completion_tokens", caps.MaxCompTokens},
+			{"max_tokens", caps.MaxTokens},
+			{"max_output_tokens", caps.MaxOutputTokens},
+		} {
+			if hostileTokenCap(cap.value) {
+				return cap.name
+			}
 		}
 	}
-	return false
+	if rec != nil && hostileTokenCap(rec.ReqMaxTokens) {
+		return "output token cap"
+	}
+	return ""
 }
 
 // writeHostileTokenCap rejects a hostile token cap with the shared 400
-// envelope. Both ServeHTTP enforcement sites use it, so the two trust
-// boundaries can never drift in status, type or wording.
-func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol) {
+// envelope, naming the client's own field. Both ServeHTTP enforcement sites
+// use it, so the two trust boundaries can never drift in status, type or
+// wording.
+func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol, field string) {
 	writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError,
-		fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens))
+		fmt.Sprintf("%s must not exceed %d", field, maxRequestOutputTokens))
 }
 
 type requestRouting struct {
