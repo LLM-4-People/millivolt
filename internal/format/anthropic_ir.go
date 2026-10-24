@@ -221,7 +221,7 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 		req.ToolChoice = tc
 		req.ParallelToolCalls = parallel
 	}
-	if r, warns, err := decodeAnthropicThinking(in.Thinking); err != nil {
+	if r, warns, err := decodeAnthropicThinking(in.Thinking, maxTokens); err != nil {
 		return nil, err
 	} else if r != nil {
 		req.Reasoning = r
@@ -622,7 +622,7 @@ func decodeAnthropicToolChoice(raw json.RawMessage) (*ir.ToolChoice, *bool, erro
 	}
 }
 
-func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warnings, error) {
+func decodeAnthropicThinking(raw json.RawMessage, maxTokens *int) (*ir.ReasoningConfig, ir.Warnings, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil, nil
 	}
@@ -641,6 +641,19 @@ func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warni
 		budget, err := jsonnum.OptionalInt(obj.BudgetTokens, "thinking.budget_tokens")
 		if err != nil {
 			return nil, nil, fmt.Errorf("anthropic thinking: %w", err)
+		}
+		// Anthropic requires a budget for enabled thinking and documents a
+		// 1024 floor plus a strict upper bound below max_tokens. Zero, a
+		// negative or an absent budget would otherwise be mapped to a
+		// reasoning effort the target cannot honor.
+		if budget == nil {
+			return nil, nil, errors.New("anthropic thinking: budget_tokens is required when type is enabled")
+		}
+		if *budget < 1024 {
+			return nil, nil, fmt.Errorf("anthropic thinking: budget_tokens must be at least 1024")
+		}
+		if maxTokens != nil && *budget >= *maxTokens {
+			return nil, nil, fmt.Errorf("anthropic thinking: budget_tokens must be less than max_tokens")
 		}
 		return &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: budget, Display: obj.Display}, nil, nil
 	case "adaptive":
