@@ -161,3 +161,38 @@ func TestPromptCacheOptionsCrossWire(t *testing.T) {
 		t.Fatalf("anthropic body carried cache options: %s", out)
 	}
 }
+
+func TestAnthropicSpeedMapsFast(t *testing.T) {
+	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"speed":"fast"}`
+	req, err := DecodeAnthropicRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if req.ServiceTier != "fast" {
+		t.Fatalf("service tier = %q, want fast", req.ServiceTier)
+	}
+	if !warningField(req.Warnings, "speed") {
+		t.Fatalf("speed mapping recorded no warning: %+v", req.Warnings)
+	}
+
+	out, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root := decodeJSONObject(t, out); root["service_tier"] != "fast" {
+		t.Fatalf("chat service tier = %v, want fast: %s", root["service_tier"], out)
+	}
+
+	fast := &ir.Request{
+		Model: "m", MaxOutputTokens: req.MaxOutputTokens, ServiceTier: "fast",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}},
+	}
+	out, err = EncodeAnthropicRequest(fast, 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decodeJSONObject(t, out)
+	if root["speed"] != "fast" || root["service_tier"] != nil {
+		t.Fatalf("anthropic speed = %v, tier = %v: %s", root["speed"], root["service_tier"], out)
+	}
+}

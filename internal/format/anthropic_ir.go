@@ -40,6 +40,7 @@ type anthropicWireRequest struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
 	ServiceTier  string          `json:"service_tier"`
+	Speed        string          `json:"speed"`
 	OutputConfig json.RawMessage `json:"output_config"`
 }
 
@@ -196,6 +197,21 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 			req.Reasoning.Effort = effort
 		}
 		req.Warnings = append(req.Warnings, warns...)
+	}
+	if in.Speed != "" {
+		switch in.Speed {
+		case "standard":
+			// Standard processing is the default; no tier is needed.
+		case "fast":
+			if req.ServiceTier == "" || req.ServiceTier == "auto" {
+				req.ServiceTier = "fast"
+				req.Warnings.Add(ir.WarningApproximated, "speed", "mapped Anthropic fast speed to service_tier fast")
+			} else {
+				req.Warnings.Add(ir.WarningDropped, "speed", "service_tier already selects the target tier")
+			}
+		default:
+			req.Warnings.Add(ir.WarningDropped, "speed", "unsupported speed value")
+		}
 	}
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
@@ -637,10 +653,16 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.User != "" {
 		out["metadata"] = map[string]any{"user_id": req.User}
 	}
-	tier, tierWarns := mapServiceTier(ir.Anthropic, req.ServiceTier)
-	req.Warnings = append(req.Warnings, tierWarns...)
-	if tier != "" {
-		out["service_tier"] = tier
+	if req.ServiceTier == "fast" {
+		// Anthropic expresses fast processing with speed, not the service
+		// tier vocabulary.
+		out["speed"] = "fast"
+	} else {
+		tier, tierWarns := mapServiceTier(ir.Anthropic, req.ServiceTier)
+		req.Warnings = append(req.Warnings, tierWarns...)
+		if tier != "" {
+			out["service_tier"] = tier
+		}
 	}
 	if req.CacheControl != nil {
 		out["cache_control"] = req.CacheControl
