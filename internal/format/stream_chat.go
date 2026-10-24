@@ -80,6 +80,7 @@ type ChatStreamDecoder struct {
 	toolBlocks     map[int]int
 	toolArguments  map[int]*strings.Builder
 	toolArgBytes   int
+	toolIDs        map[string]struct{}
 	open           []int
 
 	finishSeen    bool
@@ -99,6 +100,7 @@ func NewChatStreamDecoder(r io.Reader) *ChatStreamDecoder {
 		refusalIndex:   -1,
 		toolBlocks:     map[int]int{},
 		toolArguments:  map[int]*strings.Builder{},
+		toolIDs:        map[string]struct{}{},
 	}
 }
 
@@ -320,7 +322,14 @@ func (d *ChatStreamDecoder) legacyFunctionCall(name, args string) error {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("chat stream function_call needs a name")
 		}
-		return d.toolCall(chatLegacyToolIndex, name, "function", name, args)
+		id := name
+		if _, taken := d.toolIDs[id]; taken {
+			// A modern call already committed the same id. Keep both calls
+			// distinct rather than merging two source calls into one target
+			// identity.
+			id = ""
+		}
+		return d.toolCall(chatLegacyToolIndex, id, "function", name, args)
 	}
 	return d.toolCall(chatLegacyToolIndex, "", "function", name, args)
 }
@@ -334,10 +343,11 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 		if err := checkNativeIdentity("tool name", name); err != nil {
 			return err
 		}
+		irIndex = d.nextIndex
+		id = d.commitToolID(id, irIndex)
 		d.closeText()
 		d.closeReasoning()
 		d.closeRefusal()
-		irIndex = d.nextIndex
 		d.nextIndex++
 		d.toolBlocks[chatIndex] = irIndex
 		d.toolArguments[chatIndex] = &strings.Builder{}
@@ -355,6 +365,27 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: irIndex, Delta: &ir.Delta{Arguments: args}})
 	}
 	return nil
+}
+
+// commitToolID returns the id a newly opened stream tool call commits. The
+// wire requires a non-empty id and the block index is already fixed, so a
+// missing source id is synthesized here on the first fragment; a later id
+// never rewrites it because only the opening path calls this. The reserved
+// prefix and the collision suffix keep a synthesized id distinct from every id
+// the source already provided.
+func (d *ChatStreamDecoder) commitToolID(id string, irIndex int) string {
+	if id == "" {
+		base := fmt.Sprintf("call_proxy_%d", irIndex)
+		id = base
+		for suffix := 2; ; suffix++ {
+			if _, taken := d.toolIDs[id]; !taken {
+				break
+			}
+			id = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	d.toolIDs[id] = struct{}{}
+	return id
 }
 
 func (d *ChatStreamDecoder) closeText() {
