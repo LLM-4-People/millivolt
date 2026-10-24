@@ -2931,6 +2931,10 @@ func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Ti
 		id = rec.ID
 	}
 	msg := metrics.DegenerateMessage(code)
+	// The substitution is proxy-minted, not a provider statement: stamp the
+	// local failure before feeding the synthetic frames so the standalone
+	// error classifier cannot attribute it to the provider.
+	a.SetLocalFailure(code, msg)
 	// The free-form error event carries the specific internal code; the
 	// response.failed envelope carries the closed ResponseErrorCode enum.
 	// Feed the error event first so the analyzer's first-real-error rule keeps

@@ -6,11 +6,14 @@ package proxy
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 const prettyPrintedSummaryPartStream = `event: response.created
@@ -60,10 +63,26 @@ func TestPrettyPrintedReasoningSummaryPartIsReasoningOnly(t *testing.T) {
 		t.Fatalf("records = %d, want 1", len(recs))
 	}
 	rec := recs[0]
-	if rec.ErrorType != "provider_error" || rec.ErrorCode != metrics.CodeReasoningOnly || !rec.IsError() {
-		t.Fatalf("record = type %q code %q error %v, want provider_error/reasoning_only", rec.ErrorType, rec.ErrorCode, rec.IsError())
+	if rec.ErrorType != sse.TypeUpstreamError || rec.ErrorCode != metrics.CodeReasoningOnly || !rec.IsError() {
+		t.Fatalf("record = type %q code %q error %v, want upstream_error/reasoning_only", rec.ErrorType, rec.ErrorCode, rec.IsError())
 	}
 	if up.calls.Load() != 1 {
 		t.Fatalf("upstream calls = %d, want 1", up.calls.Load())
+	}
+}
+
+// The degenerate Responses substitution is proxy-minted. Its record must say
+// upstream_error, matching the Chat substitution, rather than attributing the
+// proxy's verdict to the provider; a provider-sent standalone error keeps its
+// provider_error classification (pinned by the C1 partial-argument test).
+func TestResponsesDegenerateSubstitutionRecordsUpstreamError(t *testing.T) {
+	rec := &metrics.Record{ID: "req_1"}
+	var a sse.Analyzer
+	w := httptest.NewRecorder()
+	emitDegenerateResponses(w, &a, time.Now(), metrics.CodeReasoningOnly, rec)
+	a.Fill(rec)
+	if rec.ErrorType != sse.TypeUpstreamError || rec.ErrorCode != metrics.CodeReasoningOnly || !rec.IsError() {
+		t.Fatalf("record = type %q code %q error %v, want upstream_error/reasoning_only",
+			rec.ErrorType, rec.ErrorCode, rec.IsError())
 	}
 }

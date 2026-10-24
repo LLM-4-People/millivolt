@@ -826,6 +826,19 @@ func (a *Analyzer) recordStandaloneError(code, message json.RawMessage) {
 	a.setStreamError("provider_error", codeString, msg)
 }
 
+// SetLocalFailure records a proxy-minted failure as an upstream_error with the
+// specific internal code. The synthetic frames the proxy substitutes for a
+// withheld terminal are not provider statements, so the standalone-error
+// classifier must not relabel them provider_error. The first-real-error rule
+// still applies: a provider error that already owns the record is never
+// overwritten.
+func (a *Analyzer) SetLocalFailure(code, msg string) {
+	if a.errType != "" {
+		return
+	}
+	a.setStreamError(TypeUpstreamError, code, msg)
+}
+
 // captureResponseFailedError records the nested provider error of a Responses
 // response.failed event. The same first-real-error rule applies.
 func (a *Analyzer) captureResponseFailedError(payload []byte) {
