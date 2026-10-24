@@ -1888,7 +1888,7 @@ type requestParameters struct {
 	Tools          []discardedJSON   `json:"tools"`
 	ToolChoice     requestToolChoice `json:"tool_choice"`
 	StreamOptions  *struct{}         `json:"stream_options"`
-	N              *int              `json:"n"`
+	N              json.RawMessage   `json:"n"`
 	Stop           json.RawMessage   `json:"stop"`
 	StopSequences  json.RawMessage   `json:"stop_sequences"`
 	Logprobs       bool              `json:"logprobs"`
@@ -1897,10 +1897,10 @@ type requestParameters struct {
 	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
-	Seed            *int64                   `json:"seed"`
+	Seed            json.RawMessage          `json:"seed"`
 	ParallelTools   *bool                    `json:"parallel_tool_calls"`
 	LogitBias       map[string]discardedJSON `json:"logit_bias"`
-	TopLogprobs     *int                     `json:"top_logprobs"`
+	TopLogprobs     json.RawMessage          `json:"top_logprobs"`
 	ServiceTier     string                   `json:"service_tier"`
 	Thinking        json.RawMessage          `json:"thinking"`
 	Metadata        requestMetadataKeys      `json:"metadata"`
@@ -3272,10 +3272,27 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	// occurrence the trust boundary validated. Prefer max_completion_tokens,
 	// matching the Anthropic translator's pick.
 	applyTokenCaps(body, rec)
+	// Integral spellings (1.0, 1e1) are accepted by every codec and relayed
+	// verbatim, but a typed int decode fails them and erased the rest of the
+	// record with it. Carry these three members as raw JSON and decode them
+	// with the shared exact parser after the merged decode; a malformed
+	// spelling records nothing here (the wire codec owns its own validation)
+	// without discarding the other fields.
+	n, errN := jsonnum.OptionalInt(req.N, "n")
+	seed, errSeed := jsonnum.OptionalInt64(req.Seed, "seed")
+	topLogprobs, errTop := jsonnum.OptionalInt(req.TopLogprobs, "top_logprobs")
+	if errN == nil {
+		rec.ReqN = n
+	}
+	if errSeed == nil {
+		rec.ReqSeed = seed
+	}
+	if errTop == nil {
+		rec.ReqTopLogprobs = topLogprobs
+	}
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
 	rec.ReqToolsCount = len(req.Tools)
-	rec.ReqN = req.N
 	rec.ReqPresencePen = req.PresencePen
 	rec.ReqFrequencyPen = req.FrequencyPen
 	rec.ReqLogprobs = req.Logprobs
@@ -3296,14 +3313,12 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	} else if req.OutputConfig != nil && req.OutputConfig.Format != nil {
 		rec.ReqResponseFormat = req.OutputConfig.Format.Type
 	}
-	rec.ReqSeed = req.Seed
 	if req.ParallelTools != nil {
 		rec.ReqParallelTools = req.ParallelTools
 	} else if req.ToolChoice.DisableSet {
 		parallel := !req.ToolChoice.DisableParallel
 		rec.ReqParallelTools = &parallel
 	}
-	rec.ReqTopLogprobs = req.TopLogprobs
 	if req.ServiceTier != "" {
 		rec.ReqServiceTier = req.ServiceTier
 	} else {
