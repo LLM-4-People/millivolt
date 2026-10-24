@@ -574,3 +574,63 @@ func TestRequestStopCountDoesNotMaterialize(t *testing.T) {
 	}
 	t.Logf("stop_sequences accepted: input=%d entries=%d alloc=%d", len(raw), entries, res.AllocedBytesPerOp())
 }
+
+func TestRequestModalitiesBound(t *testing.T) {
+	atCap := amplificationArray(requestMetadataMaxElements, `"audio"`)
+	over := amplificationArray(requestMetadataMaxElements+1, `"audio"`)
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"at cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` + atCap + `}`, false},
+		{"over cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` + over + `}`, true},
+		{"case-folded over cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"MODALITIES":` + over + `}`, true},
+		{"escaped key over cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modal\u0069ties":` + over + `}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec metrics.Record
+			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && (!strings.Contains(err.Error(), "modalities") || !strings.Contains(err.Error(), strconv.Itoa(requestMetadataMaxElements))) {
+				t.Fatalf("modalities overflow error = %v, want the bounded modalities wording", err)
+			}
+		})
+	}
+}
+
+func TestRequestModalitiesOverflowReturns400BeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[]}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+	defer srv.Close()
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` +
+		amplificationArray(requestMetadataMaxElements+1, `"audio"`) + `}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte("invalid_request_error")) || !bytes.Contains(raw, []byte("modalities")) {
+		t.Fatalf("body = %q, want the shared bounded invalid_request_error", raw)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("upstream called %d times, want 0", got)
+	}
+}

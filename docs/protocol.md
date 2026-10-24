@@ -170,9 +170,9 @@ upstream send, including case variants and escaped spellings: the relay sends
 every occurrence, so accepting duplicates would let the validated and recorded
 value differ from the bytes the upstream reads. A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
-entries in a `messages`, `tools`, `functions`, `input`, `stop` or
-`stop_sequences` array, more than 10,000 members in a `metadata` object, more
-than 1,024 aggregate
+entries in a `messages`, `tools`, `functions`, `input`, `stop`,
+`stop_sequences` or `modalities` array, more than 10,000 members in a
+`metadata` object, more than 1,024 aggregate
 `tool_calls` members across every message, more than 10,000 distinct top-level
 members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
 top-level objects. Content composition has two independent limits. A content

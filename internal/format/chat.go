@@ -141,12 +141,13 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	// proxy preflights the wire body too, but the codec is reachable on its
 	// own (and the preflight deliberately skips malformed documents).
 	var bounds struct {
-		Messages  json.RawMessage `json:"messages"`
-		Tools     json.RawMessage `json:"tools"`
-		Functions json.RawMessage `json:"functions"`
-		Stop      json.RawMessage `json:"stop"`
-		Metadata  json.RawMessage `json:"metadata"`
-		LogitBias json.RawMessage `json:"logit_bias"`
+		Messages   json.RawMessage `json:"messages"`
+		Tools      json.RawMessage `json:"tools"`
+		Functions  json.RawMessage `json:"functions"`
+		Stop       json.RawMessage `json:"stop"`
+		Modalities json.RawMessage `json:"modalities"`
+		Metadata   json.RawMessage `json:"metadata"`
+		LogitBias  json.RawMessage `json:"logit_bias"`
 	}
 	if err := json.Unmarshal(body, &bounds); err != nil {
 		return nil, errParseOpenAIBody(err)
@@ -159,6 +160,7 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		{bounds.Tools, "tools"},
 		{bounds.Functions, "functions"},
 		{bounds.Stop, "stop"},
+		{bounds.Modalities, "modalities"},
 	} {
 		if err := checkWireArray(b.raw, b.field, WireCollectionMax); err != nil {
 			return nil, errParseOpenAIBody(err)

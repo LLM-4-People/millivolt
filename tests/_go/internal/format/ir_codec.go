@@ -1263,6 +1263,10 @@ func TestWireCollectionsAreBoundedBeforeDecode(t *testing.T) {
 			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "stop exceeds",
 		},
 		{
+			"chat request modalities", `{"model":"m","messages":[],"modalities":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "modalities exceeds",
+		},
+		{
 			"chat response tool calls", `{"id":"c1","choices":[{"message":{"role":"assistant","tool_calls":` + emptyJSONArray(metrics.ContentPartMax+1) + `}}]}`,
 			func(b []byte) error { _, err := DecodeChatResponse(b); return err }, "message.tool_calls exceeds",
 		},

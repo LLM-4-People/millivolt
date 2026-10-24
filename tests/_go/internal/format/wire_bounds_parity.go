@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -187,5 +188,25 @@ func TestChatNestedCollectionsBounded(t *testing.T) {
 	}
 	if _, err := DecodeChatRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"logit_bias":` + logit(WireCollectionMax+1) + `}`)); err == nil || !strings.Contains(err.Error(), "logit_bias") {
 		t.Fatalf("logit_bias over-bound error = %v", err)
+	}
+}
+
+// TestChatModalitiesBounded pins the pre-decode bound for Chat modalities. A
+// slice of 10,001 empty strings otherwise expands into a large []string.
+func TestChatModalitiesBounded(t *testing.T) {
+	modalities := func(n int) string {
+		return repeatJSONArray(`"audio"`, n)
+	}
+	atLimit := `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` + modalities(WireCollectionMax) + `}`
+	req, err := DecodeChatRequest([]byte(atLimit))
+	if err != nil {
+		t.Fatalf("modalities at the limit rejected: %v", err)
+	}
+	if got := warningCount(req.Warnings, ir.WarningDropped, "modalities"); got != 1 {
+		t.Fatalf("modalities warnings = %d, want one (%+v)", got, req.Warnings)
+	}
+	over := `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` + modalities(WireCollectionMax+1) + `}`
+	if _, err := DecodeChatRequest([]byte(over)); err == nil || !strings.Contains(err.Error(), "modalities") {
+		t.Fatalf("modalities over-bound error = %v", err)
 	}
 }

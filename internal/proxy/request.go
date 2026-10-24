@@ -2262,7 +2262,7 @@ func boundRequestMetadata(body []byte) error {
 				toolCalls += calls
 			}
 			i = next
-		case "tools", "functions":
+		case "tools", "functions", "modalities":
 			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
 			if !ok {
 				return nil
@@ -2496,6 +2496,8 @@ func (k requestKey) collection() string {
 		return "logit_bias"
 	case k.equal("stop"), k.equal("stop_sequences"):
 		return "stop"
+	case k.equal("modalities"):
+		return "modalities"
 	}
 	return ""
 }
