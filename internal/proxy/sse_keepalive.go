@@ -49,16 +49,21 @@ type ssePacer struct {
 	// modeSet records that the body mode was assigned from the upstream
 	// content type before any status commit, so WriteHeader must not treat a
 	// 2xx as SSE by default.
-	modeSet       bool
-	stopped       bool
-	stopClosed    bool
-	lastWrite     time.Time
+	modeSet    bool
+	stopped    bool
+	stopClosed bool
+	lastWrite  time.Time
+	// atLineStart records whether the last body byte written was a newline
+	// (or no body byte has been written yet). A comment is only safe on its
+	// own line: inserting one between a partial `event:`/`data:` line and its
+	// remainder corrupts the frame, so writeComment skips while mid-line.
+	atLineStart   bool
 	interval      time.Duration
 	writeProgress time.Duration
 }
 
 func newSSEPacer(w http.ResponseWriter, interval, writeProgress time.Duration) *ssePacer {
-	return &ssePacer{w: w, lastWrite: time.Now(), interval: interval, writeProgress: writeProgress}
+	return &ssePacer{w: w, lastWrite: time.Now(), atLineStart: true, interval: interval, writeProgress: writeProgress}
 }
 
 // newSSEPacerFor is the single server-side reader of the two stream timing
@@ -143,7 +148,11 @@ func (p *ssePacer) writeSSELocked(b []byte) (int, error) {
 	if p.writeProgress > 0 {
 		_ = http.NewResponseController(p.w).SetWriteDeadline(time.Now().Add(p.writeProgress))
 	}
-	return p.w.Write(b)
+	n, err := p.w.Write(b)
+	if n > 0 {
+		p.atLineStart = b[n-1] == '\n'
+	}
+	return n, err
 }
 
 func (p *ssePacer) Flush() {
@@ -258,6 +267,12 @@ func (p *ssePacer) writeComment(force bool) bool {
 		return false
 	}
 	if !p.sse {
+		return true
+	}
+	// A comment needs its own line. The force path (the first Start comment)
+	// normally runs before any body byte, but the same boundary holds if a
+	// caller forces one later.
+	if !p.atLineStart {
 		return true
 	}
 	if !force && time.Since(p.lastWrite) < p.interval {
