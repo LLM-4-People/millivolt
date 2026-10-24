@@ -296,6 +296,13 @@ func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, statu
 // headers, and returns the body byte count for callers that book it.
 func writeProtocolHTTPErrorCodeHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, code, msg string, extra http.Header) int {
 	msg = retainedText(msg, protocolErrorEchoMax)
+	// An unknown path has no inbound protocol. This sink's contract keeps the
+	// historical OpenAI envelope for Chat and unknown paths, so normalize the
+	// zero value instead of letting EncodeError reject it and falling back to
+	// an envelope without the schema-required param field.
+	if inbound == "" {
+		inbound = ir.Chat
+	}
 	body, err := providerformat.EncodeError(inbound, &ir.Error{Type: typ, Code: code, Message: msg, Status: status})
 	if err != nil {
 		body = []byte(errJSONCode(typ, msg, code))
