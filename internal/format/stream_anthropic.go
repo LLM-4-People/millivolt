@@ -226,6 +226,9 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkNativeIdentity("tool name", block.Name); err != nil {
 					return nil, err
 				}
+				if err := checkToolCallName(block.Name); err != nil {
+					return nil, err
+				}
 				d.openToolBlocks++
 				if d.openToolBlocks > toolBlocksMax {
 					return nil, errNativeToolBlocks

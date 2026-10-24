@@ -28,6 +28,18 @@ func toolVocabularyError(target, field, value, pattern string) error {
 	return fmt.Errorf("%s %s %q does not match %s", target, field, boundedEcho(value), pattern)
 }
 
+// checkToolCallName enforces the IR's non-empty tool-name invariant at the
+// streaming decoder owners. Each target encoder still owns its name-class
+// check; this owner keeps an empty streamed name from reaching any target
+// wire, where a per-target encoder might only notice it after bytes were
+// already emitted.
+func checkToolCallName(name string) error {
+	if name == "" {
+		return errors.New("tool name is required")
+	}
+	return nil
+}
+
 // validateChatToolVocabulary enforces the Chat target's name class on every
 // declared tool, a named tool choice, and every history tool call. Chat tool
 // ids are not pattern-constrained, so only the name is checked.
