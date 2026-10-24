@@ -135,6 +135,9 @@ target cannot consume them:
   bytes are dropped with one warning while a file id or URL on the same part
   survives; a part with no remaining payload is dropped. Chat file parts keep
   their existing PDF-only default.
+- A Chat response carries one refusal field, so multiple IR refusal parts are
+  concatenated in block order. An empty part contributes nothing and never
+  clears earlier text.
 - A translated non-streaming response assumes a schema-valid source identity.
   A source that omits `id` or `model` yields an empty string on the target
   rather than an invented identity. The Responses envelope carries protocol

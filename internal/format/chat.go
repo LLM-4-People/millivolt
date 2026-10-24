@@ -1475,7 +1475,10 @@ func encodeChatContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) (any
 				}
 				continue
 			}
-			refusal = b.Refusal
+			// A response can split one refusal across several parts. Chat has
+			// one refusal field, so concatenate in block order; an empty last
+			// part must not erase the earlier text.
+			refusal += b.Refusal
 		case ir.BlockReasoning:
 			if role != ir.RoleAssistant {
 				if warns != nil {
