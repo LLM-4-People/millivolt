@@ -1175,21 +1175,20 @@ type responsesWireUsage struct {
 	} `json:"output_tokens_details"`
 }
 
-// DecodeResponsesResponse converts one non-streaming Responses body into the
-// canonical response.
-func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
-	if !utf8.Valid(body) {
-		return nil, errors.New("responses response body is not valid UTF-8")
-	}
-	// Bound the output array before the typed decode materializes it.
+// checkResponsesResponseBounds preflights the array shapes a Responses
+// response materializes before the typed decode. It is shared by the
+// non-streaming decoder and the streaming created/terminal branches so one
+// large document cannot amplify into a large typed allocation in either path.
+// The probe only retains raw members; it stops at the first over-bound array.
+func checkResponsesResponseBounds(body []byte) error {
 	var probe struct {
 		Output json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
-		return nil, fmt.Errorf("parse responses response: %w", err)
+		return fmt.Errorf("parse responses response: %w", err)
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Output) {
-		return nil, fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
+		return fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
 	}
 	// A reasoning output item's summary array is materialized by the typed
 	// item decode; the bounded output array keeps this probe slice small. An
@@ -1201,21 +1200,33 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			Content json.RawMessage `json:"content"`
 		}
 		if err := json.Unmarshal(probe.Output, &itemBounds); err != nil {
-			return nil, fmt.Errorf("parse responses response: %w", err)
+			return fmt.Errorf("parse responses response: %w", err)
 		}
 		summaryTotal := 0
 		var nested responsesNestedBudget
 		for i, item := range itemBounds {
 			if err := checkWireArray(item.Summary, "output.summary", metrics.ContentPartMax); err != nil {
-				return nil, err
+				return err
 			}
 			if err := addWireArray(&summaryTotal, item.Summary, "output.summary", WireNestedCollectionMax); err != nil {
-				return nil, err
+				return err
 			}
 			if err := checkResponsesContent(&nested, item.Content, fmt.Sprintf("output[%d].content", i)); err != nil {
-				return nil, err
+				return err
 			}
 		}
+	}
+	return nil
+}
+
+// DecodeResponsesResponse converts one non-streaming Responses body into the
+// canonical response.
+func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
+	if !utf8.Valid(body) {
+		return nil, errors.New("responses response body is not valid UTF-8")
+	}
+	if err := checkResponsesResponseBounds(body); err != nil {
+		return nil, err
 	}
 	var in responsesWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {

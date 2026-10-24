@@ -234,6 +234,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if d.started {
 				continue
 			}
+			// The created payload can carry a full output array even though
+			// this branch only needs identity. Preflight it with the same
+			// bounds owner as the non-stream decoder before the typed decode.
+			if err := checkResponsesResponseBounds(ev.Response); err != nil {
+				return nil, err
+			}
 			var resp responsesWireResponse
 			if err := json.Unmarshal(ev.Response, &resp); err != nil {
 				return nil, err
@@ -855,6 +861,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 		case "response.completed", "response.incomplete", "response.failed", "response.cancelled":
+			if err := checkResponsesResponseBounds(ev.Response); err != nil {
+				return nil, err
+			}
 			var resp responsesWireResponse
 			if err := json.Unmarshal(ev.Response, &resp); err != nil {
 				return nil, err
