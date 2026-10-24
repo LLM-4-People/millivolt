@@ -785,7 +785,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				key := d.keyByOutput[ev.OutputIndex]
-				if err := d.flushToolArguments(key, idx, item.Arguments); err != nil {
+				if err := d.flushToolArguments(key, idx, item.Arguments, true); err != nil {
 					return nil, err
 				}
 				delete(d.itemBlock, ev.OutputIndex)
@@ -833,7 +833,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			if err := d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments); err != nil {
+			if err := d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments, true); err != nil {
 				return nil, err
 			}
 		case "response.reasoning_summary_part.done":
@@ -884,10 +884,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.usageReported = true
 			}
 			d.terminal = true
-			// A failed terminal is not a clean completion. Buffered initial
-			// argument bytes may be a partial value, so drop them rather than
-			// parsing and emitting them as if the source had finished.
-			if err := d.closeAll(resp.Output, ev.Type != "response.failed"); err != nil {
+			// The terminal class owns the turn's outcome. Only a clean
+			// completion may turn an incomplete argument value into a
+			// translator failure; failed, incomplete and cancelled terminals
+			// keep their own class and drop the incomplete value.
+			if err := d.closeAll(resp.Output, responsesTerminalClassFor(ev.Type)); err != nil {
 				return nil, err
 			}
 			if ev.Type == "response.failed" {
@@ -931,7 +932,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.terminal = true
 			// The standalone error event is the terminal statement; buffered
 			// initial argument bytes are incomplete by definition here.
-			if err := d.closeAll(nil, false); err != nil {
+			if err := d.closeAll(nil, responsesTerminalError); err != nil {
 				return nil, err
 			}
 			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
@@ -946,12 +947,47 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 	}
 }
 
+// responsesTerminalClass describes the outcome a Responses terminal carries.
+// It decides whether an incomplete argument value may fail the translation.
+type responsesTerminalClass uint8
+
+const (
+	responsesTerminalCompleted responsesTerminalClass = iota
+	responsesTerminalFailed
+	responsesTerminalIncomplete
+	responsesTerminalCancelled
+	responsesTerminalError
+	responsesTerminalTruncated
+)
+
+// clean reports whether the source completed the turn normally. Only a clean
+// terminal makes a partial tool-argument value a translator failure; every
+// other class is the turn's authoritative outcome and must survive.
+func (c responsesTerminalClass) clean() bool { return c == responsesTerminalCompleted }
+
+func responsesTerminalClassFor(eventType string) responsesTerminalClass {
+	switch eventType {
+	case "response.completed":
+		return responsesTerminalCompleted
+	case "response.failed":
+		return responsesTerminalFailed
+	case "response.incomplete":
+		return responsesTerminalIncomplete
+	case "response.cancelled":
+		return responsesTerminalCancelled
+	default:
+		return responsesTerminalFailed
+	}
+}
+
 // closeAll closes every block still open at a terminal event and synthesizes
 // items that exist only in the terminal document. A provider may stream no
 // per-item events at all and place the whole answer, refusal, reasoning or
 // function call in response.completed.output; a translated client must still
-// receive those blocks exactly once.
-func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, flushToolArguments bool) error {
+// receive those blocks exactly once. class decides how an incomplete argument
+// value is treated: a clean completion fails closed, while a non-clean terminal
+// drops it and preserves the provider error or finish.
+func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class responsesTerminalClass) error {
 	// Apply the authoritative terminal payload in terminal document order.
 	// Announced blocks that already carry bytes are filled in place; every
 	// block that still has to start (an unannounced item/part, or a deferred
@@ -960,7 +996,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, flushToolA
 	pending := d.terminalPending
 	d.terminalPending = nil
 	clear(d.terminalPendingByKey)
-	more, err := d.collectTerminalOutput(output)
+	more, err := d.collectTerminalOutput(output, class.clean())
 	if err != nil {
 		return err
 	}
@@ -971,11 +1007,11 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, flushToolA
 	// A clean terminal can arrive before the streamed value was complete: the
 	// buffered added payload is then the only argument bytes the source
 	// produced, so flush it before the block closes. The identities are sorted
-	// so the emitted delta order is deterministic. A failed or errored terminal
+	// so the emitted delta order is deterministic. Every non-clean terminal
 	// instead discards the buffer below without parsing or emitting it: a
-	// partial value must neither reach the target nor turn a provider failure
-	// into a translator failure.
-	if flushToolArguments {
+	// partial value must neither reach the target nor replace the provider
+	// error, the length finish or the cancellation with a translator failure.
+	if class.clean() {
 		toolKeys := make([]string, 0, len(d.initialArgs))
 		for key := range d.initialArgs {
 			toolKeys = append(toolKeys, key)
@@ -983,7 +1019,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, flushToolA
 		sort.Strings(toolKeys)
 		for _, key := range toolKeys {
 			if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-				if err := d.flushToolArguments(key, idx, ""); err != nil {
+				if err := d.flushToolArguments(key, idx, "", class.clean()); err != nil {
 					return err
 				}
 			}
@@ -1342,7 +1378,7 @@ func (d *ResponsesStreamDecoder) appendReasoningValue(item responsesWireItem, it
 // keeps each queued value's event position. The caller closes streamed blocks
 // before emitting the queue; perfect ordering is impossible only when a later
 // announced block already streamed bytes, because its target index is fixed.
-func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem) ([]terminalEmission, error) {
+func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, strict bool) ([]terminalEmission, error) {
 	var pending []terminalEmission
 	for i, item := range output {
 		typ := item.Type
@@ -1361,7 +1397,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 			}
 			if ok && d.open[idx] {
-				if err := d.flushToolArguments(key, idx, item.Arguments); err != nil {
+				if err := d.flushToolArguments(key, idx, item.Arguments, strict); err != nil {
 					return nil, err
 				}
 				continue
@@ -1376,11 +1412,17 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			if !admitted {
 				continue
 			}
-			d.sawToolCall = true
-			emission, ok, err := functionCallTerminalEmission(item)
+			emission, ok, err := functionCallTerminalEmission(item, strict)
 			if err != nil {
-				return nil, err
+				if strict {
+					return nil, err
+				}
+				// A non-clean terminal owns the outcome; drop the call whose
+				// arguments the source never completed rather than replacing
+				// the provider error or finish with a translator failure.
+				continue
 			}
+			d.sawToolCall = true
 			if ok {
 				pending = append(pending, emission)
 			}
@@ -1710,7 +1752,7 @@ func (d *ResponsesStreamDecoder) syntheticBlock(block ir.Block, delta *ir.Delta)
 
 // functionCallTerminalEmission builds the complete block for a function call
 // that appeared only in the terminal document.
-func functionCallTerminalEmission(item responsesWireItem) (terminalEmission, bool, error) {
+func functionCallTerminalEmission(item responsesWireItem, strict bool) (terminalEmission, bool, error) {
 	if err := checkNativeIdentity("tool id", item.CallID); err != nil {
 		return terminalEmission{}, false, err
 	}
@@ -1719,6 +1761,9 @@ func functionCallTerminalEmission(item responsesWireItem) (terminalEmission, boo
 	}
 	args, err := parseToolArguments(item.Arguments)
 	if err != nil {
+		if !strict {
+			return terminalEmission{}, false, nil
+		}
 		return terminalEmission{}, false, err
 	}
 	var delta *ir.Delta
@@ -1860,7 +1905,7 @@ func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, 
 // coverage is partial, the retained bytes are only a truncated prefix of what
 // the client already received: they cannot be reconciled or validated as the
 // final value, so the streamed bytes stand and reconciliation stops.
-func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string) error {
+func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string, strict bool) error {
 	if key == "" {
 		return nil
 	}
@@ -1870,10 +1915,22 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 			return nil
 		}
 		if full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
+			if !strict {
+				// Only append a suffix whose complete value is a valid tool
+				// object; a partial terminal value must not reach the wire.
+				if err := validateStreamedToolArguments(full); err != nil {
+					return nil
+				}
+			}
 			suffix := full[len(emitted):]
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: suffix}})
 			d.recordEmittedArguments(key, suffix)
 			emitted += suffix
+		}
+		if !strict {
+			// The bytes already streamed are the client's only copy. A
+			// non-clean terminal must not reclassify them.
+			return nil
 		}
 		// Those bytes already reached the client, so the normalizing parser
 		// must not run: a completed streamed null or array fails closed
@@ -1891,6 +1948,9 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 	}
 	normalized, err := parseToolArguments(args)
 	if err != nil {
+		if !strict {
+			return nil
+		}
 		return err
 	}
 	args = string(normalized)
@@ -2152,7 +2212,7 @@ func (d *ResponsesStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
 	// FlushBlocks runs only when the upstream stream failed or truncated. The
 	// buffered initial arguments are incomplete, so close the blocks without
 	// parsing or emitting them.
-	err := d.closeAll(nil, false)
+	err := d.closeAll(nil, responsesTerminalTruncated)
 	return drainQueue(&d.q), err
 }
 
