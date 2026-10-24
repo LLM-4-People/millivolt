@@ -2010,8 +2010,8 @@ func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
 }
 
 // requestStopCount records how many stop sequences a raw stop field carries.
-// The object and array shapes are the only ones the wire schemas accept; any
-// other value records zero.
+// A string is one sequence and an array contributes its length; null, an
+// object and every other shape record zero.
 func requestStopCount(raw json.RawMessage) int {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
