@@ -839,6 +839,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				return err
 			}
 		}
+		// Anthropic's error event is the stream's terminal statement. Mark
+		// the stream done so finish()/Close() cannot append message_stop.
+		e.doneSent = true
 		return e.finish()
 	}
 	return nil
