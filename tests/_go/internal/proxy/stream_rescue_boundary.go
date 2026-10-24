@@ -247,3 +247,67 @@ func TestPartialTailDoesNotVetoTruncationRescue(t *testing.T) {
 		t.Fatalf("record = %+v, want a clean recovered record with retries=1", rec)
 	}
 }
+
+// TestReasoningRescueClosesPartialEventBeforeRetry pins H4: the read-error
+// reasoning rescue must close the client's pending SSE event before the fresh
+// attempt appends. A complete reasoning data line whose blank-line boundary
+// never arrived was relayed as an open event; without the rescue boundary the
+// fresh attempt's first data line joins that event and the client sees a
+// two-line payload.
+func TestReasoningRescueClosesPartialEventBeforeRetry(t *testing.T) {
+	const (
+		roleFrame = `data: {"id":"A","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+		// A complete data line without its terminating blank line: the event
+		// is still open on the client wire when the upstream dies.
+		reasoningLine = `data: {"id":"A","choices":[{"delta":{"reasoning_content":"thinking hard"}}]}` + "\n"
+	)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(roleFrame))
+			w.Write([]byte(reasoningLine))
+			w.(http.Flusher).Flush()
+			// Drop the connection mid-event: the proxy sees a read error,
+			// not a clean EOF.
+			panic("simulated upstream crash inside a reasoning event")
+		}
+		w.Write([]byte(`data: {"id":"B","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"))
+		w.Write([]byte(`data: {"id":"B","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+		w.Write([]byte(`data: {"id":"B","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	assertSingleDataEvents(t, got)
+	if strings.Count(got, `"reasoning_content":"thinking hard"`) != 1 {
+		t.Fatalf("attempt-1 reasoning must stay on the wire once: %s", got)
+	}
+	if strings.Count(got, `"content":"hello"`) != 1 {
+		t.Fatalf("fresh answer delivered %d times, want once: %s", strings.Count(got, `"content":"hello"`), got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one terminal expected: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("the reset must be absorbed by the rescue, not surfaced: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("rescued request facts = %+v, want clean with retries=1 and a truncated absorbed attempt", rec)
+	}
+}
