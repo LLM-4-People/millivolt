@@ -7,6 +7,7 @@ package format
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -172,7 +173,62 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	}
 }
 
+// toolArgumentDeltas returns every argument delta the target emitted, so a
+// duplicated done emission is visible as two entries instead of one joined
+// value.
+func toolArgumentDeltas(t *testing.T, protocol ir.Protocol, out string) []string {
+	t.Helper()
+	var deltas []string
+	switch protocol {
+	case ir.Chat:
+		for _, frame := range strings.Split(out, "\n\n") {
+			payload, ok := strings.CutPrefix(strings.TrimSpace(frame), "data: ")
+			if !ok || payload == "[DONE]" {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+				t.Fatalf("frame %q: %v", frame, err)
+			}
+			choices, _ := obj["choices"].([]any)
+			if len(choices) == 0 {
+				continue
+			}
+			delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+			calls, _ := delta["tool_calls"].([]any)
+			for _, c := range calls {
+				fn, _ := c.(map[string]any)["function"].(map[string]any)
+				if v, ok := fn["arguments"].(string); ok && v != "" {
+					deltas = append(deltas, v)
+				}
+			}
+		}
+	case ir.Anthropic:
+		for _, payload := range mustAnthropicPayloads(t, out) {
+			delta, _ := payload["delta"].(map[string]any)
+			if partial, ok := delta["partial_json"].(string); ok && partial != "" {
+				deltas = append(deltas, partial)
+			}
+		}
+	case ir.Responses:
+		for _, payload := range mustResponsePayloads(t, out) {
+			if payload["type"] != "response.function_call_arguments.delta" {
+				continue
+			}
+			if delta, _ := payload["delta"].(string); delta != "" {
+				deltas = append(deltas, delta)
+			}
+		}
+	}
+	return deltas
+}
+
 func TestResponsesFunctionCallArgumentsDoneWithoutDelta(t *testing.T) {
+	// The done mirror carries no arguments, so the complete value can only
+	// arrive through function_call_arguments.done. Asserting the joined value
+	// is not enough on its own: a duplicated full emission joins to an
+	// invalid JSON string that still contains the expected substring, so the
+	// delta count is asserted too.
 	source := `event: response.output_item.added
 data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
 
@@ -180,7 +236,7 @@ event: response.function_call_arguments.done
 data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"q\":1}"}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
 
 event: response.completed
 data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
@@ -188,21 +244,46 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 `
 	out := translateDoneFixture(t, source)
 	for _, target := range terminalTargets {
-		var got string
-		switch target.inbound {
-		case ir.Chat:
-			got = chatToolArguments(t, out[target.name])
-		case ir.Anthropic:
-			got = anthropicToolArguments(t, out[target.name])
-		case ir.Responses:
-			for _, payload := range mustResponsePayloads(t, out[target.name]) {
-				if payload["type"] == "response.function_call_arguments.delta" {
-					got += payload["delta"].(string)
-				}
-			}
+		deltas := toolArgumentDeltas(t, target.inbound, out[target.name])
+		got := strings.Join(deltas, "")
+		if got != `{"q":1}` {
+			t.Fatalf("%s arguments = %q, want exactly the done value", target.name, got)
 		}
-		if !strings.Contains(got, `"q":1`) {
-			t.Fatalf("%s arguments = %q, want the done value", target.name, got)
+		if n := strings.Count(got, `"q":1`); n != 1 {
+			t.Fatalf("%s emitted %d complete argument values, want 1", target.name, n)
+		}
+	}
+}
+
+func TestResponsesFunctionCallArgumentsDoneAfterDelta(t *testing.T) {
+	// A streamed prefix followed by the authoritative done value contributes
+	// only its missing suffix: the client must never receive the complete
+	// arguments twice.
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"q\":"}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"q\":1}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	out := translateDoneFixture(t, source)
+	for _, target := range terminalTargets {
+		deltas := toolArgumentDeltas(t, target.inbound, out[target.name])
+		got := strings.Join(deltas, "")
+		if got != `{"q":1}` {
+			t.Fatalf("%s arguments = %q, want the streamed prefix plus the recovered suffix", target.name, got)
+		}
+		if n := strings.Count(got, `"q":1`); n != 1 {
+			t.Fatalf("%s emitted %d complete argument values, want 1", target.name, n)
 		}
 	}
 }
