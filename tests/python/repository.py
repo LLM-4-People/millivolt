@@ -815,6 +815,7 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("withholds or replaces the terminal bytes", protocol)
         self.assertIn("A standalone in-band error line is not a delivery terminal", protocol)
         self.assertIn("a `[DONE]` on a Responses feed is not its terminal marker", protocol)
+        self.assertIn("more than 10,000 entries in an `allowed_callers` array inside a tool", protocol)
         self.assertIn("surfaces the non-SSE body as a truncated-stream error", protocol)
         self.assertIn("Discovery authenticates with the resolved target auth header and prefix", protocol)
 
