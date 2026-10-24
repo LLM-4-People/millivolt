@@ -339,7 +339,12 @@ must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
 
 Stored parameter and conversation-composition metadata describe the translated
-upstream body, not an exact copy of the original request. A body that combines the Responses `max_output_tokens` spelling with a Chat
+upstream body, not an exact copy of the original request. For a native or
+translated Anthropic body, the recorded stop count, tool choice, parallel-tool
+flag, reasoning effort, response format and service tier come from the
+Anthropic spellings (`stop_sequences`, the `tool_choice` type/name and
+`disable_parallel_tool_use`, `output_config`, and `speed`) when the Chat
+spelling is absent. A body that combines the Responses `max_output_tokens` spelling with a Chat
 `max_tokens` or `max_completion_tokens` spelling is rejected with HTTP 400
 before translation or any upstream send. If the caller omits
 all three output-limit spellings (`max_tokens`, `max_completion_tokens` and

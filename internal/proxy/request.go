@@ -1905,6 +1905,7 @@ type requestParameters struct {
 	StreamOptions  *struct{}         `json:"stream_options"`
 	N              *int              `json:"n"`
 	Stop           json.RawMessage   `json:"stop"`
+	StopSequences  json.RawMessage   `json:"stop_sequences"`
 	Logprobs       bool              `json:"logprobs"`
 	PresencePen    *float64          `json:"presence_penalty"`
 	FrequencyPen   *float64          `json:"frequency_penalty"`
@@ -1921,24 +1922,37 @@ type requestParameters struct {
 	ReasoningEffort string                   `json:"reasoning_effort"`
 	Verbosity       string                   `json:"verbosity"`
 	Reasoning       json.RawMessage          `json:"reasoning"`
+	OutputConfig    *struct {
+		Effort string `json:"effort"`
+		Format *struct {
+			Type string `json:"type"`
+		} `json:"format"`
+	} `json:"output_config"`
+	Speed string `json:"speed"`
 	// System carries the system prompt for Anthropic-shaped bodies (OpenAI
 	// puts it in a role:"system"/"developer" message instead). Content only.
 	System   requestContent                   `json:"system"`
 	Messages []requestMessage[requestContent] `json:"messages"`
 }
 
-// requestToolChoice captures only the recorded shape of a tool_choice value
-// during the single document decode. The string shorthand is kept verbatim; an
-// object contributes only function.name with the "tool:" prefix; every other
-// or malformed shape records nothing. A typed decode visits only the function
-// member and skips unknown or deeply nested members instead of materializing
-// the whole value as a map[string]any per node. Each top-level occurrence
-// resets the field, so a duplicate tool_choice key keeps JSON's last-wins
-// semantics.
-type requestToolChoice string
+// requestToolChoice captures the recorded shape of a tool_choice value during
+// the single document decode. The string shorthand is kept verbatim. A Chat
+// object contributes function.name with the "tool:" prefix; an Anthropic object
+// contributes its type (any becomes the Chat required spelling, tool becomes
+// tool:name, auto and none stay themselves) and its disable_parallel_tool_use
+// flag. Every other or malformed shape records nothing. A typed decode visits
+// only the known members and skips unknown or deeply nested ones instead of
+// materializing the whole value as a map[string]any per node. Each top-level
+// occurrence resets the field, so a duplicate tool_choice key keeps JSON's
+// last-wins semantics.
+type requestToolChoice struct {
+	Value           string
+	DisableParallel bool
+	DisableSet      bool
+}
 
 func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
-	*t = ""
+	*t = requestToolChoice{}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil
@@ -1946,24 +1960,71 @@ func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
 	if trimmed[0] == '"' {
 		var s string
 		if json.Unmarshal(trimmed, &s) == nil {
-			*t = requestToolChoice(s)
+			t.Value = s
 		}
 		return nil
 	}
 	var choice struct {
-		Function json.RawMessage `json:"function"`
+		// Raw members keep JSON's last-wins semantics for duplicate keys and
+		// let one malformed member reset the whole record instead of failing
+		// the request.
+		Function        json.RawMessage `json:"function"`
+		Type            string          `json:"type"`
+		Name            string          `json:"name"`
+		DisableParallel json.RawMessage `json:"disable_parallel_tool_use"`
 	}
-	if json.Unmarshal(trimmed, &choice) != nil || len(choice.Function) == 0 {
+	if json.Unmarshal(trimmed, &choice) != nil {
 		return nil
 	}
-	var function struct {
-		Name *string `json:"name"`
+	if raw := bytes.TrimSpace(choice.DisableParallel); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+		var disable bool
+		if json.Unmarshal(raw, &disable) != nil {
+			return nil
+		}
+		t.DisableSet = true
+		t.DisableParallel = disable
 	}
-	if json.Unmarshal(choice.Function, &function) != nil || function.Name == nil {
+	if raw := bytes.TrimSpace(choice.Function); len(raw) > 0 {
+		if bytes.Equal(raw, []byte("null")) {
+			return nil
+		}
+		var function struct {
+			Name *string `json:"name"`
+		}
+		if json.Unmarshal(raw, &function) == nil && function.Name != nil {
+			t.Value = "tool:" + *function.Name
+		}
 		return nil
 	}
-	*t = requestToolChoice("tool:" + *function.Name)
+	switch choice.Type {
+	case "any":
+		t.Value = "required"
+	case "tool":
+		if choice.Name != "" {
+			t.Value = "tool:" + choice.Name
+		}
+	case "auto", "none":
+		t.Value = choice.Type
+	}
 	return nil
+}
+
+// requestStopCount records how many stop sequences a raw stop field carries.
+// The object and array shapes are the only ones the wire schemas accept; any
+// other value records zero.
+func requestStopCount(raw json.RawMessage) int {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if s == "" {
+			return 0
+		}
+		return 1
+	}
+	var arr []string
+	if json.Unmarshal(raw, &arr) == nil {
+		return len(arr)
+	}
+	return 0
 }
 
 // requestMetadataKeysMax bounds the distinct top-level metadata keys counted
@@ -3208,28 +3269,33 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	if req.StreamOptions != nil {
 		rec.ReqStreamOpts = true
 	}
-	if len(req.ToolChoice) > 0 {
-		rec.ReqToolChoice = string(req.ToolChoice)
-	}
+	rec.ReqToolChoice = req.ToolChoice.Value
 	if len(req.Stop) > 0 {
-		var s string
-		var arr []string
-		if json.Unmarshal(req.Stop, &s) == nil {
-			rec.ReqStop = 1
-		} else if json.Unmarshal(req.Stop, &arr) == nil {
-			rec.ReqStop = len(arr)
-		}
+		rec.ReqStop = requestStopCount(req.Stop)
+	} else if len(req.StopSequences) > 0 {
+		rec.ReqStop = requestStopCount(req.StopSequences)
 	}
 	// Additional non-content params: capture shape only, never values that
 	// could carry content (logit_bias keys are token ids, metadata is counted
 	// not copied).
 	if req.ResponseFormat != nil {
 		rec.ReqResponseFormat = req.ResponseFormat.Type
+	} else if req.OutputConfig != nil && req.OutputConfig.Format != nil {
+		rec.ReqResponseFormat = req.OutputConfig.Format.Type
 	}
 	rec.ReqSeed = req.Seed
-	rec.ReqParallelTools = req.ParallelTools
+	if req.ParallelTools != nil {
+		rec.ReqParallelTools = req.ParallelTools
+	} else if req.ToolChoice.DisableSet {
+		parallel := !req.ToolChoice.DisableParallel
+		rec.ReqParallelTools = &parallel
+	}
 	rec.ReqTopLogprobs = req.TopLogprobs
-	rec.ReqServiceTier = req.ServiceTier
+	if req.ServiceTier != "" {
+		rec.ReqServiceTier = req.ServiceTier
+	} else {
+		rec.ReqServiceTier = req.Speed
+	}
 	rec.ReqLogitBias = len(req.LogitBias)
 	rec.ReqMetadataKeys = req.Metadata.count()
 	if len(req.Thinking) > 0 {
@@ -3238,13 +3304,20 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	}
 	if tok := configToken(req.ReasoningEffort); tok != "" {
 		rec.ReqReasoningEffort = tok
-	} else if len(req.Reasoning) > 0 {
-		var obj struct {
-			Effort string `json:"effort"`
+	} else {
+		var effort string
+		if req.OutputConfig != nil {
+			effort = configToken(req.OutputConfig.Effort)
 		}
-		if json.Unmarshal(req.Reasoning, &obj) == nil {
-			rec.ReqReasoningEffort = configToken(obj.Effort)
+		if effort == "" && len(req.Reasoning) > 0 {
+			var obj struct {
+				Effort string `json:"effort"`
+			}
+			if json.Unmarshal(req.Reasoning, &obj) == nil {
+				effort = configToken(obj.Effort)
+			}
 		}
+		rec.ReqReasoningEffort = effort
 	}
 	rec.ReqVerbosity = configToken(req.Verbosity)
 	// Prompt composition: per-role character sizes, multimodal counts, and the

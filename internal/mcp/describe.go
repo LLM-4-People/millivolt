@@ -477,7 +477,7 @@ var tableDocs = []TableDoc{
 			{Name: "req_thinking", Type: "INTEGER", Meaning: "whether a reasoning/thinking budget was requested"},
 			{Name: "req_reasoning_effort", Type: "TEXT", Meaning: "requested reasoning effort level"},
 			{Name: "req_verbosity", Type: "TEXT", Meaning: "requested verbosity level"},
-			{Name: "req_metadata_keys", Type: "INTEGER", Meaning: "count of client metadata keys; the values are not stored"},
+			{Name: "req_metadata_keys", Type: "INTEGER", Meaning: "count of metadata keys on the upstream request; the values are not stored"},
 			{Name: "req_stream_opts", Type: "INTEGER", Meaning: "stream options bitfield as sent by the client"},
 			{Name: "req_param_presence", Type: "INTEGER", Meaning: "bitmask over the nine tracked optional parameters where an explicit 0/false is distinguishable from absent; " +
 				"a NEGATIVE value marks a pre-tracking row where only nonzero values were known"},

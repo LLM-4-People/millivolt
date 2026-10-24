@@ -96,7 +96,7 @@ func TestRequestStopArrayBound(t *testing.T) {
 		{"escaped key over cap", `{"model":"m","st\u006fp":` + over + `}`, true, 0},
 		{"object is tolerated", `{"model":"m","stop":{"k":1}}`, false, 0},
 		{"number is tolerated", `{"model":"m","stop":3}`, false, 0},
-		{"null is tolerated", `{"model":"m","stop":null}`, false, 1},
+		{"null is tolerated", `{"model":"m","stop":null}`, false, 0},
 		{"malformed over-cap prefix stays passthrough", `{"model":"m","stop":` + over + `,X}`, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
