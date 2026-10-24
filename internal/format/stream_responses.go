@@ -2023,20 +2023,6 @@ func pendingValueSuffix(emitted, value string) string {
 	return ""
 }
 
-// responsesSummaryText joins the non-empty text parts of a Responses
-// reasoning summary. The value may arrive in output_item.added or in a
-// summary part event; both paths consume it once.
-func responsesSummaryText(parts []struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}) string {
-	var b strings.Builder
-	for _, part := range parts {
-		b.WriteString(part.Text)
-	}
-	return b.String()
-}
-
 func (d *ResponsesStreamDecoder) announceOutput(outputIndex int) (bool, error) {
 	if d.announcedOutputs[outputIndex] {
 		return false, nil
