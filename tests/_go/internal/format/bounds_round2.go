@@ -104,7 +104,7 @@ func TestAnthropicSystemCitationsBoundedAndPreserved(t *testing.T) {
 	if len(system.Content) != 1 || len(system.Content[0].Citations) != 2 {
 		t.Fatalf("system citations were not preserved: %+v", system.Content)
 	}
-	if _, err := DecodeAnthropicRequest([]byte(anthropicSystem(metrics.ContentPartMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
+	if _, err := DecodeAnthropicRequest([]byte(anthropicSystem(WireNestedCollectionMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
 		t.Fatalf("system citations over the per-array limit error = %v", err)
 	}
 }

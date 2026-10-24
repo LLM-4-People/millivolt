@@ -72,31 +72,73 @@ func TestResponsesSummaryAggregateBound(t *testing.T) {
 	}
 }
 
-// TestAnthropicCitationBound pins B3 on both the request and response paths.
+// TestAnthropicCitationBound pins the restored per-array citation limit
+// (WireNestedCollectionMax) and the shared aggregate on both the request and
+// response paths.
 func TestAnthropicCitationBound(t *testing.T) {
 	citations := func(n int) string {
 		return repeatJSONArray(`{"type":"char_location","cited_text":"x"}`, n)
 	}
-	request := func(n int) string {
-		return `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[` +
-			`{"type":"text","text":"hi","citations":` + citations(n) + `}]}]}`
+	blocks := func(counts ...int) string {
+		var b strings.Builder
+		for i, n := range counts {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			b.WriteString(`{"type":"text","text":"hi","citations":` + citations(n) + `}`)
+		}
+		return b.String()
 	}
-	if _, err := DecodeAnthropicRequest([]byte(request(metrics.ContentPartMax))); err != nil {
+	request := func(content string) string {
+		return `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[` + content + `]}]}`
+	}
+	if _, err := DecodeAnthropicRequest([]byte(request(blocks(WireNestedCollectionMax)))); err != nil {
 		t.Fatalf("request citations at the per-array limit rejected: %v", err)
 	}
-	if _, err := DecodeAnthropicRequest([]byte(request(metrics.ContentPartMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
+	if _, err := DecodeAnthropicRequest([]byte(request(blocks(WireNestedCollectionMax + 1)))); err == nil || !strings.Contains(err.Error(), "citations") {
 		t.Fatalf("request citation over-bound error = %v", err)
 	}
-	response := func(n int) string {
-		return `{"id":"m1","type":"message","role":"assistant","model":"m","content":[` +
-			`{"type":"text","text":"hi","citations":` + citations(n) + `}],"stop_reason":"end_turn",` +
-			`"usage":{"input_tokens":1,"output_tokens":1}}`
+	if _, err := DecodeAnthropicRequest([]byte(request(blocks(5_000, 5_000)))); err != nil {
+		t.Fatalf("request citations at the aggregate limit rejected: %v", err)
 	}
-	if _, err := DecodeAnthropicResponse([]byte(response(metrics.ContentPartMax))); err != nil {
+	if _, err := DecodeAnthropicRequest([]byte(request(blocks(5_000, 5_001)))); err == nil || !strings.Contains(err.Error(), "citations") {
+		t.Fatalf("request citation aggregate over-bound error = %v", err)
+	}
+	response := func(content string) string {
+		return `{"id":"m1","type":"message","role":"assistant","model":"m","content":[` + content + `],` +
+			`"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	}
+	if _, err := DecodeAnthropicResponse([]byte(response(blocks(WireNestedCollectionMax)))); err != nil {
 		t.Fatalf("response citations at the per-array limit rejected: %v", err)
 	}
-	if _, err := DecodeAnthropicResponse([]byte(response(metrics.ContentPartMax + 1))); err == nil || !strings.Contains(err.Error(), "citations") {
+	if _, err := DecodeAnthropicResponse([]byte(response(blocks(WireNestedCollectionMax + 1)))); err == nil || !strings.Contains(err.Error(), "citations") {
 		t.Fatalf("response citation over-bound error = %v", err)
+	}
+	if _, err := DecodeAnthropicResponse([]byte(response(blocks(5_000, 5_000)))); err != nil {
+		t.Fatalf("response citations at the aggregate limit rejected: %v", err)
+	}
+	if _, err := DecodeAnthropicResponse([]byte(response(blocks(5_000, 5_001)))); err == nil || !strings.Contains(err.Error(), "citations") {
+		t.Fatalf("response citation aggregate over-bound error = %v", err)
+	}
+}
+
+func TestAnthropicDocumentCitationsConfigDecoded(t *testing.T) {
+	body := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[` +
+		`{"type":"document","title":"doc","citations":{"enabled":true},` +
+		`"source":{"type":"text","media_type":"text/plain","data":"hello"}}]}]}`
+	req, err := DecodeAnthropicRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("document citations configuration rejected: %v", err)
+	}
+	if !warningField(req.Warnings, "document.citations") {
+		t.Fatalf("missing document.citations drop warning: %+v", req.Warnings)
+	}
+	for _, message := range req.Messages {
+		for _, block := range message.Content {
+			if len(block.Citations) > 0 {
+				t.Fatalf("document citation configuration became text citations: %+v", block.Citations)
+			}
+		}
 	}
 }
 

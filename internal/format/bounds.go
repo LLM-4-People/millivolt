@@ -128,10 +128,11 @@ type anthropicNestedBudget struct {
 }
 
 // checkAnthropicBlockList walks one Anthropic content array without
-// materializing its typed form. Every citations array keeps ContentPartMax and
-// every nested content array contributes to one WireNestedCollectionMax
-// aggregate. depth 0 is the caller's own block list; deeper arrays are the
-// nested tool_result/document content that can multiply through their parents.
+// materializing its typed form. Every citations array keeps
+// WireNestedCollectionMax and every nested content array contributes to one
+// WireNestedCollectionMax aggregate. depth 0 is the caller's own block list;
+// deeper arrays are the nested tool_result/document content that can multiply
+// through their parents.
 func checkAnthropicBlockList(raw json.RawMessage, field string, depth int, budget *anthropicNestedBudget) error {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
@@ -162,7 +163,7 @@ func checkAnthropicBlockList(raw json.RawMessage, field string, depth int, budge
 			return fmt.Errorf("parse %s block %d: %w", field, i, err)
 		}
 		citationsField := fmt.Sprintf("%s block %d citations", field, i)
-		if err := checkWireArray(block.Citations, citationsField, metrics.ContentPartMax); err != nil {
+		if err := checkWireArray(block.Citations, citationsField, WireNestedCollectionMax); err != nil {
 			return err
 		}
 		if err := addWireArray(&budget.citations, block.Citations, citationsField, WireNestedCollectionMax); err != nil {

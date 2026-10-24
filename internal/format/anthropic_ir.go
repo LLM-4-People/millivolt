@@ -74,8 +74,11 @@ type anthropicWireTool struct {
 type anthropicWireBlock struct {
 	Type string `json:"type"`
 
-	Text         string           `json:"text"`
-	Citations    []ir.Citation    `json:"citations"`
+	Text string `json:"text"`
+	// Citations is raw because the member is block-type-aware: text, system
+	// and tool-result text blocks carry a citation array, while a document
+	// block carries the CitationsConfigParam object ({"enabled":true}).
+	Citations    json.RawMessage  `json:"citations"`
 	CacheControl *ir.CacheControl `json:"cache_control"`
 
 	Source *struct {
@@ -269,8 +272,10 @@ func decodeAnthropicSystem(raw json.RawMessage) ([]ir.Block, ir.Warnings, error)
 			warns.Add(ir.WarningDropped, "system."+p.Type, "unsupported system block")
 			continue
 		}
+		citations, w := decodeAnthropicCitations(p.Citations, "text")
+		warns = append(warns, w...)
 		blocks = append(blocks, ir.Block{
-			Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: p.Citations,
+			Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: citations,
 		})
 	}
 	return blocks, warns, nil
@@ -321,6 +326,38 @@ func syntheticToolID(index int) string {
 	return fmt.Sprintf("toolu_proxy_%d", index)
 }
 
+// decodeAnthropicCitations decodes one block's citations member by block
+// type. Text blocks (including system and tool-result text) carry a citation
+// array. A document block carries the CitationsConfigParam object instead; the
+// canonical model has no document-citation configuration, so it is reported
+// and never turned into text citations.
+func decodeAnthropicCitations(raw json.RawMessage, blockType string) ([]ir.Citation, ir.Warnings) {
+	trimmed := bytes.TrimSpace(raw)
+	var warns ir.Warnings
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, warns
+	}
+	switch trimmed[0] {
+	case '[':
+		var citations []ir.Citation
+		if err := json.Unmarshal(trimmed, &citations); err != nil {
+			warns.Add(ir.WarningDropped, "citations", "citation array could not be decoded")
+			return nil, warns
+		}
+		return citations, warns
+	case '{':
+		if blockType == "document" {
+			warns.Add(ir.WarningDropped, "document.citations", "Anthropic document citation configuration is not represented")
+		} else {
+			warns.Add(ir.WarningDropped, "citations", "citation configuration has no text-block equivalent")
+		}
+		return nil, warns
+	default:
+		warns.Add(ir.WarningDropped, "citations", "citations member has an unsupported shape")
+		return nil, warns
+	}
+}
+
 func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings, error) {
 	var (
 		blocks []ir.Block
@@ -329,8 +366,10 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 	for i, p := range parts {
 		switch p.Type {
 		case "text":
+			citations, w := decodeAnthropicCitations(p.Citations, "text")
+			warns = append(warns, w...)
 			blocks = append(blocks, ir.Block{
-				Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: p.Citations,
+				Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: citations,
 			})
 		case "image":
 			img, err := decodeAnthropicImage(p.Source)
@@ -339,6 +378,9 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			}
 			blocks = append(blocks, ir.Block{Type: ir.BlockImage, Image: img, CacheControl: p.CacheControl})
 		case "document":
+			if _, w := decodeAnthropicCitations(p.Citations, "document"); len(w) > 0 {
+				warns = append(warns, w...)
+			}
 			docBlocks, w, err := decodeAnthropicDocument(p)
 			if err != nil {
 				return nil, nil, err
@@ -776,18 +818,20 @@ func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *i
 				}
 				continue
 			}
-			if len(b.Citations) > 0 && warns != nil {
-				warns.Add(ir.WarningDropped, "system.citations", "Anthropic system blocks have no citations")
-			}
 			// Anthropic's TextBlockParam.text has minLength 1. An empty
 			// system block cannot be represented; drop it with any cache
-			// breakpoint, matching the message-content owner.
+			// breakpoint or citations, matching the message-content owner.
 			if b.Text == "" {
 				continue
 			}
 			block := map[string]any{"type": "text", "text": b.Text}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
+			}
+			if len(b.Citations) > 0 {
+				if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
+					block["citations"] = citations
+				}
 			}
 			blocks = append(blocks, block)
 		}
@@ -796,9 +840,12 @@ func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *i
 		return nil
 	}
 	// Preserve the historical string join when no block carries a cache
-	// breakpoint; a breakpoint requires the block-array form.
+	// breakpoint or citations; either one requires the block-array form.
 	for _, block := range blocks {
 		if _, ok := block["cache_control"]; ok {
+			return blocks
+		}
+		if _, ok := block["citations"]; ok {
 			return blocks
 		}
 	}
@@ -1140,12 +1187,12 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 	if len(blocks) == 0 {
 		return ""
 	}
-	// The plain string form cannot carry a cache breakpoint. Use the array
-	// form whenever a text block has one so the breakpoint survives.
+	// The plain string form cannot carry a cache breakpoint or citations.
+	// Use the array form whenever a text block has either so it survives.
 	allText := true
 	var text strings.Builder
 	for _, b := range blocks {
-		if b.Type != ir.BlockText || b.CacheControl != nil {
+		if b.Type != ir.BlockText || b.CacheControl != nil || len(b.Citations) > 0 {
 			allText = false
 			break
 		}
@@ -1158,18 +1205,20 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 	for _, b := range blocks {
 		switch b.Type {
 		case ir.BlockText:
-			if len(b.Citations) > 0 && warns != nil {
-				warns.Add(ir.WarningDropped, "tool_result.citations", "Anthropic tool-result text blocks have no citations")
-			}
 			// TextBlockParam requires non-empty text. A mixed tool result
 			// keeps its image/file parts and drops the empty text block with
-			// its cache breakpoint.
+			// its cache breakpoint or citations.
 			if b.Text == "" {
 				continue
 			}
 			block := map[string]any{"type": "text", "text": b.Text}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
+			}
+			if len(b.Citations) > 0 {
+				if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
+					block["citations"] = citations
+				}
 			}
 			out = append(out, block)
 		case ir.BlockImage:
