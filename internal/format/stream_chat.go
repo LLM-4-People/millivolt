@@ -376,6 +376,13 @@ type ChatStreamEncoder struct {
 	// Chat streaming sends a usage chunk only when the client asked for one.
 	includeUsage bool
 	doneSent     bool
+	// started records that the mandatory role chunk has been emitted and the
+	// chunk identity is locked. A content-bearing source event without its
+	// start event opens the stream lazily.
+	started bool
+	// fallbackModel names the model when the source omitted its start event.
+	// The proxy passes its recorded request model through StreamOptions.
+	fallbackModel string
 }
 
 // NewChatStreamEncoder builds an encoder over one client response writer.
@@ -389,33 +396,63 @@ func NewChatStreamEncoder(w io.Writer, flusher http.Flusher, includeUsage bool) 
 	}
 }
 
+// startStream emits the mandatory role chunk once and locks the chunk
+// identity. A translated stream whose source omitted its start event opens
+// here from the first content-bearing event: the role chunk is part of the
+// documented Chat streaming contract, and every later chunk must carry the
+// same synthesized identity. A bare [DONE]-only source never reaches this
+// method, so a content-less stream keeps its content-less shape.
+func (e *ChatStreamEncoder) startStream() error {
+	if e.started {
+		return nil
+	}
+	e.started = true
+	if e.id == "" {
+		e.id = "chatcmpl-" + randomID()
+	}
+	if e.model == "" {
+		e.model = e.fallbackModel
+	}
+	if e.created == 0 {
+		e.created = time.Now().Unix()
+	}
+	if !e.roleSent {
+		e.roleSent = true
+		return e.emit(map[string]any{"role": "assistant"}, nil, nil)
+	}
+	return nil
+}
+
 // Write renders one canonical event.
 func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 	switch ev.Type {
 	case ir.EventStart:
-		if ev.Response != nil {
+		// A late start cannot rewrite the identity the lazy start already
+		// put on the wire; the first content event won the lock.
+		if ev.Response != nil && !e.started {
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
 			// Chunks repeat the tier on every frame, so an unrepresentable
 			// source value must be dropped here (the Chat vocabulary, not the
 			// Responses one, owns what every chunk may carry).
 			e.serviceTier, _ = mapServiceTier(ir.Chat, ev.Response.ServiceTier)
 		}
-		if e.created == 0 {
-			e.created = time.Now().Unix()
-		}
-		if !e.roleSent {
-			e.roleSent = true
-			return e.emit(map[string]any{"role": "assistant"}, nil, nil)
-		}
+		return e.startStream()
 	case ir.EventBlockStart:
 		if ev.Block == nil {
 			return nil
 		}
-		e.blockTypes[ev.Index] = ev.Block.Type
 		if ev.Block.Type == ir.BlockToolCall && ev.Block.ToolCall != nil {
+			// Validate before opening the stream: a rejected call must not
+			// leave a role chunk behind on an otherwise empty response.
 			if err := validateChatToolCall(ev.Block.ToolCall); err != nil {
 				return err
 			}
+		}
+		if err := e.startStream(); err != nil {
+			return err
+		}
+		e.blockTypes[ev.Index] = ev.Block.Type
+		if ev.Block.Type == ir.BlockToolCall && ev.Block.ToolCall != nil {
 			idx := e.nextTool
 			e.nextTool++
 			e.toolIndex[ev.Index] = idx
@@ -432,6 +469,9 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 	case ir.EventBlockDelta:
 		if ev.Delta == nil {
 			return nil
+		}
+		if err := e.startStream(); err != nil {
+			return err
 		}
 		switch {
 		case ev.Delta.Text != "":

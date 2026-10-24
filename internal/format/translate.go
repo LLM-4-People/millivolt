@@ -267,6 +267,10 @@ type StreamOptions struct {
 	// Chat target emits its extra usage chunk only when the client asked and
 	// the source actually reported usage.
 	IncludeUsage bool
+	// FallbackModel supplies the model identity for a translated Chat stream
+	// whose source omitted its start event. The proxy passes its recorded
+	// request model so the lazily opened stream still names a real model.
+	FallbackModel string
 }
 
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
@@ -293,7 +297,9 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	var enc StreamEncoder
 	switch inbound {
 	case ir.Chat:
-		enc = NewChatStreamEncoder(dst, flusher, opts.IncludeUsage)
+		chat := NewChatStreamEncoder(dst, flusher, opts.IncludeUsage)
+		chat.fallbackModel = opts.FallbackModel
+		enc = chat
 	case ir.Responses:
 		enc = NewResponsesStreamEncoder(dst, flusher)
 	case ir.Anthropic:
