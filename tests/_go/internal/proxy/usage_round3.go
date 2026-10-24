@@ -119,3 +119,74 @@ data: {"type":"message_stop"}
 		})
 	}
 }
+
+// TestAnthropicStreamUsageIntegralSpellings pins NEW-5: the live analyzer is
+// the record's Anthropic usage owner and must accept the same integral JSON
+// number spellings as the format decoders. *int64 rejected 5.0 and dropped the
+// usage from the record while the client wire stayed correct.
+func TestAnthropicStreamUsageIntegralSpellings(t *testing.T) {
+	stream := func(input, cacheRead, output string) string {
+		return `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":` + input + `,"output_tokens":0,"cache_read_input_tokens":` + cacheRead + `}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":` + output + `}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	}
+	for _, shape := range []struct {
+		name   string
+		path   string
+		format string
+		body   string
+	}{
+		{
+			name: "native",
+			path: "/v1/messages",
+			body: `{"model":"m","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name:   "translated",
+			path:   "/v1/chat/completions",
+			format: "anthropic",
+			body:   `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			run := func(fixture string) *metrics.Record {
+				up := newFixtureUpstream(t, "text/event-stream", http.StatusOK, fixture)
+				buf := metrics.NewBuffer(10)
+				s := New(config.Default(), buf)
+				s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+				w := proxyRequest(t, s, shape.path, shape.format, shape.body)
+				if w.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+				}
+				recs := waitForRecord(t, buf, 1)
+				return recs[0]
+			}
+			plain := run(stream("5", "7", "1"))
+			integral := run(stream("5.0", "7.0", "1.0"))
+			if integral.Usage != plain.Usage {
+				t.Fatalf("integral usage = %+v, want the plain-integer value %+v", integral.Usage, plain.Usage)
+			}
+			if integral.Usage.InputTokens != 12 || integral.Usage.CacheReadTokens != 7 ||
+				integral.Usage.OutputTokens == 0 ||
+				integral.Usage.TotalTokens != integral.Usage.InputTokens+integral.Usage.OutputTokens {
+				t.Fatalf("integral usage = %+v, want input 12 read 7 and a complete total", integral.Usage)
+			}
+		})
+	}
+}

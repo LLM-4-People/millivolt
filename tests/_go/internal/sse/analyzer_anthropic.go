@@ -173,3 +173,38 @@ func TestAnalyzerAnthropicDoesNotClassifyChat(t *testing.T) {
 		t.Fatal("chat chunk was misread as an Anthropic terminal")
 	}
 }
+
+// TestAnalyzerAnthropicIntegralUsageSpellings pins NEW-5: the live analyzer is
+// an Anthropic usage owner, so it must accept the same integral JSON number
+// spellings the format decoders accept. *int64 rejected 5.0 and dropped the
+// whole usage document from the record.
+func TestAnalyzerAnthropicIntegralUsageSpellings(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":5.0,"output_tokens":0.0,"cache_read_input_tokens":7.0,"cache_creation_input_tokens":2.0}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		``,
+		`event: message_delta`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1.0,"output_tokens_details":{"thinking_tokens":3.0}}}`,
+		``,
+		`event: message_stop`,
+		`data: {"type":"message_stop"}`,
+		``,
+	}, "\n")
+	var a Analyzer
+	feedAnthropicLines(t, &a, stream)
+	if !a.Terminated() {
+		t.Fatal("message_stop did not terminate")
+	}
+	if a.UsageInvalid() {
+		t.Fatal("integral spellings marked the usage invalid")
+	}
+	var rec metrics.Record
+	a.Fill(&rec)
+	if rec.Usage.InputTokens != 14 || rec.Usage.OutputTokens != 1 || rec.Usage.TotalTokens != 15 ||
+		rec.Usage.CacheReadTokens != 7 || rec.Usage.CacheWrite != 2 || rec.Usage.ReasoningTokens != 3 {
+		t.Fatalf("usage = %+v, want input 14 output 1 total 15 read 7 write 2 reasoning 3", rec.Usage)
+	}
+}

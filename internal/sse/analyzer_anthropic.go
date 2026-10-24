@@ -12,16 +12,17 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 type anthropicAnalyzerUsage struct {
-	InputTokens              *int64 `json:"input_tokens"`
-	OutputTokens             *int64 `json:"output_tokens"`
-	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	InputTokens              *jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens             *jsonnum.Int64 `json:"output_tokens"`
+	CacheReadInputTokens     *jsonnum.Int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *jsonnum.Int64 `json:"cache_creation_input_tokens"`
 	OutputTokensDetails      *struct {
-		ThinkingTokens int64 `json:"thinking_tokens"`
+		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -263,19 +264,19 @@ func (a *Analyzer) captureAnthropicCustomUsage(payload []byte, usagePath string)
 // total (input after the last breakpoint plus cache read and write).
 func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 	if u.InputTokens != nil {
-		a.anthropicInput = *u.InputTokens
+		a.anthropicInput = int64(*u.InputTokens)
 	}
 	if u.OutputTokens != nil {
-		a.anthropicOutput = *u.OutputTokens
+		a.anthropicOutput = int64(*u.OutputTokens)
 	}
 	if u.CacheReadInputTokens != nil {
-		a.anthropicCacheRead = *u.CacheReadInputTokens
+		a.anthropicCacheRead = int64(*u.CacheReadInputTokens)
 	}
 	if u.CacheCreationInputTokens != nil {
-		a.anthropicCacheWrite = *u.CacheCreationInputTokens
+		a.anthropicCacheWrite = int64(*u.CacheCreationInputTokens)
 	}
 	if u.OutputTokensDetails != nil {
-		a.anthropicThinking = u.OutputTokensDetails.ThinkingTokens
+		a.anthropicThinking = int64(u.OutputTokensDetails.ThinkingTokens)
 	}
 	input, err := metrics.SumCounts(a.anthropicInput, a.anthropicCacheRead, a.anthropicCacheWrite)
 	if err != nil {
