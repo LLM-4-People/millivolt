@@ -310,3 +310,31 @@ func TestAnthropicToolChoiceNoneOmitsParallel(t *testing.T) {
 		})
 	}
 }
+
+// TestChatTopLogprobsRequiresLogprobs pins TC1-U4: Chat accepts top_logprobs
+// only with logprobs=true, so a count without the include is dropped and
+// reported rather than sent invalid.
+func TestChatTopLogprobsRequiresLogprobs(t *testing.T) {
+	body := `{"model":"m","input":"hi","top_logprobs":2}`
+	out, warnings, err := TranslateRequestBetween(ir.Responses, ir.Chat, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decodeJSONObject(t, out)
+	if _, ok := root["top_logprobs"]; ok {
+		t.Fatalf("chat body carried top_logprobs without logprobs: %s", out)
+	}
+	if !warned(warnings, "top_logprobs") {
+		t.Fatalf("dropped top_logprobs recorded no warning: %+v", warnings)
+	}
+
+	body = `{"model":"m","input":"hi","top_logprobs":2,"include":["message.output_text.logprobs"]}`
+	out, _, err = TranslateRequestBetween(ir.Responses, ir.Chat, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = decodeJSONObject(t, out)
+	if root["top_logprobs"] != float64(2) || root["logprobs"] != true {
+		t.Fatalf("chat logprob fields = %v/%v, want 2/true: %s", root["top_logprobs"], root["logprobs"], out)
+	}
+}

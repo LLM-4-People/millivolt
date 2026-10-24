@@ -945,7 +945,14 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 		}
 	}
 	if req.TopLogprobs != nil {
-		out["top_logprobs"] = *req.TopLogprobs
+		if req.Logprobs != nil && *req.Logprobs {
+			out["top_logprobs"] = *req.TopLogprobs
+		} else {
+			// Chat documents top_logprobs only with logprobs=true. A
+			// Responses source can request the count without the include, so
+			// forwarding it alone would produce an invalid Chat request.
+			req.Warnings.Add(ir.WarningDropped, "top_logprobs", "Chat requires logprobs=true")
+		}
 	}
 	if req.ParallelToolCalls != nil {
 		out["parallel_tool_calls"] = *req.ParallelToolCalls
