@@ -1716,14 +1716,20 @@ func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, 
 // flushToolArguments reconciles the authoritative done/terminal arguments
 // with the bytes already streamed. A full value that strictly extends the
 // emitted prefix appends only the missing suffix; a divergent value keeps the
-// already-committed bytes. The resulting arguments must be valid JSON.
+// already-committed bytes. A complete retained value must be valid JSON. Once
+// coverage is partial, the retained bytes are only a truncated prefix of what
+// the client already received: they cannot be reconciled or validated as the
+// final value, so the streamed bytes stand and reconciliation stops.
 func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string) error {
 	if key == "" {
 		return nil
 	}
 	if d.argsEmitted[key] != nil {
 		emitted, complete := d.emittedArguments(key)
-		if complete && full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
+		if !complete {
+			return nil
+		}
+		if full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
 			suffix := full[len(emitted):]
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: suffix}})
 			d.recordEmittedArguments(key, suffix)
