@@ -923,6 +923,8 @@ func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOut
 	var out []anthropicOutMessage
 	seenNonSystem := false
 	leadingAssistantDropped := false
+	droppedToolCalls := map[string]struct{}{}
+	orphanResultDropped := false
 	for _, m := range in {
 		if m.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
@@ -942,6 +944,11 @@ func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOut
 		// turns rather than prepending a fabricated user turn. One warning
 		// covers every dropped turn.
 		if m.Role == ir.RoleAssistant && len(out) == 0 {
+			for _, b := range m.Content {
+				if b.Type == ir.BlockToolCall && b.ToolCall != nil && b.ToolCall.ID != "" {
+					droppedToolCalls[b.ToolCall.ID] = struct{}{}
+				}
+			}
 			if !leadingAssistantDropped {
 				leadingAssistantDropped = true
 				if warns != nil {
@@ -950,13 +957,36 @@ func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOut
 			}
 			continue
 		}
+		contentBlocks := m.Content
+		if m.Role == ir.RoleUser && len(droppedToolCalls) > 0 {
+			// A result whose tool_use was in a dropped leading assistant turn
+			// would be an orphan: Anthropic requires every tool_result to
+			// answer a preceding assistant tool_use. Keep the user turn's
+			// other blocks and report the loss once.
+			filtered := make([]ir.Block, 0, len(m.Content))
+			for _, b := range m.Content {
+				if b.Type == ir.BlockToolResult && b.ToolResult != nil {
+					if _, orphan := droppedToolCalls[b.ToolResult.CallID]; orphan {
+						if !orphanResultDropped {
+							orphanResultDropped = true
+							if warns != nil {
+								warns.Add(ir.WarningDropped, "messages.orphan_tool_result", "tool results for dropped leading assistant tool calls were dropped")
+							}
+						}
+						continue
+					}
+				}
+				filtered = append(filtered, b)
+			}
+			contentBlocks = filtered
+		}
 		role := string(m.Role)
 		var content any
 		if m.Role == ir.RoleSystem {
-			content = anthropicTextContent(anthropicSystemTextBlocks(m.Content, warns))
+			content = anthropicTextContent(anthropicSystemTextBlocks(contentBlocks, warns))
 		} else {
 			seenNonSystem = true
-			content = encodeAnthropicContent(m.Content, m.Role, warns)
+			content = encodeAnthropicContent(contentBlocks, m.Role, warns)
 		}
 		if content == nil {
 			continue

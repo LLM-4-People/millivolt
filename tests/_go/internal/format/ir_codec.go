@@ -971,20 +971,21 @@ func TestLegacyChatFunctionsTranslate(t *testing.T) {
 
 func TestLegacyChatFunctionCallPairsWithResult(t *testing.T) {
 	in := `{"model":"m","messages":[` +
+		`{"role":"user","content":"go"},` +
 		`{"role":"assistant","content":"","function_call":{"name":"lookup","arguments":"{\"q\":1}"}},` +
 		`{"role":"function","name":"lookup","content":"ok"}]}`
 	req, err := DecodeChatRequest([]byte(in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(req.Messages) != 2 {
+	if len(req.Messages) != 3 {
 		t.Fatalf("messages = %+v", req.Messages)
 	}
-	call := req.Messages[0].Content[len(req.Messages[0].Content)-1]
+	call := req.Messages[1].Content[len(req.Messages[1].Content)-1]
 	if call.Type != ir.BlockToolCall || call.ToolCall.ID != "lookup" || call.ToolCall.Name != "lookup" {
 		t.Fatalf("legacy call = %+v", call)
 	}
-	result := req.Messages[1].Content[0]
+	result := req.Messages[2].Content[0]
 	if result.Type != ir.BlockToolResult || result.ToolResult.CallID != "lookup" {
 		t.Fatalf("legacy result = %+v", result)
 	}
