@@ -816,6 +816,11 @@ func (a *Analyzer) recordStandaloneError(code, message json.RawMessage) {
 	_ = json.Unmarshal(message, &msg)
 	codeString := errorCodeString(code)
 	if codeString == "" && msg == "" {
+		// The event itself is the provider's terminal statement even when it
+		// names neither field (an absent or null nested object, or an empty
+		// Responses error event). Treat it as an upstream failure rather than
+		// leaving a healthy record behind.
+		a.setStreamError(TypeUpstreamError, "", "upstream response failed")
 		return
 	}
 	a.setStreamError("provider_error", codeString, msg)

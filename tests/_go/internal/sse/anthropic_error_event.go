@@ -44,6 +44,18 @@ func TestAnthropicStreamErrorWithoutTypeRecordsFailure(t *testing.T) {
 			wantType: "overloaded_error",
 			wantMsg:  "busy",
 		},
+		{
+			name:     "null object",
+			line:     `data: {"type":"error","error":null}`,
+			wantType: TypeUpstreamError,
+			wantMsg:  "upstream response failed",
+		},
+		{
+			name:     "absent object",
+			line:     `data: {"type":"error"}`,
+			wantType: TypeUpstreamError,
+			wantMsg:  "upstream response failed",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stream := strings.Join([]string{
@@ -84,5 +96,27 @@ func TestAnthropicStreamErrorWithoutTypeRecordsFailure(t *testing.T) {
 	a.Fill(&rec)
 	if rec.IsError() || rec.ErrorType != "" {
 		t.Fatalf("clean stream recorded an error: %+v", rec)
+	}
+}
+
+// The shared standalone-error owner also covers a Responses error event that
+// names neither code nor message.
+func TestResponsesStandaloneErrorWithoutFieldsRecordsFailure(t *testing.T) {
+	var a Analyzer
+	feedLines(&a,
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}`,
+		``,
+		`event: error`,
+		`data: {"type":"error"}`,
+		``,
+	)
+	if !a.Terminated() {
+		t.Fatal("standalone error did not terminate the analyzer")
+	}
+	var rec metrics.Record
+	a.Fill(&rec)
+	if !rec.IsError() || rec.ErrorType != TypeUpstreamError || rec.ErrorMsg != "upstream response failed" {
+		t.Fatalf("record error = %q/%q/%q, want upstream_error with the generic message",
+			rec.ErrorType, rec.ErrorCode, rec.ErrorMsg)
 	}
 }
