@@ -609,8 +609,11 @@ func (s *Server) setCursorHeaders(req *http.Request, t *target, key string) {
 // surface writes. Wrapping w at the two drive entries covers both the
 // streamed emitters (deltas, finish, usage, [DONE], in-band errors) and the
 // single-JSON completion; header/status writes are not body bytes and are
-// not counted. Flush and Unwrap keep the pacer reachable through the wrap
-// (pacerOf and the flusher assertions walk them).
+// not counted. A helper that already books accepted bytes (writeCounted, used
+// by the finishRunTurn in-band error sink) reaches the wrapped writer through
+// UncountedWriter, so the frame keeps exactly one counter. Flush and Unwrap
+// keep the pacer reachable through the wrap (pacerOf and the flusher
+// assertions walk them).
 type cursorCountWriter struct {
 	http.ResponseWriter
 	rec *metrics.Record
@@ -619,6 +622,12 @@ type cursorCountWriter struct {
 func (c cursorCountWriter) Write(p []byte) (int, error) {
 	return writeCounted(c.ResponseWriter, c.rec, p)
 }
+
+// UncountedWriter hands a counting helper the wrapped writer instead of this
+// counter. writeCounted is the single owner of accepted-byte accounting for a
+// frame it emits; without the unwrap, a composed call (finishRunTurn's
+// TurnErrored branch) would book the same bytes here and in the helper.
+func (c cursorCountWriter) UncountedWriter() io.Writer { return c.ResponseWriter }
 
 func (c cursorCountWriter) Flush() {
 	if f, ok := c.ResponseWriter.(http.Flusher); ok {

@@ -1,13 +1,17 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -134,4 +138,80 @@ func TestCursorCountWriterCountsBodyBytes(t *testing.T) {
 	if rec.ResponseBytes != want+2 {
 		t.Errorf("ResponseBytes = %d after a partial write, want %d", rec.ResponseBytes, want+2)
 	}
+}
+
+// TestComposedCursorErrorFrameCountsOnce is the R32-NEW-1 regression: the
+// cursor counting wrapper is composed with the shared protocol error sink, and
+// both write the same frame. writeCounted owns accepted-byte accounting, so a
+// full composed write books the delivered body exactly once and a partial one
+// books only the accepted bytes.
+func TestComposedCursorErrorFrameCountsOnce(t *testing.T) {
+	t.Run("full", func(t *testing.T) {
+		full := httptest.NewRecorder()
+		rec := &metrics.Record{StatusCode: http.StatusOK, Model: "m"}
+		w := cursorCountWriter{ResponseWriter: full, rec: rec}
+		if err := writeProtocolStreamError(w, rec, ir.Chat, "cursor-1", "m", errStreamRead, "", "turn failed"); err != nil {
+			t.Fatal(err)
+		}
+		if full.Body.Len() == 0 {
+			t.Fatal("the composed error sink wrote no body")
+		}
+		if got, want := rec.ResponseBytes, int64(full.Body.Len()); got != want {
+			t.Fatalf("full composed ResponseBytes = %d, want %d (the delivered body once)", got, want)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		partial := &partialResponseWriter{n: 2, err: io.ErrClosedPipe}
+		rec := &metrics.Record{StatusCode: http.StatusOK, Model: "m"}
+		w := cursorCountWriter{ResponseWriter: partial, rec: rec}
+		if err := writeProtocolStreamError(w, rec, ir.Chat, "cursor-1", "m", errStreamRead, "", "turn failed"); err == nil {
+			t.Fatal("the partial writer must report the write error")
+		}
+		if rec.ResponseBytes != 2 {
+			t.Fatalf("partial composed ResponseBytes = %d, want the 2 accepted bytes once", rec.ResponseBytes)
+		}
+	})
+}
+
+// TestFinishRunTurnErroredCountsDeliveredBytesOnce drives the production
+// composition the verifier found: driveRun wraps the client writer and
+// finishRunTurn's TurnErrored branch passes it to writeProtocolStreamError.
+// A full frame must book its body once, and a partial frame only the accepted
+// bytes, while the cursor path keeps its committed 200.
+func TestFinishRunTurnErroredCountsDeliveredBytesOnce(t *testing.T) {
+	s := New(config.Default(), metrics.Noop{})
+	newRun := func() *providerformat.CursorRun {
+		return providerformat.NewCursorRun(io.Discard, strings.NewReader(""), nil, func() {}, time.Hour)
+	}
+	errored := providerformat.TurnResult{Outcome: providerformat.TurnErrored, Err: errors.New("turn failed")}
+	rr := cursorTurnRender{model: "m"}
+
+	t.Run("full", func(t *testing.T) {
+		rec := &metrics.Record{StatusCode: http.StatusOK, Model: "m"}
+		inner := httptest.NewRecorder()
+		s.finishRunTurn(cursorCountWriter{ResponseWriter: inner, rec: rec}, newRun(), errored, nil, rec, "cursor-1", rr, false)
+		delivered := int64(inner.Body.Len())
+		if delivered == 0 {
+			t.Fatal("finishRunTurn wrote no error body")
+		}
+		if rec.ResponseBytes != delivered {
+			t.Fatalf("full ResponseBytes = %d, want %d (the delivered error frame once)", rec.ResponseBytes, delivered)
+		}
+		if rec.StatusCode != http.StatusOK || rec.ErrorType != errStreamRead || rec.ClientDisconnected {
+			t.Fatalf("record = %+v, want a committed 200 with the turn error and no disconnect", rec)
+		}
+	})
+
+	t.Run("partial", func(t *testing.T) {
+		rec := &metrics.Record{StatusCode: http.StatusOK, Model: "m"}
+		w := cursorCountWriter{ResponseWriter: &partialResponseWriter{n: 2, err: io.ErrClosedPipe}, rec: rec}
+		s.finishRunTurn(w, newRun(), errored, nil, rec, "cursor-1", rr, false)
+		if rec.ResponseBytes != 2 {
+			t.Fatalf("partial ResponseBytes = %d, want the 2 accepted bytes once", rec.ResponseBytes)
+		}
+		if !rec.ClientDisconnected || rec.StatusCode != http.StatusOK {
+			t.Fatalf("record = %+v, want ClientDisconnected with the committed 200 kept", rec)
+		}
+	})
 }

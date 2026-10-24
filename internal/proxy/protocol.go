@@ -165,10 +165,23 @@ func terminalFrameFor(inbound ir.Protocol) func([]byte) bool {
 	}
 }
 
+// uncountedWriter is implemented by a response wrapper that counts its own
+// body writes. A counting helper must write through the wrapped writer instead,
+// otherwise the wrapper and the helper book the same accepted bytes twice.
+type uncountedWriter interface {
+	UncountedWriter() io.Writer
+}
+
 // writeCounted writes one complete frame and books the bytes the writer
-// accepted. A short write is an error: the record must describe what the
-// client actually received, not the frame the proxy intended to send.
+// accepted. It is the single owner of that rule: a counting wrapper composed
+// with it (cursorCountWriter) is unwrapped first, so the frame is booked once
+// no matter which layer the caller reaches. A short write is an error: the
+// record must describe what the client actually received, not the frame the
+// proxy intended to send.
 func writeCounted(w io.Writer, rec *metrics.Record, frame []byte) (int, error) {
+	if u, ok := w.(uncountedWriter); ok {
+		w = u.UncountedWriter()
+	}
 	n, err := w.Write(frame)
 	if n > 0 && rec != nil {
 		rec.ResponseBytes += int64(n)
