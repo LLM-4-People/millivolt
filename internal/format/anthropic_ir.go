@@ -1436,6 +1436,9 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
 		return nil, err
 	}
+	if err := validateAnthropicResponseToolVocabulary(resp); err != nil {
+		return nil, err
+	}
 	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}

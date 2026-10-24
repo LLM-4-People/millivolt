@@ -509,6 +509,12 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				e.unopened[ev.Index] = true
 				return nil
 			}
+			// Validate before any state changes or bytes reach the client.
+			// The streaming target cannot repair an invalid id or name, so it
+			// aborts instead of emitting a tool_use block Anthropic rejects.
+			if err := validateAnthropicToolCall(tc); err != nil {
+				return err
+			}
 			e.open[ev.Index] = true
 			if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
 				e.blockArgs[ev.Index] = tc.Arguments

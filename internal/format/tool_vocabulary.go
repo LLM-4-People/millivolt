@@ -37,6 +37,35 @@ func validateChatToolVocabulary(req *ir.Request) error {
 	return nil
 }
 
+// validateAnthropicToolCall enforces the Anthropic target's name and id
+// classes on one tool call. The request encoders and the response encoders
+// share it so a call the target would reject fails at the same owner instead
+// of reaching the wire.
+func validateAnthropicToolCall(tc *ir.ToolCall) error {
+	if tc == nil {
+		return nil
+	}
+	if !anthropicToolNamePattern.MatchString(tc.Name) {
+		return toolVocabularyError("anthropic", "tool name", tc.Name, "^[a-zA-Z0-9_-]{1,128}$")
+	}
+	if !anthropicToolIDPattern.MatchString(tc.ID) {
+		return toolVocabularyError("anthropic", "tool_use.id", tc.ID, "^[a-zA-Z0-9_-]+$")
+	}
+	return nil
+}
+
+// validateAnthropicToolResult enforces the Anthropic target's id class on one
+// tool result reference.
+func validateAnthropicToolResult(tr *ir.ToolResult) error {
+	if tr == nil {
+		return nil
+	}
+	if !anthropicToolIDPattern.MatchString(tr.CallID) {
+		return toolVocabularyError("anthropic", "tool_use_id", tr.CallID, "^[a-zA-Z0-9_-]+$")
+	}
+	return nil
+}
+
 // validateAnthropicToolVocabulary enforces the Anthropic target's name and id
 // classes on declared tools, named choices, tool calls and tool results.
 func validateAnthropicToolVocabulary(req *ir.Request) error {
@@ -53,23 +82,28 @@ func validateAnthropicToolVocabulary(req *ir.Request) error {
 		for _, block := range message.Content {
 			switch block.Type {
 			case ir.BlockToolCall:
-				if block.ToolCall == nil {
-					continue
-				}
-				if !anthropicToolNamePattern.MatchString(block.ToolCall.Name) {
-					return toolVocabularyError("anthropic", "tool name", block.ToolCall.Name, "^[a-zA-Z0-9_-]{1,128}$")
-				}
-				if !anthropicToolIDPattern.MatchString(block.ToolCall.ID) {
-					return toolVocabularyError("anthropic", "tool_use.id", block.ToolCall.ID, "^[a-zA-Z0-9_-]+$")
+				if err := validateAnthropicToolCall(block.ToolCall); err != nil {
+					return err
 				}
 			case ir.BlockToolResult:
-				if block.ToolResult == nil {
-					continue
-				}
-				if !anthropicToolIDPattern.MatchString(block.ToolResult.CallID) {
-					return toolVocabularyError("anthropic", "tool_use_id", block.ToolResult.CallID, "^[a-zA-Z0-9_-]+$")
+				if err := validateAnthropicToolResult(block.ToolResult); err != nil {
+					return err
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// validateAnthropicResponseToolVocabulary applies the same tool_use vocabulary
+// to a decoded assistant response before any target wire is emitted.
+func validateAnthropicResponseToolVocabulary(resp *ir.Response) error {
+	for _, block := range resp.Blocks {
+		if block.Type != ir.BlockToolCall {
+			continue
+		}
+		if err := validateAnthropicToolCall(block.ToolCall); err != nil {
+			return err
 		}
 	}
 	return nil
