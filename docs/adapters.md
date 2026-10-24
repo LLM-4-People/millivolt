@@ -128,11 +128,14 @@ target cannot consume them:
 - An Anthropic target drops leading assistant turns because the first message
   must use the user role, reporting one `messages.leading_assistant` warning.
   A tool result that answered a dropped leading call is dropped with one
-  `messages.orphan_tool_result` warning, so an orphan result never reaches the
-  wire. Pairing happens before the drop: a result that names a dropped call
-  stays paired to it and is dropped with that call rather than retargeted to a
-  later same-name call, because the name may answer the dropped call and
-  retargeting could answer the wrong tool. A system or developer turn before
+  `messages.orphan_tool_result` warning, so that result never reaches the
+  wire. A source-supplied result that matches no call in the source history is
+  content, not an artifact of the drop: it passes through unchanged as a
+  `tool_result` even though no preceding `tool_use` exists, with no warning.
+  Pairing happens before the drop: a result that names a dropped call stays
+  paired to it and is dropped with that call rather than retargeted to a later
+  same-name call, because the name may answer the dropped call and retargeting
+  could answer the wrong tool. A system or developer turn before
   the first emitted turn is still lifted to the top-level prompt even when a
   dropped assistant or an empty user turn preceded it.
 - A non-clean non-streaming terminal can carry a missing, null, whitespace or

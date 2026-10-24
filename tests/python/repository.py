@@ -733,6 +733,8 @@ class PublishedContracts(unittest.TestCase):
         for phrase in (
             "messages.leading_assistant",
             "messages.orphan_tool_result",
+            "source-supplied result that matches no call",
+            "passes through unchanged as a `tool_result`",
             "Pairing happens before the drop",
             "A non-clean non-streaming terminal",
             "missing, null, whitespace or partial tool-call argument value",

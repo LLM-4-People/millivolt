@@ -123,3 +123,41 @@ func TestAnthropicTargetDropsOrphanToolResults(t *testing.T) {
 		}
 	})
 }
+
+// TestSourceOrphanToolResultPassthrough pins H5: the drop warning covers only
+// a result that answered a dropped leading call. A result the source itself
+// never paired with a call is source content, so it is relayed unchanged with
+// no warning even though the Anthropic target then has no preceding tool_use.
+func TestSourceOrphanToolResultPassthrough(t *testing.T) {
+	t.Run("chat lone tool turn", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":"hi"},` +
+			`{"role":"tool","tool_call_id":"unknown","content":"result"}]}`
+		out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), `"tool_use_id":"unknown"`) {
+			t.Fatalf("source orphan tool_result was not passed through: %s", out)
+		}
+		if got := warningCount(warnings, ir.WarningDropped, "messages.orphan_tool_result"); got != 0 {
+			t.Fatalf("source orphan warned as a drop: %+v", warnings)
+		}
+	})
+
+	t.Run("responses unmatched output", func(t *testing.T) {
+		body := `{"model":"m","max_output_tokens":16,"input":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},` +
+			`{"type":"function_call_output","call_id":"unknown","output":"result"}]}`
+		out, warnings, err := TranslateRequestBetween(ir.Responses, ir.Anthropic, []byte(body), 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(out), `"tool_use_id":"unknown"`) {
+			t.Fatalf("source orphan function_call_output was not passed through: %s", out)
+		}
+		if got := warningCount(warnings, ir.WarningDropped, "messages.orphan_tool_result"); got != 0 {
+			t.Fatalf("source orphan warned as a drop: %+v", warnings)
+		}
+	})
+}
