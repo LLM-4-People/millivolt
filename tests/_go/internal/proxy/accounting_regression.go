@@ -174,7 +174,7 @@ func TestMultilineContentWirePreservation(t *testing.T) {
 	s := New(config.Default(), metrics.NewBuffer(8))
 	w := httptest.NewRecorder()
 	rec := &metrics.Record{StatusCode: 200}
-	s.streamBody(t.Context(), w, strings.NewReader(wire), rec, false, false, &upstreamErrorRescue{}, true)
+	s.streamBody(t.Context(), w, strings.NewReader(wire), rec, false, false, &upstreamErrorRescue{}, ir.Chat)
 	if w.Body.String() != wire || !rec.HadAnswerContent || rec.ErrorType != "" {
 		t.Fatalf("legal multiline content changed: answer=%v error=%s wire=%s", rec.HadAnswerContent, rec.ErrorType, w.Body.String())
 	}

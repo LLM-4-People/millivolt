@@ -83,7 +83,7 @@ func TestRegressionSplitTerminalUsage(t *testing.T) {
 	p := New(config.Default(), nil)
 	rec := new(metrics.Record)
 	w := httptest.NewRecorder()
-	p.streamBody(context.Background(), w, &wire, rec, false, false, &upstreamErrorRescue{}, true)
+	p.streamBody(context.Background(), w, &wire, rec, false, false, &upstreamErrorRescue{}, ir.Chat)
 	if rec.Usage.InputTokens != 100 || rec.Usage.OutputTokens != 50 || rec.Cost != 0.02 {
 		t.Fatalf("fragmented terminal usage: input=%d output=%d cost=%g finish=%q body=%q", rec.Usage.InputTokens, rec.Usage.OutputTokens, rec.Cost, rec.FinishReason, w.Body.String())
 	}
@@ -107,7 +107,7 @@ func TestRegressionSplitTerminalUsage(t *testing.T) {
 	pp := New(cfg, nil)
 	prec := &metrics.Record{Provider: "p"}
 	pw := httptest.NewRecorder()
-	pp.streamBody(context.Background(), pw, &pwire, prec, false, false, &upstreamErrorRescue{}, true)
+	pp.streamBody(context.Background(), pw, &pwire, prec, false, false, &upstreamErrorRescue{}, ir.Chat)
 	if prec.Usage.InputTokens != 100 || prec.Usage.OutputTokens != 50 || prec.Cost != 0.03 {
 		t.Fatalf("provider-keyed terminal usage: input=%d output=%d cost=%g body=%q", prec.Usage.InputTokens, prec.Usage.OutputTokens, prec.Cost, pw.Body.String())
 	}

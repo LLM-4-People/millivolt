@@ -137,7 +137,7 @@ func TestNativeAnthropicStreamCostKeys(t *testing.T) {
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5},"meta":{"out":50},"billing":{"amount":0.02}}`,
 		`data: {"type":"message_stop"}`,
 	}, "\n\n") + "\n\n"
-	s.streamBody(t.Context(), w, strings.NewReader(body), rec, false, false, &upstreamErrorRescue{}, false)
+	s.streamBody(t.Context(), w, strings.NewReader(body), rec, false, false, &upstreamErrorRescue{}, ir.Anthropic)
 
 	want := metrics.Usage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150}
 	if rec.Usage != want {

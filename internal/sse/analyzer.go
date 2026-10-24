@@ -227,11 +227,18 @@ type Analyzer struct {
 	anthropicThinking   int64
 }
 
-// SetChatLike seeds the chat-completions shape from the request body before
-// any response frame arrives. A zero-frame, comment-only or [DONE]-only chat
-// stream must still classify as a degenerate completion; without this seed the
-// analyzer's chatlike flag can only be learned from a received payload.
-func (a *Analyzer) SetChatLike(v bool) { a.chatlike = v }
+// SetWire seeds the analyzer from the routed wire protocol before any frame
+// arrives. A zero-frame, comment-only or ping-only feed must classify as a
+// truncated stream of that wire instead of a healthy unknown protocol, and a
+// non-Chat wire must never enter the OpenAI degenerate substitution rules.
+func (a *Analyzer) SetWire(p ir.Protocol) {
+	switch p {
+	case ir.Anthropic:
+		a.anthropicWire = true
+	case ir.Chat, ir.Responses, ir.Cursor:
+		a.chatlike = true
+	}
+}
 
 // Feed ingests one raw SSE line (the bytes between \n delimiters, NOT
 // including the trailing \n). It must be called in order for every line the

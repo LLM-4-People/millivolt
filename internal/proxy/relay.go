@@ -1012,7 +1012,17 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 	thinkingLeft := s.cfg().ThinkingRetries
 	for {
 		uerr := &upstreamErrorRescue{}
-		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr, chatShapedResponse(t, body))
+		// Seed the analyzer from the routed wire before any frame arrives.
+		// The request-shape fallback stays for an endpoint the router does
+		// not classify.
+		wire := t.outbound
+		if wire == "" {
+			wire = t.inbound
+		}
+		if wire == "" && chatShapedResponse(t, body) {
+			wire = ir.Chat
+		}
+		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr, wire)
 		if rescue == rescueNone {
 			return
 		}
@@ -2211,7 +2221,7 @@ type upstreamErrorRescue struct {
 // and never rescuable. uerr receives the provider's envelope for a
 // rescueUpstreamError return (the caller's attempt bookkeeping); it is
 // untouched for every other outcome.
-func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue, chatlike bool) (rescue streamRescue) {
+func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue, wire ir.Protocol) (rescue streamRescue) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
@@ -2257,7 +2267,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		rescueRequested streamRescue
 	)
 	a := s.analyzerFor(rec)
-	a.SetChatLike(chatlike)
+	a.SetWire(wire)
 	// clientGone records a write-detected abort: the disconnect stamps
 	// the 499, and the analyzer's in-band error - when one reached the
 	// wire - still fills the record, so the abort counts like its 200

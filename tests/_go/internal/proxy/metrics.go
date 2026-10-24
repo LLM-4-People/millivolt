@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -638,7 +639,7 @@ func TestStreamCleanEOFAfterRequestCancelStampsDisconnect(t *testing.T) {
 	cancel()
 	w := httptest.NewRecorder()
 	uerr := &upstreamErrorRescue{}
-	s.streamBody(ctx, w, strings.NewReader(stream), rec, false, false, uerr, true)
+	s.streamBody(ctx, w, strings.NewReader(stream), rec, false, false, uerr, ir.Chat)
 	if rec.StatusCode != metrics.StatusClientClosedRequest {
 		t.Errorf("StatusCode = %d, want %d (client closed request)", rec.StatusCode, metrics.StatusClientClosedRequest)
 	}
