@@ -1593,6 +1593,12 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if len(in.Choices) == 0 {
 		return nil, errors.New("chat response has no choices")
 	}
+	if !metrics.ContentPartsWithinLimit(choice.Message.Content) {
+		// A response is a completion artifact, not a request to best-effort
+		// salvage: silently returning an empty translated body would publish
+		// a 200 success for an answer the client never received.
+		return nil, fmt.Errorf("chat response content exceeds %d parts", metrics.ContentPartMax)
+	}
 	blocks, warns, err := decodeChatContent(choice.Message.Content, ir.RoleAssistant)
 	if err != nil {
 		return nil, err
