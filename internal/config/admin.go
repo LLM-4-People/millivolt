@@ -3,10 +3,11 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
-	"os"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -224,9 +225,12 @@ func (h *Handler) fileConfig() (*Config, error) {
 	if h.Path == "" {
 		return Default(), nil
 	}
-	c, err := LoadFile(h.Path)
+	// Settings is an operational consumer, not boot repair: an invalid
+	// recognized value must fail the read so a stale revision is never
+	// written back with a silent default.
+	c, _, err := LoadFileStrict(h.Path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Default(), nil
 		}
 		return nil, fmt.Errorf("load config: %w", err)

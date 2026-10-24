@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -536,7 +537,7 @@ func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, 
 		if path == "" {
 			return backup.Archive{}, cleanup, fmt.Errorf("no config file; start with -config to back up settings")
 		}
-		cfg, err := config.LoadFile(path)
+		cfg, _, err := config.LoadFileStrict(path)
 		if err != nil {
 			return backup.Archive{}, cleanup, err
 		}
@@ -614,9 +615,9 @@ func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	cur, err := config.LoadFile(path)
+	cur, _, err := config.LoadFileStrict(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
 		cur = config.Default()

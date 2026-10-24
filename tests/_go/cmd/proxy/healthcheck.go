@@ -12,7 +12,7 @@ import (
 
 func TestHealthcheckDoesNotRewriteConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := []byte("max_retriez: 3\nmax_retries: 1\n---\nextra: true\n")
+	raw := []byte("max_retriez: 3\nmax_retries: 1\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -33,5 +33,25 @@ func TestHealthcheckDoesNotRewriteConfig(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, raw) {
 		t.Fatalf("healthcheck rewrote config: %v\n%s", err, got)
+	}
+}
+
+// TestHealthcheckRejectsInvalidBaseConfig pins TC7-1: an invalid recognized
+// value makes healthcheck exit 1 without rewriting the file.
+func TestHealthcheckRejectsInvalidBaseConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := liveConfigPath
+	t.Cleanup(func() { liveConfigPath = oldPath })
+	liveConfigPath = path
+	if code := runHealthcheck(); code != 1 {
+		t.Fatalf("healthcheck exit = %d, want 1", code)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("healthcheck rewrote the invalid base file: %v\n%s", err, got)
 	}
 }

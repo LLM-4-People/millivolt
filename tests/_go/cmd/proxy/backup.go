@@ -2432,3 +2432,45 @@ func TestRestoreInspectLiveConfigFailsClosed(t *testing.T) {
 		t.Fatalf("no-path inspect vs_live=%v, want the documented Default comparison", ins.Config.VsLive)
 	}
 }
+
+// TestBackupRejectsInvalidBaseConfig pins TC7-1: a backup capture must not
+// silently render built-in defaults from an invalid base file.
+func TestBackupRejectsInvalidBaseConfig(t *testing.T) {
+	liveReloadFixture(t)
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(liveConfigPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?config=1", nil))
+	if rr.Code == http.StatusOK {
+		t.Fatalf("backup accepted an invalid base config: %s", rr.Body.String())
+	}
+	got, err := os.ReadFile(liveConfigPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("backup rewrote the invalid base file: %v\n%s", err, got)
+	}
+}
+
+// TestRestoreMergeRejectsInvalidBaseConfig pins TC7-1: a merge restore must
+// fail before writing when the current base file is invalid.
+func TestRestoreMergeRejectsInvalidBaseConfig(t *testing.T) {
+	liveReloadFixture(t)
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(liveConfigPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var incoming bytes.Buffer
+	if err := config.WriteYAML(&incoming, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareRestoreConfig(incoming.Bytes(), "merge"); err == nil {
+		t.Fatal("merge restore accepted an invalid base config")
+	}
+	got, err := os.ReadFile(liveConfigPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("merge restore rewrote the invalid base file: %v\n%s", err, got)
+	}
+}
