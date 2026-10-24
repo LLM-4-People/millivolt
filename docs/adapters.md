@@ -154,7 +154,8 @@ target cannot consume them:
   whose block already closed is skipped before open matching when its identity
   and name agree; an id-less entry also requires its effective argument value
   to agree. Formatting differences and object key order do not affect that
-  agreement. A value above the canonicalization size, nesting or
+  agreement, but numeric literals are compared as written, so `1` and `1.0`
+  do not agree. A value above the canonicalization size, nesting or
   member-separator bounds keeps the byte-exact rule, as does a partial or
   otherwise invalid value, so formatting and key-order differences in such a
   value do not agree. An id-less terminal item then matches a unique open

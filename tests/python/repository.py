@@ -763,6 +763,8 @@ class PublishedContracts(unittest.TestCase):
             "skipped before open matching when its identity and name agree",
             "an id-less entry also requires its effective argument value",
             "Formatting differences and object key order do not affect that",
+            "numeric literals are compared as written",
+            "`1` and `1.0` do not agree",
             "A value above the canonicalization size, nesting or",
             "member-separator bounds",
             "keeps the byte-exact rule",
