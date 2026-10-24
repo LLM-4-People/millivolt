@@ -28,7 +28,7 @@ func TestResponsesInProgressRejected(t *testing.T) {
 	}
 }
 
-func TestResponsesCancelledIsNotCleanStop(t *testing.T) {
+func TestResponsesCancelledKeepsCanonicalFinish(t *testing.T) {
 	body := `{"id":"r1","status":"cancelled","output":[]}`
 	resp, err := DecodeResponsesResponse([]byte(body))
 	if err != nil {
@@ -48,8 +48,11 @@ func TestResponsesCancelledIsNotCleanStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(chat), `"finish_reason":"stop"`) {
-		t.Fatalf("cancelled terminal rewritten as a clean Chat stop: %s", chat)
+	if !strings.Contains(string(chat), `"finish_reason":"stop"`) {
+		t.Fatalf("cancelled terminal did not map to the Chat stop enum: %s", chat)
+	}
+	if !warned(resp.Warnings, "finish_reason") {
+		t.Fatalf("cancelled terminal approximation recorded no warning: %+v", resp.Warnings)
 	}
 }
 
@@ -115,7 +118,7 @@ func TestResponsesErrorEnvelopeShapesDecoded(t *testing.T) {
 	}
 }
 
-func TestMissingFinishMarkersAreNotCleanStops(t *testing.T) {
+func TestMissingFinishMarkersApproximateChatEnum(t *testing.T) {
 	chat := map[string]any{
 		"id": "c1",
 		"choices": []any{map[string]any{
@@ -141,8 +144,11 @@ func TestMissingFinishMarkersAreNotCleanStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), `"finish_reason":"stop"`) {
-		t.Fatalf("missing marker was rewritten as a clean stop: %s", encoded)
+	if !strings.Contains(string(encoded), `"finish_reason":"stop"`) {
+		t.Fatalf("missing marker did not map to the Chat stop enum: %s", encoded)
+	}
+	if !warned(resp.Warnings, "finish_reason") {
+		t.Fatalf("missing marker recorded no Chat approximation warning: %+v", resp.Warnings)
 	}
 
 	anthropic := `{"id":"m1","type":"message","role":"assistant","model":"m",` +

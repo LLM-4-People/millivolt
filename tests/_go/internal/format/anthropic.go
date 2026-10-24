@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"io"
 	"runtime"
 	"strings"
@@ -550,8 +551,10 @@ func (r *pausingReader) Read(p []byte) (int, error) {
 }
 
 // TestAnthropicStopReasonToChatFinishReason pins the public Anthropic-to-Chat
-// mapping. Canonical reasons get the documented Chat spelling; a provider-only
-// reason keeps its source spelling rather than being collapsed into "stop".
+// mapping to the documented Chat wire enum. A provider-only reason is
+// approximated: refusal keeps its meaning as content_filter, every other
+// non-enum reason becomes stop, and the non-streaming response records the
+// loss. The canonical record keeps the source spelling.
 func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 	for reason, want := range map[string]string{
 		"end_turn":                      "stop",
@@ -559,13 +562,14 @@ func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 		"max_tokens":                    "length",
 		"model_context_window_exceeded": "length",
 		"tool_use":                      "tool_calls",
-		"pause_turn":                    "pause_turn",
-		"refusal":                       "refusal",
+		"pause_turn":                    "stop",
+		"refusal":                       "content_filter",
+		"provider_unknown":              "stop",
 	} {
 		body := `{"id":"msg_1","type":"message","role":"assistant","model":"m",` +
 			`"content":[{"type":"text","text":"ok"}],"stop_reason":"` + reason + `",` +
 			`"usage":{"input_tokens":1,"output_tokens":1}}`
-		out, err := TranslateResponse([]byte(body))
+		out, warnings, err := TranslateResponseBetween(ir.Chat, ir.Anthropic, []byte(body))
 		if err != nil {
 			t.Fatalf("TranslateResponse(%q): %v", reason, err)
 		}
@@ -582,6 +586,16 @@ func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 		}
 		if got.Choices[0].FinishReason != want {
 			t.Errorf("stop_reason %q -> finish_reason %q, want %q", reason, got.Choices[0].FinishReason, want)
+		}
+		approximated := reason == "pause_turn" || reason == "refusal" || reason == "provider_unknown"
+		found := false
+		for _, warning := range warnings {
+			if warning.Field == "finish_reason" {
+				found = true
+			}
+		}
+		if found != approximated {
+			t.Errorf("stop_reason %q warning = %v, want %v (warnings %+v)", reason, found, approximated, warnings)
 		}
 	}
 }

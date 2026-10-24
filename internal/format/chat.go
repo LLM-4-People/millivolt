@@ -1666,6 +1666,10 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	if created == 0 {
 		created = time.Now().Unix()
 	}
+	if chatFinishReasonApproximated(resp.Finish) {
+		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
+			"Chat Completions has no equivalent terminal reason")
+	}
 	out := map[string]any{
 		"id":      resp.ID,
 		"object":  "chat.completion",
@@ -1714,30 +1718,32 @@ func encodeChatUsage(u ir.Usage) (map[string]any, error) {
 	return out, nil
 }
 
+// ChatFinishReason maps a canonical finish reason onto the documented Chat
+// Completions wire enum. A provider-only reason cannot be echoed: both the
+// non-streaming and streaming schemas accept only stop, length, tool_calls,
+// content_filter or function_call (plus null while streaming). A refusal keeps
+// its own meaning as content_filter; every other non-enum reason becomes stop.
+// The canonical IR and the record retain the source spelling.
 func ChatFinishReason(r ir.FinishReason) string {
 	switch r {
-	case ir.FinishStop, ir.FinishPause:
-		return "stop"
-	case ir.FinishLength:
-		return "length"
-	case ir.FinishToolCalls:
-		return "tool_calls"
-	case ir.FinishContentFilter:
-		return "content_filter"
-	case ir.FinishError:
-		return "error"
-	case ir.FinishOther:
-		// No source spelling was available. Chat Completions accepts an
-		// arbitrary finish_reason string, so "other" keeps the terminal
-		// non-clean instead of fabricating a stop.
-		return "other"
-	default:
-		// A raw provider reason (for example Anthropic's pause_turn or
-		// refusal) has no canonical equivalent. Chat Completions clients
-		// accept an arbitrary finish_reason string, so echoing the source
-		// spelling preserves the signal instead of fabricating a clean stop.
+	case ir.FinishStop, ir.FinishLength, ir.FinishToolCalls, ir.FinishContentFilter:
 		return string(r)
+	case "refusal":
+		return "content_filter"
+	default:
+		return "stop"
 	}
+}
+
+// chatFinishReasonApproximated reports whether ChatFinishReason replaced a
+// non-Chat source reason. The streaming encoder has no warning channel after
+// its status line is committed; the non-streaming encoder records the loss.
+func chatFinishReasonApproximated(r ir.FinishReason) bool {
+	switch r {
+	case ir.FinishStop, ir.FinishLength, ir.FinishToolCalls, ir.FinishContentFilter:
+		return false
+	}
+	return true
 }
 
 // irFinishReason maps one Chat finish_reason onto the canonical reason and

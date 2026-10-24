@@ -406,7 +406,9 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 	if rec == nil || resp == nil {
 		return
 	}
-	rec.FinishReason = providerformat.ChatFinishReason(resp.Finish)
+	// The record keeps the canonical source reason (for example Anthropic's
+	// pause_turn or refusal); only the Chat wire mapper approximates it.
+	rec.FinishReason = string(resp.Finish)
 	if resp.Usage != (ir.Usage{}) {
 		// The canonical usage is already normalized (Anthropic cache counts
 		// folded into input, total derived); the translated wire may omit the
