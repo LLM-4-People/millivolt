@@ -1481,6 +1481,13 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		StopSequence: in.StopSequence,
 		Warnings:     warns,
 	}
+	// A provider stop reason of "error" is a failure statement even though the
+	// current Anthropic response type does not list it and the body carries no
+	// error object. Keep the source finish and synthesize the canonical
+	// failure so the record and a translated terminal are not empty.
+	if resp.Finish == ir.FinishError && resp.Error == nil {
+		resp.Error = syntheticAnthropicFailure()
+	}
 	if tier, tierWarns := anthropicUsageServiceTier(in.Usage.ServiceTier, in.Usage.Speed); tier != "" || len(tierWarns) > 0 {
 		resp.ServiceTier = tier
 		resp.Warnings = append(resp.Warnings, tierWarns...)
@@ -1549,6 +1556,15 @@ func anthropicFinishReason(reason string) ir.FinishReason {
 		// rather than collapsing them into a clean stop.
 		return ir.FinishReason(reason)
 	}
+}
+
+// syntheticAnthropicFailure is the canonical failure for a provider stop
+// reason that says the turn failed without an error object. The spelling
+// "error" is not in the current Anthropic StopReason type, but compatible
+// upstreams emit it; dropping the failure or mapping it to a clean finish
+// would hide a provider statement.
+func syntheticAnthropicFailure() *ir.Error {
+	return &ir.Error{Type: sse.TypeUpstreamError, Message: "upstream response failed"}
 }
 
 // EncodeAnthropicResponse renders the canonical response as a non-streaming

@@ -1450,7 +1450,14 @@ func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
 		if code == "" {
 			code = "server_error"
 		}
-		out["error"] = map[string]any{"code": code, "message": env.Error.Message}
+		failure := map[string]any{"code": code, "message": env.Error.Message}
+		// ResponseError.type is the source error spelling when the provider
+		// recorded one; an absent type stays absent rather than inventing a
+		// vocabulary value.
+		if env.Error.Type != "" {
+			failure["type"] = env.Error.Type
+		}
+		out["error"] = failure
 	}
 	if env.ServiceTier != "" {
 		// Every envelope caller goes through the Responses vocabulary; a

@@ -485,6 +485,11 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 	// count them so the record's finish and tool-only token settlement agree
 	// with the streaming analyzer.
 	rec.ToolCalls += resp.ProviderToolCalls
+	// A canonical failure carried by the provider stop reason (or a native
+	// failed envelope) owns the record classification. The translated body
+	// may still be a Chat success shape, so the record must read the canonical
+	// response, not only the client wire.
+	stampNativeResponseError(rec, resp.Error)
 }
 
 // applyNativeNonChatStructure stamps the canonical structure of a native
@@ -519,9 +524,6 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 		return
 	}
 	applyTranslatedStructure(rec, resp, s.cfg().CaptureBodyPreview)
-	if resp.Error != nil {
-		stampNativeResponseError(rec, resp.Error)
-	}
 	if usageErr != nil {
 		// Invalidate after the provider error is stamped so its type/code
 		// classification is preserved (invalidateUsage owns that rule).
@@ -540,12 +542,13 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 	}
 }
 
-// stampNativeResponseError records a terminal failure carried inside a native
-// Responses 2xx body. A provider error object keeps its own classification;
-// a provider code without a type keeps the canonical provider_error fallback;
-// a bare status:"failed" (error null or absent) is an upstream lifecycle
-// failure. Existing error detail is never overwritten, and the native body and
-// HTTP status stay untouched.
+// stampNativeResponseError records a terminal failure carried inside a 2xx
+// response: a native Responses failed envelope or a canonical error synthesized
+// by a translated source codec. A provider error object keeps its own
+// classification; a provider code without a type keeps the canonical
+// provider_error fallback; a bare failure (error null or absent) is an upstream
+// lifecycle failure. Existing error detail is never overwritten, and the body
+// and HTTP status stay untouched.
 func stampNativeResponseError(rec *metrics.Record, e *ir.Error) {
 	if rec == nil || e == nil {
 		return
@@ -842,6 +845,13 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// usage_keys address its shape, not the normalized translated
 			// wire. Read the translated output for completion structure only.
 			analyzeNonStreamBytes(out, rec, nil, nil, s.cfg().CaptureBodyPreview)
+			// The canonical response owns a failure the Chat-shaped analyzer
+			// cannot see. Stamp it for every inbound wire; a Chat client still
+			// receives the translated success body (that residual is documented
+			// separately), but the record must not stay healthy.
+			if respIR != nil {
+				stampNativeResponseError(rec, respIR.Error)
+			}
 			if t.inbound != ir.Chat {
 				// The non-stream analyzer reads Chat-shaped choices. For an
 				// Anthropic or Responses client those fields live only in the

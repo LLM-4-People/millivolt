@@ -84,6 +84,10 @@ type AnthropicStreamDecoder struct {
 	toolInitialBytes int
 	toolInitial      map[int]int
 	openBlocks       map[int]bool
+	// errorSeen records an explicit error event. A terminal stop reason of
+	// "error" without one still needs a failure event; with one, the explicit
+	// provider error already owns the terminal.
+	errorSeen bool
 	// seenBlocks is a lifetime set of content-block indexes. Anthropic's
 	// stream contract assigns each block index to one position in the final
 	// content array; reusing a closed index would make the target terminal
@@ -123,7 +127,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 					d.terminal = true
 					d.closeOpenBlocks()
 					d.flushMessageDelta()
-					d.q.push(&ir.Event{Type: ir.EventDone})
+					d.pushTerminal()
 					continue
 				}
 				return nil, ErrTruncatedStream
@@ -309,11 +313,12 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			d.terminal = true
 			d.closeOpenBlocks()
 			d.flushMessageDelta()
-			d.q.push(&ir.Event{Type: ir.EventDone})
+			d.pushTerminal()
 		case "ping":
 			continue
 		case "error":
 			d.terminal = true
+			d.errorSeen = true
 			d.closeOpenBlocks()
 			if ev.Error == nil || (ev.Error.Type == "" && ev.Error.Message == "") {
 				// An empty error object is not a provider statement; treat it
@@ -356,6 +361,19 @@ func (d *AnthropicStreamDecoder) flushMessageDelta() {
 		ev.Usage = &u
 	}
 	d.q.push(ev)
+}
+
+// pushTerminal closes the canonical event stream after the message delta. A
+// terminal stop reason of "error" without an explicit error event synthesizes
+// one, so a translated terminal carries a non-null failure instead of a clean
+// end. An explicit provider error already terminated the stream and keeps its
+// own type.
+func (d *AnthropicStreamDecoder) pushTerminal() {
+	if !d.errorSeen && anthropicFinishReason(d.pendingStopReason) == ir.FinishError {
+		d.q.push(&ir.Event{Type: ir.EventError, Error: syntheticAnthropicFailure()})
+		return
+	}
+	d.q.push(&ir.Event{Type: ir.EventDone})
 }
 
 // closeOpenBlocks emits one BlockEnd for every block still open when a
