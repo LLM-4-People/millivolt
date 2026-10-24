@@ -156,8 +156,8 @@ An unauthenticated local upstream needs no dummy API key.
 Ordinary requests relay the original body bytes unless a configured request
 override, sub-conversation strip or ensured-tools rule rewrites them; the
 request is buffered up to `max_request_bytes` before metadata extraction and
-sending. Larger requests
-are rejected with HTTP 413 without an upstream send. A decoded output cap
+sending. Larger requests are rejected with HTTP 413 without an upstream send.
+A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for any spelling (`max_tokens`,
