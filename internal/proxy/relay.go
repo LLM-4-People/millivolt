@@ -1216,7 +1216,8 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				markClientGone(rec)
 			}
 			return
-		}	}
+		}
+	}
 }
 
 // parseErrorBody extracts the provider's structured error detail (type, code,
@@ -2092,11 +2093,14 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// Source accounting is authoritative for translated streams. The
 			// translated analyzer refused provider overrides; stamp what the
 			// source actually reported after the client turn is finalized.
-			sourceAnalyzer.Fill(&sourceRec)
+			fillRecord(&sourceAnalyzer, &sourceRec)
 			// Invalid accounting is sticky: the source observer may have
 			// captured only the usage object that failed validation (or a
 			// later partial one), and copying it would restore a refundable
 			// count for a turn already marked unavailable.
+			if sourceRec.UsageInvalid {
+				invalidateUsage(rec, metrics.ErrMetricRange)
+			}
 			if sourceAnalyzer.UsageReported() && !rec.UsageInvalid {
 				rec.Usage = sourceRec.Usage
 				// Provider usage also owns the generation count: the
@@ -2159,7 +2163,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			// native streamBody twin fills it in clientGone. Without this the
 			// 499 erases the provider classification.
 			if a.HasInBandError() {
-				a.Fill(rec)
+				fillRecord(&a, rec)
 			}
 			return false
 		}
@@ -2192,7 +2196,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 				// post-terminal debris cannot surface as a translation error
 				// on a completed record; the caller closes the upstream body
 				// and joins the translator.
-				a.Fill(rec)
+				fillRecord(&a, rec)
 				return
 			}
 			continue
@@ -2210,9 +2214,20 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	if err := scanner.Err(); err != nil {
 		markStreamErr(ctx, rec, err)
 	}
-	a.Fill(rec)
+	fillRecord(&a, rec)
 	if err := scanner.Err(); errors.Is(err, metrics.ErrMetricRange) {
 		invalidateUsage(rec, err)
+	}
+}
+
+// fillRecord is the one stream-side bridge from analyzer accounting to the
+// record. The analyzer owns the source-usage validity signal because it sees
+// sum overflows that a later chunk fallback would otherwise hide; invalidation
+// runs after Fill so it clears any partial document Fill published.
+func fillRecord(a *sse.Analyzer, rec *metrics.Record) {
+	a.Fill(rec)
+	if a.UsageInvalid() {
+		invalidateUsage(rec, metrics.ErrMetricRange)
 	}
 }
 
@@ -2360,7 +2375,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	clientGone := func() {
 		markClientGone(rec)
 		if a.HasInBandError() {
-			a.Fill(rec)
+			fillRecord(&a, rec)
 		}
 	}
 	writeOut := func() bool {
@@ -2495,7 +2510,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			if rescueRequested != rescueNone {
 				return true
 			}
-			a.Fill(rec)
+			fillRecord(&a, rec)
 			return true
 		}
 		// The name announced a terminal event but the document is not one:
@@ -2620,7 +2635,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if !writeOut() {
 							return rescueNone
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 				} else {
@@ -2646,7 +2661,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 					// A Responses/Anthropic terminal document stays held until
@@ -2659,7 +2674,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 				case !prev && (a.Terminated() || heldDone) && !blank:
@@ -2684,7 +2699,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 				default:
@@ -2836,7 +2851,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if !writeOut() {
 					return rescueNone
 				}
-				a.Fill(rec)
+				fillRecord(&a, rec)
 				return rescueNone
 			}
 			// Clean EOF: resolve the hold (truncation is decided here - a
@@ -2872,7 +2887,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// no [DONE] ever did).
 				return rescueRequested
 			}
-			a.Fill(rec)
+			fillRecord(&a, rec)
 			return rescueNone
 		}
 	}

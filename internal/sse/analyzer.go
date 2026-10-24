@@ -188,6 +188,11 @@ type Analyzer struct {
 	// object or a provider usage-key path), so Fill's chunk-count fallback is
 	// distinguishable from a reported zero.
 	usageSeen bool
+	// usageInvalid records that a source usage document could not be summed
+	// or represented. It is sticky: a later partial document must not restore
+	// a refundable count for a turn already marked unavailable. The proxy
+	// wrapper turns this signal into the record's UsageInvalid state.
+	usageInvalid bool
 
 	// Anthropic streams split usage across message_start and message_delta.
 	// Custom usage/cost keys may live beside the standard usage object on
@@ -1283,6 +1288,7 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 		} else if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
 			rec.Usage = metrics.Usage{}
 			a.usageSeen = false
+			a.usageInvalid = true
 		} else {
 			rec.Usage.TotalTokens = total
 			if m.outputLanded {
@@ -1336,6 +1342,11 @@ func (a *Analyzer) Terminated() bool { return a.terminatorSeen }
 // unreported stream (whose output count is the chunk fallback) from a
 // provider-reported zero.
 func (a *Analyzer) UsageReported() bool { return a.usageSeen }
+
+// UsageInvalid reports whether a source usage document could not be summed or
+// represented. The signal is sticky and independent of UsageReported, so the
+// proxy can invalidate the record even when a later partial document did land.
+func (a *Analyzer) UsageInvalid() bool { return a.usageInvalid }
 
 // HasInBandError reports whether an in-band error payload was observed (a
 // provider failure streamed inside a 200 - no synthetic stream-outcome

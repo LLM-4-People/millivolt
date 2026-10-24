@@ -32,6 +32,9 @@ func TestAnthropicUsageOverflowKeepsFallback(t *testing.T) {
 	}
 	var rec metrics.Record
 	a.Fill(&rec)
+	if !a.UsageInvalid() {
+		t.Fatal("overflow did not mark the stream usage invalid")
+	}
 	if rec.Usage.InputTokens != 0 || rec.Usage.CacheReadTokens != 0 || rec.Usage.CacheWrite != 0 || rec.Usage.TotalTokens != 0 {
 		t.Fatalf("overflow installed partial input usage: %+v", rec.Usage)
 	}

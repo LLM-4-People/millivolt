@@ -263,12 +263,15 @@ func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 	}
 	input, err := metrics.SumCounts(a.anthropicInput, a.anthropicCacheRead, a.anthropicCacheWrite)
 	if err != nil {
-		// Leave usage unreported rather than publishing a partial document;
-		// the chunk fallback can still recover it from the provider frame.
+		// Leave usage unreported rather than publishing a partial document.
+		// The invalid flag is sticky and tells the proxy not to settle the
+		// chunk fallback as if the source had reported no usage.
+		a.usageInvalid = true
 		return
 	}
 	total, err := metrics.SumCounts(input, a.anthropicOutput)
 	if err != nil {
+		a.usageInvalid = true
 		return
 	}
 	chat, err := json.Marshal(map[string]any{
