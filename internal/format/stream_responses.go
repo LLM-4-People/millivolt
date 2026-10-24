@@ -182,6 +182,10 @@ type ResponsesStreamDecoder struct {
 	// duplicate streamed bytes.
 	partOwner map[string]string
 	partKind  map[string]partChannel
+	// ownerParts indexes the parts that have emitted bytes by their logical
+	// item owner, so terminal reconciliation scans only the item's own parts
+	// instead of every part in the stream.
+	ownerParts map[string]map[string]struct{}
 	// warnings records streaming approximations that cannot be represented on
 	// the committed target wire.
 	warnings ir.Warnings
@@ -233,6 +237,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		emittedText:          map[string]*strings.Builder{},
 		partOwner:            map[string]string{},
 		partKind:             map[string]partChannel{},
+		ownerParts:           map[string]map[string]struct{}{},
 		open:                 map[int]bool{},
 	}
 }
@@ -427,7 +432,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					if _, err := d.announcePart(partKey); err != nil {
 						return nil, err
 					}
-					d.partOwner[partKey] = key
+					d.setPartOwner(partKey, key)
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
 					if err := d.setEmittedText(partKey, part.Text); err != nil {
 						return nil, err
@@ -493,7 +498,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.keyByPart[pos] = key
 			d.partPosition[key] = pos
 			d.itemIDByOutput[ev.OutputIndex] = itemID
-			d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+			d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
 			d.partKind[key] = partChannelForBlock(block.Type)
 			start := ""
 			switch block.Type {
@@ -573,7 +578,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if _, owned := d.partOwner[key]; !owned {
-				d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+				d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
 			}
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelForBlock(block.Type)
@@ -603,7 +608,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if _, err := d.announcePart(partKey); err != nil {
 					return nil, err
 				}
-				d.partOwner[partKey] = key
+				d.setPartOwner(partKey, key)
 				if err := d.appendEmittedText(partKey, ev.Delta); err != nil {
 					return nil, err
 				}
@@ -627,7 +632,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if _, err := d.announcePart(partKey); err != nil {
 				return nil, err
 			}
-			d.partOwner[partKey] = key
+			d.setPartOwner(partKey, key)
 			emit := pendingValueSuffix(d.emittedValue(partKey), part.Text)
 			if emit == "" {
 				continue
@@ -648,7 +653,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if _, err := d.announcePart(partKey); err != nil {
 				return nil, err
 			}
-			d.partOwner[partKey] = key
+			d.setPartOwner(partKey, key)
 			emit := pendingValueSuffix(d.emittedValue(partKey), ev.Text)
 			if emit == "" {
 				continue
@@ -684,7 +689,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if _, owned := d.partOwner[key]; !owned {
-				d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+				d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
 			}
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelReasoning
@@ -725,7 +730,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if _, owned := d.partOwner[key]; !owned {
-				d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+				d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
 			}
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelReasoning
@@ -804,7 +809,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					}
 				}
 				if _, owned := d.partOwner[key]; !owned {
-					d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+					d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
 				}
 				if _, kind := d.partKind[key]; !kind {
 					d.partKind[key] = partChannelForBlock(block.Type)
@@ -920,7 +925,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if _, err := d.announcePart(partKey); err != nil {
 				return nil, err
 			}
-			d.partOwner[partKey] = key
+			d.setPartOwner(partKey, key)
 			emit := pendingValueSuffix(d.emittedValue(partKey), text)
 			if emit != "" {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
@@ -1157,6 +1162,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	clear(d.partSeed)
 	clear(d.partPosition)
 	clear(d.emittedText)
+	clear(d.ownerParts)
 	d.retainedText = 0
 	d.openToolItems = 0
 	for _, block := range pending {
@@ -1355,13 +1361,37 @@ func partKeyIndex(key string) (int, bool) {
 	return index, true
 }
 
+// setPartOwner records the logical item that owns one part and keeps the
+// owner-to-parts index in step. A part key belongs to one item; a later
+// reassignment removes the old index entry.
+func (d *ResponsesStreamDecoder) setPartOwner(partKey, owner string) {
+	if previous, ok := d.partOwner[partKey]; ok {
+		if previous == owner {
+			return
+		}
+		delete(d.ownerParts[previous], partKey)
+		if len(d.ownerParts[previous]) == 0 {
+			delete(d.ownerParts, previous)
+		}
+	}
+	d.partOwner[partKey] = owner
+	if d.ownerParts[owner] == nil {
+		d.ownerParts[owner] = map[string]struct{}{}
+	}
+	d.ownerParts[owner][partKey] = struct{}{}
+}
+
 // emittedContentParts returns the non-empty streamed bytes for one item and
 // content channel, ordered by the part index the client saw.
 func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel partChannel) []channelPart {
 	var out []channelPart
-	for key, builder := range d.emittedText {
+	for key := range d.ownerParts[itemKey] {
+		builder := d.emittedText[key]
+		if builder == nil {
+			continue
+		}
 		value := builder.String()
-		if value == "" || d.partOwner[key] != itemKey || d.partKind[key] != channel {
+		if value == "" || d.partKind[key] != channel {
 			continue
 		}
 		index, ok := partKeyIndex(key)
@@ -1383,9 +1413,13 @@ func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel par
 // reasoning item, ordered by summary index.
 func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
 	var out []channelPart
-	for key, builder := range d.emittedText {
+	for key := range d.ownerParts[itemKey] {
+		builder := d.emittedText[key]
+		if builder == nil {
+			continue
+		}
 		value := builder.String()
-		if value == "" || d.partOwner[key] != itemKey {
+		if value == "" {
 			continue
 		}
 		index, ok := partKeyIndex(key)
@@ -1402,8 +1436,8 @@ func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPa
 // target wire. A terminal item that was announced with only empty parts still
 // needs the announced identity, so this only gates the aggregate owner key.
 func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
-	for key := range d.emittedText {
-		if d.partOwner[key] == itemKey {
+	for key := range d.ownerParts[itemKey] {
+		if d.emittedText[key] != nil {
 			return true
 		}
 	}
@@ -1830,7 +1864,7 @@ func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, out
 			}
 		}
 		if _, owned := d.partOwner[part.key]; !owned {
-			d.partOwner[part.key] = itemKey
+			d.setPartOwner(part.key, itemKey)
 		}
 		if _, kind := d.partKind[part.key]; !kind {
 			d.partKind[part.key] = part.channel
@@ -1879,7 +1913,7 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 		// stored. emittedSummaryParts filters by owner, so a done-only summary
 		// without this assignment looks uncovered to the terminal copy and is
 		// emitted a second time.
-		d.partOwner[part.key] = key
+		d.setPartOwner(part.key, key)
 		before := d.emittedValue(part.key)
 		d.appendReasoningValue(item, key, part.value, pending)
 		if err := d.setEmittedText(part.key, before+part.value); err != nil {
@@ -1916,7 +1950,7 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 			}
 		}
 		if _, owned := d.partOwner[part.key]; !owned {
-			d.partOwner[part.key] = key
+			d.setPartOwner(part.key, key)
 		}
 		if _, kind := d.partKind[part.key]; !kind {
 			d.partKind[part.key] = partChannelReasoning
