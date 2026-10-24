@@ -752,6 +752,12 @@ func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *i
 			if len(b.Citations) > 0 && warns != nil {
 				warns.Add(ir.WarningDropped, "system.citations", "Anthropic system blocks have no citations")
 			}
+			// Anthropic's TextBlockParam.text has minLength 1. An empty
+			// system block cannot be represented; drop it with any cache
+			// breakpoint, matching the message-content owner.
+			if b.Text == "" {
+				continue
+			}
 			block := map[string]any{"type": "text", "text": b.Text}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
@@ -1111,6 +1117,12 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 		case ir.BlockText:
 			if len(b.Citations) > 0 && warns != nil {
 				warns.Add(ir.WarningDropped, "tool_result.citations", "Anthropic tool-result text blocks have no citations")
+			}
+			// TextBlockParam requires non-empty text. A mixed tool result
+			// keeps its image/file parts and drops the empty text block with
+			// its cache breakpoint.
+			if b.Text == "" {
+				continue
 			}
 			out = append(out, map[string]any{"type": "text", "text": b.Text})
 		case ir.BlockImage:
