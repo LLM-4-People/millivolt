@@ -1811,6 +1811,12 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if err := checkNativeIdentity("model", in.Model); err != nil {
 		return nil, err
 	}
+	if in.Object != "" && in.Object != "chat.completion" {
+		// A chunk, prompt completion or other object is not a completed Chat
+		// message. Translating it produced a 200 with an empty target body
+		// while the native path classified the same bytes as a void.
+		return nil, fmt.Errorf("chat response object %q is not a completion", boundedEcho(in.Object))
+	}
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
 		// A gateway can return an error envelope on HTTP 200. ParseErrorEnvelope
 		// owns the shared decoy/null and string/object rules, so the canonical
@@ -1833,6 +1839,18 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	}
 	if len(in.Choices) == 0 {
 		return nil, errors.New("chat response has no choices")
+	}
+	var firstMessage struct {
+		Message json.RawMessage `json:"message"`
+	}
+	if err := json.Unmarshal(in.Choices[0], &firstMessage); err != nil {
+		return nil, fmt.Errorf("parse chat response: %w", err)
+	}
+	if trimmed := bytes.TrimSpace(firstMessage.Message); len(trimmed) == 0 || trimmed[0] != '{' {
+		// choices:[null] and a chunk-shaped choice decode to the zero message
+		// and were accepted as an empty completion. A completed Chat choice
+		// must carry a message object.
+		return nil, errors.New("chat response choice has no message object")
 	}
 	if !metrics.ContentPartsWithinLimit(choice.Message.Content) {
 		// A response is a completion artifact, not a request to best-effort
