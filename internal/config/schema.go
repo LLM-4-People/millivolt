@@ -121,7 +121,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected with 413.",
 			Kind: KindBytes, HotReload: true, Min: num(MaxRequestBytesMin), Max: num(MaxRequestBytesMax)},
 		{Key: "allowed_base_urls", Category: "request", Label: "Allowed base URLs",
-			Help: "SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted operator). Each entry must be an absolute http:// or https:// URL with a lowercase hostname, no userinfo, query, fragment or trailing slash, and a port only after a hostname.",
+			Help: "SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted operator). Each entry must be an absolute URL whose prefix is literally lowercase http:// or https://, with a lowercase hostname, no userinfo, query, fragment or trailing slash, and a port after a hostname in 1..65535.",
 			Kind: KindStrings, HotReload: true},
 		{Key: "capture_body_preview", Category: "request", Label: "Capture body preview",
 			Help: "Store a short bounded preview of the last user prompt / response in metrics. Off by default so content is not persisted.",

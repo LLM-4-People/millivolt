@@ -976,9 +976,10 @@ func TestSchemaHelpPinsValidationRules(t *testing.T) {
 		t.Fatal("allowed_base_urls is not registered")
 	}
 	for _, phrase := range []string{
+		"literally lowercase http:// or https://",
 		"lowercase hostname",
 		"no userinfo, query, fragment or trailing slash",
-		"port only after a hostname",
+		"port after a hostname in 1..65535",
 	} {
 		if !strings.Contains(baseURLs.Help, phrase) {
 			t.Errorf("allowed_base_urls help omits %q: %s", phrase, baseURLs.Help)
