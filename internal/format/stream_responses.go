@@ -1179,9 +1179,22 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	}
 	// Close every block the source actually opened before starting queued
 	// terminal blocks, so a target block sequence never nests two lifecycles.
+	// A failure policy leaves an open tool block unclosed: BlockEnd would
+	// publish a call over partial argument bytes.
+	skipTools := map[int]struct{}{}
+	if policy == responsesToolArgumentsSkip {
+		for key := range d.openToolKeys {
+			if idx, ok := d.itemBlockByKey[key]; ok {
+				skipTools[idx] = struct{}{}
+			}
+		}
+	}
 	for _, idx := range sortedKeys(d.open) {
-		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		delete(d.open, idx)
+		if _, skip := skipTools[idx]; skip {
+			continue
+		}
+		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	clear(d.partBlock)
 	clear(d.itemBlock)
@@ -3032,6 +3045,11 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 	for _, idx := range e.order {
 		item := e.items[idx]
 		if item == nil {
+			continue
+		}
+		// A failed turn omits an item whose block never closed: its argument
+		// value is incomplete and must not appear as an executable call.
+		if e.failed != nil && e.open[idx] {
 			continue
 		}
 		switch item.kind {

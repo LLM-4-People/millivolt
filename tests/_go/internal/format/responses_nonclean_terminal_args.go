@@ -99,7 +99,7 @@ func TestResponsesNonCleanTerminalPartialArguments(t *testing.T) {
 			name:     "failed buffered added partial keeps the accepted empty block",
 			source:   responsesBufferedTerminalArgsStream(t, partial, "response.failed", "failed", failedExtra),
 			want:     `"code":"overloaded"`,
-			wantArgs: "{}",
+			wantArgs: "",
 		},
 		{
 			name:    "incomplete terminal partial fails closed",

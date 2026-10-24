@@ -472,6 +472,13 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks(validateToolArguments bool) err
 		if d.skipped[idx] {
 			continue
 		}
+		// A failure close leaves a tool block open: content_block_stop would
+		// finalize the partial input the source never completed.
+		if !validateToolArguments {
+			if _, isTool := d.toolInitial[idx]; isTool {
+				continue
+			}
+		}
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	clear(d.openBlocks)

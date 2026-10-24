@@ -477,7 +477,19 @@ func (d *ChatStreamDecoder) closeAll(validateToolArguments bool) error {
 	d.closeText()
 	d.closeReasoning()
 	d.closeRefusal()
+	// A failure close must not finalize an open tool block: BlockEnd reads as
+	// success and would publish a call over partial argument bytes. The error
+	// frame owns the turn. A validating terminal keeps the normal close.
+	skipTools := map[int]struct{}{}
+	if !validateToolArguments {
+		for _, idx := range d.toolBlocks {
+			skipTools[idx] = struct{}{}
+		}
+	}
 	for _, idx := range d.open {
+		if _, skip := skipTools[idx]; skip {
+			continue
+		}
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	d.open = nil
