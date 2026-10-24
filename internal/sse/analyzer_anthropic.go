@@ -49,10 +49,10 @@ type anthropicAnalyzerEvent struct {
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage *anthropicAnalyzerUsage `json:"usage"`
-	Error *struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
+	// Error is raw because the nested object may carry only a message or only
+	// a code; the shared parser classifies those as provider_error and keeps
+	// numeric/string codes.
+	Error json.RawMessage `json:"error"`
 }
 
 // feedAnthropic classifies one Anthropic data payload. It reports false for
@@ -149,8 +149,17 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		a.terminatorSeen = true
 		return true
 	case "error":
-		if ev.Error != nil {
-			a.setStreamError(ev.Error.Type, "", ev.Error.Message)
+		if len(bytes.TrimSpace(ev.Error)) > 0 && !bytes.Equal(bytes.TrimSpace(ev.Error), []byte("null")) {
+			// Route the nested object through the same parser as the
+			// non-stream owner. A message-only or code-only object is a
+			// provider_error; an empty object is still a failure statement
+			// because the event itself is a terminal error.
+			typ, code, msg := metrics.ParseErrorValue(ev.Error)
+			if typ == "" {
+				typ = TypeUpstreamError
+				msg = "upstream response failed"
+			}
+			a.setStreamError(typ, code, msg)
 			// An error event is a terminal statement on every wire that
 			// carries one; never leave the analyzer waiting for a marker
 			// after it.
