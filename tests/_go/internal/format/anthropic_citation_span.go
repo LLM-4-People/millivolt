@@ -79,6 +79,11 @@ func TestAnthropicCitationSpanIsReportedApproximated(t *testing.T) {
 			len(doc.Output[0].Content[0].Annotations) != 1 {
 			t.Fatalf("responses annotation lost: %s", body)
 		}
+		ann := doc.Output[0].Content[0].Annotations[0]
+		if ann.Type != "url_citation" || ann.Start != 0 || ann.End != 0 {
+			t.Fatalf("responses annotation span/type = %s/%d..%d, want url_citation/0..0: %s",
+				ann.Type, ann.Start, ann.End, body)
+		}
 		if warningCount(resp.Warnings, ir.WarningApproximated, "citations") != 1 {
 			t.Fatalf("responses span approximation not reported: %+v", resp.Warnings)
 		}

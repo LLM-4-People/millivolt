@@ -10,6 +10,7 @@ package proxy
 import (
 	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,5 +210,48 @@ func TestCursorIdentityStripsTransportHeaders(t *testing.T) {
 	}
 	if got := req.Header.Get("Connect-Protocol-Version"); got != "1" {
 		t.Fatalf("cursor protocol header = %q, want 1", got)
+	}
+}
+
+// Round 6 H5 coverage guard: the X-Proxy-Auth-Header call site uses the same
+// transport-mode rejection as the X-Proxy-Headers map; removing that check
+// would otherwise leave every test green.
+func TestAuthHeaderRejectsTransportModeHeaders(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", http.StatusOK, chatCompletionBody)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	post := func(name string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+		r.Header.Set("X-Proxy-Auth-Header", name)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		return w
+	}
+	for _, name := range []string{"Accept-Encoding", "Range"} {
+		if w := post(name); w.Code != http.StatusBadRequest {
+			t.Fatalf("X-Proxy-Auth-Header %q status = %d, want 400 (body %s)", name, w.Code, w.Body.String())
+		}
+	}
+	if up.calls.Load() != 0 {
+		t.Fatalf("transport-mode auth header reached the upstream %d times", up.calls.Load())
+	}
+
+	var seen string
+	normal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("X-Custom-Auth")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, chatCompletionBody)
+	}))
+	defer normal.Close()
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: normal.URL}})
+	if w := post("X-Custom-Auth"); w.Code != http.StatusOK {
+		t.Fatalf("normal auth header status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	if seen != "Bearer sk-test" {
+		t.Fatalf("upstream X-Custom-Auth = %q, want the client credential", seen)
 	}
 }

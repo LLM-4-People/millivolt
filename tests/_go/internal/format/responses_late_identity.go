@@ -33,6 +33,7 @@ func TestResponsesLateStartKeepsCommittedIdentity(t *testing.T) {
 	}
 	payloads := mustResponsePayloads(t, buf.String())
 	var firstID string
+	var firstCreated float64
 	created, inProgress, completed := 0, 0, 0
 	for _, payload := range payloads {
 		typ, _ := payload["type"].(string)
@@ -41,6 +42,7 @@ func TestResponsesLateStartKeepsCommittedIdentity(t *testing.T) {
 		case "response.created":
 			created++
 			firstID, _ = response["id"].(string)
+			firstCreated, _ = response["created_at"].(float64)
 			if firstID == "" || firstID == "resp_late" {
 				t.Fatalf("created id = %q, want a synthesized identity", firstID)
 			}
@@ -49,17 +51,26 @@ func TestResponsesLateStartKeepsCommittedIdentity(t *testing.T) {
 			}
 		case "response.in_progress":
 			inProgress++
+			if got, _ := response["created_at"].(float64); got != firstCreated || got == 99 {
+				t.Fatalf("in_progress created_at = %v, want the committed %v (not the late 99)", got, firstCreated)
+			}
 		case "response.completed":
 			completed++
 			if response["id"] != firstID || response["model"] != "request-model" {
 				t.Fatalf("terminal identity = %v/%v, want %s/request-model: %s",
 					response["id"], response["model"], firstID, buf.String())
 			}
+			if got, _ := response["created_at"].(float64); got != firstCreated || got == 99 {
+				t.Fatalf("completed created_at = %v, want the committed %v (not the late 99)", got, firstCreated)
+			}
 			usage, _ := response["usage"].(map[string]any)
 			if usage["input_tokens"] != float64(10) || usage["output_tokens"] != float64(5) {
 				t.Fatalf("late-start usage was not merged: %v", usage)
 			}
 		}
+	}
+	if firstCreated == 0 || firstCreated == 99 {
+		t.Fatalf("created_at = %v, want a synthesized non-99 value", firstCreated)
 	}
 	if created != 1 || inProgress != 1 || completed != 1 {
 		t.Fatalf("start/terminal counts = %d/%d/%d, want 1/1/1: %s", created, inProgress, completed, buf.String())

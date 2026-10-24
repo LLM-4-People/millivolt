@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,17 +21,32 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
+type pauseSignalRecorder struct {
+	paused chan struct{}
+	once   sync.Once
+}
+
+func (r *pauseSignalRecorder) Record(*metrics.Record) {}
+
+func (r *pauseSignalRecorder) PublishLive(_ string, rec *metrics.Record) {
+	if rec.Paused {
+		r.once.Do(func() { close(r.paused) })
+	}
+}
+
 func TestRetryHoldDoesNotCommitSSEForJSON(t *testing.T) {
 	cfg := config.Default()
 	cfg.QualityRetries = 1
-	var calls int
+	recorder := &pauseSignalRecorder{paused: make(chan struct{})}
+	var calls atomic.Int32
 	var s *Server
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
-			// The empty completion is degenerate and spends the quality
-			// retry, whose opening WaitSend honors this hold.
-			if err := s.scheduler.AddHold(scheduler.Hold{ID: "r5e1", All: true, Until: time.Now().Add(400 * time.Millisecond)}); err != nil {
+		calls.Add(1)
+		if calls.Load() == 1 {
+			// The empty completion spends the quality retry. The indefinite
+			// hold parks its opening WaitSend until the test observes OnHold,
+			// which fires after OnWait (the pacer Start this test pins).
+			if err := s.scheduler.AddHold(scheduler.Hold{ID: "r5e1", All: true}); err != nil {
 				t.Errorf("AddHold: %v", err)
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -40,33 +57,57 @@ func TestRetryHoldDoesNotCommitSSEForJSON(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"c2","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`)
 	}))
 	defer up.Close()
-	s = New(cfg, metrics.Noop{})
+	s = New(cfg, recorder)
 	defer s.scheduler.RemoveHold("r5e1")
 	srv := httptest.NewServer(s)
 	defer srv.Close()
 
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Authorization", "Bearer sk-test")
-	req.Header.Set("X-Proxy-Base-URL", up.URL)
-	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	trigger := make(chan struct{})
+	type result struct {
+		contentType string
+		body        string
+		err         error
 	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if got := resp.Header.Get("Content-Type"); got != "application/json" {
-		t.Fatalf("content type = %q, want application/json (body %q)", got, string(body))
+	resultC := make(chan result, 1)
+	go func() {
+		close(trigger)
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+			strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer sk-test")
+		req.Header.Set("X-Proxy-Base-URL", up.URL)
+		client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+		resp, err := client.Do(req)
+		if err != nil {
+			resultC <- result{err: err}
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resultC <- result{contentType: resp.Header.Get("Content-Type"), body: string(body)}
+	}()
+	<-trigger
+
+	select {
+	case <-recorder.paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry never parked in the hold")
 	}
-	if strings.Contains(string(body), ": keepalive") {
-		t.Fatalf("JSON body carried an SSE keepalive: %q", string(body))
+	s.scheduler.RemoveHold("r5e1")
+	res := <-resultC
+	if res.err != nil {
+		t.Fatal(res.err)
 	}
-	if !strings.Contains(string(body), `"content":"hello"`) {
-		t.Fatalf("body is not the adopted JSON completion: %q", string(body))
+	if res.contentType != "application/json" {
+		t.Fatalf("content type = %q, want application/json (body %q)", res.contentType, res.body)
 	}
-	if calls != 2 {
-		t.Fatalf("upstream calls = %d, want 2", calls)
+	if strings.Contains(res.body, ": keepalive") {
+		t.Fatalf("JSON body carried an SSE keepalive: %q", res.body)
+	}
+	if !strings.Contains(res.body, `"content":"hello"`) {
+		t.Fatalf("body is not the adopted JSON completion: %q", res.body)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls.Load())
 	}
 }
 
