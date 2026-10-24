@@ -2876,9 +2876,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// Save any trailing partial line without feeding it to the
 			// analyzer yet. The line is never written by a rescue, so its
 			// content, tool call and preview state must not veto the pre-content
-			// rescues below. A partial line can never be a terminal marker, so
-			// it is never withheld. releaseTail feeds and releases it only on
-			// the paths that actually deliver it.
+			// rescues below. An unterminated final line can still carry a
+			// terminal marker ([DONE] or a non-null finish_reason); the
+			// analyzer's tail classifier owns that grammar. releaseTail feeds
+			// and releases it only on the paths that actually deliver it.
 			var tail []byte
 			if lineBuf.Len() > 0 {
 				tail = append(tail, lineBuf.Bytes()...)
@@ -2977,16 +2978,18 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// trailing partial line through its verbatim branch or drops it at
 			// the degenerate boundary. Decide that before feeding it: content
 			// the boundary drops was never delivered, so it must not set the
-			// answer content or first-answer time on the record. Only the
-			// truncation class is invariant under the feed: a terminator-less
-			// stream cannot become anything but truncated. Every other
-			// degenerate class (empty completion, empty tool call,
-			// reasoning-only) can become healthy when the tail supplies the
-			// missing answer or tool call, so those run finishHold after the
-			// feed and deliver the tail.
+			// answer content or first-answer time on the record. The
+			// truncation class is skipped only when the analyzer's own tail
+			// classifier says the line carries no terminal marker: a final
+			// [DONE] or non-null finish_reason makes the stream complete and
+			// must be delivered. Every other degenerate class (empty
+			// completion, empty tool call, reasoning-only) also runs
+			// finishHold after the feed, because the tail can supply the
+			// missing answer or tool call.
 			preTailCode := a.OutcomeCode()
 			tailDropped := preTailCode == metrics.CodeTruncated && !a.HasInBandError() &&
-				!rec.ClientDisconnected && a.ChatLike() && !holdAborted
+				!rec.ClientDisconnected && a.ChatLike() && !holdAborted &&
+				!a.TailTerminates(tail)
 			if !tailDropped {
 				releaseTail()
 			}

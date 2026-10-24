@@ -1427,6 +1427,29 @@ func (a *Analyzer) UsageInvalid() bool { return a.usageInvalid }
 // signaling should stack on top of the provider's own).
 func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
 
+// TailTerminates reports whether one unterminated trailing line (the bytes
+// after the last newline, without their newline) carries this wire's terminal
+// marker. It reads the same frame grammar as Feed and never mutates analyzer
+// state: the relay uses it to decide whether a tail that would otherwise be
+// dropped at the degenerate boundary must be fed and delivered instead. A
+// Chat [DONE], a non-null finish_reason and a Responses terminal event are the
+// complete terminal set for the chatlike wires that can reach this decision.
+func (a *Analyzer) TailTerminates(line []byte) bool {
+	payload, ok := DataPayload(line)
+	if !ok {
+		return false
+	}
+	if isDonePayload(payload) {
+		return a.DoneTerminates()
+	}
+	var keys frameKeys
+	keys.scan(payload)
+	if jsonValueString(keys.finishReason) != "" {
+		return true
+	}
+	return responsesTerminalEvent(keys.responseEventType(payload))
+}
+
 // OutcomeCode classifies the finished stream via the canonical degenerate
 // rules (metrics.ClassifyOutcome - the same predicate every relay path uses).
 // Answer presence and reasoning presence are separate inputs: reasoning is

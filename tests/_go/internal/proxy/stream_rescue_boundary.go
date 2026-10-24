@@ -517,3 +517,97 @@ func TestDegenerateTailCanCompleteStream(t *testing.T) {
 		})
 	}
 }
+
+// TestTerminalTailIsDelivered pins NEW-6: an unterminated final Chat line can
+// carry the terminal marker itself. The analyzer's tail classifier must
+// recognize it so the relay feeds and delivers it; dropping it fabricated a
+// truncated error after a complete answer and lost the finish reason.
+func TestTerminalTailIsDelivered(t *testing.T) {
+	const (
+		roleFrame    = `data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+		contentFrame = `data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"
+		finishTail   = `data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`
+		doneTail     = `data: [DONE]`
+	)
+	for _, tc := range []struct {
+		name        string
+		source      string
+		wantBody    []string
+		forbidCode  string
+		wantCode    string
+		wantFinish  string
+		wantAnswer  bool
+		wantIsError bool
+	}{
+		{
+			name:       "content then finish without newline",
+			source:     roleFrame + contentFrame + finishTail,
+			wantBody:   []string{`"content":"hello"`, `"finish_reason":"stop"`},
+			forbidCode: metrics.CodeTruncated,
+			wantFinish: "stop",
+			wantAnswer: true,
+		},
+		{
+			name:       "content then done without newline",
+			source:     roleFrame + contentFrame + doneTail,
+			wantBody:   []string{`"content":"hello"`, "data: [DONE]"},
+			forbidCode: metrics.CodeTruncated,
+			wantAnswer: true,
+		},
+		{
+			// The tail still terminates the stream before the answer: the
+			// empty completion is the correct class, not a truncation, and
+			// the finish reason reaches the record even though the boundary
+			// replaces the withheld terminal bytes.
+			name:        "empty completion with finish without newline",
+			source:      roleFrame + finishTail,
+			forbidCode:  metrics.CodeTruncated,
+			wantCode:    metrics.CodeEmptyCompletion,
+			wantFinish:  "stop",
+			wantIsError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(tc.source))
+				w.(http.Flusher).Flush()
+			}))
+			defer upstream.Close()
+
+			cfg := newConfigWithQuality(0)
+			cfg.ThinkingRetries = 0
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, got := streamRequest(t, srv, upstream)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			for _, want := range tc.wantBody {
+				if !strings.Contains(got, want) {
+					t.Fatalf("delivered body missing %q: %s", want, got)
+				}
+			}
+			if strings.Contains(got, `"code":"`+tc.forbidCode+`"`) {
+				t.Fatalf("terminal tail was reported as %s: %s", tc.forbidCode, got)
+			}
+			if tc.wantCode != "" && !strings.Contains(got, `"code":"`+tc.wantCode+`"`) {
+				t.Fatalf("expected %s error missing: %s", tc.wantCode, got)
+			}
+			recs := waitForRecord(t, buf, 1)
+			rec := recs[0]
+			if rec.FinishReason != tc.wantFinish {
+				t.Fatalf("finish reason = %q, want %q", rec.FinishReason, tc.wantFinish)
+			}
+			if rec.HadAnswerContent != tc.wantAnswer {
+				t.Fatalf("answer content = %v, want %v", rec.HadAnswerContent, tc.wantAnswer)
+			}
+			if rec.IsError() != tc.wantIsError || rec.ErrorCode != tc.wantCode {
+				t.Fatalf("record error = %v/%q, want %v/%q", rec.IsError(), rec.ErrorCode, tc.wantIsError, tc.wantCode)
+			}
+		})
+	}
+}
