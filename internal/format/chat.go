@@ -621,23 +621,6 @@ func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int) (*ir.ToolC
 	return &ir.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args}, warns, nil
 }
 
-// parseToolArguments normalizes a Chat tool-call argument string into a JSON
-// object. Empty and null become {}, which is what every target protocol needs
-// for a zero-argument call.
-func parseToolArguments(raw string) (json.RawMessage, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || trimmed == "null" {
-		return json.RawMessage(`{}`), nil
-	}
-	if !json.Valid([]byte(trimmed)) {
-		return nil, errors.New("tool call arguments must be valid JSON")
-	}
-	if trimmed[0] != '{' {
-		return nil, errors.New("tool call arguments must be a JSON object")
-	}
-	return json.RawMessage(trimmed), nil
-}
-
 // decodeChatContent converts a Chat content value (string, null, or part
 // array) into canonical blocks.
 func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnings, error) {

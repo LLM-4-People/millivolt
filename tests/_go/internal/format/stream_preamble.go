@@ -415,7 +415,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 `
 	var buf bytes.Buffer
 	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
-	if err == nil || !strings.Contains(err.Error(), "tool arguments are not valid JSON") {
+	if err == nil || !strings.Contains(err.Error(), "tool call arguments must be") {
 		t.Fatalf("partial arguments error = %v", err)
 	}
 }
@@ -496,7 +496,7 @@ data: {"type":"response.output_item.added","output_index":0,"item":{"type":"func
 `
 	var buf bytes.Buffer
 	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
-	if err == nil || !strings.Contains(err.Error(), "tool arguments are not valid JSON") {
+	if err == nil || !strings.Contains(err.Error(), "tool call arguments must be") {
 		t.Fatalf("truncated partial arguments error = %v", err)
 	}
 }

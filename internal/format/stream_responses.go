@@ -1594,12 +1594,19 @@ func functionCallTerminalEmission(item responsesWireItem) (terminalEmission, boo
 	if err := checkNativeIdentity("tool name", item.Name); err != nil {
 		return terminalEmission{}, false, err
 	}
+	args, err := parseToolArguments(item.Arguments)
+	if err != nil {
+		return terminalEmission{}, false, err
+	}
 	var delta *ir.Delta
-	if item.Arguments != "" && item.Arguments != "{}" {
-		delta = &ir.Delta{Arguments: item.Arguments}
+	if string(args) != "{}" {
+		delta = &ir.Delta{Arguments: string(args)}
 	}
 	return terminalEmission{
 		block: ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
+			// The block is the type-only start template; the normalized
+			// arguments travel in the delta so a target encoder cannot count
+			// them twice.
 			ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 		}},
 		delta: delta,
@@ -1745,8 +1752,8 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 			d.recordEmittedArguments(key, suffix)
 			emitted += suffix
 		}
-		if emitted != "" && !json.Valid([]byte(emitted)) {
-			return fmt.Errorf("tool arguments are not valid JSON")
+		if _, err := parseToolArguments(emitted); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -1759,13 +1766,12 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 	if d.argsEmitted[key] == nil {
 		d.argsEmitted[key] = &toolArgumentCoverage{}
 	}
-	if args == "" {
-		return nil
+	normalized, err := parseToolArguments(args)
+	if err != nil {
+		return err
 	}
+	args = string(normalized)
 	if args != "{}" {
-		if !json.Valid([]byte(args)) {
-			return fmt.Errorf("tool arguments are not valid JSON")
-		}
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: args}})
 	}
 	d.recordEmittedArguments(key, args)

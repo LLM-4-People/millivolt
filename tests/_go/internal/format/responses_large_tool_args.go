@@ -107,7 +107,7 @@ func TestResponsesToolArgumentsCompleteCoverageStillValidates(t *testing.T) {
 	var buf bytes.Buffer
 	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(
 		responsesFunctionCallDoneStream("", `{\"q\":`, `{\"q\":1`)), nil, nil, StreamOptions{})
-	if err == nil || !strings.Contains(err.Error(), "tool arguments are not valid JSON") {
+	if err == nil || !strings.Contains(err.Error(), "tool call arguments must be") {
 		t.Fatalf("invalid complete arguments error = %v", err)
 	}
 }

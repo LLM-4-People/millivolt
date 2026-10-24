@@ -106,7 +106,7 @@ func TestResponsesToolArgumentsDivergenceFailsClosed(t *testing.T) {
 	var buf bytes.Buffer
 	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(
 		responsesFunctionCallDoneStream("", `{\"q\":`, `{\"other\":1}`)), nil, nil, StreamOptions{})
-	if err == nil || !strings.Contains(err.Error(), "tool arguments are not valid JSON") {
+	if err == nil || !strings.Contains(err.Error(), "tool call arguments must be") {
 		t.Fatalf("divergent arguments error = %v", err)
 	}
 }
