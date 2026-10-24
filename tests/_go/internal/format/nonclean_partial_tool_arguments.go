@@ -252,3 +252,77 @@ func TestResponsesNonCleanTerminalMissingArguments(t *testing.T) {
 		})
 	}
 }
+
+func chatCallResponse(finish, arguments string) string {
+	return `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"partial text","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":` + arguments + `}}]},"finish_reason":"` + finish + `"}]}`
+}
+
+func TestChatNonCleanTerminalMissingArguments(t *testing.T) {
+	const empty = `""`
+	const null = `null`
+	const whitespace = `"   "`
+	const explicitEmpty = `"{}"`
+	const complete = `"{\"q\":1}"`
+	for _, tc := range []struct {
+		name      string
+		finish    string
+		arguments string
+		wantCall  bool
+		wantArgs  string
+	}{
+		{"length empty", "length", empty, false, ""},
+		{"length null", "length", null, false, ""},
+		{"length whitespace", "length", whitespace, false, ""},
+		{"content filter whitespace", "content_filter", whitespace, false, ""},
+		{"length explicit empty", "length", explicitEmpty, true, "{}"},
+		{"length complete", "length", complete, true, `{"q":1}`},
+		{"stop empty", "stop", empty, true, "{}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(chatCallResponse(tc.finish, tc.arguments))
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					out, warnings, err := TranslateResponseBetween(target, ir.Chat, body)
+					if err != nil {
+						t.Fatalf("translation failed: %v", err)
+					}
+					wire := string(out)
+					if !strings.Contains(wire, "partial text") {
+						t.Fatalf("client lost the answer text: %s", wire)
+					}
+					count, args := translatedToolCall(t, target, wire)
+					if !tc.wantCall {
+						if count != 0 {
+							t.Fatalf("unusable call reached the client: count=%d args=%q\n%s", count, args, wire)
+						}
+						if got := warningCount(warnings, ir.WarningDropped, "tool_calls.arguments"); got != 1 {
+							t.Fatalf("argument warnings = %d, want 1: %+v", got, warnings)
+						}
+						return
+					}
+					if count != 1 || args != tc.wantArgs {
+						t.Fatalf("tool calls = %d args = %q, want one %q\n%s", count, args, tc.wantArgs, wire)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestChatNonCleanLegacyFunctionMissingArgumentsDropped(t *testing.T) {
+	body := []byte(`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"partial text","function_call":{"name":"lookup","arguments":""}},"finish_reason":"length"}]}`)
+	out, warnings, err := TranslateResponseBetween(ir.Chat, ir.Chat, body)
+	if err != nil {
+		t.Fatalf("translation failed: %v", err)
+	}
+	wire := string(out)
+	if !strings.Contains(wire, "partial text") {
+		t.Fatalf("client lost the answer text: %s", wire)
+	}
+	if count, args := translatedToolCall(t, ir.Chat, wire); count != 0 {
+		t.Fatalf("unusable legacy call reached the client: count=%d args=%q\n%s", count, args, wire)
+	}
+	if got := warningCount(warnings, ir.WarningDropped, "function_call.arguments"); got != 1 {
+		t.Fatalf("argument warnings = %d, want 1: %+v", got, warnings)
+	}
+}
