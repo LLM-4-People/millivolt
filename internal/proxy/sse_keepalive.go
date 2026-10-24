@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
-	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 // A comment line needs only its own newline. A trailing blank line would
@@ -342,7 +341,7 @@ func (p *ssePacer) commitStatus(status int) bool {
 // so it never increments the record's ResponseBytes; a relayed upstream error
 // body counts through its own write path. Returns true when SSE was already
 // committed (caller emits in-band).
-func (p *ssePacer) commitError(extra http.Header, rec *metrics.Record, inbound ir.Protocol, code int, typ, msg string) (alreadySSE bool) {
+func (p *ssePacer) commitError(extra http.Header, inbound ir.Protocol, code int, typ, msg string) (alreadySSE bool) {
 	if p == nil {
 		return false
 	}

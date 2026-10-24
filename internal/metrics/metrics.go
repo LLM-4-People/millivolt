@@ -227,13 +227,15 @@ type Record struct {
 	// attempt's role/keepalive/reasoning frames genuinely reached the client
 	// and the fresh attempt appends behind them, so the accumulated total
 	// IS the bytes the client received. Proxy-synthesized signaling is NOT
-	// body relay and is NOT counted, in every rendering: the status-line
-	// error envelopes (http.Error 502s, queue-full and storm 429s) and the
-	// in-band SSE rejection pairs (error frame + [DONE] emitted in place of
-	// a response), plus the SSE pacer's keepalives. The one counted
-	// proxy-synthesized pair is the degenerate terminal-region substitution
-	// (emitDegenerateSSE): it replaces withheld content the client would
-	// otherwise have received, so it is delivered body, not signaling. The
+	// body relay and is NOT counted: the status-line error envelopes
+	// (http.Error 502s, queue-full and storm 429s) and the SSE pacer's
+	// keepalives. An in-band SSE rejection pair (error frame plus its
+	// protocol terminal) is different: once the status line is committed it
+	// is delivered body, so its frames count through the same write path as
+	// any other stream bytes. The degenerate terminal-region substitution
+	// (emitDegenerateSSE) is also counted: it replaces withheld content the
+	// client would otherwise have received, so it is delivered body, not
+	// signaling. The
 	// cursor surface is the deliberate exception: the bridge synthesizes the
 	// whole response itself, so its counting writer counts every body byte
 	// it emits, error bodies included.

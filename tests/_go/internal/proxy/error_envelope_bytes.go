@@ -17,7 +17,7 @@ import (
 func TestErrorEnvelopeBytesNotCounted(t *testing.T) {
 	pacerRec := &metrics.Record{}
 	p := newSSEPacer(httptest.NewRecorder(), time.Hour, 0)
-	alreadySSE := p.commitError(nil, pacerRec, ir.Chat, http.StatusBadGateway, "api_error", "boom")
+	alreadySSE := p.commitError(nil, ir.Chat, http.StatusBadGateway, "api_error", "boom")
 	if alreadySSE {
 		t.Fatal("commitError reported an SSE commit")
 	}
