@@ -1710,7 +1710,11 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 		out["metadata"] = resp.Metadata
 	}
 	if resp.ServiceTier != "" {
-		out["service_tier"] = resp.ServiceTier
+		tier, tierWarns := mapServiceTier(ir.Chat, resp.ServiceTier)
+		resp.Warnings = append(resp.Warnings, tierWarns...)
+		if tier != "" {
+			out["service_tier"] = tier
+		}
 	}
 	if resp.Usage != (ir.Usage{}) {
 		usage, err := encodeChatUsage(resp.Usage)

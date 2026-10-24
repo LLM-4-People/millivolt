@@ -33,7 +33,11 @@ type anthropicStreamUsage struct {
 	OutputTokens             *int64 `json:"output_tokens"`
 	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
-	OutputTokensDetails      *struct {
+	// ServiceTier and Speed exist only on the message_start usage; a
+	// message_delta repeats the token fields without them.
+	ServiceTier         string `json:"service_tier"`
+	Speed               string `json:"speed"`
+	OutputTokensDetails *struct {
 		ThinkingTokens int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
@@ -153,15 +157,17 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			}
 			d.id, d.model = msg.ID, msg.Model
 			d.created = time.Now().Unix()
+			tier := ""
 			if msg.Usage != nil {
 				if err := d.mergeUsage(msg.Usage); err != nil {
 					return nil, err
 				}
 				d.usageReported = true
+				tier, _ = anthropicUsageServiceTier(msg.Usage.ServiceTier, msg.Usage.Speed)
 			}
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
-				ID: d.id, Model: d.model, Created: d.created, Usage: u,
+				ID: d.id, Model: d.model, Created: d.created, Usage: u, ServiceTier: tier,
 			}})
 		case "content_block_start":
 			if d.openBlocks[ev.Index] {

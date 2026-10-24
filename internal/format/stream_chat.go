@@ -395,7 +395,10 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 	case ir.EventStart:
 		if ev.Response != nil {
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
-			e.serviceTier = ev.Response.ServiceTier
+			// Chunks repeat the tier on every frame, so an unrepresentable
+			// source value must be dropped here (the Chat vocabulary, not the
+			// Responses one, owns what every chunk may carry).
+			e.serviceTier, _ = mapServiceTier(ir.Chat, ev.Response.ServiceTier)
 		}
 		if e.created == 0 {
 			e.created = time.Now().Unix()

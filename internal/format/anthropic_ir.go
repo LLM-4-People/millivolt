@@ -1413,7 +1413,12 @@ type anthropicWireUsage struct {
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	OutputTokensDetails      *struct {
+	// ServiceTier and Speed describe the serving tier of this usage. They
+	// exist only on the response side; the request spells the tier through
+	// service_tier/speed as well.
+	ServiceTier         string `json:"service_tier"`
+	Speed               string `json:"speed"`
+	OutputTokensDetails *struct {
 		ThinkingTokens int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
@@ -1475,6 +1480,10 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		Finish:       anthropicFinishReason(in.StopReason),
 		StopSequence: in.StopSequence,
 		Warnings:     warns,
+	}
+	if tier, tierWarns := anthropicUsageServiceTier(in.Usage.ServiceTier, in.Usage.Speed); tier != "" || len(tierWarns) > 0 {
+		resp.ServiceTier = tier
+		resp.Warnings = append(resp.Warnings, tierWarns...)
 	}
 	if in.StopReason == "model_context_window_exceeded" {
 		resp.Warnings.Add(ir.WarningApproximated, "stop_reason",
@@ -1563,6 +1572,14 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	}
 	if resp.Usage.ReasoningTokens != 0 {
 		usage["output_tokens_details"] = map[string]any{"thinking_tokens": resp.Usage.ReasoningTokens}
+	}
+	serviceTier, speed, tierWarns := anthropicResponseUsageTier(resp.ServiceTier)
+	resp.Warnings = append(resp.Warnings, tierWarns...)
+	if serviceTier != "" {
+		usage["service_tier"] = serviceTier
+	}
+	if speed != "" {
+		usage["speed"] = speed
 	}
 	out := map[string]any{
 		"id":            resp.ID,

@@ -1417,7 +1417,11 @@ func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
 		out["error"] = map[string]any{"code": code, "message": env.Error.Message}
 	}
 	if env.ServiceTier != "" {
-		out["service_tier"] = env.ServiceTier
+		// Every envelope caller goes through the Responses vocabulary; a
+		// source tier from another wire cannot leak a foreign spelling.
+		if tier, _ := mapServiceTier(ir.Responses, env.ServiceTier); tier != "" {
+			out["service_tier"] = tier
+		}
 	}
 	if env.Usage != (ir.Usage{}) {
 		usage, err := encodeResponsesUsage(env.Usage)
@@ -1511,12 +1515,14 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
 			fmt.Sprintf("finish reason %q is represented as Responses status %q", string(resp.Finish), status))
 	}
+	tier, tierWarns := mapServiceTier(ir.Responses, resp.ServiceTier)
+	resp.Warnings = append(resp.Warnings, tierWarns...)
 	out, err := NewResponsesEnvelope(ResponsesEnvelope{
 		ID: resp.ID, Model: resp.Model, Created: created, Status: status,
 		IncompleteReason: incompleteReason,
 		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, &resp.Warnings)),
 		Error:            resp.Error, Usage: resp.Usage,
-		Metadata: resp.Metadata, ServiceTier: resp.ServiceTier,
+		Metadata: resp.Metadata, ServiceTier: tier,
 	})
 	if err != nil {
 		return nil, err
