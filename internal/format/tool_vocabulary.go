@@ -3,7 +3,6 @@ package format
 import (
 	"fmt"
 	"regexp"
-	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
@@ -19,24 +18,8 @@ var (
 	anthropicToolIDPattern   = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 )
 
-// toolVocabularyEchoMax bounds the rejected value echoed in an encoder error.
-const toolVocabularyEchoMax = 128
-
-// boundedToolValue keeps an error echo printable and bounded; a body-sized
-// name must not become a body-sized error.
-func boundedToolValue(value string) string {
-	if len(value) <= toolVocabularyEchoMax {
-		return value
-	}
-	cut := toolVocabularyEchoMax
-	for cut > 0 && !utf8.RuneStart(value[cut]) {
-		cut--
-	}
-	return value[:cut] + "..."
-}
-
 func toolVocabularyError(target, field, value, pattern string) error {
-	return fmt.Errorf("%s %s %q does not match %s", target, field, boundedToolValue(value), pattern)
+	return fmt.Errorf("%s %s %q does not match %s", target, field, boundedEcho(value), pattern)
 }
 
 // validateChatToolVocabulary enforces the Chat target's name class on every

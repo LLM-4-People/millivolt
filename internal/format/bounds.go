@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
@@ -42,6 +43,24 @@ const WireNestedCollectionMax = 10_000
 // The proxy's request preflight and the Chat codec share this one value so the
 // translated wire cannot accept a document the passthrough path rejects.
 const WireToolCallsMax = 1024
+
+// boundedEchoMax bounds a body-controlled value echoed in an error or
+// warning. A request-sized value must never become a request-sized
+// diagnostic.
+const boundedEchoMax = 128
+
+// boundedEcho truncates value to boundedEchoMax bytes on a rune boundary and
+// marks the cut.
+func boundedEcho(value string) string {
+	if len(value) <= boundedEchoMax {
+		return value
+	}
+	cut := boundedEchoMax
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "..."
+}
 
 // checkWireArray rejects an over-bound JSON array before its typed decode.
 // Absent, null and non-array values pass: the typed decode owns their shape

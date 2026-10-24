@@ -187,7 +187,8 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
 				d.closeAll()
 				d.finishSeen = true
-				d.pendingFinish = &ir.Finish{Reason: irFinishReason(*choice.FinishReason)}
+				reason, _ := irFinishReason(*choice.FinishReason)
+				d.pendingFinish = &ir.Finish{Reason: reason}
 			}
 		}
 		if chunk.Usage != nil {

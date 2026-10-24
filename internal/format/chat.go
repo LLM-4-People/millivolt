@@ -1593,12 +1593,13 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 			blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 		}
 	}
+	finish, exactFinish := irFinishReason(choice.Finish)
 	resp := &ir.Response{
 		ID:       in.ID,
 		Model:    in.Model,
 		Created:  in.Created,
 		Blocks:   blocks,
-		Finish:   irFinishReason(choice.Finish),
+		Finish:   finish,
 		Warnings: warns,
 	}
 	if in.Usage != nil {
@@ -1612,6 +1613,12 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	}
 	if choice.Finish == "" {
 		resp.Warnings.Add(ir.WarningApproximated, "finish_reason", "provider omitted the completion marker")
+	} else if !exactFinish {
+		// The raw spelling has no canonical equivalent and is lost; report
+		// it so a strict translation can reject instead of silently
+		// publishing an incomplete result.
+		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
+			fmt.Sprintf("unknown finish reason %q has no canonical equivalent", boundedEcho(choice.Finish)))
 	}
 	return resp, nil
 }
@@ -1733,22 +1740,25 @@ func ChatFinishReason(r ir.FinishReason) string {
 	}
 }
 
-func irFinishReason(s string) ir.FinishReason {
+// irFinishReason maps one Chat finish_reason onto the canonical reason and
+// reports whether the source spelling is an exact canonical value. An empty or
+// unknown non-empty value maps to FinishOther; the caller owns the separate
+// missing-marker and unknown-value warnings.
+func irFinishReason(s string) (ir.FinishReason, bool) {
 	switch s {
 	case "stop":
-		return ir.FinishStop
+		return ir.FinishStop, true
 	case "length":
-		return ir.FinishLength
+		return ir.FinishLength, true
 	case "tool_calls", "function_call":
-		return ir.FinishToolCalls
+		return ir.FinishToolCalls, true
 	case "content_filter":
-		return ir.FinishContentFilter
+		return ir.FinishContentFilter, true
 	case "cancelled":
-		return ir.FinishCancelled
-	case "":
-		// A missing completion marker is not a clean stop.
-		return ir.FinishOther
+		return ir.FinishCancelled, true
 	default:
-		return ir.FinishOther
+		// A missing completion marker and an unknown provider spelling are
+		// not a clean stop.
+		return ir.FinishOther, false
 	}
 }
