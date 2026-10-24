@@ -96,10 +96,20 @@ type anthropicWireBlock struct {
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+	// Caller and ToolsetName describe a server-side tool call. They are
+	// retained on the wire model so their presence is reported instead of
+	// being silently discarded by encoding/json.
+	Caller      json.RawMessage `json:"caller"`
+	ToolsetName string          `json:"toolset_name"`
 
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
 	IsError   bool            `json:"is_error"`
+
+	// Transformations is an image-only knob (oversized_image: downsize or
+	// error) and changes request semantics; the canonical model has no
+	// equivalent, so its presence is reported.
+	Transformations json.RawMessage `json:"transformations"`
 
 	Thinking  string `json:"thinking"`
 	Signature string `json:"signature"`
@@ -372,6 +382,9 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 				Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: citations,
 			})
 		case "image":
+			if wireValuePresent(p.Transformations) {
+				warns.AddOnce(ir.WarningDropped, "image.transformations", "Anthropic image transformations have no cross-protocol equivalent")
+			}
 			img, err := decodeAnthropicImage(p.Source)
 			if err != nil {
 				return nil, nil, err
@@ -396,6 +409,12 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			}
 			blocks = append(blocks, docBlocks...)
 		case "tool_use":
+			if wireValuePresent(p.Caller) {
+				warns.AddOnce(ir.WarningDropped, "tool_use.caller", "server-side tool caller has no cross-protocol equivalent")
+			}
+			if p.ToolsetName != "" {
+				warns.AddOnce(ir.WarningDropped, "tool_use.toolset_name", "server-side toolset name has no cross-protocol equivalent")
+			}
 			if p.Input != nil && !json.Valid(p.Input) {
 				return nil, nil, errors.New("anthropic tool_use input is not valid JSON")
 			}
@@ -420,6 +439,9 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 				},
 			})
 		case "tool_result":
+			if p.ToolsetName != "" {
+				warns.AddOnce(ir.WarningDropped, "tool_result.toolset_name", "server-side toolset name has no cross-protocol equivalent")
+			}
 			content, w, err := decodeAnthropicContent(p.Content)
 			if err != nil {
 				return nil, nil, err

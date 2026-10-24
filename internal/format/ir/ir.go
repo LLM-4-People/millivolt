@@ -112,6 +112,20 @@ func (w *Warnings) Add(kind WarningKind, field, detail string) {
 	*w = append(*w, Warning{Kind: kind, Field: field, Detail: detail})
 }
 
+// AddOnce appends a warning unless the same kind and field are already
+// present. A loss repeated across a bounded but large collection is reported
+// once, so one request cannot amplify the warning header with one entry per
+// block. The linear scan is bounded by the number of distinct warnings, which
+// stays small.
+func (w *Warnings) AddOnce(kind WarningKind, field, detail string) {
+	for _, item := range *w {
+		if item.Kind == kind && item.Field == field {
+			return
+		}
+	}
+	w.Add(kind, field, detail)
+}
+
 // Header renders the warnings as a single header-safe value. It is bounded by
 // the caller's header budget; the proxy truncates at the boundary.
 func (w Warnings) Header() string {
