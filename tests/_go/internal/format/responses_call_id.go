@@ -47,7 +47,7 @@ func TestResponsesTargetRejectsOverlongToolCallID(t *testing.T) {
 				}
 				// The empty id is also rejected by ir.ValidateRequest, which
 				// runs first; any fail-closed error satisfies the contract.
-				if tc.id != "" && !strings.Contains(err.Error(), "1..64 bytes") {
+				if tc.id != "" && !strings.Contains(err.Error(), "1..64 characters") {
 					t.Fatalf("error = %v, want the Responses call-id bound", err)
 				}
 				return
