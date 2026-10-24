@@ -313,6 +313,15 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.itemBlockByKey[key] = idx
 				d.keyByOutput[ev.OutputIndex] = key
 				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				// An announced reasoning item opens its target block now so
+				// summary/content deltas have a stable index. A provider that
+				// announces an empty item, closes it, then delivers every
+				// summary part only in the terminal document leaves one empty
+				// Anthropic thinking block. Suppressing it would require
+				// deferring the start or buffering a start already sent, which
+				// risks ordering and signature loss for a cosmetic residual;
+				// TestResponsesEmptyAnnouncedReasoningPinsThinkingBlock pins
+				// the accepted behavior.
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
 						ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
