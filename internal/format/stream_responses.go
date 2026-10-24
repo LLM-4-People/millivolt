@@ -124,11 +124,10 @@ type ResponsesStreamDecoder struct {
 	openToolKeys map[string]bool
 	// toolAliases maps an alternate identity spelling of an announced call to
 	// its canonical key. A terminal entry can carry only the item id after the
-	// announcement used the call id, or the reverse.
+	// announcement used the call id, or the reverse. Aliases live for the
+	// whole stream: the terminal document still repeats a call after its done
+	// event closed the block.
 	toolAliases map[string]string
-	// toolAliasByKey maps a canonical call key to the alias it registered, so
-	// closing the call removes both.
-	toolAliasByKey map[string]string
 	// toolNames maps an announced call key to its function name for
 	// identity-free terminal matching.
 	toolNames map[string]string
@@ -200,7 +199,6 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		argumentEvidence:     map[string]bool{},
 		openToolKeys:         map[string]bool{},
 		toolAliases:          map[string]string{},
-		toolAliasByKey:       map[string]string{},
 		toolNames:            map[string]string{},
 		announcedOutputs:     map[int]bool{},
 		announcedItems:       map[string]bool{},
@@ -345,7 +343,6 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					if _, exists := d.toolAliases[alias]; !exists {
 						if _, exists := d.itemBlockByKey[alias]; !exists {
 							d.toolAliases[alias] = key
-							d.toolAliasByKey[key] = alias
 						}
 					}
 				}
@@ -1131,7 +1128,6 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	clear(d.argumentEvidence)
 	clear(d.openToolKeys)
 	clear(d.toolAliases)
-	clear(d.toolAliasByKey)
 	clear(d.toolNames)
 	clear(d.keyByOutput)
 	clear(d.keyByPart)
@@ -2246,10 +2242,6 @@ func (d *ResponsesStreamDecoder) clearToolState(key string) {
 	delete(d.argumentEvidence, key)
 	delete(d.openToolKeys, key)
 	delete(d.toolNames, key)
-	if alias, ok := d.toolAliasByKey[key]; ok {
-		delete(d.toolAliases, alias)
-		delete(d.toolAliasByKey, key)
-	}
 	if cov := d.argsEmitted[key]; cov != nil {
 		d.argsEmittedBytes -= cov.emitted.Len()
 		delete(d.argsEmitted, key)

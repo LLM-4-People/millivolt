@@ -395,3 +395,38 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+// A done event closes the announced block before the terminal document repeats
+// it. The terminal may use the other identity spelling at another position; the
+// alias must survive the close so the call is recognized, not synthesized again.
+func TestResponsesTerminalIdentitySpellingAfterDoneMatchesAnnouncement(t *testing.T) {
+	source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":5,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","id":"fc_1","name":"lookup","arguments":"{\"q\":1}"}]}}
+
+`
+	for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+		t.Run(string(target), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			out := buf.String()
+			calls := streamedToolCalls(t, target, out)
+			if len(calls) != 1 {
+				t.Fatalf("tool calls = %d, want one: %s", len(calls), out)
+			}
+			if got := chatCallID(t, target, calls[0]); got != "call_1" {
+				t.Fatalf("tool id = %q, want call_1: %s", got, out)
+			}
+			if strings.TrimSpace(calls[0].args.String()) != `{"q":1}` {
+				t.Fatalf("arguments = %q, want the terminal object: %s", calls[0].args.String(), out)
+			}
+		})
+	}
+}
