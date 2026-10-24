@@ -1900,10 +1900,13 @@ async function main() {
   {
     const doc = {
       writable: true,
-      fields: [{ key: 'backup_max_bytes', category: 'backup', label: 'Backup size cap', kind: 'bytes', help: 'cap', hot_reload: true }],
+      fields: [
+        { key: 'backup_max_bytes', category: 'backup', label: 'Backup size cap', kind: 'bytes', help: 'cap', hot_reload: true },
+        { key: 'db_path', category: 'providers', label: 'Database path', kind: 'string', help: 'path', hot_reload: false },
+      ],
       categories: [{ id: 'backup', label: 'Backup', help: 'archives' }],
-      values: { backup_max_bytes: '1GiB' },
-      defaults: { backup_max_bytes: '1GiB' },
+      values: { backup_max_bytes: '1GiB', db_path: 'live.db' },
+      defaults: { backup_max_bytes: '1GiB', db_path: 'default.db' },
       overrides: {},
       backup: { config: true, database: true, requests: 12, modified: ['backup_max_bytes'] },
     };
@@ -1941,7 +1944,7 @@ async function main() {
         if (u.includes('inspect=1')) {
           return Promise.resolve({ ok: true, json: async () => ({
             ok: true, created: '2026-09-07T12:00:00Z',
-            config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+            config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes', 'db_path'] },
             database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
           }) });
         }
@@ -1972,7 +1975,7 @@ async function main() {
     calls.length = 0;
     const inspectPayload = {
       ok: true, created: '2026-09-07T12:00:00Z',
-      config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+      config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes', 'db_path'] },
       database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
     };
     let releaseInspect;
@@ -2025,6 +2028,21 @@ async function main() {
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
       d.getElementById('backup-preview').textContent.includes('default 1GiB') &&
       d.getElementById('backup-preview').textContent.includes('live 1GiB'));
+    const liveOnlyRow = d.querySelector('[data-backup="diff"][data-key="db_path"]');
+    check('replace preview shows a live-only key as reset',
+      !!liveOnlyRow &&
+      liveOnlyRow.textContent.includes('backup default default.db') &&
+      liveOnlyRow.textContent.includes('live live.db') &&
+      liveOnlyRow.textContent.includes('replace resets it'));
+    const mergeRadio = d.querySelector('input[name="backup-mode"][value="merge"]');
+    mergeRadio.checked = true;
+    mergeRadio.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const mergeRow = d.querySelector('[data-backup="diff"][data-key="db_path"]');
+    check('merge preview reports a live-only key as unchanged',
+      !!mergeRow && mergeRow.textContent.includes('merge leaves it unchanged'));
+    const replaceRadio = d.querySelector('input[name="backup-mode"][value="replace"]');
+    replaceRadio.checked = true;
+    replaceRadio.dispatchEvent(new w.Event('change', { bubbles: true }));
     check('archive facts sit apart from restore options',
       d.querySelector('[data-backup="archive"]') &&
       d.querySelector('[data-backup="archive"]').textContent.includes('t.mvb') &&

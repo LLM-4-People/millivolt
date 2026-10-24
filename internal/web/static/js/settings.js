@@ -552,8 +552,16 @@ function backupDiffRowsHTML(doc) {
   const cfg = backupInspect.data.config || {};
   if (!cfg.present) return '';
   const modified = Array.isArray(cfg.modified) ? cfg.modified : [];
-  if (!modified.length) {
-    return `<div class="st-row st-backup" data-cat="backup" data-backup="diff" data-label="restore config default" id="backup-preview"><div class="st-name">Config</div><div class="st-ctl"><span class="st-hint">every key in this backup is still the built-in default</span></div></div>`;
+  const modifiedSet = new Set(modified);
+  const vsLive = new Set(Array.isArray(cfg.vs_live) ? cfg.vs_live : []);
+  // A replace restore writes every key, including a key that is default in
+  // the backup but customized live. Render the union so that reset is visible;
+  // merge only overlays non-default backup keys, so a live-only key is
+  // explicitly reported as unchanged instead.
+  const keys = modified.slice();
+  for (const key of vsLive) if (!modifiedSet.has(key)) keys.push(key);
+  if (!keys.length) {
+    return `<div class="st-row st-backup" data-cat="backup" data-backup="diff" data-label="restore config default" id="backup-preview"><div class="st-name">Config</div><div class="st-ctl"><span class="st-hint">every key in this backup is still the built-in default and matches the live config</span></div></div>`;
   }
   const fields = (doc && doc.fields) || (settingsDoc && settingsDoc.fields) || [];
   const byKey = {};
@@ -561,12 +569,16 @@ function backupDiffRowsHTML(doc) {
   const defaults = (doc && doc.defaults) || (settingsDoc && settingsDoc.defaults) || {};
   const live = (doc && doc.values) || (settingsDoc && settingsDoc.values) || {};
   const values = cfg.values || {};
-  const vsLive = new Set(Array.isArray(cfg.vs_live) ? cfg.vs_live : []);
-  return modified.map((key, i) => {
+  const merge = backupMode === 'merge';
+  return keys.map((key, i) => {
     const label = (byKey[key] && byKey[key].label) || key;
     const val = backupScalar(values[key]);
-    let hint = 'default ' + backupScalar(defaults[key]);
-    hint += vsLive.has(key) ? ' · live ' + backupScalar(live[key]) : ' · same as live';
+    const inBackup = modifiedSet.has(key);
+    const differsLive = vsLive.has(key);
+    let hint = inBackup ? 'default ' + backupScalar(defaults[key]) : 'backup default ' + backupScalar(defaults[key]);
+    if (differsLive) hint += ' · live ' + backupScalar(live[key]);
+    else if (inBackup) hint += ' · same as live';
+    if (!inBackup) hint += merge ? ' · merge leaves it unchanged' : ' · replace resets it';
     const id = i === 0 ? ' id="backup-preview"' : '';
     return `<div class="st-row" data-cat="backup" data-backup="diff" data-key="${escapeHtml(key)}" data-label="${escapeHtml(label)} restore"${id}>
       <div class="st-name">${escapeHtml(label)}</div>
