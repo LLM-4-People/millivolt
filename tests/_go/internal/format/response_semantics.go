@@ -14,6 +14,7 @@ import (
 func TestResponsesReasoningTextDecoded(t *testing.T) {
 	t.Run("request", func(t *testing.T) {
 		body := `{"model":"m","input":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"start"}]},` +
 			`{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"sum"}],` +
 			`"content":[{"type":"reasoning_text","text":"raw"},{"type":"mystery"}]},` +
 			`{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
@@ -21,10 +22,10 @@ func TestResponsesReasoningTextDecoded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(req.Messages) == 0 || len(req.Messages[0].Content) == 0 {
+		if len(req.Messages) < 2 || len(req.Messages[1].Content) == 0 {
 			t.Fatalf("decoded messages = %+v", req.Messages)
 		}
-		reasoning := req.Messages[0].Content[0].Reasoning
+		reasoning := req.Messages[1].Content[0].Reasoning
 		if reasoning == nil || reasoning.Text != "raw" {
 			t.Fatalf("reasoning = %+v, want the reasoning_text content", reasoning)
 		}
@@ -39,7 +40,7 @@ func TestResponsesReasoningTextDecoded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		blocks := decodeJSONMap(t, out)["messages"].([]any)[0].(map[string]any)["content"].([]any)
+		blocks := decodeJSONMap(t, out)["messages"].([]any)[1].(map[string]any)["content"].([]any)
 		if len(blocks) != 1 || blocks[0].(map[string]any)["text"] != "raw" {
 			t.Fatalf("Anthropic reasoning blocks = %v, want visible text", blocks)
 		}

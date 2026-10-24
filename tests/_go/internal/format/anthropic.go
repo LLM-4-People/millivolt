@@ -51,6 +51,7 @@ func TestTranslateRequestBasic(t *testing.T) {
 func TestTranslateRequestContentArraysAndToolDefaults(t *testing.T) {
 	in := `{"model":"m","messages":[
 		{"role":"system","content":[{"type":"text","text":"be nice"},{"type":"image"}]},
+		{"role":"user","content":"use the tool"},
 		{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"noargs","arguments":""}}]},
 		{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"result"}]}
 	],"tools":[{"type":"function","function":{"name":"noargs","description":"d"}}]}`
@@ -66,12 +67,15 @@ func TestTranslateRequestContentArraysAndToolDefaults(t *testing.T) {
 		t.Fatalf("array system = %v, want be nice", got["system"])
 	}
 	msgs := got["messages"].([]any)
-	assistant := msgs[0].(map[string]any)
+	if len(msgs) != 3 || msgs[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("history must begin with the user turn: %v", msgs)
+	}
+	assistant := msgs[1].(map[string]any)
 	block := assistant["content"].([]any)[0].(map[string]any)
 	if input, ok := block["input"].(map[string]any); !ok || len(input) != 0 {
 		t.Fatalf("empty tool arguments input = %#v, want {}", block["input"])
 	}
-	toolResult := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	toolResult := msgs[2].(map[string]any)["content"].([]any)[0].(map[string]any)
 	if toolResult["content"] != "result" {
 		t.Fatalf("array tool result = %#v, want result", toolResult["content"])
 	}

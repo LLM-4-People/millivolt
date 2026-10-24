@@ -730,13 +730,14 @@ func TestChatReasoningIsDecoded(t *testing.T) {
 			}
 
 			reqBody := `{"model":"m","messages":[` +
+				`{"role":"user","content":"start"},` +
 				`{"role":"assistant","content":"answer","` + tc.field + `":"thought"},` +
 				`{"role":"user","content":"next"}]}`
 			req, err := DecodeChatRequest([]byte(reqBody))
 			if err != nil {
 				t.Fatal(err)
 			}
-			first := req.Messages[0].Content
+			first := req.Messages[1].Content
 			if len(first) != 2 || first[0].Type != ir.BlockReasoning || first[1].Type != ir.BlockText {
 				t.Fatalf("request blocks = %+v", first)
 			}
