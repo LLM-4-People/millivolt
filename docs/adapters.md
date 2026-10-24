@@ -65,6 +65,11 @@ tool use, tool calls and results, structured outputs, reasoning effort and
 summary, stop sequences, sampling parameters, metadata, usage and cache-token
 accounting.
 
+A malformed Chat `stop` value is rejected before any upstream send. Absent,
+null, a string and an array of strings are the accepted shapes; any other type
+returns 400 instead of silently dropping the stop filter. An empty string and
+an empty array still mean no stops.
+
 Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:
 

@@ -250,7 +250,11 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		// message and parameter warnings share the same slice.
 		req.Metadata, warns = decodeChatMetadata(in.Metadata)
 	}
-	if stops := parseStop(in.Stop); len(stops) > 0 {
+	stops, err := parseStop(in.Stop)
+	if err != nil {
+		return nil, err
+	}
+	if len(stops) > 0 {
 		req.Stop = stops
 	}
 	if in.N != nil && *in.N > 1 {
@@ -375,23 +379,27 @@ func (m chatWireMessage) ContentText() (string, bool) {
 	return b.String(), true
 }
 
-// parseStop normalizes the Chat stop field's string or array form.
-func parseStop(raw json.RawMessage) []string {
-	if len(raw) == 0 {
-		return nil
+// parseStop normalizes the Chat stop field's string or array form. Absent,
+// null, a string and an array of strings are the accepted shapes; anything else
+// is a client error rather than a silently dropped stop filter. The single
+// empty string and the empty array still mean no stops.
+func parseStop(raw json.RawMessage) ([]string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
 	}
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
+	if err := json.Unmarshal(trimmed, &s); err == nil {
 		if s == "" {
-			return nil
+			return nil, nil
 		}
-		return []string{s}
+		return []string{s}, nil
 	}
 	var arr []string
-	if err := json.Unmarshal(raw, &arr); err == nil {
-		return arr
+	if err := json.Unmarshal(trimmed, &arr); err == nil {
+		return arr, nil
 	}
-	return nil
+	return nil, errors.New("stop must be a string, an array of strings, or null")
 }
 
 // decodeChatMetadata keeps the string-valued metadata entries and warns about
