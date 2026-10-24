@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
@@ -95,10 +96,13 @@ func validateResponsesToolVocabulary(req *ir.Request) error {
 }
 
 func validateResponsesToolReference(field, id string) error {
-	if len(id) >= 1 && len(id) <= 64 {
+	// JSON Schema maxLength counts characters (RFC 8259 code points), not
+	// UTF-8 bytes. A 64-rune multibyte id is valid even though it is longer
+	// than 64 bytes.
+	if n := utf8.RuneCountInString(id); n >= 1 && n <= 64 {
 		return nil
 	}
-	return fmt.Errorf("responses %s %q must be 1..64 bytes", field, boundedEcho(id))
+	return fmt.Errorf("responses %s %q must be 1..64 characters", field, boundedEcho(id))
 }
 
 // validateAnthropicToolCall enforces the Anthropic target's name and id
