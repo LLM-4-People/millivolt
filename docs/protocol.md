@@ -182,7 +182,7 @@ entries in a `messages`, `tools`, `functions`, `input`, `stop`,
 `tool_calls` members across every message, more than 10,000 distinct top-level
 members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
 top-level objects. Those preflight bounds apply to native and translated
-requests alike. A translated request also passes through its target codec,
+requests alike. A translated request also passes through its protocol codec,
 which rejects with HTTP 400 more than 10,000 entries in a Responses `include`
 array or in a tool `allowed_callers` array, or more than 4,096 blocks in an
 Anthropic `system` list. A native passthrough is byte-transparent and does not
