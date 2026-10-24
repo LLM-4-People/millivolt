@@ -6,7 +6,10 @@ package proxy
 // helper now writes the closing newline before every rescue return.
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -790,5 +794,65 @@ func TestTerminalHoldFramesCompleteLines(t *testing.T) {
 				t.Fatalf("record = %+v, want one healthy delivered answer and terminal", rec)
 			}
 		})
+	}
+}
+
+// splitChunkReader returns one chunk per Read so the relay flushes the first
+// line before it sees the next one.
+type splitChunkReader struct{ chunks [][]byte }
+
+func (r *splitChunkReader) Read(p []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunks[0])
+	if n < len(r.chunks[0]) {
+		r.chunks[0] = r.chunks[0][n:]
+	} else {
+		r.chunks = r.chunks[1:]
+	}
+	return n, nil
+}
+
+type flushRecorder struct {
+	header http.Header
+	body   bytes.Buffer
+}
+
+func (w *flushRecorder) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+func (w *flushRecorder) WriteHeader(int)             {}
+func (w *flushRecorder) Write(p []byte) (int, error) { return w.body.Write(p) }
+func (w *flushRecorder) Flush()                      {}
+
+// TestTerminalHoldFramesAfterFlushedDataLine is the NEW-1 write-boundary
+// regression: the content line was flushed to the client in an earlier read,
+// so the hold cannot see it in out. The remembered wire state must still start
+// the terminal in a new event instead of appending a second data line.
+func TestTerminalHoldFramesAfterFlushedDataLine(t *testing.T) {
+	contentLine := []byte(`data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n")
+	finishLine := []byte(`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n")
+	body := &splitChunkReader{chunks: [][]byte{contentLine, finishLine}}
+	w := &flushRecorder{}
+	rec := &metrics.Record{StatusCode: http.StatusOK}
+	s := New(config.Default(), metrics.Noop{})
+	var uerr upstreamErrorRescue
+	if rescue := s.streamBody(context.Background(), w, body, rec, false, false, &uerr, ir.Chat); rescue != rescueNone {
+		t.Fatalf("rescue = %v, want none", rescue)
+	}
+	got := w.body.String()
+	assertSingleDataEvents(t, got)
+	if !strings.Contains(got, `"content":"hello"`) {
+		t.Fatalf("content line missing: %s", got)
+	}
+	if n := strings.Count(got, `"finish_reason":"stop"`); n != 1 {
+		t.Fatalf("terminal markers = %d, want exactly 1: %s", n, got)
+	}
+	if rec.IsError() || !rec.HadAnswerContent || rec.FinishReason != "stop" {
+		t.Fatalf("record = %+v, want a healthy delivered answer and terminal", rec)
 	}
 }

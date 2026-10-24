@@ -2373,6 +2373,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		out     bytes.Buffer // released bytes awaiting one client write
 		hold    []byte       // bytes withheld from the terminal-candidate event onward
 		holding bool
+		// wireDataOpen records that the last bytes written to the client end
+		// with a data line and no blank separator. It survives writeOut's
+		// buffer reset, so a hold opened after an earlier flush still knows to
+		// start a new event.
+		wireDataOpen bool
 		// eventName and eventBody buffer one Responses terminal-named event
 		// until its blank-line boundary. The name alone cannot decide hold or
 		// release: a multi-line data payload may only become a terminal
@@ -2426,6 +2431,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		hold = append(hold, line...)
 		hold = append(hold, '\n')
 	}
+	// lastLineIsData reports whether the next data line would join an open
+	// event's existing data line, whether that line is still buffered in out
+	// or was already flushed to the client.
+	lastLineIsData := func() bool {
+		if out.Len() > 0 {
+			return endsWithUnframedDataLine(out.Bytes())
+		}
+		return wireDataOpen
+	}
 	// clientGone records a write-detected abort: the disconnect stamps
 	// the 499, and the analyzer's in-band error - when one reached the
 	// wire - still fills the record, so the abort counts like its 200
@@ -2447,6 +2461,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			clientGone()
 			return false
 		}
+		wireDataOpen = endsWithUnframedDataLine(o)
 		if bytes.IndexByte(o, '\n') >= 0 {
 			flusher.Flush()
 		}
@@ -2480,6 +2495,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			clientGone()
 			return false
 		}
+		wireDataOpen = false
 		flusher.Flush()
 		return true
 	}
@@ -2547,6 +2563,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					clientGone()
 					return false
 				}
+				wireDataOpen = endsWithUnframedDataLine(hold)
 				hold = hold[:0]
 			}
 			holding = false
@@ -2583,6 +2600,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				clientGone()
 				return false
 			}
+			wireDataOpen = endsWithUnframedDataLine(hold)
 		}
 		hold = hold[:0]
 		holding = false
@@ -2796,7 +2814,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// line already flushed in out is its own event; separate
 					// it before the held event starts.
 					holding = true
-					if endsWithUnframedDataLine(out.Bytes()) {
+					if lastLineIsData() {
 						hold = append(hold, '\n')
 					}
 					appendHeld(line)
@@ -2866,6 +2884,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						clientGone()
 						return rescueNone
 					}
+					wireDataOpen = endsWithUnframedDataLine(hold)
 					flusher.Flush()
 					hold = hold[:0]
 					holding = false
@@ -2942,7 +2961,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, tail...)
 					hold = append(hold, '\n', '\n')
 				} else {
-					if _, isData := sse.DataPayload(tail); isData && endsWithUnframedDataLine(out.Bytes()) {
+					if _, isData := sse.DataPayload(tail); isData && lastLineIsData() {
 						out.WriteByte('\n')
 					}
 					out.Write(tail)
@@ -2992,6 +3011,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						clientGone()
 						return rescueNone
 					}
+					wireDataOpen = endsWithUnframedDataLine(hold)
 					hold = hold[:0]
 				}
 				if !writeOut() {
