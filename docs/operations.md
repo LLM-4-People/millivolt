@@ -192,11 +192,13 @@ case-insensitively, and values must be non-empty single-line header values.
 
 The body rewrite is fail closed. It applies to passthrough and translated
 Anthropic requests; when the body is not a JSON object, or the rewritten
-result would exceed `max_request_bytes`, nothing is written and the original
-bytes are relayed verbatim with one process log line recording the reason. A
-successful rewrite replaces the body for the request's whole life, so every
-relay attempt, absorbed retry and quality re-send reuses it, and the recorded
-request cap is re-stamped from the effective body. A rule sets only the body
+result would exceed `max_request_bytes`, nothing is written: the original
+bytes are used unchanged by the rewrite stage and are still translated when
+translation is active, with one process log line recording the reason. Only a
+passthrough relays them verbatim. A successful rewrite replaces the body for
+the request's whole life, so every relay attempt, absorbed retry and quality
+re-send reuses it, and the recorded request cap is re-stamped from the
+effective body. A rule sets only the body
 fields it names, and the re-read pair keeps the wire's documented precedence -
 `max_completion_tokens` wins over `max_tokens` - so a rule setting only
 `max_tokens` cannot raise a request whose client already sent
@@ -270,9 +272,9 @@ drawer read it like any other.
 the body's top level from the relayed upstream bytes; the default `false`
 forwards them unchanged. The removal rides the same body-rewrite engine and
 gate as the [request overrides](#request-overrides) body section: one document
-decode when both features match one request, the original bytes relayed
-unchanged when the body is not a JSON object or the rewrite would exceed
-`max_request_bytes`, and cursor targets skipping the body section. The
+decode when both features match one request, the original bytes used unchanged
+by the rewrite stage when the body is not a JSON object or the rewrite would
+exceed `max_request_bytes`, and cursor targets skipping the body section. The
 client's spelling reaches the upstream wire only on OpenAI-wire passthrough.
 
 When a tracked value was extracted and the request translates to the Anthropic

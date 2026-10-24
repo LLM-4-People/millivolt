@@ -681,3 +681,60 @@ func TestTypeLineDurationRange(t *testing.T) {
 		t.Errorf("queue_retry_after TypeLine = %q, must not use integer seconds", qline)
 	}
 }
+
+// TestSchemaHelpStatesTranslationScope pins the corrected help text and the
+// generated example together, so a regeneration cannot drift back to the old
+// OpenAI-only/Anthropic-ensure_tools/first-occurrence claims.
+func TestSchemaHelpStatesTranslationScope(t *testing.T) {
+	cases := []struct {
+		key     string
+		want    string
+		notWant string
+	}{
+		{"providers", "on a Chat outbound wire", "Anthropic client bodies"},
+		{"request_overrides", "on a Chat Completions or Anthropic client body", "on the OpenAI wire"},
+		{"sub_conversations", "a duplicate top-level key drops the identity", "resolve by their first occurrence"},
+	}
+	for _, tc := range cases {
+		field := FieldByKey(tc.key)
+		if field == nil {
+			t.Fatalf("schema key %q missing", tc.key)
+		}
+		if !strings.Contains(field.Help, tc.want) {
+			t.Fatalf("%s help does not state %q: %s", tc.key, tc.want, field.Help)
+		}
+		if strings.Contains(field.Help, tc.notWant) {
+			t.Fatalf("%s help still states %q: %s", tc.key, tc.notWant, field.Help)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "proxy.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The YAML writer wraps documentation into comment lines, so join them
+	// before asserting a contiguous sentence.
+	example := exampleHelpText(string(raw))
+	for _, tc := range cases {
+		if !strings.Contains(example, tc.want) {
+			t.Fatalf("proxy.example.yaml does not carry the corrected %s text %q", tc.key, tc.want)
+		}
+		if strings.Contains(example, tc.notWant) {
+			t.Fatalf("proxy.example.yaml still carries the old %s text %q", tc.key, tc.notWant)
+		}
+	}
+}
+
+// exampleHelpText joins the generated example's wrapped comment lines into one
+// searchable string. Comments are "# ..." possibly indented; every line break
+// inside a comment block becomes one space.
+func exampleHelpText(example string) string {
+	lines := strings.Split(example, "\n")
+	var joined []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			joined = append(joined, strings.TrimSpace(strings.TrimPrefix(trimmed, "#")))
+		}
+	}
+	return strings.Join(joined, " ")
+}

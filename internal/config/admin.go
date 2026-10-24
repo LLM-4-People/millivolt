@@ -38,8 +38,9 @@ type Handler struct {
 	// back into the file (dev instance -listen / -db-path).
 	Overrides map[string]string
 	// Persist is called AFTER a successful WriteFile to hot-apply. Production
-	// uses LoadFileRepair + CLI overrides + Server.Reload (a clean WriteFile
-	// is a no-op repair). Nil is write-only (tests).
+	// persists through reloadConfigLocked (LoadFileStrict + CLI overrides +
+	// Server.Reload); a clean WriteFile is still applied and reported. Nil is
+	// write-only (tests).
 	Persist func() (restartRequired []string, err error)
 	// Serialize brackets the POST file read/validate/write/reload transaction
 	// with the process-wide config-application serializer. Production wires it

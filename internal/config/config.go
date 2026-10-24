@@ -1732,12 +1732,14 @@ func failClosedYAMLKey(key string) bool {
 	}
 }
 
-// LoadFile reads the YAML config at path (may be empty) and merges recognized,
-// valid keys over the built-in defaults. A missing file yields the defaults.
-// Unknown keys, invalid types/ranges, and extra YAML documents are omitted so
-// a typo cannot block boot; a duplicate top-level key is ambiguous and returns
-// a parse error naming the key and line. Settings POST still rejects those
-// inputs. This read path does not rewrite the file.
+// LoadFile is the lenient library/test read. It reads the YAML config at path
+// (may be empty) and merges recognized, valid keys over the built-in defaults;
+// a missing file yields the defaults. Unknown keys, invalid types/ranges and
+// extra YAML documents are omitted. Production does not call it: boot uses
+// LoadFileRepair, reload uses LoadFileStrict, and Settings, backup and the
+// healthcheck use their strict reads. A duplicate top-level key is ambiguous
+// and returns a parse error naming the key and line. This path does not
+// rewrite the file.
 func LoadFile(path string) (*Config, error) {
 	cfg, _, err := loadYAMLFile(path)
 	return cfg, err

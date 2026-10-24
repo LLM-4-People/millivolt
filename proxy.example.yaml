@@ -523,15 +523,15 @@ conversation_max_open: 64
 # Per-client tracking of a request body field that carries a sub-conversation identity,
 # exemplified by opencode's promptCacheKey. Each entry names one classified client exactly
 # (no wildcard, no case folding) plus 1..4 exact JSON field names matched only at the
-# request body's top level; the first present field decides (duplicate top-level keys
-# resolve by their first occurrence): a present value that is not a JSON string value
-# counts as absent and the next field is checked, while a present string that cannot be
-# decoded or fails the identity rules (non-empty after trimming, valid UTF-8, free of
-# control bytes, at most 512 bytes) drops the identity for the request - no later field is
-# consulted - and a dropped identity is never a client error. The drop is conservative: a
-# value whose raw spelling exceeds the bounded scan window is dropped even when its
-# trimmed form would pass. The value groups the request under a k: conversation identity,
-# after the X-Proxy-Session header (s:) and before automatic client+key grouping;
+# request body's top level; the first present field decides (a duplicate top-level key
+# drops the identity): a present value that is not a JSON string value counts as absent
+# and the next field is checked, while a present string that cannot be decoded or fails
+# the identity rules (non-empty after trimming, valid UTF-8, free of control bytes, at
+# most 512 bytes) drops the identity for the request - no later field is consulted - and a
+# dropped identity is never a client error. The drop is conservative: a value whose raw
+# spelling exceeds the bounded scan window is dropped even when its trimmed form would
+# pass. The value groups the request under a k: conversation identity, after the
+# X-Proxy-Session header (s:) and before automatic client+key grouping;
 # X-Proxy-Parent-Session still owns parent linkage. Requests translated to the Anthropic
 # wire gain a top-level prompt_cache_key carrying the value. strip: true removes the
 # entry's configured fields from the top level of the relayed upstream passthrough body;
@@ -746,8 +746,8 @@ model_rules:
 # ensured tool names and headers (a string map). Field names only, never static prices.
 # Custom cost_keys must report USD; leave cost_in_usd_ticks to automatic unit conversion.
 # ensure_tools names function tools injected as inert stubs into relayed Chat Completions
-# or Anthropic client bodies missing them, with tool_choice none added when the client
-# sent no tools, so a first-party client's tool-signature gate still recognizes the
+# client bodies on a Chat outbound wire missing them, with tool_choice none added when the
+# client sent no tools, so a first-party client's tool-signature gate still recognizes the
 # request. Header values expand {{uuid4}} to a fresh UUID, {{platform}} to the server's
 # Rust-style os; arch pair, and {{opencode-msg-id}}/{{opencode-ses-id}} to fresh
 # opencode-format identifiers; unknown templates stay literal. On HTTP relay requests,
@@ -817,14 +817,14 @@ provider_aliases: {}
 # and for the same header or body field the later rule wins. headers sets or replaces
 # upstream headers (names are canonicalized, values must be non-empty single-line),
 # remove_headers deletes them, and body sets max_tokens / max_completion_tokens
-# (1..1000000) on the OpenAI wire. Credential and protocol headers (such as authorization,
-# cookie, host, content-type, and the whole x-proxy- control prefix) are rejected at load.
-# The override applies after provider headers and the client's X-Proxy-Headers map and
-# wins over both; it covers inference sends only, never model discovery or token refresh.
-# Body rewrites apply to passthrough and translated-anthropic requests and re-stamp the
-# recorded request cap; the Cursor bridge reads no body fields, so body is skipped for
-# cursor targets while header rules still apply. An empty list leaves every request
-# untouched. Hot-reloads.
+# (1..1000000) on a Chat Completions or Anthropic client body. Credential and protocol
+# headers (such as authorization, cookie, host, content-type, and the whole x-proxy-
+# control prefix) are rejected at load. The override applies after provider headers and
+# the client's X-Proxy-Headers map and wins over both; it covers inference sends only,
+# never model discovery or token refresh. Body rewrites apply to passthrough and
+# translated-anthropic requests and re-stamp the recorded request cap; the Cursor bridge
+# reads no body fields, so body is skipped for cursor targets while header rules still
+# apply. An empty list leaves every request untouched. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
 request_overrides: []

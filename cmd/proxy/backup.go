@@ -661,8 +661,9 @@ func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 }
 
 // readRestoreConfigFile captures the live config file for rollback. A missing
-// file is not an error: LoadFile treats it as defaults and a restore may create
-// it. Any other read failure aborts before the restore writes anything.
+// file is not an error for this capture: the caller's strict load substitutes
+// defaults on fs.ErrNotExist and the restore may create it. Any other read
+// failure aborts before the restore writes anything.
 func readRestoreConfigFile(path string) (raw []byte, mode os.FileMode, exists bool, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
