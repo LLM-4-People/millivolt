@@ -2024,10 +2024,7 @@ func requestStopCount(raw json.RawMessage) int {
 		}
 		return 1
 	case '[':
-		n, _, ok := metrics.CountJSONArrayBytes(raw, i, requestMetadataMaxElements)
-		if ok {
-			return n
-		}
+		return requestArrayCount(raw)
 	}
 	return 0
 }
