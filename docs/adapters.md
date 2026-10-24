@@ -223,6 +223,13 @@ target cannot consume them:
 - A Chat response carries one refusal field, so multiple IR refusal parts are
   concatenated in block order. An empty part contributes nothing and never
   clears earlier text.
+- A translated response has no audio representation: the IR has no audio output
+  block, so a Chat `message.audio` or streamed `delta.audio` and a Responses
+  `output_audio` content part never reach a target wire. The non-streaming
+  Responses decoder reports one `content.output_audio` warning; the Chat
+  decoder carries no audio block and reports no warning. Native same-protocol
+  relay keeps the audio unchanged. Mapping a transcript to assistant text
+  would be a fidelity feature, not a lossless translation.
 - A translated non-streaming response assumes a schema-valid source identity.
   A source that omits `id` or `model` yields an empty string on the target
   rather than an invented identity. The Responses envelope carries protocol

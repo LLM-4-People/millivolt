@@ -795,6 +795,8 @@ class PublishedContracts(unittest.TestCase):
             "A source in-band error followed by the protocol terminal is deliberate",
             "A streamed tool `arguments` value that is exactly `null`",
             "Anthropic `content_block_start` text is not counted as answer content",
+            "A translated response has no audio representation",
+            "the non-streaming Responses decoder reports one `content.output_audio` warning",
         ):
             self.assertIn(phrase, adapters)
         for stale in (
