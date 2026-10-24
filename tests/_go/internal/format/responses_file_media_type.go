@@ -148,6 +148,16 @@ func TestResponsesRawBase64FileDataInfersMediaType(t *testing.T) {
 		}
 	})
 
+	t.Run("a part with no payload stays invalid", func(t *testing.T) {
+		body := responsesFileRequest(`{"type":"input_file","filename":"a.pdf"}`)
+		for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic} {
+			if _, _, err := TranslateRequestBetween(ir.Responses, target, []byte(body), 16, ""); err == nil ||
+				!strings.Contains(err.Error(), "file block has no file_id, file_data or file_url") {
+				t.Fatalf("%s: payload-less file error = %v, want the IR rejection", target, err)
+			}
+		}
+	})
+
 	t.Run("data url unchanged", func(t *testing.T) {
 		body := responsesFileRequest(`{"type":"input_file","filename":"a.pdf","file_data":"data:application/pdf;base64,JVBERi0="}`)
 		chat, _, err := TranslateRequestBetween(ir.Responses, ir.Chat, []byte(body), 16, "")

@@ -516,13 +516,13 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 			}
 			if file.FileData != "" && file.MediaType == "" {
 				// The bytes cannot be typed for a target that needs a media
-				// type. Keep a file id or URL on the same part; otherwise the
-				// block has no payload left and is dropped below.
+				// type. Keep a file id or URL on the same part; without one
+				// the block has no payload left and is dropped.
 				warns.Add(ir.WarningDropped, "content.file_data", "inline file data has no recognizable media type")
 				file.FileData = ""
-			}
-			if file.FileID == "" && file.FileURL == "" && file.FileData == "" {
-				continue
+				if file.FileID == "" && file.FileURL == "" {
+					continue
+				}
 			}
 			out = append(out, ir.Block{Type: ir.BlockFile, File: file})
 		case "input_audio":
