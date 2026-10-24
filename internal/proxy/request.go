@@ -1907,7 +1907,12 @@ type requestParameters struct {
 		} `json:"format"`
 		Verbosity string `json:"verbosity"`
 	} `json:"text"`
-	Include         json.RawMessage          `json:"include"`
+	Include json.RawMessage `json:"include"`
+	// Functions and FunctionCall are the deprecated Chat spellings the codec
+	// still converts. Keep them raw so a schema-invalid member records a
+	// lexical count instead of failing the whole parameters decode.
+	Functions       json.RawMessage          `json:"functions"`
+	FunctionCall    json.RawMessage          `json:"function_call"`
 	Seed            json.RawMessage          `json:"seed"`
 	ParallelTools   *bool                    `json:"parallel_tool_calls"`
 	LogitBias       map[string]discardedJSON `json:"logit_bias"`
@@ -2064,6 +2069,53 @@ func requestIncludeLogprobs(raw json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// requestArrayCount counts a raw JSON array's members lexically, so a
+// schema-invalid member still records how many entries the client offered. A
+// non-array or malformed value records zero; the count saturates at the shared
+// collection ceiling.
+func requestArrayCount(raw json.RawMessage) int {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '[' {
+		return 0
+	}
+	n, _, ok := metrics.CountJSONArrayBytes(raw, i, requestMetadataMaxElements)
+	if !ok {
+		return 0
+	}
+	return n
+}
+
+// requestFunctionCallChoice maps the deprecated Chat function_call selector to
+// the same recorded spelling as tool_choice. The codec gives tool_choice
+// precedence, so callers apply this only when tool_choice recorded nothing.
+func requestFunctionCallChoice(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	switch trimmed[0] {
+	case '"':
+		var shorthand string
+		if json.Unmarshal(trimmed, &shorthand) != nil {
+			return ""
+		}
+		switch shorthand {
+		case "auto", "none", "required":
+			return shorthand
+		}
+	case '{':
+		var obj struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(trimmed, &obj) == nil {
+			if name := strings.TrimSpace(obj.Name); name != "" {
+				return "tool:" + name
+			}
+		}
+	}
+	return ""
 }
 
 // requestMetadataKeysMax bounds the distinct top-level metadata keys counted
@@ -3339,7 +3391,7 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	}
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
-	rec.ReqToolsCount = len(req.Tools)
+	rec.ReqToolsCount = len(req.Tools) + requestArrayCount(req.Functions)
 	rec.ReqPresencePen = req.PresencePen
 	rec.ReqFrequencyPen = req.FrequencyPen
 	rec.ReqLogprobs = req.Logprobs || requestIncludeLogprobs(req.Include)
@@ -3347,6 +3399,9 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 		rec.ReqStreamOpts = true
 	}
 	rec.ReqToolChoice = req.ToolChoice.Value
+	if rec.ReqToolChoice == "" {
+		rec.ReqToolChoice = requestFunctionCallChoice(req.FunctionCall)
+	}
 	if len(req.Stop) > 0 {
 		rec.ReqStop = requestStopCount(req.Stop)
 	} else if len(req.StopSequences) > 0 {

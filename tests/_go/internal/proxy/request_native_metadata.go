@@ -95,3 +95,59 @@ func TestAnthropicThinkingDisabledNotRequested(t *testing.T) {
 		})
 	}
 }
+
+// TestChatLegacyFunctionsMetadata pins the deprecated Chat functions and
+// function_call record: the codec still converts them, so the record must
+// report the definitions offered and the requested policy.
+func TestChatLegacyFunctionsMetadata(t *testing.T) {
+	fn := `{"name":"lookup","parameters":{}}`
+
+	rec := parseRequestRecord(t, `{"model":"m","functions":[`+fn+`],`+
+		`"function_call":{"name":"lookup"},"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.ReqToolsCount != 1 {
+		t.Fatalf("functions count = %d, want 1", rec.ReqToolsCount)
+	}
+	if rec.ReqToolChoice != "tool:lookup" {
+		t.Fatalf("function_call choice = %q, want tool:lookup", rec.ReqToolChoice)
+	}
+
+	// Modern tools and legacy functions are both offered upstream.
+	rec = parseRequestRecord(t, `{"model":"m","tools":[{"type":"function","function":{"name":"modern","parameters":{}}}],`+
+		`"functions":[`+fn+`],"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.ReqToolsCount != 2 {
+		t.Fatalf("tools+functions count = %d, want 2", rec.ReqToolsCount)
+	}
+
+	// tool_choice wins over function_call, matching the codec's precedence.
+	rec = parseRequestRecord(t, `{"model":"m","functions":[`+fn+`],`+
+		`"tool_choice":"auto","function_call":{"name":"lookup"},"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.ReqToolChoice != "auto" {
+		t.Fatalf("tool_choice precedence = %q, want auto", rec.ReqToolChoice)
+	}
+
+	for _, tc := range []struct {
+		call string
+		want string
+	}{
+		{call: `"auto"`, want: "auto"},
+		{call: `"none"`, want: "none"},
+		{call: `"required"`, want: "required"},
+		{call: `{"name":"lookup"}`, want: "tool:lookup"},
+		{call: `"unsupported"`, want: ""},
+		{call: `{"name":""}`, want: ""},
+		{call: `42`, want: ""},
+	} {
+		rec := parseRequestRecord(t, `{"model":"m","function_call":`+tc.call+`,"messages":[{"role":"user","content":"hi"}]}`)
+		if rec.ReqToolChoice != tc.want {
+			t.Fatalf("function_call %s = %q, want %q", tc.call, rec.ReqToolChoice, tc.want)
+		}
+	}
+
+	// A schema-invalid functions member records its lexical count instead of
+	// erasing the rest of the record.
+	rec = parseRequestRecord(t, `{"model":"m","temperature":0.5,"functions":[42],`+
+		`"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.ReqToolsCount != 1 || rec.ReqTemperature == nil || *rec.ReqTemperature != 0.5 {
+		t.Fatalf("malformed functions record = tools %d temperature %v, want 1/0.5", rec.ReqToolsCount, rec.ReqTemperature)
+	}
+}
