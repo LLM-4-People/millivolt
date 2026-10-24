@@ -41,6 +41,76 @@ const toolInitialBytesMax = 4 << 20
 // single call without finishing it fails closed before a clean terminal.
 const streamToolArgumentsMax = 4 << 20
 
+// toolArgumentsCanonicalBytesMax bounds one argument value whose JSON is
+// canonicalized for an id-less repeat comparison. Canonicalization decodes and
+// re-marshals the value, so a larger provider-controlled value would multiply
+// transient memory even though it is already capped at streamToolArgumentsMax;
+// the fingerprint then falls back to the raw-byte hash. Normal tool arguments
+// are kilobytes. Internal safety guardrail, not user-tunable.
+const toolArgumentsCanonicalBytesMax = 1 << 20
+
+// toolArgumentsCanonicalSeparatorsMax bounds the aggregate array commas and
+// object colons in one canonicalized value. It is a conservative proxy for the
+// decoded member count: a compact array of hundreds of thousands of scalars
+// expands into a generic tree during the canonical decode, while a value within
+// this budget stays bounded. Internal safety guardrail, not user-tunable.
+const toolArgumentsCanonicalSeparatorsMax = WireCollectionMax
+
+// toolArgumentsCanonicalDepthMax bounds bracket nesting in one canonicalized
+// value. Tool-argument schemas are shallow, and the generic decode recurses;
+// a deeper value falls back to the raw-byte hash. Internal safety guardrail,
+// not user-tunable.
+const toolArgumentsCanonicalDepthMax = 64
+
+// toolArgumentsWithinCanonicalBounds reports whether a complete JSON object
+// may be decoded and re-marshaled for canonical hashing. The scan is lexical:
+// it skips strings, counts array commas and object colons, tracks bracket
+// depth, and stops at the first proof of overflow, so an over-bound value costs
+// only a prefix pass and no decoded tree. Malformed, partial, non-object and
+// over-bound values return false; the caller hashes their raw bytes.
+func toolArgumentsWithinCanonicalBounds(data []byte) bool {
+	if len(data) > toolArgumentsCanonicalBytesMax {
+		return false
+	}
+	i := metrics.SkipSpace(data, 0)
+	if i >= len(data) || data[i] != '{' {
+		return false
+	}
+	depth := 0
+	separators := 0
+	for i < len(data) {
+		switch data[i] {
+		case '"':
+			next := metrics.SkipJSONString(data, i)
+			if next < 0 {
+				return false
+			}
+			i = next
+			continue
+		case '{', '[':
+			depth++
+			if depth > toolArgumentsCanonicalDepthMax {
+				return false
+			}
+		case '}', ']':
+			depth--
+			if depth < 0 {
+				return false
+			}
+			if depth == 0 {
+				return metrics.SkipSpace(data, i+1) == len(data)
+			}
+		case ',', ':':
+			separators++
+			if separators > toolArgumentsCanonicalSeparatorsMax {
+				return false
+			}
+		}
+		i++
+	}
+	return false
+}
+
 // WireNestedCollectionMax bounds an aggregate of nested collections that a
 // single top-level bound cannot cover, such as every reasoning summary array in
 // an output list or every citation array in a content list.

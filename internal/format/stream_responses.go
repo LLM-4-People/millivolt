@@ -1541,31 +1541,36 @@ func terminalToolIdentityCompatible(callID, itemID, candidateKey string) bool {
 	return true
 }
 
-// toolArgumentsFingerprint hashes the canonical argument value. Whitespace is
-// removed, object keys are sorted, and numeric literals are preserved; a
-// missing, null or whitespace value is the empty object the target emitted. An
-// invalid or partial value cannot be canonicalized, so its raw bytes are
-// hashed instead.
+// toolArgumentsFingerprint hashes the canonical argument value when it is
+// small enough to canonicalize cheaply. Whitespace is removed, object keys are
+// sorted, and numeric literals are preserved; a missing, null or whitespace
+// value is the empty object the target emitted. An invalid, partial, non-object
+// or over-bound value cannot be canonicalized within the memory guard, so its
+// raw bytes are hashed instead.
 func toolArgumentsFingerprint(raw string) [sha256.Size]byte {
 	if toolArgumentsMissing(raw) {
 		return sha256.Sum256([]byte("{}"))
 	}
+	data := []byte(raw)
+	if !toolArgumentsWithinCanonicalBounds(data) {
+		return sha256.Sum256(data)
+	}
 	var compact bytes.Buffer
-	if err := json.Compact(&compact, []byte(raw)); err != nil {
-		return sha256.Sum256([]byte(raw))
+	if err := json.Compact(&compact, data); err != nil {
+		return sha256.Sum256(data)
 	}
 	dec := json.NewDecoder(bytes.NewReader(compact.Bytes()))
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil {
-		return sha256.Sum256([]byte(raw))
+		return sha256.Sum256(data)
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return sha256.Sum256([]byte(raw))
+		return sha256.Sum256(data)
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
-		return sha256.Sum256([]byte(raw))
+		return sha256.Sum256(data)
 	}
 	return sha256.Sum256(canonical)
 }

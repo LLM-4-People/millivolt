@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -702,5 +703,73 @@ func TestToolArgumentsFingerprintCanonicalizes(t *testing.T) {
 	partial := `{"a":`
 	if got, want := toolArgumentsFingerprint(partial), sha256.Sum256([]byte(partial)); got != want {
 		t.Errorf("partial fingerprint = %x, want the raw bytes %x", got, want)
+	}
+}
+
+// Canonicalization must not materialize a generic tree for a compact,
+// high-cardinality value. Above the canonicalization bounds the fingerprint is
+// the raw-byte hash, so memory stays proportional to the input.
+func TestToolArgumentsFingerprintBoundsHighCardinality(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target int
+	}{
+		{name: "1 MiB", target: (1 << 20) - 64},
+		{name: "4 MiB", target: 4 << 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var b strings.Builder
+			b.Grow(tc.target + 8)
+			b.WriteString(`{"a":[`)
+			for b.Len()+len("1,")+len("1]}") <= tc.target {
+				b.WriteString("1,")
+			}
+			b.WriteString("1]}")
+			raw := b.String()
+			if len(raw) > tc.target {
+				t.Fatalf("built %d bytes, target %d", len(raw), tc.target)
+			}
+			runtime.GC()
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got := toolArgumentsFingerprint(raw)
+			runtime.ReadMemStats(&after)
+			allocated := after.TotalAlloc - before.TotalAlloc
+			t.Logf("%d-byte value allocated %d bytes", len(raw), allocated)
+			if allocated > 32<<20 {
+				t.Fatalf("%d-byte high-cardinality value allocated %d bytes, want at most %d", len(raw), allocated, 32<<20)
+			}
+			if want := sha256.Sum256([]byte(raw)); got != want {
+				t.Fatalf("high-cardinality fingerprint = %x, want the raw bytes %x", got, want)
+			}
+		})
+	}
+}
+
+func TestToolArgumentsFingerprintFallsBackOverBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "over size",
+			raw:  `{"a":"` + strings.Repeat("x", toolArgumentsCanonicalBytesMax) + `"}`,
+		},
+		{
+			name: "over depth",
+			raw: `{"a":` + strings.Repeat("[", toolArgumentsCanonicalDepthMax+1) +
+				strings.Repeat("]", toolArgumentsCanonicalDepthMax+1) + `}`,
+		},
+		{
+			name: "over separators",
+			raw: `{"a":[` + strings.Repeat("0,", toolArgumentsCanonicalSeparatorsMax+1) +
+				`0]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, want := toolArgumentsFingerprint(tc.raw), sha256.Sum256([]byte(tc.raw)); got != want {
+				t.Fatalf("fingerprint = %x, want the raw bytes %x", got, want)
+			}
+		})
 	}
 }
