@@ -671,8 +671,9 @@ func allocDelta(fn func()) uint64 {
 }
 
 // TestTranslateRequestSystemFragmentsExactOutput pins the exact system join:
-// the existing "\n\n" separator between lifted fragments, including empty
-// fragments, must survive the strings.Builder rewrite byte-for-byte.
+// the "\n\n" separator between lifted non-empty fragments must survive the
+// strings.Builder rewrite byte-for-byte. An empty fragment is dropped before
+// the join because Anthropic text blocks require at least one character.
 func TestTranslateRequestSystemFragmentsExactOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -690,9 +691,9 @@ func TestTranslateRequestSystemFragmentsExactOutput(t *testing.T) {
 			want: `{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","stream":false,"system":"top\n\na"}`,
 		},
 		{
-			name: "empty fragment keeps separator",
-			body: `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"system","content":""},{"role":"system","content":"b"}]}`,
-			want: `{"max_tokens":64,"messages":null,"model":"m","stream":false,"system":"s\n\n\n\nb"}`,
+			name: "empty fragment skipped",
+			body: `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"system","content":""},{"role":"system","content":"b"},{"role":"user","content":"hi"}]}`,
+			want: `{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","stream":false,"system":"s\n\nb"}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
