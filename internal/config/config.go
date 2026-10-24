@@ -1295,9 +1295,9 @@ func (c *Config) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("allowed_base_urls: %q must be an absolute http:// or https:// URL", entry)
 		}
-		// The runtime match is byte-sensitive and the request boundary rejects
-		// a non-lowercase scheme, so an entry that only parses after scheme
-		// folding could never match a normal client base URL.
+		// The runtime prefix match is byte-sensitive, so an entry that only
+		// parses after url.Parse folds the scheme to lowercase could match
+		// only a client base URL spelled with the same uppercase scheme.
 		if !strings.HasPrefix(entry, "http://") && !strings.HasPrefix(entry, "https://") {
 			return fmt.Errorf("allowed_base_urls: %q must start with lowercase http:// or https://: the runtime prefix match is byte-sensitive", entry)
 		}
