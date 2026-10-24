@@ -199,7 +199,7 @@ func (a *NonStreamAnalysis) analyzeRecordFields(raw nonStreamEnvelope, usageKeys
 		contentPresent(ch.Message.ReasoningDet) ||
 		contentPresent(ch.Message.ReasoningText)
 	toolCalls := len(ch.Message.ToolCalls)
-	a.Outcome = ClassifyOutcome(ch.FinishReason, true, hadAnswer, hadReasoning, toolCalls, true)
+	a.Outcome = ClassifyOutcome(ch.FinishReason, true, hadAnswer, hadReasoning, false, toolCalls, true)
 	a.FinishReason = ch.FinishReason
 	if text, ok := FlattenContent(ch.Message.Content); ok && text != "" {
 		a.HadAnswerContent = true

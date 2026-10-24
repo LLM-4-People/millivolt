@@ -9,37 +9,39 @@ func TestClassifyOutcome(t *testing.T) {
 		term   bool
 		answer bool
 		reason bool
+		output bool
 		tools  int
 		chat   bool
 		want   string
 	}{
-		{"healthy stop with content", "stop", true, true, false, 0, true, ""},
-		{"healthy tool_calls with call", "tool_calls", true, false, false, 1, true, ""},
-		{"healthy stop with tool call", "stop", true, false, false, 1, true, ""},
-		{"healthy stop after reasoning and answer", "stop", true, true, true, 0, true, ""},
-		{"reasoning-only stop is its own class", "stop", true, false, true, 0, true, CodeReasoningOnly},
-		{"reasoning-only absent finish is its own class", "", true, false, true, 0, true, CodeReasoningOnly},
-		{"reasoning-only interruption finish is rescuable void", "insufficient_system_resource", true, false, true, 0, true, CodeReasoningOnly},
-		{"reasoning-only aborted finish is rescuable void", "aborted", true, false, true, 0, true, CodeReasoningOnly},
-		{"reasoning-only length is the client's cap, never a void", "length", true, false, true, 0, true, ""},
-		{"reasoning-only content_filter is provider-signed, never a void", "content_filter", true, false, true, 0, true, ""},
-		{"reasoning does not rescue a lying tool_calls finish", "tool_calls", true, false, true, 0, true, CodeEmptyToolCall},
-		{"void stop", "stop", true, false, false, 0, true, CodeEmptyCompletion},
-		{"void absent finish (grok style)", "", true, false, false, 0, true, CodeEmptyCompletion},
-		{"void interruption finish stays provider-signed", "insufficient_system_resource", true, false, false, 0, true, ""},
-		{"tool_calls without calls", "tool_calls", true, false, false, 0, true, CodeEmptyToolCall},
-		{"truncated: clean EOF, no terminator", "", false, false, false, 0, true, CodeTruncated},
-		{"truncated even with reasoning relayed", "stop", false, false, true, 0, true, CodeTruncated},
-		{"length is not void (legit cutoff)", "length", true, false, false, 0, true, ""},
-		{"content_filter is not void", "content_filter", true, false, false, 0, true, ""},
-		{"error finish is not void (provider-signed)", "error", true, false, false, 0, true, ""},
-		{"sensitive is not void", "sensitive", true, false, false, 0, true, ""},
-		{"foreign protocol never classified", "", false, false, false, 0, false, ""},
-		{"foreign protocol with clean end", "stop", true, false, false, 0, false, ""},
+		{"healthy stop with content", "stop", true, true, false, false, 0, true, ""},
+		{"healthy tool_calls with call", "tool_calls", true, false, false, false, 1, true, ""},
+		{"healthy stop with tool call", "stop", true, false, false, false, 1, true, ""},
+		{"healthy stop after reasoning and answer", "stop", true, true, true, false, 0, true, ""},
+		{"reasoning-only stop is its own class", "stop", true, false, true, false, 0, true, CodeReasoningOnly},
+		{"reasoning-only absent finish is its own class", "", true, false, true, false, 0, true, CodeReasoningOnly},
+		{"reasoning-only interruption finish is rescuable void", "insufficient_system_resource", true, false, true, false, 0, true, CodeReasoningOnly},
+		{"reasoning-only aborted finish is rescuable void", "aborted", true, false, true, false, 0, true, CodeReasoningOnly},
+		{"reasoning-only length is the client's cap, never a void", "length", true, false, true, false, 0, true, ""},
+		{"reasoning-only content_filter is provider-signed, never a void", "content_filter", true, false, true, false, 0, true, ""},
+		{"reasoning does not rescue a lying tool_calls finish", "tool_calls", true, false, true, false, 0, true, CodeEmptyToolCall},
+		{"void stop", "stop", true, false, false, false, 0, true, CodeEmptyCompletion},
+		{"other official output rescues an empty stop", "stop", true, false, false, true, 0, true, ""},
+		{"void absent finish (grok style)", "", true, false, false, false, 0, true, CodeEmptyCompletion},
+		{"void interruption finish stays provider-signed", "insufficient_system_resource", true, false, false, false, 0, true, ""},
+		{"tool_calls without calls", "tool_calls", true, false, false, false, 0, true, CodeEmptyToolCall},
+		{"truncated: clean EOF, no terminator", "", false, false, false, false, 0, true, CodeTruncated},
+		{"truncated even with reasoning relayed", "stop", false, false, true, false, 0, true, CodeTruncated},
+		{"length is not void (legit cutoff)", "length", true, false, false, false, 0, true, ""},
+		{"content_filter is not void", "content_filter", true, false, false, false, 0, true, ""},
+		{"error finish is not void (provider-signed)", "error", true, false, false, false, 0, true, ""},
+		{"sensitive is not void", "sensitive", true, false, false, false, 0, true, ""},
+		{"foreign protocol never classified", "", false, false, false, false, 0, false, ""},
+		{"foreign protocol with clean end", "stop", true, false, false, false, 0, false, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ClassifyOutcome(c.finish, c.term, c.answer, c.reason, c.tools, c.chat); got != c.want {
+			if got := ClassifyOutcome(c.finish, c.term, c.answer, c.reason, c.output, c.tools, c.chat); got != c.want {
 				t.Fatalf("ClassifyOutcome = %q, want %q", got, c.want)
 			}
 		})

@@ -107,6 +107,13 @@ type Analyzer struct {
 	// reasoning presence exactly like a streamed reasoning delta.
 	terminalReasoningSeen bool
 
+	// responsesOutputSeen marks a Responses output item that is neither
+	// answer text, reasoning, nor a model tool call (for example a web search,
+	// file search, image generation or provider-specific item). It is still
+	// official output, so a completed terminal carrying it must never be
+	// replaced by the empty-completion failure.
+	responsesOutputSeen bool
+
 	// toolChunks counts content-bearing chunks that carry tool-call deltas.
 	// chunkCount (every content-bearing chunk: content, reasoning, AND tool
 	// calls) feeds the output-token fallback when the provider sends no usage
@@ -425,14 +432,23 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	if eventType == "response.output_item.added" {
 		var ev struct {
 			Item struct {
-				Type   string `json:"type"`
-				CallID string `json:"call_id"`
-				Name   string `json:"name"`
+				Type             string `json:"type"`
+				CallID           string `json:"call_id"`
+				Name             string `json:"name"`
+				EncryptedContent string `json:"encrypted_content"`
 			} `json:"item"`
 		}
-		if json.Unmarshal(payload, &ev) == nil && ev.Item.Type == "function_call" {
-			a.countResponsesToolCall(ev.Item.CallID, ev.Item.Name)
-			hasToolDelta = true
+		if json.Unmarshal(payload, &ev) == nil {
+			switch {
+			case responsesToolCallItem(ev.Item.Type):
+				a.countResponsesToolCall(ev.Item.CallID, ev.Item.Name)
+				hasToolDelta = true
+			case ev.Item.Type != "" && ev.Item.Type != "message" && ev.Item.Type != "reasoning":
+				a.responsesOutputSeen = true
+			}
+			if ev.Item.Type == "reasoning" && ev.Item.EncryptedContent != "" {
+				a.terminalReasoningSeen = true
+			}
 		}
 	}
 
@@ -716,12 +732,13 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
 			Output []struct {
-				Type    string          `json:"type"`
-				Role    string          `json:"role"`
-				CallID  string          `json:"call_id"`
-				Name    string          `json:"name"`
-				Content json.RawMessage `json:"content"`
-				Summary []struct {
+				Type             string          `json:"type"`
+				Role             string          `json:"role"`
+				CallID           string          `json:"call_id"`
+				Name             string          `json:"name"`
+				EncryptedContent string          `json:"encrypted_content"`
+				Content          json.RawMessage `json:"content"`
+				Summary          []struct {
 					Text string `json:"text"`
 				} `json:"summary"`
 			} `json:"output"`
@@ -739,8 +756,8 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 			if typ == "" && item.Role != "" {
 				typ = "message"
 			}
-			switch typ {
-			case "function_call":
+			switch {
+			case responsesToolCallItem(typ):
 				// A function call may appear only in the terminal document;
 				// count each call once per call_id so a legitimate tool turn
 				// is never classified as empty and replaced by a failure. A
@@ -749,7 +766,7 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				if a.countResponsesToolCall(item.CallID, item.Name) {
 					a.recordTerminalToolUnit(now)
 				}
-			case "message":
+			case typ == "message":
 				text, refusal := terminalMessageText(item.Content)
 				if text != "" {
 					a.answerishSeen = true
@@ -769,11 +786,18 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 						a.preview = []byte(metrics.TruncatePreview(refusal))
 					}
 				}
-			case "reasoning":
+			case typ == "reasoning":
 				units := terminalReasoningUnits(item.Content, item.Summary)
 				if units > 0 {
 					a.terminalReasoningSeen = true
 					terminalReasoningCount += units
+				}
+				if item.EncryptedContent != "" {
+					a.terminalReasoningSeen = true
+				}
+			default:
+				if typ != "" {
+					a.responsesOutputSeen = true
 				}
 			}
 		}
@@ -1190,7 +1214,21 @@ func (a *Analyzer) OutcomeCode() string {
 	hadAnswer := !a.firstAnswerAt.IsZero() || a.answerishSeen
 	hadReasoning := !a.firstReasoningAt.IsZero() || a.terminalReasoningSeen
 	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
-		hadAnswer, hadReasoning, a.toolCalls, a.chatlike)
+		hadAnswer, hadReasoning, a.responsesOutputSeen, a.toolCalls, a.chatlike)
+}
+
+// responsesToolCallItem reports whether one Responses output item is a model
+// tool invocation. These items are tool activity even when they carry no
+// function-call arguments, and they must never be classified as an empty
+// completion. Provider-executed output items (web search, file search, image
+// generation, code interpreter) are output presence instead.
+func responsesToolCallItem(typ string) bool {
+	switch typ {
+	case "function_call", "custom_tool_call", "local_shell_call", "mcp_call",
+		"shell_call", "apply_patch_call", "computer_call", "tool_search_call":
+		return true
+	}
+	return false
 }
 
 // ChatLike reports whether the analyzed feed follows the Chat/Responses
