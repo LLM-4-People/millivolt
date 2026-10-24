@@ -430,3 +430,81 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+// A terminal document repeats an announced call that its done event already
+// closed. A different open same-name call must not receive that repeat's
+// arguments through the name fallback.
+func TestResponsesClosedCallRepeatDoesNotStealOpenSameNameCall(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		openItem     string
+		terminalOpen string
+		announcedA   string
+		terminalA    string
+		wantOpenID   string
+	}{
+		{
+			name:         "open id-less call",
+			openItem:     `{"type":"function_call","name":"lookup","arguments":""}`,
+			terminalOpen: `{"type":"function_call","name":"lookup","arguments":"{\"b\":2}"}`,
+			announcedA:   `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}`,
+			terminalA:    `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"a\":1}"}`,
+			wantOpenID:   "call_proxy_5",
+		},
+		{
+			name:         "open item-id call",
+			openItem:     `{"type":"function_call","id":"fc_b","name":"lookup","arguments":""}`,
+			terminalOpen: `{"type":"function_call","id":"fc_b","name":"lookup","arguments":"{\"b\":2}"}`,
+			announcedA:   `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}`,
+			terminalA:    `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"a\":1}"}`,
+			wantOpenID:   "fc_b",
+		},
+		{
+			name:         "open id-less call, alias repeat",
+			openItem:     `{"type":"function_call","name":"lookup","arguments":""}`,
+			terminalOpen: `{"type":"function_call","name":"lookup","arguments":"{\"b\":2}"}`,
+			announcedA:   `{"type":"function_call","id":"fc_a","call_id":"call_1","name":"lookup","arguments":""}`,
+			terminalA:    `{"type":"function_call","id":"fc_a","name":"lookup","arguments":"{\"a\":1}"}`,
+			wantOpenID:   "call_proxy_5",
+		},
+	} {
+		source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":` + tc.announcedA + `}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":` + tc.openItem + `}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_1","name":"lookup","arguments":"{\"a\":1}","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[` + tc.terminalA + `,` + tc.terminalOpen + `]}}
+
+`
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					var buf bytes.Buffer
+					if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					out := buf.String()
+					calls := streamedToolCalls(t, target, out)
+					if len(calls) != 2 {
+						t.Fatalf("tool calls = %d, want two: %s", len(calls), out)
+					}
+					args := map[string]string{}
+					for _, call := range calls {
+						args[call.id] = strings.TrimSpace(call.args.String())
+					}
+					if args["call_1"] != `{"a":1}` {
+						t.Fatalf("closed call arguments = %q, want {\"a\":1}: %v\n%s", args["call_1"], args, out)
+					}
+					if args[tc.wantOpenID] != `{"b":2}` {
+						t.Fatalf("open call %s arguments = %q, want {\"b\":2}: %v\n%s", tc.wantOpenID, args[tc.wantOpenID], args, out)
+					}
+				})
+			}
+		})
+	}
+}

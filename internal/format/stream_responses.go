@@ -122,6 +122,11 @@ type ResponsesStreamDecoder struct {
 	// openToolKeys names every announced function call whose target block may
 	// still be open, including a call that never carried argument bytes.
 	openToolKeys map[string]bool
+	// announcedToolKeys names every announced function call for the whole
+	// stream, including one whose done event already closed its block. A
+	// terminal document can repeat a closed call; that entry must not be
+	// reassigned to a different open call by name or position.
+	announcedToolKeys map[string]bool
 	// toolAliases maps an alternate identity spelling of an announced call to
 	// its canonical key. A terminal entry can carry only the item id after the
 	// announcement used the call id, or the reverse. Aliases live for the
@@ -198,6 +203,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		argsEmitted:          map[string]*toolArgumentCoverage{},
 		argumentEvidence:     map[string]bool{},
 		openToolKeys:         map[string]bool{},
+		announcedToolKeys:    map[string]bool{},
 		toolAliases:          map[string]string{},
 		toolNames:            map[string]string{},
 		announcedOutputs:     map[int]bool{},
@@ -328,6 +334,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 				d.sawToolCall = true
 				d.openToolKeys[key] = true
+				d.announcedToolKeys[key] = true
 				d.toolNames[key] = item.Name
 				d.openToolItems++
 				if d.openToolItems > toolBlocksMax {
@@ -1127,6 +1134,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	clear(d.argsEmitted)
 	clear(d.argumentEvidence)
 	clear(d.openToolKeys)
+	clear(d.announcedToolKeys)
 	clear(d.toolAliases)
 	clear(d.toolNames)
 	clear(d.keyByOutput)
@@ -1577,6 +1585,14 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 		case "function_call":
 			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
 			idx, ok := d.itemBlockByKey[key]
+			if d.announcedToolKeys[key] && !d.openToolKeys[key] {
+				// This terminal entry repeats an announced call whose block
+				// already closed. Its arguments belong to that call, not to a
+				// different open call with the same name. Non-tool
+				// announcements are absent from this set, so a cross-kind
+				// reorder still reaches the name fallback.
+				continue
+			}
 			if ok && !d.openToolKeys[key] {
 				// An identity can also name an announced non-tool item at the
 				// same position or with the same id. Only a function call this
