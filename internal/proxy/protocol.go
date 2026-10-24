@@ -214,11 +214,14 @@ func writeCounted(w io.Writer, rec *metrics.Record, frame []byte) (int, error) {
 	return n, nil
 }
 
-// writeProtocolError writes one protocol-native error frame.
+// writeProtocolError writes one protocol-native error frame. A provider-
+// captured type or code is bounded with the same preview bound the format
+// decoders use, so an in-band error cannot echo a request-sized value.
 func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, id, typ, code, msg string) error {
 	if typ == "" {
 		typ = sse.TypeUpstreamError
 	}
+	typ, code = metrics.TruncatePreview(typ), metrics.TruncatePreview(code)
 	var frame []byte
 	switch inbound {
 	case ir.Anthropic:
@@ -329,6 +332,9 @@ func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, statu
 // code), sets the proxy-owned content type and nosniff fence, preserves extra
 // headers, and returns the body byte count for callers that book it.
 func writeProtocolHTTPErrorCodeHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, code, msg string, extra http.Header) int {
+	// Provider-captured type and code use the shared preview bound, matching
+	// the format decoders and the in-band writer above.
+	typ, code = metrics.TruncatePreview(typ), metrics.TruncatePreview(code)
 	msg = retainedText(msg, protocolErrorEchoMax)
 	// An unknown path has no inbound protocol. This sink's contract keeps the
 	// historical OpenAI envelope for Chat and unknown paths, so normalize the
