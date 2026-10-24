@@ -633,6 +633,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
 	if rewriteBody {
+		// The rewrite decodes into a map and re-marshals, which collapses
+		// duplicate cap members to one. Run the occurrence scan on the
+		// pre-rewrite bytes so the documented duplicate rejection cannot be
+		// lost before the cap check below sees the rewritten body.
+		if reason := tokenCapViolation(body, nil); reason != "" {
+			writeHostileTokenCap(w, t.inbound, reason)
+			return
+		}
 		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes), t.inbound); why == "" {
 			body = rewritten
 			if changed {

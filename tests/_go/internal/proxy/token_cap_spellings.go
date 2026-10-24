@@ -147,3 +147,44 @@ func TestApplyTokenCapsRawSpellings(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// TestHostileTokenCapDuplicatesRejectedBeforeEnsureToolsRewrite pins D1: the
+// ensured-tools rewrite re-marshals the body and collapses duplicate cap
+// members, so the duplicate scan must run on the pre-rewrite bytes.
+func TestHostileTokenCapDuplicatesRejectedBeforeEnsureToolsRewrite(t *testing.T) {
+	upstream := newFixtureUpstream(t, "application/json", http.StatusOK,
+		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	cfg := ensuredCfg("fixture.example")
+	cfg.QualityRetries = 0
+	cfg.ThinkingRetries = 0
+	s := New(cfg, metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: upstream.server.URL}})
+
+	for _, payload := range []string{
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"max_tokens":20}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"max\u005ftokens":20}`,
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1000001,"MAX_TOKENS":10}`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			w := proxyRequest(t, s, "/v1/chat/completions", "", payload)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "max_tokens") {
+				t.Fatalf("status = %d body = %s, want the duplicate-cap 400", w.Code, w.Body.String())
+			}
+		})
+	}
+	if got := upstream.calls.Load(); got != 0 {
+		t.Fatalf("duplicate cap reached the upstream %d times", got)
+	}
+
+	control := `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1000000}`
+	w := proxyRequest(t, s, "/v1/chat/completions", "", control)
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid rewrite control status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	if got := upstream.calls.Load(); got != 1 {
+		t.Fatalf("valid rewrite control upstream hits = %d, want 1", got)
+	}
+	if !strings.Contains(string(upstream.lastBody()), `"bash"`) {
+		t.Fatalf("ensure-tools rewrite did not run: %s", upstream.lastBody())
+	}
+}
