@@ -136,6 +136,11 @@ target cannot consume them:
   pairs with its `role: function` reply by function name. Chat `prediction`,
   audio output, non-text `modalities`, and `web_search_options` have no target
   equivalent and are dropped with a warning.
+- A Chat assistant tool call without an id gets a generated id and reports the
+  recorded approximation. A later `role: tool` reply that names the call by
+  `tool_call_id` or the message's `name` is paired with that generated id, so
+  an Anthropic or Responses target receives a matching result reference; a name
+  matching more than one unresolved generated call fails closed.
 - A `json_schema` response format must carry its `schema` object to translate;
   a schema-less `json_schema` is rejected with 400 because a cross-protocol
   target has no meaningful mapping for one. A native same-protocol Chat

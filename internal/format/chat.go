@@ -423,9 +423,10 @@ func decodeChatMetadata(in map[string]json.RawMessage) (map[string]string, ir.Wa
 // Anthropic requires, and the Chat encoder splits it back out losslessly.
 func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error) {
 	var (
-		out     []ir.Message
-		warns   ir.Warnings
-		pending *ir.Message
+		out            []ir.Message
+		warns          ir.Warnings
+		pending        *ir.Message
+		generatedCalls chatGeneratedToolCallIDs
 	)
 	flush := func() {
 		if pending != nil {
@@ -496,11 +497,14 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 				blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *m.Refusal})
 			}
 			for j, tc := range m.ToolCalls {
-				call, w, err := decodeChatToolCall(tc, i, j)
+				call, generated, w, err := decodeChatToolCall(tc, i, j)
 				if err != nil {
 					return nil, nil, err
 				}
 				warns = append(warns, w...)
+				if generated {
+					generatedCalls.add(call.ID, call.Name)
+				}
 				blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 			}
 			if rawPresent(m.FunctionCall) {
@@ -522,6 +526,16 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 			callID := m.ToolCallID
 			if callID == "" {
 				callID = m.Name
+			}
+			if m.Role == "tool" {
+				// A modern tool reply may name its call instead of carrying
+				// the synthesized id; a legacy role:"function" reply already
+				// pairs with function_call by name and stays untouched.
+				resolved, err := generatedCalls.consume(callID)
+				if err != nil {
+					return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d: %w", i, err))
+				}
+				callID = resolved
 			}
 			if callID == "" {
 				return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d: tool message has no tool_call_id", i))
@@ -620,27 +634,94 @@ func decodeLegacyMessageFunctionCall(raw json.RawMessage) (*ir.ToolCall, error) 
 	return &ir.ToolCall{ID: obj.Name, Name: obj.Name, Arguments: args}, nil
 }
 
-func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int) (*ir.ToolCall, ir.Warnings, error) {
+// chatGeneratedToolCallIDs reconciles the call ids decodeChatToolCall
+// synthesizes for assistant tool calls whose wire id was missing with the tool
+// replies that answer them by function name. Chat lets a client answer by name
+// (tool_call_id or the message's name), but every translated target pairs the
+// result with the assistant call's exact id. A reference matching more than one
+// unconsumed generated call is ambiguous: attaching the result to a guess would
+// silently pair it with the wrong call, so the decoder fails closed.
+type chatGeneratedToolCallIDs struct {
+	pending []chatGeneratedToolCallID
+}
+
+type chatGeneratedToolCallID struct {
+	id   string
+	name string
+}
+
+func (g *chatGeneratedToolCallIDs) add(id, name string) {
+	g.pending = append(g.pending, chatGeneratedToolCallID{id: id, name: name})
+}
+
+// consume resolves one tool reply reference. An exact generated id, a unique
+// function name, or an empty reference with exactly one pending generated call
+// resolves to the generated id and marks the call answered. A reference that
+// matches no generated call is returned unchanged: it names a client-supplied
+// call id, which this decoder must not rewrite.
+func (g *chatGeneratedToolCallIDs) consume(reference string) (string, error) {
+	if len(g.pending) == 0 {
+		return reference, nil
+	}
+	if reference != "" {
+		for i, call := range g.pending {
+			if call.id == reference {
+				g.consumeAt(i)
+				return reference, nil
+			}
+		}
+	}
+	match := -1
+	for i, call := range g.pending {
+		if reference != "" && call.name != reference {
+			continue
+		}
+		if match >= 0 {
+			if reference == "" {
+				return "", errors.New("tool message has no tool_call_id and more than one generated tool call is unresolved")
+			}
+			return "", fmt.Errorf("tool result references %q, which matches more than one generated tool call", reference)
+		}
+		match = i
+	}
+	if match < 0 {
+		return reference, nil
+	}
+	id := g.pending[match].id
+	g.consumeAt(match)
+	return id, nil
+}
+
+func (g *chatGeneratedToolCallIDs) consumeAt(i int) {
+	g.pending = append(g.pending[:i], g.pending[i+1:]...)
+}
+
+// decodeChatToolCall decodes one assistant tool call. The bool reports that the
+// wire id was missing and synthesized, so the request decoder can reconcile a
+// later tool reply that names the call instead of carrying that id.
+func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int) (*ir.ToolCall, bool, ir.Warnings, error) {
 	var warns ir.Warnings
 	args, err := parseToolArguments(tc.Function.Arguments)
 	if err != nil {
-		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
 	}
 	id := tc.ID
+	generated := false
 	if id == "" {
 		id = fmt.Sprintf("call_%d_%d", msgIndex, callIndex)
+		generated = true
 		warns.Add(ir.WarningApproximated, "tool_calls.id", "generated a missing call id")
 	}
 	if err := checkNativeIdentity("tool id", id); err != nil {
-		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
 	}
 	if tc.Function.Name == "" {
-		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: function name is required", msgIndex, callIndex))
+		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: function name is required", msgIndex, callIndex))
 	}
 	if err := checkNativeIdentity("tool name", tc.Function.Name); err != nil {
-		return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
 	}
-	return &ir.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args}, warns, nil
+	return &ir.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args}, generated, warns, nil
 }
 
 // decodeChatContent converts a Chat content value (string, null, or part
@@ -1649,7 +1730,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *choice.Message.Refusal})
 	}
 	for j, tc := range choice.Message.ToolCalls {
-		call, w, err := decodeChatToolCall(tc, 0, j)
+		call, _, w, err := decodeChatToolCall(tc, 0, j)
 		if err != nil {
 			return nil, err
 		}
