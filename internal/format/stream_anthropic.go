@@ -58,6 +58,10 @@ type AnthropicStreamDecoder struct {
 	id      string
 	model   string
 	created int64
+	// started records that the first message_start already committed this
+	// stream's identity. A later message_start may merge usage but must never
+	// rewrite the id/model/created the client already saw.
+	started bool
 
 	usage          ir.Usage
 	usageBaseInput int64
@@ -155,8 +159,6 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			if err := checkNativeIdentity("model", msg.Model); err != nil {
 				return nil, err
 			}
-			d.id, d.model = msg.ID, msg.Model
-			d.created = time.Now().Unix()
 			tier := ""
 			if msg.Usage != nil {
 				if err := d.mergeUsage(msg.Usage); err != nil {
@@ -165,6 +167,15 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				d.usageReported = true
 				tier, _ = anthropicUsageServiceTier(msg.Usage.ServiceTier, msg.Usage.Speed)
 			}
+			if d.started {
+				// Identity already reached the wire: keep the first start's
+				// id/model/created and its start event. Only the cumulative
+				// usage above may still move.
+				continue
+			}
+			d.started = true
+			d.id, d.model = msg.ID, msg.Model
+			d.created = time.Now().Unix()
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
 				ID: d.id, Model: d.model, Created: d.created, Usage: u, ServiceTier: tier,
