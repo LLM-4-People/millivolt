@@ -389,6 +389,27 @@ func TestChatExplicitIDWinsOverGeneratedName(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("answered explicit id is not stolen by the generated name", func(t *testing.T) {
+		body := chatGeneratedIDBody(
+			chatUserGo,
+			generatedFirst,
+			chatToolResult("foo", "first explicit result"),
+			chatToolResult("foo", "duplicate explicit result"),
+			chatUserNext,
+		)
+		out, _, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, body, 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		uses, results := anthropicCallIDs(t, out)
+		if !slices.Equal(uses, []string{"call_1_0", "foo"}) {
+			t.Fatalf("call ids = %v, want [call_1_0 foo]: %s", uses, out)
+		}
+		if !slices.Equal(results, []string{"foo", "foo"}) {
+			t.Fatalf("result ids = %v, want [foo foo]: %s", results, out)
+		}
+	})
 }
 
 // TestChatEmptyReferenceAmbiguity pins the empty-reference rule: it may answer

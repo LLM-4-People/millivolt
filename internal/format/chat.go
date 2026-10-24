@@ -666,11 +666,22 @@ func (c *chatToolCalls) add(id, name string, generated bool) {
 // missing id; only a unique such name resolves, and an explicit call's name is
 // never reinterpreted as an id.
 func (c *chatToolCalls) consumeID(reference string) (string, error) {
+	knownID := false
 	for i := range c.calls {
-		if !c.calls[i].answered && c.calls[i].id == reference {
+		if c.calls[i].id != reference {
+			continue
+		}
+		if !c.calls[i].answered {
 			c.calls[i].answered = true
 			return reference, nil
 		}
+		knownID = true
+	}
+	if knownID {
+		// The reference is an id this history already answered. A duplicate
+		// result stays as supplied rather than falling back to a generated
+		// call that happens to use the same string as its function name.
+		return reference, nil
 	}
 	generated := -1
 	named := 0
