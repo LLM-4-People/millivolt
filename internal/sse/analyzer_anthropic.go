@@ -160,7 +160,12 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 				typ = TypeUpstreamError
 				msg = "upstream response failed"
 			}
-			a.setStreamError(typ, code, msg)
+			// The first real error owns the record. A later nested error is a
+			// duplicate statement; overwriting would report a different
+			// failure than the one the client saw first.
+			if a.errType == "" {
+				a.setStreamError(typ, code, msg)
+			}
 			// An error event is a terminal statement on every wire that
 			// carries one; never leave the analyzer waiting for a marker
 			// after it.
