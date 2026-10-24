@@ -66,6 +66,41 @@ func validateChatToolCall(tc *ir.ToolCall) error {
 	return nil
 }
 
+// validateResponsesToolVocabulary enforces the Responses request-input bound on
+// history tool references. Responses FunctionCallOutputItemParam.call_id is
+// 1..64 characters; the output FunctionToolCall.call_id has no such bound, so
+// this is a request-only rule. Chat has no id length limit, and a longer id
+// cannot be shortened without changing the client-visible identity, so the
+// request fails closed instead of emitting a wire the target rejects.
+func validateResponsesToolVocabulary(req *ir.Request) error {
+	for _, message := range req.Messages {
+		for _, block := range message.Content {
+			switch block.Type {
+			case ir.BlockToolCall:
+				if block.ToolCall != nil {
+					if err := validateResponsesToolReference("tool call id", block.ToolCall.ID); err != nil {
+						return err
+					}
+				}
+			case ir.BlockToolResult:
+				if block.ToolResult != nil {
+					if err := validateResponsesToolReference("tool result call id", block.ToolResult.CallID); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateResponsesToolReference(field, id string) error {
+	if len(id) >= 1 && len(id) <= 64 {
+		return nil
+	}
+	return fmt.Errorf("responses %s %q must be 1..64 bytes", field, boundedEcho(id))
+}
+
 // validateAnthropicToolCall enforces the Anthropic target's name and id
 // classes on one tool call. The request encoders and the response encoders
 // share it so a call the target would reject fails at the same owner instead

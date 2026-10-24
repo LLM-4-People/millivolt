@@ -680,6 +680,9 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
 	}
+	if err := validateResponsesToolVocabulary(req); err != nil {
+		return nil, err
+	}
 	if err := validateResponseFormatName("responses", req.ResponseFormat); err != nil {
 		return nil, err
 	}
