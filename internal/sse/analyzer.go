@@ -1392,11 +1392,14 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	}
 	// A restored output count is part of the turn's usage, so a provider
 	// total captured before that restoration must not remain below
-	// input+restored output. The custom-total merge above can overwrite the
-	// earlier value, so the consistency guard runs once after every usage
-	// owner. A zero total stays zero (settlement derives input+output), and a
-	// provider total at or above the sum stays authoritative.
-	if restoredOutput && rec.Usage.TotalTokens > 0 {
+	// input+restored output. A custom Anthropic total captured at
+	// message_start is similarly stale once a completed message_delta reports
+	// output, even though that output was not "restored". The custom-total
+	// merge above can overwrite the earlier value, so the consistency guard
+	// runs once after every usage owner. A zero total stays zero (settlement
+	// derives input+output), and a provider total at or above the sum stays
+	// authoritative.
+	if (restoredOutput || a.anthropicCustomTotal > 0) && rec.Usage.TotalTokens > 0 {
 		if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
 			a.usageInvalid = true
 		} else if rec.Usage.TotalTokens < total {
