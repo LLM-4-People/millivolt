@@ -423,10 +423,10 @@ func decodeChatMetadata(in map[string]json.RawMessage) (map[string]string, ir.Wa
 // Anthropic requires, and the Chat encoder splits it back out losslessly.
 func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error) {
 	var (
-		out            []ir.Message
-		warns          ir.Warnings
-		pending        *ir.Message
-		generatedCalls chatGeneratedToolCallIDs
+		out       []ir.Message
+		warns     ir.Warnings
+		pending   *ir.Message
+		toolCalls chatToolCalls
 	)
 	flush := func() {
 		if pending != nil {
@@ -502,9 +502,7 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 					return nil, nil, err
 				}
 				warns = append(warns, w...)
-				if generated {
-					generatedCalls.add(call.ID, call.Name)
-				}
+				toolCalls.add(call.ID, call.Name, generated)
 				blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 			}
 			if rawPresent(m.FunctionCall) {
@@ -524,18 +522,26 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 			}
 			warns = append(warns, w...)
 			callID := m.ToolCallID
-			if callID == "" {
-				callID = m.Name
-			}
 			if m.Role == "tool" {
-				// A modern tool reply may name its call instead of carrying
-				// the synthesized id; a legacy role:"function" reply already
-				// pairs with function_call by name and stays untouched.
-				resolved, err := generatedCalls.consume(callID)
+				// A modern tool reply preserves which reference the client
+				// used: tool_call_id is an id, the message name is a function
+				// name, and neither one resolves an ambiguous remaining call.
+				// A legacy role:"function" reply pairs with function_call by
+				// name and stays outside this state.
+				var err error
+				switch {
+				case m.ToolCallID != "":
+					callID, err = toolCalls.consumeID(m.ToolCallID)
+				case m.Name != "":
+					callID, err = toolCalls.consumeName(m.Name)
+				default:
+					callID, err = toolCalls.consumeEmpty()
+				}
 				if err != nil {
 					return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d: %w", i, err))
 				}
-				callID = resolved
+			} else if callID == "" {
+				callID = m.Name
 			}
 			if callID == "" {
 				return nil, nil, errParseOpenAIBody(fmt.Errorf("message %d: tool message has no tool_call_id", i))
@@ -634,66 +640,113 @@ func decodeLegacyMessageFunctionCall(raw json.RawMessage) (*ir.ToolCall, error) 
 	return &ir.ToolCall{ID: obj.Name, Name: obj.Name, Arguments: args}, nil
 }
 
-// chatGeneratedToolCallIDs reconciles the call ids decodeChatToolCall
-// synthesizes for assistant tool calls whose wire id was missing with the tool
-// replies that answer them by function name. Chat lets a client answer by name
-// (tool_call_id or the message's name), but every translated target pairs the
-// result with the assistant call's exact id. A reference matching more than one
-// unconsumed generated call is ambiguous: attaching the result to a guess would
-// silently pair it with the wrong call, so the decoder fails closed.
-type chatGeneratedToolCallIDs struct {
-	pending []chatGeneratedToolCallID
+// chatToolCalls owns the pairing state for Chat assistant tool calls. It tracks
+// every call, explicit and generated, because a result id must never be matched
+// against another call's function name, and an empty reference is ambiguous as
+// soon as a second call is unresolved.
+type chatToolCalls struct {
+	calls []chatToolCallRef
 }
 
-type chatGeneratedToolCallID struct {
-	id   string
-	name string
+type chatToolCallRef struct {
+	id        string
+	name      string
+	generated bool
+	answered  bool
 }
 
-func (g *chatGeneratedToolCallIDs) add(id, name string) {
-	g.pending = append(g.pending, chatGeneratedToolCallID{id: id, name: name})
+func (c *chatToolCalls) add(id, name string, generated bool) {
+	c.calls = append(c.calls, chatToolCallRef{id: id, name: name, generated: generated})
 }
 
-// consume resolves one tool reply reference. An exact generated id, a unique
-// function name, or an empty reference with exactly one pending generated call
-// resolves to the generated id and marks the call answered. A reference that
-// matches no generated call is returned unchanged: it names a client-supplied
-// call id, which this decoder must not rewrite.
-func (g *chatGeneratedToolCallIDs) consume(reference string) (string, error) {
-	if len(g.pending) == 0 {
-		return reference, nil
-	}
-	if reference != "" {
-		for i, call := range g.pending {
-			if call.id == reference {
-				g.consumeAt(i)
-				return reference, nil
-			}
+// consumeID resolves a result's tool_call_id. An exact id is authoritative: an
+// unanswered call carrying that id is answered even when another call uses the
+// same string as its function name. When no id matches, a generated call may
+// still be addressed by the function name its client supplied in place of the
+// missing id; only a unique such name resolves, and an explicit call's name is
+// never reinterpreted as an id.
+func (c *chatToolCalls) consumeID(reference string) (string, error) {
+	for i := range c.calls {
+		if !c.calls[i].answered && c.calls[i].id == reference {
+			c.calls[i].answered = true
+			return reference, nil
 		}
 	}
-	match := -1
-	for i, call := range g.pending {
-		if reference != "" && call.name != reference {
+	generated := -1
+	named := 0
+	for i := range c.calls {
+		if c.calls[i].answered || c.calls[i].name != reference {
 			continue
 		}
-		if match >= 0 {
-			if reference == "" {
-				return "", errors.New("tool message has no tool_call_id and more than one generated tool call is unresolved")
-			}
-			return "", fmt.Errorf("tool result references %q, which matches more than one generated tool call", reference)
+		named++
+		if c.calls[i].generated {
+			generated = i
 		}
-		match = i
 	}
-	if match < 0 {
+	switch {
+	case named > 1:
+		return "", fmt.Errorf("tool_call_id %q matches more than one unresolved tool call", reference)
+	case generated >= 0:
+		c.calls[generated].answered = true
+		return c.calls[generated].id, nil
+	default:
+		// An explicit call is answered through its id, never through its
+		// function name alone; an unknown id also stays as supplied.
 		return reference, nil
 	}
-	id := g.pending[match].id
-	g.consumeAt(match)
-	return id, nil
 }
 
-func (g *chatGeneratedToolCallIDs) consumeAt(i int) {
-	g.pending = append(g.pending[:i], g.pending[i+1:]...)
+// consumeName resolves a result's message name. A name is a function name, not
+// an id: only a generated call is name-addressable, and a name shared by more
+// than one unresolved call fails closed. An explicit call is answered through
+// its id, so its name alone leaves the reference unchanged.
+func (c *chatToolCalls) consumeName(reference string) (string, error) {
+	generated := -1
+	named := 0
+	for i := range c.calls {
+		if c.calls[i].answered || c.calls[i].name != reference {
+			continue
+		}
+		named++
+		if c.calls[i].generated {
+			generated = i
+		}
+	}
+	switch {
+	case named > 1:
+		return "", fmt.Errorf("tool result name %q matches more than one unresolved tool call", reference)
+	case generated >= 0:
+		c.calls[generated].answered = true
+		return c.calls[generated].id, nil
+	default:
+		return reference, nil
+	}
+}
+
+// consumeEmpty resolves a result with no tool_call_id and no name. It can only
+// answer the one remaining generated call: any second unresolved call, explicit
+// or generated, makes the empty reference ambiguous. With no unresolved calls
+// the caller keeps its existing "tool message has no tool_call_id" rejection.
+func (c *chatToolCalls) consumeEmpty() (string, error) {
+	unanswered := 0
+	generated := -1
+	for i := range c.calls {
+		if c.calls[i].answered {
+			continue
+		}
+		unanswered++
+		if c.calls[i].generated {
+			generated = i
+		}
+	}
+	if unanswered == 0 {
+		return "", nil
+	}
+	if unanswered == 1 && generated >= 0 {
+		c.calls[generated].answered = true
+		return c.calls[generated].id, nil
+	}
+	return "", errors.New("tool message has no tool_call_id and does not identify a unique generated tool call")
 }
 
 // decodeChatToolCall decodes one assistant tool call. The bool reports that the

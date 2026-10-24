@@ -137,10 +137,15 @@ target cannot consume them:
   audio output, non-text `modalities`, and `web_search_options` have no target
   equivalent and are dropped with a warning.
 - A Chat assistant tool call without an id gets a generated id and reports the
-  recorded approximation. A later `role: tool` reply that names the call by
-  `tool_call_id` or the message's `name` is paired with that generated id, so
-  an Anthropic or Responses target receives a matching result reference; a name
-  matching more than one unresolved generated call fails closed.
+  recorded approximation. Pairing keeps the kind of reference. A non-empty
+  `tool_call_id` answers the unanswered call with that exact id, so an explicit
+  id is never shadowed by another call's function name; when no id matches, a
+  generated call may still be addressed by the function name its client supplied
+  in place of the missing id. A message `name` (with no `tool_call_id`) addresses
+  a unique generated call. A reply with neither resolves only while exactly one
+  generated call is unresolved and no other call is unresolved. Any reference
+  matching more than one unresolved call fails closed, and an explicit call is
+  never answered by its name alone.
 - A `json_schema` response format must carry its `schema` object to translate;
   a schema-less `json_schema` is rejected with 400 because a cross-protocol
   target has no meaningful mapping for one. A native same-protocol Chat
