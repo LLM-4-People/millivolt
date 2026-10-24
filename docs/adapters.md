@@ -252,10 +252,11 @@ target cannot consume them:
   generated call is unresolved and no other call is unresolved. Any reference
   matching more than one unresolved call fails closed, and an explicit call is
   never answered by its name alone.
-- A `json_schema` response format must carry its `schema` object to translate;
-  a schema-less `json_schema` is rejected with 400 because a cross-protocol
-  target has no meaningful mapping for one. A native same-protocol Chat
-  request is relayed unchanged, so the passthrough path still forwards it.
+- A `json_schema` response format must carry a valid JSON object `schema` to
+  translate; a schema-less, null, non-object or invalid `json_schema` schema is
+  rejected with 400 because a cross-protocol target has no meaningful mapping
+  for one. A native same-protocol Chat request is relayed unchanged, so the
+  passthrough path still forwards it.
 - A non-function tool type and malformed tool arguments are rejected before any
   upstream send.
 
