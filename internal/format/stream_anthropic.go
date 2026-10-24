@@ -716,10 +716,11 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		return e.finish()
 	case ir.EventError:
 		if ev.Error != nil {
-			typ := ev.Error.Type
-			if typ == "" {
-				typ = "api_error"
-			}
+			// The target vocabulary is Anthropic's documented set, not the
+			// shared OpenAI class: the non-stream owner applies the same
+			// mapping, so a truncated internal class or a foreign server_error
+			// becomes api_error and provider classes pass through.
+			typ := anthropicErrorType(ev.Error.Type)
 			if err := e.emit("error", map[string]any{
 				"type":  "error",
 				"error": map[string]any{"type": typ, "message": ev.Error.Message},
