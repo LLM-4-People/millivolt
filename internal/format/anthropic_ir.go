@@ -538,6 +538,9 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
 	}
+	if err := validateAnthropicToolVocabulary(req); err != nil {
+		return nil, err
+	}
 	if req.PreviousResponseID != "" {
 		return nil, errors.New("anthropic target cannot resolve previous_response_id")
 	}

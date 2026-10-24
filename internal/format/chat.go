@@ -874,6 +874,9 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
 	}
+	if err := validateChatToolVocabulary(req); err != nil {
+		return nil, err
+	}
 	if req.PreviousResponseID != "" {
 		return nil, errors.New("chat target cannot resolve previous_response_id")
 	}
