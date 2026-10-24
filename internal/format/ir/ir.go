@@ -576,8 +576,15 @@ func ValidateRequest(r *Request) error {
 		switch r.ResponseFormat.Type {
 		case "", "text", "json_object":
 		case "json_schema":
-			if len(r.ResponseFormat.Schema) == 0 {
+			// Both official schemas require the schema member itself to be a
+			// JSON object. Length alone would pass null, an array or a
+			// boolean and emit a target wire the provider rejects.
+			schema := bytes.TrimSpace(r.ResponseFormat.Schema)
+			if len(schema) == 0 {
 				return fmt.Errorf("ir: json_schema response format requires a schema")
+			}
+			if schema[0] != '{' || !json.Valid(schema) {
+				return fmt.Errorf("ir: json_schema response format requires a JSON object schema")
 			}
 		default:
 			return fmt.Errorf("ir: unsupported response format %q", r.ResponseFormat.Type)
