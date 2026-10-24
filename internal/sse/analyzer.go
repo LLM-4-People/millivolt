@@ -173,6 +173,11 @@ type Analyzer struct {
 	// x_nanogpt_pricing) rather than inside usage itself. The usage object
 	// stays the fallback root so paths written against it keep resolving.
 	usageChunk []byte
+	// cost and costSeen retain the last payload whose cost_keys path
+	// resolved. A later usage-bearing or terminal chunk without a cost must
+	// not erase the provider's earlier charge.
+	cost     float64
+	costSeen bool
 	// usageSeen records that the source actually reported usage (a usage
 	// object or a provider usage-key path), so Fill's chunk-count fallback is
 	// distinguishable from a reported zero.
@@ -346,6 +351,7 @@ func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
 			a.terminatorSeen = true
 			a.responsesStream = true
 			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			a.captureCost(a.eventData)
 			// The reassembled document is the whole event, so its usage
 			// object may span several data: lines that no per-line scan could
 			// parse. Capture it here exactly like feedData does for a
@@ -371,6 +377,17 @@ func (a *Analyzer) captureUsage(keys *frameKeys, payload []byte) {
 	a.usage = append(a.usage[:0], raw...)
 	a.usageChunk = append(a.usageChunk[:0], payload...)
 	a.usageSeen = true
+	a.captureCost(payload)
+}
+
+// captureCost retains the last cost-bearing payload. Cost keys are relative to
+// the response root and providers may place the charge on an earlier chunk
+// than the usage they finish with, so the value is captured when it resolves
+// instead of re-read from whichever chunk happens to be last.
+func (a *Analyzer) captureCost(payload []byte) {
+	if cost, ok := a.extractCost(payload); ok {
+		a.cost, a.costSeen = cost, true
+	}
 }
 
 // feedData classifies one data payload. forcedType supplies the Responses
@@ -532,6 +549,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		// x_nanogpt_pricing rides exactly this chunk). Copied once - payload
 		// aliases the relay's reused line buffer.
 		a.usageChunk = append(a.usageChunk[:0], payload...)
+		a.captureCost(payload)
 	}
 
 	// Chat/Responses-API shape detection + Responses terminal events
@@ -548,6 +566,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	if responsesTerminalEvent(eventType) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
+		a.captureCost(payload)
 		a.captureResponsesTerminalFinish(eventType, payload, now)
 	}
 	// A Responses failure states its provider error under response.error, not
@@ -642,6 +661,7 @@ func (a *Analyzer) flushEvent(now time.Time) {
 		if typ := keys.responseEventType(a.eventData); responsesTerminalEvent(typ) {
 			a.terminatorSeen = true
 			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			a.captureCost(a.eventData)
 			a.captureResponsesTerminalFinish(typ, a.eventData, now)
 		}
 	}
@@ -1116,40 +1136,49 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 		}
 		// Provider usage-key paths may live beside the usage object in the
 		// raw chunk root; merge them without clobbering normalized counts.
-		if len(a.usageChunk) > 0 && mergeChunkUsage(a.usageChunk, rec, a.UsageKeys) {
-			rec.GenTokens = 0
-			a.usageSeen = true
+		if len(a.usageChunk) > 0 {
+			if m := mergeChunkUsage(a.usageChunk, rec, a.UsageKeys); m.merged {
+				if m.outputLanded {
+					rec.GenTokens = 0
+				}
+				a.usageSeen = true
+			}
 		}
 	} else if len(a.usageChunk) > 0 {
-		if mergeChunkUsage(a.usageChunk, rec, a.UsageKeys) {
-			rec.GenTokens = 0
+		if m := mergeChunkUsage(a.usageChunk, rec, a.UsageKeys); m.merged {
+			if m.outputLanded {
+				rec.GenTokens = 0
+			}
 			a.usageSeen = true
 		}
 	}
 	if a.anthropicCustomSeen {
-		mergeUsageValues(&rec.Usage, a.anthropicCustomUsage)
+		m := mergeUsageValues(&rec.Usage, a.anthropicCustomUsage)
 		if a.anthropicCustomTotal > 0 {
 			rec.Usage.TotalTokens = a.anthropicCustomTotal
-			rec.GenTokens = 0
+			if m.outputLanded {
+				rec.GenTokens = 0
+			}
 			a.usageSeen = true
 		} else if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
 			rec.Usage = metrics.Usage{}
 			a.usageSeen = false
 		} else {
 			rec.Usage.TotalTokens = total
-			rec.GenTokens = 0
+			if m.outputLanded {
+				rec.GenTokens = 0
+			}
 			a.usageSeen = true
 		}
 	}
 	// Cost is read straight from the provider's response (dynamic), so it
-	// reflects what the provider actually charged for this request. The cost
-	// root is the usage-bearing/terminal CHUNK (the stream's response
-	// document - cost_keys paths are response-root relative, and the cost may
-	// sit in a sibling object like nano-gpt's x_nanogpt_pricing); the bare
-	// usage object is the fallback, so paths written against usage keep
-	// working (a chunk root that lacks the path falls through).
-	if cost, ok := a.extractCost(a.usageChunk); ok {
-		rec.Cost = cost
+	// reflects what the provider actually charged for this request. Every
+	// usage-bearing or terminal chunk is scanned at capture time and the last
+	// cost-bearing value is retained; a later usage-less chunk therefore
+	// cannot erase an earlier charge. The bare usage object is the fallback,
+	// so paths written against usage keep working.
+	if a.costSeen {
+		rec.Cost = a.cost
 	} else if cost, ok := a.extractCost(a.usage); ok {
 		rec.Cost = cost
 	}
@@ -1380,35 +1409,48 @@ func decodeUsage(raw json.RawMessage, rec *metrics.Record, usageKeys map[string]
 // object (via usage_keys paths) into the record - WITHOUT replacing the
 // chunk-count fallbacks: only positive values are merged. Returns whether
 // anything merged.
-func mergeChunkUsage(raw []byte, rec *metrics.Record, usageKeys map[string]string) bool {
+func mergeChunkUsage(raw []byte, rec *metrics.Record, usageKeys map[string]string) usageMerge {
 	var obj any
 	if json.Unmarshal(raw, &obj) != nil {
-		return false
+		return usageMerge{}
 	}
 	return mergeUsageValues(&rec.Usage, metrics.ParseUsage(obj, usageKeys))
 }
 
+// usageMerge reports what one merge actually landed. OutputLanded gates the
+// chunk-derived GenTokens fallback: only a provider output count may displace
+// it, so a custom path that reports input alone keeps the tool-excluded chunk
+// count.
+type usageMerge struct {
+	merged       bool
+	outputLanded bool
+}
+
 // mergeUsageValues folds only positive counts into dst. A custom path that
 // resolves to zero never clobbers a standard count or the chunk fallback.
-func mergeUsageValues(dst *metrics.Usage, src metrics.Usage) bool {
-	merged := false
+func mergeUsageValues(dst *metrics.Usage, src metrics.Usage) usageMerge {
+	var out usageMerge
 	for _, f := range []struct {
-		got int64
-		dst *int64
+		got   int64
+		dst   *int64
+		field string
 	}{
-		{src.InputTokens, &dst.InputTokens},
-		{src.OutputTokens, &dst.OutputTokens},
-		{src.TotalTokens, &dst.TotalTokens},
-		{src.CacheReadTokens, &dst.CacheReadTokens},
-		{src.CacheWrite, &dst.CacheWrite},
-		{src.ReasoningTokens, &dst.ReasoningTokens},
+		{src.InputTokens, &dst.InputTokens, "input_tokens"},
+		{src.OutputTokens, &dst.OutputTokens, "output_tokens"},
+		{src.TotalTokens, &dst.TotalTokens, "total_tokens"},
+		{src.CacheReadTokens, &dst.CacheReadTokens, "cache_read_tokens"},
+		{src.CacheWrite, &dst.CacheWrite, "cache_write_tokens"},
+		{src.ReasoningTokens, &dst.ReasoningTokens, "reasoning_tokens"},
 	} {
 		if f.got > 0 {
 			*f.dst = f.got
-			merged = true
+			out.merged = true
+			if f.field == "output_tokens" {
+				out.outputLanded = true
+			}
 		}
 	}
-	return merged
+	return out
 }
 
 // responsesReasoningEvent matches OpenAI/xAI Responses-API reasoning stream

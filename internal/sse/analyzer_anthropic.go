@@ -94,7 +94,7 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 			if msg.Usage != nil {
 				a.usageChunk = append(a.usageChunk[:0], payload...)
 				a.setAnthropicUsage(msg.Usage)
-				a.captureAnthropicCustomUsage(payload)
+				a.captureAnthropicCustomUsage(payload, "message.usage")
 			}
 		}
 		return true
@@ -131,7 +131,7 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		if ev.Usage != nil {
 			a.usageChunk = append(a.usageChunk[:0], payload...)
 			a.setAnthropicUsage(ev.Usage)
-			a.captureAnthropicCustomUsage(payload)
+			a.captureAnthropicCustomUsage(payload, "usage")
 		}
 		if ev.Delta.StopReason != "" {
 			a.finishReason = anthropicAnalyzerFinish(ev.Delta.StopReason)
@@ -214,16 +214,29 @@ func (a *Analyzer) recordAnthropicToolToken(now time.Time) {
 }
 
 // captureAnthropicCustomUsage folds provider usage/cost key paths that live
-// beside the standard usage object. Anthropic splits usage across events, so
-// the contribution from each usage-bearing payload is merged independently
-// instead of reading only the final chunk root.
-func (a *Analyzer) captureAnthropicCustomUsage(payload []byte) {
+// beside the standard usage object. usagePath selects the event's usage subtree
+// (message.usage on message_start, usage on message_delta) because usage_keys
+// paths are documented relative to the usage object, not the event root; cost
+// keys remain relative to the whole payload. Anthropic splits usage across
+// events, so the contribution from each usage-bearing payload is merged
+// independently instead of reading only the final chunk root.
+func (a *Analyzer) captureAnthropicCustomUsage(payload []byte, usagePath string) {
 	var root any
 	if json.Unmarshal(payload, &root) != nil {
 		return
 	}
-	parsed := metrics.ParseUsage(root, a.UsageKeys)
-	if mergeUsageValues(&a.anthropicCustomUsage, parsed) {
+	usage, _ := metrics.DigJSON(root, usagePath)
+	// The documented shape addresses the usage object; some gateways place
+	// the same overrides beside it at the event root, so that fallback stays.
+	// Only provider overrides are read: the standard usage document already
+	// owns the built-in paths through setAnthropicUsage's folded counts.
+	parsed := metrics.ParseUsageOverrides(usage, a.UsageKeys)
+	if len(a.UsageKeys) > 0 {
+		beside := metrics.ParseUsageOverrides(root, a.UsageKeys)
+		mergeUsageValues(&beside, parsed)
+		parsed = beside
+	}
+	if mergeUsageValues(&a.anthropicCustomUsage, parsed).merged {
 		a.anthropicCustomSeen = true
 	}
 	if parsed.TotalTokens > 0 {

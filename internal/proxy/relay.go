@@ -2006,6 +2006,10 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// count for a turn already marked unavailable.
 			if sourceAnalyzer.UsageReported() && !rec.UsageInvalid {
 				rec.Usage = sourceRec.Usage
+				// Provider usage also owns the generation count: the
+				// translated analyzer's chunk-derived fallback (tool-arg
+				// chunks excluded) must not survive real accounting.
+				rec.GenTokens = sourceRec.GenTokens
 			}
 			if sourceCostReported {
 				rec.Cost = sourceCost

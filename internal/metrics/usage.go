@@ -182,7 +182,57 @@ var usageKeyPaths = map[string][]string{
 	"cache_write_tokens": {"prompt_tokens_details.cache_write_tokens", "prompt_tokens_details.created_cache_tokens",
 		"input_tokens_details.cache_write_tokens", "cache_creation_input_tokens", "cache_write_tokens"},
 	"reasoning_tokens": {"completion_tokens_details.reasoning_tokens", "output_tokens_details.reasoning_tokens",
-		"reasoning_tokens"},
+		"output_tokens_details.thinking_tokens", "reasoning_tokens"},
+}
+
+// usageField names one canonical count and its destination.
+type usageField struct {
+	name string
+	dst  *int64
+}
+
+// usageFields lists every canonical count in one place so the override-only
+// parser and ParseUsage stay in lockstep.
+func usageFields(u *Usage) []usageField {
+	return []usageField{
+		{"input_tokens", &u.InputTokens},
+		{"output_tokens", &u.OutputTokens},
+		{"total_tokens", &u.TotalTokens},
+		{"cache_read_tokens", &u.CacheReadTokens},
+		{"cache_write_tokens", &u.CacheWrite},
+		{"reasoning_tokens", &u.ReasoningTokens},
+	}
+}
+
+// usageCount bounds a token count to a sane, in-range non-negative value.
+// Token counts are never negative and never near int64 range; a rejected value
+// is treated as unreported.
+func usageCount(v any) (int64, bool) {
+	f, ok := asFloat(v)
+	if !ok {
+		return 0, false
+	}
+	// float64(math.MaxInt64) rounds UP to 2^63, which cannot convert
+	// to a nonnegative int64. Counts must also be integral.
+	if f < 0 || f >= float64(math.MaxInt64) || math.Trunc(f) != f {
+		return 0, false
+	}
+	return int64(f), true
+}
+
+// tryUsagePath stores the count at one candidate path when it resolves to an
+// accepted value; false falls through to the next candidate.
+func tryUsagePath(usageObj any, path string, dst *int64) bool {
+	v, ok := DigJSON(usageObj, path)
+	if !ok {
+		return false
+	}
+	n, ok := usageCount(v)
+	if !ok {
+		return false
+	}
+	*dst = n
+	return true
 }
 
 // ParseUsage extracts token usage from a decoded "usage" object (already
@@ -191,49 +241,40 @@ var usageKeyPaths = map[string][]string{
 // first for the fields it names.
 func ParseUsage(usageObj any, overrides map[string]string) Usage {
 	var u Usage
-	// accept bounds a token count to a sane, in-range non-negative value; a
-	// rejected value falls through to the next candidate key path rather than
-	// being stored. Token counts are never negative and never near int64 range.
-	accept := func(f float64) (int64, bool) {
-		// float64(math.MaxInt64) rounds UP to 2^63, which cannot convert
-		// to a nonnegative int64. Counts must also be integral.
-		if f < 0 || f >= float64(math.MaxInt64) || math.Trunc(f) != f {
-			return 0, false
-		}
-		return int64(f), true
-	}
 	set := func(field string, dst *int64) {
-		// tryPath stores the count at one candidate path when it resolves to
-		// an accepted value; false falls through to the next candidate.
-		tryPath := func(p string) bool {
-			if v, ok := DigJSON(usageObj, p); ok {
-				if f, ok := asFloat(v); ok {
-					if n, ok := accept(f); ok {
-						*dst = n
-						return true
-					}
-				}
-			}
-			return false
-		}
 		// provider override path first
-		if p, ok := overrides[field]; ok && p != "" {
-			if tryPath(p) {
+		if p := overrides[field]; p != "" {
+			if tryUsagePath(usageObj, p, dst) {
 				return
 			}
 		}
 		for _, p := range usageKeyPaths[field] {
-			if tryPath(p) {
+			if tryUsagePath(usageObj, p, dst) {
 				return
 			}
 		}
 	}
-	set("input_tokens", &u.InputTokens)
-	set("output_tokens", &u.OutputTokens)
-	set("total_tokens", &u.TotalTokens)
-	set("cache_read_tokens", &u.CacheReadTokens)
-	set("cache_write_tokens", &u.CacheWrite)
-	set("reasoning_tokens", &u.ReasoningTokens)
+	for _, f := range usageFields(&u) {
+		set(f.name, f.dst)
+	}
+	return u
+}
+
+// ParseUsageOverrides extracts only the fields a provider override names,
+// relative to usageObj. The standard usage document already owns every
+// built-in path, so folding built-ins again could clobber a folded total
+// (Anthropic's cache-inclusive input). Empty when no override is configured
+// or none resolves.
+func ParseUsageOverrides(usageObj any, overrides map[string]string) Usage {
+	var u Usage
+	if len(overrides) == 0 {
+		return u
+	}
+	for _, f := range usageFields(&u) {
+		if p := overrides[f.name]; p != "" {
+			tryUsagePath(usageObj, p, f.dst)
+		}
+	}
 	return u
 }
 
