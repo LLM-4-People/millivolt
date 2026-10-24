@@ -1940,9 +1940,16 @@ func boundRequestMetadata(body []byte) error {
 	var logitSeen map[string]struct{}
 	logitOver := false
 	// metadata is also a map field. Duplicate metadata objects merge in
-	// encoding/json, so every occurrence contributes distinct keys to the
-	// decoded map and the aggregate must follow the same merge.
+	// encoding/json, so distinct keys accumulate across every occurrence. A
+	// single occurrence needs only a raw member count: distinct keys cannot
+	// exceed raw members, and the typed decode caps its retained keys at the
+	// same ceiling. The distinct-key set is built only once a second object
+	// makes merge semantics relevant, so a hostile single object never
+	// retains a decoded key map.
 	var metadataSeen map[string]struct{}
+	metadataObjects := 0
+	metadataFirstStart := 0
+	metadataFirstOver := false
 	metadataOver := false
 	// memberSeen counts distinct top-level keys because the rewrite engine and
 	// metadata decode both keep one entry per distinct key; duplicate members
@@ -2054,25 +2061,49 @@ func boundRequestMetadata(body []byte) error {
 			}
 			i = next
 		case "metadata":
-			// The metadata map is decoded into a typed map and duplicate
-			// objects merge, so count distinct keys across every occurrence.
-			if metadataOver {
-				next := skipJSONValue(body, i)
-				if next < 0 {
-					return nil
-				}
-				i = next
-				break
-			}
-			if metadataSeen == nil {
-				metadataSeen = make(map[string]struct{})
-			}
-			n, next, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements, metadataSeen)
-			if !ok {
+			next := skipJSONValue(body, i)
+			if next < 0 {
 				return nil
 			}
-			if n > requestMetadataMaxElements {
-				metadataOver = true
+			trimmed := metrics.SkipSpace(body, i)
+			switch {
+			case trimmed < next && body[trimmed] == 'n':
+				// encoding/json sets the map field to nil for null, so every
+				// key merged before this member is discarded.
+				clear(metadataSeen)
+				metadataSeen = nil
+				metadataObjects = 0
+				metadataFirstStart = 0
+				metadataFirstOver, metadataOver = false, false
+			case trimmed < next && body[trimmed] == '{':
+				metadataObjects++
+				rawOK := metrics.ObjectWithinLimit(body[i:next], requestMetadataMaxElements)
+				if metadataObjects == 1 {
+					metadataFirstStart = i
+					metadataFirstOver = !rawOK
+				} else if !metadataOver {
+					if metadataSeen == nil {
+						// Merge semantics now need the first object's
+						// distinct keys; it was counted but not decoded.
+						metadataSeen = make(map[string]struct{}, 8)
+						n, _, ok := countJSONObjectKeys(body, metadataFirstStart, requestMetadataMaxElements, metadataSeen)
+						if !ok {
+							return nil
+						}
+						if n > requestMetadataMaxElements {
+							metadataOver = true
+						}
+					}
+					if !metadataOver {
+						n, _, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements, metadataSeen)
+						if !ok {
+							return nil
+						}
+						if n > requestMetadataMaxElements {
+							metadataOver = true
+						}
+					}
+				}
 			}
 			i = next
 		case "stop":
@@ -2145,7 +2176,7 @@ func boundRequestMetadata(body []byte) error {
 	if logitOver {
 		return requestMetadataOverflow(body, fmt.Errorf("request logit_bias exceeds %d entries", requestMetadataMaxElements))
 	}
-	if metadataOver {
+	if metadataOver || (metadataObjects == 1 && metadataFirstOver) {
 		return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
 	}
 	return nil
@@ -2729,9 +2760,11 @@ func asciiKeyEqual(raw []byte, name string) bool {
 // into seen. encoding/json reuses the non-nil map field across duplicate
 // top-level map members (metadata, logit_bias), so distinct keys, not raw
 // members, are the decoded size. Duplicate members of one object therefore do
-// not consume the bound. Once seen exceeds max, the map is cleared and the rest
-// of the object is skipped without decoding keys; the caller preserves the
-// overflow state and skips later occurrences entirely.
+// not consume the bound. Plain ASCII keys decode from their source slice and
+// allocate only the map key; escaped or non-ASCII keys decode once through the
+// shared requestKey owner. Once seen exceeds max, the map is cleared and the
+// rest of the object is skipped without decoding keys; the caller preserves
+// the overflow state and skips later occurrences entirely.
 func countJSONObjectKeys(data []byte, i, max int, seen map[string]struct{}) (int, int, bool) {
 	i = metrics.SkipSpace(data, i)
 	if i >= len(data) {
@@ -2758,17 +2791,13 @@ func countJSONObjectKeys(data []byte, i, max int, seen map[string]struct{}) (int
 			return 0, 0, false
 		}
 		if !over {
-			var key string
-			if json.Unmarshal(data[keyStart:end], &key) != nil {
+			key, ok := decodeRequestKey(data[keyStart:end])
+			if !ok {
 				return 0, 0, false
 			}
-			if _, exists := seen[key]; !exists {
-				if len(seen) >= max {
-					over = true
-					clear(seen)
-				} else {
-					seen[key] = struct{}{}
-				}
+			if countDistinctJSONKey(seen, key, max) > max {
+				over = true
+				clear(seen)
 			}
 		}
 		i = metrics.SkipSpace(data, end)
