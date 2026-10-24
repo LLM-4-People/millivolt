@@ -148,10 +148,11 @@ func boundedEcho(value string) string {
 	return value[:cut] + "..."
 }
 
-// boundedProviderError is the single owner for a provider-controlled stream
-// error tuple. All three fields are copied into the client event and echoed by
-// the target encoders, so each is cut with the shared preview bound before it
-// can carry a request-sized value onto the wire.
+// boundedProviderError is the single owner for a provider-controlled error
+// tuple on every decoded surface, streaming and non-streaming. All three fields
+// are copied into the client event and echoed by the target encoders, so each
+// is cut with the shared preview bound before it can carry a request-sized
+// value onto the wire.
 func boundedProviderError(typ, code, message string) *ir.Error {
 	return &ir.Error{
 		Type:    metrics.TruncatePreview(typ),

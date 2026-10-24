@@ -74,3 +74,69 @@ func TestProviderStreamErrorTextBounded(t *testing.T) {
 		check(t, e, false)
 	})
 }
+
+// TestNonStreamProviderErrorFieldsBounded is the B2 regression: the non-stream
+// Chat, Responses and error-body decoders copy provider type/code into the IR
+// and every target encoder echoes them. A 200 in-band envelope may be as large
+// as the translation cap, so all three fields must carry the shared bound.
+func TestNonStreamProviderErrorFieldsBounded(t *testing.T) {
+	long := strings.Repeat("T", 200_000)
+	check := func(t *testing.T, e *ir.Error, target ir.Protocol) {
+		t.Helper()
+		if e == nil {
+			t.Fatal("no decoded error")
+		}
+		for name, value := range map[string]string{"type": e.Type, "code": e.Code, "message": e.Message} {
+			if len(value) > metrics.PreviewMaxBytes+3 {
+				t.Fatalf("%s length = %d, want the preview bound", name, len(value))
+			}
+		}
+		out, err := EncodeError(target, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) >= 1024 {
+			t.Fatalf("encoded %s error is %d bytes, want the bounded envelope", target, len(out))
+		}
+		if strings.Contains(string(out), long[:1024]) {
+			t.Fatalf("encoded %s error carries the unbounded provider value", target)
+		}
+	}
+
+	envelope := `"type":"` + long + `","code":"` + long + `","message":"m"`
+
+	t.Run("chat 200 envelope", func(t *testing.T) {
+		body := `{"id":"c","object":"chat.completion","created":1,"model":"m","error":{` + envelope + `},"choices":[]}`
+		resp, err := DecodeChatResponse([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, resp.Error, ir.Chat)
+	})
+
+	t.Run("responses 200 envelope", func(t *testing.T) {
+		body := `{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[],"error":{` + envelope + `}}`
+		resp, err := DecodeResponsesResponse([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, resp.Error, ir.Responses)
+	})
+
+	t.Run("responses failed status", func(t *testing.T) {
+		body := `{"id":"r","object":"response","created_at":1,"status":"failed","model":"m","output":[],"error":{` + envelope + `}}`
+		resp, err := DecodeResponsesResponse([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, resp.Error, ir.Responses)
+	})
+
+	t.Run("responses error body", func(t *testing.T) {
+		e, err := DecodeResponsesError([]byte(`{"error":{` + envelope + `}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(t, e, ir.Responses)
+	})
+}

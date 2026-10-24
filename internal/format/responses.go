@@ -1349,9 +1349,10 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if in.Status == "failed" {
 		e := &ir.Error{Message: "upstream response failed"}
 		if typ, code, msg := metrics.ParseErrorComponents(in.Error); typ != "" || code != "" || msg != "" {
-			e.Type, e.Code = typ, code
+			bounded := boundedProviderError(typ, code, msg)
+			e.Type, e.Code = bounded.Type, bounded.Code
 			if msg != "" {
-				e.Message = msg
+				e.Message = bounded.Message
 			}
 		}
 		resp.Error = e
@@ -1362,7 +1363,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	// through the shared decoy-aware parser: an empty error object is not a
 	// failure, while a string or numeric-code envelope still classifies.
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
-		resp.Error = &ir.Error{Type: typ, Code: code, Message: msg}
+		resp.Error = boundedProviderError(typ, code, msg)
 		resp.Finish = ir.FinishError
 		return resp, nil
 	}
@@ -1864,7 +1865,7 @@ func encodeResponsesUsage(u ir.Usage) (map[string]any, error) {
 // never rejected by a narrower local shape.
 func DecodeResponsesError(body []byte) (*ir.Error, error) {
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
-		return &ir.Error{Type: typ, Code: code, Message: msg}, nil
+		return boundedProviderError(typ, code, msg), nil
 	}
 	return nil, errors.New("not an OpenAI error envelope")
 }

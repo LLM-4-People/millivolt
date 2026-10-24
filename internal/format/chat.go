@@ -1811,7 +1811,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		// decode error from the missing choices.
 		resp := &ir.Response{
 			ID: in.ID, Model: in.Model, Created: int64(in.Created),
-			Error:       &ir.Error{Type: typ, Code: code, Message: msg},
+			Error:       boundedProviderError(typ, code, msg),
 			Finish:      ir.FinishError,
 			Metadata:    in.Metadata.values,
 			ServiceTier: in.ServiceTier,
