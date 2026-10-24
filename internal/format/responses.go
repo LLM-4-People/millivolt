@@ -1258,13 +1258,20 @@ type responsesWireUsage struct {
 // The probe only retains raw members; it stops at the first over-bound array.
 func checkResponsesResponseBounds(body []byte) error {
 	var probe struct {
-		Output json.RawMessage `json:"output"`
+		Output   json.RawMessage `json:"output"`
+		Metadata json.RawMessage `json:"metadata"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
 		return fmt.Errorf("parse responses response: %w", err)
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Output) {
 		return fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
+	}
+	// The metadata map is retained on the canonical response and re-emitted.
+	// Bound it before the typed map decode so a body of tiny members cannot
+	// expand a response into hundreds of MiB.
+	if err := checkWireObject(probe.Metadata, "metadata", WireCollectionMax); err != nil {
+		return fmt.Errorf("responses response: %w", err)
 	}
 	// A reasoning output item's summary array is materialized by the typed
 	// item decode; the bounded output array keeps this probe slice small. An

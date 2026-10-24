@@ -1745,13 +1745,20 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	// the first choice is translated, and a body of tiny objects must not
 	// expand into an unbounded slice.
 	var probe struct {
-		Choices json.RawMessage `json:"choices"`
+		Choices  json.RawMessage `json:"choices"`
+		Metadata json.RawMessage `json:"metadata"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
 		return nil, fmt.Errorf("parse chat response: %w", err)
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Choices) {
 		return nil, fmt.Errorf("chat response choices exceed %d items", metrics.ContentPartMax)
+	}
+	// The metadata map is retained on the canonical response and re-emitted.
+	// Bound it before the typed map decode so a body of tiny members cannot
+	// expand a response into hundreds of MiB.
+	if err := checkWireObject(probe.Metadata, "metadata", WireCollectionMax); err != nil {
+		return nil, err
 	}
 	// The first choice is the one translated; decode it alone from its raw
 	// bytes and bound its tool_calls array so the other choices' arrays are
