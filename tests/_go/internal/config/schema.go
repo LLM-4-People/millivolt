@@ -745,7 +745,7 @@ func exampleHelpText(example string) string {
 // Chat/Anthropic body before translation, and ensured tools require a Chat
 // client body on a Chat outbound wire.
 func TestSettingsHintsStateTranslationScope(t *testing.T) {
-	source := string(settingsJSSource(t))
+	source := strings.Join(strings.Fields(string(settingsJSSource(t))), " ")
 	for _, tc := range []struct {
 		want    string
 		notWant string
@@ -758,12 +758,48 @@ func TestSettingsHintsStateTranslationScope(t *testing.T) {
 			want:    "relayed Chat Completions client bodies on a Chat outbound wire",
 			notWant: "every chat request's tools array",
 		},
+		{
+			want:    "Chat or Anthropic client-body token",
+			notWant: "OpenAI-wire token ceilings",
+		},
 	} {
 		if !strings.Contains(source, tc.want) {
 			t.Errorf("settings.js omits %q", tc.want)
 		}
 		if strings.Contains(source, tc.notWant) {
 			t.Errorf("settings.js still states %q", tc.notWant)
+		}
+	}
+}
+
+// TestProtocolDocsQualifyPassthrough pins the same rewrite exception in the
+// protocol document that the adapters document states: passthrough skips
+// translation, but configured request overrides, a sub-conversation strip or
+// ensured tools can still rewrite the upstream body.
+func TestProtocolDocsQualifyPassthrough(t *testing.T) {
+	doc := strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", "protocol.md"))), " ")
+	for _, tc := range []struct {
+		want    string
+		notWant string
+	}{
+		{
+			want:    "Without a configured request rewrite, a passthrough request's body bytes are relayed unchanged",
+			notWant: "is byte-transparent passthrough",
+		},
+		{
+			want:    "Absent means passthrough; configured request rewrites can still change the body",
+			notWant: "Absent means byte-transparent passthrough",
+		},
+		{
+			want:    "Ordinary requests relay the original body bytes unless a configured request override",
+			notWant: "Ordinary requests preserve original body bytes",
+		},
+	} {
+		if !strings.Contains(doc, tc.want) {
+			t.Errorf("docs/protocol.md omits %q", tc.want)
+		}
+		if strings.Contains(doc, tc.notWant) {
+			t.Errorf("docs/protocol.md still states %q", tc.notWant)
 		}
 	}
 }

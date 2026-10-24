@@ -1416,8 +1416,8 @@ function mrRestoreDefaults(wrap) {
 
 // ---- request overrides editor ----
 // request_overrides: ordered rules rewriting the upstream request before
-// relay (headers set/replace/remove plus OpenAI-wire token ceilings),
-// scoped per client, provider and/or model. One visual grammar with the
+// relay (headers set/replace/remove plus Chat or Anthropic client-body token
+// ceilings), scoped per client, provider and/or model. One visual grammar with the
 // other structured editors: each rule is a .prov-sec card inside an
 // .mr-wrap shell (tools row, count, muted tokens), the headers mapping
 // reuses the providers editor's headerRowHTML family verbatim (its add

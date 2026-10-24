@@ -25,9 +25,13 @@ Other paths reach the relay catch-all and require valid routing headers; the
 client chooses the upstream endpoint and model.
 
 A known client path is translated only when `X-Proxy-Format` selects a
-different upstream protocol. An absent `X-Proxy-Format` is byte-transparent
-passthrough, and an explicit format equal to the client protocol is also
-passthrough. `X-Proxy-In-Format` overrides the protocol named by the path, so an
+different upstream protocol. An absent `X-Proxy-Format` selects passthrough, as
+does an explicit format equal to the client protocol. Without a configured
+request rewrite, a passthrough request's body bytes are relayed unchanged;
+configured request overrides, a sub-conversation strip or ensured tools can
+still rewrite the upstream body (see
+[request overrides](operations.md#request-overrides)). `X-Proxy-In-Format`
+overrides the protocol named by the path, so an
 otherwise unknown path is translated when that header names the inbound wire;
 without the override, paths outside the three known endpoints are never
 translated. A translated request addresses the outbound protocol's canonical
@@ -58,7 +62,7 @@ Routing validation and request construction live in
 | `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Cursor and model discovery ignore both. |
 | `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. Not applied to model discovery or the Cursor bridge. |
 | `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
-| `X-Proxy-Format` | Upstream format: `openai` (Chat Completions), `openai-responses` (Responses), `anthropic` (Messages), or `cursor` (agent.v1). Absent means byte-transparent passthrough. See [supported combinations](adapters.md#client-and-upstream-compatibility). |
+| `X-Proxy-Format` | Upstream format: `openai` (Chat Completions), `openai-responses` (Responses), `anthropic` (Messages), or `cursor` (agent.v1). Absent means passthrough; configured request rewrites can still change the body. See [supported combinations](adapters.md#client-and-upstream-compatibility). |
 | `X-Proxy-In-Format` | Optional client-protocol override: `openai`, `openai-chat` or `chat` (Chat Completions), `openai-responses` or `responses` (Responses), or `anthropic` (Messages). Aliases normalize to the canonical wire. Normally unnecessary because the request path selects the protocol. |
 | `X-Proxy-Client` | Observability/client label; one that only repeats the user agent's product name records the fuller user-agent identity instead. Otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise a configured tracked body param or automatic grouping applies. |
@@ -149,8 +153,10 @@ An unauthenticated local upstream needs no dummy API key.
 
 ## Relay, retries and model discovery
 
-Ordinary requests preserve original body bytes, but the request is buffered up
-to `max_request_bytes` before metadata extraction and sending. Larger requests
+Ordinary requests relay the original body bytes unless a configured request
+override, sub-conversation strip or ensured-tools rule rewrites them; the
+request is buffered up to `max_request_bytes` before metadata extraction and
+sending. Larger requests
 are rejected with HTTP 413 without an upstream send. A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
