@@ -2068,16 +2068,11 @@ func (d *ResponsesStreamDecoder) startPartBlock(key string) (int, bool) {
 	return idx, true
 }
 
-// Item and content-part identities. A provider's terminal output array is not
-// required to preserve output_index positions, so dedupe and terminal
-// completion match on the wire identity the target correlates with: call id
-// for function calls, item id for messages/reasoning, then content index for a
-// part. A source that supplies no identity falls back to its wire position.
 // responsesFunctionCallID returns the target tool id for a streamed Responses
-// function call: call_id first, then the item id, then a stable synthetic id
-// for the output position. The non-stream decoder still rejects a call with
-// both identities absent, but a stream must not close a target block with an
-// empty id (Anthropic aborts and parallel Chat calls collide).
+// function call: call_id first, then the item id, then a synthetic id for the
+// output position. The non-stream decoder still rejects a call with both
+// identities absent, but a stream must not close a target block with an empty
+// id (Anthropic aborts and parallel Chat calls collide).
 func responsesFunctionCallID(callID, itemID string, index int) string {
 	switch {
 	case callID != "":
@@ -2089,6 +2084,11 @@ func responsesFunctionCallID(callID, itemID string, index int) string {
 	}
 }
 
+// Item and content-part identities. A provider's terminal output array is not
+// required to preserve output_index positions, so dedupe and terminal
+// completion match on the wire identity the target correlates with: call id
+// for function calls, item id for messages/reasoning, then content index for a
+// part. A source that supplies no identity falls back to its wire position.
 func functionCallKey(callID, itemID string, outputIndex int) string {
 	switch {
 	case callID != "":
