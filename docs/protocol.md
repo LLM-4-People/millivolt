@@ -170,10 +170,12 @@ HTTP 400; `translation_loss: reject` turns any recorded loss into a 400. Composi
 and Anthropic `messages`/`system` shapes; a byte-transparent Responses body's
 `input`/`instructions` items contribute no composition counts (their model,
 stream flag and output cap are still recorded). Separately, the aggregate
-content-part count over
-every message content array and a top-level `system` array is capped at 16,384;
-a valid request above that aggregate is rejected with HTTP 400 before an
-upstream send. Invalid JSON is passed through on the nontranslated path.
+content-part count over every message content array, a top-level `system`
+array and every Responses `input` item's nested `content`/`output` array is
+capped at 16,384, and the aggregate annotation count inside those Responses
+content parts is capped at 10,000; a valid request above either aggregate is
+rejected with HTTP 400 before an upstream send. Invalid JSON is passed through on the nontranslated
+path.
 Syntactically valid JSON whose strings carry raw invalid UTF-8 is bounded the
 same way: valid UTF-8 and JSON escapes decode to no more bytes than their
 spelling, while the standard decoder replaces each invalid byte with a
