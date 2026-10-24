@@ -209,10 +209,11 @@ generation content was relayed. Durable
 quota/billing 429s follow `quota_pause_mode` instead of the transient retry
 ladder: `off` (default) surfaces them immediately; `retry` parks the
 triggering request and every new request to the same OpenAI-wire provider
-behind a recovery gate until the first re-send resolves 2xx, with the
-consecutive-success threshold from `quota_pause_recovery_successes` (a
-provider `Retry-After` on the quota response paces the next probe like
-any other 429); `manual` installs an indefinite provider pause that only
+behind a recovery gate that closes after
+`quota_pause_recovery_successes` consecutive successful probes (the default 1
+closes on the first 2xx); a provider `Retry-After` on the quota response paces
+the next probe like any other 429; `manual` installs an indefinite provider
+pause that only
 an operator resumes. Quota re-sends never burn the transient retry budget. Provider
 retry hints and operator holds can substantially extend total wall time. With
 `suppress_client_retries` the proxy declares itself the client's sole retry
@@ -361,9 +362,10 @@ The quota pause (`quota_pause_mode: retry`) is a separate provider-wide gate in
 the same scheduler: the first durable quota/billing 429 from an OpenAI-wire
 provider opens it immediately (no sample thresholds), the triggering request
 absorbs the 429 and re-sends per the same recovery cooldowns, and every new
-request to the provider parks at admission. The first send that resolves 2xx
-closes the gate after `quota_pause_recovery_successes` probes and the queue
-drains; a provider `Retry-After` on the quota 429 is a floor on the next probe,
+request to the provider parks at admission. The gate closes after
+`quota_pause_recovery_successes` consecutive successful probes (the default 1
+closes on the first 2xx) and the queue drains; a provider `Retry-After` on the
+quota 429 is a floor on the next probe,
 bounded by the shared hint ceiling. Parked sends obey `storm_max_queue` and
 `storm_max_wait`; beyond them the proxy answers HTTP 429 locally. The gate
 appears in the storm banner as a quota incident with an operator **Resume now**

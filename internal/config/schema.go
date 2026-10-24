@@ -292,7 +292,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 
 		// ---- quota ----
 		{Key: "quota_pause_mode", Category: "quota", Label: "Mode",
-			Help: "Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits; in-band occurrences included): off surfaces it immediately; retry opens a provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per the storm recovery delays, new requests park on the gate (bounded by storm_max_queue/storm_max_wait), and the first 2xx closes it; manual creates an indefinite provider pause that only an operator resumes. Classification is fixed; only the reaction is configurable. OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior.",
+			Help: "Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits; in-band occurrences included): off surfaces it immediately; retry opens a provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per the storm recovery delays, new requests park on the gate (bounded by storm_max_queue/storm_max_wait), and the gate closes after quota_pause_recovery_successes consecutive successful probes (the default 1 closes on the first 2xx); manual creates an indefinite provider pause that only an operator resumes. Classification is fixed; only the reaction is configurable. OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior.",
 			Kind: KindString, HotReload: true},
 		{Key: "quota_pause_recovery_successes", Category: "quota", Label: "Recovery successes",
 			Help: "Consecutive successful recovery probes that close a retry-mode quota gate. 1 releases the queue on the first 2xx. Meaningful only in retry mode.",

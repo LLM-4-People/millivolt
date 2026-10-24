@@ -1055,8 +1055,8 @@ error envelope is a durable account condition - `insufficient_quota`,
   OpenAI-wire provider. The triggering request absorbs the 429 and re-sends
   per the error storm recovery delays; every new request to the provider
   parks on the gate (bounded by `storm_max_queue` and `storm_max_wait`); the
-  first send that resolves 2xx closes the gate after
-  `quota_pause_recovery_successes` probes and the queue drains. A provider
+  gate closes after `quota_pause_recovery_successes` consecutive successful
+  probes (the default 1 closes on the first 2xx) and the queue drains. A provider
   `Retry-After` on the quota 429 paces the next probe like any other 429.
 - **manual**: an indefinite provider-scoped pause (an operator hold labeled
   with the quota class) is created automatically; every request, triggering

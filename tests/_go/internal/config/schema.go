@@ -905,6 +905,9 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"responses cancelled extension", adapters, "response.cancelled"},
 		{"responses cancelled compatibility", adapters, "forward-compatible extension"},
 		{"synthetic sequence reset", adapters, "restart `sequence_number` at 0 and 1"},
+		{"quota recovery consecutive probes", operations, "consecutive successful probes (the default 1 closes on the first 2xx)"},
+		{"quota recovery protocol wording", protocol, "consecutive successful probes (the default 1 closes on the first 2xx)"},
+		{"quota recovery example wording", example, "consecutive successful probes (the default 1 closes on the first 2xx)"},
 	} {
 		if !strings.Contains(tc.text, tc.want) {
 			t.Errorf("%s: missing %q", tc.name, tc.want)
