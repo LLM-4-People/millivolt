@@ -1006,7 +1006,21 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 				warns.Add(ir.WarningOpaque, "reasoning", "redacted reasoning cannot be replayed on Anthropic Messages")
 			}
 		case ir.BlockRefusal:
-			out = append(out, map[string]any{"type": "text", "text": b.Refusal})
+			// A refusal becomes a text block, which Anthropic also rejects
+			// when empty (minLength 1). Drop it explicitly instead of
+			// emitting an invalid block; a non-empty refusal keeps its cache
+			// breakpoint like any other text block.
+			if b.Refusal == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.refusal", "empty refusal has no representable content")
+				}
+				continue
+			}
+			block := map[string]any{"type": "text", "text": b.Refusal}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			out = append(out, block)
 		}
 	}
 	_ = role
