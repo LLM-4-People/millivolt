@@ -638,15 +638,22 @@ func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 }
 
 func applyTokenCaps(body []byte, rec *metrics.Record) {
-	var caps struct {
-		MaxTokens       *int `json:"max_tokens"`
-		MaxCompTokens   *int `json:"max_completion_tokens"`
-		MaxOutputTokens *int `json:"max_output_tokens"`
-	}
+	var caps tokenCapMembers
 	if json.Unmarshal(body, &caps) != nil {
 		return
 	}
-	rec.ReqMaxTokens = resolveRequestTokenCap(caps.MaxCompTokens, caps.MaxTokens, caps.MaxOutputTokens)
+	value := func(raw json.RawMessage, field string) *int {
+		v, err := tokenCapValue(raw, field)
+		if err != nil {
+			return nil
+		}
+		return v
+	}
+	rec.ReqMaxTokens = resolveRequestTokenCap(
+		value(caps.MaxCompTokens, "max_completion_tokens"),
+		value(caps.MaxTokens, "max_tokens"),
+		value(caps.MaxOutputTokens, "max_output_tokens"),
+	)
 }
 
 // restampReqMaxTokens re-reads the effective token ceiling from a rewritten
@@ -1713,65 +1720,204 @@ func hostileTokenCap(v *int) bool {
 	return v != nil && *v > maxRequestOutputTokens
 }
 
+// tokenCapMembers decodes the three accepted token-ceiling spellings as raw
+// JSON. A typed *int decode rejects a representable value spelled 1e6 or
+// 1000000.0 and, worse, fails the whole struct decode, so every member looks
+// absent to both the bound and the conflict checks. Presence and exact value
+// validation therefore live on the raw member.
+type tokenCapMembers struct {
+	MaxTokens       json.RawMessage `json:"max_tokens"`
+	MaxCompTokens   json.RawMessage `json:"max_completion_tokens"`
+	MaxOutputTokens json.RawMessage `json:"max_output_tokens"`
+}
+
+// tokenCapPresent reports whether a raw cap member was supplied. JSON null is
+// the schema's explicit absent value.
+func tokenCapPresent(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
+// tokenCapExponentClamp bounds the decimal exponent accepted by decimalParts.
+// Only a small scale can change the integral or bound verdict for a body that
+// fits the request limit, so a hostile exponent is clamped instead of being
+// materialized as a huge integer.
+const tokenCapExponentClamp = 1 << 30
+
+// decimalParts splits one JSON number literal into its digits and a base-10
+// scale, so the exact value is digits * 10^scale. It accepts the full JSON
+// number grammar and rejects anything else.
+func decimalParts(lit string) (digits string, scale int, negative, ok bool) {
+	if lit == "" {
+		return "", 0, false, false
+	}
+	i := 0
+	if lit[i] == '-' {
+		negative = true
+		i++
+	}
+	start := i
+	for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+		i++
+	}
+	if i == start {
+		return "", 0, false, false
+	}
+	digits = lit[start:i]
+	if i < len(lit) && lit[i] == '.' {
+		i++
+		fracStart := i
+		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			i++
+		}
+		if i == fracStart {
+			return "", 0, false, false
+		}
+		digits += lit[fracStart:i]
+		scale = -(i - fracStart)
+	}
+	if i < len(lit) && (lit[i] == 'e' || lit[i] == 'E') {
+		i++
+		expNegative := false
+		if i < len(lit) && (lit[i] == '+' || lit[i] == '-') {
+			expNegative = lit[i] == '-'
+			i++
+		}
+		expStart := i
+		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
+			i++
+		}
+		if i == expStart {
+			return "", 0, false, false
+		}
+		exp, err := strconv.Atoi(lit[expStart:i])
+		if err != nil {
+			// The exponent exceeds an int; either direction is decisive for
+			// a non-zero significand, so clamp rather than materialize it.
+			exp = tokenCapExponentClamp
+		}
+		if exp > tokenCapExponentClamp {
+			exp = tokenCapExponentClamp
+		}
+		if exp < -tokenCapExponentClamp {
+			exp = -tokenCapExponentClamp
+		}
+		if expNegative {
+			exp = -exp
+		}
+		scale += exp
+	}
+	if i != len(lit) {
+		return "", 0, false, false
+	}
+	return digits, scale, negative, true
+}
+
+// tokenCapValue validates one raw token-ceiling member. An absent or JSON null
+// member returns nil with no error. A supplied member must be a JSON number
+// whose value is integral and no greater than maxRequestOutputTokens; the
+// returned int is that exact value. The wire schema requires an integer, so a
+// fractional, overflowing, out-of-range or non-number value fails closed
+// instead of slipping past a typed decode that rejected the whole object.
+func tokenCapValue(raw json.RawMessage, field string) (*int, error) {
+	lit := strings.TrimSpace(string(raw))
+	if lit == "" || lit == "null" {
+		return nil, nil
+	}
+	digits, scale, negative, ok := decimalParts(lit)
+	if !ok {
+		return nil, fmt.Errorf("%s must be an integer number", field)
+	}
+	sig := strings.TrimLeft(digits, "0")
+	if sig == "" {
+		zero := 0
+		return &zero, nil
+	}
+	switch {
+	case scale < 0:
+		drop := -scale
+		if drop >= len(sig) {
+			return nil, fmt.Errorf("%s must be an integer", field)
+		}
+		for _, c := range sig[len(sig)-drop:] {
+			if c != '0' {
+				return nil, fmt.Errorf("%s must be an integer", field)
+			}
+		}
+		sig = sig[:len(sig)-drop]
+	case scale > 0:
+		if len(sig)+scale > 19 {
+			return nil, fmt.Errorf("%s is outside the supported integer range", field)
+		}
+		sig += strings.Repeat("0", scale)
+	}
+	if !negative && len(sig) > 7 {
+		return nil, fmt.Errorf("%s must not exceed %d", field, maxRequestOutputTokens)
+	}
+	n, err := strconv.ParseInt(sig, 10, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%s is outside the supported integer range", field)
+	}
+	if negative {
+		n = -n
+	}
+	if n > maxRequestOutputTokens {
+		return nil, fmt.Errorf("%s must not exceed %d", field, maxRequestOutputTokens)
+	}
+	v := int(n)
+	return &v, nil
+}
+
 // conflictingTokenCapSpellings reports a body that mixes the Responses
 // max_output_tokens spelling with a Chat max_tokens/max_completion_tokens
-// spelling. The wire families are distinct, so accepting both would make the
-// recorded ceiling depend on decode precedence rather than the client's wire.
+// spelling. Presence is decided on the raw member, so an unrepresentable
+// spelling cannot hide the mix by failing a typed decode. The wire families
+// are distinct, so accepting both would make the recorded ceiling depend on
+// decode precedence rather than the client's wire.
 func conflictingTokenCapSpellings(body []byte) bool {
-	var caps struct {
-		MaxTokens       *int `json:"max_tokens"`
-		MaxCompTokens   *int `json:"max_completion_tokens"`
-		MaxOutputTokens *int `json:"max_output_tokens"`
-	}
+	var caps tokenCapMembers
 	if json.Unmarshal(body, &caps) != nil {
 		return false
 	}
-	return caps.MaxOutputTokens != nil && (caps.MaxTokens != nil || caps.MaxCompTokens != nil)
+	return tokenCapPresent(caps.MaxOutputTokens) &&
+		(tokenCapPresent(caps.MaxTokens) || tokenCapPresent(caps.MaxCompTokens))
 }
 
-// offendingTokenCapField names the token-ceiling spelling that exceeds the
-// hostile bound. It checks EVERY spelling the body carries, not only the one
-// that wins the record precedence: a Responses body can carry both max_tokens
-// and max_output_tokens, and checking only the winner let the other spelling
-// reach the upstream unbounded. The body is authoritative because it carries
-// the client's actual field names; the record's effective ceiling is a
-// fallback for a body whose cap fields did not decode. The empty string means
-// no hostile cap.
-func offendingTokenCapField(body []byte, rec *metrics.Record) string {
-	var caps struct {
-		MaxTokens       *int `json:"max_tokens"`
-		MaxCompTokens   *int `json:"max_completion_tokens"`
-		MaxOutputTokens *int `json:"max_output_tokens"`
-	}
+// tokenCapViolation returns the client-facing 400 reason for the first token
+// ceiling spelling that is hostile or malformed, or the empty string when every
+// spelling is valid. It checks EVERY spelling the body carries, not only the
+// one that wins the record precedence: a Responses body can carry both
+// max_tokens and max_output_tokens, and checking only the winner let the other
+// spelling reach the upstream unbounded. The body is authoritative because it
+// carries the client's actual field names; the record's effective ceiling is a
+// fallback for a body whose cap fields did not decode.
+func tokenCapViolation(body []byte, rec *metrics.Record) string {
+	var caps tokenCapMembers
 	if json.Unmarshal(body, &caps) == nil {
-		// Decode precedence, so the named field is the one the record and
-		// the upstream would actually use when several are present.
 		for _, cap := range []struct {
-			name  string
-			value *int
+			name string
+			raw  json.RawMessage
 		}{
 			{"max_completion_tokens", caps.MaxCompTokens},
 			{"max_tokens", caps.MaxTokens},
 			{"max_output_tokens", caps.MaxOutputTokens},
 		} {
-			if hostileTokenCap(cap.value) {
-				return cap.name
+			if _, err := tokenCapValue(cap.raw, cap.name); err != nil {
+				return err.Error()
 			}
 		}
 	}
 	if rec != nil && hostileTokenCap(rec.ReqMaxTokens) {
-		return "output token cap"
+		return fmt.Sprintf("output token cap must not exceed %d", maxRequestOutputTokens)
 	}
 	return ""
 }
 
-// writeHostileTokenCap rejects a hostile token cap with the shared 400
-// envelope, naming the client's own field. Both ServeHTTP enforcement sites
-// use it, so the two trust boundaries can never drift in status, type or
-// wording.
-func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol, field string) {
-	writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError,
-		fmt.Sprintf("%s must not exceed %d", field, maxRequestOutputTokens))
+// writeHostileTokenCap rejects a hostile or malformed token cap with the shared
+// 400 envelope. Both ServeHTTP enforcement sites use it, so the two trust
+// boundaries can never drift in status or type.
+func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol, reason string) {
+	writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError, reason)
 }
 
 type requestRouting struct {

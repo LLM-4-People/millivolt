@@ -678,8 +678,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if field := offendingTokenCapField(body, rec); field != "" {
-		writeHostileTokenCap(w, t.inbound, field)
+	if reason := tokenCapViolation(body, rec); reason != "" {
+		writeHostileTokenCap(w, t.inbound, reason)
 		return
 	}
 	stream, model := rec.Stream, rec.Model
@@ -743,8 +743,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// anything consumes the record. A decoy type error can keep the
 		// original decode's ReqMaxTokens nil while the translator still
 		// carries the hostile cap into the translated body.
-		if field := offendingTokenCapField(body, rec); field != "" {
-			writeHostileTokenCap(w, t.inbound, field)
+		if reason := tokenCapViolation(body, rec); reason != "" {
+			writeHostileTokenCap(w, t.inbound, reason)
 			return
 		}
 	}

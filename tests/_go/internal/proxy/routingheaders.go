@@ -7,6 +7,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -364,16 +365,17 @@ func TestMixedTokenCapSpellingsRejectedInRange(t *testing.T) {
 func TestHostileTokenCapFallbackNeutral(t *testing.T) {
 	n := maxRequestOutputTokens + 1
 	rec := &metrics.Record{ReqMaxTokens: &n}
-	if got := offendingTokenCapField([]byte(`{}`), rec); got != "output token cap" {
-		t.Fatalf("fallback field = %q, want the neutral name", got)
+	fallback := fmt.Sprintf("output token cap must not exceed %d", maxRequestOutputTokens)
+	if got := tokenCapViolation([]byte(`{}`), rec); got != fallback {
+		t.Fatalf("fallback reason = %q, want the neutral name", got)
 	}
-	if got := offendingTokenCapField(nil, rec); got != "output token cap" {
-		t.Fatalf("nil-body field = %q, want the neutral name", got)
+	if got := tokenCapViolation(nil, rec); got != fallback {
+		t.Fatalf("nil-body reason = %q, want the neutral name", got)
 	}
-	if got := offendingTokenCapField([]byte(`{"max_output_tokens":2}`), rec); got != "output token cap" {
-		t.Fatalf("non-hostile body field = %q, want the record fallback", got)
+	if got := tokenCapViolation([]byte(`{"max_output_tokens":2}`), rec); got != fallback {
+		t.Fatalf("non-hostile body reason = %q, want the record fallback", got)
 	}
-	if got := offendingTokenCapField([]byte(`{"max_output_tokens":1000001}`), nil); got != "max_output_tokens" {
-		t.Fatalf("body field = %q, want max_output_tokens", got)
+	if got := tokenCapViolation([]byte(`{"max_output_tokens":1000001}`), nil); !strings.HasPrefix(got, "max_output_tokens ") {
+		t.Fatalf("body reason = %q, want max_output_tokens", got)
 	}
 }
