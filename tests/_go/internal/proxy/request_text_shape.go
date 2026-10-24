@@ -5,7 +5,6 @@ package proxy
 // option decodes to the same logprob opt-in the codec sees.
 
 import (
-	"fmt"
 	"net/http"
 	"testing"
 

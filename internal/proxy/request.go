@@ -2040,7 +2040,7 @@ func requestIncludeLogprobs(raw json.RawMessage) bool {
 	if i >= len(raw) || raw[i] != '[' {
 		return false
 	}
-	const field = `"message.output_text.logprobs"`
+	const field = "message.output_text.logprobs"
 	i = metrics.SkipSpace(raw, i+1)
 	for i < len(raw) && raw[i] != ']' {
 		if raw[i] == '"' {
@@ -2048,7 +2048,11 @@ func requestIncludeLogprobs(raw json.RawMessage) bool {
 			if end < 0 {
 				return false
 			}
-			if string(raw[i:end]) == field {
+			// Decode the token so an escaped spelling such as
+			// "message.output_text\u002elogprobs" matches the option the
+			// codec sees after its own JSON decode.
+			var member string
+			if json.Unmarshal(raw[i:end], &member) == nil && member == field {
 				return true
 			}
 			i = metrics.SkipSpace(raw, end)
