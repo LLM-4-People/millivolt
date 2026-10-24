@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -51,13 +52,13 @@ const ResponsesStreamFrameMaxBytes = WireJSONEscapeExpansion*ResponsesStreamReta
 
 type responsesStreamEvent struct {
 	Type           string          `json:"type"`
-	SequenceNumber int64           `json:"sequence_number"`
+	SequenceNumber jsonnum.Int64   `json:"sequence_number"`
 	Response       json.RawMessage `json:"response"`
 	Item           json.RawMessage `json:"item"`
 	Part           json.RawMessage `json:"part"`
-	OutputIndex    int             `json:"output_index"`
-	ContentIndex   int             `json:"content_index"`
-	SummaryIndex   int             `json:"summary_index"`
+	OutputIndex    jsonnum.Int64   `json:"output_index"`
+	ContentIndex   jsonnum.Int64   `json:"content_index"`
+	SummaryIndex   jsonnum.Int64   `json:"summary_index"`
 	ItemID         string          `json:"item_id"`
 	Delta          string          `json:"delta"`
 	Text           string          `json:"text"`
@@ -277,6 +278,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		if ev.Type == "" {
 			ev.Type = raw.Name
 		}
+		outputIndex := int(ev.OutputIndex)
+		contentIndex := int(ev.ContentIndex)
+		summaryIndex := int(ev.SummaryIndex)
 		switch ev.Type {
 		case "response.created", "response.in_progress":
 			if d.started {
@@ -324,7 +328,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if item.Phase != "" {
 				d.phaseSeen = true
 			}
-			admitted, err := d.announceOutput(ev.OutputIndex)
+			admitted, err := d.announceOutput(outputIndex)
 			if err != nil {
 				return nil, err
 			}
@@ -335,7 +339,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			switch item.Type {
 			case "function_call":
-				toolID := responsesFunctionCallID(item.CallID, item.ID, ev.OutputIndex)
+				toolID := responsesFunctionCallID(item.CallID, item.ID, outputIndex)
 				if err := checkNativeIdentity("tool id", toolID); err != nil {
 					return nil, err
 				}
@@ -345,7 +349,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkToolCallName(item.Name); err != nil {
 					return nil, err
 				}
-				key := functionCallKey(item.CallID, item.ID, ev.OutputIndex)
+				key := functionCallKey(item.CallID, item.ID, outputIndex)
 				admitted, err := d.announceItem(key)
 				if err != nil {
 					return nil, err
@@ -362,12 +366,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", toolBlocksMax)
 				}
 				idx := d.newBlock()
-				d.itemBlock[ev.OutputIndex] = idx
+				d.itemBlock[outputIndex] = idx
 				d.itemBlockByKey[key] = idx
-				d.keyByOutput[ev.OutputIndex] = key
-				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				d.keyByOutput[outputIndex] = key
+				d.itemIDByOutput[outputIndex] = item.ID
 				if item.CallID != "" && item.ID != "" {
-					alias := functionCallKey("", item.ID, ev.OutputIndex)
+					alias := functionCallKey("", item.ID, outputIndex)
 					if _, exists := d.toolAliases[alias]; !exists {
 						if _, exists := d.itemBlockByKey[alias]; !exists {
 							d.toolAliases[alias] = key
@@ -397,7 +401,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
 					return nil, err
 				}
-				key := reasoningItemKey(item.ID, ev.OutputIndex)
+				key := reasoningItemKey(item.ID, outputIndex)
 				admitted, err := d.announceItem(key)
 				if err != nil {
 					return nil, err
@@ -406,10 +410,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				idx := d.newBlock()
-				d.itemBlock[ev.OutputIndex] = idx
+				d.itemBlock[outputIndex] = idx
 				d.itemBlockByKey[key] = idx
-				d.keyByOutput[ev.OutputIndex] = key
-				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				d.keyByOutput[outputIndex] = key
+				d.itemIDByOutput[outputIndex] = item.ID
 				// An announced reasoning item opens its target block now so
 				// summary/content deltas have a stable index. A provider that
 				// announces an empty item, closes it, then delivers every
@@ -448,10 +452,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkNativeIdentity("message id", item.ID); err != nil {
 					return nil, err
 				}
-				if _, err := d.announceItem(messageItemKey(item.ID, ev.OutputIndex)); err != nil {
+				if _, err := d.announceItem(messageItemKey(item.ID, outputIndex)); err != nil {
 					return nil, err
 				}
-				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				d.itemIDByOutput[outputIndex] = item.ID
 			default:
 				// A provider-specific item has no cross-protocol equivalent.
 				// Streaming cannot report the loss (the status line is already
@@ -484,12 +488,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			itemID := ev.ItemID
 			if itemID == "" {
-				itemID = d.itemIDByOutput[ev.OutputIndex]
+				itemID = d.itemIDByOutput[outputIndex]
 			}
 			if err := checkNativeIdentity("item id", itemID); err != nil {
 				return nil, err
 			}
-			key := contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			key := contentPartKey(itemID, outputIndex, contentIndex)
 			admitted, err := d.announcePart(key)
 			if err != nil {
 				return nil, err
@@ -497,11 +501,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !admitted {
 				continue
 			}
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			pos := [2]int{outputIndex, contentIndex}
 			d.keyByPart[pos] = key
 			d.partPosition[key] = pos
-			d.itemIDByOutput[ev.OutputIndex] = itemID
-			d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
+			d.itemIDByOutput[outputIndex] = itemID
+			d.setPartOwner(key, streamItemKey(itemID, outputIndex))
 			d.partKind[key] = partChannelForBlock(block.Type)
 			start := ""
 			switch block.Type {
@@ -538,7 +542,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if ev.Delta == "" {
 				continue
 			}
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			pos := [2]int{outputIndex, contentIndex}
 			key := d.keyByPart[pos]
 			if key == "" {
 				continue
@@ -555,11 +559,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// The done payload is the authoritative full part value. Emit it
 			// only when no delta carried bytes; repeating streamed text would
 			// duplicate the answer.
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			itemID := d.itemIDByOutput[ev.OutputIndex]
+			pos := [2]int{outputIndex, contentIndex}
+			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
 			if !ok {
-				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+				key = contentPartKey(itemID, outputIndex, contentIndex)
 			}
 			text := ev.Text
 			block := ir.Block{Type: ir.BlockText}
@@ -581,7 +585,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if _, owned := d.partOwner[key]; !owned {
-				d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
+				d.setPartOwner(key, streamItemKey(itemID, outputIndex))
 			}
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelForBlock(block.Type)
@@ -595,19 +599,19 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 		case "response.function_call_arguments.delta":
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if !ok {
 				continue
 			}
-			d.toolArgumentsDelta(d.keyByOutput[ev.OutputIndex], idx, ev.Delta)
+			d.toolArgumentsDelta(d.keyByOutput[outputIndex], idx, ev.Delta)
 		case "response.reasoning_summary_text.delta":
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if !ok {
 				continue
 			}
-			key := d.keyByOutput[ev.OutputIndex]
+			key := d.keyByOutput[outputIndex]
 			if ev.Delta != "" && key != "" {
-				partKey := summaryPartKey(key, ev.SummaryIndex)
+				partKey := summaryPartKey(key, summaryIndex)
 				if _, err := d.announcePart(partKey); err != nil {
 					return nil, err
 				}
@@ -626,12 +630,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Part, &part); err != nil {
 				return nil, err
 			}
-			key := d.keyByOutput[ev.OutputIndex]
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			key := d.keyByOutput[outputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if part.Text == "" || !ok || key == "" {
 				continue
 			}
-			partKey := summaryPartKey(key, ev.SummaryIndex)
+			partKey := summaryPartKey(key, summaryIndex)
 			if _, err := d.announcePart(partKey); err != nil {
 				return nil, err
 			}
@@ -647,12 +651,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		case "response.reasoning_summary_text.done":
 			// The done payload is authoritative per summary part. Emit only
 			// the bytes no delta or start payload already covered.
-			key := d.keyByOutput[ev.OutputIndex]
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			key := d.keyByOutput[outputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if ev.Text == "" || !ok || key == "" {
 				continue
 			}
-			partKey := summaryPartKey(key, ev.SummaryIndex)
+			partKey := summaryPartKey(key, summaryIndex)
 			if _, err := d.announcePart(partKey); err != nil {
 				return nil, err
 			}
@@ -676,11 +680,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if ev.Delta == "" {
 				continue
 			}
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			itemID := d.itemIDByOutput[ev.OutputIndex]
+			pos := [2]int{outputIndex, contentIndex}
+			itemID := d.itemIDByOutput[outputIndex]
 			key := d.keyByPart[pos]
 			if key == "" {
-				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+				key = contentPartKey(itemID, outputIndex, contentIndex)
 			}
 			if _, announced := d.announcedParts[key]; !announced {
 				admitted, err := d.announcePart(key)
@@ -692,7 +696,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if _, owned := d.partOwner[key]; !owned {
-				d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
+				d.setPartOwner(key, streamItemKey(itemID, outputIndex))
 			}
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelReasoning
@@ -706,7 +710,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if idx, ok := d.startPartBlock(key); ok {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
-			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
+			} else if idx, ok := d.itemBlock[outputIndex]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
 			} else if err := d.queueTerminal(key, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}, &ir.Delta{Reasoning: delta}); err != nil {
 				return nil, err
@@ -717,11 +721,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// event entirely, so the reasoning item block is the fallback
 			// channel; the part identity is still recorded so the terminal
 			// document cannot repeat the value.
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			itemID := d.itemIDByOutput[ev.OutputIndex]
+			pos := [2]int{outputIndex, contentIndex}
+			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
 			if !ok {
-				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+				key = contentPartKey(itemID, outputIndex, contentIndex)
 			}
 			if _, announced := d.announcedParts[key]; !announced {
 				admitted, err := d.announcePart(key)
@@ -733,7 +737,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if _, owned := d.partOwner[key]; !owned {
-				d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
+				d.setPartOwner(key, streamItemKey(itemID, outputIndex))
 			}
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelReasoning
@@ -744,7 +748,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if idx, ok := d.startPartBlock(key); ok {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
+			} else if idx, ok := d.itemBlock[outputIndex]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 			} else if err := d.queueTerminal(key, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}, &ir.Delta{Reasoning: emit}); err != nil {
 				return nil, err
@@ -753,17 +757,17 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 		case "response.content_part.done":
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			pos := [2]int{outputIndex, contentIndex}
 			if err := checkNativeIdentity("item id", ev.ItemID); err != nil {
 				return nil, err
 			}
 			itemID := ev.ItemID
 			if itemID == "" {
-				itemID = d.itemIDByOutput[ev.OutputIndex]
+				itemID = d.itemIDByOutput[outputIndex]
 			}
 			key := d.keyByPart[pos]
 			if key == "" {
-				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+				key = contentPartKey(itemID, outputIndex, contentIndex)
 			}
 			var part struct {
 				Type    string `json:"type"`
@@ -812,7 +816,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					}
 				}
 				if _, owned := d.partOwner[key]; !owned {
-					d.setPartOwner(key, streamItemKey(itemID, ev.OutputIndex))
+					d.setPartOwner(key, streamItemKey(itemID, outputIndex))
 				}
 				if _, kind := d.partKind[key]; !kind {
 					d.partKind[key] = partChannelForBlock(block.Type)
@@ -852,34 +856,34 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				typ = "message"
 			}
 			if typ == "function_call" {
-				idx, ok := d.itemBlock[ev.OutputIndex]
+				idx, ok := d.itemBlock[outputIndex]
 				if !ok {
 					continue
 				}
-				key := d.keyByOutput[ev.OutputIndex]
+				key := d.keyByOutput[outputIndex]
 				if err := d.flushToolArguments(key, idx, item.Arguments, responsesToolArgumentsComplete); err != nil {
 					return nil, err
 				}
-				delete(d.itemBlock, ev.OutputIndex)
+				delete(d.itemBlock, outputIndex)
 				delete(d.open, idx)
 				d.clearToolState(key)
 				d.openToolItems--
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if typ == "reasoning" {
-				idx, ok := d.itemBlock[ev.OutputIndex]
+				idx, ok := d.itemBlock[outputIndex]
 				if !ok {
 					continue
 				}
-				if err := d.applyReasoningContent(item, d.keyByOutput[ev.OutputIndex], ev.OutputIndex, &d.terminalPending); err != nil {
+				if err := d.applyReasoningContent(item, d.keyByOutput[outputIndex], outputIndex, &d.terminalPending); err != nil {
 					return nil, err
 				}
-				delete(d.itemBlock, ev.OutputIndex)
+				delete(d.itemBlock, outputIndex)
 				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if sse.ResponsesToolCallItem(typ) {
 				d.sawToolCall = true
 			} else if typ == "message" {
-				if err := d.applyMessageContent(item, ev.OutputIndex, &d.terminalPending); err != nil {
+				if err := d.applyMessageContent(item, outputIndex, &d.terminalPending); err != nil {
 					return nil, err
 				}
 				// Some providers skip content_part.done; close any part block
@@ -887,7 +891,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				// never reached the target, so discard its seed rather than
 				// opening and immediately closing an empty block.
 				for pos, key := range d.keyByPart {
-					if pos[0] != ev.OutputIndex {
+					if pos[0] != outputIndex {
 						continue
 					}
 					idx, started := d.partBlockByKey[key]
@@ -901,11 +905,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 		case "response.function_call_arguments.done":
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if !ok {
 				continue
 			}
-			if err := d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments, responsesToolArgumentsComplete); err != nil {
+			if err := d.flushToolArguments(d.keyByOutput[outputIndex], idx, ev.Arguments, responsesToolArgumentsComplete); err != nil {
 				return nil, err
 			}
 		case "response.reasoning_summary_part.done":
@@ -922,12 +926,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if text == "" {
 				text = ev.Text
 			}
-			key := d.keyByOutput[ev.OutputIndex]
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			key := d.keyByOutput[outputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if text == "" || !ok || key == "" {
 				continue
 			}
-			partKey := summaryPartKey(key, ev.SummaryIndex)
+			partKey := summaryPartKey(key, summaryIndex)
 			if _, err := d.announcePart(partKey); err != nil {
 				return nil, err
 			}

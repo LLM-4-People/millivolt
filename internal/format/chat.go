@@ -95,10 +95,10 @@ type chatWireMessage struct {
 type chatWireAnnotation struct {
 	Type        string `json:"type"`
 	URLCitation *struct {
-		URL        string `json:"url"`
-		Title      string `json:"title"`
-		StartIndex int    `json:"start_index"`
-		EndIndex   int    `json:"end_index"`
+		URL        string        `json:"url"`
+		Title      string        `json:"title"`
+		StartIndex jsonnum.Int64 `json:"start_index"`
+		EndIndex   jsonnum.Int64 `json:"end_index"`
 	} `json:"url_citation"`
 }
 
@@ -970,7 +970,7 @@ func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings)
 		}
 		out = append(out, ir.Citation{
 			Type: "url_citation", URL: a.URLCitation.URL, Title: a.URLCitation.Title,
-			StartIndex: a.URLCitation.StartIndex, EndIndex: a.URLCitation.EndIndex,
+			StartIndex: int(a.URLCitation.StartIndex), EndIndex: int(a.URLCitation.EndIndex),
 		})
 	}
 	return out, warns
@@ -1722,7 +1722,6 @@ type chatWireResponse struct {
 }
 
 type chatWireChoice struct {
-	Index   int             `json:"index"`
 	Message chatWireMessage `json:"message"`
 	Finish  string          `json:"finish_reason"`
 }

@@ -21,7 +21,6 @@ type chatWireChunk struct {
 	Created jsonnum.Int64 `json:"created"`
 	Model   string        `json:"model"`
 	Choices []struct {
-		Index int `json:"index"`
 		Delta struct {
 			Role             string  `json:"role"`
 			Content          *string `json:"content"`
@@ -29,9 +28,9 @@ type chatWireChunk struct {
 			Reasoning        string  `json:"reasoning"`
 			Refusal          *string `json:"refusal"`
 			ToolCalls        []struct {
-				Index    int    `json:"index"`
-				ID       string `json:"id"`
-				Type     string `json:"type"`
+				Index    jsonnum.Int64 `json:"index"`
+				ID       string        `json:"id"`
+				Type     string        `json:"type"`
 				Function struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
@@ -206,10 +205,11 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				// The schema's index is non-negative, and the reserved legacy
 				// index is negative; a negative modern index would merge two
 				// distinct source calls, so reject it at the boundary.
-				if tc.Index < 0 {
-					return nil, fmt.Errorf("chat stream tool call index %d is negative", tc.Index)
+				chatIndex := int(tc.Index)
+				if tc.Index < 0 || int64(chatIndex) != int64(tc.Index) {
+					return nil, fmt.Errorf("chat stream tool call index %d is negative or out of range", tc.Index)
 				}
-				if err := d.toolCall(tc.Index, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+				if err := d.toolCall(chatIndex, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
 					return nil, err
 				}
 			}

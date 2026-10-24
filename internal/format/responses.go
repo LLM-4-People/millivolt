@@ -82,14 +82,13 @@ type responsesWireTool struct {
 // is also the source field set for a Chat url_citation, so both decoders
 // share the same IR mapping.
 type responsesWireAnnotation struct {
-	Type       string `json:"type"`
-	URL        string `json:"url"`
-	Title      string `json:"title"`
-	StartIndex int    `json:"start_index"`
-	EndIndex   int    `json:"end_index"`
-	FileID     string `json:"file_id"`
-	Filename   string `json:"filename"`
-	Index      int    `json:"index"`
+	Type       string        `json:"type"`
+	URL        string        `json:"url"`
+	Title      string        `json:"title"`
+	StartIndex jsonnum.Int64 `json:"start_index"`
+	EndIndex   jsonnum.Int64 `json:"end_index"`
+	FileID     string        `json:"file_id"`
+	Filename   string        `json:"filename"`
 }
 
 type responsesWireItem struct {
@@ -572,7 +571,7 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 			}
 			out = append(out, ir.Citation{
 				Type: "url_citation", URL: a.URL, Title: a.Title,
-				StartIndex: a.StartIndex, EndIndex: a.EndIndex,
+				StartIndex: int(a.StartIndex), EndIndex: int(a.EndIndex),
 			})
 		case "":
 			warns.Add(ir.WarningDropped, "annotations", "annotation has no type")
@@ -1229,7 +1228,6 @@ type responsesWireResponse struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
 	Instructions       json.RawMessage     `json:"instructions"`
-	MaxOutputTokens    *int                `json:"max_output_tokens"`
 	Model              string              `json:"model"`
 	Metadata           map[string]string   `json:"metadata"`
 	ServiceTier        string              `json:"service_tier"`
