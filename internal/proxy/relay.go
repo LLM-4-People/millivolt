@@ -2418,6 +2418,37 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		out.Reset()
 		return true
 	}
+	// writeRescueBoundary closes the client's pending SSE event before a rescue
+	// return. Complete lines already in out are written; the trailing partial
+	// line was never received by the client and is dropped. One newline ends the
+	// open event (and is a harmless blank separator between complete events), so
+	// the fresh attempt's first data line cannot join an existing payload. The
+	// withheld terminal region is discarded with the attempt.
+	writeRescueBoundary := func() bool {
+		o := out.Bytes()
+		if n := bytes.LastIndexByte(o, '\n'); n >= 0 {
+			o = o[:n+1]
+		} else {
+			o = nil
+		}
+		if len(o) > 0 {
+			if _, werr := w.Write(o); werr != nil {
+				clientGone()
+				return false
+			}
+			rec.ResponseBytes += int64(len(o))
+		}
+		out.Reset()
+		hold = hold[:0]
+		holding = false
+		if _, werr := w.Write([]byte("\n")); werr != nil {
+			clientGone()
+			return false
+		}
+		rec.ResponseBytes++
+		flusher.Flush()
+		return true
+	}
 	// finishHold resolves the withheld terminal region: classify the stream and
 	// either release the held bytes verbatim or replace them with the in-band
 	// degenerate error - never stacked on top of a provider-sent in-band error,
@@ -2444,6 +2475,21 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			clientGone()
 			return false
 		}
+		code := a.OutcomeCode()
+		// The stop rescue requires the terminal region still WITHHELD: once a
+		// finishHold call released it the outcome was already signed on the
+		// wire, and no re-send may append behind it. RetryableReasoningStop is
+		// the analyzer's wire-safety gate (no refusal/function_call bytes, not
+		// a Responses-shaped feed). Close any pending event before returning;
+		// the held terminal bytes are discarded instead of written.
+		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected && a.ChatLike() &&
+			holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
+			if !writeRescueBoundary() {
+				return false
+			}
+			rescueRequested = rescueReasoningStop
+			return true
+		}
 		if !writeOut() {
 			return false
 		}
@@ -2464,7 +2510,6 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			flusher.Flush()
 			return true
 		}
-		code := a.OutcomeCode()
 		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected {
 			if !a.ChatLike() {
 				// A foreign wire such as Anthropic Messages has its own
@@ -2474,17 +2519,6 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				rec.ErrorCode = code
 				rec.ErrorMsg = metrics.DegenerateMessage(code)
 			} else {
-				// The stop rescue requires the terminal region still WITHHELD:
-				// once a finishHold call released it the outcome was already
-				// signed on the wire, and no re-send may append behind it.
-				// RetryableReasoningStop is the analyzer's wire-safety gate (no
-				// refusal/function_call bytes, not a Responses-shaped feed).
-				if holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
-					hold = hold[:0]
-					holding = false
-					rescueRequested = rescueReasoningStop
-					return true
-				}
 				if a.ResponsesFeed() {
 					emitDegenerateResponses(w, &a, time.Now(), code, rec)
 				} else {
@@ -2755,8 +2789,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						// first chunk. A blank line ends that event with no
 						// data - spec parsers discard it - and is a no-op
 						// between complete events.
-						out.WriteByte('\n')
-						if !writeOut() {
+						if !writeRescueBoundary() {
 							return rescueNone
 						}
 						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
@@ -2862,6 +2895,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if allowThinkingRescue && ctx.Err() == nil &&
 					!errors.Is(err, context.DeadlineExceeded) &&
 					a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+					if !writeRescueBoundary() {
+						return rescueNone
+					}
 					return rescueReasoningTruncation
 				}
 				// A real read failure is the transport's own error - release
@@ -2901,9 +2937,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// (holdAborted) must never be re-sent: the client already saw the
 			// oversized bytes.
 			if allowTruncationRetry && ctx.Err() == nil && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
+				if !writeRescueBoundary() {
+					return rescueNone
+				}
 				return rescueEmptyTruncation
 			}
 			if allowThinkingRescue && ctx.Err() == nil && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+				if !writeRescueBoundary() {
+					return rescueNone
+				}
 				return rescueReasoningTruncation
 			}
 			if !finishHold() {
