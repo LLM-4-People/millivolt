@@ -196,11 +196,12 @@ type Record struct {
 	// See Fill / FinalizeRecord.
 	GenTokens int64 `json:"gen_tokens,omitempty"`
 
-	// Chunks is the count of content-bearing SSE chunks of the analyzed
-	// stream (content, reasoning and tool-call deltas; role/keepalive/
-	// terminal/usage frames are not content-bearing). The generic relay's
-	// SSE analyzer owns it; the cursor bridge synthesizes frames itself and
-	// never populates it, so streamed cursor rows keep 0 - as do
+	// Chunks is the count of content-bearing chunks of the analyzed stream:
+	// content, reasoning and tool-call deltas plus terminal-document answer,
+	// reasoning and tool units that no streamed chunk already represents.
+	// Role, keepalive and usage frames are not content-bearing. The generic
+	// relay's SSE analyzer owns it; the cursor bridge synthesizes frames
+	// itself and never populates it, so streamed cursor rows keep 0 - as do
 	// non-streamed requests. It is the raw stream telemetry behind the
 	// no-usage token fallbacks in Fill.
 	Chunks int64 `json:"chunks,omitempty"`

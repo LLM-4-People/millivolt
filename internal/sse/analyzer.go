@@ -113,10 +113,12 @@ type Analyzer struct {
 	// lets Fill derive the content+reasoning-only chunk count.
 	toolChunks int64
 
-	// textChunks counts streamed chunks that carry answer text. The terminal
-	// Responses document repeats the whole answer, so its text units must
-	// count only the units that no streamed chunk already represents.
-	textChunks int64
+	// textChunks and reasoningChunks count streamed chunks that carry answer
+	// text or reasoning. The terminal Responses document repeats the whole
+	// answer and reasoning, so their terminal units must count only the units
+	// that no streamed chunk already represents.
+	textChunks      int64
+	reasoningChunks int64
 
 	// err captures an IN-BAND error payload (data: {"error":{...}}): some
 	// providers signal failures inside a 200-OK stream instead of via the HTTP
@@ -449,6 +451,9 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		if hasContent {
 			a.textChunks++
 		}
+		if hasReasoning {
+			a.reasoningChunks++
+		}
 	}
 
 	// Reasoning/answer separation for thinking models.
@@ -722,6 +727,7 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 	parsed := json.Unmarshal(payload, &ev) == nil
 	terminalUnits := 0
+	terminalReasoningCount := 0
 	if parsed {
 		if ev.Response.ID != "" {
 			a.responseID = ev.Response.ID
@@ -762,14 +768,19 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 					}
 				}
 			case "reasoning":
-				if terminalReasoningPresent(item.Content, item.Summary) {
+				units := terminalReasoningUnits(item.Content, item.Summary)
+				if units > 0 {
 					a.terminalReasoningSeen = true
+					terminalReasoningCount += units
 				}
 			}
 		}
 	}
 	if a.textChunks < int64(terminalUnits) {
 		a.recordTerminalAnswerUnits(now, terminalUnits-int(a.textChunks))
+	}
+	if a.reasoningChunks < int64(terminalReasoningCount) {
+		a.recordTerminalReasoningUnits(now, terminalReasoningCount-int(a.reasoningChunks))
 	}
 	if a.finishReason != "" {
 		return
@@ -816,7 +827,27 @@ func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
 	}
 	a.lastTokenAt = now
 	a.chunkCount += int64(units)
-	a.firstAnswerAt = now
+	if a.firstAnswerAt.IsZero() {
+		a.firstAnswerAt = now
+	}
+}
+
+// recordTerminalReasoningUnits records reasoning units delivered only inside a
+// Responses terminal document. It mirrors the streamed reasoning accounting:
+// TTFT and last-token timing, one chunk per unit, and the first-reasoning
+// time. Reasoning units are generation, never tool chunks.
+func (a *Analyzer) recordTerminalReasoningUnits(now time.Time, units int) {
+	if units <= 0 {
+		return
+	}
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
+	}
+	a.lastTokenAt = now
+	a.chunkCount += int64(units)
+	if a.firstReasoningAt.IsZero() {
+		a.firstReasoningAt = now
+	}
 }
 
 // recordTerminalToolUnit records a function call that appeared only in the
@@ -907,35 +938,37 @@ func terminalMessageText(raw json.RawMessage) (text, refusal string) {
 	return text, refusal
 }
 
-// terminalReasoningPresent reports non-empty summary or reasoning_text content
-// in a terminal reasoning item.
-func terminalReasoningPresent(content json.RawMessage, summary []struct {
+// terminalReasoningUnits counts the non-empty summary and reasoning_text parts
+// of one terminal reasoning item. Each part is one content-bearing unit, the
+// same way one streamed reasoning delta is one chunk.
+func terminalReasoningUnits(content json.RawMessage, summary []struct {
 	Text string `json:"text"`
-}) bool {
+}) int {
+	units := 0
 	for _, part := range summary {
 		if part.Text != "" {
-			return true
+			units++
 		}
 	}
 	if len(content) == 0 {
-		return false
+		return units
 	}
 	if !metrics.ContentPartsWithinLimit(content) {
-		return false
+		return units
 	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(content, &parts) != nil {
-		return false
+		return units
 	}
 	for _, part := range parts {
 		if part.Type == "reasoning_text" && part.Text != "" {
-			return true
+			units++
 		}
 	}
-	return false
+	return units
 }
 
 // ResponsesStream reports whether the feed carried Responses-API typed events.
