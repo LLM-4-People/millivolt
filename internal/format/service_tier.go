@@ -10,7 +10,7 @@ var (
 		"auto": true, "default": true, "flex": true, "scale": true, "priority": true, "fast": true,
 	}
 	responsesServiceTiers = map[string]bool{
-		"auto": true, "default": true, "flex": true, "fast": true, "priority": true, "ultrafast": true,
+		"auto": true, "default": true, "flex": true, "scale": true, "fast": true, "priority": true, "ultrafast": true,
 	}
 	anthropicServiceTiers = map[string]bool{
 		"auto": true, "standard_only": true,

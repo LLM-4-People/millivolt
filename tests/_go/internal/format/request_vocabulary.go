@@ -139,7 +139,7 @@ func TestServiceTierCrossVocabulary(t *testing.T) {
 		{"chat flex stays", ir.Chat, "flex", "flex", false},
 		{"chat flex to anthropic dropped", ir.Anthropic, "flex", "", true},
 		{"responses ultrafast to chat dropped", ir.Chat, "ultrafast", "", true},
-		{"chat scale to responses dropped", ir.Responses, "scale", "", true},
+		{"chat scale to responses passes", ir.Responses, "scale", "scale", false},
 		{"anthropic unknown dropped", ir.Anthropic, "bogus", "", true},
 	}
 	for _, tc := range cases {
@@ -200,5 +200,22 @@ func TestResponsesReasoningFieldsDecoded(t *testing.T) {
 	}
 	if !warned(req.Warnings, "reasoning.summary") || !warned(req.Warnings, "reasoning.context") {
 		t.Fatalf("cross-protocol reasoning losses not reported: %+v", req.Warnings)
+	}
+}
+
+// TestChatScaleTierReachesResponses pins TC1-3: Responses accepts the scale
+// tier, so a Chat scale request must pass through instead of being dropped.
+func TestChatScaleTierReachesResponses(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"service_tier":"scale"}`
+	out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Responses, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decodeJSONObject(t, out)
+	if root["service_tier"] != "scale" {
+		t.Fatalf("service_tier = %v, want scale: %s", root["service_tier"], out)
+	}
+	if warned(warnings, "service_tier") {
+		t.Fatalf("scale recorded a tier warning: %+v", warnings)
 	}
 }
