@@ -544,8 +544,8 @@ func TestArmedPacerPreCommitUsesInboundErrorShape(t *testing.T) {
 			if rec.StatusCode != http.StatusTooManyRequests || rec.ErrorType != "rate_limit_error" {
 				t.Fatalf("record = %+v", rec)
 			}
-			if rec.ResponseBytes != int64(len(body)) {
-				t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
+			if rec.ResponseBytes != 0 {
+				t.Fatalf("recorded bytes = %d, want 0: a status-line envelope is not relayed body", rec.ResponseBytes)
 			}
 		})
 	}
