@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
@@ -1181,4 +1182,18 @@ func TestTranslatedInBandErrorIsAFailure(t *testing.T) {
 			t.Fatalf("error envelope = %+v (body %s)", doc, w.Body.String())
 		}
 	})
+}
+
+// TestTranslatedFrameBufCoversEncoderCaps pins TC8-9: the relay's derived
+// scanner bound must cover every frame the format encoders can legally emit.
+func TestTranslatedFrameBufCoversEncoderCaps(t *testing.T) {
+	for name, cap := range map[string]int{
+		"native stream":          providerformat.NativeStreamFrameMaxBytes,
+		"responses stream":       providerformat.ResponsesStreamFrameMaxBytes,
+		"responses stream + pad": providerformat.ResponsesStreamFrameMaxBytes + 2*1024,
+	} {
+		if translatedFrameBufMax < cap {
+			t.Fatalf("translatedFrameBufMax = %d, want at least %s (%d)", translatedFrameBufMax, name, cap)
+		}
+	}
 }

@@ -53,35 +53,32 @@ func TestResponsesTerminalOnlyContentTranslates(t *testing.T) {
 	cases := []struct {
 		name   string
 		output string
-		want   map[ir.Protocol]string
+		value  string
+		count  func(*testing.T, ir.Protocol, string, string) int
 	}{
 		{
 			name:   "text",
 			output: `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]`,
-			want: map[ir.Protocol]string{
-				ir.Chat: `"content":"hello"`, ir.Anthropic: `"text":"hello"`, ir.Responses: `"text":"hello"`,
-			},
+			value:  "hello",
+			count:  textDeltaCount,
 		},
 		{
 			name:   "refusal",
 			output: `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"refusal","refusal":"no"}]}]`,
-			want: map[ir.Protocol]string{
-				ir.Chat: `"refusal":"no"`, ir.Anthropic: `"text":"no"`, ir.Responses: `"refusal":"no"`,
-			},
+			value:  "no",
+			count:  refusalDeltaCount,
 		},
 		{
 			name:   "summary reasoning",
 			output: `[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"think"}]}]`,
-			want: map[ir.Protocol]string{
-				ir.Chat: `"reasoning_content":"think"`, ir.Anthropic: `"thinking":"think"`, ir.Responses: `"text":"think"`,
-			},
+			value:  "think",
+			count:  reasoningDeltaCount,
 		},
 		{
 			name:   "content reasoning",
 			output: `[{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"deep"}]}]`,
-			want: map[ir.Protocol]string{
-				ir.Chat: `"reasoning_content":"deep"`, ir.Anthropic: `"thinking":"deep"`, ir.Responses: `"text":"deep"`,
-			},
+			value:  "deep",
+			count:  reasoningDeltaCount,
 		},
 	}
 	for _, tc := range cases {
@@ -91,8 +88,8 @@ func TestResponsesTerminalOnlyContentTranslates(t *testing.T) {
 				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(tc.output)), nil, nil); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
-				if !strings.Contains(buf.String(), tc.want[target.inbound]) {
-					t.Fatalf("missing %s in %s output: %s", tc.want[target.inbound], target.name, buf.String())
+				if got := tc.count(t, target.inbound, buf.String(), tc.value); got != 1 {
+					t.Fatalf("%s emitted %d times, want once: %s", tc.value, got, buf.String())
 				}
 			})
 		}
@@ -111,8 +108,8 @@ func TestResponsesTerminalMixedTextAndToolTranslates(t *testing.T) {
 			if got := target.evidence(t, buf.String()); got != `{"q":1}` {
 				t.Fatalf("tool arguments = %q, want {\"q\":1}: %s", got, buf.String())
 			}
-			if !strings.Contains(buf.String(), "hello") {
-				t.Fatalf("mixed terminal text was lost: %s", buf.String())
+			if got := textDeltaCount(t, target.inbound, buf.String(), "hello"); got != 1 {
+				t.Fatalf("mixed terminal text emitted %d times, want once: %s", got, buf.String())
 			}
 		})
 	}

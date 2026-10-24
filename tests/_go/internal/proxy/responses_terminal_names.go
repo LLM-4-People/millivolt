@@ -219,8 +219,8 @@ func TestResponsesOverBoundTerminalResolves(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			stream := responsesOverBoundTerminal(typed)
-			if len(stream) <= 64*1024 {
-				t.Fatalf("fixture is %d bytes, want above the 64 KiB hold bound", len(stream))
+			if len(stream) <= terminalHoldMax {
+				t.Fatalf("fixture is %d bytes, want above terminalHoldMax (%d)", len(stream), terminalHoldMax)
 			}
 			upstream := streamUpstream(t, stream)
 			defer upstream.Close()
