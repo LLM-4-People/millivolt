@@ -135,6 +135,13 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		}
 		if ev.Delta.StopReason != "" {
 			a.finishReason = anthropicAnalyzerFinish(ev.Delta.StopReason)
+			// A terminal stop reason of "error" is the provider's failure
+			// statement even when no error event follows, matching the
+			// non-stream decoder and the translated EventError path. An
+			// explicit provider error already owns its classification.
+			if a.finishReason == "error" && a.errType == "" {
+				a.setStreamError(TypeUpstreamError, "", "upstream response failed")
+			}
 			a.terminatorSeen = true
 		}
 		return true
