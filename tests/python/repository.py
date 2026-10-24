@@ -760,6 +760,9 @@ class PublishedContracts(unittest.TestCase):
             "rather than synthesizing a second call",
             "accepts either spelling on the terminal item",
             "unique open announced call with the same name",
+            "skipped before open matching when its identity and name agree",
+            "an id-less entry also requires its arguments to agree",
+            "agrees with a closed id-less call's name and arguments",
             "the proxy does not guess further",
         ):
             self.assertIn(phrase, adapters)

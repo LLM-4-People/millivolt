@@ -3,6 +3,7 @@ package format
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -134,8 +135,18 @@ type ResponsesStreamDecoder struct {
 	// event closed the block.
 	toolAliases map[string]string
 	// toolNames maps an announced call key to its function name for
-	// identity-free terminal matching.
+	// identity-free terminal matching. Names stay available after the call
+	// closes so a terminal repeat can be recognized.
 	toolNames map[string]string
+	// toolArgsHash records the emitted argument value of an id-less announced
+	// call when it closes. A reordered terminal repeat has no identity, so the
+	// proxy compares the function name and this hash without retaining the
+	// argument bytes for the whole stream.
+	toolArgsHash map[string][sha256.Size]byte
+	// closedIdlessCalls counts closed id-less calls by function name and
+	// emitted argument hash. It is the constant-time lookup for a terminal
+	// repeat that no longer occupies its announcement position.
+	closedIdlessCalls map[string]map[[sha256.Size]byte]int
 	// Announcement identity. A provider's terminal output array is not
 	// required to preserve output_index positions, so dedupe and terminal
 	// completion use stable identities (call id, item id, content index) and
@@ -206,6 +217,8 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		announcedToolKeys:    map[string]bool{},
 		toolAliases:          map[string]string{},
 		toolNames:            map[string]string{},
+		toolArgsHash:         map[string][sha256.Size]byte{},
+		closedIdlessCalls:    map[string]map[[sha256.Size]byte]int{},
 		announcedOutputs:     map[int]bool{},
 		announcedItems:       map[string]bool{},
 		announcedParts:       map[string]bool{},
@@ -1137,6 +1150,8 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	clear(d.announcedToolKeys)
 	clear(d.toolAliases)
 	clear(d.toolNames)
+	clear(d.toolArgsHash)
+	clear(d.closedIdlessCalls)
 	clear(d.keyByOutput)
 	clear(d.keyByPart)
 	clear(d.partSeed)
@@ -1526,6 +1541,39 @@ func terminalToolIdentityCompatible(callID, itemID, candidateKey string) bool {
 	return true
 }
 
+// toolArgumentsFingerprint hashes the effective argument value. A missing,
+// null or whitespace value is the empty object the target emitted.
+func toolArgumentsFingerprint(raw string) [sha256.Size]byte {
+	if toolArgumentsMissing(raw) {
+		return sha256.Sum256([]byte("{}"))
+	}
+	return sha256.Sum256([]byte(raw))
+}
+
+// closedToolCallRepeat reports whether this terminal entry repeats the named
+// announced call whose block already closed. A name mismatch at a reused
+// position is a different call. An id-less call has only its name and
+// arguments, so both must agree.
+func (d *ResponsesStreamDecoder) closedToolCallRepeat(key string, item responsesWireItem) bool {
+	if d.toolNames[key] != item.Name {
+		return false
+	}
+	if strings.HasPrefix(key, "output:") {
+		want, ok := d.toolArgsHash[key]
+		return ok && want == toolArgumentsFingerprint(item.Arguments)
+	}
+	return true
+}
+
+// matchesClosedIdlessCall reports whether an unmatched id-less terminal entry
+// repeats a closed id-less announced call by name and emitted arguments.
+func (d *ResponsesStreamDecoder) matchesClosedIdlessCall(item responsesWireItem) bool {
+	if item.Name == "" {
+		return false
+	}
+	return d.closedIdlessCalls[item.Name][toolArgumentsFingerprint(item.Arguments)] > 0
+}
+
 // matchTerminalToolCall resolves a terminal function call that did not match
 // by identity. A unique open announced call with the same name wins; an
 // id-less terminal item then uses its wire position, a lone open call, or the
@@ -1585,7 +1633,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 		case "function_call":
 			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
 			idx, ok := d.itemBlockByKey[key]
-			if d.announcedToolKeys[key] && !d.openToolKeys[key] {
+			if d.announcedToolKeys[key] && !d.openToolKeys[key] && d.closedToolCallRepeat(key, item) {
 				// This terminal entry repeats an announced call whose block
 				// already closed. Its arguments belong to that call, not to a
 				// different open call with the same name. Non-tool
@@ -1613,6 +1661,12 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				if matchedKey, matchedIdx, matched := d.matchTerminalToolCall(item, i, claimedTools); matched {
 					key, idx, ok = matchedKey, matchedIdx, true
 				}
+			}
+			if !ok && item.CallID == "" && item.ID == "" && d.matchesClosedIdlessCall(item) {
+				// No open call matched. An id-less entry at another position
+				// can still repeat a closed call with the same name and
+				// arguments; skip it instead of synthesizing a duplicate.
+				continue
 			}
 			if ok && d.open[idx] {
 				claimedTools[key] = true
@@ -2256,11 +2310,24 @@ func (d *ResponsesStreamDecoder) dropInitialArgs(key string) {
 func (d *ResponsesStreamDecoder) clearToolState(key string) {
 	d.dropInitialArgs(key)
 	delete(d.argumentEvidence, key)
+	wasOpen := d.openToolKeys[key]
 	delete(d.openToolKeys, key)
-	delete(d.toolNames, key)
+	// Keep the name and, for an id-less call, a hash of the emitted arguments.
+	// A terminal repeat after the block closes still has to be recognized.
+	emitted := "{}"
 	if cov := d.argsEmitted[key]; cov != nil {
+		emitted = cov.emitted.String()
 		d.argsEmittedBytes -= cov.emitted.Len()
 		delete(d.argsEmitted, key)
+	}
+	if wasOpen && strings.HasPrefix(key, "output:") {
+		sum := toolArgumentsFingerprint(emitted)
+		d.toolArgsHash[key] = sum
+		name := d.toolNames[key]
+		if d.closedIdlessCalls[name] == nil {
+			d.closedIdlessCalls[name] = map[[sha256.Size]byte]int{}
+		}
+		d.closedIdlessCalls[name][sum]++
 	}
 }
 

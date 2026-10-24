@@ -508,3 +508,64 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+// A closed id-less call can be repeated at another array position after the
+// open call's entry moved into its old position. The closed repeat must not be
+// assigned to the open call, and the open call must keep its own arguments.
+func TestResponsesReorderedClosedIdlessRepeatKeepsOpenArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		closedName string
+		openName   string
+		order      string
+	}{
+		{name: "distinct names reordered", closedName: "lookup", openName: "other", order: "open-first"},
+		{name: "same names reordered", closedName: "lookup", openName: "lookup", order: "open-first"},
+		{name: "same names announcement order", closedName: "lookup", openName: "lookup", order: "closed-first"},
+	} {
+		closedCall := `{"type":"function_call","name":"` + tc.closedName + `","arguments":"{\"a\":1}"}`
+		openCall := `{"type":"function_call","name":"` + tc.openName + `","arguments":"{\"b\":2}"}`
+		terminal := closedCall + `,` + openCall
+		if tc.order == "open-first" {
+			terminal = openCall + `,` + closedCall
+		}
+		source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"` + tc.closedName + `","arguments":""}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":{"type":"function_call","name":"` + tc.openName + `","arguments":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"` + tc.closedName + `","arguments":"{\"a\":1}","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[` + terminal + `]}}
+
+`
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					var buf bytes.Buffer
+					if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					out := buf.String()
+					calls := streamedToolCalls(t, target, out)
+					if len(calls) != 2 {
+						t.Fatalf("tool calls = %d, want two: %s", len(calls), out)
+					}
+					args := map[string]string{}
+					for _, call := range calls {
+						args[call.id] = strings.TrimSpace(call.args.String())
+					}
+					if args["call_proxy_0"] != `{"a":1}` {
+						t.Fatalf("closed call arguments = %q, want {\"a\":1}: %v\n%s", args["call_proxy_0"], args, out)
+					}
+					if args["call_proxy_5"] != `{"b":2}` {
+						t.Fatalf("open call arguments = %q, want {\"b\":2}: %v\n%s", args["call_proxy_5"], args, out)
+					}
+				})
+			}
+		})
+	}
+}
