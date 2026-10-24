@@ -219,3 +219,38 @@ func TestChatScaleTierReachesResponses(t *testing.T) {
 		t.Fatalf("scale recorded a tier warning: %+v", warnings)
 	}
 }
+
+// TestResponsesReasoningBudgetWarnsWithEffort pins TC1-5: Responses has no
+// token budget, so a budget beside an explicit effort must be reported (and a
+// disabled request must report both knobs).
+func TestResponsesReasoningBudgetWarnsWithEffort(t *testing.T) {
+	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+		`"thinking":{"type":"enabled","budget_tokens":6000},"output_config":{"effort":"high"}}`
+	out, warnings, err := TranslateRequestBetween(ir.Anthropic, ir.Responses, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warned(warnings, "reasoning.budget_tokens") {
+		t.Fatalf("budget beside effort recorded no warning: %+v", warnings)
+	}
+	root := decodeJSONObject(t, out)
+	reasoning, _ := root["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" {
+		t.Fatalf("reasoning = %v, want effort high: %s", reasoning, out)
+	}
+
+	enabled := false
+	budget := 6000
+	maxTokens := 16
+	req := &ir.Request{
+		Model: "m", MaxOutputTokens: &maxTokens,
+		Messages:  []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}},
+		Reasoning: &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: &budget, Effort: "high"},
+	}
+	if _, err := EncodeResponsesRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	if !warned(req.Warnings, "reasoning.budget_tokens") {
+		t.Fatalf("disabled budget recorded no warning: %+v", req.Warnings)
+	}
+}

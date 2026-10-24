@@ -607,10 +607,17 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 			if req.Reasoning.Effort != "" {
 				req.Warnings.Add(ir.WarningApproximated, "reasoning.effort", "disabled thinking supersedes the requested effort")
 			}
+			if req.Reasoning.BudgetTokens != nil {
+				req.Warnings.Add(ir.WarningDropped, "reasoning.budget_tokens", "disabled thinking supersedes the requested budget")
+			}
 			req.Reasoning.Effort = "none"
-		} else if req.Reasoning.BudgetTokens != nil && req.Reasoning.Effort == "" {
-			req.Reasoning.Effort = effortFromBudget(*req.Reasoning.BudgetTokens)
-			req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "mapped to reasoning.effort")
+		} else if req.Reasoning.BudgetTokens != nil {
+			if req.Reasoning.Effort == "" {
+				req.Reasoning.Effort = effortFromBudget(*req.Reasoning.BudgetTokens)
+				req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "mapped to reasoning.effort")
+			} else {
+				req.Warnings.Add(ir.WarningDropped, "reasoning.budget_tokens", "reasoning.effort takes precedence over the budget")
+			}
 		}
 		if req.Reasoning.Display != "" {
 			req.Warnings.Add(ir.WarningDropped, "reasoning.display", "Responses has no display mode")
