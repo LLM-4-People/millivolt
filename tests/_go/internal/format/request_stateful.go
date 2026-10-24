@@ -66,3 +66,51 @@ func TestModerationRequiresModel(t *testing.T) {
 		t.Fatalf("missing moderation model error = %v", err)
 	}
 }
+
+func TestResponsesInputPhaseWarns(t *testing.T) {
+	body := `{"model":"m","input":[{"type":"message","role":"user","phase":"commentary","content":"hi"}]}`
+	output, warnings, err := TranslateRequestBetween(ir.Responses, ir.Chat, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(warnings, "input.phase") {
+		t.Fatalf("phase recorded no warning: %+v", warnings)
+	}
+	if strings.Contains(string(output), "commentary") {
+		t.Fatalf("phase leaked into the translated body: %s", output)
+	}
+
+	clean := `{"model":"m","input":[{"type":"message","role":"user","content":"hi"}]}`
+	_, warnings, err = TranslateRequestBetween(ir.Responses, ir.Chat, []byte(clean), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warningField(warnings, "input.phase") {
+		t.Fatalf("phase warning without a phase: %+v", warnings)
+	}
+}
+
+func TestChatIncludeObfuscationWarns(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true,` +
+		`"stream_options":{"include_usage":true,"include_obfuscation":true}}`
+	output, warnings, err := TranslateRequestBetween(ir.Chat, ir.Responses, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(warnings, "stream_options.include_obfuscation") {
+		t.Fatalf("include_obfuscation recorded no warning: %+v", warnings)
+	}
+	if strings.Contains(string(output), "obfuscation") {
+		t.Fatalf("obfuscation leaked into the translated body: %s", output)
+	}
+
+	clean := `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true,` +
+		`"stream_options":{"include_usage":true}}`
+	_, warnings, err = TranslateRequestBetween(ir.Chat, ir.Responses, []byte(clean), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warningField(warnings, "stream_options.include_obfuscation") {
+		t.Fatalf("obfuscation warning without the flag: %+v", warnings)
+	}
+}

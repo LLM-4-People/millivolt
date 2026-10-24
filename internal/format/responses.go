@@ -85,6 +85,7 @@ type responsesWireAnnotation struct {
 type responsesWireItem struct {
 	Type    string          `json:"type"`
 	Role    string          `json:"role"`
+	Phase   string          `json:"phase"`
 	Content json.RawMessage `json:"content"`
 
 	CallID    string          `json:"call_id"`
@@ -288,7 +289,11 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 		}
 		out = append(out, ir.Message{Role: ir.RoleUser, Content: []ir.Block{block}})
 	}
+	phaseSeen := false
 	for i, item := range items {
+		if item.Phase != "" {
+			phaseSeen = true
+		}
 		typ := item.Type
 		if typ == "" && item.Role != "" {
 			typ = "message"
@@ -371,6 +376,11 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 		default:
 			warns.Add(ir.WarningDropped, "input."+typ, "unsupported input item")
 		}
+	}
+	if phaseSeen {
+		// One warning per request: the phase is a per-item hint, and
+		// repeating it for every item would amplify the header.
+		warns.Add(ir.WarningDropped, "input.phase", "input item phase has no cross-protocol equivalent")
 	}
 	return out, warns, nil
 }

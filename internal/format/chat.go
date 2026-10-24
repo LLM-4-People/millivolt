@@ -46,7 +46,8 @@ type chatWireRequest struct {
 	ReasoningEffort     string             `json:"reasoning_effort"`
 	Stream              bool               `json:"stream"`
 	StreamOptions       *struct {
-		IncludeUsage bool `json:"include_usage"`
+		IncludeUsage       bool `json:"include_usage"`
+		IncludeObfuscation bool `json:"include_obfuscation"`
 	} `json:"stream_options"`
 	Metadata         map[string]json.RawMessage `json:"metadata"`
 	ServiceTier      string                     `json:"service_tier"`
@@ -220,6 +221,10 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	}
 	if in.StreamOptions != nil {
 		req.StreamIncludeUsage = in.StreamOptions.IncludeUsage
+		if in.StreamOptions.IncludeObfuscation {
+			req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation",
+				"provider-generated stream obfuscation cannot be translated")
+		}
 	}
 	if len(in.Metadata) > 0 {
 		// Keep these warnings in the shared accumulator so the single final
