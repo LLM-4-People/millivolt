@@ -1,7 +1,8 @@
 package format
 
-// Round 4 batch 8 regression (C3): a reasoning_text delta without the optional
-// content_part.added announcement still reaches every target exactly once.
+// Round 4 batch 8 regression (C3) plus round 7 NEW-1: a reasoning_text delta is
+// incremental and reaches every target verbatim, with or without the optional
+// content_part.added announcement and without a done payload masking a loss.
 
 import (
 	"bytes"
@@ -12,62 +13,82 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
 
-func responsesReasoningNoPartStream(deltas []string, done string, terminalOutput string) string {
+// responsesReasoningTextStream builds a Responses reasoning stream. announced
+// adds the optional content_part.added with startText; done, when non-empty,
+// adds the authoritative done payload.
+func responsesReasoningTextStream(announced bool, startText string, deltas []string, done string) string {
 	var b strings.Builder
 	b.WriteString(terminalStreamCreated)
 	b.WriteString(`event: response.output_item.added
 data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
 
 `)
+	if announced {
+		fmt.Fprintf(&b, "event: response.content_part.added\ndata: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"reasoning_text\",\"text\":%q}}\n\n", startText)
+	}
 	for _, delta := range deltas {
 		fmt.Fprintf(&b, "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":%q}\n\n", delta)
 	}
 	if done != "" {
 		fmt.Fprintf(&b, "event: response.reasoning_text.done\ndata: {\"type\":\"response.reasoning_text.done\",\"output_index\":0,\"content_index\":0,\"text\":%q}\n\n", done)
 	}
-	fmt.Fprintf(&b, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\",\"status\":\"completed\",\"output\":%s}}\n\n", terminalOutput)
+	b.WriteString("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\",\"status\":\"completed\",\"output\":[]}}\n\n")
 	return b.String()
 }
 
-func TestResponsesReasoningTextDeltaWithoutPartAnnouncement(t *testing.T) {
-	source := responsesReasoningNoPartStream([]string{"step ", "one"}, "step one", `[]`)
-	for _, target := range terminalTargets {
-		t.Run(target.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			out := buf.String()
-			if got := strings.Join(reasoningEmissionOrder(t, target.inbound, out), ""); got != "step one" {
-				t.Fatalf("reasoning = %q, want step one exactly once: %s", got, out)
-			}
-			if got := textDeltaCount(t, target.inbound, out, "step "); got != 0 {
-				t.Fatalf("reasoning leaked into visible text: %s", out)
-			}
-		})
+func TestResponsesReasoningTextIncrementalVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		announced bool
+		startText string
+		deltas    []string
+		want      string
+	}{
+		{
+			name:   "unannounced two deltas",
+			deltas: []string{"step ", "one"},
+			want:   "step one",
+		},
+		{
+			name:      "announced empty start two deltas",
+			announced: true,
+			deltas:    []string{"step ", "one"},
+			want:      "step one",
+		},
+		{
+			name:      "announced non-empty start plus delta",
+			announced: true,
+			startText: "step",
+			deltas:    []string{" one"},
+			want:      "step one",
+		},
+		{
+			name:   "repeated incremental delta is new text",
+			deltas: []string{"x", "x"},
+			want:   "xx",
+		},
+	} {
+		source := responsesReasoningTextStream(tc.announced, tc.startText, tc.deltas, "")
+		for _, target := range terminalTargets {
+			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				out := buf.String()
+				if got := strings.Join(reasoningEmissionOrder(t, target.inbound, out), ""); got != tc.want {
+					t.Fatalf("reasoning = %q, want %q: %s", got, tc.want, out)
+				}
+				if got := textDeltaCount(t, target.inbound, out, "step "); got != 0 {
+					t.Fatalf("reasoning leaked into visible text: %s", out)
+				}
+			})
+		}
 	}
 }
 
 func TestResponsesReasoningPartAnnouncementStillReconciles(t *testing.T) {
-	source := terminalStreamCreated + `event: response.output_item.added
-data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
-
-event: response.content_part.added
-data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":""}}
-
-event: response.reasoning_text.delta
-data: {"type":"response.reasoning_text.delta","output_index":0,"content_index":0,"delta":"step "}
-
-event: response.reasoning_text.delta
-data: {"type":"response.reasoning_text.delta","output_index":0,"content_index":0,"delta":"one"}
-
-event: response.reasoning_text.done
-data: {"type":"response.reasoning_text.done","output_index":0,"content_index":0,"text":"step one"}
-
-event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
-
-`
+	source := responsesReasoningTextStream(true, "", []string{"step ", "one"}, "step one")
 	var buf bytes.Buffer
 	if err := TranslateStreamBetween(ir.Anthropic, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 		t.Fatal(err)

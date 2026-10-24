@@ -615,10 +615,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelReasoning
 			}
-			delta := pendingValueSuffix(d.emittedValue(key), ev.Delta)
-			if delta == "" {
-				continue
-			}
+			// The wire delta is incremental, exactly like output_text.delta:
+			// append it verbatim. Only the done payload is cumulative, and its
+			// own handler reconciles against the recorded coverage.
+			delta := ev.Delta
 			if err := d.appendEmittedText(key, delta); err != nil {
 				return nil, err
 			}
