@@ -993,6 +993,19 @@ func TestSchemaHelpPinsValidationRules(t *testing.T) {
 	if !strings.Contains(rules.Help, "Capped at 64 rules.") {
 		t.Errorf("model_rules help omits the 64-rule cap: %s", rules.Help)
 	}
+
+	overrides := FieldByKey("request_overrides")
+	if overrides == nil {
+		t.Fatal("request_overrides is not registered")
+	}
+	for _, phrase := range []string{
+		"the target's resolved auth header and Authorization are never set or removed",
+		"Accept-Encoding and Range are stripped after the override merge",
+	} {
+		if !strings.Contains(overrides.Help, phrase) {
+			t.Errorf("request_overrides help omits %q: %s", phrase, overrides.Help)
+		}
+	}
 	operations := repositoryText(t, filepath.Join("docs", "operations.md"))
 	if !strings.Contains(operations, "The list is capped at 64 rules.") {
 		t.Error("docs/operations.md omits the model_rules cap")
