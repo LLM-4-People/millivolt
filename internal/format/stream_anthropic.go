@@ -63,6 +63,14 @@ type AnthropicStreamDecoder struct {
 	skipped       map[int]bool
 	observe       func(string, []byte)
 	sawStopReason bool
+	// pendingStopReason and pendingStopSequence hold the last non-empty
+	// message_delta terminal values. Anthropic permits multiple message_delta
+	// events (usage is cumulative), so the decoder emits one canonical
+	// MessageDelta after the final wire event and never lets an interim empty
+	// delta send a premature finish to the target.
+	pendingStopReason   string
+	pendingStopSequence *string
+	messageDeltaSent    bool
 
 	openToolBlocks   int
 	toolInitialBytes int
@@ -105,6 +113,8 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				// closing the turn; only a stream with neither is truncated.
 				if d.sawStopReason {
 					d.terminal = true
+					d.closeOpenBlocks()
+					d.flushMessageDelta()
 					d.q.push(&ir.Event{Type: ir.EventDone})
 					continue
 				}
@@ -270,27 +280,18 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if delta.StopReason != "" {
 				d.sawStopReason = true
+				d.pendingStopReason = delta.StopReason
+			}
+			if delta.StopSequence != nil {
+				d.pendingStopSequence = delta.StopSequence
 			}
 			d.closeOpenBlocks()
-			// The non-streaming decoder records a stop_reason approximation
-			// warning for model_context_window_exceeded. This path committed
-			// the target status line before message_delta arrived, and
-			// TranslateStreamBetween has no warning channel, so the same
-			// length finish is applied silently. The terminal status, reason
-			// and usage stay identical to the non-streaming path.
-			finish := &ir.Finish{Reason: anthropicFinishReason(delta.StopReason)}
-			if delta.StopSequence != nil {
-				finish.StopSequence = *delta.StopSequence
-			}
-			messageDelta := &ir.Event{Type: ir.EventMessageDelta, Finish: finish}
-			if d.usageReported {
-				u := d.usage
-				messageDelta.Usage = &u
-			}
-			d.q.push(messageDelta)
+			// The canonical MessageDelta is emitted once at message_stop so an
+			// interim usage-only delta cannot send a premature empty finish.
 		case "message_stop":
 			d.terminal = true
 			d.closeOpenBlocks()
+			d.flushMessageDelta()
 			d.q.push(&ir.Event{Type: ir.EventDone})
 		case "ping":
 			continue
@@ -313,6 +314,31 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 	}
+}
+
+// flushMessageDelta emits the single canonical terminal delta. The finish
+// reason is the last non-empty stop_reason the source reported; a source that
+// never reported one keeps the non-clean FinishOther. Usage is the merged
+// cumulative value at the terminal event.
+func (d *AnthropicStreamDecoder) flushMessageDelta() {
+	if d.messageDeltaSent {
+		return
+	}
+	d.messageDeltaSent = true
+	// The non-streaming decoder records a stop_reason approximation warning
+	// for model_context_window_exceeded. This path committed the target status
+	// line before message_delta arrived, and TranslateStreamBetween has no
+	// warning channel, so the same length finish is applied silently.
+	finish := &ir.Finish{Reason: anthropicFinishReason(d.pendingStopReason)}
+	if d.pendingStopSequence != nil {
+		finish.StopSequence = *d.pendingStopSequence
+	}
+	ev := &ir.Event{Type: ir.EventMessageDelta, Finish: finish}
+	if d.usageReported {
+		u := d.usage
+		ev.Usage = &u
+	}
+	d.q.push(ev)
 }
 
 // closeOpenBlocks emits one BlockEnd for every block still open when a
@@ -343,9 +369,9 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks() {
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
-func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
+func (d *AnthropicStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
 	d.closeOpenBlocks()
-	return drainQueue(&d.q)
+	return drainQueue(&d.q), nil
 }
 
 // mergeUsage folds one Anthropic usage object into the stream total. The wire

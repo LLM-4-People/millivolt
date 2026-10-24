@@ -68,6 +68,14 @@ type responsesStreamEvent struct {
 }
 
 // ResponsesStreamDecoder converts Responses SSE events into canonical events.
+// toolArgumentCoverage is the bounded prefix of one tool call's emitted
+// argument bytes. partial means more bytes reached the target than this
+// decoder retains, so a later full value cannot be reconciled safely.
+type toolArgumentCoverage struct {
+	emitted strings.Builder
+	partial bool
+}
+
 type ResponsesStreamDecoder struct {
 	r        *sseReader
 	q        eventQueue
@@ -100,9 +108,13 @@ type ResponsesStreamDecoder struct {
 	// can be open at once.
 	initialArgsBytes int
 	openToolItems    int
-	// argsEmitted marks that at least one argument payload was emitted for an
-	// item identity, so a done/terminal full value must not repeat it.
-	argsEmitted map[string]bool
+	// argsEmitted retains the argument bytes already emitted for one item
+	// identity so a later authoritative done/terminal value can append only a
+	// strict extension. A provider that emits more than the bounded coverage
+	// keeps its streamed bytes and stops reconciling; the aggregate stays
+	// bounded by toolInitialBytesMax.
+	argsEmitted      map[string]*toolArgumentCoverage
+	argsEmittedBytes int
 	// Announcement identity. A provider's terminal output array is not
 	// required to preserve output_index positions, so dedupe and terminal
 	// completion use stable identities (call id, item id, content index) and
@@ -159,7 +171,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		itemBlock:        map[int]int{},
 		partBlock:        map[[2]int]int{},
 		initialArgs:      map[string]string{},
-		argsEmitted:      map[string]bool{},
+		argsEmitted:      map[string]*toolArgumentCoverage{},
 		announcedOutputs: map[int]bool{},
 		announcedItems:   map[string]bool{},
 		announcedParts:   map[string]bool{},
@@ -737,7 +749,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				key := d.keyByOutput[ev.OutputIndex]
-				d.flushToolArguments(key, idx, item.Arguments)
+				if err := d.flushToolArguments(key, idx, item.Arguments); err != nil {
+					return nil, err
+				}
 				delete(d.itemBlock, ev.OutputIndex)
 				delete(d.open, idx)
 				d.clearToolState(key)
@@ -781,7 +795,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments)
+			if err := d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments); err != nil {
+				return nil, err
+			}
 		case "response.reasoning_summary_part.done":
 			var part struct {
 				Text string `json:"text"`
@@ -913,7 +929,9 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	sort.Strings(toolKeys)
 	for _, key := range toolKeys {
 		if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-			d.flushToolArguments(key, idx, "")
+			if err := d.flushToolArguments(key, idx, ""); err != nil {
+				return err
+			}
 		}
 	}
 	// Close every block the source actually opened before starting queued
@@ -1278,7 +1296,9 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 			}
 			if ok && d.open[idx] {
-				d.flushToolArguments(key, idx, item.Arguments)
+				if err := d.flushToolArguments(key, idx, item.Arguments); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			if d.terminalItemAnnounced(key, i, item.ID) {
@@ -1672,46 +1692,103 @@ func reasoningTerminalEmission(item responsesWireItem) (terminalEmission, bool, 
 	return terminalEmission{block: reasoningTerminalBlock(item), delta: delta}, true, nil
 }
 
-// toolArgumentsDelta applies the first streamed arguments delta for one item
-// identity. The buffered output_item.added payload is emitted first; when the
-// delta already repeats that prefix only its suffix is emitted. No delta means
-// no emission, so the done or terminal full value can still replace the
-// initial payload.
+// toolArgumentsDelta records one incremental argument delta. The buffered
+// output_item.added payload is emitted first, then the delta is appended
+// verbatim: OpenAI's document says each delta is added to the previous value,
+// so a prefix heuristic would corrupt a legitimate first delta that happens to
+// start with the inline prefix.
 func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, delta string) {
 	if delta == "" || key == "" {
 		return
 	}
-	if !d.argsEmitted[key] {
+	if d.argsEmitted[key] == nil {
 		if initial := d.initialArgs[key]; initial != "" {
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: initial}})
-			if strings.HasPrefix(delta, initial) {
-				delta = delta[len(initial):]
-			}
+			d.recordEmittedArguments(key, initial)
 		}
 		d.dropInitialArgs(key)
-		d.argsEmitted[key] = true
 	}
-	if delta != "" {
-		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: delta}})
-	}
+	d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: delta}})
+	d.recordEmittedArguments(key, delta)
 }
 
-// flushToolArguments emits the full done/terminal arguments for an item
-// identity that never streamed a delta. When the completion carries no value
-// at all, the buffered output_item.added payload is the only available value.
-func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string) {
-	if key == "" || d.argsEmitted[key] {
-		return
+// flushToolArguments reconciles the authoritative done/terminal arguments
+// with the bytes already streamed. A full value that strictly extends the
+// emitted prefix appends only the missing suffix; a divergent value keeps the
+// already-committed bytes. The resulting arguments must be valid JSON.
+func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string) error {
+	if key == "" {
+		return nil
 	}
+	if d.argsEmitted[key] != nil {
+		emitted, complete := d.emittedArguments(key)
+		if complete && full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
+			suffix := full[len(emitted):]
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: suffix}})
+			d.recordEmittedArguments(key, suffix)
+			emitted += suffix
+		}
+		if emitted != "" && !json.Valid([]byte(emitted)) {
+			return fmt.Errorf("tool arguments are not valid JSON")
+		}
+		return nil
+	}
+
 	args := full
 	if args == "" {
 		args = d.initialArgs[key]
 	}
-	d.argsEmitted[key] = true
 	d.dropInitialArgs(key)
-	if args != "" && args != "{}" {
+	if d.argsEmitted[key] == nil {
+		d.argsEmitted[key] = &toolArgumentCoverage{}
+	}
+	if args == "" {
+		return nil
+	}
+	if args != "{}" {
+		if !json.Valid([]byte(args)) {
+			return fmt.Errorf("tool arguments are not valid JSON")
+		}
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: args}})
 	}
+	d.recordEmittedArguments(key, args)
+	return nil
+}
+
+// recordEmittedArguments adds argument bytes to the bounded coverage for one
+// item identity. Coverage past toolInitialBytesMax is not retained.
+func (d *ResponsesStreamDecoder) recordEmittedArguments(key, value string) {
+	if key == "" || value == "" {
+		return
+	}
+	cov := d.argsEmitted[key]
+	if cov == nil {
+		cov = &toolArgumentCoverage{}
+		d.argsEmitted[key] = cov
+	}
+	if cov.partial {
+		return
+	}
+	remaining := toolInitialBytesMax - d.argsEmittedBytes
+	if len(value) > remaining {
+		if remaining > 0 {
+			cov.emitted.WriteString(value[:remaining])
+			d.argsEmittedBytes += remaining
+		}
+		cov.partial = true
+		return
+	}
+	cov.emitted.WriteString(value)
+	d.argsEmittedBytes += len(value)
+}
+
+// emittedArguments returns the retained coverage and whether it is complete.
+func (d *ResponsesStreamDecoder) emittedArguments(key string) (string, bool) {
+	cov := d.argsEmitted[key]
+	if cov == nil {
+		return "", true
+	}
+	return cov.emitted.String(), !cov.partial
 }
 
 // dropInitialArgs releases the buffered output_item.added arguments for one
@@ -1726,7 +1803,10 @@ func (d *ResponsesStreamDecoder) dropInitialArgs(key string) {
 // clearToolState releases every per-call entry once a function call closes.
 func (d *ResponsesStreamDecoder) clearToolState(key string) {
 	d.dropInitialArgs(key)
-	delete(d.argsEmitted, key)
+	if cov := d.argsEmitted[key]; cov != nil {
+		d.argsEmittedBytes -= cov.emitted.Len()
+		delete(d.argsEmitted, key)
+	}
 }
 
 // startPartBlock starts the target block for an announced content part when
@@ -1936,9 +2016,9 @@ func (d *ResponsesStreamDecoder) announcePart(key string) (bool, error) {
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
-func (d *ResponsesStreamDecoder) FlushBlocks() []*ir.Event {
-	_ = d.closeAll(nil)
-	return drainQueue(&d.q)
+func (d *ResponsesStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
+	err := d.closeAll(nil)
+	return drainQueue(&d.q), err
 }
 
 // Warnings returns the streaming approximations recorded so far. A streamed

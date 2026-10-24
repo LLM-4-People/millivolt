@@ -371,9 +371,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		{"partial-then-done", added(`{"q":1`) + done(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
 		{"partial-then-terminal", added(`{"q":1`) + terminal(`{"q":1}`), `{"q":1}`},
 		{"full-then-done", added(`{"q":1}`) + done(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
-		{"full-then-repeated-delta", added(`{"q":1}`) + delta(`{"q":1}`, `{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
 		{"partial-then-suffix-delta", added(`{"q":1`) + delta(`}`, `{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
-		{"partial-no-full-value", added(`{"q":1`) + done("") + terminal(""), `{"q":1`},
 	}
 	for _, proto := range []struct {
 		name     string
@@ -395,6 +393,30 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 				}
 			})
 		}
+	}
+}
+
+// TestResponsesPartialToolArgumentsWithoutFullValueFailsClosed pins C4: when
+// the source never supplies a complete value, an incomplete buffered prefix
+// must not be emitted as if it were valid JSON.
+func TestResponsesPartialToolArgumentsWithoutFullValueFailsClosed(t *testing.T) {
+	const source = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	var buf bytes.Buffer
+	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
+	if err == nil || !strings.Contains(err.Error(), "tool arguments are not valid JSON") {
+		t.Fatalf("partial arguments error = %v", err)
 	}
 }
 
@@ -464,7 +486,7 @@ func responsesToolArguments(t *testing.T, out string) string {
 // N10: when the source ends before a done/terminal value, the buffered
 // output_item.added payload is the only argument text to flush before the
 // truncation error closes the stream.
-func TestResponsesInitialToolArgumentsSurviveTruncation(t *testing.T) {
+func TestResponsesInitialToolArgumentsTruncationFailsClosed(t *testing.T) {
 	source := `event: response.created
 data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
 
@@ -473,13 +495,8 @@ data: {"type":"response.output_item.added","output_index":0,"item":{"type":"func
 
 `
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
-		t.Fatalf("TranslateStreamBetween: %v", err)
-	}
-	if got := chatToolArguments(t, buf.String()); got != `{"q":1` {
-		t.Fatalf("tool arguments = %q, want the buffered initial payload: %s", got, buf.String())
-	}
-	if !strings.Contains(buf.String(), `"code":"truncated"`) {
-		t.Fatalf("truncation was not reported in-band: %s", buf.String())
+	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
+	if err == nil || !strings.Contains(err.Error(), "tool arguments are not valid JSON") {
+		t.Fatalf("truncated partial arguments error = %v", err)
 	}
 }

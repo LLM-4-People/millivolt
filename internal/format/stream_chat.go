@@ -347,9 +347,9 @@ func (d *ChatStreamDecoder) closeAll() {
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
-func (d *ChatStreamDecoder) FlushBlocks() []*ir.Event {
+func (d *ChatStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
 	d.closeAll()
-	return drainQueue(&d.q)
+	return drainQueue(&d.q), nil
 }
 
 // ChatStreamEncoder renders canonical events as Chat Completions SSE.

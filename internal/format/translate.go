@@ -318,8 +318,12 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 			// terminal event: a target client must never receive an error or
 			// terminal frame for a block that is still open.
 			if errors.Is(err, ErrTruncatedStream) {
-				for _, pending := range dec.FlushBlocks() {
-					if writeErr := enc.Write(pending); writeErr != nil {
+				pending, flushErr := dec.FlushBlocks()
+				if flushErr != nil {
+					return abort(flushErr)
+				}
+				for _, event := range pending {
+					if writeErr := enc.Write(event); writeErr != nil {
 						return abort(writeErr)
 					}
 				}
