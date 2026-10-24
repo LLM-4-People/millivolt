@@ -147,8 +147,9 @@ target cannot consume them:
   stable `call_proxy_<output index>` id instead of an empty id, so Chat does not
   write an empty tool call and Anthropic does not reject the block. An
   announcement that carries both identities accepts either spelling on the
-  terminal item; a terminal item whose spelling shares no id matches a unique
-  open announced call with the same name. An id-less terminal item matches a
+  terminal item. A terminal item that uses the other identity kind, an item id
+  after a call-id announcement or the reverse, matches a unique open announced
+  call with the same name. An id-less terminal item matches a
   unique open announced call with the same name first, then the announcement at
   its own position, then a lone or first still-open id-less announced call in
   output order, so a reordered terminal array completes the announced block
