@@ -982,7 +982,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// already consuming events) and the terminal-region hold/substitution
 		// happens inside streamBody, after any content already relayed.
 		// The idle pacer may already have committed 200 SSE + comment
-		// frames (queue / hold / TTFB); WriteHeader is then a no-op.
+		// frames (queue / hold); WriteHeader is then a no-op.
 		// A 4xx/5xx body after that commit cannot change the status - emit
 		// it in-band so the SDK sees a retryable error, not raw JSON on 200.
 		// A non-streaming request can still receive an event-stream response;

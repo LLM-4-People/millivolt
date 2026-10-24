@@ -1046,3 +1046,22 @@ func TestModelRulesHelpNamesTheRealFilterSurfaces(t *testing.T) {
 		t.Fatalf("help still names the removed Clear menu: %s", field.Help)
 	}
 }
+
+// TestSSEKeepaliveCommentsOmitTTFB keeps the config field, the pacer and the
+// relay comment aligned with the user-facing Help: Start is called only from
+// OnWait, so an admitted-immediately stream gets no comment before upstream
+// headers. A stale TTFB claim in any of those owners re-promises it.
+func TestSSEKeepaliveCommentsOmitTTFB(t *testing.T) {
+	for _, rel := range []string{
+		"internal/config/config.go",
+		"internal/proxy/sse_keepalive.go",
+		"internal/proxy/proxy.go",
+	} {
+		source := repositoryText(t, rel)
+		for _, stale := range []string{"upstream TTFB", "queue / hold / TTFB"} {
+			if strings.Contains(source, stale) {
+				t.Errorf("%s still promises the stale keepalive scope %q", rel, stale)
+			}
+		}
+	}
+}

@@ -407,9 +407,9 @@ type Config struct {
 
 	// SSEKeepaliveInterval is how often a quiet streaming socket gets an SSE
 	// comment (`: keepalive`) so proxies and the client do not drop the
-	// connection during queue wait, operator hold, upstream TTFB, or mid-stream
-	// gaps. Chat Completions clients ignore SSE comments. Hot-reloads (new
-	// streams; in-flight pacers keep the interval they started with).
+	// connection during queue wait, operator hold, or mid-stream gaps. Chat
+	// Completions clients ignore SSE comments. Hot-reloads (new streams;
+	// in-flight pacers keep the interval they started with).
 	SSEKeepaliveInterval time.Duration `yaml:"sse_keepalive_interval" json:"sse_keepalive_interval"`
 	// SSEWriteProgressTimeout bounds one client-facing SSE write. A stalled
 	// reader fails that write instead of pinning shutdown. New streams use the
