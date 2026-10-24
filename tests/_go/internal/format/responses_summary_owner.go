@@ -69,4 +69,26 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 			})
 		}
 	})
+
+	// A terminal document that never announced either item still carries both
+	// summaries. The colon ids are distinct owners, so the merged text the
+	// provider itself reported must appear once per item, not as a partition
+	// duplicate.
+	t.Run("terminal-only colon ids stay faithful", func(t *testing.T) {
+		source := terminalStreamCreated + `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"rs:1","summary":[{"type":"summary_text","text":"alpha beta"}]},{"type":"reasoning","id":"rs:1:extra","summary":[{"type":"summary_text","text":"beta"}]}]}}
+
+`
+		for _, target := range terminalTargets {
+			t.Run(target.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+					t.Fatalf("TranslateStreamBetween: %v", err)
+				}
+				if got := strings.Join(reasoningEmissionOrder(t, target.inbound, buf.String()), ""); got != "alpha betabeta" {
+					t.Fatalf("reasoning = %q, want alpha betabeta: %s", got, buf.String())
+				}
+			})
+		}
+	})
 }

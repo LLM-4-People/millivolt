@@ -52,3 +52,19 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		t.Fatalf("huge content part item id error = %v", err)
 	}
 }
+
+// TestTranslatedHugeTerminalOnlyMessageIDRejected covers the terminal-only
+// path: a message item that never streamed an announcement still fails the
+// identity bound when the terminal document is reconciled.
+func TestTranslatedHugeTerminalOnlyMessageIDRejected(t *testing.T) {
+	id := strings.Repeat("m", 513)
+	source := terminalStreamCreated + `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"` + id + `","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}
+
+`
+	var buf bytes.Buffer
+	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
+	if err == nil || !strings.Contains(err.Error(), "message id") {
+		t.Fatalf("huge terminal-only message id error = %v", err)
+	}
+}
