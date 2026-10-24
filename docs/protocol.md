@@ -247,9 +247,11 @@ before the client status line commits, so the retry is delivered as one
 ordinary response with no post-commit keepalive gap or partial payload. A
 stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
-the in-band error for the client to retry. A trailing partial line that the
-rescue drops was never delivered, so it does not count as relayed content and
-does not veto the re-send; a delivering path feeds and writes it exactly once.
+the in-band error for the client to retry. A trailing partial line that a
+rescue or the degenerate terminal boundary drops was never delivered, so it
+neither counts as relayed content nor as the record's answer content or
+first-answer time, and it does not veto the re-send; only a delivering path
+feeds and writes it, exactly once.
 A translated streaming request whose 200 response body is not SSE is still
 relabelled `text/event-stream`: the upstream bytes are never converted into SSE
 frames, and the relay surfaces the non-SSE body as a truncated-stream error

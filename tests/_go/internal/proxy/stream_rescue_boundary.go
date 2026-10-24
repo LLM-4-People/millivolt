@@ -311,3 +311,105 @@ func TestReasoningRescueClosesPartialEventBeforeRetry(t *testing.T) {
 		t.Fatalf("rescued request facts = %+v, want clean with retries=1 and a truncated absorbed attempt", rec)
 	}
 }
+
+// TestDroppedTailDoesNotMarkAnswer pins NEW-2: a trailing partial content line
+// is never delivered when no rescue remains, because finishHold's degenerate
+// boundary drops it. Feeding it first published answer content and a
+// first-answer time for bytes the client never received.
+func TestDroppedTailDoesNotMarkAnswer(t *testing.T) {
+	const partialContent = `data: {"id":"1","choices":[{"delta":{"content":"HELLO"}}]}`
+	for _, tc := range []struct {
+		name        string
+		budget      int
+		wantCalls   int32
+		wantRetries int
+	}{
+		{name: "no retry budget", budget: 0, wantCalls: 1, wantRetries: 0},
+		{name: "budget exhausted", budget: 2, wantCalls: 3, wantRetries: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				calls.Add(1)
+				w.Write([]byte(partialContent))
+				w.(http.Flusher).Flush()
+			}))
+			defer upstream.Close()
+
+			cfg := newConfigWithQuality(tc.budget)
+			cfg.ThinkingRetries = 0
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, got := streamRequest(t, srv, upstream)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			if strings.Contains(got, "HELLO") {
+				t.Fatalf("undelivered tail reached the client: %s", got)
+			}
+			if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+				t.Fatalf("in-band truncated error missing: %s", got)
+			}
+			if strings.Count(got, "data: [DONE]") != 1 {
+				t.Fatalf("exactly one terminal expected: %s", got)
+			}
+			if n := calls.Load(); n != tc.wantCalls {
+				t.Fatalf("upstream calls = %d, want %d", n, tc.wantCalls)
+			}
+			recs := waitForRecord(t, buf, 1)
+			rec := recs[0]
+			if !rec.IsError() || rec.ErrorCode != metrics.CodeTruncated {
+				t.Fatalf("record = %+v, want the truncated error", rec)
+			}
+			if rec.Retries != tc.wantRetries {
+				t.Fatalf("retries = %d, want %d", rec.Retries, tc.wantRetries)
+			}
+			if rec.HadAnswerContent || !rec.FirstAnswerAt.IsZero() || !rec.FirstTokenAt.IsZero() {
+				t.Fatalf("record marks answer content for dropped bytes: hadAnswer=%v firstAnswer=%v firstToken=%v",
+					rec.HadAnswerContent, rec.FirstAnswerAt, rec.FirstTokenAt)
+			}
+		})
+	}
+}
+
+// TestDeliveredTailStillCounts is the control for NEW-2: a stream that already
+// terminated keeps its partial tail on the wire, and the tail still reaches the
+// record through the delivering path.
+func TestDeliveredTailStillCounts(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"))
+		w.Write([]byte(`data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+		w.Write([]byte(`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n"))
+		w.Write([]byte(`data: {"id":"1","choices":[{"delta":{"content":"TAIL"}}]}`))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := newConfigWithQuality(0)
+	cfg.ThinkingRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(got, `"content":"TAIL"`) {
+		t.Fatalf("delivered partial tail missing: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("terminated stream surfaced truncation: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || !rec.HadAnswerContent || rec.FirstAnswerAt.IsZero() {
+		t.Fatalf("record = %+v, want the delivered answer counted", rec)
+	}
+}

@@ -2973,10 +2973,20 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				return rescueReasoningTruncation
 			}
-			// No rescue owns this attempt, so the trailing partial line is
-			// delivered and may now update the record and the degenerate
-			// classification.
-			releaseTail()
+			// No rescue owns this attempt. finishHold either delivers the
+			// trailing partial line through its verbatim branch or drops it at
+			// the degenerate boundary. Decide that before feeding it: content
+			// the boundary drops was never delivered, so it must not set the
+			// answer content or first-answer time on the record. The pre-tail
+			// outcome is the same one finishHold classifies because a
+			// terminator-less stream cannot become anything but truncated by
+			// these bytes.
+			preTailCode := a.OutcomeCode()
+			tailDropped := preTailCode != "" && !a.HasInBandError() &&
+				!rec.ClientDisconnected && a.ChatLike() && !holdAborted
+			if !tailDropped {
+				releaseTail()
+			}
 			if !finishHold() {
 				return rescueNone
 			}
