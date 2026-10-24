@@ -426,20 +426,18 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 	w := httptest.NewRecorder()
 	emitDegenerateResponses(w, &a, time.Now(), metrics.CodeTruncated, rec)
 	body := w.Body.String()
-	if !strings.HasPrefix(body, "event: response.failed\ndata: ") || !strings.HasSuffix(body, "\n\n") {
-		t.Fatalf("frame framing = %q", body)
-	}
-	if strings.Count(body, "event: response.failed") != 1 {
-		t.Fatalf("response.failed count = %d: %q", strings.Count(body, "event: response.failed"), body)
-	}
 	if strings.Contains(body, "[DONE]") || strings.Contains(body, `"choices"`) {
 		t.Fatalf("Responses client received a Chat frame: %q", body)
 	}
-	payload := strings.TrimSuffix(strings.TrimPrefix(body, "event: response.failed\ndata: "), "\n\n")
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
-		t.Fatalf("payload %q: %v", payload, err)
+	payloads := responsesFramePayloads(t, body)
+	if len(payloads) != 2 {
+		t.Fatalf("frames = %d, want error + failed: %q", len(payloads), body)
 	}
+	errorEvent := payloads[0]
+	if errorEvent["type"] != "error" || errorEvent["code"] != metrics.CodeTruncated {
+		t.Fatalf("error event = %v, want the specific truncated code", errorEvent)
+	}
+	doc := payloads[1]
 	if doc["type"] != "response.failed" {
 		t.Fatalf("event type = %v", doc["type"])
 	}
@@ -448,11 +446,17 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 		t.Fatalf("response = %v", response)
 	}
 	failure, _ := response["error"].(map[string]any)
-	if failure["code"] != metrics.CodeTruncated || failure["message"] != metrics.DegenerateMessage(metrics.CodeTruncated) {
+	// response.error.code is the closed ResponseErrorCode enum; the specific
+	// internal code stays on the error event and the record.
+	if failure["code"] != "server_error" || failure["message"] != metrics.DegenerateMessage(metrics.CodeTruncated) {
 		t.Fatalf("error = %v", failure)
 	}
 	if output, ok := response["output"].([]any); !ok || len(output) != 0 {
 		t.Fatalf("output = %v, want an empty array", response["output"])
+	}
+	a.Fill(rec)
+	if rec.ErrorCode != metrics.CodeTruncated || !rec.IsError() {
+		t.Fatalf("record error = %q (error %v), want the specific truncated code", rec.ErrorCode, rec.IsError())
 	}
 	if rec.ResponseBytes != int64(len(body)) {
 		t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
@@ -465,12 +469,12 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 	rec2 := &metrics.Record{ID: "req_2"}
 	w2 := httptest.NewRecorder()
 	emitDegenerateResponses(w2, &withID, time.Now(), metrics.CodeTruncated, rec2)
-	var doc2 map[string]any
-	payload2 := strings.TrimSuffix(strings.TrimPrefix(w2.Body.String(), "event: response.failed\ndata: "), "\n\n")
-	if err := json.Unmarshal([]byte(payload2), &doc2); err != nil {
-		t.Fatalf("payload %q: %v", payload2, err)
+	payloads2 := responsesFramePayloads(t, w2.Body.String())
+	if len(payloads2) != 2 {
+		t.Fatalf("frames = %d, want error + failed: %s", len(payloads2), w2.Body.String())
 	}
-	if got := doc2["response"].(map[string]any)["id"]; got != "resp_terminal" {
+	failed, _ := payloads2[1]["response"].(map[string]any)
+	if got := failed["id"]; got != "resp_terminal" {
 		t.Fatalf("synthetic failure id = %v, want the terminal response id", got)
 	}
 }
@@ -687,15 +691,18 @@ func TestSyntheticResponsesErrorFramesSchemaComplete(t *testing.T) {
 		w := httptest.NewRecorder()
 		emitDegenerateResponses(w, &a, time.Now(), metrics.CodeTruncated, rec)
 		payloads := responsesFramePayloads(t, w.Body.String())
-		if len(payloads) != 1 || payloads[0]["type"] != "response.failed" {
+		if len(payloads) != 2 || payloads[0]["type"] != "error" || payloads[1]["type"] != "response.failed" {
 			t.Fatalf("payloads = %v", payloads)
 		}
-		if _, ok := payloads[0]["sequence_number"]; !ok {
-			t.Fatalf("degenerate event is missing sequence_number: %v", payloads[0])
+		if payloads[0]["code"] != metrics.CodeTruncated {
+			t.Fatalf("degenerate error event = %v, want the specific code", payloads[0])
 		}
-		response, _ := payloads[0]["response"].(map[string]any)
+		if _, ok := payloads[1]["sequence_number"]; !ok {
+			t.Fatalf("degenerate event is missing sequence_number: %v", payloads[1])
+		}
+		response, _ := payloads[1]["response"].(map[string]any)
 		if response == nil {
-			t.Fatalf("degenerate event has no response object: %v", payloads[0])
+			t.Fatalf("degenerate event has no response object: %v", payloads[1])
 		}
 		assertResponsesEnvelopeRequired(t, response)
 		if response["model"] != "model-a" {

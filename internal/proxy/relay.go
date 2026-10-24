@@ -2930,8 +2930,23 @@ func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Ti
 	if id == "" {
 		id = rec.ID
 	}
+	msg := metrics.DegenerateMessage(code)
+	// The free-form error event carries the specific internal code; the
+	// response.failed envelope carries the closed ResponseErrorCode enum.
+	// Feed the error event first so the analyzer's first-real-error rule keeps
+	// the specific code on the record; the enum value is wire-only.
+	if payload, frame, err := providerformat.ResponsesSyntheticEvent(
+		"error", 0, id, rec.Model, code, msg); err == nil {
+		a.Feed(append([]byte("data: "), payload...), now)
+		a.Feed(nil, now)
+		if _, werr := w.Write(frame); werr != nil {
+			markClientGone(rec)
+			return
+		}
+		rec.ResponseBytes += int64(len(frame))
+	}
 	payload, frame, err := providerformat.ResponsesSyntheticEvent(
-		"response.failed", 0, id, rec.Model, code, metrics.DegenerateMessage(code))
+		"response.failed", 1, id, rec.Model, code, msg)
 	if err != nil {
 		return
 	}
