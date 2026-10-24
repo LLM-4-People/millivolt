@@ -2495,7 +2495,18 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			rescueRequested = rescueReasoningStop
 			return true
 		}
-		if !writeOut() {
+		// A degenerate error is appended as a new SSE event. Close the
+		// pending event first: a complete data line in out still needs its
+		// blank separator, and a trailing partial line was never received and
+		// must be dropped. Without this boundary the error becomes a second
+		// data line in the open payload, or concatenates on the same line.
+		degenerate := code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
+			a.ChatLike() && !holdAborted
+		if degenerate {
+			if !writeRescueBoundary() {
+				return false
+			}
+		} else if !writeOut() {
 			return false
 		}
 		if holdAborted {
