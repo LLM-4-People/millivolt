@@ -31,7 +31,7 @@ type anthropicWireRequest struct {
 	Stream        bool                `json:"stream"`
 	Temperature   *float64            `json:"temperature"`
 	TopP          *float64            `json:"top_p"`
-	TopK          *int                `json:"top_k"`
+	TopK          json.RawMessage     `json:"top_k"`
 	StopSequences []string            `json:"stop_sequences"`
 	Tools         []anthropicWireTool `json:"tools"`
 	ToolChoice    json.RawMessage     `json:"tool_choice"`
@@ -172,12 +172,16 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 	if maxTokens == nil {
 		return nil, errors.New("anthropic request: max_tokens is required")
 	}
+	topK, err := jsonnum.OptionalInt(in.TopK, "top_k")
+	if err != nil {
+		return nil, fmt.Errorf("anthropic request: %w", err)
+	}
 	req := &ir.Request{
 		Model:           in.Model,
 		MaxOutputTokens: maxTokens,
 		Temperature:     in.Temperature,
 		TopP:            in.TopP,
-		TopK:            in.TopK,
+		TopK:            topK,
 		Stop:            in.StopSequences,
 		Stream:          in.Stream,
 		ServiceTier:     in.ServiceTier,
@@ -623,9 +627,9 @@ func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warni
 		return nil, nil, nil
 	}
 	var obj struct {
-		Type         string `json:"type"`
-		BudgetTokens *int   `json:"budget_tokens"`
-		Display      string `json:"display"`
+		Type         string          `json:"type"`
+		BudgetTokens json.RawMessage `json:"budget_tokens"`
+		Display      string          `json:"display"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, nil, fmt.Errorf("anthropic thinking: %w", err)
@@ -634,7 +638,11 @@ func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warni
 	switch obj.Type {
 	case "enabled":
 		enabled := true
-		return &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: obj.BudgetTokens, Display: obj.Display}, nil, nil
+		budget, err := jsonnum.OptionalInt(obj.BudgetTokens, "thinking.budget_tokens")
+		if err != nil {
+			return nil, nil, fmt.Errorf("anthropic thinking: %w", err)
+		}
+		return &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: budget, Display: obj.Display}, nil, nil
 	case "adaptive":
 		enabled := true
 		warns.Add(ir.WarningApproximated, "thinking.type", "adaptive thinking has no cross-protocol equivalent")

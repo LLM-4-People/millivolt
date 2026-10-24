@@ -177,6 +177,21 @@ func OptionalInt(raw json.RawMessage, field string) (*int, error) {
 	return &n, nil
 }
 
+// OptionalInt64 decodes one optional int64 member. A nil or JSON null raw
+// member means absent and returns nil. A present member is parsed exactly and
+// errors name the field, so a decoder can report which wire member failed.
+func OptionalInt64(raw json.RawMessage, field string) (*int64, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	n, err := ParseInt64(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s", field, err)
+	}
+	return &n, nil
+}
+
 // decimalParts splits one JSON number literal into its digits and a base-10
 // scale, so the exact value is digits * 10^scale. It accepts the full JSON
 // number grammar and rejects anything else.

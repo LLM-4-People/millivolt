@@ -34,12 +34,12 @@ type chatWireRequest struct {
 	Temperature         *float64           `json:"temperature"`
 	TopP                *float64           `json:"top_p"`
 	Stop                json.RawMessage    `json:"stop"`
-	Seed                *int64             `json:"seed"`
+	Seed                json.RawMessage    `json:"seed"`
 	PresencePenalty     *float64           `json:"presence_penalty"`
 	FrequencyPenalty    *float64           `json:"frequency_penalty"`
 	LogitBias           map[string]float64 `json:"logit_bias"`
 	Logprobs            *bool              `json:"logprobs"`
-	TopLogprobs         *int               `json:"top_logprobs"`
+	TopLogprobs         json.RawMessage    `json:"top_logprobs"`
 	Tools               []chatWireTool     `json:"tools"`
 	ToolChoice          json.RawMessage    `json:"tool_choice"`
 	ParallelToolCalls   *bool              `json:"parallel_tool_calls"`
@@ -60,7 +60,7 @@ type chatWireRequest struct {
 	PromptCacheOptions   *ir.PromptCacheOptions     `json:"prompt_cache_options"`
 	PromptCacheRetention string                     `json:"prompt_cache_retention"`
 	Store                *bool                      `json:"store"`
-	N                    *int                       `json:"n"`
+	N                    json.RawMessage            `json:"n"`
 
 	// Legacy and provider-specific request fields that the canonical model
 	// does not carry. Present values are reported or converted below.
@@ -217,6 +217,18 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	if err != nil {
 		return nil, errParseOpenAIBody(err)
 	}
+	seed, err := jsonnum.OptionalInt64(in.Seed, "seed")
+	if err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
+	topLogprobs, err := jsonnum.OptionalInt(in.TopLogprobs, "top_logprobs")
+	if err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
+	n, err := jsonnum.OptionalInt(in.N, "n")
+	if err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
 
 	var warns ir.Warnings
 	req := &ir.Request{
@@ -224,12 +236,12 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		MaxOutputTokens:      MergeTokenCaps(maxCompletionTokens, maxTokens),
 		Temperature:          in.Temperature,
 		TopP:                 in.TopP,
-		Seed:                 in.Seed,
+		Seed:                 seed,
 		PresencePenalty:      in.PresencePenalty,
 		FrequencyPenalty:     in.FrequencyPenalty,
 		LogitBias:            in.LogitBias,
 		Logprobs:             in.Logprobs,
-		TopLogprobs:          in.TopLogprobs,
+		TopLogprobs:          topLogprobs,
 		ParallelToolCalls:    in.ParallelToolCalls,
 		Stream:               in.Stream,
 		ServiceTier:          in.ServiceTier,
@@ -262,7 +274,7 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	if len(stops) > 0 {
 		req.Stop = stops
 	}
-	if in.N != nil && *in.N > 1 {
+	if n != nil && *n > 1 {
 		req.Warnings.Add(ir.WarningDropped, "n", "only one choice can be translated")
 	}
 	if in.ReasoningEffort != "" {

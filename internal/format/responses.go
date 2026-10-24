@@ -29,7 +29,7 @@ type responsesWireRequest struct {
 	MaxOutputTokens   json.RawMessage     `json:"max_output_tokens"`
 	Temperature       *float64            `json:"temperature"`
 	TopP              *float64            `json:"top_p"`
-	TopLogprobs       *int                `json:"top_logprobs"`
+	TopLogprobs       json.RawMessage     `json:"top_logprobs"`
 	Tools             []responsesWireTool `json:"tools"`
 	ToolChoice        json.RawMessage     `json:"tool_choice"`
 	ParallelToolCalls *bool               `json:"parallel_tool_calls"`
@@ -58,7 +58,7 @@ type responsesWireRequest struct {
 	Include              []string               `json:"include"`
 	Truncation           string                 `json:"truncation"`
 	Background           bool                   `json:"background"`
-	MaxToolCalls         *int                   `json:"max_tool_calls"`
+	MaxToolCalls         json.RawMessage        `json:"max_tool_calls"`
 	Conversation         json.RawMessage        `json:"conversation"`
 	Prompt               json.RawMessage        `json:"prompt"`
 	ContextManagement    json.RawMessage        `json:"context_management"`
@@ -166,13 +166,17 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	if err != nil {
 		return nil, fmt.Errorf("responses request: %w", err)
 	}
+	topLogprobs, err := jsonnum.OptionalInt(in.TopLogprobs, "top_logprobs")
+	if err != nil {
+		return nil, fmt.Errorf("responses request: %w", err)
+	}
 	req := &ir.Request{
 		Model:                in.Model,
 		Instructions:         in.Instructions,
 		MaxOutputTokens:      maxOutputTokens,
 		Temperature:          in.Temperature,
 		TopP:                 in.TopP,
-		TopLogprobs:          in.TopLogprobs,
+		TopLogprobs:          topLogprobs,
 		ParallelToolCalls:    in.ParallelToolCalls,
 		Stream:               in.Stream,
 		Store:                in.Store,
@@ -226,7 +230,11 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	if in.Truncation != "" && in.Truncation != "disabled" {
 		req.Warnings.Add(ir.WarningDropped, "truncation", "server-side truncation is not translated")
 	}
-	if in.MaxToolCalls != nil {
+	maxToolCalls, err := jsonnum.OptionalInt(in.MaxToolCalls, "max_tool_calls")
+	if err != nil {
+		return nil, fmt.Errorf("responses request: %w", err)
+	}
+	if maxToolCalls != nil {
 		req.Warnings.Add(ir.WarningDropped, "max_tool_calls", "no cross-protocol equivalent")
 	}
 	if wireValuePresent(in.AccessPrograms) {
