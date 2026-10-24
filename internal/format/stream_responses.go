@@ -138,10 +138,10 @@ type ResponsesStreamDecoder struct {
 	// identity-free terminal matching. Names stay available after the call
 	// closes so a terminal repeat can be recognized.
 	toolNames map[string]string
-	// toolArgsHash records the emitted argument value of an id-less announced
-	// call when it closes. A reordered terminal repeat has no identity, so the
-	// proxy compares the function name and this hash without retaining the
-	// argument bytes for the whole stream.
+	// toolArgsHash records the canonical fingerprint of the emitted argument
+	// value of an id-less announced call when it closes. A reordered terminal
+	// repeat has no identity, so the proxy compares the function name and this
+	// hash without retaining the argument bytes for the whole stream.
 	toolArgsHash map[string][sha256.Size]byte
 	// closedIdlessCalls counts closed id-less calls by function name and
 	// emitted argument hash. It is the constant-time lookup for a terminal
@@ -1541,19 +1541,39 @@ func terminalToolIdentityCompatible(callID, itemID, candidateKey string) bool {
 	return true
 }
 
-// toolArgumentsFingerprint hashes the effective argument value. A missing,
-// null or whitespace value is the empty object the target emitted.
+// toolArgumentsFingerprint hashes the canonical argument value. Whitespace is
+// removed, object keys are sorted, and numeric literals are preserved; a
+// missing, null or whitespace value is the empty object the target emitted. An
+// invalid or partial value cannot be canonicalized, so its raw bytes are
+// hashed instead.
 func toolArgumentsFingerprint(raw string) [sha256.Size]byte {
 	if toolArgumentsMissing(raw) {
 		return sha256.Sum256([]byte("{}"))
 	}
-	return sha256.Sum256([]byte(raw))
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(raw)); err != nil {
+		return sha256.Sum256([]byte(raw))
+	}
+	dec := json.NewDecoder(bytes.NewReader(compact.Bytes()))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return sha256.Sum256([]byte(raw))
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return sha256.Sum256([]byte(raw))
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return sha256.Sum256([]byte(raw))
+	}
+	return sha256.Sum256(canonical)
 }
 
 // closedToolCallRepeat reports whether this terminal entry repeats the named
 // announced call whose block already closed. A name mismatch at a reused
 // position is a different call. An id-less call has only its name and
-// arguments, so both must agree.
+// effective arguments, so both must agree.
 func (d *ResponsesStreamDecoder) closedToolCallRepeat(key string, item responsesWireItem) bool {
 	if d.toolNames[key] != item.Name {
 		return false
@@ -1566,7 +1586,8 @@ func (d *ResponsesStreamDecoder) closedToolCallRepeat(key string, item responses
 }
 
 // matchesClosedIdlessCall reports whether an unmatched id-less terminal entry
-// repeats a closed id-less announced call by name and emitted arguments.
+// repeats a closed id-less announced call by name and canonical argument
+// value.
 func (d *ResponsesStreamDecoder) matchesClosedIdlessCall(item responsesWireItem) bool {
 	if item.Name == "" {
 		return false

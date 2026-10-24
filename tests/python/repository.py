@@ -761,8 +761,10 @@ class PublishedContracts(unittest.TestCase):
             "accepts either spelling on the terminal item",
             "unique open announced call with the same name",
             "skipped before open matching when its identity and name agree",
-            "an id-less entry also requires its arguments to agree",
-            "agrees with a closed id-less call's name and arguments",
+            "an id-less entry also requires its effective argument value",
+            "Formatting differences and object key order do not affect that",
+            "whose name and",
+            "effective argument value agree with a closed id-less call",
             "the proxy does not guess further",
         ):
             self.assertIn(phrase, adapters)

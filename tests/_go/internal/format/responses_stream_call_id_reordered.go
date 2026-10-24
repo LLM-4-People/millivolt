@@ -7,6 +7,9 @@ package format
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -567,5 +570,137 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 				})
 			}
 		})
+	}
+}
+
+// toolArgumentsEquivalent reports whether two JSON argument values carry the
+// same effective value. Formatting and key order do not matter; number
+// literals are compared exactly.
+func toolArgumentsEquivalent(t *testing.T, got, want string) bool {
+	t.Helper()
+	decode := func(raw string) any {
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.UseNumber()
+		var value any
+		if err := dec.Decode(&value); err != nil {
+			t.Fatalf("decode arguments %q: %v", raw, err)
+		}
+		return value
+	}
+	return reflect.DeepEqual(decode(got), decode(want))
+}
+
+// A closed id-less call's terminal repeat may differ from its streamed value
+// only in JSON formatting. It is still that call's repeat, not the open
+// same-name call's entry.
+func TestResponsesReformattedClosedRepeatKeepsOpenArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		closedName string
+		openName   string
+		added      string
+		done       string
+		terminal   string
+		wantClosed string
+	}{
+		{
+			name:       "whitespace differs",
+			closedName: "lookup",
+			openName:   "lookup",
+			done:       `{\"a\": 1}`,
+			terminal:   `{\"a\":1}`,
+			wantClosed: `{"a": 1}`,
+		},
+		{
+			name:       "key order differs",
+			closedName: "lookup",
+			openName:   "lookup",
+			done:       `{\"a\":1,\"c\":3}`,
+			terminal:   `{\"c\":3,\"a\":1}`,
+			wantClosed: `{"a":1,"c":3}`,
+		},
+		{
+			name:       "distinct names, whitespace differs",
+			closedName: "lookup",
+			openName:   "other",
+			done:       `{\"a\": 1}`,
+			terminal:   `{\"a\":1}`,
+			wantClosed: `{"a": 1}`,
+		},
+		{
+			name:       "announcement carries arguments",
+			closedName: "lookup",
+			openName:   "lookup",
+			added:      `{\"a\":1}`,
+			done:       `{\"a\":1}`,
+			terminal:   `{\"a\": 1}`,
+			wantClosed: `{"a":1}`,
+		},
+	} {
+		source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"` + tc.closedName + `","arguments":"` + tc.added + `"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":{"type":"function_call","name":"` + tc.openName + `","arguments":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","name":"` + tc.closedName + `","arguments":"` + tc.done + `","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","name":"` + tc.closedName + `","arguments":"` + tc.terminal + `"},{"type":"function_call","name":"` + tc.openName + `","arguments":"{\"b\":2}"}]}}
+
+`
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					var buf bytes.Buffer
+					if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					out := buf.String()
+					calls := streamedToolCalls(t, target, out)
+					args := map[string]string{}
+					for _, call := range calls {
+						args[call.id] = strings.TrimSpace(call.args.String())
+					}
+					closed, ok := args["call_proxy_0"]
+					if !ok || !toolArgumentsEquivalent(t, closed, tc.wantClosed) {
+						t.Fatalf("closed call arguments = %q, want effective %s: %v\n%s", closed, tc.wantClosed, args, out)
+					}
+					if args["call_proxy_5"] != `{"b":2}` {
+						t.Fatalf("open call arguments = %q, want {\"b\":2}: %v\n%s", args["call_proxy_5"], args, out)
+					}
+					if len(calls) != 2 {
+						t.Fatalf("tool calls = %d, want two: %s", len(calls), out)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestToolArgumentsFingerprintCanonicalizes(t *testing.T) {
+	for _, pair := range [][2]string{
+		{`{"a":1}`, `{ "a" : 1 }`},
+		{`{"a":1,"b":2}`, `{"b":2,"a":1}`},
+		{``, `{}`},
+		{"  ", `null`},
+	} {
+		if toolArgumentsFingerprint(pair[0]) != toolArgumentsFingerprint(pair[1]) {
+			t.Errorf("fingerprint(%q) != fingerprint(%q)", pair[0], pair[1])
+		}
+	}
+	for _, pair := range [][2]string{
+		{`{"n":1}`, `{"n":1.0}`},
+		{`{"a":1}`, `{"a":2}`},
+		{`{"a":`, `{"a":1}`},
+	} {
+		if toolArgumentsFingerprint(pair[0]) == toolArgumentsFingerprint(pair[1]) {
+			t.Errorf("fingerprint(%q) == fingerprint(%q)", pair[0], pair[1])
+		}
+	}
+	partial := `{"a":`
+	if got, want := toolArgumentsFingerprint(partial), sha256.Sum256([]byte(partial)); got != want {
+		t.Errorf("partial fingerprint = %x, want the raw bytes %x", got, want)
 	}
 }
