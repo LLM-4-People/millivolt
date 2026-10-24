@@ -975,6 +975,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode != http.StatusOK {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+			// The status line is already committed, so this in-band error is
+			// the turn's outcome: stamp the same owners the envelope uses.
+			// A 201 or other committed 2xx would otherwise look healthy to
+			// the record even though the client received an error.
+			rec.ErrorType, rec.ErrorMsg = typ, msg
 			if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
 				// The in-band error hit a dead socket: the client is gone.
 				// The decided error status stays on the record (markClientGone

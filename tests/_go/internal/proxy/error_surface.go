@@ -213,8 +213,10 @@ func TestCommittedNonOKStatusIsInBand(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("first request never completed")
 	}
+	var secondBody string
 	select {
 	case body := <-second:
+		secondBody = body
 		if strings.Contains(body, `"choices"`) || strings.Contains(body, "[DONE]") {
 			t.Fatalf("committed non-200 status leaked a JSON/OpenAI body: %s", body)
 		}
@@ -223,6 +225,18 @@ func TestCommittedNonOKStatusIsInBand(t *testing.T) {
 		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("queued request never completed")
+	}
+	var queued *metrics.Record
+	for _, rec := range waitForRecord(t, buf, 2) {
+		if rec.StatusCode == http.StatusCreated {
+			queued = rec
+		}
+	}
+	if queued == nil {
+		t.Fatalf("no record for the queued 201 request: %s", secondBody)
+	}
+	if queued.ErrorType == "" || queued.ErrorMsg == "" || !queued.IsError() {
+		t.Fatalf("committed 201 record must carry the in-band outcome: %+v", queued)
 	}
 }
 
