@@ -866,6 +866,7 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 		// untouched - this is the record view only.
 		if a.errType == "" {
 			a.errType = TypeUpstreamError
+			a.errMsg = "upstream response failed"
 		}
 	}
 	var ev struct {

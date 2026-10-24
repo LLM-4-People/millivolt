@@ -13,21 +13,25 @@ func TestStreamingFailedTerminalWithoutErrorRecordsUpstreamError(t *testing.T) {
 		line     string
 		wantType string
 		wantCode string
+		wantMsg  bool
 	}{
 		{
 			name:     "bare failed",
 			line:     `data: {"type":"response.failed"}`,
 			wantType: "upstream_error",
+			wantMsg:  true,
 		},
 		{
 			name:     "null nested error",
 			line:     `data: {"type":"response.failed","response":{"id":"r1","status":"failed","error":null}}`,
 			wantType: "upstream_error",
+			wantMsg:  true,
 		},
 		{
 			name:     "empty nested error",
 			line:     `data: {"type":"response.failed","response":{"error":{}}}`,
 			wantType: "upstream_error",
+			wantMsg:  true,
 		},
 		{
 			name:     "code without type",
@@ -52,6 +56,9 @@ func TestStreamingFailedTerminalWithoutErrorRecordsUpstreamError(t *testing.T) {
 			}
 			if rec.ErrorCode != tc.wantCode {
 				t.Fatalf("error code = %q, want %q", rec.ErrorCode, tc.wantCode)
+			}
+			if tc.wantMsg && rec.ErrorMsg == "" {
+				t.Fatal("bare failure recorded no message")
 			}
 			if !rec.IsError() {
 				t.Fatalf("record is not an error: %+v", rec)

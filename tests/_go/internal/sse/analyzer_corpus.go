@@ -2391,7 +2391,7 @@ const analyzerCorpusGolden = `{
     "preview": "",
     "error_type": "upstream_error",
     "error_code": "",
-    "error_msg": "",
+    "error_msg": "upstream response failed",
     "has_in_band_error": true,
     "outcome": "",
     "record_usage": {
