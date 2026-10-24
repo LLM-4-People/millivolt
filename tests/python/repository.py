@@ -746,6 +746,7 @@ class PublishedContracts(unittest.TestCase):
             "legacy Chat `message.function_call`",
             "content delta after `message_delta`",
             "one `output.phase` warning",
+            "no client header or stored record carries it",
             "`output.<type>` warning",
             "fixed 32 MiB cap each",
             # Round 8 verification follow-up: each corrected claim is pinned so

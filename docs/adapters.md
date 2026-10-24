@@ -98,8 +98,15 @@ target cannot consume them:
   no cross-protocol equivalent and are dropped with a warning.
 - A Responses item `phase` is a wire hint with no target equivalent. A
   non-streaming request or response records one `input.phase` or `output.phase`
-  warning, and a translated stream records one `output.phase` warning on its
-  terminal. The phase text never reaches the client wire.
+  warning. A translated stream keeps one `output.phase` warning only in the
+  decoder's diagnostic state; no client header or stored record carries it.
+  The phase text never reaches the client wire.
+- A `response.output_text.delta` for a part the source never announced is
+  dropped, but the matching done event or the terminal document recovers the
+  full text, so only the incremental gap is lost. A Chat `[DONE]` without a
+  finish reason maps to `response.incomplete` for Responses and to a clean
+  `message_delta` with `end_turn` for Anthropic; both are accepted limits with
+  no reproduced client failure.
 - A canonical output block with no Responses content part, such as a file or
   audio block carried from Anthropic, is dropped from the output with one
   `output.<type>` warning. Text around the dropped block is preserved.
