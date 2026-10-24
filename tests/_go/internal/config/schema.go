@@ -999,6 +999,7 @@ func TestSchemaHelpPinsValidationRules(t *testing.T) {
 		t.Fatal("request_overrides is not registered")
 	}
 	for _, phrase := range []string{
+		"Capped at 64 rules.",
 		"the target's resolved auth header and Authorization are never set or removed",
 		"Accept-Encoding and Range are stripped after the override merge",
 	} {
