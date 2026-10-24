@@ -326,3 +326,79 @@ func TestChatNonCleanLegacyFunctionMissingArgumentsDropped(t *testing.T) {
 		t.Fatalf("argument warnings = %d, want 1: %+v", got, warnings)
 	}
 }
+
+func responsesRawCallResponse(status, reason, call string) string {
+	incomplete := ""
+	if reason != "" {
+		incomplete = `"incomplete_details":{"reason":"` + reason + `"},`
+	}
+	return `{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"` + status + `",` + incomplete + `"output":[` + call + `]}`
+}
+
+func chatRawCallResponse(finish, call string) string {
+	return `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"partial text","tool_calls":[` + call + `]},"finish_reason":"` + finish + `"}]}`
+}
+
+func TestResponsesNonCleanStructuralIdentityStaysFatal(t *testing.T) {
+	oversized := strings.Repeat("x", 513)
+	for _, tc := range []struct {
+		name string
+		call string
+		want string
+	}{
+		{
+			name: "missing id and arguments",
+			call: `{"type":"function_call","name":"lookup","arguments":""}`,
+			want: "no call_id",
+		},
+		{
+			name: "oversized id and missing arguments",
+			call: `{"type":"function_call","call_id":"` + oversized + `","name":"lookup","arguments":""}`,
+			want: "tool id",
+		},
+		{
+			name: "missing name and arguments",
+			call: `{"type":"function_call","call_id":"call_1","arguments":""}`,
+			want: "no name",
+		},
+		{
+			name: "missing id with complete arguments",
+			call: `{"type":"function_call","name":"lookup","arguments":"{\"q\":1}"}`,
+			want: "no call_id",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(responsesRawCallResponse("incomplete", "max_output_tokens", tc.call))
+			if _, _, err := TranslateResponseBetween(ir.Chat, ir.Responses, body); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestChatNonCleanStructuralIdentityStaysFatal(t *testing.T) {
+	oversized := strings.Repeat("x", 513)
+	for _, tc := range []struct {
+		name string
+		call string
+		want string
+	}{
+		{
+			name: "oversized id and missing arguments",
+			call: `{"id":"` + oversized + `","type":"function","function":{"name":"lookup","arguments":""}}`,
+			want: "tool id",
+		},
+		{
+			name: "missing name and missing arguments",
+			call: `{"id":"call_1","type":"function","function":{"name":"","arguments":""}}`,
+			want: "function name is required",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(chatRawCallResponse("length", tc.call))
+			if _, _, err := TranslateResponseBetween(ir.Anthropic, ir.Chat, body); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}

@@ -737,6 +737,9 @@ class PublishedContracts(unittest.TestCase):
             "A non-clean non-streaming terminal",
             "missing, null, whitespace or partial tool-call argument value",
             "drops only the unusable call",
+            "still maps an omitted, null or whitespace value to the empty object",
+            "fails closed on a partial or otherwise invalid value",
+            "remain fatal on every terminal, even when the arguments are also unusable",
             "`call_proxy_<output index>`",
             "legacy Chat `message.function_call`",
             "content delta after `message_delta`",
@@ -763,6 +766,7 @@ class PublishedContracts(unittest.TestCase):
         for stale in (
             "A malformed Chat `stop` value is rejected before any upstream send",
             "a Responses status other than `completed` with no incomplete reason",
+            "A clean terminal fails closed on the same bytes",
         ):
             self.assertNotIn(stale, adapters)
 

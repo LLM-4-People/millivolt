@@ -778,13 +778,6 @@ func (c *chatToolCalls) consumeEmpty() (string, error) {
 // response decoder sets it for a non-clean terminal.
 func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int, requireEvidence bool) (*ir.ToolCall, bool, ir.Warnings, error) {
 	var warns ir.Warnings
-	if requireEvidence && toolArgumentsMissing(tc.Function.Arguments) {
-		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, errToolArgumentsMissing))
-	}
-	args, err := parseToolArguments(tc.Function.Arguments)
-	if err != nil {
-		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
-	}
 	id := tc.ID
 	generated := false
 	if id == "" {
@@ -799,6 +792,16 @@ func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int, requireEvi
 		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: function name is required", msgIndex, callIndex))
 	}
 	if err := checkNativeIdentity("tool name", tc.Function.Name); err != nil {
+		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+	}
+	// Structural identity failures stay fatal even when the source also
+	// omitted the argument value; only a well-formed call can be dropped for
+	// unusable arguments.
+	if requireEvidence && toolArgumentsMissing(tc.Function.Arguments) {
+		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, errToolArgumentsMissing))
+	}
+	args, err := parseToolArguments(tc.Function.Arguments)
+	if err != nil {
 		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
 	}
 	return &ir.ToolCall{ID: id, Name: tc.Function.Name, Arguments: args}, generated, warns, nil

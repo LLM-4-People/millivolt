@@ -576,11 +576,7 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool) (
 	if item.Name == "" {
 		return nil, nil, errors.New("function_call has no name")
 	}
-	if requireEvidence && toolArgumentsMissing(item.Arguments) {
-		return nil, nil, errToolArgumentsMissing
-	}
-	args, err := parseToolArguments(item.Arguments)
-	if err != nil {
+	if err := checkNativeIdentity("tool name", item.Name); err != nil {
 		return nil, nil, err
 	}
 	id := item.CallID
@@ -593,7 +589,14 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool) (
 	if err := checkNativeIdentity("tool id", id); err != nil {
 		return nil, nil, err
 	}
-	if err := checkNativeIdentity("tool name", item.Name); err != nil {
+	// Structural identity failures stay fatal even when the source also
+	// omitted the argument value; only a well-formed call can be dropped for
+	// unusable arguments.
+	if requireEvidence && toolArgumentsMissing(item.Arguments) {
+		return nil, nil, errToolArgumentsMissing
+	}
+	args, err := parseToolArguments(item.Arguments)
+	if err != nil {
 		return nil, nil, err
 	}
 	return &ir.ToolCall{ID: id, Name: item.Name, Arguments: args}, warns, nil

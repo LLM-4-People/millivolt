@@ -139,9 +139,10 @@ target cannot consume them:
   with one `tool_calls.arguments` or `function_call.arguments` warning and
   keeps the text, refusal and source finish. A Responses `failed` terminal is not covered
   by that rule: it returns the provider error envelope and discards the output,
-  so no block or warning is produced. A clean terminal fails closed on the same
-  bytes, and structural failures such as a missing name or id remain fatal on
-  every terminal.
+  so no block or warning is produced. A clean terminal still maps an omitted,
+  null or whitespace value to the empty object, but fails closed on a partial
+  or otherwise invalid value. Structural failures such as a missing name or id
+  remain fatal on every terminal, even when the arguments are also unusable.
 - A streamed Responses `function_call` that omits `call_id` uses its item id as
   the target tool id. When both identities are absent, the block starts with a
   stable `call_proxy_<output index>` id instead of an empty id, so Chat does not
