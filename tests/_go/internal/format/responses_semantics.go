@@ -45,7 +45,9 @@ func TestResponsesAssistantMediaWarns(t *testing.T) {
 		t.Fatalf("assistant content = %v, want only the text part", content)
 	}
 	for _, part := range content {
-		if typ, _ := part.(map[string]any)["type"].(string); typ != "output_text" {
+		// A request-side assistant turn uses the EasyInputMessage part type;
+		// output_text is reserved for the response encoder.
+		if typ, _ := part.(map[string]any)["type"].(string); typ != "input_text" {
 			t.Fatalf("assistant media leaked as %q", typ)
 		}
 	}
