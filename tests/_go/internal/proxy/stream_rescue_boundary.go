@@ -413,3 +413,107 @@ func TestDeliveredTailStillCounts(t *testing.T) {
 		t.Fatalf("record = %+v, want the delivered answer counted", rec)
 	}
 }
+
+// TestDegenerateTailCanCompleteStream pins NEW-4: only the truncation class is
+// invariant under feeding the trailing partial line. When a terminal marker was
+// already seen but the answer or tool call itself arrives in that tail, the feed
+// turns empty_completion, empty_tool_call or reasoning_only into a healthy
+// completion; dropping the tail would fabricate an error and lose the output.
+func TestDegenerateTailCanCompleteStream(t *testing.T) {
+	const (
+		roleFrame       = `data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+		reasoningFrame  = `data: {"id":"1","choices":[{"delta":{"reasoning_content":"think"}}]}` + "\n\n"
+		finishStop      = `data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n"
+		finishToolCalls = `data: {"id":"1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n"
+		contentTail     = `data: {"id":"1","choices":[{"delta":{"content":"TAIL"}}]}`
+		toolCallTail    = `data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}`
+	)
+	for _, tc := range []struct {
+		name            string
+		thinkingRetries int
+		first           []string
+		tail            string
+		forbidCode      string
+		wantBody        string
+		wantAnswer      bool
+		wantToolCalls   int
+	}{
+		{
+			name:       "empty completion tail supplies the answer",
+			first:      []string{roleFrame, finishStop},
+			tail:       contentTail,
+			forbidCode: metrics.CodeEmptyCompletion,
+			wantBody:   `"content":"TAIL"`,
+			wantAnswer: true,
+		},
+		{
+			name:          "empty tool call tail supplies the call",
+			first:         []string{roleFrame, finishToolCalls},
+			tail:          toolCallTail,
+			forbidCode:    metrics.CodeEmptyToolCall,
+			wantBody:      `"id":"call_1"`,
+			wantToolCalls: 1,
+		},
+		{
+			name:       "reasoning-only tail supplies the answer",
+			first:      []string{reasoningFrame, finishStop},
+			tail:       contentTail,
+			forbidCode: metrics.CodeReasoningOnly,
+			wantBody:   `"content":"TAIL"`,
+			wantAnswer: true,
+		},
+		{
+			name:            "reasoning-only tail before the stop rescue",
+			thinkingRetries: 1,
+			first:           []string{reasoningFrame, finishStop},
+			tail:            contentTail,
+			forbidCode:      metrics.CodeReasoningOnly,
+			wantBody:        `"content":"TAIL"`,
+			wantAnswer:      true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				calls.Add(1)
+				for _, frame := range tc.first {
+					w.Write([]byte(frame))
+				}
+				w.Write([]byte(tc.tail))
+				w.(http.Flusher).Flush()
+			}))
+			defer upstream.Close()
+
+			cfg := newConfigWithQuality(0)
+			cfg.ThinkingRetries = tc.thinkingRetries
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, got := streamRequest(t, srv, upstream)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			if !strings.Contains(got, tc.wantBody) {
+				t.Fatalf("partial tail output missing (%s): %s", tc.wantBody, got)
+			}
+			if strings.Contains(got, `"code":"`+tc.forbidCode+`"`) {
+				t.Fatalf("fabricated %s despite the completing tail: %s", tc.forbidCode, got)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("upstream calls = %d, want 1 (the tail completes the stream)", n)
+			}
+			recs := waitForRecord(t, buf, 1)
+			rec := recs[0]
+			if rec.IsError() || rec.Retries != 0 {
+				t.Fatalf("record = %+v, want a healthy single attempt", rec)
+			}
+			if rec.HadAnswerContent != tc.wantAnswer || rec.ToolCalls != tc.wantToolCalls {
+				t.Fatalf("record answer/tools = %v/%d, want %v/%d",
+					rec.HadAnswerContent, rec.ToolCalls, tc.wantAnswer, tc.wantToolCalls)
+			}
+		})
+	}
+}

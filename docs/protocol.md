@@ -251,7 +251,12 @@ the in-band error for the client to retry. A trailing partial line that a
 rescue or the degenerate terminal boundary drops was never delivered, so it
 neither counts as relayed content nor as the record's answer content or
 first-answer time, and it does not veto the re-send; only a delivering path
-feeds and writes it, exactly once.
+feeds and writes it, exactly once. Only the truncation class is decided before
+that feed: a tail that supplies the missing answer or tool call for an
+already-terminated empty or reasoning-only completion is delivered and resolves
+the stream healthy. A terminator-less partial line that carries an in-band
+error is not delivered either, so the stream reports truncation rather than a
+provider error the client never saw.
 A translated streaming request whose 200 response body is not SSE is still
 relabelled `text/event-stream`: the upstream bytes are never converted into SSE
 frames, and the relay surfaces the non-SSE body as a truncated-stream error

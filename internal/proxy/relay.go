@@ -2977,12 +2977,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// trailing partial line through its verbatim branch or drops it at
 			// the degenerate boundary. Decide that before feeding it: content
 			// the boundary drops was never delivered, so it must not set the
-			// answer content or first-answer time on the record. The pre-tail
-			// outcome is the same one finishHold classifies because a
-			// terminator-less stream cannot become anything but truncated by
-			// these bytes.
+			// answer content or first-answer time on the record. Only the
+			// truncation class is invariant under the feed: a terminator-less
+			// stream cannot become anything but truncated. Every other
+			// degenerate class (empty completion, empty tool call,
+			// reasoning-only) can become healthy when the tail supplies the
+			// missing answer or tool call, so those run finishHold after the
+			// feed and deliver the tail.
 			preTailCode := a.OutcomeCode()
-			tailDropped := preTailCode != "" && !a.HasInBandError() &&
+			tailDropped := preTailCode == metrics.CodeTruncated && !a.HasInBandError() &&
 				!rec.ClientDisconnected && a.ChatLike() && !holdAborted
 			if !tailDropped {
 				releaseTail()
