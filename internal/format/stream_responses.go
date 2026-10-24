@@ -977,9 +977,6 @@ const (
 	responsesTerminalTruncated
 )
 
-// clean reports whether the source completed the turn normally.
-func (c responsesTerminalClass) clean() bool { return c == responsesTerminalCompleted }
-
 // skipToolArguments reports whether an incomplete argument value may be
 // discarded instead of failing the translation. A failed, errored or truncated
 // terminal carries no usable completion, so the source outcome wins. An
