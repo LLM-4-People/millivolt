@@ -196,3 +196,45 @@ func TestAnthropicSpeedMapsFast(t *testing.T) {
 		t.Fatalf("anthropic speed = %v, tier = %v: %s", root["speed"], root["service_tier"], out)
 	}
 }
+
+func TestAnthropicProviderOnlyToolKnobsWarn(t *testing.T) {
+	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"tools":[` +
+		`{"name":"lookup","input_schema":{"type":"object"},"allowed_callers":["direct"],` +
+		`"defer_loading":true,"input_examples":[{"q":1}],"eager_input_streaming":true},` +
+		`{"name":"other","input_schema":{"type":"object"},"defer_loading":true}]}`
+	req, err := DecodeAnthropicRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		"tool.allowed_callers", "tool.defer_loading", "tool.input_examples", "tool.eager_input_streaming",
+	} {
+		count := 0
+		for _, warning := range req.Warnings {
+			if warning.Field == field {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("%s warnings = %d, want one: %+v", field, count, req.Warnings)
+		}
+	}
+	if len(req.Tools) != 2 {
+		t.Fatalf("tools = %d, want 2", len(req.Tools))
+	}
+}
+
+func TestAnthropicDocumentContextWarns(t *testing.T) {
+	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":[` +
+		`{"type":"document","source":{"type":"text","data":"hello"},"context":"retrieved passage"}]}]}`
+	req, err := DecodeAnthropicRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(req.Warnings, "document.context") {
+		t.Fatalf("document context recorded no warning: %+v", req.Warnings)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 1 || req.Messages[0].Content[0].Text != "hello" {
+		t.Fatalf("document content = %+v, want the text block", req.Messages)
+	}
+}

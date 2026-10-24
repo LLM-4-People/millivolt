@@ -56,6 +56,13 @@ type anthropicWireTool struct {
 	InputSchema  json.RawMessage  `json:"input_schema"`
 	Strict       *bool            `json:"strict"`
 	CacheControl *ir.CacheControl `json:"cache_control"`
+
+	// Provider-only tool knobs. They have no cross-protocol equivalent and
+	// are reported rather than silently dropped.
+	AllowedCallers      json.RawMessage `json:"allowed_callers"`
+	DeferLoading        *bool           `json:"defer_loading"`
+	InputExamples       json.RawMessage `json:"input_examples"`
+	EagerInputStreaming *bool           `json:"eager_input_streaming"`
 }
 
 type anthropicWireBlock struct {
@@ -74,6 +81,8 @@ type anthropicWireBlock struct {
 		Content   json.RawMessage `json:"content"`
 	} `json:"source"`
 	Title string `json:"title"`
+	// Context is a document-only hint with no cross-protocol equivalent.
+	Context json.RawMessage `json:"context"`
 
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
@@ -398,30 +407,35 @@ func decodeAnthropicDocument(p anthropicWireBlock) ([]ir.Block, ir.Warnings, err
 	if p.Source == nil {
 		return nil, nil, errors.New("anthropic document block has no source")
 	}
+	var contextWarns ir.Warnings
+	if len(bytes.TrimSpace(p.Context)) > 0 && !bytes.Equal(bytes.TrimSpace(p.Context), []byte("null")) {
+		contextWarns.Add(ir.WarningDropped, "document.context", "document context has no cross-protocol equivalent")
+	}
 	switch p.Source.Type {
 	case "base64":
 		file := &ir.File{FileData: p.Source.Data, MediaType: p.Source.MediaType, Filename: p.Title}
-		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, contextWarns, nil
 	case "text":
 		// A plain-text document's data is the text itself, not base64. The
 		// title has no text-block field on any target, so a non-empty one is a
 		// recorded loss instead of a silent drop.
-		var warns ir.Warnings
+		warns := contextWarns
 		if p.Title != "" {
 			warns.Add(ir.WarningDropped, "document.title", "plain-text document title has no cross-protocol equivalent")
 		}
 		return []ir.Block{ir.TextBlock(string(p.Source.Data))}, warns, nil
 	case "url":
 		file := &ir.File{FileURL: p.Source.URL, Filename: p.Title}
-		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, contextWarns, nil
 	case "file":
 		file := &ir.File{FileID: p.Source.FileID, Filename: p.Title}
-		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, contextWarns, nil
 	case "content":
 		blocks, warns, err := decodeAnthropicContent(p.Source.Content)
 		if err != nil {
 			return nil, nil, err
 		}
+		warns = append(contextWarns, warns...)
 		warns.Add(ir.WarningApproximated, "document.content",
 			"nested document content was inlined and its title, context and citations are not preserved")
 		return blocks, warns, nil
@@ -435,9 +449,24 @@ func decodeAnthropicTools(in []anthropicWireTool) ([]ir.Tool, ir.Warnings, error
 		out   []ir.Tool
 		warns ir.Warnings
 	)
+	dropped := map[string]bool{}
 	for i, t := range in {
 		if t.Type != "" && t.Type != "custom" {
 			return nil, nil, fmt.Errorf("anthropic tool %d: provider-defined type %q has no cross-protocol equivalent", i, t.Type)
+		}
+		for _, field := range []struct {
+			name    string
+			present bool
+		}{
+			{"tool.allowed_callers", len(bytes.TrimSpace(t.AllowedCallers)) > 0 && !bytes.Equal(bytes.TrimSpace(t.AllowedCallers), []byte("null"))},
+			{"tool.defer_loading", t.DeferLoading != nil},
+			{"tool.input_examples", len(bytes.TrimSpace(t.InputExamples)) > 0 && !bytes.Equal(bytes.TrimSpace(t.InputExamples), []byte("null"))},
+			{"tool.eager_input_streaming", t.EagerInputStreaming != nil},
+		} {
+			if field.present && !dropped[field.name] {
+				dropped[field.name] = true
+				warns.Add(ir.WarningDropped, field.name, "provider-only tool knob has no cross-protocol equivalent")
+			}
 		}
 		if strings.TrimSpace(t.Name) == "" {
 			return nil, nil, fmt.Errorf("anthropic tool %d: name is required", i)
