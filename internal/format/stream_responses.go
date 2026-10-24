@@ -386,7 +386,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			default:
 				// A provider-specific item has no cross-protocol equivalent.
 				// Streaming cannot report the loss (the status line is already
-				// committed), so it is dropped without a record.
+				// committed), so it is dropped without a record. It is still a
+				// model tool invocation: the shared vocabulary keeps the turn's
+				// finish and settlement aligned with the non-stream decoder.
+				if sse.ResponsesToolCallItem(item.Type) {
+					d.sawToolCall = true
+				}
 			}
 		case "response.content_part.added":
 			var part struct {
@@ -799,6 +804,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				delete(d.itemBlock, ev.OutputIndex)
 				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
+			} else if sse.ResponsesToolCallItem(typ) {
+				d.sawToolCall = true
 			} else if typ == "message" {
 				if err := d.applyMessageContent(item, ev.OutputIndex, &d.terminalPending); err != nil {
 					return nil, err
@@ -2113,7 +2120,11 @@ func (d *ResponsesStreamDecoder) newBlock() int {
 func (d *ResponsesStreamDecoder) blocksFromItems(items []responsesWireItem) []ir.Block {
 	var out []ir.Block
 	for _, item := range items {
-		if item.Type == "function_call" {
+		// The shared vocabulary covers function_call plus provider-executed
+		// custom, shell, MCP and computer calls. The target blocks are dropped
+		// where unrepresentable, but the finish and token settlement must
+		// still read as a tool turn.
+		if sse.ResponsesToolCallItem(item.Type) {
 			out = append(out, ir.Block{Type: ir.BlockToolCall})
 		}
 	}
