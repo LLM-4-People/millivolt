@@ -773,9 +773,10 @@ function settingsFieldHTML(f, val, def, override) {
   const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
   let hint = '';
   if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
-  else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations' && String(val) === String(def)) {
+  else if (def != null && def !== '' && f.kind === 'model_rules' && JSON.stringify(val) === JSON.stringify(def)) hint = `<span class="st-hint">default</span>`;
+  else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'model_rules' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations' && String(val) === String(def)) {
     hint = `<span class="st-hint">default</span>`;
-  } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations') {
+  } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'model_rules' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations') {
     hint = `<span class="st-hint">default ${escapeHtml(String(def))}</span>`;
   }
   if (locked) hint += `<span class="st-hint">via flag · ${escapeHtml(String(override))}</span>`;

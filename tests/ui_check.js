@@ -4857,6 +4857,41 @@ async function main() {
     delete w.__settingsUxRestore;
   }
 
+  // (G3) A model_rules list is an array of objects, so String(val) compares as
+  // "[object Object],..." and can fabricate a "default" hint or print that
+  // string. The field must not use the scalar default-hint comparison.
+  {
+    const base = {
+      revision: 'mr-hint-r1',
+      fields: [{ key: 'model_rules', category: 'ux', label: 'Model rules', help: '', kind: 'model_rules', hot_reload: true }],
+      categories: [{ id: 'ux', label: 'UX', help: '' }],
+      defaults: { model_rules: DEF_RULES },
+      effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    const render = values => {
+      const doc = JSON.parse(JSON.stringify(base));
+      doc.values = { model_rules: values };
+      w.__mrHintDoc = doc;
+      w.eval('settingsDoc = window.__mrHintDoc; fillSettingsForm(settingsDoc)');
+      return d.querySelector('#settings-fields .st-row[data-key="model_rules"] .st-hint');
+    };
+    d.getElementById('settings-sheet').hidden = false;
+    const untouched = render(JSON.parse(JSON.stringify(DEF_RULES)));
+    check('an untouched model rule list renders the default hint', !!untouched && untouched.textContent === 'default');
+    const modified = render([
+      { mode: 'lower' },
+      { mode: 'pattern', from: 'a', to: 'b' },
+      { mode: 'pattern', from: 'c', to: 'd' },
+      { mode: 'pattern', from: 'e', to: 'f' },
+      { mode: 'pattern', from: 'g', to: 'h' },
+    ]);
+    check('a modified same-length model rule list shows no default hint', !modified);
+    const shorter = render([{ mode: 'lower' }]);
+    check('a shorter model rule list shows no object string hint', !shorter);
+    delete w.__mrHintDoc;
+    w.closeSettings(true);
+  }
+
   // ---- MCP settings category pin: the schema-driven mcp category must render
   // the enable switch and the six limit fields, every row restart-required, the
   // rail badge resolving through the SETTINGS_CAT_REF mcp entry (the tool
