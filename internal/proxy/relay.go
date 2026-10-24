@@ -130,6 +130,15 @@ func (s *Server) translatedAnalyzer() sse.Analyzer {
 // classification; every post-commit write failure funnels through here
 // (Cursor keeps its own documented exception in cursor_bidi.go - the
 // upstream 200 stays).
+// countDelivered books the bytes a client writer accepted. A failed or short
+// write still delivered n bytes, so accounting describes what the client
+// received rather than the frame the proxy intended to send.
+func countDelivered(rec *metrics.Record, n int) {
+	if rec != nil && n > 0 {
+		rec.ResponseBytes += int64(n)
+	}
+}
+
 func markClientGone(rec *metrics.Record) {
 	rec.ClientDisconnected = true
 	if rec.StatusCode < 400 {
@@ -206,14 +215,15 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 	for {
 		n, err := body.Read(chunk)
 		if n > 0 {
-			if _, werr := w.Write(chunk[:n]); werr != nil {
+			wn, werr := w.Write(chunk[:n])
+			countDelivered(rec, wn)
+			if werr != nil {
 				markClientGone(rec)
 				// Break to the analysis of the captured prefix: the
 				// upstream delivered those bytes, and the disconnect is
 				// recorded without losing their payload.
 				break
 			}
-			rec.ResponseBytes += int64(n)
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
 			if len(buf)+n <= nonStreamCaptureMax {
@@ -2185,7 +2195,9 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		// decode window. The direct relay path anchors its timestamps the
 		// same way at the read site.
 		now := time.Now()
-		if _, err := w.Write(frame); err != nil {
+		wn, err := w.Write(frame)
+		countDelivered(rec, wn)
+		if err != nil {
 			markClientGone(rec)
 			// An in-band provider error that already reached the client is
 			// the turn's outcome even though the following write failed; the
@@ -2196,7 +2208,6 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			}
 			return false
 		}
-		rec.ResponseBytes += int64(len(frame))
 		// Feed the analyzer from the bytes actually delivered, in line order.
 		rest := frame
 		for len(rest) > 0 {
@@ -2420,11 +2431,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return true
 		}
 		o := out.Bytes()
-		if _, werr := w.Write(o); werr != nil {
+		wn, werr := w.Write(o)
+		countDelivered(rec, wn)
+		if werr != nil {
 			clientGone()
 			return false
 		}
-		rec.ResponseBytes += int64(len(o))
 		if bytes.IndexByte(o, '\n') >= 0 {
 			flusher.Flush()
 		}
@@ -2446,20 +2458,22 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			o = nil
 		}
 		if len(o) > 0 {
-			if _, werr := w.Write(o); werr != nil {
+			wn, werr := w.Write(o)
+			countDelivered(rec, wn)
+			if werr != nil {
 				clientGone()
 				return false
 			}
-			rec.ResponseBytes += int64(len(o))
 		}
 		out.Reset()
 		hold = hold[:0]
 		holding = false
-		if _, werr := w.Write([]byte("\n")); werr != nil {
+		wn, werr := w.Write([]byte("\n"))
+		countDelivered(rec, wn)
+		if werr != nil {
 			clientGone()
 			return false
 		}
-		rec.ResponseBytes++
 		flusher.Flush()
 		return true
 	}
@@ -2523,11 +2537,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// after the overflow (a later marker opened a fresh hold) are
 			// still part of the verbatim stream.
 			if len(hold) > 0 {
-				if _, werr := w.Write(hold); werr != nil {
+				wn, werr := w.Write(hold)
+				countDelivered(rec, wn)
+				if werr != nil {
 					clientGone()
 					return false
 				}
-				rec.ResponseBytes += int64(len(hold))
 				hold = hold[:0]
 			}
 			holding = false
@@ -2560,11 +2575,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				hold = append(hold, '\n')
 			}
-			if _, werr := w.Write(hold); werr != nil {
+			wn, werr := w.Write(hold)
+			countDelivered(rec, wn)
+			if werr != nil {
 				clientGone()
 				return false
 			}
-			rec.ResponseBytes += int64(len(hold))
 		}
 		hold = hold[:0]
 		holding = false
@@ -2841,11 +2857,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if len(hold)+lineBuf.Len() > terminalHoldMax {
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
-					if _, werr := w.Write(hold); werr != nil {
+					wn, werr := w.Write(hold)
+					countDelivered(rec, wn)
+					if werr != nil {
 						clientGone()
 						return rescueNone
 					}
-					rec.ResponseBytes += int64(len(hold))
 					flusher.Flush()
 					hold = hold[:0]
 					holding = false
@@ -2965,11 +2982,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				markStreamErr(ctx, rec, err)
 				releaseTail()
 				if holding {
-					if _, werr := w.Write(hold); werr != nil {
+					wn, werr := w.Write(hold)
+					countDelivered(rec, wn)
+					if werr != nil {
 						clientGone()
 						return rescueNone
 					}
-					rec.ResponseBytes += int64(len(hold))
 					hold = hold[:0]
 				}
 				if !writeOut() {

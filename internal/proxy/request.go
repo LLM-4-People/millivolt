@@ -1362,9 +1362,8 @@ type disconnectWriter struct {
 
 func (d disconnectWriter) Write(p []byte) (int, error) {
 	n, err := d.w.Write(p)
-	if err == nil {
-		d.rec.ResponseBytes += int64(n)
-	} else {
+	countDelivered(d.rec, n)
+	if err != nil {
 		markClientGone(d.rec)
 	}
 	return n, err
