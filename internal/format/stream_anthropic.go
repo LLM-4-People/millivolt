@@ -107,6 +107,9 @@ type AnthropicStreamDecoder struct {
 	// repeat the same position and could amplify a bounded event into a huge
 	// terminal.
 	seenBlocks map[int]struct{}
+	// toolIDs is a lifetime set of committed tool_use ids. Two target blocks
+	// with one id make the client's tool-result correlation ambiguous.
+	toolIDs map[string]struct{}
 }
 
 // NewAnthropicStreamDecoder builds a decoder over one upstream body. observe,
@@ -121,6 +124,7 @@ func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *Anthr
 		toolInput:         map[int]*strings.Builder{},
 		openBlocks:        map[int]bool{},
 		seenBlocks:        map[int]struct{}{},
+		toolIDs:           map[string]struct{}{},
 	}
 }
 
@@ -233,6 +237,9 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				if err := checkToolCallName(block.Name); err != nil {
+					return nil, err
+				}
+				if err := reserveToolID(d.toolIDs, block.ID); err != nil {
 					return nil, err
 				}
 				d.openToolBlocks++

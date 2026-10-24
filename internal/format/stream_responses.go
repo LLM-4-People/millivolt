@@ -124,6 +124,10 @@ type ResponsesStreamDecoder struct {
 	// openToolKeys names every announced function call whose target block may
 	// still be open, including a call that never carried argument bytes.
 	openToolKeys map[string]bool
+	// toolIDs is a lifetime set of committed function-call ids. Two target
+	// blocks with one id make the client's tool-result correlation ambiguous;
+	// synthesis never shadows a source id silently.
+	toolIDs map[string]struct{}
 	// announcedToolKeys names every announced function call for the whole
 	// stream, including one whose done event already closed its block. A
 	// terminal document can repeat a closed call; that entry must not be
@@ -219,6 +223,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		argsEmitted:          map[string]*toolArgumentCoverage{},
 		argumentEvidence:     map[string]bool{},
 		openToolKeys:         map[string]bool{},
+		toolIDs:              map[string]struct{}{},
 		announcedToolKeys:    map[string]bool{},
 		toolAliases:          map[string]string{},
 		toolNames:            map[string]string{},
@@ -365,6 +370,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 				if !admitted {
 					continue
+				}
+				if err := reserveToolID(d.toolIDs, toolID); err != nil {
+					return nil, err
 				}
 				d.sawToolCall = true
 				d.openToolKeys[key] = true
@@ -1800,6 +1808,9 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			}
 			d.sawToolCall = true
 			if ok {
+				if err := reserveToolID(d.toolIDs, emission.block.ToolCall.ID); err != nil {
+					return nil, err
+				}
 				pending = append(pending, emission)
 			}
 		case "message":

@@ -40,6 +40,18 @@ func checkToolCallName(name string) error {
 	return nil
 }
 
+// reserveToolID records one committed tool-call id and fails closed when the
+// same id was already committed. The IR correlates a tool result by id, so two
+// target blocks sharing one id are ambiguous. A source id is never suffixed:
+// that would break the client's correlation with the provider's tool result.
+func reserveToolID(seen map[string]struct{}, id string) error {
+	if _, taken := seen[id]; taken {
+		return fmt.Errorf("duplicate tool call id %q", boundedEcho(id))
+	}
+	seen[id] = struct{}{}
+	return nil
+}
+
 // validateChatToolVocabulary enforces the Chat target's name class on every
 // declared tool, a named tool choice, and every history tool call. Chat tool
 // ids are not pattern-constrained, so only the name is checked.

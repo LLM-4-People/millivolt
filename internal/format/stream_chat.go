@@ -355,7 +355,10 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 			return fmt.Errorf("chat stream exceeds %d concurrent tool calls", toolBlocksMax)
 		}
 		irIndex = d.nextIndex
-		id = d.commitToolID(id, irIndex)
+		id, err := d.commitToolID(id, irIndex)
+		if err != nil {
+			return err
+		}
 		d.closeText()
 		d.closeReasoning()
 		d.closeRefusal()
@@ -383,8 +386,10 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 // missing source id is synthesized here on the first fragment; a later id
 // never rewrites it because only the opening path calls this. The reserved
 // prefix and the collision suffix keep a synthesized id distinct from every id
-// the source already provided.
-func (d *ChatStreamDecoder) commitToolID(id string, irIndex int) string {
+// the source already provided. A source id that was already committed fails
+// closed: suffixing it would break the client's correlation with the provider's
+// tool result.
+func (d *ChatStreamDecoder) commitToolID(id string, irIndex int) (string, error) {
 	if id == "" {
 		base := fmt.Sprintf("call_proxy_%d", irIndex)
 		id = base
@@ -395,8 +400,10 @@ func (d *ChatStreamDecoder) commitToolID(id string, irIndex int) string {
 			id = fmt.Sprintf("%s_%d", base, suffix)
 		}
 	}
-	d.toolIDs[id] = struct{}{}
-	return id
+	if err := reserveToolID(d.toolIDs, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (d *ChatStreamDecoder) closeText() {
