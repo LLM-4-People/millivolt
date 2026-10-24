@@ -841,6 +841,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
 			}
+			if item.Phase != "" {
+				d.phaseSeen = true
+			}
 			typ := item.Type
 			if typ == "" && item.Role != "" {
 				typ = "message"

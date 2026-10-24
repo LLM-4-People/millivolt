@@ -89,3 +89,29 @@ func TestResponsesStreamOutputPhaseWarns(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesPhaseOnDoneWarns(t *testing.T) {
+	source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hi"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"hi"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hi"}]}]}}
+
+`
+	if got := responsesPhaseWarningCount(t, source); got != 1 {
+		t.Fatalf("done-only output.phase warnings = %d, want 1", got)
+	}
+	var out bytes.Buffer
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &out, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "phase") || strings.Contains(out.String(), "final_answer") {
+		t.Fatalf("done-only phase reached the client wire: %s", out.String())
+	}
+}
