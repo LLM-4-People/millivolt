@@ -283,10 +283,10 @@ type StreamOptions struct {
 	// Chat target emits its extra usage chunk only when the client asked and
 	// the source actually reported usage.
 	IncludeUsage bool
-	// FallbackModel supplies the model identity for a translated Chat or
-	// Responses stream whose source omitted its start event. The proxy passes
-	// its recorded request model so the lazily opened stream still names a
-	// real model.
+	// FallbackModel supplies the model identity for a translated Chat,
+	// Responses or Anthropic stream whose source omitted its start event. The
+	// proxy passes its recorded request model so the lazily opened stream still
+	// names a real model.
 	FallbackModel string
 }
 
@@ -322,7 +322,9 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 		responses.fallbackModel = opts.FallbackModel
 		enc = responses
 	case ir.Anthropic:
-		enc = NewAnthropicStreamEncoder(dst, flusher)
+		anthropic := NewAnthropicStreamEncoder(dst, flusher)
+		anthropic.fallbackModel = opts.FallbackModel
+		enc = anthropic
 	default:
 		return fmt.Errorf("unsupported inbound protocol %q", inbound)
 	}

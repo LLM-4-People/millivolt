@@ -512,9 +512,13 @@ type AnthropicStreamEncoder struct {
 	w       io.Writer
 	flusher http.Flusher
 
-	id      string
-	model   string
-	created int64
+	id    string
+	model string
+	// fallbackModel is the request model from StreamOptions. A source stream
+	// whose first chunk omits model still needs the required Message.model in
+	// message_start; the request identity is the only sound fallback.
+	fallbackModel string
+	created       int64
 
 	started    bool
 	open       map[int]bool
@@ -568,11 +572,15 @@ func (e *AnthropicStreamEncoder) startStream() error {
 	if e.created == 0 {
 		e.created = time.Now().Unix()
 	}
+	model := e.model
+	if model == "" {
+		model = e.fallbackModel
+	}
 	return e.emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"id": e.id, "type": "message", "role": "assistant", "content": []any{},
-			"model": e.model, "stop_reason": nil, "stop_sequence": nil,
+			"model": model, "stop_reason": nil, "stop_sequence": nil,
 			"usage": anthropicUsageJSON(e.usage),
 		},
 	})
@@ -587,7 +595,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 	}
 	switch ev.Type {
 	case ir.EventStart:
-		if ev.Response != nil {
+		// message_start is already committed after the first non-start event;
+		// a late start must not rewrite the identity the client received.
+		if ev.Response != nil && !e.started {
 			if err := validateUsage(ev.Response.Usage); err != nil {
 				return err
 			}
