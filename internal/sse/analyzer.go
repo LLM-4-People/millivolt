@@ -477,7 +477,8 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		eventType = forcedType
 	}
 	hasContent := keys.contentStart() || keys.textStart() || responsesContentEvent(eventType, &keys)
-	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
+	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys) ||
+		responsesReasoningSummaryPart(eventType, payload)
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
 	// Responses tool activity: a function call is announced by
@@ -1551,6 +1552,24 @@ func responsesReasoningEvent(eventType string, keys *frameKeys) bool {
 		return keys.deltaNonEmpty
 	}
 	return false
+}
+
+// responsesReasoningSummaryPart reports whether a reasoning summary part
+// announcement carries visible text. The part is nested under "part", which
+// the flat key probe does not classify as a reasoning channel, so a
+// summary-part-only stream must still record reasoning presence (and never
+// classify as an empty completion). The payload decode is scoped to this one
+// documented event type.
+func responsesReasoningSummaryPart(eventType string, payload []byte) bool {
+	if eventType != "response.reasoning_summary_part.added" {
+		return false
+	}
+	var ev struct {
+		Part struct {
+			Text string `json:"text"`
+		} `json:"part"`
+	}
+	return json.Unmarshal(payload, &ev) == nil && ev.Part.Text != ""
 }
 
 // responsesContentEvents are the OpenAI/xAI Responses-API stream events that
