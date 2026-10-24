@@ -47,7 +47,7 @@ func TestChatUnknownFinishReasonWarns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if root := decodeJSONObject(t, out); root["status"] != "incomplete" {
+	if root := decodeJSONMap(t, out); root["status"] != "incomplete" {
 		t.Fatalf("responses status = %v, want incomplete: %s", root["status"], out)
 	}
 }

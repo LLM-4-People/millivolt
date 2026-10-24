@@ -6,20 +6,10 @@ package format
 // one owner.
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
-
-func decodeJSONObject(t *testing.T, body []byte) map[string]any {
-	t.Helper()
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("body %q: %v", body, err)
-	}
-	return out
-}
 
 func TestAnthropicJSONSchemaNameSynthesized(t *testing.T) {
 	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
@@ -32,7 +22,7 @@ func TestAnthropicJSONSchemaNameSynthesized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chatDoc := decodeJSONObject(t, chat)
+	chatDoc := decodeJSONMap(t, chat)
 	rf, _ := chatDoc["response_format"].(map[string]any)
 	js, _ := rf["json_schema"].(map[string]any)
 	if js["name"] != defaultResponseFormatName {
@@ -42,7 +32,7 @@ func TestAnthropicJSONSchemaNameSynthesized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, _ := decodeJSONObject(t, responses)["text"].(map[string]any)
+	text, _ := decodeJSONMap(t, responses)["text"].(map[string]any)
 	format, _ := text["format"].(map[string]any)
 	if format["name"] != defaultResponseFormatName {
 		t.Fatalf("Responses json_schema name = %v, want %q: %s", format["name"], defaultResponseFormatName, responses)
@@ -59,7 +49,7 @@ func TestReasoningEffortNoneOmittedForAnthropic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := decodeJSONObject(t, out)
+	doc := decodeJSONMap(t, out)
 	config, _ := doc["output_config"].(map[string]any)
 	if _, present := config["effort"]; present {
 		t.Fatalf("Anthropic body carries effort:none: %s", out)
@@ -80,7 +70,7 @@ func TestThinkingBudgetMapsToChatEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := decodeJSONObject(t, out)["reasoning_effort"]; got != "medium" {
+	if got := decodeJSONMap(t, out)["reasoning_effort"]; got != "medium" {
 		t.Fatalf("reasoning_effort = %v, want medium: %s", got, out)
 	}
 	if !warned(req.Warnings, "reasoning.budget_tokens") {
@@ -99,14 +89,14 @@ func TestThinkingDisabledMapsToNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := decodeJSONObject(t, chat)["reasoning_effort"]; got != "none" {
+	if got := decodeJSONMap(t, chat)["reasoning_effort"]; got != "none" {
 		t.Fatalf("Chat reasoning_effort = %v, want none: %s", got, chat)
 	}
 	responses, err := EncodeResponsesRequest(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, _ := decodeJSONObject(t, responses)["reasoning"].(map[string]any)
+	reasoning, _ := decodeJSONMap(t, responses)["reasoning"].(map[string]any)
 	if reasoning["effort"] != "none" {
 		t.Fatalf("Responses reasoning.effort = %v, want none: %s", reasoning["effort"], responses)
 	}
@@ -166,7 +156,7 @@ func TestChatStopSequencesClamped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stops, _ := decodeJSONObject(t, out)["stop"].([]any)
+	stops, _ := decodeJSONMap(t, out)["stop"].([]any)
 	if len(stops) != ChatMaxStopSequences {
 		t.Fatalf("stop count = %d, want %d: %s", len(stops), ChatMaxStopSequences, out)
 	}
@@ -190,7 +180,7 @@ func TestResponsesReasoningFieldsDecoded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, _ := decodeJSONObject(t, out)["reasoning"].(map[string]any)
+	reasoning, _ := decodeJSONMap(t, out)["reasoning"].(map[string]any)
 	if reasoning["summary"] != "auto" || reasoning["context"] != "current_turn" || reasoning["mode"] != "standard" {
 		t.Fatalf("reasoning round trip = %v: %s", reasoning, out)
 	}
@@ -211,7 +201,7 @@ func TestChatScaleTierReachesResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	if root["service_tier"] != "scale" {
 		t.Fatalf("service_tier = %v, want scale: %s", root["service_tier"], out)
 	}
@@ -233,7 +223,7 @@ func TestResponsesReasoningBudgetWarnsWithEffort(t *testing.T) {
 	if !warned(warnings, "reasoning.budget_tokens") {
 		t.Fatalf("budget beside effort recorded no warning: %+v", warnings)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	reasoning, _ := root["reasoning"].(map[string]any)
 	if reasoning["effort"] != "high" {
 		t.Fatalf("reasoning = %v, want effort high: %s", reasoning, out)
@@ -270,7 +260,7 @@ func TestChatTargetEmitsStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.body, err)
 		}
-		root := decodeJSONObject(t, out)
+		root := decodeJSONMap(t, out)
 		if got, ok := root["store"].(bool); !ok || got != tc.want {
 			t.Fatalf("chat store = %v, want %v: %s", root["store"], tc.want, out)
 		}
@@ -302,7 +292,7 @@ func TestAnthropicToolChoiceNoneOmitsParallel(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			root := decodeJSONObject(t, out)
+			root := decodeJSONMap(t, out)
 			choice, _ := root["tool_choice"].(map[string]any)
 			if _, ok := choice["disable_parallel_tool_use"]; ok != tc.want {
 				t.Fatalf("disable_parallel_tool_use present = %v, want %v: %s", ok, tc.want, out)
@@ -320,7 +310,7 @@ func TestChatTopLogprobsRequiresLogprobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	if _, ok := root["top_logprobs"]; ok {
 		t.Fatalf("chat body carried top_logprobs without logprobs: %s", out)
 	}
@@ -333,7 +323,7 @@ func TestChatTopLogprobsRequiresLogprobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root = decodeJSONObject(t, out)
+	root = decodeJSONMap(t, out)
 	if root["top_logprobs"] != float64(2) || root["logprobs"] != true {
 		t.Fatalf("chat logprob fields = %v/%v, want 2/true: %s", root["top_logprobs"], root["logprobs"], out)
 	}

@@ -92,7 +92,7 @@ func TestAnthropicEmptySystemBlockOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	if system, ok := root["system"]; ok {
 		t.Fatalf("empty system block produced %v: %s", system, out)
 	}
@@ -104,7 +104,7 @@ func TestAnthropicEmptySystemBlockOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if system, ok := decodeJSONObject(t, out)["system"]; ok {
+	if system, ok := decodeJSONMap(t, out)["system"]; ok {
 		t.Fatalf("late empty system block produced %v: %s", system, out)
 	}
 }
@@ -128,7 +128,7 @@ func anthropicToolResultRequest(t *testing.T, content []ir.Block) map[string]any
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	messages, _ := root["messages"].([]any)
 	if len(messages) != 3 {
 		t.Fatalf("messages = %v, want three", messages)
@@ -187,7 +187,7 @@ func TestAnthropicResponsesEmptyToolResultTextSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	messages, _ := root["messages"].([]any)
 	if len(messages) != 3 {
 		t.Fatalf("messages = %v, want three", messages)

@@ -5,20 +5,10 @@ package format
 // target reports them as dropped.
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
-
-func decodeRequestObject(t *testing.T, body []byte) map[string]any {
-	t.Helper()
-	var root map[string]any
-	if err := json.Unmarshal(body, &root); err != nil {
-		t.Fatalf("request body %q: %v", body, err)
-	}
-	return root
-}
 
 func TestRequestIdentityFieldsCrossWire(t *testing.T) {
 	chatBody := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
@@ -29,7 +19,7 @@ func TestRequestIdentityFieldsCrossWire(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		root := decodeRequestObject(t, out)
+		root := decodeJSONMap(t, out)
 		if root["safety_identifier"] != "s1" || root["prompt_cache_key"] != "k1" {
 			t.Fatalf("identity fields = %v/%v, want s1/k1: %s",
 				root["safety_identifier"], root["prompt_cache_key"], out)
@@ -53,7 +43,7 @@ func TestRequestIdentityFieldsCrossWire(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		root := decodeRequestObject(t, out)
+		root := decodeJSONMap(t, out)
 		if root["verbosity"] != "low" || root["safety_identifier"] != "s2" || root["prompt_cache_key"] != "k2" {
 			t.Fatalf("identity fields = %v/%v/%v, want low/s2/k2: %s",
 				root["verbosity"], root["safety_identifier"], root["prompt_cache_key"], out)
@@ -80,7 +70,7 @@ func TestRequestIdentityFieldsCrossWire(t *testing.T) {
 				t.Fatalf("missing %q warning: %+v", field, warnings)
 			}
 		}
-		root := decodeRequestObject(t, out)
+		root := decodeJSONMap(t, out)
 		if _, ok := root["verbosity"]; ok {
 			t.Fatalf("anthropic body carried verbosity: %s", out)
 		}

@@ -28,7 +28,7 @@ func TestModerationCrossWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	got, _ := root["moderation"].(map[string]any)
 	if got["model"] != "omni-moderation-latest" {
 		t.Fatalf("responses moderation = %v: %s", root["moderation"], out)
@@ -42,7 +42,7 @@ func TestModerationCrossWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root = decodeJSONObject(t, out)
+	root = decodeJSONMap(t, out)
 	got, _ = root["moderation"].(map[string]any)
 	if got["model"] != "omni-moderation-latest" {
 		t.Fatalf("chat moderation = %v: %s", root["moderation"], out)
@@ -122,7 +122,7 @@ func TestPromptCacheOptionsCrossWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	options, _ := root["prompt_cache_options"].(map[string]any)
 	if options["ttl"] != "30m" || options["mode"] != "explicit" || root["prompt_cache_retention"] != "24h" {
 		t.Fatalf("responses cache fields = %v/%v: %s", options, root["prompt_cache_retention"], out)
@@ -137,7 +137,7 @@ func TestPromptCacheOptionsCrossWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root = decodeJSONObject(t, out)
+	root = decodeJSONMap(t, out)
 	options, _ = root["prompt_cache_options"].(map[string]any)
 	if options["ttl"] != "30m" || options["mode"] != "explicit" {
 		t.Fatalf("chat cache fields = %v: %s", options, out)
@@ -179,7 +179,7 @@ func TestAnthropicSpeedMapsFast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if root := decodeJSONObject(t, out); root["service_tier"] != "fast" {
+	if root := decodeJSONMap(t, out); root["service_tier"] != "fast" {
 		t.Fatalf("chat service tier = %v, want fast: %s", root["service_tier"], out)
 	}
 
@@ -191,7 +191,7 @@ func TestAnthropicSpeedMapsFast(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	if root["speed"] != "fast" || root["service_tier"] != nil {
 		t.Fatalf("anthropic speed = %v, tier = %v: %s", root["speed"], root["service_tier"], out)
 	}

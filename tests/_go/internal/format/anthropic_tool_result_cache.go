@@ -27,7 +27,7 @@ func anthropicToolResultCacheRequest(t *testing.T, content string) []byte {
 
 func anthropicToolResultContent(t *testing.T, out []byte) any {
 	t.Helper()
-	root := decodeJSONObject(t, out)
+	root := decodeJSONMap(t, out)
 	messages, _ := root["messages"].([]any)
 	if len(messages) != 3 {
 		t.Fatalf("messages = %v, want three", messages)
