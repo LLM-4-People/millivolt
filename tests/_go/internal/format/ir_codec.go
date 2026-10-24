@@ -501,6 +501,26 @@ func TestDecodeChatResponseErrorEnvelope(t *testing.T) {
 	}
 }
 
+// TestChatErrorEnvelopeWithObjectKeepsProviderMessage pins the B2 side-effect
+// order: a 200 error envelope may also carry object "error", and the provider
+// message must win over the completion-shape check.
+func TestChatErrorEnvelopeWithObjectKeepsProviderMessage(t *testing.T) {
+	body := `{"object":"error","error":{"message":"upstream exploded","type":"api_error","code":"boom"}}`
+	resp, err := DecodeChatResponse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("missing canonical provider error: %+v", resp)
+	}
+	if resp.Error.Type != "api_error" || resp.Error.Code != "boom" || resp.Error.Message != "upstream exploded" {
+		t.Fatalf("error = %+v, want the provider envelope", resp.Error)
+	}
+	if resp.Finish != ir.FinishError {
+		t.Fatalf("finish = %q, want error", resp.Finish)
+	}
+}
+
 func TestCodecRejectsStatefulReplay(t *testing.T) {
 	in := `{"model":"gpt","input":"hi","previous_response_id":"resp_1"}`
 	req, err := DecodeResponsesRequest([]byte(in))

@@ -1804,12 +1804,6 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if err := checkNativeIdentity("model", in.Model); err != nil {
 		return nil, err
 	}
-	if in.Object != "" && in.Object != "chat.completion" {
-		// A chunk, prompt completion or other object is not a completed Chat
-		// message. Translating it produced a 200 with an empty target body
-		// while the native path classified the same bytes as a void.
-		return nil, fmt.Errorf("chat response object %q is not a completion", boundedEcho(in.Object))
-	}
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
 		// A gateway can return an error envelope on HTTP 200. ParseErrorEnvelope
 		// owns the shared decoy/null and string/object rules, so the canonical
@@ -1829,6 +1823,14 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 			}
 		}
 		return resp, nil
+	}
+	if in.Object != "" && in.Object != "chat.completion" {
+		// A chunk, prompt completion or other object is not a completed Chat
+		// message. Translating it produced a 200 with an empty target body
+		// while the native path classified the same bytes as a void. A 200
+		// error envelope is classified above, so an envelope that also names
+		// object "error" keeps the provider's message.
+		return nil, fmt.Errorf("chat response object %q is not a completion", boundedEcho(in.Object))
 	}
 	if len(in.Choices) == 0 {
 		return nil, errors.New("chat response has no choices")
