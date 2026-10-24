@@ -2900,10 +2900,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// holding implies a seen terminator. A committed verbatim relay
 			// (holdAborted) must never be re-sent: the client already saw the
 			// oversized bytes.
-			if allowTruncationRetry && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
+			if allowTruncationRetry && ctx.Err() == nil && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
 				return rescueEmptyTruncation
 			}
-			if allowThinkingRescue && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+			if allowThinkingRescue && ctx.Err() == nil && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 				return rescueReasoningTruncation
 			}
 			if !finishHold() {
