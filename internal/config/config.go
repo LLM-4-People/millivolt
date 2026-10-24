@@ -1771,7 +1771,7 @@ func LoadFileStrict(path string) (*Config, []string, error) {
 	if path == "" {
 		return Default(), nil, nil
 	}
-	b, err := readConfigFile(path)
+	b, err := ReadDocument(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read config: %w", err)
 	}
@@ -1798,7 +1798,7 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 		cfg := Default()
 		return cfg, nil, cfg.Validate()
 	}
-	b, err := readConfigFile(path)
+	b, err := ReadDocument(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Default(), nil, nil
@@ -1846,7 +1846,11 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 // allocation. Stat catches an oversized regular file immediately; the bounded
 // read keeps the guarantee if the file grows between stat and read (or if the
 // path is a special file).
-func readConfigFile(path string) ([]byte, error) {
+// ReadDocument is the one bounded read owner for a configuration document.
+// Boot, reload and the restore admin plane all use it, so an overgrown file, a
+// FIFO or a device is rejected before it is read whole. The regular-file check
+// prevents a blocking open of a special file.
+func ReadDocument(path string) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1855,6 +1859,9 @@ func readConfigFile(path string) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
 	}
 	if info.Size() > int64(ConfigDocumentMaxBytes) {
 		return nil, configFileTooLarge(path, info.Size())
@@ -1879,7 +1886,7 @@ func loadYAMLFile(path string) (*Config, []string, error) {
 	if path == "" {
 		return def, nil, def.Validate()
 	}
-	b, err := readConfigFile(path)
+	b, err := ReadDocument(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return def, nil, nil

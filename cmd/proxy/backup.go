@@ -672,7 +672,7 @@ func readRestoreConfigFile(path string) (raw []byte, mode os.FileMode, exists bo
 		}
 		return nil, 0, false, err
 	}
-	raw, err = os.ReadFile(path)
+	raw, err = config.ReadDocument(path)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -938,11 +938,11 @@ func restoreInspectLiveConfig(path string) (*config.Config, error) {
 	if path == "" {
 		return config.Default(), nil
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("live config unavailable: %w", err)
-	}
-	cur, _, err := config.LoadBytes(raw)
+	// Inspect compares against the same strict document the restore apply
+	// path will load. Repair semantics (LoadBytes) would omit unknown fields and
+	// extra documents that LoadFileStrict rejects, presenting a diff against a
+	// view the apply can never produce.
+	cur, _, err := config.LoadFileStrict(path)
 	if err != nil {
 		return nil, fmt.Errorf("live config unavailable: %w", err)
 	}

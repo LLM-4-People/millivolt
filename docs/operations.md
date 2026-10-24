@@ -572,8 +572,12 @@ for `backup_max_bytes`, so a small compressed file cannot expand without bound.
 Download lists how many live settings differ from default and how many stored
 requests would be packed. Picking a file first inspects the archive: created
 time, size, request span, and each config key as default vs modified vs the
-live file. Inspect validates and counts the decoded database file in place and
-computes its overlap with the live store without writing another copy.
+live file. Inspect loads the live file through the same strict, bounded reader
+as boot and restore: an unknown nested field, an extra YAML document, a
+non-regular file, or a file above the 16 MiB document bound fails the inspect
+instead of comparing against a repaired or partial view. Inspect validates and
+counts the decoded database file in place and computes its overlap with the
+live store without writing another copy.
 Config **replace** loads and validates the backup, writes canonical YAML, and
 preserves CLI-overridden `listen` and `db_path`. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values

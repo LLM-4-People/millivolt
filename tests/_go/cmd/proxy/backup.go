@@ -2417,10 +2417,40 @@ func TestRestoreInspectLiveConfigFailsClosed(t *testing.T) {
 	}
 	assertUnavailable(inspect())
 
+	// Repair semantics would omit an unknown nested field or an extra YAML
+	// document; inspect must fail closed like the strict apply path.
+	for _, strictFailure := range []string{
+		"providers:\n  example:\n    models_path: /v1/models\n    bogus_field: true\n",
+		"max_retries: 2\n---\nmax_retries: 3\n",
+	} {
+		if err := os.WriteFile(liveConfigPath, []byte(strictFailure), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertUnavailable(inspect())
+	}
+
+	// The bounded read owner rejects an overgrown document before a whole-file
+	// read, so inspect reports the size limit rather than allocating it.
+	oversized := bytes.Repeat([]byte("a"), config.ConfigDocumentMaxBytes+1)
+	if err := os.WriteFile(liveConfigPath, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertUnavailable(inspect())
+
 	if err := os.Remove(liveConfigPath); err != nil {
 		t.Fatal(err)
 	}
 	assertUnavailable(inspect())
+
+	// A directory is not a regular file; the read owner fails closed instead of
+	// attempting a document read.
+	if err := os.Mkdir(liveConfigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assertUnavailable(inspect())
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
 
 	liveConfigPath = ""
 	rr := inspect()
