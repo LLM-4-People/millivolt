@@ -47,7 +47,7 @@ type responsesWireRequest struct {
 	Stream               bool                   `json:"stream"`
 	Store                *bool                  `json:"store"`
 	PreviousResponseID   string                 `json:"previous_response_id"`
-	Metadata             map[string]string      `json:"metadata"`
+	Metadata             boundedStringMap       `json:"metadata"`
 	ServiceTier          string                 `json:"service_tier"`
 	User                 string                 `json:"user"`
 	SafetyIdentifier     string                 `json:"safety_identifier"`
@@ -180,7 +180,7 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		Stream:               in.Stream,
 		Store:                in.Store,
 		PreviousResponseID:   in.PreviousResponseID,
-		Metadata:             in.Metadata,
+		Metadata:             in.Metadata.values,
 		ServiceTier:          in.ServiceTier,
 		User:                 in.User,
 		SafetyIdentifier:     in.SafetyIdentifier,
