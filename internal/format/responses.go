@@ -999,7 +999,19 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 			// match none of the valid input variants.
 			out = append(out, map[string]any{"type": "input_text", "text": b.Text})
 		case ir.BlockRefusal:
-			out = append(out, map[string]any{"type": "refusal", "refusal": b.Refusal})
+			// The request input union is input_text, input_image and
+			// input_file; refusal is an OutputMessage part, and this encoder
+			// emits a minimal EasyInputMessage with no id or status. Send the
+			// refusal text as input text and report that the distinction is
+			// lost instead of emitting an input part no schema accepts.
+			if b.Refusal == "" {
+				continue
+			}
+			out = append(out, map[string]any{"type": "input_text", "text": b.Refusal})
+			if warns != nil {
+				warns.AddOnce(ir.WarningDropped, "content.refusal",
+					"Responses input has no refusal part; the refusal text is sent as input text")
+			}
 		case ir.BlockImage:
 			part := map[string]any{"type": "input_image"}
 			if b.Image.FileID != "" {
@@ -1059,7 +1071,7 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 func responsesContentRoleDetail(role ir.Role) string {
 	switch role {
 	case ir.RoleAssistant:
-		return "assistant content accepts text and refusal only"
+		return "assistant content accepts text only"
 	case ir.RoleSystem, ir.RoleDeveloper:
 		return "system and developer content accepts text only"
 	default:
