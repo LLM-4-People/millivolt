@@ -71,6 +71,43 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		}
 	})
 
+	t.Run("streamed null fails closed", func(t *testing.T) {
+		for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic} {
+			_, err := translate(t, target, responsesFunctionCallDoneStream("", "null", "null"))
+			if err == nil || !strings.Contains(err.Error(), "tool call arguments must be a JSON object") {
+				t.Fatalf("%s streamed null error = %v, want a JSON-object rejection", target, err)
+			}
+		}
+	})
+
+	t.Run("streamed empty array fails closed", func(t *testing.T) {
+		for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic} {
+			_, err := translate(t, target, responsesFunctionCallDoneStream("", "[]", "[]"))
+			if err == nil || !strings.Contains(err.Error(), "tool call arguments must be a JSON object") {
+				t.Fatalf("%s streamed array error = %v, want a JSON-object rejection", target, err)
+			}
+		}
+	})
+
+	t.Run("terminal-only null normalizes to object", func(t *testing.T) {
+		for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic} {
+			out, err := translate(t, target, terminalFunctionCallStream("null"))
+			if err != nil {
+				t.Fatalf("%s terminal-only null: %v", target, err)
+			}
+			if target == ir.Chat {
+				if got := chatToolArguments(t, out); got != `{}` {
+					t.Fatalf("terminal-only null arguments = %q, want {}", got)
+				}
+			} else {
+				inputs := anthropicToolInputs(t, out)
+				if len(inputs) != 1 || len(inputs[0]) != 0 {
+					t.Fatalf("terminal-only null anthropic input = %v, want one empty object", inputs)
+				}
+			}
+		}
+	})
+
 	t.Run("terminal object is emitted once", func(t *testing.T) {
 		out, err := translate(t, ir.Chat, terminalFunctionCallStream(`{"q":1}`))
 		if err != nil {

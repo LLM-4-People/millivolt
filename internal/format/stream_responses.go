@@ -1783,6 +1783,12 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 		if _, err := parseToolArguments(emitted); err != nil {
 			return err
 		}
+		// Those bytes already reached the client; normalization cannot rewrite
+		// them, so a completed streamed null or array fails closed instead of
+		// passing as the normalized object.
+		if err := validateStreamedToolArguments(emitted); err != nil {
+			return err
+		}
 		return nil
 	}
 
