@@ -1393,6 +1393,17 @@ func chatMessageAnnotations(blocks []ir.Block, warns *ir.Warnings) []map[string]
 			}
 			continue
 		}
+		// The source location type may carry no character span; Chat requires
+		// both span fields, so the 0..0 range is fabricated. Report it once for
+		// this text block.
+		for _, c := range b.Citations {
+			if c.URL != "" && c.Type != "url_citation" && c.StartIndex == 0 && c.EndIndex == 0 {
+				if warns != nil {
+					warns.Add(ir.WarningApproximated, "citations", "source citation has no character span; target span is 0..0")
+				}
+				break
+			}
+		}
 		for _, c := range b.Citations {
 			if c.URL == "" {
 				if warns != nil {
