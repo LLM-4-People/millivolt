@@ -99,3 +99,72 @@ func TestChatStreamBareDoneStaysBare(t *testing.T) {
 		t.Fatalf("bare [DONE] shape changed: %q", out)
 	}
 }
+
+// A source that emits only a terminal event still gets a complete Chat
+// envelope: the terminal delta opens the stream, so the role chunk carries the
+// fallback identity before the finish chunk.
+func TestChatTargetLazyStartOnTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source ir.Protocol
+		stream string
+	}{
+		{
+			name:   "anthropic stop only",
+			source: ir.Anthropic,
+			stream: `event: message_stop
+data: {"type":"message_stop"}
+
+`,
+		},
+		{
+			name:   "responses empty completion",
+			source: ir.Responses,
+			stream: `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(ir.Chat, tc.source, &buf, strings.NewReader(tc.stream), nil, nil, StreamOptions{FallbackModel: "request-model"}); err != nil {
+				t.Fatal(err)
+			}
+			out := buf.String()
+			payloads := chatPayloads(t, out)
+			if len(payloads) < 2 {
+				t.Fatalf("chunks = %d, want at least role + finish: %s", len(payloads), out)
+			}
+			identity := ""
+			for i, payload := range payloads {
+				id, _ := payload["id"].(string)
+				if !strings.HasPrefix(id, "chatcmpl-") {
+					t.Fatalf("chunk %d has no synthesized id: %s", i, out)
+				}
+				if payload["model"] != "request-model" {
+					t.Fatalf("chunk %d model = %v, want the fallback model: %s", i, payload["model"], out)
+				}
+				if payload["created"] == float64(0) {
+					t.Fatalf("chunk %d has no created stamp: %s", i, out)
+				}
+				if identity == "" {
+					identity = id
+					choices, _ := payload["choices"].([]any)
+					delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+					if delta["role"] != "assistant" {
+						t.Fatalf("first chunk carries no role delta: %s", out)
+					}
+				} else if id != identity {
+					t.Fatalf("chunk identity changed: %s", out)
+				}
+			}
+			if !strings.Contains(out, `"finish_reason":"stop"`) {
+				t.Fatalf("terminal chunk lost its finish reason: %s", out)
+			}
+			if strings.Count(out, "data: [DONE]") != 1 {
+				t.Fatalf("terminal sentinel shape changed: %s", out)
+			}
+		})
+	}
+}

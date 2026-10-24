@@ -615,6 +615,14 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		}
 		e.releaseBlock(ev.Index)
 	case ir.EventMessageDelta:
+		// A source may deliver only a terminal (Anthropic message_stop or an
+		// empty Responses completion). Open the Chat stream first so the
+		// finish chunk carries a non-empty id/model/created and the role
+		// chunk precedes it, matching the other target encoders. EventDone
+		// stays untouched so a bare [DONE] keeps its content-less shape.
+		if err := e.startStream(); err != nil {
+			return err
+		}
 		if ev.Finish != nil && !e.finishSent {
 			e.finishSent = true
 			if err := e.emit(map[string]any{}, ChatFinishReason(ev.Finish.Reason), nil); err != nil {
