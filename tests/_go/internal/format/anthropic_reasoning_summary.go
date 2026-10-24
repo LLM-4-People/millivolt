@@ -125,3 +125,35 @@ func TestAnthropicReasoningSummaryAndEncryptedReportsBoth(t *testing.T) {
 		t.Fatalf("encrypted summary reported as a generic drop: %+v", warnings)
 	}
 }
+
+// A cross-family reasoning block with visible text and an encrypted artifact
+// keeps the text but must report both losses: the approximation and the
+// unreplayable opaque artifact. The documentation promises the encrypted loss
+// for every branch that carries one.
+func TestAnthropicReasoningTextWithEncryptedWarns(t *testing.T) {
+	text, warnings := anthropicReasoningBody(t, []ir.Block{{
+		Type:      ir.BlockReasoning,
+		Reasoning: &ir.Reasoning{Text: "the raw chain", Encrypted: "OPAQUE"},
+	}})
+	if text != "the raw chain" {
+		t.Fatalf("visible text = %q, want the raw chain", text)
+	}
+	if warningCount(warnings, ir.WarningApproximated, "reasoning") != 1 {
+		t.Fatalf("text approximation not reported: %+v", warnings)
+	}
+	if warningCount(warnings, ir.WarningOpaque, "reasoning") != 1 {
+		t.Fatalf("encrypted artifact loss not reported: %+v", warnings)
+	}
+
+	text, warnings = anthropicReasoningBody(t, []ir.Block{{
+		Type:      ir.BlockReasoning,
+		Reasoning: &ir.Reasoning{Text: "the raw chain"},
+	}})
+	if text != "the raw chain" {
+		t.Fatalf("text-only visible text = %q, want the raw chain", text)
+	}
+	if warningCount(warnings, ir.WarningApproximated, "reasoning") != 1 ||
+		warningCount(warnings, ir.WarningOpaque, "reasoning") != 0 {
+		t.Fatalf("text-only warnings = %+v, want approximated only", warnings)
+	}
+}

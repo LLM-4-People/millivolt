@@ -1112,8 +1112,14 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			} else if b.Reasoning.Text != "" {
 				// A reasoning block minted by another family has no Anthropic
 				// signature; emitting it as text preserves the visible content.
+				// An encrypted artifact is still unreplayable, so that loss is
+				// reported alongside the approximation, matching the
+				// summary-only branch.
 				if warns != nil {
 					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning was emitted as visible text")
+					if b.Reasoning.Encrypted != "" {
+						warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
+					}
 					if len(b.Reasoning.Summary) > 0 {
 						warns.Add(ir.WarningDropped, "reasoning.summary", "Anthropic text has no separate reasoning summary")
 					}
