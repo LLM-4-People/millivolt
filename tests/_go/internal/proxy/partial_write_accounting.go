@@ -150,3 +150,44 @@ func TestTranslatedUpstreamErrorCountsPartialWrite(t *testing.T) {
 		t.Fatalf("record = %+v, want a 500 client disconnect", rec)
 	}
 }
+
+// partialStreamWriter accepts a fixed byte count and then fails, with the
+// Flush method streamBody requires to enter its per-event writeOut path.
+type partialStreamWriter struct {
+	header http.Header
+	n      int
+	err    error
+}
+
+func (w *partialStreamWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+func (w *partialStreamWriter) WriteHeader(int)           {}
+func (w *partialStreamWriter) Write([]byte) (int, error) { return w.n, w.err }
+func (w *partialStreamWriter) Flush()                    {}
+
+// TestStreamBodyCountsPartialWrite is the H4 regression: the SSE relay's
+// writeOut is the primary client-write owner, and a partial (n, err) write
+// must book the accepted bytes and classify the client as gone. A
+// count-on-nil revert at that owner otherwise leaves the whole suite green.
+func TestStreamBodyCountsPartialWrite(t *testing.T) {
+	body := &splitChunkReader{chunks: [][]byte{
+		[]byte(`data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"),
+	}}
+	w := &partialStreamWriter{n: 2, err: io.ErrClosedPipe}
+	rec := &metrics.Record{StatusCode: http.StatusOK}
+	s := New(config.Default(), metrics.Noop{})
+	var uerr upstreamErrorRescue
+	if rescue := s.streamBody(context.Background(), w, body, rec, false, false, &uerr, ir.Chat); rescue != rescueNone {
+		t.Fatalf("rescue = %v, want none", rescue)
+	}
+	if rec.ResponseBytes != 2 {
+		t.Fatalf("ResponseBytes = %d, want the 2 delivered bytes", rec.ResponseBytes)
+	}
+	if !rec.ClientDisconnected || rec.StatusCode != metrics.StatusClientClosedRequest {
+		t.Fatalf("record = %+v, want a 499 client disconnect", rec)
+	}
+}
