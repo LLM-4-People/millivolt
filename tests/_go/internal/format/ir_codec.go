@@ -100,7 +100,7 @@ func TestChatToAnthropicRequestCodec(t *testing.T) {
 func TestAnthropicToChatRequestCodec(t *testing.T) {
 	in := `{
 		"model":"claude",
-		"max_tokens":512,
+		"max_tokens":4096,
 		"system":[{"type":"text","text":"be careful","cache_control":{"type":"ephemeral"}}],
 		"messages":[
 			{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]},
@@ -123,7 +123,7 @@ func TestAnthropicToChatRequestCodec(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := decodeJSONMap(t, out)
-	if got["max_tokens"] != float64(512) {
+	if got["max_tokens"] != float64(4096) {
 		t.Fatalf("max_tokens = %v", got["max_tokens"])
 	}
 	if got["user"] != "u1" {
@@ -419,7 +419,7 @@ func TestResponsesToAnthropicRequestCodec(t *testing.T) {
 
 func TestAnthropicToResponsesRequestCodec(t *testing.T) {
 	in := `{
-		"model":"claude","max_tokens":128,
+		"model":"claude","max_tokens":8192,
 		"system":"be brief",
 		"messages":[
 			{"role":"user","content":"hi"},
@@ -440,7 +440,7 @@ func TestAnthropicToResponsesRequestCodec(t *testing.T) {
 	if got["instructions"] != "be brief" {
 		t.Fatalf("instructions = %v", got["instructions"])
 	}
-	if got["max_output_tokens"] != float64(128) {
+	if got["max_output_tokens"] != float64(8192) {
 		t.Fatalf("max_output_tokens = %v", got["max_output_tokens"])
 	}
 	reasoning := got["reasoning"].(map[string]any)
@@ -1193,15 +1193,20 @@ func TestIRValidateRejectsUnknownRole(t *testing.T) {
 // decodes.
 func TestResponseArraysAreBoundedBeforeDecode(t *testing.T) {
 	array := emptyJSONArray
+	// A Chat choice must carry a message object; null filler is now rejected
+	// by the completion-shape check rather than exercising the array bound.
+	choices := func(n int) string {
+		return repeatJSONArray(`{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}`, n)
+	}
 
 	t.Run("chat choices at limit", func(t *testing.T) {
-		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax) + `}`
+		body := `{"id":"c1","choices":` + choices(metrics.ContentPartMax) + `}`
 		if _, err := DecodeChatResponse([]byte(body)); err != nil {
 			t.Fatalf("body at the limit was rejected: %v", err)
 		}
 	})
 	t.Run("chat choices over limit", func(t *testing.T) {
-		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax+1) + `}`
+		body := `{"id":"c1","choices":` + choices(metrics.ContentPartMax+1) + `}`
 		_, err := DecodeChatResponse([]byte(body))
 		if err == nil || !strings.Contains(err.Error(), "exceed") {
 			t.Fatalf("over-bound choices error = %v", err)

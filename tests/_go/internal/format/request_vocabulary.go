@@ -60,7 +60,7 @@ func TestReasoningEffortNoneOmittedForAnthropic(t *testing.T) {
 }
 
 func TestThinkingBudgetMapsToChatEffort(t *testing.T) {
-	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+	body := `{"model":"m","max_tokens":8192,"messages":[{"role":"user","content":"hi"}],` +
 		`"thinking":{"type":"enabled","budget_tokens":6000}}`
 	req, err := DecodeAnthropicRequest([]byte(body))
 	if err != nil {
@@ -214,9 +214,9 @@ func TestChatScaleTierReachesResponses(t *testing.T) {
 // token budget, so a budget beside an explicit effort must be reported (and a
 // disabled request must report both knobs).
 func TestResponsesReasoningBudgetWarnsWithEffort(t *testing.T) {
-	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+	body := `{"model":"m","max_tokens":8192,"messages":[{"role":"user","content":"hi"}],` +
 		`"thinking":{"type":"enabled","budget_tokens":6000},"output_config":{"effort":"high"}}`
-	out, warnings, err := TranslateRequestBetween(ir.Anthropic, ir.Responses, []byte(body), 16, "")
+	out, warnings, err := TranslateRequestBetween(ir.Anthropic, ir.Responses, []byte(body), 8192, "")
 	if err != nil {
 		t.Fatal(err)
 	}
