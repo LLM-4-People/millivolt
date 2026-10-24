@@ -94,6 +94,12 @@ func TestRequestStopArrayBound(t *testing.T) {
 		{"array over cap", `{"model":"m","stop":` + over + `}`, true, 0},
 		{"case-folded key over cap", `{"model":"m","STOP":` + over + `}`, true, 0},
 		{"escaped key over cap", `{"model":"m","st\u006fp":` + over + `}`, true, 0},
+		{"stop_sequences string", `{"model":"m","stop_sequences":"done"}`, false, 1},
+		{"stop_sequences empty string", `{"model":"m","stop_sequences":""}`, false, 0},
+		{"stop_sequences at cap", `{"model":"m","stop_sequences":` + atCap + `}`, false, requestMetadataMaxElements},
+		{"stop_sequences over cap", `{"model":"m","stop_sequences":` + over + `}`, true, 0},
+		{"stop_sequences case-folded over cap", `{"model":"m","STOP_SEQUENCES":` + over + `}`, true, 0},
+		{"stop_sequences escaped key over cap", `{"model":"m","stop\u005fsequences":` + over + `}`, true, 0},
 		{"object is tolerated", `{"model":"m","stop":{"k":1}}`, false, 0},
 		{"number is tolerated", `{"model":"m","stop":3}`, false, 0},
 		{"null is tolerated", `{"model":"m","stop":null}`, false, 0},
@@ -541,4 +547,30 @@ func TestRequestAggregateContentPartsReturn400BeforeUpstream(t *testing.T) {
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("upstream called %d times, want 0", got)
 	}
+}
+
+// requestStopCount counts an accepted stop array lexically: 10,000 entries
+// must not allocate one decoded string per element.
+func TestRequestStopCountDoesNotMaterialize(t *testing.T) {
+	const entries = requestMetadataMaxElements
+	raw := []byte(`{"model":"m","stop_sequences":` + amplificationArray(entries, `"xxx"`) + `}`)
+	var parseErr error
+	var gotStop int
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			var rec metrics.Record
+			parseErr = parseLLMRequest(raw, &rec, false)
+			gotStop = rec.ReqStop
+		}
+	})
+	if parseErr != nil {
+		t.Fatalf("parseLLMRequest error = %v", parseErr)
+	}
+	if gotStop != entries {
+		t.Fatalf("ReqStop = %d, want %d", gotStop, entries)
+	}
+	if alloc := res.AllocedBytesPerOp(); alloc > 256<<10 {
+		t.Fatalf("%d-entry stop_sequences allocated %d bytes/op, want lexical counting", entries, alloc)
+	}
+	t.Logf("stop_sequences accepted: input=%d entries=%d alloc=%d", len(raw), entries, res.AllocedBytesPerOp())
 }

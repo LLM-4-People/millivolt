@@ -2011,18 +2011,25 @@ func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
 
 // requestStopCount records how many stop sequences a raw stop field carries.
 // A string is one sequence and an array contributes its length; null, an
-// object and every other shape record zero.
+// object and every other shape record zero. The scan is lexical: counting an
+// accepted array never materializes a []string, and an over-bound array stops
+// at requestMetadataMaxElements+1.
 func requestStopCount(raw json.RawMessage) int {
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		if s == "" {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) {
+		return 0
+	}
+	switch raw[i] {
+	case '"':
+		if metrics.SkipJSONString(raw, i) == i+2 {
 			return 0
 		}
 		return 1
-	}
-	var arr []string
-	if json.Unmarshal(raw, &arr) == nil {
-		return len(arr)
+	case '[':
+		n, _, ok := metrics.CountJSONArrayBytes(raw, i, requestMetadataMaxElements)
+		if ok {
+			return n
+		}
 	}
 	return 0
 }
@@ -2487,7 +2494,7 @@ func (k requestKey) collection() string {
 		return "metadata"
 	case k.equal("logit_bias"):
 		return "logit_bias"
-	case k.equal("stop"):
+	case k.equal("stop"), k.equal("stop_sequences"):
 		return "stop"
 	}
 	return ""
