@@ -370,6 +370,7 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 		out = append(out, ir.Message{Role: ir.RoleUser, Content: []ir.Block{block}})
 	}
 	phaseSeen := false
+	ids := newRequestToolIDs()
 	for i, item := range items {
 		if item.Phase != "" {
 			phaseSeen = true
@@ -397,7 +398,7 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 				out = append(out, ir.Message{Role: role, Content: blocks})
 			}
 		case "function_call":
-			call, w, err := decodeResponsesFunctionCall(item, false)
+			call, w, err := decodeResponsesFunctionCall(item, false, ids)
 			if err != nil {
 				return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
 			}
@@ -612,7 +613,7 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation, offset, partRunes 
 // rejects a missing, null or whitespace argument value; the response decoder
 // sets it for a non-clean terminal, while request history keeps the empty
 // object.
-func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool) (*ir.ToolCall, ir.Warnings, error) {
+func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, ids *requestToolIDs) (*ir.ToolCall, ir.Warnings, error) {
 	var warns ir.Warnings
 	if item.Name == "" {
 		return nil, nil, errors.New("function_call has no name")
@@ -628,6 +629,9 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool) (
 		return nil, nil, errors.New("function_call has no call_id")
 	}
 	if err := checkNativeIdentity("tool id", id); err != nil {
+		return nil, nil, err
+	}
+	if err := ids.reserve(id); err != nil {
 		return nil, nil, err
 	}
 	// Structural identity failures stay fatal even when the source also
@@ -1415,7 +1419,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			resp.Blocks = append(resp.Blocks, blocks...)
 			resp.Warnings = append(resp.Warnings, warns...)
 		case typ == "function_call":
-			call, warns, err := decodeResponsesFunctionCall(item, !cleanTerminal)
+			call, warns, err := decodeResponsesFunctionCall(item, !cleanTerminal, nil)
 			if err != nil {
 				if !cleanTerminal && isToolArgumentsError(err) {
 					resp.Warnings.AddOnce(ir.WarningDropped, "function_call.arguments",

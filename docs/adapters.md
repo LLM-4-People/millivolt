@@ -261,8 +261,14 @@ target cannot consume them:
   pairs with its `role: function` reply by function name. Chat `prediction`,
   audio output, non-text `modalities`, and `web_search_options` have no target
   equivalent and are dropped with a warning.
-- A Chat assistant tool call without an id gets a generated id and reports the
-  recorded approximation. Pairing keeps the kind of reference. A non-empty
+- A request-history tool call without an id gets a generated id and reports the
+  recorded approximation. Tool ids are reserved once per request across every
+  message and item: a generated id can never collide with an explicit id in
+  another message, and a repeated explicit id fails closed with HTTP 400. The
+  deprecated per-assistant Chat `function_call` keeps its function name as the
+  id because that shape carries no id; a repeated same-name legacy call is
+  inherently ambiguous and remains the documented exception. Pairing keeps the
+  kind of reference. A non-empty
   `tool_call_id` answers the unanswered call with that exact id, so an explicit
   id is never shadowed by another call's function name; when no id matches, a
   generated call may still be addressed by the function name its client supplied

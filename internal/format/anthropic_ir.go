@@ -198,10 +198,11 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 		req.Messages = append(req.Messages, ir.Message{Role: ir.RoleSystem, Content: blocks})
 		req.Warnings = append(req.Warnings, warns...)
 	}
+	ids := newRequestToolIDs()
 	for i, m := range in.Messages {
 		// One accumulator spans every message so AddOnce sees the whole
 		// request instead of restarting at each message.
-		msg, err := decodeAnthropicMessage(m, &req.Warnings)
+		msg, err := decodeAnthropicMessage(m, &req.Warnings, ids)
 		if err != nil {
 			return nil, fmt.Errorf("anthropic message %d: %w", i, err)
 		}
@@ -304,21 +305,21 @@ func decodeAnthropicSystem(raw json.RawMessage) ([]ir.Block, ir.Warnings, error)
 	return blocks, warns, nil
 }
 
-func decodeAnthropicMessage(m anthropicWireMsg, warns *ir.Warnings) (ir.Message, error) {
+func decodeAnthropicMessage(m anthropicWireMsg, warns *ir.Warnings, ids *requestToolIDs) (ir.Message, error) {
 	role := ir.Role(m.Role)
 	switch role {
 	case ir.RoleUser, ir.RoleAssistant, ir.RoleSystem:
 	default:
 		return ir.Message{}, fmt.Errorf("unsupported role %q", m.Role)
 	}
-	blocks, err := decodeAnthropicContent(m.Content, warns)
+	blocks, err := decodeAnthropicContent(m.Content, warns, ids)
 	if err != nil {
 		return ir.Message{}, err
 	}
 	return ir.Message{Role: role, Content: blocks}, nil
 }
 
-func decodeAnthropicContent(raw json.RawMessage, warns *ir.Warnings) ([]ir.Block, error) {
+func decodeAnthropicContent(raw json.RawMessage, warns *ir.Warnings, ids *requestToolIDs) ([]ir.Block, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
@@ -339,7 +340,7 @@ func decodeAnthropicContent(raw json.RawMessage, warns *ir.Warnings) ([]ir.Block
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, err
 	}
-	return decodeAnthropicBlocks(parts, warns)
+	return decodeAnthropicBlocks(parts, warns, ids)
 }
 
 // syntheticToolID is a bounded, schema-conforming id for an Anthropic tool
@@ -381,7 +382,7 @@ func decodeAnthropicCitations(raw json.RawMessage, blockType string) ([]ir.Citat
 	}
 }
 
-func decodeAnthropicBlocks(parts []anthropicWireBlock, warns *ir.Warnings) ([]ir.Block, error) {
+func decodeAnthropicBlocks(parts []anthropicWireBlock, warns *ir.Warnings, ids *requestToolIDs) ([]ir.Block, error) {
 	var blocks []ir.Block
 	for i, p := range parts {
 		switch p.Type {
@@ -404,7 +405,7 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock, warns *ir.Warnings) ([]ir
 			if _, w := decodeAnthropicCitations(p.Citations, "document"); len(w) > 0 {
 				*warns = append(*warns, w...)
 			}
-			docBlocks, err := decodeAnthropicDocument(p, warns)
+			docBlocks, err := decodeAnthropicDocument(p, warns, ids)
 			if err != nil {
 				return nil, err
 			}
@@ -438,9 +439,12 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock, warns *ir.Warnings) ([]ir
 			if id == "" {
 				// Anthropic requires a non-empty tool_use id. Synthesize a
 				// conforming one and report the approximation rather than
-				// emitting an empty id on the target wire.
-				id = syntheticToolID(i)
+				// emitting an empty id on the target wire. The request-scoped
+				// namespace keeps it unique across every message.
+				id = ids.synthesize(syntheticToolID(i))
 				warns.Add(ir.WarningApproximated, "tool_use.id", "generated a missing tool id")
+			} else if err := ids.reserve(id); err != nil {
+				return nil, err
 			}
 			blocks = append(blocks, ir.Block{
 				Type: ir.BlockToolCall, CacheControl: p.CacheControl, ToolCall: &ir.ToolCall{
@@ -451,7 +455,7 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock, warns *ir.Warnings) ([]ir
 			if p.ToolsetName != "" {
 				warns.AddOnce(ir.WarningDropped, "tool_result.toolset_name", "server-side toolset name has no cross-protocol equivalent")
 			}
-			content, err := decodeAnthropicContent(p.Content, warns)
+			content, err := decodeAnthropicContent(p.Content, warns, ids)
 			if err != nil {
 				return nil, err
 			}
@@ -510,7 +514,7 @@ func decodeAnthropicImage(src *struct {
 // keeping them as blocks preserves the images and avoids manufacturing an
 // empty file block. The document boundary (title/context/citations) has no
 // cross-protocol equivalent and is reported.
-func decodeAnthropicDocument(p anthropicWireBlock, warns *ir.Warnings) ([]ir.Block, error) {
+func decodeAnthropicDocument(p anthropicWireBlock, warns *ir.Warnings, ids *requestToolIDs) ([]ir.Block, error) {
 	if p.Source == nil {
 		return nil, errors.New("anthropic document block has no source")
 	}
@@ -536,7 +540,7 @@ func decodeAnthropicDocument(p anthropicWireBlock, warns *ir.Warnings) ([]ir.Blo
 		file := &ir.File{FileID: p.Source.FileID, Filename: p.Title}
 		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil
 	case "content":
-		blocks, err := decodeAnthropicContent(p.Source.Content, warns)
+		blocks, err := decodeAnthropicContent(p.Source.Content, warns, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -1730,7 +1734,7 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 	}
 	// The response accumulator spans every content block so AddOnce dedupes
 	// a repeated block-level loss.
-	blocks, err := decodeAnthropicBlocks(in.Content, &resp.Warnings)
+	blocks, err := decodeAnthropicBlocks(in.Content, &resp.Warnings, nil)
 	if err != nil {
 		return nil, err
 	}

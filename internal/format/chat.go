@@ -342,7 +342,7 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		req.Warnings.Add(ir.WarningDropped, "web_search_options", "provider-hosted web search has no cross-protocol equivalent")
 	}
 
-	msgs, msgWarns, err := decodeChatMessages(in.Messages)
+	msgs, msgWarns, err := decodeChatMessages(in.Messages, newRequestToolIDs())
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +452,7 @@ func decodeChatMetadata(in map[string]json.RawMessage) (map[string]string, ir.Wa
 // Consecutive role:"tool" messages (and a following user turn) are merged into
 // one user message whose tool_result blocks come first: that is the shape
 // Anthropic requires, and the Chat encoder splits it back out losslessly.
-func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error) {
+func decodeChatMessages(in []chatWireMessage, ids *requestToolIDs) ([]ir.Message, ir.Warnings, error) {
 	var (
 		out       []ir.Message
 		warns     ir.Warnings
@@ -532,7 +532,7 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 				blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *m.Refusal})
 			}
 			for j, tc := range m.ToolCalls {
-				call, generated, w, err := decodeChatToolCall(tc, i, j, false)
+				call, generated, w, err := decodeChatToolCall(tc, i, j, false, ids)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -656,7 +656,9 @@ func decodeLegacyFunctionCall(raw json.RawMessage) (*ir.ToolChoice, error) {
 // decodeLegacyMessageFunctionCall converts the deprecated per-assistant
 // "function_call" object. The legacy protocol carried no call id, and the
 // matching role:"function" reply identifies the call by function name, so the
-// name is the id that pairs the two turns.
+// name is the id that pairs the two turns. This is the one documented exception
+// to the request-scoped id namespace: a source with no id cannot be checked for
+// uniqueness, and repeated same-name legacy calls are inherently ambiguous.
 func decodeLegacyMessageFunctionCall(raw json.RawMessage, requireEvidence bool) (*ir.ToolCall, error) {
 	var obj struct {
 		Name      string `json:"name"`
@@ -803,17 +805,22 @@ func (c *chatToolCalls) consumeEmpty() (string, error) {
 // later tool reply that names the call instead of carrying that id.
 // requireEvidence rejects a missing, null or whitespace argument value; the
 // response decoder sets it for a non-clean terminal.
-func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int, requireEvidence bool) (*ir.ToolCall, bool, ir.Warnings, error) {
+func decodeChatToolCall(tc chatWireToolCall, msgIndex, callIndex int, requireEvidence bool, ids *requestToolIDs) (*ir.ToolCall, bool, ir.Warnings, error) {
 	var warns ir.Warnings
 	id := tc.ID
 	generated := false
 	if id == "" {
-		id = fmt.Sprintf("call_%d_%d", msgIndex, callIndex)
+		id = ids.synthesize(fmt.Sprintf("call_%d_%d", msgIndex, callIndex))
 		generated = true
 		warns.Add(ir.WarningApproximated, "tool_calls.id", "generated a missing call id")
 	}
 	if err := checkNativeIdentity("tool id", id); err != nil {
 		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+	}
+	if !generated {
+		if err := ids.reserve(id); err != nil {
+			return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", msgIndex, callIndex, err))
+		}
 	}
 	if tc.Function.Name == "" {
 		return nil, false, nil, errParseOpenAIBody(fmt.Errorf("message %d tool call %d: function name is required", msgIndex, callIndex))
@@ -1936,7 +1943,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *choice.Message.Refusal})
 	}
 	for j, tc := range choice.Message.ToolCalls {
-		call, _, w, err := decodeChatToolCall(tc, 0, j, !cleanTerminal)
+		call, _, w, err := decodeChatToolCall(tc, 0, j, !cleanTerminal, nil)
 		if err != nil {
 			if !cleanTerminal && isToolArgumentsError(err) {
 				warns.AddOnce(ir.WarningDropped, "tool_calls.arguments",

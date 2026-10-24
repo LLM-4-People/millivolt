@@ -40,6 +40,47 @@ func checkToolCallName(name string) error {
 	return nil
 }
 
+// requestToolIDs is one request-scoped namespace for tool-call ids across every
+// message and item. A request decoder reserves each explicit id and allocates
+// synthetic ids from the same set, so a generated id can never collide with an
+// explicit one in another message. A nil namespace disables the check for
+// response decoders, whose stream counterparts already own their own set.
+type requestToolIDs struct {
+	seen map[string]struct{}
+}
+
+func newRequestToolIDs() *requestToolIDs {
+	return &requestToolIDs{seen: map[string]struct{}{}}
+}
+
+// reserve claims one explicit id and fails closed on a repeat. An explicit id
+// is never suffixed: that would break the client's correlation with the
+// provider's tool result.
+func (r *requestToolIDs) reserve(id string) error {
+	if r == nil {
+		return nil
+	}
+	return reserveToolID(r.seen, id)
+}
+
+// synthesize claims the first free spelling of base. The suffix starts at 1 so
+// a generated call_3_0 becomes call_3_0_1 when an explicit call_3_0 already
+// exists.
+func (r *requestToolIDs) synthesize(base string) string {
+	if r == nil {
+		return base
+	}
+	id := base
+	for suffix := 1; ; suffix++ {
+		if _, taken := r.seen[id]; !taken {
+			break
+		}
+		id = fmt.Sprintf("%s_%d", base, suffix)
+	}
+	r.seen[id] = struct{}{}
+	return id
+}
+
 // reserveToolID records one committed tool-call id and fails closed when the
 // same id was already committed. The IR correlates a tool result by id, so two
 // target blocks sharing one id are ambiguous. A source id is never suffixed:
