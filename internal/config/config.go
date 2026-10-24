@@ -1841,9 +1841,10 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 }
 
 // ReadDocument is the one bounded read owner for a configuration document.
-// Boot, reload, inspect and the restore rollback capture all use it, so the
-// configuration document is allowed exactly the envelope SetDocument's size
-// check enforces before parsing or proportional allocation.
+// Boot, reload, inspect and the restore rollback capture all use it. It
+// enforces the ConfigDocumentMaxBytes bound on the input bytes before parsing,
+// matching the rendered-document bound that Config.validateDocumentSize
+// enforces through Validate after parsing.
 //
 // The pre-open stat rejects a FIFO, device or directory before os.Open, which
 // would block indefinitely on a FIFO with no writer. The post-open stat repeats
