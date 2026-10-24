@@ -857,6 +857,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	}
 	operations := normalize("operations.md")
 	adapters := normalize("adapters.md")
+	protocol := normalize("protocol.md")
 	example := exampleHelpText(repositoryText(t, "proxy.example.yaml"))
 	configSource := strings.Join(strings.Fields(strings.ReplaceAll(repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
 
@@ -870,7 +871,12 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"strip includes Responses", operations, "including a Responses client body"},
 		{"strip is not inbound-limited", operations, "not limited to Chat Completions or Anthropic inbound"},
 		{"strip operations wording", operations, "tracked client-body fields"},
-		{"strip protocol scope", strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", "protocol.md"))), " "), "client request body before relay or translation. It applies to any JSON body, including a Responses client body"},
+		{"strip protocol scope", protocol, "client request body before relay or translation. It applies to any JSON body, including a Responses client body"},
+		{"transport header exception", operations, "`accept-encoding` and `range` are the exception"},
+		{"transport header client map", operations, "`X-Proxy-Headers` and an `X-Proxy-Auth-Header` naming one"},
+		{"transport header protocol row", protocol, "`accept-encoding` and `range` are proxy-owned and rejected with 400"},
+		{"transport header provider comment", configSource, "accept-encoding and range are proxy-owned: the X-Proxy-Headers map rejects them with 400"},
+		{"transport header example", example, "accept-encoding and range are proxy-owned: the X-Proxy-Headers map rejects them with 400"},
 		{"strip config list comment", configSource, "client request body before relay or translation, including a Responses client body"},
 		{"strip config field comment", configSource, "It applies to any JSON body, including a Responses client body"},
 		{"streamed item status", adapters, "response.output_item.added"},
@@ -894,7 +900,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	settings := repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings.js"))
 	for name, text := range map[string]string{
 		"config comments": configSource,
-		"protocol doc":    strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", "protocol.md"))), " "),
+		"protocol doc":    protocol,
 		"operations doc":  operations,
 		"settings label":  settings,
 	} {
@@ -907,6 +913,11 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	}
 	if !strings.Contains(settings, "client request body before relay or translation") {
 		t.Error("settings strip label omits the pre-translation scope")
+	}
+
+	providers := FieldByKey("providers")
+	if providers == nil || !strings.Contains(providers.Help, "accept-encoding and range are proxy-owned: the X-Proxy-Headers map rejects them with 400") {
+		t.Error("providers help omits the transport-mode header exception")
 	}
 
 	quota := FieldByKey("quota_pause_mode")

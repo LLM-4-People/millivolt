@@ -179,7 +179,12 @@ the later rule wins.
 Header rules are the operator's last word on the upstream wire: the resolved
 merge applies after client-forwarded values, configured provider headers and
 the client's `X-Proxy-Headers` map, so a matching override wins over all of
-them. Credential and protocol names (`authorization`, `cookie`,
+them. The proxy-owned transport-mode names `accept-encoding` and `range` are
+the exception: the client header maps (`X-Proxy-Headers` and an
+`X-Proxy-Auth-Header` naming one) reject them with a 400 before any send, and
+configured provider headers or request-override values are stripped from the
+final upstream request, so the transport keeps its own gzip negotiation and
+never sends a partial range. Credential and protocol names (`authorization`, `cookie`,
 `proxy-authorization`, `host`, `content-type`, `content-length`,
 `transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
 `proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control

@@ -759,9 +759,11 @@ model_rules:
 # fresh UUID, {{platform}} to the server's Rust-style os; arch pair, and
 # {{opencode-msg-id}}/{{opencode-ses-id}} to fresh opencode-format identifiers; unknown
 # templates stay literal. On HTTP relay requests, configured headers override
-# forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor
-# bridge construct headers separately and do not apply X-Proxy-Headers. Headers can
-# contain secrets; keep runtime configuration private.
+# forwarded/extracted-auth values and X-Proxy-Headers wins. accept-encoding and range are
+# proxy-owned: the X-Proxy-Headers map rejects them with 400, and configured or override
+# values are stripped from the final request. Model discovery and the Cursor bridge
+# construct headers separately and do not apply X-Proxy-Headers. Headers can contain
+# secrets; keep runtime configuration private.
 # Hot-reload: yes.
 #   type: map of provider label → {cost_keys, usage_keys, models_path, models_keys, ensure_tools, headers}
 providers:

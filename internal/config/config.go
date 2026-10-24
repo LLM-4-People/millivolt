@@ -636,8 +636,12 @@ type ProviderOverride struct {
 	// Headers are extra upstream headers sent on every request to this
 	// provider (LLM calls and models discovery), e.g. mimicking a first-party
 	// client's wire fingerprint. Values override client-forwarded headers;
-	// the client's explicit X-Proxy-Headers injection map still wins. Four
-	// per-request template placeholders expand at send time: "{{uuid4}}" (a
+	// the client's explicit X-Proxy-Headers injection map still wins.
+	// accept-encoding and range are proxy-owned: the X-Proxy-Headers map
+	// rejects them with 400, and a configured or override value is stripped
+	// from the final request so the transport keeps its own gzip negotiation
+	// and never sends a partial range. Four per-request template placeholders
+	// expand at send time: "{{uuid4}}" (a
 	// fresh UUID v4 per request), "{{platform}}" (rust-style "os; arch",
 	// e.g. "linux; x86_64"), "{{opencode-msg-id}}" and
 	// "{{opencode-ses-id}}" (fresh identifiers in the opencode CLI's wire
