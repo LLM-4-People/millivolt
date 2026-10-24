@@ -1013,7 +1013,8 @@ func isValidAuthHeader(h string) bool {
 	if !config.ValidHeaderName(h) {
 		return false
 	}
-	if isHopByHop(h) || isProxyControlHeader(h) || isTransportModeHeader(h) || strings.EqualFold(h, "host") {
+	if isHopByHop(h) || isProxyControlHeader(h) || isTransportModeHeader(h) ||
+		strings.EqualFold(h, "host") || strings.EqualFold(h, "content-length") {
 		return false
 	}
 	return true

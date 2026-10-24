@@ -188,9 +188,10 @@ never sends a partial range. Credential and protocol names (`authorization`, `co
 `proxy-authorization`, `host`, `content-type`, `content-length`,
 `transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
 `proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control
-prefix are rejected at load in both header lists; at runtime the target's
-configured auth header is skipped even if one slips through, so credentials
-stay at their owner. The fixed list cannot know a provider's configured
+prefix are rejected at load in both header lists, and the client header maps
+reject `content-length` before any send so the transport keeps ownership of
+message framing; at runtime the target's configured auth header is skipped
+even if one slips through, so credentials stay at their owner. The fixed list cannot know a provider's configured
 auth header, so a rule naming the target's (for example `x-api-key`) passes
 config validation and is denied at send time by the runtime belt. Header
 names are trimmed and canonicalized

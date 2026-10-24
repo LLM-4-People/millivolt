@@ -36,11 +36,14 @@ func TestXProxyHeadersRejectsTransportModeHeaders(t *testing.T) {
 	s := New(cfg, metrics.Noop{})
 	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
 
-	for _, header := range []string{"Accept-Encoding", "Range"} {
+	for _, header := range []string{"Accept-Encoding", "Range", "Content-Length"} {
 		t.Run(header, func(t *testing.T) {
 			injected := `{"` + header + `":["gzip"]}`
 			if header == "Range" {
 				injected = `{"Range":["bytes=0-1"]}`
+			}
+			if header == "Content-Length" {
+				injected = `{"Content-Length":["999"]}`
 			}
 			r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
 				strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
@@ -231,7 +234,7 @@ func TestAuthHeaderRejectsTransportModeHeaders(t *testing.T) {
 		s.ServeHTTP(w, r)
 		return w
 	}
-	for _, name := range []string{"Accept-Encoding", "Range"} {
+	for _, name := range []string{"Accept-Encoding", "Range", "Content-Length"} {
 		if w := post(name); w.Code != http.StatusBadRequest {
 			t.Fatalf("X-Proxy-Auth-Header %q status = %d, want 400 (body %s)", name, w.Code, w.Body.String())
 		}

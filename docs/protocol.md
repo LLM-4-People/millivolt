@@ -106,9 +106,10 @@ refilled budgets, not strict fixed-window quotas; see
 [Pause and Limits](operations.md#pause-and-limits) for charging and burst behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
-valid, unique case-insensitively, and not reserved control/hop-by-hop/Host names;
-values must be valid HTTP field values. Ordinary hop-by-hop and
-Connection-nominated headers are removed. Precedence depends on the request path:
+valid, unique case-insensitively, and not reserved control, framing
+(`content-length`), hop-by-hop or Host names; values must be valid HTTP field
+values. Ordinary hop-by-hop and Connection-nominated headers are removed.
+Precedence depends on the request path:
 
 | Path | Header precedence, lowest to highest |
 | --- | --- |
