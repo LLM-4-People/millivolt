@@ -254,3 +254,29 @@ func TestResponsesReasoningBudgetWarnsWithEffort(t *testing.T) {
 		t.Fatalf("disabled budget recorded no warning: %+v", req.Warnings)
 	}
 }
+
+// TestChatTargetEmitsStore pins TC1-6: Chat Completions accepts store, so a
+// translated store flag is carried instead of rejected. Anthropic still
+// rejects store=true because it has no stateful storage.
+func TestChatTargetEmitsStore(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"model":"m","input":"hi","store":true}`, true},
+		{`{"model":"m","input":"hi","store":false}`, false},
+	} {
+		out, _, err := TranslateRequestBetween(ir.Responses, ir.Chat, []byte(tc.body), 16, "")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		root := decodeJSONObject(t, out)
+		if got, ok := root["store"].(bool); !ok || got != tc.want {
+			t.Fatalf("chat store = %v, want %v: %s", root["store"], tc.want, out)
+		}
+	}
+	if _, _, err := TranslateRequestBetween(ir.Responses, ir.Anthropic,
+		[]byte(`{"model":"m","input":"hi","store":true}`), 16, ""); err == nil {
+		t.Fatal("anthropic target accepted store=true")
+	}
+}

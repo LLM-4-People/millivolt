@@ -872,9 +872,6 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if req.PreviousResponseID != "" {
 		return nil, errors.New("chat target cannot resolve previous_response_id")
 	}
-	if req.Store != nil && *req.Store {
-		return nil, errors.New("chat target cannot store the response (store=true)")
-	}
 	messages := req.Messages
 	if req.Instructions != nil && *req.Instructions != "" {
 		messages = append([]ir.Message{{
@@ -985,6 +982,9 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	}
 	if len(req.Metadata) > 0 {
 		out["metadata"] = req.Metadata
+	}
+	if req.Store != nil {
+		out["store"] = *req.Store
 	}
 	tier, tierWarns := mapServiceTier(ir.Chat, req.ServiceTier)
 	req.Warnings = append(req.Warnings, tierWarns...)
