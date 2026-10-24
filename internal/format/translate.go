@@ -309,7 +309,9 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 		chat.fallbackModel = opts.FallbackModel
 		enc = chat
 	case ir.Responses:
-		enc = NewResponsesStreamEncoder(dst, flusher)
+		responses := NewResponsesStreamEncoder(dst, flusher)
+		responses.fallbackModel = opts.FallbackModel
+		enc = responses
 	case ir.Anthropic:
 		enc = NewAnthropicStreamEncoder(dst, flusher)
 	default:

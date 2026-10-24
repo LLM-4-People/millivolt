@@ -2105,6 +2105,9 @@ type ResponsesStreamEncoder struct {
 	id      string
 	model   string
 	created int64
+	// fallbackModel names the model when the source omitted its start event,
+	// matching the Chat encoder's StreamOptions.FallbackModel contract.
+	fallbackModel string
 
 	started     bool
 	outputIndex int
@@ -2157,6 +2160,9 @@ func (e *ResponsesStreamEncoder) startStream() error {
 	if e.id == "" {
 		e.id = "resp_" + randomID()
 	}
+	if e.model == "" {
+		e.model = e.fallbackModel
+	}
 	if e.created == 0 {
 		e.created = time.Now().Unix()
 	}
@@ -2192,7 +2198,14 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			if err := validateUsage(ev.Response.Usage); err != nil {
 				return err
 			}
-			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			// response.created/response.in_progress may already be on the
+			// wire (a source stream can deliver its start event late, or not
+			// at all). Identity is immutable once committed, exactly like the
+			// Chat encoder's !started guard; only late-arriving data that the
+			// target still needs is merged.
+			if !e.started {
+				e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			}
 			e.usage = ev.Response.Usage
 			e.metadata = ev.Response.Metadata
 			e.serviceTier = ev.Response.ServiceTier
