@@ -1462,12 +1462,19 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 		case "function_call":
 			key := functionCallKey(item.CallID, item.ID, i)
 			idx, ok := d.itemBlockByKey[key]
+			if ok && !d.openToolKeys[key] {
+				// An identity can also name an announced non-tool item at the
+				// same position or with the same id. Only a function call this
+				// stream announced is a candidate for its arguments.
+				ok = false
+				idx = 0
+			}
 			if !ok && item.CallID == "" && item.ID == "" {
 				// An id-less terminal item first uses the announcement at the
 				// same wire position. If the terminal array reordered the
 				// items, match the first still-open announced id-less call in
 				// output order instead of synthesizing a second call.
-				if fallback, exists := d.keyByOutput[i]; exists {
+				if fallback, exists := d.keyByOutput[i]; exists && d.openToolKeys[fallback] {
 					if fallbackIdx, open := d.itemBlockByKey[fallback]; open && !claimedTools[fallback] {
 						key, idx, ok = fallback, fallbackIdx, true
 					}
