@@ -819,8 +819,10 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	}
 	// The base must be exactly scheme://host[:port][/path] - no userinfo
 	// (credentials would ride to the upstream and leak into error echoes), no
-	// query or fragment (they collide with the path/query join). Deny by default.
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
+	// query or fragment (they collide with the path/query join). A bare
+	// trailing "#" parses to an empty Fragment but is still a fragment marker;
+	// a percent-encoded %23 remains path data. Deny by default.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(baseURL, "#") {
 		return nil, fmt.Errorf("invalid %s %q: userinfo, query, and fragment are not allowed in a base URL", hdrBaseURL, clientEcho(baseURL))
 	}
 	// A client controls this authority, and providerFromURL falls back to the
