@@ -669,7 +669,13 @@ func TestCodecWarnsOnUnrepresentableFields(t *testing.T) {
 	}
 
 	budget := 1024
-	reasoning := &ir.Request{Model: "m", Reasoning: &ir.ReasoningConfig{BudgetTokens: &budget, Display: "omitted"}}
+	reasoning := &ir.Request{
+		Model:    "m",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}},
+		Reasoning: &ir.ReasoningConfig{
+			BudgetTokens: &budget, Display: "omitted",
+		},
+	}
 	if _, err := EncodeChatRequest(reasoning); err != nil {
 		t.Fatal(err)
 	}

@@ -443,6 +443,17 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 			}
 			warns = append(warns, w...)
 			if pending != nil {
+				// A user turn merged behind tool results keeps its participant
+				// name so a target that can express it (Chat) does, and the
+				// target encoders own any loss. Only conflicting names are a
+				// decoder-level loss: the first one wins.
+				if m.Name != "" {
+					if pending.Name == "" {
+						pending.Name = m.Name
+					} else if pending.Name != m.Name {
+						warns.Add(ir.WarningDropped, "messages.name", "merged user turns carried conflicting names; kept the first")
+					}
+				}
 				pending.Content = append(pending.Content, blocks...)
 				continue
 			}
@@ -909,6 +920,9 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	if err := validateChatToolVocabulary(req); err != nil {
 		return nil, err
 	}
+	if err := validateResponseFormatName("chat", req.ResponseFormat); err != nil {
+		return nil, err
+	}
 	if req.PreviousResponseID != "" {
 		return nil, errors.New("chat target cannot resolve previous_response_id")
 	}
@@ -941,9 +955,16 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 			req.Warnings.Add(ir.WarningDropped, "reasoning.mode", "Chat Completions has no reasoning mode")
 		}
 	}
+	encodedMessages := encodeChatMessages(messages, &req.Warnings)
+	if len(encodedMessages) == 0 {
+		// Chat requires at least one message. An empty Responses input, or a
+		// turn whose every part was dropped, must fail closed instead of
+		// emitting messages:[] (the Anthropic encoder's twin guard).
+		return nil, errors.New("chat target requires at least one non-empty message")
+	}
 	out := map[string]any{
 		"model":    req.Model,
-		"messages": encodeChatMessages(messages, &req.Warnings),
+		"messages": encodedMessages,
 	}
 	if req.MaxOutputTokens != nil {
 		out["max_tokens"] = *req.MaxOutputTokens

@@ -252,8 +252,16 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 }
 
 func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, nil, errors.New("responses request: input is required")
+	if len(raw) == 0 {
+		// The Responses reference marks input optional. An absent field means
+		// no messages; the target encoders then decide from instructions (a
+		// Chat system message) or fail closed on an empty conversation.
+		return nil, nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		// Explicit null is not a valid input value even though the field is
+		// optional.
+		return nil, nil, errors.New("responses request: input must not be null")
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
@@ -645,6 +653,9 @@ func decodeResponsesFormat(raw json.RawMessage) (*ir.ResponseFormat, string, err
 // EncodeResponsesRequest renders the canonical request as a Responses body.
 func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	if err := ir.ValidateRequest(req); err != nil {
+		return nil, err
+	}
+	if err := validateResponseFormatName("responses", req.ResponseFormat); err != nil {
 		return nil, err
 	}
 	if len(req.Stop) > 0 {

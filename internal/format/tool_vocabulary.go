@@ -15,7 +15,10 @@ import (
 // A cross-protocol encoder validates the whole request before emitting a wire
 // the target would reject.
 var (
-	chatToolNamePattern      = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+	// openAIIdentifierPattern is the shared OpenAI identifier class: Chat
+	// function names and the json_schema response_format name both document
+	// 1-64 characters of this set.
+	openAIIdentifierPattern  = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 	anthropicToolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 	anthropicToolIDPattern   = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 )
@@ -29,12 +32,12 @@ func toolVocabularyError(target, field, value, pattern string) error {
 // ids are not pattern-constrained, so only the name is checked.
 func validateChatToolVocabulary(req *ir.Request) error {
 	for _, tool := range req.Tools {
-		if !chatToolNamePattern.MatchString(tool.Name) {
+		if !openAIIdentifierPattern.MatchString(tool.Name) {
 			return toolVocabularyError("chat", "tool name", tool.Name, "^[a-zA-Z0-9_-]{1,64}$")
 		}
 	}
 	if req.ToolChoice != nil && req.ToolChoice.Mode == ir.ToolChoiceTool &&
-		!chatToolNamePattern.MatchString(req.ToolChoice.Name) {
+		!openAIIdentifierPattern.MatchString(req.ToolChoice.Name) {
 		return toolVocabularyError("chat", "tool_choice.name", req.ToolChoice.Name, "^[a-zA-Z0-9_-]{1,64}$")
 	}
 	for _, message := range req.Messages {
@@ -57,7 +60,7 @@ func validateChatToolCall(tc *ir.ToolCall) error {
 	if tc == nil {
 		return nil
 	}
-	if !chatToolNamePattern.MatchString(tc.Name) {
+	if !openAIIdentifierPattern.MatchString(tc.Name) {
 		return toolVocabularyError("chat", "tool name", tc.Name, "^[a-zA-Z0-9_-]{1,64}$")
 	}
 	return nil
@@ -155,4 +158,18 @@ func toolAllowedCallers(raw json.RawMessage) (present bool, err error) {
 		}
 	}
 	return true, errors.New("allowed_callers excludes direct calls, which the target requires")
+}
+
+// validateResponseFormatName enforces the OpenAI identifier class on a
+// json_schema response-format name. An empty name is legal: both encoders
+// synthesize the documented "response" default. A name the target would
+// reject fails closed at the request boundary.
+func validateResponseFormatName(target string, rf *ir.ResponseFormat) error {
+	if rf == nil || rf.Type != "json_schema" || rf.Name == "" {
+		return nil
+	}
+	if !openAIIdentifierPattern.MatchString(rf.Name) {
+		return toolVocabularyError(target, "response_format.name", rf.Name, "^[a-zA-Z0-9_-]{1,64}$")
+	}
+	return nil
 }
