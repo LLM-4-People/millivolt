@@ -1182,6 +1182,7 @@ func TerminalLine(line []byte) bool {
 // retained list and its dedupe set are bounded by RetainedToolNamesMax, so a
 // hostile stream cannot grow either; every wire family feeds this owner.
 func (a *Analyzer) retainToolName(name string) {
+	name = metrics.RetainToolName(name)
 	if name == "" || len(a.toolNames) >= metrics.RetainedToolNamesMax {
 		return
 	}
@@ -1625,12 +1626,14 @@ func (a *Analyzer) countResponsesToolCall(callID, id, name string) bool {
 	// function_call and custom_tool_call carry call_id; MCPToolCall (and some
 	// provider items) carry only id. Either identity dedupes the streamed
 	// announcement against the terminal document; an item with neither is
-	// still counted but cannot be deduped.
+	// still counted but cannot be deduped. An over-long id is keyed by its
+	// digest so the set stays byte-bounded without merging distinct calls.
 	key := callID
 	if key == "" {
 		key = id
 	}
 	if key != "" {
+		key = metrics.RetainToolCallIDKey(key)
 		if a.toolCallIDs == nil {
 			a.toolCallIDs = make(map[string]struct{}, 4)
 		}
