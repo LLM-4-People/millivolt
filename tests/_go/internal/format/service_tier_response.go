@@ -228,3 +228,63 @@ data: {"type":"message_stop"}
 		t.Fatalf("foreign tier leaked: %s", out)
 	}
 }
+
+// TestAnthropicResponseUsageServiceTierReverse pins the IR-to-Anthropic
+// direction of the usage tier mapping: the canonical tier becomes the
+// documented response usage spelling, and an unrepresentable tier is omitted
+// with a dropped warning.
+func TestAnthropicResponseUsageServiceTierReverse(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		tier        string
+		usageTier   string
+		speed       string
+		wantWarning bool
+	}{
+		{name: "default becomes standard", tier: "default", usageTier: "standard"},
+		{name: "priority passes", tier: "priority", usageTier: "priority"},
+		{name: "fast becomes speed", tier: "fast", speed: "fast"},
+		{name: "batch passes", tier: "batch", usageTier: "batch"},
+		{name: "scale is dropped", tier: "scale", wantWarning: true},
+		{name: "empty emits neither", tier: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &ir.Response{
+				ID: "msg_1", Model: "m", Finish: ir.FinishStop,
+				Blocks:      []ir.Block{ir.TextBlock("hi")},
+				Usage:       ir.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+				ServiceTier: tc.tier,
+			}
+			body, err := EncodeAnthropicResponse(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out struct {
+				Usage map[string]any `json:"usage"`
+			}
+			if err := json.Unmarshal(body, &out); err != nil {
+				t.Fatal(err)
+			}
+			gotTier, _ := out.Usage["service_tier"].(string)
+			gotSpeed, _ := out.Usage["speed"].(string)
+			if gotTier != tc.usageTier || gotSpeed != tc.speed {
+				t.Fatalf("usage tier/speed = %q/%q, want %q/%q (body %s)", gotTier, gotSpeed, tc.usageTier, tc.speed, body)
+			}
+			count := serviceTierWarnings(resp.Warnings)
+			if (count > 0) != tc.wantWarning {
+				t.Fatalf("service_tier warnings = %d, want warning %v: %+v", count, tc.wantWarning, resp.Warnings)
+			}
+			if tc.wantWarning {
+				found := false
+				for _, warning := range resp.Warnings {
+					if warning.Field == "service_tier" && warning.Kind == ir.WarningDropped {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("missing dropped service_tier warning: %+v", resp.Warnings)
+				}
+			}
+		})
+	}
+}
