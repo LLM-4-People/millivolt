@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -25,7 +26,7 @@ type responsesWireRequest struct {
 	Model             string              `json:"model"`
 	Input             json.RawMessage     `json:"input"`
 	Instructions      *string             `json:"instructions"`
-	MaxOutputTokens   *int                `json:"max_output_tokens"`
+	MaxOutputTokens   json.RawMessage     `json:"max_output_tokens"`
 	Temperature       *float64            `json:"temperature"`
 	TopP              *float64            `json:"top_p"`
 	TopLogprobs       *int                `json:"top_logprobs"`
@@ -153,10 +154,14 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	if len(in.Prompt) > 0 && !bytes.Equal(bytes.TrimSpace(in.Prompt), []byte("null")) {
 		return nil, errors.New("responses request: prompt templates are not supported")
 	}
+	maxOutputTokens, err := jsonnum.OptionalInt(in.MaxOutputTokens, "max_output_tokens")
+	if err != nil {
+		return nil, fmt.Errorf("responses request: %w", err)
+	}
 	req := &ir.Request{
 		Model:                in.Model,
 		Instructions:         in.Instructions,
-		MaxOutputTokens:      in.MaxOutputTokens,
+		MaxOutputTokens:      maxOutputTokens,
 		Temperature:          in.Temperature,
 		TopP:                 in.TopP,
 		TopLogprobs:          in.TopLogprobs,

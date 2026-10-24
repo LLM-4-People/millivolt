@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -28,8 +29,8 @@ type chatWireRequest struct {
 	Model               string             `json:"model"`
 	System              string             `json:"system"`
 	Messages            []chatWireMessage  `json:"messages"`
-	MaxTokens           *int               `json:"max_tokens"`
-	MaxCompletionTokens *int               `json:"max_completion_tokens"`
+	MaxTokens           json.RawMessage    `json:"max_tokens"`
+	MaxCompletionTokens json.RawMessage    `json:"max_completion_tokens"`
 	Temperature         *float64           `json:"temperature"`
 	TopP                *float64           `json:"top_p"`
 	Stop                json.RawMessage    `json:"stop"`
@@ -203,11 +204,19 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	if strings.TrimSpace(in.Model) == "" {
 		return nil, errParseOpenAIBody(errors.New("model is required"))
 	}
+	maxCompletionTokens, err := jsonnum.OptionalInt(in.MaxCompletionTokens, "max_completion_tokens")
+	if err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
+	maxTokens, err := jsonnum.OptionalInt(in.MaxTokens, "max_tokens")
+	if err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
 
 	var warns ir.Warnings
 	req := &ir.Request{
 		Model:                in.Model,
-		MaxOutputTokens:      MergeTokenCaps(in.MaxCompletionTokens, in.MaxTokens),
+		MaxOutputTokens:      MergeTokenCaps(maxCompletionTokens, maxTokens),
 		Temperature:          in.Temperature,
 		TopP:                 in.TopP,
 		Seed:                 in.Seed,

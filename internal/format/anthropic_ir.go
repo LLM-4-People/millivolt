@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -26,7 +27,7 @@ type anthropicWireRequest struct {
 	Model         string              `json:"model"`
 	Messages      []anthropicWireMsg  `json:"messages"`
 	System        json.RawMessage     `json:"system"`
-	MaxTokens     *int                `json:"max_tokens"`
+	MaxTokens     json.RawMessage     `json:"max_tokens"`
 	Stream        bool                `json:"stream"`
 	Temperature   *float64            `json:"temperature"`
 	TopP          *float64            `json:"top_p"`
@@ -161,12 +162,16 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 	if strings.TrimSpace(in.Model) == "" {
 		return nil, errors.New("anthropic request: model is required")
 	}
-	if in.MaxTokens == nil {
+	maxTokens, err := jsonnum.OptionalInt(in.MaxTokens, "max_tokens")
+	if err != nil {
+		return nil, fmt.Errorf("anthropic request: %w", err)
+	}
+	if maxTokens == nil {
 		return nil, errors.New("anthropic request: max_tokens is required")
 	}
 	req := &ir.Request{
 		Model:           in.Model,
-		MaxOutputTokens: in.MaxTokens,
+		MaxOutputTokens: maxTokens,
 		Temperature:     in.Temperature,
 		TopP:            in.TopP,
 		TopK:            in.TopK,

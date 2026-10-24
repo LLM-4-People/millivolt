@@ -28,6 +28,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 
 	"golang.org/x/net/publicsuffix"
@@ -622,10 +623,12 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 // applyTokenCaps decodes the request's token-ceiling spellings from body with
 // one minimal unmarshal and stamps the effective ceiling onto the record
 // through MergeTokenCaps' precedence (max_completion_tokens over max_tokens
-// over max_output_tokens; none present stamps nil). A body whose cap fields
-// do not decode leaves the record untouched. Both cap re-reads share it: restampReqMaxTokens re-reads
-// a rewritten body, and parseLLMRequest's split-decode recovery re-reads a
-// body whose parameter block failed its strict decode.
+// over max_output_tokens; none present stamps nil). A malformed spelling
+// leaves the ceiling unset here; ServeHTTP's tokenCapViolation rejects it
+// before the request can proceed. Both cap re-reads share it:
+// restampReqMaxTokens re-reads a rewritten body, and parseLLMRequest's
+// split-decode recovery re-reads a body whose parameter block failed its
+// strict decode.
 // resolveRequestTokenCap owns the three wire spellings the metadata decoder
 // accepts: the Chat pair (max_completion_tokens over max_tokens) first, then the
 // Responses max_output_tokens spelling. Both metadata decode paths call it, so
@@ -1738,81 +1741,6 @@ func tokenCapPresent(raw json.RawMessage) bool {
 	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
-// tokenCapExponentClamp bounds the decimal exponent accepted by decimalParts.
-// Only a small scale can change the integral or bound verdict for a body that
-// fits the request limit, so a hostile exponent is clamped instead of being
-// materialized as a huge integer.
-const tokenCapExponentClamp = 1 << 30
-
-// decimalParts splits one JSON number literal into its digits and a base-10
-// scale, so the exact value is digits * 10^scale. It accepts the full JSON
-// number grammar and rejects anything else.
-func decimalParts(lit string) (digits string, scale int, negative, ok bool) {
-	if lit == "" {
-		return "", 0, false, false
-	}
-	i := 0
-	if lit[i] == '-' {
-		negative = true
-		i++
-	}
-	start := i
-	for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-		i++
-	}
-	if i == start {
-		return "", 0, false, false
-	}
-	digits = lit[start:i]
-	if i < len(lit) && lit[i] == '.' {
-		i++
-		fracStart := i
-		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			i++
-		}
-		if i == fracStart {
-			return "", 0, false, false
-		}
-		digits += lit[fracStart:i]
-		scale = -(i - fracStart)
-	}
-	if i < len(lit) && (lit[i] == 'e' || lit[i] == 'E') {
-		i++
-		expNegative := false
-		if i < len(lit) && (lit[i] == '+' || lit[i] == '-') {
-			expNegative = lit[i] == '-'
-			i++
-		}
-		expStart := i
-		for i < len(lit) && lit[i] >= '0' && lit[i] <= '9' {
-			i++
-		}
-		if i == expStart {
-			return "", 0, false, false
-		}
-		exp, err := strconv.Atoi(lit[expStart:i])
-		if err != nil {
-			// The exponent exceeds an int; either direction is decisive for
-			// a non-zero significand, so clamp rather than materialize it.
-			exp = tokenCapExponentClamp
-		}
-		if exp > tokenCapExponentClamp {
-			exp = tokenCapExponentClamp
-		}
-		if exp < -tokenCapExponentClamp {
-			exp = -tokenCapExponentClamp
-		}
-		if expNegative {
-			exp = -exp
-		}
-		scale += exp
-	}
-	if i != len(lit) {
-		return "", 0, false, false
-	}
-	return digits, scale, negative, true
-}
-
 // tokenCapValue validates one raw token-ceiling member. An absent or JSON null
 // member returns nil with no error. A supplied member must be a JSON number
 // whose value is integral and no greater than maxRequestOutputTokens; the
@@ -1820,52 +1748,17 @@ func decimalParts(lit string) (digits string, scale int, negative, ok bool) {
 // fractional, overflowing, out-of-range or non-number value fails closed
 // instead of slipping past a typed decode that rejected the whole object.
 func tokenCapValue(raw json.RawMessage, field string) (*int, error) {
-	lit := strings.TrimSpace(string(raw))
-	if lit == "" || lit == "null" {
+	if !tokenCapPresent(raw) {
 		return nil, nil
 	}
-	digits, scale, negative, ok := decimalParts(lit)
-	if !ok {
-		return nil, fmt.Errorf("%s must be an integer number", field)
-	}
-	sig := strings.TrimLeft(digits, "0")
-	if sig == "" {
-		zero := 0
-		return &zero, nil
-	}
-	switch {
-	case scale < 0:
-		drop := -scale
-		if drop >= len(sig) {
-			return nil, fmt.Errorf("%s must be an integer", field)
-		}
-		for _, c := range sig[len(sig)-drop:] {
-			if c != '0' {
-				return nil, fmt.Errorf("%s must be an integer", field)
-			}
-		}
-		sig = sig[:len(sig)-drop]
-	case scale > 0:
-		if len(sig)+scale > 19 {
-			return nil, fmt.Errorf("%s is outside the supported integer range", field)
-		}
-		sig += strings.Repeat("0", scale)
-	}
-	if !negative && len(sig) > 7 {
-		return nil, fmt.Errorf("%s must not exceed %d", field, maxRequestOutputTokens)
-	}
-	n, err := strconv.ParseInt(sig, 10, 0)
+	n, err := jsonnum.Parse(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%s is outside the supported integer range", field)
-	}
-	if negative {
-		n = -n
+		return nil, fmt.Errorf("%s %s", field, err)
 	}
 	if n > maxRequestOutputTokens {
 		return nil, fmt.Errorf("%s must not exceed %d", field, maxRequestOutputTokens)
 	}
-	v := int(n)
-	return &v, nil
+	return &n, nil
 }
 
 // conflictingTokenCapSpellings reports a body that mixes the Responses
