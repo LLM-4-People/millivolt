@@ -490,8 +490,16 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	}
 	hasContent := keys.contentStart() || keys.textStart() || keys.audioTranscriptStart() ||
 		responsesContentEvent(eventType, &keys)
-	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys) ||
+	// The generic reasoning-key scan is the Chat/Anthropic-family detector.
+	// A Responses feed carries the official Response object in created and
+	// completed events, and that envelope's `reasoning` echo is not output
+	// presence. Keep the typed Responses owners, and run the generic scan only
+	// for a non-Responses-looking frame.
+	hasReasoning := responsesReasoningEvent(eventType, &keys) ||
 		responsesReasoningSummaryPart(eventType, payload)
+	if !a.responsesWire && !strings.HasPrefix(eventType, "response.") {
+		hasReasoning = hasReasoning || keys.reasoningStart()
+	}
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
 	// Responses tool activity: a function call is announced by

@@ -75,11 +75,55 @@ func TestResponsesUnknownOutputItemCompletes(t *testing.T) {
 
 func TestResponsesEmptyMessageStaysEmptyCompletion(t *testing.T) {
 	a, _ := analyzeLines([]string{
-		`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}`,
+		`data: {"type":"response.created","response":{"id":"r1","status":"in_progress","reasoning":{"effort":null,"summary":null}}}`,
 		`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}`,
-		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`,
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","reasoning":{"effort":null,"summary":null},"output":[]}}`,
 	})
 	if a.OutcomeCode() != metrics.CodeEmptyCompletion {
 		t.Fatalf("empty message outcome = %q, want empty_completion", a.OutcomeCode())
+	}
+}
+
+// TestResponsesReasoningEchoIsNotPresence is the round 12 F1 regression: the
+// official response.created and response.completed envelopes carry
+// "reasoning":{"effort":null,"summary":null}. That object is a request echo,
+// not output, so it must not set TTFT, the reasoning timestamp, chunks or the
+// no-usage token fallback, and an empty turn stays empty_completion.
+func TestResponsesReasoningEchoIsNotPresence(t *testing.T) {
+	a, rec := analyzeLines([]string{
+		`data: {"type":"response.created","response":{"id":"r1","status":"in_progress","reasoning":{"effort":null,"summary":null}}}`,
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed","reasoning":{"effort":null,"summary":null},"output":[]}}`,
+	})
+	if !rec.FirstTokenAt.IsZero() {
+		t.Fatalf("first token at %v, want zero for an empty turn", rec.FirstTokenAt)
+	}
+	if rec.FirstReasoningAt != 0 {
+		t.Fatalf("first reasoning at %d, want zero", rec.FirstReasoningAt)
+	}
+	if rec.Chunks != 0 || rec.GenTokens != 0 {
+		t.Fatalf("chunks/gen = %d/%d, want 0/0", rec.Chunks, rec.GenTokens)
+	}
+	if got := a.OutcomeCode(); got != metrics.CodeEmptyCompletion {
+		t.Fatalf("outcome = %q, want empty_completion", got)
+	}
+
+	// A typed reasoning summary delta is real output presence.
+	_, typed := analyzeLines([]string{
+		`data: {"type":"response.created","response":{"id":"r1","status":"in_progress","reasoning":{"effort":null,"summary":null}}}`,
+		`data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"think"}`,
+		`data: {"type":"response.completed","response":{"id":"r1","status":"completed"}}`,
+	})
+	if typed.FirstReasoningAt == 0 {
+		t.Fatal("typed reasoning summary delta recorded no reasoning timestamp")
+	}
+
+	// The Chat reasoning-content control still runs through the generic scan.
+	_, chat := analyzeLines([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"think"}}]}`,
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	})
+	if chat.FirstReasoningAt == 0 {
+		t.Fatal("Chat reasoning_content recorded no reasoning timestamp")
 	}
 }
