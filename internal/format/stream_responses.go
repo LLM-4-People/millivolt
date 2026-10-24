@@ -1875,6 +1875,11 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 		if _, err := d.announcePart(part.key); err != nil {
 			return err
 		}
+		// Record the item that owns this summary part before the value is
+		// stored. emittedSummaryParts filters by owner, so a done-only summary
+		// without this assignment looks uncovered to the terminal copy and is
+		// emitted a second time.
+		d.partOwner[part.key] = key
 		before := d.emittedValue(part.key)
 		d.appendReasoningValue(item, key, part.value, pending)
 		if err := d.setEmittedText(part.key, before+part.value); err != nil {

@@ -92,3 +92,30 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		}
 	})
 }
+
+// A summary that first arrives in output_item.done has no earlier part
+// announcement. Its part owner must still be recorded so the terminal copy
+// recognizes the emitted bytes and does not queue a second block.
+func TestResponsesSummaryDoneThenTerminalEmitsOnce(t *testing.T) {
+	source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"abc"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"abc"}]}]}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			if got := strings.Join(reasoningEmissionOrder(t, target.inbound, buf.String()), ""); got != "abc" {
+				t.Fatalf("reasoning = %q, want abc once: %s", got, buf.String())
+			}
+		})
+	}
+}
