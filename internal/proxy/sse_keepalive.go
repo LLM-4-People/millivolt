@@ -335,8 +335,10 @@ func (p *ssePacer) commitStatus(status int) bool {
 }
 
 // commitError writes a protocol-native JSON HTTP error under p.mu if headers
-// are still open, and books the body bytes on the record. Returns true when
-// SSE was already committed (caller emits in-band).
+// are still open. The generated status-line envelope is not relayed body bytes,
+// so it never increments the record's ResponseBytes; a relayed upstream error
+// body counts through its own write path. Returns true when SSE was already
+// committed (caller emits in-band).
 func (p *ssePacer) commitError(extra http.Header, rec *metrics.Record, inbound ir.Protocol, code int, typ, msg string) (alreadySSE bool) {
 	if p == nil {
 		return false
@@ -352,10 +354,7 @@ func (p *ssePacer) commitError(extra http.Header, rec *metrics.Record, inbound i
 	if p.started {
 		return false
 	}
-	n := writeProtocolHTTPErrorHdr(p.w, inbound, code, typ, msg, extra)
-	if rec != nil {
-		rec.ResponseBytes += int64(n)
-	}
+	writeProtocolHTTPErrorHdr(p.w, inbound, code, typ, msg, extra)
 	p.started = true
 	p.lastWrite = time.Now()
 	return false
