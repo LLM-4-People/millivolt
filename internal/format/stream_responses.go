@@ -284,7 +284,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			switch item.Type {
 			case "function_call":
-				if err := checkNativeIdentity("tool id", item.CallID); err != nil {
+				toolID := responsesFunctionCallID(item.CallID, item.ID, ev.OutputIndex)
+				if err := checkNativeIdentity("tool id", toolID); err != nil {
 					return nil, err
 				}
 				if err := checkNativeIdentity("tool name", item.Name); err != nil {
@@ -310,7 +311,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.itemIDByOutput[ev.OutputIndex] = item.ID
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
-						ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
+						ID: toolID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 					},
 				}})
 				// output_item.added may carry a prefix of the arguments, or the
@@ -1412,7 +1413,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			if !admitted {
 				continue
 			}
-			emission, ok, err := functionCallTerminalEmission(item, strict)
+			emission, ok, err := functionCallTerminalEmission(item, i, strict)
 			if err != nil {
 				if strict {
 					return nil, err
@@ -1752,8 +1753,9 @@ func (d *ResponsesStreamDecoder) syntheticBlock(block ir.Block, delta *ir.Delta)
 
 // functionCallTerminalEmission builds the complete block for a function call
 // that appeared only in the terminal document.
-func functionCallTerminalEmission(item responsesWireItem, strict bool) (terminalEmission, bool, error) {
-	if err := checkNativeIdentity("tool id", item.CallID); err != nil {
+func functionCallTerminalEmission(item responsesWireItem, index int, strict bool) (terminalEmission, bool, error) {
+	toolID := responsesFunctionCallID(item.CallID, item.ID, index)
+	if err := checkNativeIdentity("tool id", toolID); err != nil {
 		return terminalEmission{}, false, err
 	}
 	if err := checkNativeIdentity("tool name", item.Name); err != nil {
@@ -1775,7 +1777,7 @@ func functionCallTerminalEmission(item responsesWireItem, strict bool) (terminal
 			// The block is the type-only start template; the normalized
 			// arguments travel in the delta so a target encoder cannot count
 			// them twice.
-			ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
+			ID: toolID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 		}},
 		delta: delta,
 	}, true, nil
@@ -2044,6 +2046,22 @@ func (d *ResponsesStreamDecoder) startPartBlock(key string) (int, bool) {
 // completion match on the wire identity the target correlates with: call id
 // for function calls, item id for messages/reasoning, then content index for a
 // part. A source that supplies no identity falls back to its wire position.
+// responsesFunctionCallID returns the target tool id for a streamed Responses
+// function call: call_id first, then the item id, then a stable synthetic id
+// for the output position. The non-stream decoder still rejects a call with
+// both identities absent, but a stream must not close a target block with an
+// empty id (Anthropic aborts and parallel Chat calls collide).
+func responsesFunctionCallID(callID, itemID string, index int) string {
+	switch {
+	case callID != "":
+		return callID
+	case itemID != "":
+		return itemID
+	default:
+		return "call_proxy_" + strconv.Itoa(index)
+	}
+}
+
 func functionCallKey(callID, itemID string, outputIndex int) string {
 	switch {
 	case callID != "":
