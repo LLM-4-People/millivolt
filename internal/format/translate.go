@@ -158,6 +158,14 @@ func TranslateRequestBetweenIR(inbound, outbound ir.Protocol, body []byte, defau
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// A translated stream targeting Chat must ask for the usage chunk. The
+	// decoder-owned flag describes only a direct Chat client's request, and a
+	// compliant Chat upstream sends no usage unless stream_options asks for
+	// it. This is the single translation owner, so every inbound protocol
+	// inherits the rule.
+	if outbound == ir.Chat && inbound != ir.Chat && req.Stream {
+		req.StreamIncludeUsage = true
+	}
 	out, err := EncodeRequest(outbound, req, defaultMaxTokens, promptCacheKey)
 	if err != nil {
 		return req, nil, req.Warnings, err
