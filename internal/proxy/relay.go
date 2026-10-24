@@ -2101,6 +2101,23 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// translated analyzer refused provider overrides; stamp what the
 			// source actually reported after the client turn is finalized.
 			fillRecord(&sourceAnalyzer, &sourceRec)
+			// The source observer owns the provider error class. The
+			// client-wire analyzer sees the target encoder's normalized error
+			// (api_error, provider_error) and loses the source code, so the
+			// first real source error wins over that view. A truncation is
+			// synthesized by the translator inside TranslateStreamBetween and
+			// therefore never reaches the source analyzer as an error event;
+			// stamp the canonical truncation unless a genuine translator
+			// failure already owns the record. Healthy streams are unchanged.
+			if sourceRec.ErrorType != "" {
+				rec.ErrorType = sourceRec.ErrorType
+				rec.ErrorCode = sourceRec.ErrorCode
+				rec.ErrorMsg = sourceRec.ErrorMsg
+			} else if translationErr == nil && sourceAnalyzer.OutcomeCode() == metrics.CodeTruncated {
+				rec.ErrorType = sse.TypeUpstreamError
+				rec.ErrorCode = metrics.CodeTruncated
+				rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+			}
 			// Invalid accounting is sticky: the source observer may have
 			// captured only the usage object that failed validation (or a
 			// later partial one), and copying it would restore a refundable
