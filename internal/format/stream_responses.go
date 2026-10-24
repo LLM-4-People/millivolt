@@ -2888,7 +2888,10 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 // Abort closes every item this encoder opened after a target-side failure,
 // without flushing retained payload. Chat completions need no close frame;
 // Anthropic emits a content_block_stop; Responses emits an empty part done
-// (when the part was opened) followed by an incomplete item done.
+// (when the part was opened) followed by an incomplete item done. An open
+// function_call is left without a done item because that item would carry
+// arguments {}, an executable empty call; the proxy error frame terminates the
+// stream instead.
 func (e *ResponsesStreamEncoder) Abort() error {
 	for _, idx := range e.order {
 		if !e.open[idx] {
