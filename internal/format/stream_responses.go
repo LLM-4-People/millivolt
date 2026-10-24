@@ -1073,6 +1073,15 @@ func reconcileChannel(emitted, terminal []channelPart) channelReconciliation {
 	}
 	if strings.HasPrefix(terminalTotal, emittedTotal) {
 		covered := len(emittedTotal)
+		// A terminal part that straddles the end of the streamed bytes is the
+		// continuation of the LAST emitted part, whatever terminal index it
+		// carries. Keeping its terminal key would resolve to an earlier open
+		// block and append the tail there (the C1 text-order corruption).
+		// Fully new tail parts keep their own keys and order.
+		lastKey := ""
+		if len(emitted) > 0 {
+			lastKey = emitted[len(emitted)-1].key
+		}
 		offset := 0
 		for _, part := range terminal {
 			start := offset
@@ -1082,6 +1091,7 @@ func reconcileChannel(emitted, terminal []channelPart) channelReconciliation {
 			}
 			if start < covered {
 				part.value = part.value[covered-start:]
+				part.key = lastKey
 			}
 			if part.value != "" {
 				res.emit = append(res.emit, part)
