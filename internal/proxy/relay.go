@@ -398,10 +398,10 @@ func spoolBody(body io.Reader) (b []byte, overflow bool, err error) {
 // in-band error envelope passthrough and the healthy commit) stay at their
 // call sites.
 // applyTranslatedStructure stamps the record fields the Chat-oriented
-// non-stream analyzer cannot see when the CLIENT-facing wire is Anthropic or
-// Responses: finish reason, answer presence, preview and tool calls. Usage,
-// model and id remain owned by the shared non-stream analysis of the
-// translated body.
+// non-stream analyzer cannot see when the client-facing wire is Anthropic or
+// Responses, translated or native: finish reason, answer presence, preview,
+// tool calls and the canonical usage. Model and id stay with the shared
+// non-stream analysis when it can read the body.
 func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bool) {
 	if rec == nil || resp == nil {
 		return
@@ -467,6 +467,46 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 	}
 	if len(names) > 0 {
 		rec.ToolNames = names
+	}
+}
+
+// applyNativeNonChatStructure stamps the canonical structure of a native
+// Responses or Anthropic 2xx body. The Chat-oriented non-stream analysis
+// cannot see those wires, so finish reason, tool calls, answer presence,
+// preview and folded cache usage would stay empty. Best-effort by design: a
+// body the codec cannot decode keeps the existing analysis and relays
+// unchanged, because metrics must never block the client.
+func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spooled []byte) {
+	if rec == nil || t == nil {
+		return
+	}
+	switch t.outbound {
+	case ir.Responses, ir.Anthropic:
+	default:
+		return
+	}
+	resp, err := providerformat.DecodeResponse(t.outbound, spooled)
+	if err != nil || resp == nil {
+		return
+	}
+	applyTranslatedStructure(rec, resp, s.cfg().CaptureBodyPreview)
+	// The provider's usage object is authoritative and honors custom
+	// usage_keys; the canonical decoder folds Anthropic's cache counts and
+	// derives the total only for its own documented shape.
+	usage, ok, usageErr := providerformat.SourceUsage(t.outbound, spooled, s.usageKeysFor(rec.Provider))
+	if usageErr != nil {
+		invalidateUsage(rec, usageErr)
+		return
+	}
+	if ok {
+		rec.Usage = metrics.Usage{
+			InputTokens:     usage.InputTokens,
+			OutputTokens:    usage.OutputTokens,
+			TotalTokens:     usage.TotalTokens,
+			CacheReadTokens: usage.CacheReadTokens,
+			CacheWrite:      usage.CacheWriteTokens,
+			ReasoningTokens: usage.ReasoningTokens,
+		}
 	}
 }
 
@@ -931,6 +971,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		}
 
 		// Healthy: commit the spooled body verbatim.
+		s.applyNativeNonChatStructure(rec, t, spooled)
 		s.commitSpooledBody(w, resp, spooled, rec, analysis)
 		s.respBudget.release(reserve)
 		return
