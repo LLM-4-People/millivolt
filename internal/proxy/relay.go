@@ -844,14 +844,11 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// The source document owns usage and cost accounting; provider
 			// usage_keys address its shape, not the normalized translated
 			// wire. Read the translated output for completion structure only.
+			// A canonical failure never reaches this point: a non-nil
+			// respIR.Error makes TranslateResponseBetweenIR return a nil
+			// canonical response, and the branch above already stamped the
+			// failure and the 502 status from the source error envelope.
 			analyzeNonStreamBytes(out, rec, nil, nil, s.cfg().CaptureBodyPreview)
-			// The canonical response owns a failure the Chat-shaped analyzer
-			// cannot see. Stamp it for every inbound wire; a Chat client still
-			// receives the translated success body (that residual is documented
-			// separately), but the record must not stay healthy.
-			if respIR != nil {
-				stampNativeResponseError(rec, respIR.Error)
-			}
 			if t.inbound != ir.Chat {
 				// The non-stream analyzer reads Chat-shaped choices. For an
 				// Anthropic or Responses client those fields live only in the
