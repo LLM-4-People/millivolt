@@ -42,10 +42,10 @@ const requestReadHintMax = 1 << 20
 // setResolvedAuth stamps the extracted upstream key into the target's
 // configured auth header (name + prefix); an empty key stamps nothing. The
 // one owner shared by the generic upstream request builder, the metadata
-// fetchers, and the cursor identity headers. The anthropic x-api-key
-// fallback (a target with no configured auth header) keeps its own branch,
-// and buildUpstreamRequest additionally strips the client's forwarded
-// credential before stamping.
+// fetchers, and the cursor identity headers. t.authHeader always carries the
+// resolved header (Authorization unless the client names one), so there is no
+// protocol-specific fallback, and buildUpstreamRequest additionally strips the
+// client's forwarded credential before stamping.
 func setResolvedAuth(h http.Header, t *target, key string) {
 	if key != "" {
 		h.Set(t.authHeader, t.authPrefix+key)

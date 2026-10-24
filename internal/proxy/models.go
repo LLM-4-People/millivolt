@@ -558,9 +558,10 @@ func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, e
 }
 
 // serveAnthropicModels pages Anthropic's /v1/models (collecting all pages) and
-// returns the merged list in the OpenAI shape. Anthropic requires x-api-key and
-// an anthropic-version header; both are set here (the client sends an
-// OpenAI-style Authorization, which Anthropic would not accept).
+// returns the merged list in the OpenAI shape. Discovery uses the resolved
+// target auth header, which defaults to Authorization; an Anthropic endpoint
+// that requires x-api-key therefore needs X-Proxy-Auth-Header: x-api-key.
+// The anthropic-version header is set here because it is protocol-specific.
 func (s *Server) serveAnthropicModels(d *modelsDiscovery, w http.ResponseWriter, r *http.Request, t *target, key string) {
 	const anthropicVersion = "2023-06-01" // required on every Anthropic API request
 	const pageLimit = "1000"              // Anthropic caps limit at 1000
