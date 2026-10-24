@@ -342,6 +342,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkNativeIdentity("tool name", item.Name); err != nil {
 					return nil, err
 				}
+				if err := checkToolCallName(item.Name); err != nil {
+					return nil, err
+				}
 				key := functionCallKey(item.CallID, item.ID, ev.OutputIndex)
 				admitted, err := d.announceItem(key)
 				if err != nil {
@@ -1755,12 +1758,6 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 					key, idx, ok = matchedKey, matchedIdx, true
 				}
 			}
-			if !ok && item.CallID == "" && item.ID == "" && d.matchesClosedIdlessCall(item) {
-				// No open call matched. An id-less entry at another position
-				// can still repeat a closed call with the same name and
-				// arguments; skip it instead of synthesizing a duplicate.
-				continue
-			}
 			if ok && d.open[idx] {
 				claimedTools[key] = true
 				if err := d.flushToolArguments(key, idx, item.Arguments, policy); err != nil {
@@ -1768,7 +1765,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 				continue
 			}
-			if d.terminalItemAnnounced(key, i, item.ID) {
+			if d.terminalToolCallAnnounced(key, i, item.ID) {
 				continue
 			}
 			admitted, err := d.announceItem(key)
@@ -1970,16 +1967,18 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 	return nil
 }
 
-// terminalItemAnnounced reports whether a terminal item's stable identity was
-// already announced by a streamed item event. A positional fallback is used
-// only when the stream and terminal item share an item id (or one side has no
-// id), never to relabel a different item that happens to occupy the position.
-func (d *ResponsesStreamDecoder) terminalItemAnnounced(key string, outputIndex int, itemID string) bool {
-	if d.announcedItems[key] {
+// terminalToolCallAnnounced reports whether a terminal function call's stable
+// identity was already announced by a streamed tool item. The positional
+// fallback requires the position to name an announced TOOL call, never a
+// reasoning or message announcement: a foreign item at the same position is
+// not an identity and must not claim the call. The item-id agreement still
+// guards a tool announcement that carries an id.
+func (d *ResponsesStreamDecoder) terminalToolCallAnnounced(key string, outputIndex int, itemID string) bool {
+	if d.announcedToolKeys[key] {
 		return true
 	}
 	fallback, ok := d.keyByOutput[outputIndex]
-	if !ok || !d.announcedItems[fallback] {
+	if !ok || !d.announcedToolKeys[fallback] {
 		return false
 	}
 	announcedID := d.itemIDByOutput[outputIndex]
@@ -2130,6 +2129,9 @@ func functionCallTerminalEmission(item responsesWireItem, index int, policy resp
 		return terminalEmission{}, false, err
 	}
 	if err := checkNativeIdentity("tool name", item.Name); err != nil {
+		return terminalEmission{}, false, err
+	}
+	if err := checkToolCallName(item.Name); err != nil {
 		return terminalEmission{}, false, err
 	}
 	if policy == responsesToolArgumentsRequired && toolArgumentsMissing(item.Arguments) {
