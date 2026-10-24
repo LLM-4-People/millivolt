@@ -62,3 +62,44 @@ func TestNormalAnthropicUsageTotalUnchanged(t *testing.T) {
 		t.Fatalf("usage = %+v, want %+v", rec.Usage, want)
 	}
 }
+
+func TestCustomProviderTotalIncludesRestoredOutput(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":10,"output_tokens":0,"my_total":10}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		``,
+	}, "\n")
+	var a Analyzer
+	a.UsageKeys = map[string]string{"total_tokens": "my_total"}
+	feedAnthropicLines(t, &a, stream)
+	var rec metrics.Record
+	a.Fill(&rec)
+	if want := (metrics.Usage{InputTokens: 10, OutputTokens: 1, TotalTokens: 11}); rec.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", rec.Usage, want)
+	}
+	if a.UsageInvalid() {
+		t.Fatal("a recoverable custom total was marked invalid")
+	}
+}
+
+func TestCustomProviderTotalAboveRestoredSumIsKept(t *testing.T) {
+	stream := strings.Join([]string{
+		`event: message_start`,
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":10,"output_tokens":0,"my_total":50}}}`,
+		``,
+		`event: content_block_delta`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		``,
+	}, "\n")
+	var a Analyzer
+	a.UsageKeys = map[string]string{"total_tokens": "my_total"}
+	feedAnthropicLines(t, &a, stream)
+	var rec metrics.Record
+	a.Fill(&rec)
+	if want := (metrics.Usage{InputTokens: 10, OutputTokens: 1, TotalTokens: 50}); rec.Usage != want {
+		t.Fatalf("usage = %+v, want the provider total %+v", rec.Usage, want)
+	}
+}

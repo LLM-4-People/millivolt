@@ -1247,6 +1247,7 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	// GenTokens fallback yields to FinalizeRecord's usage-based finalization
 	// (the same contract as a present usage object).
 	fallbackOutput := rec.Usage.OutputTokens
+	restoredOutput := false
 	if a.usage != nil {
 		decodeUsage(a.usage, rec, a.UsageKeys)
 		// A present usage object may omit output_tokens (a truncated
@@ -1258,18 +1259,7 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 		if rec.Usage.OutputTokens == 0 && fallbackOutput > 0 {
 			rec.Usage.OutputTokens = fallbackOutput
 			rec.GenTokens = a.chunkCount - a.toolChunks
-			// A provider total captured before the restored output (the
-			// truncated Anthropic message_start shape) is now too small.
-			// Raise only a non-zero total, and never lower one: a zero total
-			// deliberately lets settlement derive input+output, while a
-			// provider total at or above the sum stays authoritative.
-			if rec.Usage.TotalTokens > 0 {
-				if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
-					a.usageInvalid = true
-				} else if rec.Usage.TotalTokens < total {
-					rec.Usage.TotalTokens = total
-				}
-			}
+			restoredOutput = true
 		}
 		// Provider usage-key paths may live beside the usage object in the
 		// raw chunk root; merge them without clobbering normalized counts.
@@ -1307,6 +1297,19 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 				rec.GenTokens = 0
 			}
 			a.usageSeen = true
+		}
+	}
+	// A restored output count is part of the turn's usage, so a provider
+	// total captured before that restoration must not remain below
+	// input+restored output. The custom-total merge above can overwrite the
+	// earlier value, so the consistency guard runs once after every usage
+	// owner. A zero total stays zero (settlement derives input+output), and a
+	// provider total at or above the sum stays authoritative.
+	if restoredOutput && rec.Usage.TotalTokens > 0 {
+		if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
+			a.usageInvalid = true
+		} else if rec.Usage.TotalTokens < total {
+			rec.Usage.TotalTokens = total
 		}
 	}
 	// Cost is read straight from the provider's response (dynamic), so it
