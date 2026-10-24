@@ -67,7 +67,7 @@ func TestRequestIntegralNumbers(t *testing.T) {
 			body:   responses(`"max_tool_calls":1.0`),
 			decode: DecodeResponsesRequest,
 			check: func(t *testing.T, req *ir.Request) {
-				if !hasWarningField(req, "max_tool_calls") {
+				if !warningField(req.Warnings, "max_tool_calls") {
 					t.Fatalf("max_tool_calls warning missing: %+v", req.Warnings)
 				}
 			},
