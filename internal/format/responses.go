@@ -56,6 +56,7 @@ type responsesWireRequest struct {
 	MaxToolCalls       *int              `json:"max_tool_calls"`
 	Conversation       json.RawMessage   `json:"conversation"`
 	Prompt             json.RawMessage   `json:"prompt"`
+	ContextManagement  json.RawMessage   `json:"context_management"`
 }
 
 type responsesWireTool struct {
@@ -128,6 +129,12 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	}
 	if in.Background {
 		return nil, errors.New("responses request: background execution is not supported")
+	}
+	if len(in.ContextManagement) > 0 && !bytes.Equal(bytes.TrimSpace(in.ContextManagement), []byte("null")) {
+		// Compaction is server-side conversation state. The proxy is
+		// stateless, so honoring it is impossible and silently dropping it
+		// would change the model's context. Reject before any upstream call.
+		return nil, errors.New("responses request: context_management is not supported")
 	}
 	if len(in.Conversation) > 0 && !bytes.Equal(bytes.TrimSpace(in.Conversation), []byte("null")) {
 		return nil, errors.New("responses request: conversation is not supported")
