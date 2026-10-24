@@ -1853,7 +1853,10 @@ func DecodeAnthropicError(body []byte) (*ir.Error, error) {
 	if in.Error.Message == "" && in.Error.Type == "" {
 		return nil, errors.New("not an anthropic error envelope")
 	}
-	return &ir.Error{Type: in.Error.Type, Message: in.Error.Message}, nil
+	return &ir.Error{
+		Type:    metrics.TruncatePreview(in.Error.Type),
+		Message: metrics.TruncatePreview(in.Error.Message),
+	}, nil
 }
 
 // EncodeAnthropicError renders the canonical error as an Anthropic error

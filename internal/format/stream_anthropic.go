@@ -369,7 +369,8 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-				Type: ev.Error.Type, Message: ev.Error.Message,
+				Type:    metrics.TruncatePreview(ev.Error.Type),
+				Message: metrics.TruncatePreview(ev.Error.Message),
 			}})
 		default:
 			continue
