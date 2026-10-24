@@ -1840,17 +1840,26 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 	return cfg, skipped, nil
 }
 
-// readConfigFile is LoadFile's one input reader. The configuration document
-// is intentionally allowed the same envelope as the rendered document Validate
-// enforces, so the size check happens before parsing or proportional
-// allocation. Stat catches an oversized regular file immediately; the bounded
-// read keeps the guarantee if the file grows between stat and read (or if the
-// path is a special file).
 // ReadDocument is the one bounded read owner for a configuration document.
-// Boot, reload and the restore admin plane all use it, so an overgrown file, a
-// FIFO or a device is rejected before it is read whole. The regular-file check
-// prevents a blocking open of a special file.
+// Boot, reload, inspect and the restore rollback capture all use it, so the
+// configuration document is allowed exactly the envelope SetDocument's size
+// check enforces before parsing or proportional allocation.
+//
+// The pre-open stat rejects a FIFO, device or directory before os.Open, which
+// would block indefinitely on a FIFO with no writer. The post-open stat repeats
+// the regular-file and size checks for the stat-to-open race, and the bounded
+// LimitReader keeps the size guarantee even if the file grows after the check.
 func ReadDocument(path string) ([]byte, error) {
+	pre, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	if pre.Size() > int64(ConfigDocumentMaxBytes) {
+		return nil, configFileTooLarge(path, pre.Size())
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

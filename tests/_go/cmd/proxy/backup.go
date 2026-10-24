@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2448,6 +2449,24 @@ func TestRestoreInspectLiveConfigFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUnavailable(inspect())
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// A FIFO must be rejected from its stat before os.Open, which would block
+	// forever waiting for a writer. Run inspect off the test goroutine so a
+	// reordering regression fails on the timeout instead of hanging the suite.
+	if err := syscall.Mkfifo(liveConfigPath, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	fifoDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { fifoDone <- inspect() }()
+	select {
+	case fifoRR := <-fifoDone:
+		assertUnavailable(fifoRR)
+	case <-time.After(2 * time.Second):
+		t.Fatal("inspect blocked on a FIFO instead of rejecting the non-regular path")
+	}
 	if err := os.Remove(liveConfigPath); err != nil {
 		t.Fatal(err)
 	}
