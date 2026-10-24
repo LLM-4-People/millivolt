@@ -822,7 +822,7 @@ func TestInlineFileDataURLRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
+func TestAnthropicKeepsLateSystemMessage(t *testing.T) {
 	in := `{"model":"m","messages":[` +
 		`{"role":"user","content":"hi"},` +
 		`{"role":"system","content":"late rules"},` +
@@ -836,22 +836,18 @@ func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := decodeJSONMap(t, out)
-	if doc["system"] != "late rules" {
-		t.Fatalf("system = %v, want the lifted text", doc["system"])
+	if doc["system"] != nil {
+		t.Fatalf("system = %v, want the late system turn kept in messages", doc["system"])
 	}
 	msgs, _ := doc["messages"].([]any)
-	if len(msgs) != 1 {
-		t.Fatalf("messages = %v, want the two adjacent user turns merged", doc["messages"])
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %v, want user/system/user in order", doc["messages"])
 	}
-	if msgs[0].(map[string]any)["role"] != "user" {
-		t.Fatalf("non-user role reached Anthropic messages: %v", doc["messages"])
+	if msgs[1].(map[string]any)["role"] != "system" {
+		t.Fatalf("messages[1] = %v, want the system turn at its original position", msgs[1])
 	}
-	content, _ := msgs[0].(map[string]any)["content"].([]any)
-	if len(content) != 2 {
-		t.Fatalf("merged content = %v, want both user texts", content)
-	}
-	if !warningField(req.Warnings, "system") {
-		t.Fatalf("missing late-system warning: %+v", req.Warnings)
+	if warningField(req.Warnings, "system") {
+		t.Fatalf("kept system turn was reported as moved: %+v", req.Warnings)
 	}
 }
 

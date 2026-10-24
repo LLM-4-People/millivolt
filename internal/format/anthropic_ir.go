@@ -768,13 +768,26 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 		out["output_config"] = oc
 	}
 	if req.User != "" {
+		// Anthropic metadata.user_id is maxLength 512 in characters. An
+		// overlong identifier is rejected rather than truncated, because a
+		// truncated identifier can collide with a different caller.
+		if utf8.RuneCountInString(req.User) > anthropicUserIDMax {
+			return nil, fmt.Errorf("anthropic metadata.user_id exceeds %d characters", anthropicUserIDMax)
+		}
 		out["metadata"] = map[string]any{"user_id": req.User}
 	}
-	if req.ServiceTier == "fast" {
+	switch req.ServiceTier {
+	case "fast":
 		// Anthropic expresses fast processing with speed, not the service
 		// tier vocabulary.
 		out["speed"] = "fast"
-	} else {
+	case "priority":
+		// OpenAI's priority spelling is the other request opt-in for Fast
+		// mode; Anthropic has one fast speed value, so the intent survives
+		// with an approximation warning.
+		out["speed"] = "fast"
+		req.Warnings.Add(ir.WarningApproximated, "service_tier", "priority is a fast-mode request; Anthropic has one speed value")
+	default:
 		tier, tierWarns := mapServiceTier(ir.Anthropic, req.ServiceTier)
 		req.Warnings = append(req.Warnings, tierWarns...)
 		if tier != "" {
@@ -791,8 +804,10 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 }
 
 // encodeAnthropicSystem lifts the Responses instructions and leading
-// system/developer messages into the top-level system field. Mid-conversation
-// system messages stay in messages.
+// system/developer messages into the top-level system field. A system message
+// after the conversation has started is representable as SystemMessageParam
+// and stays in messages at its original position. A later developer message
+// has no Anthropic role and is lifted with an approximation warning.
 func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *ir.Warnings) any {
 	var blocks []map[string]any
 	if instructions != nil && *instructions != "" {
@@ -805,46 +820,56 @@ func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *i
 			seenNonSystem = true
 			continue
 		}
-		// Anthropic Messages has one top-level system prompt and no system
-		// turn inside the conversation. Lift a late system/developer message
-		// to that prompt rather than emitting an invalid role; the positional
-		// change is reported.
-		if seenNonSystem && !moved {
+		if m.Role == ir.RoleSystem && seenNonSystem {
+			continue
+		}
+		if m.Role == ir.RoleDeveloper && seenNonSystem && !moved {
 			moved = true
 			if warns != nil {
-				warns.Add(ir.WarningApproximated, "system", "Anthropic Messages only supports a top-level system prompt; a later system message was moved before the conversation")
+				warns.Add(ir.WarningApproximated, "system", "Anthropic Messages has no developer role; a later developer message was moved before the conversation")
 			}
 		}
-		for _, b := range m.Content {
-			if b.Type != ir.BlockText {
-				if warns != nil {
-					warns.Add(ir.WarningDropped, "system."+string(b.Type), "Anthropic system prompts are text-only")
-				}
-				continue
-			}
-			// Anthropic's TextBlockParam.text has minLength 1. An empty
-			// system block cannot be represented; drop it with any cache
-			// breakpoint or citations, matching the message-content owner.
-			if b.Text == "" {
-				continue
-			}
-			block := map[string]any{"type": "text", "text": b.Text}
-			if b.CacheControl != nil {
-				block["cache_control"] = b.CacheControl
-			}
-			if len(b.Citations) > 0 {
-				if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
-					block["citations"] = citations
-				}
-			}
-			blocks = append(blocks, block)
-		}
+		blocks = append(blocks, anthropicSystemTextBlocks(m.Content, warns)...)
 	}
+	return anthropicTextContent(blocks)
+}
+
+// anthropicSystemTextBlocks renders the text-only part of a system or
+// developer turn. Anthropic system content cannot carry non-text blocks, and
+// TextBlockParam.text has minLength 1, so both are dropped with a warning.
+func anthropicSystemTextBlocks(content []ir.Block, warns *ir.Warnings) []map[string]any {
+	var blocks []map[string]any
+	for _, b := range content {
+		if b.Type != ir.BlockText {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "system."+string(b.Type), "Anthropic system prompts are text-only")
+			}
+			continue
+		}
+		if b.Text == "" {
+			continue
+		}
+		block := map[string]any{"type": "text", "text": b.Text}
+		if b.CacheControl != nil {
+			block["cache_control"] = b.CacheControl
+		}
+		if len(b.Citations) > 0 {
+			if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
+				block["citations"] = citations
+			}
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks
+}
+
+// anthropicTextContent keeps the historical string join for plain text while a
+// cache breakpoint or citation requires the block-array form. Both the
+// top-level and in-conversation system encoders share it.
+func anthropicTextContent(blocks []map[string]any) any {
 	if len(blocks) == 0 {
 		return nil
 	}
-	// Preserve the historical string join when no block carries a cache
-	// breakpoint or citations; either one requires the block-array form.
 	for _, block := range blocks {
 		if _, ok := block["cache_control"]; ok {
 			return blocks
@@ -869,17 +894,28 @@ type anthropicOutMessage struct {
 
 func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOutMessage {
 	var out []anthropicOutMessage
+	seenNonSystem := false
 	for _, m := range in {
 		if m.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
 		}
-		// Every system/developer message is rendered at the top level; none
-		// may appear as a role inside the conversation.
-		if m.Role == ir.RoleSystem || m.Role == ir.RoleDeveloper {
+		// Developer messages are lifted at the top level. A leading system
+		// message is lifted too; a later system turn stays here as the
+		// SystemMessageParam the Messages schema accepts.
+		if m.Role == ir.RoleDeveloper {
+			continue
+		}
+		if m.Role == ir.RoleSystem && !seenNonSystem {
 			continue
 		}
 		role := string(m.Role)
-		content := encodeAnthropicContent(m.Content, warns)
+		var content any
+		if m.Role == ir.RoleSystem {
+			content = anthropicTextContent(anthropicSystemTextBlocks(m.Content, warns))
+		} else {
+			seenNonSystem = true
+			content = encodeAnthropicContent(m.Content, warns)
+		}
 		if content == nil {
 			continue
 		}
@@ -1122,6 +1158,10 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 
 // anthropicImageMediaTypes is the Base64ImageSource media-type allowlist from
 // the Anthropic Messages schema.
+// anthropicUserIDMax is the official metadata.user_id maxLength. It counts
+// Unicode characters, matching the JSON Schema maxLength semantics.
+const anthropicUserIDMax = 512
+
 var anthropicImageMediaTypes = map[string]bool{
 	"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
 }
@@ -1631,6 +1671,12 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	}
 	if resp.StopSequence != "" {
 		out["stop_sequence"] = resp.StopSequence
+	}
+	if len(resp.Metadata) > 0 {
+		// The Anthropic Message response object has no metadata property.
+		// The field is unrepresentable, so report the loss instead of adding
+		// a non-schema field.
+		resp.Warnings.Add(ir.WarningDropped, "metadata", "Anthropic Messages responses have no metadata field")
 	}
 	if resp.Finish == ir.FinishOther || resp.Finish == ir.FinishCancelled {
 		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",

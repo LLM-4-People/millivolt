@@ -84,6 +84,20 @@ target cannot consume them:
   retrieval path. Explicit source values are preserved. A Responses source's
   implicit storage cannot be honored on Chat or Anthropic, and no response id
   is returned for later retrieval.
+- A leading system or developer message and the Responses instructions become
+  the top-level Anthropic `system` prompt. A system turn after the conversation
+  starts stays in `messages` as a `system` turn at its original position. A
+  later developer turn has no Anthropic role and is lifted to the prompt with
+  an approximation warning, which reports the positional change.
+- Anthropic `metadata.user_id` is limited to 512 characters. A longer Chat or
+  Responses `user` value is rejected before any upstream send rather than
+  truncated, because truncation can collide two distinct identifiers.
+  Chat/Responses `service_tier: priority` maps to Anthropic `speed: fast` with
+  an approximation warning; `fast` maps without one.
+- A response metadata map has no field on the Anthropic Message object, so a
+  non-streaming translated response drops it with a warning. A translated
+  Anthropic stream cannot report response-side warnings after its status line
+  is committed.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
@@ -107,9 +121,9 @@ vocabulary are not inspected or reported; the passthrough path relays them
 unchanged. `reject` fails the request with 400 naming the fields before any
 upstream send,
 and it refuses every recorded loss, including a documented approximation such
-as a clamped temperature, a moved system message, a generated tool-call id or
-a `json_object` response format, not only a field the target cannot represent
-at all. The header is proxy-owned: a provider response header of the same name
+as a clamped temperature, a moved developer message, a generated tool-call id
+or a `json_object` response format, not only a field the target cannot
+represent at all. The header is proxy-owned: a provider response header of the same name
 is never forwarded. Its whole value is bounded at 1024 bytes; an over-cap list
 is cut at the byte budget, possibly inside the final field, and ends with
 `; truncated`. Response-side warnings
