@@ -2741,6 +2741,11 @@ type ResponsesStreamEncoder struct {
 	outputIndex int
 	items       map[int]*responsesItemState
 	open        map[int]bool
+	// pendingDone defers a message item's final output_item.done until the
+	// terminal status is known. The block closes before the canonical
+	// MessageDelta, so emitting "completed" at BlockEnd would lie for a
+	// length/content-filter/failed turn.
+	pendingDone *responsesItemState
 	order       []int
 	finish      ir.FinishReason
 	usage       ir.Usage
@@ -3020,7 +3025,14 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 	if e.failed != nil {
 		status = "failed"
 	}
-	response, err := e.responseObject(status, incompleteReason, e.outputItems())
+	itemStatus := "completed"
+	if status != "completed" {
+		itemStatus = "incomplete"
+	}
+	if err := e.flushPendingDone(itemStatus); err != nil {
+		return err
+	}
+	response, err := e.responseObject(status, incompleteReason, e.outputItems(status))
 	if err != nil {
 		return err
 	}
@@ -3040,7 +3052,11 @@ func (e *ResponsesStreamEncoder) responseObject(status, incompleteReason string,
 	})
 }
 
-func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
+func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
+	messageStatus := "completed"
+	if status != "completed" {
+		messageStatus = "incomplete"
+	}
 	var out []map[string]any
 	for _, idx := range e.order {
 		item := e.items[idx]
@@ -3054,14 +3070,7 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 		}
 		switch item.kind {
 		case "message":
-			part := map[string]any{"type": "output_text", "text": item.text.String(), "annotations": []any{}, "logprobs": []any{}}
-			if item.partType == "refusal" {
-				part = map[string]any{"type": "refusal", "refusal": item.refusal.String()}
-			}
-			out = append(out, map[string]any{
-				"type": "message", "id": item.id, "status": "completed", "role": "assistant",
-				"content": []any{part},
-			})
+			out = append(out, messageItemJSON(item, messageStatus))
 		case "function_call":
 			args := item.args.String()
 			if args == "" {
@@ -3076,6 +3085,48 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 		}
 	}
 	return out
+}
+
+// messageItemJSON renders one message item with the supplied lifecycle status.
+func messageItemJSON(item *responsesItemState, status string) map[string]any {
+	var part map[string]any
+	if item.partType == "refusal" {
+		part = map[string]any{"type": "refusal", "refusal": item.refusal.String()}
+	} else {
+		part = map[string]any{
+			"type": "output_text", "text": item.text.String(), "annotations": []any{}, "logprobs": []any{},
+		}
+	}
+	return map[string]any{
+		"type": "message", "id": item.id, "status": status, "role": "assistant",
+		"content": []any{part},
+	}
+}
+
+// deferMessageDone holds a closed message item's final output_item.done until
+// the next item starts or the terminal status is known. A preceding deferred
+// item is flushed as completed first, so event order and the item count stay
+// unchanged.
+func (e *ResponsesStreamEncoder) deferMessageDone(item *responsesItemState) error {
+	if err := e.flushPendingDone("completed"); err != nil {
+		return err
+	}
+	e.pendingDone = item
+	return nil
+}
+
+// flushPendingDone emits the deferred message done frame with the supplied
+// status.
+func (e *ResponsesStreamEncoder) flushPendingDone(status string) error {
+	item := e.pendingDone
+	if item == nil {
+		return nil
+	}
+	e.pendingDone = nil
+	return e.emit("response.output_item.done", map[string]any{
+		"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+		"output_index": item.outputIndex, "item": messageItemJSON(item, status),
+	})
 }
 
 // closeItem emits the normal completion frames for one open Responses item.
@@ -3100,15 +3151,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 				return err
 			}
 			item.partOpen = false
-			return e.emit("response.output_item.done", map[string]any{
-				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-				"output_index": item.outputIndex,
-				"item": map[string]any{
-					"type": "message", "id": item.id, "status": "completed",
-					"role":    "assistant",
-					"content": []any{map[string]any{"type": "refusal", "refusal": text}},
-				},
-			})
+			return e.deferMessageDone(item)
 		}
 		text := item.text.String()
 		if err := e.emit("response.output_text.done", map[string]any{
@@ -3126,17 +3169,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 			return err
 		}
 		item.partOpen = false
-		return e.emit("response.output_item.done", map[string]any{
-			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-			"output_index": item.outputIndex,
-			"item": map[string]any{
-				"type": "message", "id": item.id, "status": "completed",
-				"role": "assistant",
-				"content": []any{map[string]any{
-					"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{},
-				}},
-			},
-		})
+		return e.deferMessageDone(item)
 	case "function_call":
 		args := item.args.String()
 		if args == "" {
@@ -3240,6 +3273,9 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 // arguments {}, an executable empty call; the proxy error frame terminates the
 // stream instead.
 func (e *ResponsesStreamEncoder) Abort() error {
+	if err := e.flushPendingDone("incomplete"); err != nil {
+		return err
+	}
 	for _, idx := range e.order {
 		if !e.open[idx] {
 			continue
@@ -3287,6 +3323,9 @@ func reasoningItem(item *responsesItemState, text string) map[string]any {
 // document within ResponsesStreamFrameMaxBytes even when the source opens
 // thousands of empty items.
 func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*responsesItemState, error) {
+	if err := e.flushPendingDone("completed"); err != nil {
+		return nil, err
+	}
 	if e.items[index] != nil {
 		return nil, fmt.Errorf("responses stream item index %d already started", index)
 	}
