@@ -103,3 +103,25 @@ func TestAnthropicReasoningSummaryReportsLoss(t *testing.T) {
 		}
 	})
 }
+
+func TestAnthropicReasoningSummaryAndEncryptedReportsBoth(t *testing.T) {
+	text, warnings := anthropicReasoningBody(t, []ir.Block{{
+		Type: ir.BlockReasoning,
+		Reasoning: &ir.Reasoning{
+			Summary:   []string{"the summary"},
+			Encrypted: "enc",
+		},
+	}})
+	if text != "the summary" {
+		t.Fatalf("visible text = %q, want the summary preserved", text)
+	}
+	if warningCount(warnings, ir.WarningApproximated, "reasoning") != 1 {
+		t.Fatalf("summary approximation not reported: %+v", warnings)
+	}
+	if warningCount(warnings, ir.WarningOpaque, "reasoning") != 1 {
+		t.Fatalf("encrypted artifact loss not reported: %+v", warnings)
+	}
+	if warningCount(warnings, ir.WarningDropped, "reasoning") != 0 {
+		t.Fatalf("encrypted summary reported as a generic drop: %+v", warnings)
+	}
+}

@@ -1075,9 +1075,14 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			} else if len(b.Reasoning.Summary) > 0 {
 				// No raw text is available; the summaries are the only visible
 				// reasoning, so fold them into text with the same approximation
-				// the Chat encoder applies instead of dropping the block.
+				// the Chat encoder applies instead of dropping the block. An
+				// encrypted artifact is still unreplayable, so that loss stays
+				// reported alongside the approximation.
 				if warns != nil {
 					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning summary was emitted as visible text")
+					if b.Reasoning.Encrypted != "" {
+						warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
+					}
 				}
 				out = append(out, map[string]any{"type": "text", "text": strings.Join(b.Reasoning.Summary, "")})
 			} else if b.Reasoning.Encrypted != "" {
