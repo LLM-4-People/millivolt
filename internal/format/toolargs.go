@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+// errToolArgumentsJSON and errToolArgumentsObject mark an argument value the
+// source never completed. A non-clean non-stream terminal drops only the call
+// carrying one of these; a clean terminal and the request path stay strict.
+var (
+	errToolArgumentsJSON   = errors.New("tool call arguments must be valid JSON")
+	errToolArgumentsObject = errors.New("tool call arguments must be a JSON object")
+)
+
+// isToolArgumentsError reports whether err is an argument-value failure rather
+// than a structural tool-call failure such as a missing name or id.
+func isToolArgumentsError(err error) bool {
+	return errors.Is(err, errToolArgumentsJSON) || errors.Is(err, errToolArgumentsObject)
+}
+
 // parseToolArguments normalizes a tool-call argument string into a JSON
 // object. Empty and null both become the empty object; any other value must
 // be valid JSON whose first non-space byte is an object opener. The non-stream
@@ -18,10 +32,10 @@ func parseToolArguments(raw string) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
 	}
 	if !json.Valid([]byte(trimmed)) {
-		return nil, errors.New("tool call arguments must be valid JSON")
+		return nil, errToolArgumentsJSON
 	}
 	if trimmed[0] != '{' {
-		return nil, errors.New("tool call arguments must be a JSON object")
+		return nil, errToolArgumentsObject
 	}
 	return json.RawMessage(trimmed), nil
 }
@@ -37,10 +51,10 @@ func validateStreamedToolArguments(raw string) error {
 		return nil
 	}
 	if !json.Valid([]byte(trimmed)) {
-		return errors.New("tool call arguments must be valid JSON")
+		return errToolArgumentsJSON
 	}
 	if trimmed[0] != '{' {
-		return errors.New("tool call arguments must be a JSON object")
+		return errToolArgumentsObject
 	}
 	return nil
 }

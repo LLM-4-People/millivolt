@@ -1329,6 +1329,10 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		resp.Finish = ir.FinishError
 		return resp, nil
 	}
+	// A completed response with no incomplete reason owns a finished turn. Any
+	// other terminal can carry the prefix of a function-call argument value the
+	// source never completed; drop only that call and keep the source terminal.
+	cleanTerminal := in.Status == "completed" && (in.IncompleteDetails == nil || in.IncompleteDetails.Reason == "")
 	outputPhaseSeen := false
 	for i, item := range in.Output {
 		if item.Phase != "" {
@@ -1349,6 +1353,11 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		case typ == "function_call":
 			call, warns, err := decodeResponsesFunctionCall(item)
 			if err != nil {
+				if !cleanTerminal && isToolArgumentsError(err) {
+					resp.Warnings.AddOnce(ir.WarningDropped, "function_call.arguments",
+						"the source stopped before the function call arguments were complete")
+					continue
+				}
 				return nil, fmt.Errorf("responses output item %d: %w", i, err)
 			}
 			resp.Blocks = append(resp.Blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})

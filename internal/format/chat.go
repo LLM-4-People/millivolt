@@ -1697,6 +1697,19 @@ type chatWireUsage struct {
 
 // DecodeChatResponse converts one non-streaming Chat response into the
 // canonical response.
+// chatResponseTerminalClean reports whether a Chat finish_reason denotes a
+// completed turn. Length, content_filter, cancelled, unknown and missing values
+// all mean the source stopped before the answer was complete, so an
+// unparseable tool-call argument value is that truncation rather than a
+// translator failure.
+func chatResponseTerminalClean(finish string) bool {
+	switch finish {
+	case "stop", "tool_calls", "function_call":
+		return true
+	}
+	return false
+}
+
 func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if !utf8.Valid(body) {
 		return nil, errors.New("chat response body is not valid UTF-8")
@@ -1776,6 +1789,11 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		// a 200 success for an answer the client never received.
 		return nil, fmt.Errorf("chat response content exceeds %d parts", metrics.ContentPartMax)
 	}
+	// A length-truncated or otherwise non-clean turn can carry the prefix of a
+	// tool-call argument value the model never finished. That is the source's
+	// terminal class, not a translator failure, so only the unparseable call is
+	// dropped; text, refusal and the source finish survive.
+	cleanTerminal := chatResponseTerminalClean(choice.Finish)
 	blocks, warns, err := decodeChatContent(choice.Message.Content, ir.RoleAssistant)
 	if err != nil {
 		return nil, err
@@ -1796,6 +1814,11 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	for j, tc := range choice.Message.ToolCalls {
 		call, _, w, err := decodeChatToolCall(tc, 0, j)
 		if err != nil {
+			if !cleanTerminal && isToolArgumentsError(err) {
+				warns.AddOnce(ir.WarningDropped, "tool_calls.arguments",
+					"the source stopped before the tool call arguments were complete")
+				continue
+			}
 			return nil, err
 		}
 		warns = append(warns, w...)
@@ -1804,10 +1827,17 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if rawPresent(choice.Message.FunctionCall) {
 		if len(choice.Message.ToolCalls) > 0 {
 			warns.Add(ir.WarningDropped, "message.function_call", "ignored because tool_calls is present")
-		} else if call, err := decodeLegacyMessageFunctionCall(choice.Message.FunctionCall); err != nil {
-			return nil, err
 		} else {
-			blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
+			call, err := decodeLegacyMessageFunctionCall(choice.Message.FunctionCall)
+			switch {
+			case err == nil:
+				blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
+			case !cleanTerminal && isToolArgumentsError(err):
+				warns.AddOnce(ir.WarningDropped, "function_call.arguments",
+					"the source stopped before the function call arguments were complete")
+			default:
+				return nil, err
+			}
 		}
 	}
 	finish, exactFinish := irFinishReason(choice.Finish)
