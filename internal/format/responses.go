@@ -1742,6 +1742,11 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 		case ir.BlockRedactedReasoning:
 			flushText()
 			out = append(out, encodeResponsesReasoning(b.Reasoning, warns))
+		default:
+			if warns != nil {
+				warns.AddOnce(ir.WarningDropped, "output."+string(b.Type),
+					"Responses output has no equivalent content part")
+			}
 		}
 	}
 	flushText()

@@ -89,6 +89,9 @@ target cannot consume them:
   non-streaming request or response records one `input.phase` or `output.phase`
   warning, and a translated stream records one `output.phase` warning on its
   terminal. The phase text never reaches the client wire.
+- A canonical output block with no Responses content part, such as a file or
+  audio block carried from Anthropic, is dropped from the output with one
+  `output.<type>` warning. Text around the dropped block is preserved.
 - Responses provider-executed tool calls in the shared tool-item vocabulary
   (`custom_tool_call`, `local_shell_call`, `mcp_call`, `computer_call`,
   `tool_search_call` and their peers) are tool activity: they count toward a
