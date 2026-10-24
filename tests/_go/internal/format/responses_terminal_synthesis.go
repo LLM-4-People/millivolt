@@ -39,7 +39,7 @@ func TestResponsesTerminalOnlyToolCallTranslates(t *testing.T) {
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(output)), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(output)), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := target.evidence(t, buf.String()); got != `{"q":1}` {
@@ -85,7 +85,7 @@ func TestResponsesTerminalOnlyContentTranslates(t *testing.T) {
 		for _, target := range terminalTargets {
 			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(tc.output)), nil, nil); err != nil {
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(tc.output)), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				if got := tc.count(t, target.inbound, buf.String(), tc.value); got != 1 {
@@ -102,7 +102,7 @@ func TestResponsesTerminalMixedTextAndToolTranslates(t *testing.T) {
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(output)), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStream(output)), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := target.evidence(t, buf.String()); got != `{"q":1}` {
@@ -132,7 +132,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if target.inbound == ir.Responses {
@@ -184,7 +184,7 @@ data: {"type":"response.incomplete","response":{"id":"resp_1","model":"m","statu
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := target.evidence(t, buf.String()); got != `{"q":1}` {

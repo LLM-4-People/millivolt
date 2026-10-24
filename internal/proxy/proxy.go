@@ -226,6 +226,10 @@ type target struct {
 	// exists, never carries one, and the two inference send owners
 	// (buildUpstreamRequest, setCursorIdentity) are its only consumers.
 	override *resolvedOverride
+	// streamIncludeUsage is the translated Chat client's
+	// stream_options.include_usage. The Chat encoder emits its extra usage
+	// chunk only when requested and the source reported usage.
+	streamIncludeUsage bool
 }
 
 // livePublisher is the narrow interface for emitting per-request lifecycle
@@ -698,6 +702,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		body = translated
+		t.streamIncludeUsage = req.StreamIncludeUsage
 		setWarningsHeader(w.Header(), warnings)
 		// Parameter/composition metrics describe the translated upstream body
 		// for the two wire shapes the metadata decoder understands. A

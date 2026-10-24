@@ -28,7 +28,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 
 `
 	var buf bytes.Buffer
-	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil)
+	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
 	if err == nil || !strings.Contains(err.Error(), "message id") {
 		t.Fatalf("huge message id error = %v", err)
 	}
@@ -47,7 +47,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 
 `
 	var buf bytes.Buffer
-	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil)
+	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
 	if err == nil || !strings.Contains(err.Error(), "item id") {
 		t.Fatalf("huge content part item id error = %v", err)
 	}

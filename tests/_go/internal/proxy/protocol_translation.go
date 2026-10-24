@@ -1241,3 +1241,47 @@ func TestUnknownPathInFormatTranslationEndToEnd(t *testing.T) {
 		t.Fatalf("translated response = %s, want a Chat completion with hello", w.Body.String())
 	}
 }
+
+// TestChatClientUsageChunkFollowsRequest pins TC3-6 end-to-end: a Chat client
+// receives the extra usage chunk only when it asked for stream_options
+// include_usage, even though the upstream Responses body reports usage.
+func TestChatClientUsageChunkFollowsRequest(t *testing.T) {
+	up := newFixtureUpstream(t, "text/event-stream", 200,
+		`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+
+`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "not requested",
+			body: `{"model":"m","stream":true,"input":"hi"}`,
+			want: false,
+		},
+		{
+			name: "requested",
+			body: `{"model":"m","stream":true,"input":"hi","stream_options":{"include_usage":true}}`,
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := proxyRequest(t, s, "/v1/chat/completions", "openai-responses", tc.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+			}
+			out := w.Body.String()
+			if got := strings.Contains(out, `"usage":{`); got != tc.want {
+				t.Fatalf("usage chunk present = %v, want %v:\n%s", got, tc.want, out)
+			}
+			if !strings.Contains(out, `"content":"Hi"`) || !strings.Contains(out, "data: [DONE]") {
+				t.Fatalf("translated stream is incomplete:\n%s", out)
+			}
+		})
+	}
+}

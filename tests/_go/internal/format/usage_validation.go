@@ -136,7 +136,7 @@ func TestChatStreamUsageValidation(t *testing.T) {
 				`"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":` + usage + `}` + "\n\n" +
 				"data: [DONE]\n\n"
 			var out strings.Builder
-			if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &out, strings.NewReader(stream), nil, nil); err == nil {
+			if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &out, strings.NewReader(stream), nil, nil, StreamOptions{}); err == nil {
 				t.Fatalf("Chat stream accepted impossible usage: %s", usage)
 			}
 		})
@@ -152,7 +152,7 @@ func TestChatStreamUsageValidation(t *testing.T) {
 				"data: " + `{"type":"response.completed","response":{"id":"r1","object":"response",` +
 				`"created_at":1,"status":"completed","model":"m","output":[],"usage":` + usage + `}}` + "\n\n"
 			var out strings.Builder
-			if err := TranslateStreamBetween(ir.Chat, ir.Responses, &out, strings.NewReader(stream), nil, nil); err == nil {
+			if err := TranslateStreamBetween(ir.Chat, ir.Responses, &out, strings.NewReader(stream), nil, nil, StreamOptions{}); err == nil {
 				t.Fatalf("Responses stream accepted impossible usage: %s", usage)
 			}
 		})
@@ -164,7 +164,7 @@ func TestChatStreamUsageValidation(t *testing.T) {
 		`"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}` + "\n\n" +
 		"data: [DONE]\n\n"
 	var chatOut strings.Builder
-	if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &chatOut, strings.NewReader(chat), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &chatOut, strings.NewReader(chat), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("valid Chat stream rejected: %v", err)
 	}
 
@@ -174,7 +174,7 @@ func TestChatStreamUsageValidation(t *testing.T) {
 		`"created_at":1,"status":"completed","model":"m","output":[],` +
 		`"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}` + "\n\n"
 	var responsesOut strings.Builder
-	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &responsesOut, strings.NewReader(responses), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &responsesOut, strings.NewReader(responses), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("valid Responses stream rejected: %v", err)
 	}
 }

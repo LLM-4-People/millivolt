@@ -24,7 +24,7 @@ func TestResponsesEncoderRetentionFailureAbortsTarget(t *testing.T) {
 	src.WriteString("data: [DONE]\n\n")
 
 	var buf bytes.Buffer
-	err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader(src.String()), nil, nil)
+	err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader(src.String()), nil, nil, StreamOptions{})
 	if err == nil || !strings.Contains(err.Error(), "retained bytes") {
 		t.Fatalf("error = %v, want the Responses retention bound", err)
 	}
@@ -152,7 +152,7 @@ func TestAnthropicAbortClosesOnlyOpenedBlocks(t *testing.T) {
 
 func TestChatEncoderAbortKeepsValidChunks(t *testing.T) {
 	var buf bytes.Buffer
-	enc := NewChatStreamEncoder(&buf, nil)
+	enc := NewChatStreamEncoder(&buf, nil, false)
 	for _, ev := range []*ir.Event{
 		{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
 		{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText}},

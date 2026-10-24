@@ -29,7 +29,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := textEmissionOrder(t, target.inbound, buf.String()); strings.Join(got, " ") != "alpha beta" {
@@ -59,7 +59,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			order := textEmissionOrder(t, target.inbound, buf.String())
@@ -128,7 +128,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := textEmissionOrder(t, target.inbound, buf.String()); strings.Join(got, " ") != "alpha beta" {
@@ -164,7 +164,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := textEmissionOrder(t, target.inbound, buf.String()); strings.Join(got, " ") != "alpha beta" {

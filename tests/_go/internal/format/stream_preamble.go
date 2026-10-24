@@ -79,7 +79,7 @@ func anthropicEventData(t *testing.T, out string) ([]string, []map[string]any) {
 // still opens the Anthropic stream before its terminal frames.
 func TestAnthropicBareDoneSynthesizesMessageStart(t *testing.T) {
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween = %v", err)
 	}
 	names, payloads := anthropicEventData(t, buf.String())
@@ -99,7 +99,7 @@ func TestAnthropicBareDoneSynthesizesMessageStart(t *testing.T) {
 // created/in_progress pair precedes the completed terminal.
 func TestResponsesBareDoneSynthesizesCreated(t *testing.T) {
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween = %v", err)
 	}
 	names, payloads := responseFrameTypes(t, buf.String())
@@ -133,7 +133,7 @@ data: [DONE]
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(tc.inbound, ir.Chat, &buf, strings.NewReader(in), nil, nil); err != nil {
+			if err := TranslateStreamBetween(tc.inbound, ir.Chat, &buf, strings.NewReader(in), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween = %v", err)
 			}
 			var names []string
@@ -171,7 +171,7 @@ data: {"type":"message_stop"}
 
 `
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween = %v", err)
 	}
 	var indices []int
@@ -280,7 +280,7 @@ func TestChatEncoderInitialBlockPayloads(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			enc := NewChatStreamEncoder(&buf, nil)
+			enc := NewChatStreamEncoder(&buf, nil, false)
 			for _, ev := range []*ir.Event{
 				{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
 				{Type: ir.EventBlockStart, Index: 0, Block: tc.block},
@@ -302,7 +302,7 @@ func TestChatEncoderInitialBlockPayloads(t *testing.T) {
 
 	t.Run("text followed by delta", func(t *testing.T) {
 		var buf bytes.Buffer
-		enc := NewChatStreamEncoder(&buf, nil)
+		enc := NewChatStreamEncoder(&buf, nil, false)
 		for _, ev := range []*ir.Event{
 			{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
 			{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText, Text: "hello"}},
@@ -387,7 +387,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		for _, variant := range variants {
 			t.Run(proto.name+"/"+variant.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(created+variant.stream), nil, nil); err != nil {
+				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(created+variant.stream), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				if got := proto.evidence(t, buf.String()); got != variant.want {
@@ -473,7 +473,7 @@ data: {"type":"response.output_item.added","output_index":0,"item":{"type":"func
 
 `
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween: %v", err)
 	}
 	if got := chatToolArguments(t, buf.String()); got != `{"q":1` {

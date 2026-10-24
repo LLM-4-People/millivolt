@@ -54,7 +54,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
 				source := terminalStreamCreated + tc.source
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				got := textDeltaCount(t, target.inbound, buf.String(), tc.wantText)
@@ -141,7 +141,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		for _, target := range terminalTargets {
 			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				if got := reasoningDeltaCount(t, target.inbound, buf.String(), "think"); got != 1 {
@@ -169,7 +169,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v", err)
 			}
 			if got := textDeltaCount(t, target.inbound, buf.String(), "hello"); got != 1 {
@@ -341,7 +341,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		for _, target := range terminalTargets {
 			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				want := tc.want
@@ -432,7 +432,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		for _, target := range terminalTargets {
 			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				for _, want := range []string{"alpha", "beta"} {

@@ -57,9 +57,12 @@ type AnthropicStreamDecoder struct {
 
 	usage          ir.Usage
 	usageBaseInput int64
-	skipped        map[int]bool
-	observe        func(string, []byte)
-	sawStopReason  bool
+	// usageReported distinguishes a source that reported usage (even all
+	// zeros) from one that never did. Only a reported usage is forwarded.
+	usageReported bool
+	skipped       map[int]bool
+	observe       func(string, []byte)
+	sawStopReason bool
 
 	openToolBlocks   int
 	toolInitialBytes int
@@ -137,6 +140,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if err := d.mergeUsage(msg.Usage); err != nil {
 					return nil, err
 				}
+				d.usageReported = true
 			}
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
@@ -248,6 +252,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if err := d.mergeUsage(ev.Usage); err != nil {
 					return nil, err
 				}
+				d.usageReported = true
 			}
 			if delta.StopReason != "" {
 				d.sawStopReason = true
@@ -257,8 +262,12 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			if delta.StopSequence != nil {
 				finish.StopSequence = *delta.StopSequence
 			}
-			u := d.usage
-			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: finish, Usage: &u})
+			messageDelta := &ir.Event{Type: ir.EventMessageDelta, Finish: finish}
+			if d.usageReported {
+				u := d.usage
+				messageDelta.Usage = &u
+			}
+			d.q.push(messageDelta)
 		case "message_stop":
 			d.terminal = true
 			d.closeOpenBlocks()

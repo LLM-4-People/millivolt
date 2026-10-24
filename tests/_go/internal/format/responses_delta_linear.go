@@ -71,7 +71,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		for _, target := range terminalTargets {
 			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
 				var buf strings.Builder
-				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				var got string

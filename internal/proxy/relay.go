@@ -1933,7 +1933,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}
-				})
+				}, providerformat.StreamOptions{IncludeUsage: t.streamIncludeUsage})
 				pw.CloseWithError(translationErr)
 			}()
 			// Re-run the SSE analyzer over the transformed stream.

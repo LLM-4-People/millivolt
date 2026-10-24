@@ -260,12 +260,21 @@ func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sour
 	return out, resp, resp.Warnings, err
 }
 
+// StreamOptions carries the client's stream preferences that the target
+// encoder must honor. The zero value requests the protocol's default frames.
+type StreamOptions struct {
+	// IncludeUsage is the Chat client's stream_options.include_usage. The
+	// Chat target emits its extra usage chunk only when the client asked and
+	// the source actually reported usage.
+	IncludeUsage bool
+}
+
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
 // protocol's SSE stream. observe, when non-nil, receives every raw upstream
 // event name and data payload (used for source-only cost accounting). The
 // name is needed for a type-less terminal document whose SSE event name is
 // its only classifier.
-func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io.Reader, flusher http.Flusher, observe func(string, []byte)) error {
+func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io.Reader, flusher http.Flusher, observe func(string, []byte), opts StreamOptions) error {
 	var dec StreamDecoder
 	switch outbound {
 	case ir.Chat:
@@ -284,7 +293,7 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	var enc StreamEncoder
 	switch inbound {
 	case ir.Chat:
-		enc = NewChatStreamEncoder(dst, flusher)
+		enc = NewChatStreamEncoder(dst, flusher, opts.IncludeUsage)
 	case ir.Responses:
 		enc = NewResponsesStreamEncoder(dst, flusher)
 	case ir.Anthropic:

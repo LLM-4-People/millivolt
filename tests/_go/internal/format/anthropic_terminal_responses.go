@@ -89,7 +89,7 @@ data: {"type":"message_stop"}
 	for _, tc := range cases {
 		t.Run("stream/"+tc.reason, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(stream(tc.reason)), nil, nil); err != nil {
+			if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(stream(tc.reason)), nil, nil, StreamOptions{}); err != nil {
 				t.Fatal(err)
 			}
 			found := false

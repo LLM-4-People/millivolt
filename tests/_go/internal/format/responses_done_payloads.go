@@ -18,7 +18,7 @@ func translateDoneFixture(t *testing.T, source string) map[string]string {
 	out := map[string]string{}
 	for _, target := range terminalTargets {
 		var buf bytes.Buffer
-		if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+		if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil, StreamOptions{}); err != nil {
 			t.Fatalf("%s: TranslateStreamBetween: %v", target.name, err)
 		}
 		out[target.name] = buf.String()

@@ -85,8 +85,11 @@ type ResponsesStreamDecoder struct {
 	created int64
 
 	nextIndex int
-	itemBlock map[int]int
-	partBlock map[[2]int]int
+	// usageReported distinguishes a source that reported usage (even all
+	// zeros) from one that never did. Only a reported usage is forwarded.
+	usageReported bool
+	itemBlock     map[int]int
+	partBlock     map[[2]int]int
 	// initialArgs holds output_item.added item.arguments that have not been
 	// emitted yet. A partial prefix must not reach the target before the
 	// first delta or the full done/terminal value decides the continuation.
@@ -234,6 +237,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.usage = usage
+				d.usageReported = true
 			}
 			d.started = true
 			u := d.usage
@@ -791,6 +795,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.usage = usage
+				d.usageReported = true
 			}
 			d.terminal = true
 			if err := d.closeAll(resp.Output); err != nil {
@@ -826,8 +831,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					finish = ir.FinishToolCalls
 				}
 			}
-			u := d.usage
-			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: finish}, Usage: &u})
+			delta := &ir.Event{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: finish}}
+			if d.usageReported {
+				u := d.usage
+				delta.Usage = &u
+			}
+			d.q.push(delta)
 			d.q.push(&ir.Event{Type: ir.EventDone})
 		case "error":
 			d.terminal = true

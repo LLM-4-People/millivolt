@@ -19,7 +19,7 @@ data: {"response":{"id":"resp_1","model":"m","status":"completed","output":[{"ty
 	for _, target := range terminalTargets {
 		t.Run(target.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween: %v (%s)", err, buf.String())
 			}
 			if got := strings.Join(textEmissionOrder(t, target.inbound, buf.String()), ""); got != "hello" {

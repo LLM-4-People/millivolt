@@ -145,5 +145,8 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 	if observe != nil {
 		typed = func(_ string, payload []byte) { observe(payload) }
 	}
-	return TranslateStreamBetween(ir.Chat, ir.Anthropic, dst, src, f, typed)
+	// This wrapper has no client request to consult, so it keeps its
+	// historical contract of emitting the usage chunk whenever the source
+	// reported usage.
+	return TranslateStreamBetween(ir.Chat, ir.Anthropic, dst, src, f, typed, StreamOptions{IncludeUsage: true})
 }

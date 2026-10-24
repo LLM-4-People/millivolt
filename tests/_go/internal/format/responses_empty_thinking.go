@@ -58,7 +58,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 
 `
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Anthropic, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Anthropic, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(reasoningEmissionOrder(t, ir.Anthropic, buf.String()), ""); got != "alphabeta" {

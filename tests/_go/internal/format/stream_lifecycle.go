@@ -225,7 +225,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(tc.inbound, tc.outbound, &buf, strings.NewReader(tc.in), nil, nil); err != nil {
+			if err := TranslateStreamBetween(tc.inbound, tc.outbound, &buf, strings.NewReader(tc.in), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween = %v", err)
 			}
 			if tc.inbound == ir.Anthropic {
@@ -315,7 +315,7 @@ data: not-json
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			err := TranslateStreamBetween(tc.inbound, tc.outbound, &buf, strings.NewReader(tc.in), nil, nil)
+			err := TranslateStreamBetween(tc.inbound, tc.outbound, &buf, strings.NewReader(tc.in), nil, nil, StreamOptions{})
 			if err == nil {
 				t.Fatal("TranslateStreamBetween returned nil for a malformed source")
 			}
@@ -341,7 +341,7 @@ data: not-json
 
 `
 		var buf bytes.Buffer
-		if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil); err == nil {
+		if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil, StreamOptions{}); err == nil {
 			t.Fatal("TranslateStreamBetween returned nil for a malformed source")
 		}
 		out := buf.String()

@@ -74,6 +74,9 @@ type ChatStreamDecoder struct {
 	finishSeen    bool
 	pendingFinish *ir.Finish
 	usage         ir.Usage
+	// usageReported distinguishes a source that reported usage (even all
+	// zeros) from one that never did. Only a reported usage is forwarded.
+	usageReported bool
 }
 
 // NewChatStreamDecoder builds a decoder over one upstream body.
@@ -197,6 +200,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 			d.usage = usage
+			d.usageReported = true
 		}
 	}
 }
@@ -205,11 +209,11 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 // arrive in separate chunks (opaque providers do not guarantee their order),
 // so both are held until the stream's terminal marker and delivered once.
 func (d *ChatStreamDecoder) flushFinish() {
-	if d.pendingFinish == nil && d.usage == (ir.Usage{}) {
+	if d.pendingFinish == nil && !d.usageReported {
 		return
 	}
 	ev := &ir.Event{Type: ir.EventMessageDelta, Finish: d.pendingFinish}
-	if d.usage != (ir.Usage{}) {
+	if d.usageReported {
 		u := d.usage
 		ev.Usage = &u
 	}
@@ -366,13 +370,18 @@ type ChatStreamEncoder struct {
 	finishSent  bool
 	usage       *ir.Usage
 	usageSent   bool
-	doneSent    bool
+	// includeUsage is the client's stream_options.include_usage. Official
+	// Chat streaming sends a usage chunk only when the client asked for one.
+	includeUsage bool
+	doneSent     bool
 }
 
 // NewChatStreamEncoder builds an encoder over one client response writer.
-func NewChatStreamEncoder(w io.Writer, flusher http.Flusher) *ChatStreamEncoder {
+// includeUsage mirrors the client's stream_options.include_usage: the extra
+// usage chunk is part of the requested contract, not an unconditional frame.
+func NewChatStreamEncoder(w io.Writer, flusher http.Flusher, includeUsage bool) *ChatStreamEncoder {
 	return &ChatStreamEncoder{
-		w: w, flusher: flusher,
+		w: w, flusher: flusher, includeUsage: includeUsage,
 		toolIndex: map[int]int{}, blockTypes: map[int]ir.BlockType{},
 		blockArgs: map[int]json.RawMessage{}, argsEmitted: map[int]bool{},
 	}
@@ -538,7 +547,7 @@ func (e *ChatStreamEncoder) emit(delta map[string]any, finish any, extra map[str
 }
 
 func (e *ChatStreamEncoder) emitUsage() error {
-	if e.usage == nil || e.usageSent {
+	if !e.includeUsage || e.usage == nil || e.usageSent {
 		return nil
 	}
 	e.usageSent = true
