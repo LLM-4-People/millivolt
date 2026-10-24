@@ -2523,3 +2523,52 @@ func TestRestoreMergeRejectsInvalidBaseConfig(t *testing.T) {
 		t.Fatalf("merge restore rewrote the invalid base file: %v\n%s", err, got)
 	}
 }
+
+// TestRestoreConfigCaptureFailsClosed pins the rollback-capture read bound:
+// prepareRestoreConfig must reject a FIFO or an oversized live config before
+// any write, using the same bounded config.ReadDocument owner as inspect. A
+// plain os.ReadFile would block on the FIFO or allocate the oversized file.
+func TestRestoreConfigCaptureFailsClosed(t *testing.T) {
+	liveReloadFixture(t)
+	raw, err := backup.Encode("", backup.Archive{Config: defaultConfigYAMLForRestore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	restore := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", bytes.NewReader(raw)))
+		return rr
+	}
+	assertRejected := func(rr *httptest.ResponseRecorder, want string) {
+		t.Helper()
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("restore status %d body %s, want 400", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), want) {
+			t.Fatalf("restore rejection %q does not contain %q", rr.Body.String(), want)
+		}
+	}
+
+	if err := syscall.Mkfifo(liveConfigPath, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- restore() }()
+	select {
+	case rr := <-done:
+		assertRejected(rr, "not a regular file")
+	case <-time.After(2 * time.Second):
+		t.Fatal("restore blocked on a FIFO instead of rejecting the non-regular live config")
+	}
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	oversized := bytes.Repeat([]byte("a"), config.ConfigDocumentMaxBytes+1)
+	if err := os.WriteFile(liveConfigPath, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected(restore(), "config document limit")
+}
