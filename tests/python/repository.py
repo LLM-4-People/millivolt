@@ -797,6 +797,7 @@ class PublishedContracts(unittest.TestCase):
             "A streamed tool `arguments` value that is exactly `null`",
             "Anthropic `content_block_start` text is not counted as answer content",
             "A translated response has no audio representation",
+            "while a translated stream opens a `thinking` block with an empty `signature`",
             "The non-streaming Responses decoder reports one `content.output_audio` warning",
         ):
             self.assertIn(phrase, adapters)

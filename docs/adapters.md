@@ -78,9 +78,11 @@ Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:
 
 - Anthropic thinking and redacted-thinking blocks keep their opaque signatures.
-  A Responses reasoning item has no Anthropic signature, so translating it to
-  Anthropic emits a `thinking` block with an empty `signature`. The proxy keeps
-  the reasoning text and does not invent a signature; resending that block is a
+  A Responses reasoning item has no Anthropic signature: a translated request
+  or non-streaming response emits its visible text with an approximation
+  warning instead of a `thinking` block, while a translated stream opens a
+  `thinking` block with an empty `signature`. The proxy keeps the reasoning
+  text and does not invent a signature; resending an empty-signature block is a
   client choice and the target may reject it.
 - OpenAI Responses reasoning items keep `encrypted_content` and item ids.
   A cross-family encrypted reasoning artifact is never replayed into another
