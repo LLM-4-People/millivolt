@@ -741,8 +741,25 @@ class PublishedContracts(unittest.TestCase):
             "one `output.phase` warning",
             "`output.<type>` warning",
             "fixed 32 MiB cap each",
+            # Round 8 verification follow-up: each corrected claim is pinned so
+            # the docs cannot drift back to the stronger behavior.
+            "rejected before the upstream send on a translated request",
+            "Native Chat passthrough is not decoded",
+            "`stop: 5` reaches the upstream",
+            "A Responses `failed` terminal is not covered by that rule",
+            "it returns the provider error envelope and discards the output",
+            "leaves an open tool block unclosed",
+            "Anthropic emits no `content_block_stop` over empty input",
+            "missing or null arguments is also rejected unless the source explicitly sent `{}`",
+            "first still-open id-less announced call in output order",
+            "rather than synthesizing a second call",
         ):
             self.assertIn(phrase, adapters)
+        for stale in (
+            "A malformed Chat `stop` value is rejected before any upstream send",
+            "a Responses status other than `completed` with no incomplete reason",
+        ):
+            self.assertNotIn(stale, adapters)
 
         protocol = re.sub(r"\s+", " ", self.read("docs/protocol.md"))
         self.assertIn("More than one top-level member that folds to the same cap name", protocol)

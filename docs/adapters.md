@@ -65,10 +65,12 @@ tool use, tool calls and results, structured outputs, reasoning effort and
 summary, stop sequences, sampling parameters, metadata, usage and cache-token
 accounting.
 
-A malformed Chat `stop` value is rejected before any upstream send. Absent,
-null, a string and an array of strings are the accepted shapes; any other type
-returns 400 instead of silently dropping the stop filter. An empty string and
-an empty array still mean no stops.
+A malformed Chat `stop` value is rejected before the upstream send on a
+translated request. Absent, null, a string and an array of strings are the
+accepted shapes; any other type returns 400 instead of silently dropping the
+stop filter. Native Chat passthrough is not decoded: the body is relayed
+unchanged, so `stop: 5` reaches the upstream and its response is returned. An
+empty string and an empty array still mean no stops.
 
 Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:
@@ -131,10 +133,13 @@ target cannot consume them:
   dropped assistant or an empty user turn preceded it.
 - A non-clean non-streaming terminal can carry the prefix of a tool-call
   argument value the source never finished: a Chat finish other than `stop`,
-  `tool_calls` or `function_call`, or a Responses status other than `completed`
-  with no incomplete reason. The proxy drops only the unparseable call with one
+  `tool_calls` or `function_call`, or a Responses `incomplete` or `cancelled`
+  terminal, including a `completed` response that still carries an incomplete
+  reason. The proxy drops only the unparseable call with one
   `tool_calls.arguments` or `function_call.arguments` warning and keeps the
-  text, refusal and source finish. A clean terminal fails closed on the same
+  text, refusal and source finish. A Responses `failed` terminal is not covered
+  by that rule: it returns the provider error envelope and discards the output,
+  so no block or warning is produced. A clean terminal fails closed on the same
   bytes, and structural failures such as a missing name or id remain fatal on
   every terminal.
 - A streamed Responses `function_call` that omits `call_id` uses its item id as

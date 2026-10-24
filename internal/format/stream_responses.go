@@ -1048,9 +1048,10 @@ func responsesTerminalClassFor(eventType string) responsesTerminalClass {
 // items that exist only in the terminal document. A provider may stream no
 // per-item events at all and place the whole answer, refusal, reasoning or
 // function call in response.completed.output; a translated client must still
-// receive those blocks exactly once. class decides how an incomplete argument
-// value is treated: a clean completion fails closed, while a non-clean terminal
-// drops it and preserves the provider error or finish.
+// receive those blocks exactly once. The terminal class decides how an
+// incomplete argument value is treated: a completed, incomplete or cancelled
+// terminal validates it, while a failed, errored or truncated terminal drops
+// the unparseable call and preserves the provider error or truncation.
 func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class responsesTerminalClass) error {
 	// Apply the authoritative terminal payload in terminal document order.
 	// Announced blocks that already carry bytes are filled in place; every
