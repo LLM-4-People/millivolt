@@ -1106,10 +1106,12 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 	if len(blocks) == 0 {
 		return ""
 	}
+	// The plain string form cannot carry a cache breakpoint. Use the array
+	// form whenever a text block has one so the breakpoint survives.
 	allText := true
 	var text strings.Builder
 	for _, b := range blocks {
-		if b.Type != ir.BlockText {
+		if b.Type != ir.BlockText || b.CacheControl != nil {
 			allText = false
 			break
 		}
@@ -1131,7 +1133,11 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 			if b.Text == "" {
 				continue
 			}
-			out = append(out, map[string]any{"type": "text", "text": b.Text})
+			block := map[string]any{"type": "text", "text": b.Text}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			out = append(out, block)
 		case ir.BlockImage:
 			if source := encodeAnthropicImage(b.Image, warns); source != nil {
 				out = append(out, map[string]any{"type": "image", "source": source})
@@ -1149,6 +1155,11 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 				warns.Add(ir.WarningDropped, "tool_result."+string(b.Type), "block has no Anthropic tool-result equivalent")
 			}
 		}
+	}
+	if len(out) == 0 {
+		// Every block was dropped, so no text block remains to carry a
+		// breakpoint. The empty string is the valid empty tool_result.
+		return ""
 	}
 	return out
 }
