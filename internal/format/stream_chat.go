@@ -531,14 +531,15 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		return e.done()
 	case ir.EventError:
 		if ev.Error != nil {
-			obj := map[string]any{"error": map[string]any{
-				"message": ev.Error.Message,
-				"type":    firstNonEmptyString(ev.Error.Type, sse.TypeUpstreamError),
-			}}
+			// The OpenAI error object requires type, message, param and code
+			// on this frame exactly like every other in-band path. An empty
+			// code is explicit null, never an omitted member.
+			var code any
 			if ev.Error.Code != "" {
-				obj["error"] = sse.ErrorObject(
-					firstNonEmptyString(ev.Error.Type, sse.TypeUpstreamError), ev.Error.Code, ev.Error.Message)
+				code = ev.Error.Code
 			}
+			obj := map[string]any{"error": sse.ErrorObject(
+				firstNonEmptyString(ev.Error.Type, sse.TypeUpstreamError), code, ev.Error.Message)}
 			if e.id != "" {
 				obj["id"] = e.id
 			}

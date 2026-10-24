@@ -639,7 +639,7 @@ func TestAnthropicErrorEventSurfaces(t *testing.T) {
 	if err := StreamToOpenAI(&sseOut, strings.NewReader(stream), nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sseOut.String(), `"error":{"message":"Overloaded","type":"overloaded_error"}`) {
+	if !strings.Contains(sseOut.String(), `"error":{"code":null,"message":"Overloaded","param":null,"type":"overloaded_error"}`) {
 		t.Errorf("stream error event not re-rendered as the shared OpenAI envelope: %q", sseOut.String())
 	}
 }
