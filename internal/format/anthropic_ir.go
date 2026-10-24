@@ -752,6 +752,12 @@ func encodeAnthropicContent(blocks []ir.Block, warns *ir.Warnings) any {
 		text.WriteString(b.Text)
 	}
 	if allText {
+		// Anthropic's TextBlockParam.text has minLength 1. An all-empty
+		// text-only turn contributes no content at all, matching the
+		// zero-block skip below.
+		if text.Len() == 0 {
+			return nil
+		}
 		return text.String()
 	}
 	return encodeAnthropicBlocks(blocks, ir.RoleUser, warns)
@@ -816,6 +822,12 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 	for _, b := range ordered {
 		switch b.Type {
 		case ir.BlockText:
+			// Anthropic rejects an empty text block (minLength 1). Drop it
+			// with its cache control and citations rather than emitting an
+			// invalid block; a structured turn keeps its other blocks.
+			if b.Text == "" {
+				continue
+			}
 			block := map[string]any{"type": "text", "text": b.Text}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
