@@ -25,7 +25,7 @@ func TestAnthropicKeepsMidConversationSystem(t *testing.T) {
 		`{"role":"system","content":"lead rule"},` +
 		`{"role":"user","content":"u1"},` +
 		`{"role":"system","content":"mid rule"},` +
-		`{"role":"user","content":"u2"}]}`
+		`{"role":"assistant","content":"a2"}]}`
 	out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestAnthropicKeepsMidConversationSystem(t *testing.T) {
 	}
 	messages := anthropicMessagesOf(t, out)
 	if len(messages) != 3 {
-		t.Fatalf("messages = %d, want user/system/user: %s", len(messages), out)
+		t.Fatalf("messages = %d, want user/system/assistant: %s", len(messages), out)
 	}
 	mid := messages[1].(map[string]any)
 	if mid["role"] != "system" || mid["content"] != "mid rule" {

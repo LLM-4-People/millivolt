@@ -890,9 +890,11 @@ func anthropicTextContent(blocks []map[string]any) any {
 // conversation turn. "First emitted turn" is out's emptiness, not the presence
 // of a non-system input: a leading assistant turn can be dropped and an empty
 // leading user turn can encode to nothing, so neither may push a later system
-// turn into messages where Anthropic rejects it. A system turn after an emitted
-// turn stays in messages at its position. A later developer turn has no
-// Anthropic role and is lifted with one approximation warning.
+// turn into messages where Anthropic rejects it. A mid-conversation system run
+// stays in messages only after an emitted user turn and before an assistant
+// turn or the end; any other position is lifted to the top-level prompt with
+// one approximation warning. A later developer turn has no Anthropic role and
+// is lifted with one approximation warning.
 func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir.Warnings) (any, []anthropicOutMessage) {
 	var systemBlocks []map[string]any
 	if instructions != nil && *instructions != "" {
@@ -903,18 +905,54 @@ func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir
 	droppedToolCalls := map[string]struct{}{}
 	orphanResultDropped := false
 	developerLifted := false
-	for _, m := range messages {
+	for i := 0; i < len(messages); i++ {
+		m := messages[i]
 		if m.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
 		}
 		switch m.Role {
 		case ir.RoleSystem:
-			if len(out) == 0 {
-				systemBlocks = append(systemBlocks, anthropicSystemTextBlocks(m.Content, warns)...)
-				continue
+			// A mid-conversation system run is valid only after a user turn and
+			// before an assistant turn (or at the end). Anthropic rejects it
+			// between user turns and between a tool_use and its tool_result.
+			// Judge the whole contiguous run, then lift it to the top-level
+			// prompt with one approximation warning when its position is not
+			// valid. A leading run always belongs at the top level.
+			end := i + 1
+			for end < len(messages) && messages[end].Role == ir.RoleSystem {
+				end++
 			}
-			out = appendAnthropicTurn(out, string(m.Role),
-				anthropicTextContent(anthropicSystemTextBlocks(m.Content, warns)))
+			blocks := anthropicSystemTextBlocks(m.Content, warns)
+			for j := i + 1; j < end; j++ {
+				if messages[j].Name != "" && warns != nil {
+					warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
+				}
+				blocks = append(blocks, anthropicSystemTextBlocks(messages[j].Content, warns)...)
+			}
+			next := ir.Role("")
+			for j := end; j < len(messages); j++ {
+				if messages[j].Role != ir.RoleSystem {
+					next = messages[j].Role
+					break
+				}
+			}
+			previous := ir.Role("")
+			if len(out) > 0 {
+				previous = ir.Role(out[len(out)-1].Role)
+			}
+			if len(out) == 0 || (previous == ir.RoleUser && (next == "" || next == ir.RoleAssistant)) {
+				if len(out) == 0 {
+					systemBlocks = append(systemBlocks, blocks...)
+				} else {
+					out = appendAnthropicTurn(out, string(m.Role), anthropicTextContent(blocks))
+				}
+			} else {
+				systemBlocks = append(systemBlocks, blocks...)
+				if len(blocks) > 0 && warns != nil {
+					warns.AddOnce(ir.WarningApproximated, "system", "a system message was moved before the conversation because Anthropic only accepts one after a user turn and before an assistant turn")
+				}
+			}
+			i = end - 1
 		case ir.RoleDeveloper:
 			if len(out) != 0 && !developerLifted {
 				developerLifted = true

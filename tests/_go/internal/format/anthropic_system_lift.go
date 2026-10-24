@@ -88,7 +88,29 @@ func TestAnthropicSystemAfterDroppedLeadingTurnIsLifted(t *testing.T) {
 		}
 	})
 
-	t.Run("system after an emitted turn stays in messages", func(t *testing.T) {
+	t.Run("system after an emitted user turn before an assistant stays in messages", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":"u1"},` +
+			`{"role":"system","content":"mid"},` +
+			`{"role":"assistant","content":"a1"}]}`
+		out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := decodeJSONMap(t, out)["system"]; ok {
+			t.Fatalf("valid mid-conversation system was lifted: %s", out)
+		}
+		messages := anthropicWireMessages(t, out)
+		if len(messages) != 3 || messages[0]["role"] != "user" || messages[1]["role"] != "system" ||
+			messages[1]["content"] != "mid" || messages[2]["role"] != "assistant" {
+			t.Fatalf("messages = %v, want user/system/assistant in place: %s", messages, out)
+		}
+		if warningField(warnings, "system") {
+			t.Fatalf("in-place system turn was reported as moved: %+v", warnings)
+		}
+	})
+
+	t.Run("system between user turns is lifted", func(t *testing.T) {
 		body := `{"model":"m","max_tokens":16,"messages":[` +
 			`{"role":"user","content":"u1"},` +
 			`{"role":"system","content":"mid"},` +
@@ -97,16 +119,86 @@ func TestAnthropicSystemAfterDroppedLeadingTurnIsLifted(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := decodeJSONMap(t, out)["system"]; ok {
-			t.Fatalf("mid-conversation system was lifted: %s", out)
+		if got := decodeJSONMap(t, out)["system"]; got != "mid" {
+			t.Fatalf("top-level system = %v, want mid: %s", got, out)
 		}
 		messages := anthropicWireMessages(t, out)
-		if len(messages) != 3 || messages[0]["role"] != "user" || messages[1]["role"] != "system" ||
-			messages[1]["content"] != "mid" || messages[2]["role"] != "user" {
-			t.Fatalf("messages = %v, want user/system/user in place: %s", messages, out)
+		if len(messages) != 1 || messages[0]["role"] != "user" {
+			t.Fatalf("messages = %v, want the two user turns merged: %s", messages, out)
+		}
+		if !strings.Contains(string(out), "u1") || !strings.Contains(string(out), "u2") {
+			t.Fatalf("merged user turns lost text: %s", out)
+		}
+		if got := warningCount(warnings, ir.WarningApproximated, "system"); got != 1 {
+			t.Fatalf("system placement warnings = %d, want 1 (%+v)", got, warnings)
+		}
+	})
+
+	t.Run("system between a tool call and its result is lifted", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":"go"},` +
+			`{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"q\":1}"}}]},` +
+			`{"role":"system","content":"SYS"},` +
+			`{"role":"tool","tool_call_id":"call_1","content":"result"}]}`
+		out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := decodeJSONMap(t, out)["system"]; got != "SYS" {
+			t.Fatalf("top-level system = %v, want SYS: %s", got, out)
+		}
+		messages := anthropicWireMessages(t, out)
+		if len(messages) != 3 || messages[0]["role"] != "user" || messages[1]["role"] != "assistant" ||
+			messages[2]["role"] != "user" {
+			t.Fatalf("messages = %v, want user/assistant/tool-result: %s", messages, out)
+		}
+		if !strings.Contains(string(out), `"tool_use_id":"call_1"`) {
+			t.Fatalf("tool result lost its call id: %s", out)
+		}
+		if got := warningCount(warnings, ir.WarningApproximated, "system"); got != 1 {
+			t.Fatalf("system placement warnings = %d, want 1 (%+v)", got, warnings)
+		}
+	})
+
+	t.Run("consecutive system turns are one in-place run", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":"u1"},` +
+			`{"role":"system","content":"S1"},` +
+			`{"role":"system","content":"S2"},` +
+			`{"role":"assistant","content":"a1"}]}`
+		out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := decodeJSONMap(t, out)["system"]; ok {
+			t.Fatalf("valid system run was lifted: %s", out)
+		}
+		messages := anthropicWireMessages(t, out)
+		if len(messages) != 3 || messages[1]["role"] != "system" || messages[1]["content"] != "S1\n\nS2" {
+			t.Fatalf("messages = %v, want one merged system run: %s", messages, out)
 		}
 		if warningField(warnings, "system") {
-			t.Fatalf("in-place system turn was reported as moved: %+v", warnings)
+			t.Fatalf("in-place system run was reported as moved: %+v", warnings)
+		}
+	})
+
+	t.Run("system at the end after a user turn stays", func(t *testing.T) {
+		body := `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":"u1"},` +
+			`{"role":"system","content":"last"}]}`
+		out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := decodeJSONMap(t, out)["system"]; ok {
+			t.Fatalf("trailing valid system was lifted: %s", out)
+		}
+		messages := anthropicWireMessages(t, out)
+		if len(messages) != 2 || messages[1]["role"] != "system" || messages[1]["content"] != "last" {
+			t.Fatalf("messages = %v, want user/system: %s", messages, out)
+		}
+		if warningField(warnings, "system") {
+			t.Fatalf("trailing system was reported as moved: %+v", warnings)
 		}
 	})
 

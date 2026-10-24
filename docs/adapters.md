@@ -119,10 +119,11 @@ target cannot consume them:
   is returned for later retrieval.
 - Every system or developer message before the first emitted conversation
   turn, together with the Responses instructions, becomes the top-level
-  Anthropic `system` prompt. A system turn after the conversation starts stays
-  in `messages` as a `system` turn at its original position. A later developer
-  turn has no Anthropic role and is lifted to the prompt with an approximation
-  warning, which reports the positional change.
+  Anthropic `system` prompt. A mid-conversation system run stays in `messages`
+  only after an emitted user turn and before an assistant turn or the end; any
+  other position is lifted to the prompt with one approximation warning. A
+  later developer turn has no Anthropic role and is lifted to the prompt with
+  an approximation warning, which reports the positional change.
 - An Anthropic target drops leading assistant turns because the first message
   must use the user role, reporting one `messages.leading_assistant` warning.
   A tool result that answered a dropped leading call is dropped with one

@@ -827,7 +827,7 @@ func TestAnthropicKeepsLateSystemMessage(t *testing.T) {
 	in := `{"model":"m","messages":[` +
 		`{"role":"user","content":"hi"},` +
 		`{"role":"system","content":"late rules"},` +
-		`{"role":"user","content":"more"}]}`
+		`{"role":"assistant","content":"more"}]}`
 	req, err := DecodeChatRequest([]byte(in))
 	if err != nil {
 		t.Fatal(err)
@@ -842,7 +842,7 @@ func TestAnthropicKeepsLateSystemMessage(t *testing.T) {
 	}
 	msgs, _ := doc["messages"].([]any)
 	if len(msgs) != 3 {
-		t.Fatalf("messages = %v, want user/system/user in order", doc["messages"])
+		t.Fatalf("messages = %v, want user/system/assistant in order", doc["messages"])
 	}
 	if msgs[1].(map[string]any)["role"] != "system" {
 		t.Fatalf("messages[1] = %v, want the system turn at its original position", msgs[1])
