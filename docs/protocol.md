@@ -423,6 +423,10 @@ Discovery ignores `X-Proxy-Path`, `X-Proxy-Query` and the incoming query. HTTP
 discovery constructs `/v1/models` using the shared base join; Anthropic pagination
 constructs its own query. Cursor uses its native unary model service. A primary
 upstream non-200 response, including a redirect, becomes a 502 discovery error.
+Discovery authenticates with the resolved target auth header and prefix, the
+same construction as a relayed request, and has no protocol-specific fallback:
+an Anthropic endpoint that requires `x-api-key` must be called with
+`X-Proxy-Auth-Header: x-api-key` and an empty `X-Proxy-Auth-Prefix`.
 
 The ordinary HTTP relay returns upstream redirects rather than following them.
 Forwarding also changes transport headers and may decompress an upstream gzip response;

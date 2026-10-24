@@ -578,14 +578,14 @@ func (s *Server) serveAnthropicModels(d *modelsDiscovery, w http.ResponseWriter,
 			writeModelsError(w, err)
 			return
 		}
-		// Anthropic auth: x-api-key (not Bearer). The resolved key may carry an
-		// authHeader/authPrefix override; honor it, defaulting to x-api-key.
+		// Discovery uses the resolved target auth header and prefix, the same
+		// construction as the relay. t.authHeader always carries a value
+		// (Authorization unless the client names one), so Anthropic discovery
+		// has no protocol-specific x-api-key fallback: an endpoint that
+		// requires it needs X-Proxy-Auth-Header: x-api-key with an empty
+		// prefix, exactly like a relayed request.
 		if key != "" {
-			if t.authHeader != "" {
-				req.Header.Set(t.authHeader, t.authPrefix+key)
-			} else {
-				req.Header.Set("x-api-key", key)
-			}
+			req.Header.Set(t.authHeader, t.authPrefix+key)
 		}
 		req.Header.Set("anthropic-version", anthropicVersion)
 
