@@ -72,8 +72,25 @@ target cannot consume them:
 - OpenAI Responses reasoning items keep `encrypted_content` and item ids.
   A cross-family encrypted reasoning artifact is never replayed into another
   provider's field; it is dropped with a warning.
+- A Responses reasoning item exposes two independent text channels: the
+  summary parts and the content reasoning text. A translated stream emits both
+  as they arrive, so text the source places in both channels appears in two
+  target reasoning blocks. The proxy does not deduplicate across channels: a
+  native client accumulating the source observes the same two channels, and
+  merging them would corrupt genuinely distinct summary and content text.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
+- Responses provider-executed tool calls in the shared tool-item vocabulary
+  (`custom_tool_call`, `local_shell_call`, `mcp_call`, `computer_call`,
+  `tool_search_call` and their peers) are tool activity: they count toward a
+  `tool_calls` finish even though no cross-protocol content block exists for
+  them. Provider-executed generation artifacts (`program`, `program_output`,
+  `image_generation_call`, `code_interpreter_call`) are output presence
+  instead: a completed turn that carries only one of them is not an empty
+  completion, while its finish stays the source's stop rather than
+  `tool_calls`, because the item is generated source or media rather than a
+  model tool invocation. Extending the tool vocabulary waits for a
+  demonstrated client need.
 - `previous_response_id`, `item_reference`, `background`, `conversation` and
   prompt templates require provider-side state and are rejected when the
   target cannot honor them. `store: true` is honored by Chat Completions and

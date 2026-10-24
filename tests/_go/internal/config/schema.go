@@ -913,6 +913,10 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"memory limit precedence example", example, "With the setting at 0, an operator GOMEMLIMIT wins"},
 		{"memory limit override example", example, "a set value overrides GOMEMLIMIT, not GOGC"},
 		{"strip passthrough scope", operations, "client's spelling reaches the upstream wire on a same-protocol passthrough"},
+		{"reasoning channels documented", adapters, "A Responses reasoning item exposes two independent text channels"},
+		{"reasoning channels not merged", adapters, "The proxy does not deduplicate across channels"},
+		{"generation artifacts are output presence", adapters, "Provider-executed generation artifacts (`program`, `program_output`, `image_generation_call`, `code_interpreter_call`) are output presence"},
+		{"generation artifacts keep the stop finish", adapters, "its finish stays the source's stop rather than `tool_calls`"},
 	} {
 		if !strings.Contains(tc.text, tc.want) {
 			t.Errorf("%s: missing %q", tc.name, tc.want)
