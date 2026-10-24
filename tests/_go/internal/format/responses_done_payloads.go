@@ -206,3 +206,87 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		}
 	}
 }
+
+// refusalEmissionOrder returns every refusal payload the target emitted.
+// Anthropic has no refusal block, so its mapped text deltas are the refusal
+// channel there.
+func refusalEmissionOrder(t *testing.T, protocol ir.Protocol, out string) []string {
+	t.Helper()
+	var order []string
+	switch protocol {
+	case ir.Responses:
+		for _, payload := range mustResponsePayloads(t, out) {
+			if payload["type"] != "response.refusal.delta" {
+				continue
+			}
+			if text, _ := payload["delta"].(string); text != "" {
+				order = append(order, text)
+			}
+		}
+	case ir.Anthropic:
+		for _, payload := range mustAnthropicPayloads(t, out) {
+			delta, _ := payload["delta"].(map[string]any)
+			if delta["type"] != "text_delta" {
+				continue
+			}
+			if text, _ := delta["text"].(string); text != "" {
+				order = append(order, text)
+			}
+		}
+	case ir.Chat:
+		for _, payload := range chatPayloads(t, out) {
+			choices, _ := payload["choices"].([]any)
+			if len(choices) == 0 {
+				continue
+			}
+			delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+			if text, _ := delta["refusal"].(string); text != "" {
+				order = append(order, text)
+			}
+		}
+	}
+	return order
+}
+
+// TestResponsesRefusalPartDoneCarriesValue covers the refusal arm of the
+// content_part.done matrix: deferred, partially streamed and type-less done
+// payloads must stay on the refusal channel once, never as visible output text.
+func TestResponsesRefusalPartDoneCarriesValue(t *testing.T) {
+	cases := []struct {
+		name  string
+		added string
+		done  string
+	}{
+		{name: "deferred part", added: `{"type":"refusal","refusal":""}`, done: `{"type":"refusal","refusal":"no"}`},
+		{name: "started part", added: `{"type":"refusal","refusal":"n"}`, done: `{"type":"refusal","refusal":"no"}`},
+		{name: "type-less done", added: `{"type":"refusal","refusal":""}`, done: `{"refusal":"no"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":` + tc.added + `}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","output_index":0,"content_index":0,"part":` + tc.done + `}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+			out := translateDoneFixture(t, source)
+			for _, target := range terminalTargets {
+				if got := strings.Join(refusalEmissionOrder(t, target.inbound, out[target.name]), ""); got != "no" {
+					t.Fatalf("%s refusal = %q, want no: %s", target.name, got, out[target.name])
+				}
+				if target.inbound != ir.Anthropic {
+					if got := strings.Join(textEmissionOrder(t, target.inbound, out[target.name]), ""); got != "" {
+						t.Fatalf("%s refusal leaked into visible text %q", target.name, got)
+					}
+				}
+			}
+		})
+	}
+}
