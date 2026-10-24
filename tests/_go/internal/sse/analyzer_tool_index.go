@@ -126,3 +126,42 @@ func TestAnalyzerChatToolCallMalformedIndexKeepsSiblings(t *testing.T) {
 		})
 	}
 }
+
+// TestAnalyzerChatToolCallIntegralIndexRetained pins the index set itself.
+// The sibling test keeps id-bearing malformed rows at two calls, so it cannot
+// tell whether an integral index was retained or accepted by the id fallback.
+func TestAnalyzerChatToolCallIntegralIndexRetained(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		index  string
+		want   int
+		retain bool
+	}{
+		{"0.0", 0, true},
+		{"1e0", 1, true},
+		{"0", 0, true},
+		{`"0"`, 0, false},
+		{"0.5", 0, false},
+		{"-1", 0, false},
+		{"1e20", 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.index, func(t *testing.T) {
+			var a Analyzer
+			a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":`+tc.index+`,"id":"call_1","function":{"name":"search"}}]}}]}`), now)
+			_, retained := a.toolCallIndexes[tc.want]
+			if tc.retain && !retained {
+				t.Fatalf("index %s was not retained as %d", tc.index, tc.want)
+			}
+			if !tc.retain && retained {
+				t.Fatalf("malformed index %s was retained as %d", tc.index, tc.want)
+			}
+			if tc.retain && len(a.toolCallIndexes) != 1 {
+				t.Fatalf("index set = %v, want one entry", a.toolCallIndexes)
+			}
+			if !tc.retain && len(a.toolCallIndexes) != 0 {
+				t.Fatalf("index set = %v, want no entry", a.toolCallIndexes)
+			}
+		})
+	}
+}
