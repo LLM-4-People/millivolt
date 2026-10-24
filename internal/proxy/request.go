@@ -807,6 +807,13 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
+	// "http://:8080" parses with a non-empty Host but no hostname, and Go's
+	// transport dials the local host for that authority. A base URL without a
+	// host is malformed input, never a local-target shorthand; reject it here
+	// rather than allowing a request to reach a loopback service.
+	if parsed.Hostname() == "" {
+		return nil, fmt.Errorf("invalid %s %q: a hostname is required", hdrBaseURL, clientEcho(baseURL))
+	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("unsupported %s scheme %q", hdrBaseURL, clientEcho(parsed.Scheme))
 	}

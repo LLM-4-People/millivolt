@@ -1280,6 +1280,13 @@ func (c *Config) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("allowed_base_urls: %q must be an absolute http:// or https:// URL", entry)
 		}
+		// "http://:8080" parses with a port but no hostname. No request base
+		// URL can be hostless (the request boundary rejects it), so the entry
+		// could never match; fail closed at load instead of accepting a dead
+		// allowlist rule.
+		if u.Hostname() == "" {
+			return fmt.Errorf("allowed_base_urls: %q must name a host: a port without a hostname can never match a request base URL", entry)
+		}
 		if u.User != nil {
 			return fmt.Errorf("allowed_base_urls: %q must not carry userinfo: a request base URL never does, and the entry persists credentials in the config", entry)
 		}
