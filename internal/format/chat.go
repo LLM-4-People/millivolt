@@ -250,13 +250,15 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	if in.ReasoningEffort != "" {
 		req.Reasoning = &ir.ReasoningConfig{Effort: in.ReasoningEffort}
 	}
-	if rf, warn, err := decodeChatResponseFormat(in.ResponseFormat); err != nil {
+	rf, formatWarn, err := decodeChatResponseFormat(in.ResponseFormat)
+	if err != nil {
 		return nil, err
-	} else if rf != nil {
+	}
+	if rf != nil {
 		req.ResponseFormat = rf
-		if warn != "" {
-			req.Warnings.Add(ir.WarningDropped, "response_format", warn)
-		}
+	}
+	if formatWarn != "" {
+		req.Warnings.Add(ir.WarningDropped, "response_format", formatWarn)
 	}
 	if len(in.Tools) > 0 {
 		tools, err := decodeChatTools(in.Tools)
