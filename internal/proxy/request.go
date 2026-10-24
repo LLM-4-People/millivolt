@@ -74,6 +74,10 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	if err != nil {
 		return nil, err
 	}
+	// NewRequest re-parses its URL string, where a literal "#" in RawQuery
+	// becomes a fragment and truncates the query. Keep the structurally built
+	// URL the transport will serialize instead.
+	req.URL = u
 
 	// Forward client headers, dropping proxy control, hop-by-hop, and the
 	// upstream auth header (re-added below from the extracted key). Drop
@@ -672,28 +676,25 @@ func upstreamURL(baseURL, escapedPath, queryOverride, clientQuery string) (*url.
 // joinUpstreamEscapedPath joins two escaped paths and drops the request path's
 // first segment when it duplicates the base's last non-empty segment. Segment
 // comparison uses the decoded spelling so an encoded character still matches;
-// joining uses the escaped spelling so %2F never becomes a separator.
+// joining uses the escaped spelling so %2F never becomes a separator. Exactly
+// one leading separator is consumed: every remaining empty segment (a doubled
+// slash at the start, inside or at the end) is part of the client's path shape
+// and is preserved.
 func joinUpstreamEscapedPath(basePath, escapedPath string) string {
 	base := strings.TrimRight(basePath, "/")
 	if !strings.HasPrefix(escapedPath, "/") {
 		escapedPath = "/" + escapedPath
 	}
-	var baseSegs, pathSegs []string
+	var baseSegs []string
 	if base != "" {
 		baseSegs = strings.Split(strings.Trim(base, "/"), "/")
 	}
-	trailingSlash := escapedPath == "/" || strings.HasSuffix(escapedPath, "/")
-	if trimmed := strings.Trim(escapedPath, "/"); trimmed != "" {
-		pathSegs = strings.Split(trimmed, "/")
-	}
-	if len(baseSegs) > 0 && len(pathSegs) > 0 && decodedPathSegment(baseSegs[len(baseSegs)-1]) == decodedPathSegment(pathSegs[0]) {
+	pathSegs := strings.Split(escapedPath[1:], "/")
+	if len(baseSegs) > 0 && len(pathSegs) > 0 && pathSegs[0] != "" &&
+		decodedPathSegment(baseSegs[len(baseSegs)-1]) == decodedPathSegment(pathSegs[0]) {
 		pathSegs = pathSegs[1:]
 	}
-	joined := "/" + strings.Join(append(baseSegs, pathSegs...), "/")
-	if trailingSlash && joined != "/" {
-		joined += "/"
-	}
-	return joined
+	return "/" + strings.Join(append(baseSegs, pathSegs...), "/")
 }
 
 func decodedPathSegment(segment string) string {
