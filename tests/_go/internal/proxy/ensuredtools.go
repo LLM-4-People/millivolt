@@ -3,9 +3,10 @@ package proxy
 // Provider-configured ensured tools (config providers.<label>.ensure_tools):
 // the third actor of the single body-rewrite engine. Missing names are
 // injected as inert chat/completions function stubs; a client that sent no
-// tools of its own additionally gets tool_choice none so the stubs can never
-// be invoked; a body that already satisfies the signature relays
-// byte-identical, and non-chat bodies are never rewritten. The mechanism is
+// tools of its own gets its absent, null, or auto tool_choice forced to none,
+// while a required, named, or malformed choice skips injection entirely; a
+// body that already satisfies the signature relays byte-identical, and
+// non-chat bodies are never rewritten. The mechanism is
 // label-blind like the provider-header tests: the profile keys whatever
 // provider label the upstream URL derives.
 

@@ -1196,8 +1196,9 @@ func Example() *Config {
 			// identifier format (shape-validated upstream; the two template
 			// placeholders mint fresh ones per request) and a tools array
 			// containing the bash and read tool names (ensure_tools injects
-			// inert stubs when a client's request lacks them, with
-			// tool_choice none so stubs can never be invoked). A check on
+			// inert stubs when a client's request lacks them; an absent,
+			// null, or auto choice becomes none, while a required or named
+			// choice skips injection). A check on
 			// 2026-09-24 found the free models then served under the
 			// anonymous public bearer with this signature; that is an
 			// observation about that day, not an entitlement. The profile is

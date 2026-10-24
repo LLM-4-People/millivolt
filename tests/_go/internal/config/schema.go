@@ -844,6 +844,14 @@ func TestEnsureToolsChoiceHelpMatchesRuntime(t *testing.T) {
 	if strings.Contains(doc, "adds `tool_choice: none` when the client sent no tools of its own") {
 		t.Fatal("docs/adapters.md still states the unconditional none rule")
 	}
+	runtimeComments := strings.Join(strings.Fields(strings.ReplaceAll(
+		repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
+	if !strings.Contains(runtimeComments, "a required or named choice skips injection") {
+		t.Fatal("the bundled Zen comment omits the required/named injection rule")
+	}
+	if strings.Contains(runtimeComments, "tool_choice none so stubs can never be invoked") {
+		t.Fatal("the bundled Zen comment still states the unconditional none rule")
+	}
 }
 
 // TestDocsStateRuntimeContracts pins the round-5 documentation corrections to
