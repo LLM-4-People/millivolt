@@ -113,7 +113,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			// provider may close the connection without the optional [DONE]
 			// sentinel; that is a complete stream, not a truncation.
 			if d.finishSeen {
-				if err := d.closeAll(); err != nil {
+				if err := d.closeAll(true); err != nil {
 					return nil, err
 				}
 				d.flushFinish()
@@ -133,7 +133,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			d.observe(raw.Name, raw.Data)
 		}
 		if strings.TrimSpace(string(raw.Data)) == "[DONE]" {
-			if err := d.closeAll(); err != nil {
+			if err := d.closeAll(true); err != nil {
 				return nil, err
 			}
 			d.flushFinish()
@@ -146,7 +146,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			return nil, err
 		}
 		if chunk.Error != nil {
-			_ = d.closeAll()
+			_ = d.closeAll(false)
 			d.terminal = true
 			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
 				Type: chunk.Error.Type, Code: stringifyCode(chunk.Error.Code), Message: chunk.Error.Message,
@@ -197,7 +197,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				if err := d.closeAll(); err != nil {
+				if err := d.closeAll(true); err != nil {
 					return nil, err
 				}
 				d.finishSeen = true
@@ -350,13 +350,18 @@ func (d *ChatStreamDecoder) closeOpen(idx int) {
 	}
 }
 
-func (d *ChatStreamDecoder) closeAll() error {
-	// Tool-argument fragments are forwarded verbatim, so the completed value
-	// can only be validated here. A null, array, fragment or non-JSON value
-	// must fail the translation before the target receives a clean terminal.
-	for chatIndex, builder := range d.toolArguments {
-		if err := validateStreamedToolArguments(builder.String()); err != nil {
-			return fmt.Errorf("chat stream tool call %d: %w", chatIndex, err)
+// closeAll closes every open block. validateToolArguments is true on a clean
+// finish, where forwarded fragments must form a JSON object before the target
+// receives a clean terminal. It is false for a provider error and for the
+// truncation flush: those paths already terminate with an error, and an
+// incomplete argument value is expected at a truncation, not a translator
+// failure.
+func (d *ChatStreamDecoder) closeAll(validateToolArguments bool) error {
+	if validateToolArguments {
+		for chatIndex, builder := range d.toolArguments {
+			if err := validateStreamedToolArguments(builder.String()); err != nil {
+				return fmt.Errorf("chat stream tool call %d: %w", chatIndex, err)
+			}
 		}
 	}
 	d.closeText()
@@ -376,7 +381,10 @@ func (d *ChatStreamDecoder) closeAll() error {
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
 func (d *ChatStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
-	err := d.closeAll()
+	// FlushBlocks runs only for ErrTruncatedStream. The canonical truncation
+	// error already refuses a clean terminal, so an incomplete argument value
+	// must not be reclassified as a translator failure.
+	err := d.closeAll(false)
 	return drainQueue(&d.q), err
 }
 
