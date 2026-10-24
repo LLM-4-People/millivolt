@@ -203,6 +203,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		if err := json.Unmarshal(raw.Data, &ev); err != nil {
 			return nil, err
 		}
+		// A terminal document can omit its top-level type; the SSE event name
+		// is then the only classifier. Resolve it before the switch so a
+		// type-less response.completed is terminal rather than debris.
+		if ev.Type == "" {
+			ev.Type = raw.Name
+		}
 		switch ev.Type {
 		case "response.created", "response.in_progress":
 			if d.started {
