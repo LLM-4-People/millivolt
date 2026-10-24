@@ -82,6 +82,11 @@ type chatWireMessage struct {
 	ReasoningContent string               `json:"reasoning_content"`
 	Reasoning        string               `json:"reasoning"`
 	Annotations      []chatWireAnnotation `json:"annotations"`
+	// Audio replays a prior assistant audio output. The canonical model has
+	// no audio-output identity, so a present value is reported.
+	Audio *struct {
+		ID string `json:"id"`
+	} `json:"audio"`
 }
 
 // chatWireAnnotation is the Chat message-level url_citation wrapper. Responses
@@ -449,6 +454,16 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 				return nil, nil, fmt.Errorf("message %d: %w", i, err)
 			}
 			warns = append(warns, w...)
+			if len(m.Annotations) > 0 {
+				// A client replaying a prior Chat response carries its
+				// message-level annotations. Attach them exactly like the
+				// response decoder so the extension is preserved.
+				blocks, w = attachChatAnnotations(blocks, m.Annotations)
+				warns = append(warns, w...)
+			}
+			if m.Audio != nil {
+				warns.Add(ir.WarningDropped, "messages.audio", "Chat audio output has no cross-protocol equivalent")
+			}
 			if reasoning := m.reasoningText(); reasoning != "" {
 				// Reasoning precedes the visible answer in canonical order.
 				blocks = append([]ir.Block{{
@@ -660,6 +675,7 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 			FileData string `json:"file_data"`
 			Filename string `json:"filename"`
 		} `json:"file"`
+		PromptCacheBreakpoint json.RawMessage `json:"prompt_cache_breakpoint"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, nil, err
@@ -669,6 +685,9 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 		warns ir.Warnings
 	)
 	for _, p := range parts {
+		if rawPresent(p.PromptCacheBreakpoint) {
+			warns.Add(ir.WarningDropped, "prompt_cache_breakpoint", "per-part prompt_cache_breakpoint is not mapped")
+		}
 		switch p.Type {
 		case "text":
 			out = append(out, ir.TextBlock(p.Text))
@@ -720,6 +739,25 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 
 // decodeChatAnnotations maps the message-level URL citation wrapper onto the
 // IR citation fields. Other annotation types have no IR representation.
+// attachChatAnnotations decodes message-level url_citation annotations into
+// citations on the last text block. The Chat response decoder and the assistant
+// request decoder (a client replaying a prior response) share this owner, so
+// the non-standard extension is preserved instead of silently dropped.
+func attachChatAnnotations(blocks []ir.Block, annotations []chatWireAnnotation) ([]ir.Block, ir.Warnings) {
+	citations, warns := decodeChatAnnotations(annotations)
+	if len(citations) == 0 {
+		return blocks, warns
+	}
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Type == ir.BlockText {
+			blocks[i].Citations = append(blocks[i].Citations, citations...)
+			return blocks, warns
+		}
+	}
+	warns.Add(ir.WarningDropped, "annotations", "Chat annotations have no text block to attach to")
+	return blocks, warns
+}
+
 func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings) {
 	var (
 		out   []ir.Citation
@@ -1158,7 +1196,7 @@ func encodeChatContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) (any
 	}
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
-			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
+			warns.Add(ir.WarningDropped, "cache_control", "per-part prompt_cache_breakpoint is not mapped")
 		}
 		switch b.Type {
 		case ir.BlockText:
@@ -1307,7 +1345,7 @@ func encodeChatToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {
 	var texts []string
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
-			warns.Add(ir.WarningDropped, "cache_control", "Chat Completions has no cache breakpoints")
+			warns.Add(ir.WarningDropped, "cache_control", "per-part prompt_cache_breakpoint is not mapped")
 		}
 		if len(b.Citations) > 0 && warns != nil {
 			warns.Add(ir.WarningDropped, "citations", "Chat Completions input has no citations")
@@ -1552,21 +1590,9 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		return nil, err
 	}
 	if len(choice.Message.Annotations) > 0 {
-		citations, w := decodeChatAnnotations(choice.Message.Annotations)
-		warns = append(warns, w...)
-		if len(citations) > 0 {
-			attached := false
-			for i := len(blocks) - 1; i >= 0; i-- {
-				if blocks[i].Type == ir.BlockText {
-					blocks[i].Citations = append(blocks[i].Citations, citations...)
-					attached = true
-					break
-				}
-			}
-			if !attached {
-				warns.Add(ir.WarningDropped, "annotations", "Chat annotations have no text block to attach to")
-			}
-		}
+		annotated, annotationWarns := attachChatAnnotations(blocks, choice.Message.Annotations)
+		blocks = annotated
+		warns = append(warns, annotationWarns...)
 	}
 	if reasoning := choice.Message.reasoningText(); reasoning != "" {
 		blocks = append([]ir.Block{{

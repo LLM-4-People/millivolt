@@ -423,7 +423,8 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 			Data   string `json:"data"`
 			Format string `json:"format"`
 		} `json:"input_audio"`
-		Annotations []responsesWireAnnotation `json:"annotations"`
+		Annotations           []responsesWireAnnotation `json:"annotations"`
+		PromptCacheBreakpoint json.RawMessage           `json:"prompt_cache_breakpoint"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, nil, err
@@ -433,6 +434,9 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 		warns ir.Warnings
 	)
 	for _, p := range parts {
+		if rawPresent(p.PromptCacheBreakpoint) {
+			warns.Add(ir.WarningDropped, "prompt_cache_breakpoint", "per-part prompt_cache_breakpoint is not mapped")
+		}
 		switch p.Type {
 		case "input_text", "output_text", "text", "reasoning_text":
 			block := ir.TextBlock(p.Text)
@@ -666,7 +670,16 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 		out["instructions"] = *instructions
 	}
 	if req.MaxOutputTokens != nil {
-		out["max_output_tokens"] = *req.MaxOutputTokens
+		// CreateResponse.max_output_tokens has a documented minimum of 16
+		// while Chat max_tokens and Anthropic max_tokens allow smaller values
+		// (including 0). Clamp up and report the approximation; reject-mode
+		// translation turns the warning into a 400.
+		limit := *req.MaxOutputTokens
+		if limit < 16 {
+			limit = 16
+			req.Warnings.Add(ir.WarningApproximated, "max_output_tokens", "Responses requires at least 16")
+		}
+		out["max_output_tokens"] = limit
 	}
 	if req.Temperature != nil {
 		out["temperature"] = *req.Temperature
@@ -835,6 +848,13 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 					out = append(out, encodeResponsesFunctionCall(b.ToolCall))
 				case ir.BlockText, ir.BlockRefusal:
 					textBlocks = append(textBlocks, b)
+				default:
+					// OutputMessageContent is text/refusal only, so an
+					// assistant media block cannot ride the same message
+					// without producing an invalid part. Report the drop
+					// instead of losing it silently.
+					req.Warnings.Add(ir.WarningDropped, "assistant."+string(b.Type),
+						"the Responses assistant input message accepts text, refusal, reasoning and tool calls only")
 				}
 			}
 			if len(textBlocks) > 0 {
@@ -889,7 +909,7 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 	out := make([]map[string]any, 0, len(blocks))
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
-			warns.Add(ir.WarningDropped, "cache_control", "Responses input has no cache breakpoints")
+			warns.Add(ir.WarningDropped, "cache_control", "per-part prompt_cache_breakpoint is not mapped")
 		}
 		if len(b.Citations) > 0 && warns != nil {
 			warns.Add(ir.WarningDropped, "citations", "Responses input has no citations")

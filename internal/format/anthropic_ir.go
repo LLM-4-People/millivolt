@@ -42,6 +42,12 @@ type anthropicWireRequest struct {
 	ServiceTier  string          `json:"service_tier"`
 	Speed        string          `json:"speed"`
 	OutputConfig json.RawMessage `json:"output_config"`
+	// Stateful and data-residency controls the canonical request cannot carry.
+	// Present values are reported rather than silently dropped; diagnostics
+	// also covers its nested previous_message_id.
+	Container    json.RawMessage `json:"container"`
+	Diagnostics  json.RawMessage `json:"diagnostics"`
+	InferenceGeo string          `json:"inference_geo"`
 }
 
 type anthropicWireMsg struct {
@@ -206,6 +212,20 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 			req.Reasoning.Effort = effort
 		}
 		req.Warnings = append(req.Warnings, warns...)
+	}
+	for _, field := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"container", in.Container},
+		{"diagnostics", in.Diagnostics},
+	} {
+		if rawPresent(field.raw) {
+			req.Warnings.Add(ir.WarningDropped, field.name, "the canonical request has no Anthropic "+field.name+" state")
+		}
+	}
+	if in.InferenceGeo != "" {
+		req.Warnings.Add(ir.WarningDropped, "inference_geo", "the canonical request has no data-residency control")
 	}
 	if in.Speed != "" {
 		switch in.Speed {
@@ -1306,6 +1326,14 @@ func encodeAnthropicOutputConfig(rf *ir.ResponseFormat, reasoning *ir.ReasoningC
 		out["format"] = map[string]any{"type": "json_schema", "schema": rf.Schema}
 		if rf.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "response_format.name", "Anthropic output_config.format has no name")
+		}
+		if rf.Description != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "response_format.description", "Anthropic output_config.format has no description")
+		}
+		// Anthropic's JSONOutputFormat has no strict mode. Strict false is
+		// the target's default and therefore not a loss; strict true is.
+		if rf.Strict != nil && *rf.Strict && warns != nil {
+			warns.Add(ir.WarningDropped, "response_format.strict", "Anthropic output_config.format has no strict mode")
 		}
 	}
 	if len(out) == 0 {
