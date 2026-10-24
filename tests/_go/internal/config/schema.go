@@ -1030,3 +1030,19 @@ func TestSSEKeepaliveHelpOmitsTTFB(t *testing.T) {
 		t.Fatalf("help still promises a TTFB keepalive: %s", field.Help)
 	}
 }
+
+// TestModelRulesHelpNamesTheRealFilterSurfaces pins the current UI: the header
+// Clear menu is gone and the canonical model grouping reaches the Logs
+// download filter and the Settings delete filter.
+func TestModelRulesHelpNamesTheRealFilterSurfaces(t *testing.T) {
+	field := FieldByKey("model_rules")
+	if field == nil {
+		t.Fatal("model_rules is missing from Schema()")
+	}
+	if !strings.Contains(field.Help, "the Logs download and Settings delete-filter model optgroups") {
+		t.Fatalf("help does not name the real filter surfaces: %s", field.Help)
+	}
+	if strings.Contains(field.Help, "Clear/Logs") {
+		t.Fatalf("help still names the removed Clear menu: %s", field.Help)
+	}
+}

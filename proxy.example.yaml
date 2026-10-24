@@ -729,15 +729,16 @@ dash_background_refresh: false
 # model in every grouped surface. Records keep their exact spelling; hot-reloads.
 # Capped at 64 rules. Ordered rewrite pipeline that merges spelling variants of the same
 # model in every grouped surface (explorer model dimension, scope filters, debug
-# checklist, Clear/Logs optgroups, and the request-log leaf’s displayed name). Each rule
-# is one step: exact (whole-string merge old → new), pattern (regex rewrite of all
-# occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped
-# default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a
-# trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and
-# unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored
-# spelling. Stored values remain unchanged; purge/export match them exactly and request
-# details show the original. Debug matching uses separate native base-model normalization,
-# not these display rules. Hot-reloads.
+# checklist, the Logs download and Settings delete-filter model optgroups, and the
+# request-log leaf’s displayed name). Each rule is one step: exact (whole-string merge
+# old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold
+# case). Rules apply once in order; the shipped default folds case, strips a `vendor/`
+# namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix
+# (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between
+# digits. An explicitly empty list groups by the exact stored spelling. Stored values
+# remain unchanged; purge/export match them exactly and request details show the original.
+# Debug matching uses separate native base-model normalization, not these display rules.
+# Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {mode: exact|pattern|lower, from, to} rewrite rules · default: the shipped pipeline (lower · strip vendor/ · strip :tag · strip architecture/quant suffix · unify . and - between digits); restorable in Settings with ↺ default pipeline
 model_rules:
