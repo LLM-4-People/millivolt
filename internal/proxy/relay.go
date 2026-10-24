@@ -130,15 +130,6 @@ func (s *Server) translatedAnalyzer() sse.Analyzer {
 // classification; every post-commit write failure funnels through here
 // (Cursor keeps its own documented exception in cursor_bidi.go - the
 // upstream 200 stays).
-// countDelivered books the bytes a client writer accepted. A failed or short
-// write still delivered n bytes, so accounting describes what the client
-// received rather than the frame the proxy intended to send.
-func countDelivered(rec *metrics.Record, n int) {
-	if rec != nil && n > 0 {
-		rec.ResponseBytes += int64(n)
-	}
-}
-
 func markClientGone(rec *metrics.Record) {
 	rec.ClientDisconnected = true
 	if rec.StatusCode < 400 {
@@ -215,9 +206,7 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 	for {
 		n, err := body.Read(chunk)
 		if n > 0 {
-			wn, werr := w.Write(chunk[:n])
-			countDelivered(rec, wn)
-			if werr != nil {
+			if _, werr := writeCounted(w, rec, chunk[:n]); werr != nil {
 				markClientGone(rec)
 				// Break to the analysis of the captured prefix: the
 				// upstream delivered those bytes, and the disconnect is
@@ -584,10 +573,8 @@ func stampNativeResponseError(rec *metrics.Record, e *ir.Error) {
 func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record, analysis metrics.NonStreamAnalysis) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if _, werr := w.Write(spooled); werr != nil {
+	if _, werr := writeCounted(w, rec, spooled); werr != nil {
 		markClientGone(rec)
-	} else {
-		rec.ResponseBytes += int64(len(spooled))
 	}
 	applyNonStreamAnalysis(rec, analysis)
 }
@@ -888,10 +875,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// upstream header of the same name cannot replace or mask them.
 			setWarningsHeader(w.Header(), warnings)
 			w.WriteHeader(clientStatus)
-			if _, werr := w.Write(out); werr != nil {
+			if _, werr := writeCounted(w, rec, out); werr != nil {
 				markClientGone(rec)
-			} else {
-				rec.ResponseBytes += int64(len(out))
 			}
 			return
 		}
@@ -2195,9 +2180,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		// decode window. The direct relay path anchors its timestamps the
 		// same way at the read site.
 		now := time.Now()
-		wn, err := w.Write(frame)
-		countDelivered(rec, wn)
-		if err != nil {
+		if _, err := writeCounted(w, rec, frame); err != nil {
 			markClientGone(rec)
 			// An in-band provider error that already reached the client is
 			// the turn's outcome even though the following write failed; the
@@ -2460,9 +2443,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return true
 		}
 		o := out.Bytes()
-		wn, werr := w.Write(o)
-		countDelivered(rec, wn)
-		if werr != nil {
+		if _, werr := writeCounted(w, rec, o); werr != nil {
 			clientGone()
 			return false
 		}
@@ -2487,9 +2468,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			o = nil
 		}
 		if len(o) > 0 {
-			wn, werr := w.Write(o)
-			countDelivered(rec, wn)
-			if werr != nil {
+			if _, werr := writeCounted(w, rec, o); werr != nil {
 				clientGone()
 				return false
 			}
@@ -2497,9 +2476,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		out.Reset()
 		hold = hold[:0]
 		holding = false
-		wn, werr := w.Write([]byte("\n"))
-		countDelivered(rec, wn)
-		if werr != nil {
+		if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
 			clientGone()
 			return false
 		}
@@ -2566,9 +2543,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// after the overflow (a later marker opened a fresh hold) are
 			// still part of the verbatim stream.
 			if len(hold) > 0 {
-				wn, werr := w.Write(hold)
-				countDelivered(rec, wn)
-				if werr != nil {
+				if _, werr := writeCounted(w, rec, hold); werr != nil {
 					clientGone()
 					return false
 				}
@@ -2604,9 +2579,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				hold = append(hold, '\n')
 			}
-			wn, werr := w.Write(hold)
-			countDelivered(rec, wn)
-			if werr != nil {
+			if _, werr := writeCounted(w, rec, hold); werr != nil {
 				clientGone()
 				return false
 			}
@@ -2889,9 +2862,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if len(hold)+lineBuf.Len() > terminalHoldMax {
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
-					wn, werr := w.Write(hold)
-					countDelivered(rec, wn)
-					if werr != nil {
+					if _, werr := writeCounted(w, rec, hold); werr != nil {
 						clientGone()
 						return rescueNone
 					}
@@ -3017,9 +2988,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				markStreamErr(ctx, rec, err)
 				releaseTail()
 				if holding {
-					wn, werr := w.Write(hold)
-					countDelivered(rec, wn)
-					if werr != nil {
+					if _, werr := writeCounted(w, rec, hold); werr != nil {
 						clientGone()
 						return rescueNone
 					}
@@ -3125,11 +3094,10 @@ func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Ti
 		"error", 0, id, rec.Model, code, msg); err == nil {
 		a.Feed(append([]byte("data: "), payload...), now)
 		a.Feed(nil, now)
-		if _, werr := w.Write(frame); werr != nil {
+		if _, werr := writeCounted(w, rec, frame); werr != nil {
 			markClientGone(rec)
 			return
 		}
-		rec.ResponseBytes += int64(len(frame))
 	}
 	payload, frame, err := providerformat.ResponsesSyntheticEvent(
 		"response.failed", 1, id, rec.Model, code, msg)
@@ -3137,11 +3105,10 @@ func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Ti
 		return
 	}
 	a.Feed(append([]byte("data: "), payload...), now)
-	if _, werr := w.Write(frame); werr != nil {
+	if _, werr := writeCounted(w, rec, frame); werr != nil {
 		markClientGone(rec)
 		return
 	}
-	rec.ResponseBytes += int64(len(frame))
 }
 
 // emitDegenerateSSE writes the in-band OpenAI error chunk + closing [DONE] in
@@ -3154,19 +3121,16 @@ func emitDegenerateSSE(w http.ResponseWriter, a *sse.Analyzer, now time.Time, co
 	if b, err := sse.ErrorEnvelope("", sse.TypeUpstreamError, code, metrics.DegenerateMessage(code)); err == nil {
 		line := sse.DataFrame(b)
 		a.Feed(line[:len(line)-2], now)
-		if _, werr := w.Write(line); werr != nil {
+		// The substituted frames replace a terminal region the client never
+		// saw, so writeCounted books the bytes the client received, never the
+		// withheld originals.
+		if _, werr := writeCounted(w, rec, line); werr != nil {
 			markClientGone(rec)
 			return
 		}
-		// The substituted frames replace a terminal region the client never
-		// saw, so they are the bytes the client received - count them, never
-		// the withheld originals.
-		rec.ResponseBytes += int64(len(line))
 	}
 	a.Feed([]byte("data: [DONE]"), now)
-	if _, werr := io.WriteString(w, sse.DoneFrame); werr != nil {
+	if _, werr := writeCounted(w, rec, []byte(sse.DoneFrame)); werr != nil {
 		markClientGone(rec)
-	} else {
-		rec.ResponseBytes += int64(len(sse.DoneFrame))
 	}
 }

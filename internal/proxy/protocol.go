@@ -165,21 +165,21 @@ func terminalFrameFor(inbound ir.Protocol) func([]byte) bool {
 	}
 }
 
-// writeCounted writes one complete frame and books it on the record. A short
-// write is an error: the record must describe the bytes the client actually
-// received, not the frame the proxy intended to send.
-func writeCounted(w io.Writer, rec *metrics.Record, frame []byte) error {
+// writeCounted writes one complete frame and books the bytes the writer
+// accepted. A short write is an error: the record must describe what the
+// client actually received, not the frame the proxy intended to send.
+func writeCounted(w io.Writer, rec *metrics.Record, frame []byte) (int, error) {
 	n, err := w.Write(frame)
 	if n > 0 && rec != nil {
 		rec.ResponseBytes += int64(n)
 	}
 	if err != nil {
-		return err
+		return n, err
 	}
 	if n != len(frame) {
-		return io.ErrShortWrite
+		return n, io.ErrShortWrite
 	}
-	return nil
+	return n, nil
 }
 
 // writeProtocolError writes one protocol-native error frame.
@@ -213,7 +213,8 @@ func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, i
 		}
 		frame = sse.DataFrame(payload)
 	}
-	return writeCounted(w, rec, frame)
+	_, err := writeCounted(w, rec, frame)
+	return err
 }
 
 // writeProtocolTerminal writes the inbound protocol's terminal frame.
@@ -231,7 +232,8 @@ func writeProtocolTerminal(w io.Writer, rec *metrics.Record, inbound ir.Protocol
 	default:
 		frame = []byte(sse.DoneFrame)
 	}
-	return writeCounted(w, rec, frame)
+	_, err := writeCounted(w, rec, frame)
+	return err
 }
 
 // writeProtocolStreamError writes the inbound protocol's in-band error frame
