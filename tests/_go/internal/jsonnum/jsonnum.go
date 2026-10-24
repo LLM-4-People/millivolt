@@ -258,3 +258,99 @@ func FuzzParseNumberGrammar(f *testing.F) {
 		}
 	})
 }
+
+func TestParseInt64Bounds(t *testing.T) {
+	for _, tc := range []struct {
+		literal string
+		want    int64
+		wantErr error
+	}{
+		{literal: "0", want: 0},
+		{literal: "5", want: 5},
+		{literal: "5.0", want: 5},
+		{literal: "5e0", want: 5},
+		{literal: "1e3", want: 1000},
+		{literal: "-2", want: -2},
+		{literal: "9223372036854775807", want: 9223372036854775807},
+		{literal: "-9223372036854775808", want: -9223372036854775808},
+		{literal: "9223372036854775808", wantErr: ErrOutOfRange},
+		{literal: "5.5", wantErr: ErrNotInteger},
+		{literal: `"5"`, wantErr: ErrNotNumber},
+		{literal: "null", wantErr: ErrNotNumber},
+	} {
+		t.Run(tc.literal, func(t *testing.T) {
+			got, err := ParseInt64([]byte(tc.literal))
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("ParseInt64(%s) error = %v, want %v", tc.literal, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("ParseInt64(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestInt64Unmarshal(t *testing.T) {
+	for _, tc := range []struct {
+		literal string
+		want    int64
+		wantErr bool
+	}{
+		{"5", 5, false},
+		{"5.0", 5, false},
+		{"1e3", 1000, false},
+		{"0", 0, false},
+		{"-2", -2, false},
+		{"5.5", 0, true},
+		{`"5"`, 0, true},
+		{"null", 0, true},
+	} {
+		t.Run(tc.literal, func(t *testing.T) {
+			var got Int64
+			err := json.Unmarshal([]byte(tc.literal), &got)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Unmarshal(%s) error = %v, wantErr %v", tc.literal, err, tc.wantErr)
+			}
+			if !tc.wantErr && int64(got) != tc.want {
+				t.Fatalf("Unmarshal(%s) = %d, want %d", tc.literal, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnixSecondsUnmarshal(t *testing.T) {
+	for _, tc := range []struct {
+		literal string
+		want    int64
+		wantErr error
+	}{
+		{literal: "1.5", want: 1},
+		{literal: "1.999", want: 1},
+		{literal: "1698982736.0", want: 1698982736},
+		{literal: "0.999", want: 0},
+		{literal: "-0.5", want: 0},
+		{literal: "0", want: 0},
+		{literal: "1e3", want: 1000},
+		{literal: "-1", wantErr: ErrNegative},
+		{literal: "1e20", wantErr: ErrOutOfRange},
+		{literal: `"1"`, wantErr: ErrNotNumber},
+		{literal: "null", wantErr: ErrNotNumber},
+	} {
+		t.Run(tc.literal, func(t *testing.T) {
+			var got UnixSeconds
+			err := json.Unmarshal([]byte(tc.literal), &got)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Unmarshal(%s) error = %v, want %v", tc.literal, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || int64(got) != tc.want {
+				t.Fatalf("Unmarshal(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
+			}
+		})
+	}
+}

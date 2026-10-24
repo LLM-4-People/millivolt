@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -30,16 +31,16 @@ type anthropicStreamEvent struct {
 }
 
 type anthropicStreamUsage struct {
-	InputTokens              *int64 `json:"input_tokens"`
-	OutputTokens             *int64 `json:"output_tokens"`
-	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+	InputTokens              *jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens             *jsonnum.Int64 `json:"output_tokens"`
+	CacheCreationInputTokens *jsonnum.Int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *jsonnum.Int64 `json:"cache_read_input_tokens"`
 	// ServiceTier and Speed exist only on the message_start usage; a
 	// message_delta repeats the token fields without them.
 	ServiceTier         string `json:"service_tier"`
 	Speed               string `json:"speed"`
 	OutputTokensDetails *struct {
-		ThinkingTokens int64 `json:"thinking_tokens"`
+		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -477,20 +478,20 @@ func (d *AnthropicStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
 // validation aborts the translation.
 func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	if u.InputTokens != nil {
-		d.usageBaseInput = *u.InputTokens
+		d.usageBaseInput = int64(*u.InputTokens)
 	}
 	usage := d.usage
 	if u.OutputTokens != nil {
-		usage.OutputTokens = *u.OutputTokens
+		usage.OutputTokens = int64(*u.OutputTokens)
 	}
 	if u.CacheReadInputTokens != nil {
-		usage.CacheReadTokens = *u.CacheReadInputTokens
+		usage.CacheReadTokens = int64(*u.CacheReadInputTokens)
 	}
 	if u.CacheCreationInputTokens != nil {
-		usage.CacheWriteTokens = *u.CacheCreationInputTokens
+		usage.CacheWriteTokens = int64(*u.CacheCreationInputTokens)
 	}
 	if u.OutputTokensDetails != nil {
-		usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
+		usage.ReasoningTokens = int64(u.OutputTokensDetails.ThinkingTokens)
 	}
 	input, err := metrics.SumCounts(d.usageBaseInput, usage.CacheReadTokens, usage.CacheWriteTokens)
 	if err != nil {

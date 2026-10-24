@@ -1594,17 +1594,17 @@ type anthropicWireResponse struct {
 }
 
 type anthropicWireUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	InputTokens              jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens             jsonnum.Int64 `json:"output_tokens"`
+	CacheCreationInputTokens jsonnum.Int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     jsonnum.Int64 `json:"cache_read_input_tokens"`
 	// ServiceTier and Speed describe the serving tier of this usage. They
 	// exist only on the response side; the request spells the tier through
 	// service_tier/speed as well.
 	ServiceTier         string `json:"service_tier"`
 	Speed               string `json:"speed"`
 	OutputTokensDetails *struct {
-		ThinkingTokens int64 `json:"thinking_tokens"`
+		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -1705,22 +1705,22 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 
 func anthropicUsageToIR(u anthropicWireUsage) (ir.Usage, error) {
 	out := ir.Usage{
-		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  u.CacheReadInputTokens,
-		CacheWriteTokens: u.CacheCreationInputTokens,
+		OutputTokens:     int64(u.OutputTokens),
+		CacheReadTokens:  int64(u.CacheReadInputTokens),
+		CacheWriteTokens: int64(u.CacheCreationInputTokens),
 	}
-	input, err := metrics.SumCounts(u.InputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	input, err := metrics.SumCounts(int64(u.InputTokens), int64(u.CacheReadInputTokens), int64(u.CacheCreationInputTokens))
 	if err != nil {
 		return ir.Usage{}, fmt.Errorf("usage: %w", err)
 	}
-	total, err := metrics.SumCounts(input, u.OutputTokens)
+	total, err := metrics.SumCounts(input, int64(u.OutputTokens))
 	if err != nil {
 		return ir.Usage{}, fmt.Errorf("usage: %w", err)
 	}
 	out.InputTokens = input
 	out.TotalTokens = total
 	if u.OutputTokensDetails != nil {
-		out.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
+		out.ReasoningTokens = int64(u.OutputTokensDetails.ThinkingTokens)
 	}
 	return out, nil
 }

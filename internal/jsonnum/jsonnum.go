@@ -19,8 +19,11 @@ var (
 	ErrNotNumber = errors.New("must be an integer number")
 	// ErrNotInteger reports a fractional value.
 	ErrNotInteger = errors.New("must be an integer")
-	// ErrOutOfRange reports an integral value that does not fit int.
+	// ErrOutOfRange reports an integral value that does not fit int64.
 	ErrOutOfRange = errors.New("is outside the supported integer range")
+	// ErrNegative reports a negative value where the schema requires a
+	// non-negative timestamp.
+	ErrNegative = errors.New("must be non-negative")
 )
 
 // exponentClamp bounds the decimal exponent accepted by decimalParts. Only a
@@ -35,6 +38,20 @@ const exponentClamp = 1 << 30
 // fractional value, an overflow, or a non-number literal fails with one of the
 // exported reasons.
 func Parse(raw []byte) (int, error) {
+	n, err := ParseInt64(raw)
+	if err != nil {
+		return 0, err
+	}
+	if int64(int(n)) != n {
+		return 0, ErrOutOfRange
+	}
+	return int(n), nil
+}
+
+// ParseInt64 decodes one JSON number literal into an exact int64. It accepts
+// every spelling whose mathematical value is integral and fits int64, and
+// rejects fractional values, overflow and non-number literals.
+func ParseInt64(raw []byte) (int64, error) {
 	lit := strings.TrimSpace(string(raw))
 	if lit == "" {
 		return 0, ErrNotNumber
@@ -66,18 +83,80 @@ func Parse(raw []byte) (int, error) {
 		}
 		sig += strings.Repeat("0", scale)
 	}
-	// Parse the sign with the magnitude so the minimum int value (for
-	// example -9223372036854775808 on a 64-bit platform) is accepted: its
-	// magnitude overflows int64 before negation.
+	// Parse the sign with the magnitude so the minimum int64 value is
+	// accepted: its magnitude overflows int64 before negation.
 	signed := sig
 	if negative {
 		signed = "-" + sig
 	}
-	n, err := strconv.ParseInt(signed, 10, 0)
+	n, err := strconv.ParseInt(signed, 10, 64)
 	if err != nil {
 		return 0, ErrOutOfRange
 	}
-	return int(n), nil
+	return n, nil
+}
+
+// Int64 is a JSON number whose mathematical value is an integer. It accepts
+// the integral spellings 5, 5.0 and 5e0 and rejects 5.5.
+type Int64 int64
+
+// UnmarshalJSON decodes one integral JSON number through ParseInt64.
+func (n *Int64) UnmarshalJSON(raw []byte) error {
+	value, err := ParseInt64(raw)
+	if err != nil {
+		return err
+	}
+	*n = Int64(value)
+	return nil
+}
+
+// UnixSeconds is a non-negative JSON number of seconds. The Responses
+// created_at schema is number/unixtime, so fractional seconds are valid and
+// truncate toward zero.
+type UnixSeconds int64
+
+// UnmarshalJSON decodes one non-negative JSON number and truncates any
+// fractional part. It rejects negative values and overflow.
+func (s *UnixSeconds) UnmarshalJSON(raw []byte) error {
+	lit := strings.TrimSpace(string(raw))
+	if lit == "" {
+		return ErrNotNumber
+	}
+	digits, scale, negative, ok := decimalParts(lit)
+	if !ok {
+		return ErrNotNumber
+	}
+	sig := strings.TrimLeft(digits, "0")
+	if sig == "" {
+		*s = 0
+		return nil
+	}
+	if scale < 0 {
+		drop := -scale
+		if drop >= len(sig) {
+			*s = 0
+			return nil
+		}
+		sig = sig[:len(sig)-drop]
+		if sig == "" {
+			*s = 0
+			return nil
+		}
+	} else if scale > 0 {
+		if len(sig)+scale > 19 {
+			return ErrOutOfRange
+		}
+		sig += strings.Repeat("0", scale)
+	}
+	if negative {
+		return ErrNegative
+	}
+	n, err := strconv.ParseInt(sig, 10, 64)
+	if err != nil {
+		return ErrOutOfRange
+	}
+	*s = UnixSeconds(n)
+	return nil
 }
 
 // OptionalInt decodes one optional integer member. A nil or JSON null raw

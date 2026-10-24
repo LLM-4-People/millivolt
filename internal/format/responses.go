@@ -1201,10 +1201,10 @@ func encodeResponsesFormat(rf *ir.ResponseFormat) map[string]any {
 }
 
 type responsesWireResponse struct {
-	ID        string `json:"id"`
-	Object    string `json:"object"`
-	CreatedAt int64  `json:"created_at"`
-	Status    string `json:"status"`
+	ID        string              `json:"id"`
+	Object    string              `json:"object"`
+	CreatedAt jsonnum.UnixSeconds `json:"created_at"`
+	Status    string              `json:"status"`
 	// Error is raw because the shared envelope parser deliberately accepts a
 	// string value and a numeric code; a typed object would reject those
 	// shapes before the proxy can record the provider's failure.
@@ -1231,15 +1231,15 @@ type responsesWireResponse struct {
 }
 
 type responsesWireUsage struct {
-	InputTokens        int64 `json:"input_tokens"`
-	OutputTokens       int64 `json:"output_tokens"`
-	TotalTokens        int64 `json:"total_tokens"`
+	InputTokens        jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens       jsonnum.Int64 `json:"output_tokens"`
+	TotalTokens        jsonnum.Int64 `json:"total_tokens"`
 	InputTokensDetails *struct {
-		CachedTokens     int64 `json:"cached_tokens"`
-		CacheWriteTokens int64 `json:"cache_write_tokens"`
+		CachedTokens     jsonnum.Int64 `json:"cached_tokens"`
+		CacheWriteTokens jsonnum.Int64 `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails *struct {
-		ReasoningTokens int64 `json:"reasoning_tokens"`
+		ReasoningTokens jsonnum.Int64 `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -1321,7 +1321,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	resp := &ir.Response{
 		ID:          in.ID,
 		Model:       in.Model,
-		Created:     in.CreatedAt,
+		Created:     int64(in.CreatedAt),
 		Status:      in.Status,
 		Metadata:    in.Metadata,
 		ServiceTier: in.ServiceTier,
@@ -1464,16 +1464,16 @@ func hasToolCall(blocks []ir.Block) bool {
 
 func responsesUsageToIR(in *responsesWireUsage) ir.Usage {
 	u := ir.Usage{
-		InputTokens:  in.InputTokens,
-		OutputTokens: in.OutputTokens,
-		TotalTokens:  in.TotalTokens,
+		InputTokens:  int64(in.InputTokens),
+		OutputTokens: int64(in.OutputTokens),
+		TotalTokens:  int64(in.TotalTokens),
 	}
 	if in.InputTokensDetails != nil {
-		u.CacheReadTokens = in.InputTokensDetails.CachedTokens
-		u.CacheWriteTokens = in.InputTokensDetails.CacheWriteTokens
+		u.CacheReadTokens = int64(in.InputTokensDetails.CachedTokens)
+		u.CacheWriteTokens = int64(in.InputTokensDetails.CacheWriteTokens)
 	}
 	if in.OutputTokensDetails != nil {
-		u.ReasoningTokens = in.OutputTokensDetails.ReasoningTokens
+		u.ReasoningTokens = int64(in.OutputTokensDetails.ReasoningTokens)
 	}
 	return u
 }

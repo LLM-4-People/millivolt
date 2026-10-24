@@ -1695,7 +1695,7 @@ func encodeChatResponseFormat(rf *ir.ResponseFormat) any {
 type chatWireResponse struct {
 	ID          string            `json:"id"`
 	Object      string            `json:"object"`
-	Created     int64             `json:"created"`
+	Created     jsonnum.Int64     `json:"created"`
 	Model       string            `json:"model"`
 	Choices     []json.RawMessage `json:"choices"`
 	Usage       *chatWireUsage    `json:"usage"`
@@ -1710,15 +1710,15 @@ type chatWireChoice struct {
 }
 
 type chatWireUsage struct {
-	PromptTokens        int64 `json:"prompt_tokens"`
-	CompletionTokens    int64 `json:"completion_tokens"`
-	TotalTokens         int64 `json:"total_tokens"`
+	PromptTokens        jsonnum.Int64 `json:"prompt_tokens"`
+	CompletionTokens    jsonnum.Int64 `json:"completion_tokens"`
+	TotalTokens         jsonnum.Int64 `json:"total_tokens"`
 	PromptTokensDetails *struct {
-		CachedTokens     int64 `json:"cached_tokens"`
-		CacheWriteTokens int64 `json:"cache_write_tokens"`
+		CachedTokens     jsonnum.Int64 `json:"cached_tokens"`
+		CacheWriteTokens jsonnum.Int64 `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 	CompletionTokensDetails *struct {
-		ReasoningTokens int64 `json:"reasoning_tokens"`
+		ReasoningTokens jsonnum.Int64 `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
 }
 
@@ -1793,7 +1793,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		// response carries the provider's real failure instead of a generic
 		// decode error from the missing choices.
 		resp := &ir.Response{
-			ID: in.ID, Model: in.Model, Created: in.Created,
+			ID: in.ID, Model: in.Model, Created: int64(in.Created),
 			Error:       &ir.Error{Type: typ, Code: code, Message: msg},
 			Finish:      ir.FinishError,
 			Metadata:    in.Metadata,
@@ -1871,7 +1871,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	resp := &ir.Response{
 		ID:          in.ID,
 		Model:       in.Model,
-		Created:     in.Created,
+		Created:     int64(in.Created),
 		Blocks:      blocks,
 		Finish:      finish,
 		Warnings:    warns,
@@ -1901,16 +1901,16 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 
 func decodeChatUsage(in *chatWireUsage) ir.Usage {
 	u := ir.Usage{
-		InputTokens:  in.PromptTokens,
-		OutputTokens: in.CompletionTokens,
-		TotalTokens:  in.TotalTokens,
+		InputTokens:  int64(in.PromptTokens),
+		OutputTokens: int64(in.CompletionTokens),
+		TotalTokens:  int64(in.TotalTokens),
 	}
 	if in.PromptTokensDetails != nil {
-		u.CacheReadTokens = in.PromptTokensDetails.CachedTokens
-		u.CacheWriteTokens = in.PromptTokensDetails.CacheWriteTokens
+		u.CacheReadTokens = int64(in.PromptTokensDetails.CachedTokens)
+		u.CacheWriteTokens = int64(in.PromptTokensDetails.CacheWriteTokens)
 	}
 	if in.CompletionTokensDetails != nil {
-		u.ReasoningTokens = in.CompletionTokensDetails.ReasoningTokens
+		u.ReasoningTokens = int64(in.CompletionTokensDetails.ReasoningTokens)
 	}
 	return u
 }

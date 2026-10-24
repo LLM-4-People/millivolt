@@ -293,7 +293,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := checkNativeIdentity("model", resp.Model); err != nil {
 				return nil, err
 			}
-			d.id, d.model, d.created = resp.ID, resp.Model, resp.CreatedAt
+			d.id, d.model, d.created = resp.ID, resp.Model, int64(resp.CreatedAt)
 			if d.created == 0 {
 				d.created = time.Now().Unix()
 			}

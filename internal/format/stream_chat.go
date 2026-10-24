@@ -9,16 +9,17 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 // Chat Completions streaming codec.
 
 type chatWireChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
+	ID      string        `json:"id"`
+	Object  string        `json:"object"`
+	Created jsonnum.Int64 `json:"created"`
+	Model   string        `json:"model"`
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
@@ -171,7 +172,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 			d.started = true
-			d.id, d.model, d.created = chunk.ID, chunk.Model, chunk.Created
+			d.id, d.model, d.created = chunk.ID, chunk.Model, int64(chunk.Created)
 			if d.created == 0 {
 				d.created = time.Now().Unix()
 			}
