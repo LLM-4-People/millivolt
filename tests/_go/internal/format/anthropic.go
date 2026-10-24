@@ -792,7 +792,7 @@ func TestTranslateResponseContentExactOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ab","role":"assistant"}}],"created":0,"id":"msg","model":"m","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":1,"prompt_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"total_tokens":3}}`
+	const want = `{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"ab","role":"assistant"}}],"created":0,"id":"msg","model":"m","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":1,"prompt_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"total_tokens":3}}`
 	if string(normalized) != want {
 		t.Fatalf("translated response =\n%s\nwant\n%s", normalized, want)
 	}

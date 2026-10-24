@@ -1679,6 +1679,9 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 			"index":         0,
 			"message":       message,
 			"finish_reason": ChatFinishReason(resp.Finish),
+			// The response schema requires the nullable logprobs member;
+			// this proxy never requests log probabilities, so it is null.
+			"logprobs": nil,
 		}},
 	}
 	if resp.Usage != (ir.Usage{}) {
