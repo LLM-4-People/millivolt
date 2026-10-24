@@ -2195,6 +2195,11 @@ func boundRequestMetadata(body []byte) error {
 	contentParts := 0
 	annotationParts := 0
 	toolCalls := 0
+	// stream_options is a RawMessage field: duplicate top-level occurrences
+	// overwrite, so only the last object reaches the typed decode. Retain its
+	// span and bound that occurrence after the scan, matching the codec.
+	streamOptionsStart, streamOptionsEnd := -1, -1
+	streamOptionsSeen := false
 	for i < len(body) {
 		keyStart := i
 		end := skipJSONString(body, i)
@@ -2336,6 +2341,14 @@ func boundRequestMetadata(body []byte) error {
 				}
 			}
 			i = next
+		case "stream_options":
+			next := skipJSONValue(body, i)
+			if next < 0 {
+				return nil
+			}
+			streamOptionsStart, streamOptionsEnd = i, next
+			streamOptionsSeen = true
+			i = next
 		case "stop":
 			// stop is decoded into []string only to count it. A string is one
 			// value and every non-array shape is tolerated by the metadata
@@ -2409,6 +2422,10 @@ func boundRequestMetadata(body []byte) error {
 	if metadataOver || (metadataObjects == 1 && metadataFirstOver) {
 		return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
 	}
+	if streamOptionsSeen &&
+		!metrics.ObjectWithinLimit(body[streamOptionsStart:streamOptionsEnd], requestMetadataMaxElements) {
+		return requestMetadataOverflow(body, fmt.Errorf("request stream_options exceeds %d members", requestMetadataMaxElements))
+	}
 	return nil
 }
 
@@ -2479,6 +2496,8 @@ func (k requestKey) collection() string {
 		return "input"
 	case k.equal("metadata"):
 		return "metadata"
+	case k.equal("stream_options"):
+		return "stream_options"
 	case k.equal("logit_bias"):
 		return "logit_bias"
 	case k.equal("stop"), k.equal("stop_sequences"):

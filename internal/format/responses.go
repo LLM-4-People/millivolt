@@ -120,8 +120,9 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	// Bound the collections the typed decode materializes. Input has its own
 	// check in decodeResponsesInput, before that function's item decode.
 	var bounds struct {
-		Tools   json.RawMessage `json:"tools"`
-		Include json.RawMessage `json:"include"`
+		Tools         json.RawMessage `json:"tools"`
+		Include       json.RawMessage `json:"include"`
+		StreamOptions json.RawMessage `json:"stream_options"`
 	}
 	if err := json.Unmarshal(body, &bounds); err != nil {
 		return nil, fmt.Errorf("parse responses request: %w", err)
@@ -130,6 +131,13 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		return nil, err
 	}
 	if err := checkWireArray(bounds.Include, "include", WireCollectionMax); err != nil {
+		return nil, err
+	}
+	// The member map is decoded below and one warning is added per present
+	// member. Bound it before that materializes: a request-sized object of
+	// tiny members otherwise expands into a body-sized map plus a body-sized
+	// warning join before the header sink cuts it.
+	if err := checkWireObject(bounds.StreamOptions, "stream_options", WireCollectionMax); err != nil {
 		return nil, err
 	}
 	var in responsesWireRequest
