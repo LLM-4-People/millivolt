@@ -1197,3 +1197,47 @@ func TestTranslatedFrameBufCoversEncoderCaps(t *testing.T) {
 		}
 	}
 }
+
+// TestUnknownPathInFormatTranslationEndToEnd pins TC4-4: an unknown path with
+// X-Proxy-In-Format selects the inbound decoder, translates the request to the
+// target protocol and translates the response back.
+func TestUnknownPathInFormatTranslationEndToEnd(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", 200,
+		`{"id":"msg_1","type":"message","role":"assistant","model":"m",`+
+			`"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",`+
+			`"usage":{"input_tokens":3,"output_tokens":2}}`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/openai/deployments/foo/chat/completions",
+		strings.NewReader(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	r.Header.Set("Authorization", "Bearer sk-test")
+	r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+	r.Header.Set("X-Proxy-In-Format", "openai")
+	r.Header.Set("X-Proxy-Format", "anthropic")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if got := up.lastPath(); got != "/v1/messages" {
+		t.Fatalf("upstream path = %q, want /v1/messages", got)
+	}
+	if body := string(up.lastBody()); !strings.Contains(body, `"messages"`) || !strings.Contains(body, `"max_tokens":16`) {
+		t.Fatalf("upstream body is not the translated Anthropic request: %s", body)
+	}
+	var doc struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("response is not a Chat completion: %v (%s)", err, w.Body.String())
+	}
+	if len(doc.Choices) != 1 || doc.Choices[0].Message.Content != "hello" {
+		t.Fatalf("translated response = %s, want a Chat completion with hello", w.Body.String())
+	}
+}
