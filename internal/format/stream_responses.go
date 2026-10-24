@@ -2953,9 +2953,11 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 	return nil
 }
 
-// abortItem closes one Responses item after a target-side failure. It emits an
-// empty close for a content part or reasoning summary the encoder opened, then
-// the item done frame, and never flushes retained text, arguments or reasoning.
+// abortItem closes one non-tool Responses item after a target-side failure. It
+// emits an empty close for a content part or reasoning summary the encoder
+// opened, then the item done frame, and never flushes retained text or
+// reasoning. Abort leaves an open function call for the proxy error frame, so
+// this helper has no function-call shape.
 func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 	switch item.kind {
 	case "message":
@@ -2990,10 +2992,6 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 	case "message":
 		closed["role"] = "assistant"
 		closed["content"] = []any{}
-	case "function_call":
-		closed["call_id"] = item.callID
-		closed["name"] = item.name
-		closed["arguments"] = "{}"
 	case "reasoning":
 		closed["summary"] = []any{}
 	}

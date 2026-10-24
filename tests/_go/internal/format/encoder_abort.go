@@ -187,3 +187,30 @@ func TestChatEncoderAbortKeepsValidChunks(t *testing.T) {
 		t.Fatalf("content written before the abort was lost: %s", out)
 	}
 }
+
+// TestResponsesEncoderAbortLeavesToolItemOpen pins the abort contract: an open
+// function call receives no output_item.done or arguments {} frame, because
+// either would finalize an executable empty call. The proxy error frame
+// terminates the stream instead.
+func TestResponsesEncoderAbortLeavesToolItemOpen(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewResponsesStreamEncoder(&buf, nil)
+	for _, ev := range []*ir.Event{
+		{Type: ir.EventStart, Response: &ir.Response{ID: "resp_1", Model: "m", Created: 1}},
+		{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
+			ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{}`),
+		}}},
+		{Type: ir.EventBlockDelta, Index: 0, Delta: &ir.Delta{Arguments: `{"q":`}},
+	} {
+		if err := enc.Write(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := enc.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "response.output_item.done") || strings.Contains(out, `"arguments":"{}"`) {
+		t.Fatalf("aborted tool item was closed: %s", out)
+	}
+}
