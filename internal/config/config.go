@@ -623,11 +623,13 @@ type ProviderOverride struct {
 	// EnsureTools names function tools that must be present in the tools
 	// array of relayed OpenAI-wire chat bodies for this provider. A
 	// first-party client may gate its free tier on its own tool signature;
-	// names the request lacks are injected as inert function stubs, and a
-	// body that carried no tools and no tool_choice also receives
-	// tool_choice "none" so the injected stubs can never be invoked. Only
-	// chat-shaped bodies (a top-level messages array) are rewritten; a body
-	// that already carries every configured name relays byte-identical.
+	// names the request lacks are injected as inert function stubs. When the
+	// client supplied no tools, an absent, null, or auto tool_choice is
+	// forced to none, an explicit none stays, and a required, named, or
+	// malformed choice skips injection entirely. Only chat-shaped bodies (a
+	// top-level messages array) are rewritten; a body that already carries
+	// every configured name needs no tool edit and is byte-identical only
+	// when no configured request override or strip also rewrites the body.
 	// Names must be non-empty and unique, validated on load.
 	EnsureTools []string `yaml:"ensure_tools" json:"ensure_tools"`
 	// Headers are extra upstream headers sent on every request to this

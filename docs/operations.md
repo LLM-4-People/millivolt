@@ -39,7 +39,8 @@ created a new empty overlay. On startup, unknown keys, unknown nested fields and
 extra YAML documents are dropped and the file is rewritten without them. An
 invalid recognized value fails startup without rewriting the file, and an
 unparseable file is moved to `PATH.invalid` and replaced with the documented
-defaults. Reload rejects an invalid document without rewriting it. Settings,
+defaults, except an ambiguous duplicate top-level key, which fails closed and
+stays in place. Reload rejects an invalid document without rewriting it. Settings,
 backup capture, restore merge and healthcheck read the file fail-closed and
 report an error instead of substituting a default. Settings POST still rejects
 those inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck
@@ -270,12 +271,14 @@ is an ordinary conversation id: lineage, filters, saved views and the request
 drawer read it like any other.
 
 `strip: true` removes every configured field of the entry that is present at
-the body's top level from the relayed upstream bytes; the default `false`
-forwards them unchanged. The removal rides the same body-rewrite engine and
-gate as the [request overrides](#request-overrides) body section: one document
-decode when both features match one request, the original bytes used unchanged
-by the rewrite stage when the body is not a JSON object or the rewrite would
-exceed `max_request_bytes`, and cursor targets skipping the body section. The
+the body's top level from the client body before relay or translation,
+including a Responses client body; the default `false` forwards them
+unchanged. Unlike the [request overrides](#request-overrides) body fields,
+strip is not limited to Chat Completions or Anthropic inbound. The removal
+rides the same body-rewrite engine: one document decode when both features
+match one request, the original bytes used unchanged by the rewrite stage when
+the body is not a JSON object or the rewrite would exceed
+`max_request_bytes`, and cursor targets skipping the body section. The
 client's spelling reaches the upstream wire only on OpenAI-wire passthrough.
 
 When a tracked value was extracted and the request translates to the Anthropic
@@ -565,7 +568,8 @@ requests would be packed. Picking a file first inspects the archive: created
 time, size, request span, and each config key as default vs modified vs the
 live file. Inspect validates and counts the decoded database file in place and
 computes its overlap with the live store without writing another copy.
-Config **replace** writes the backup document. Config **merge** overlays only
+Config **replace** loads and validates the backup, writes canonical YAML, and
+preserves CLI-overridden `listen` and `db_path`. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values
 stay unless the backup also customized them. An omitted `config_mode` or
 `database_mode` defaults to replace; an explicitly empty or whitespace value is

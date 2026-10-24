@@ -126,7 +126,16 @@ protocol's ordering invariants: Anthropic opens a block before any delta and
 closes it before `message_delta`; Responses emits `response.created`, per-item
 lifecycle events and one terminal event; Chat emits the role chunk, deltas, one
 `finish_reason` chunk and one `[DONE]`. A truncated upstream is closed with the
-client protocol's own error event, never a fabricated clean finish.
+client protocol's own error event, never a fabricated clean finish. The
+Responses encoder can emit `response.cancelled` for a canonical cancelled
+finish. The current `ResponseStreamEvent` union lists completed, failed and
+incomplete terminals, while the `Response` status enum includes cancelled; the
+event is kept as a forward-compatible extension and a strict client may treat
+it as unknown. Synthetic Responses error and terminal frames emitted on a
+committed socket after an accepted non-completion status restart
+`sequence_number` at 0 and 1; relayed events before that keep their original
+sequence. The reset is a documented contract gap, not a reproduced client
+failure.
 
 Streaming citations are not translated. A Responses
 `response.output_text.annotation.added` event is not decoded, and a streamed
@@ -134,10 +143,13 @@ target does not emit citations or annotations; non-streaming responses do carry
 url citations. A citation stream event is a separate feature, not a silent
 claim of streaming parity.
 
-Translated Responses message items always carry `status: "completed"`. The
-response-level `status` owns lifecycle and can be `incomplete` or `failed` even
-when individual items completed; a truncated tool turn is reported there, not
-by rewriting an item's status.
+A non-streaming translated Responses message item always carries
+`status: "completed"`. The response-level `status` owns lifecycle and can be
+`incomplete` or `failed` even when individual items completed; a truncated
+tool turn is reported there, not by rewriting an item's status. In a
+translated stream, `response.output_item.added` carries `status:
+"in_progress"` and the closing `response.output_item.done` carries
+`"completed"`; the terminal response status still owns the turn lifecycle.
 
 ## Bundled compatibility profiles
 
@@ -250,6 +262,13 @@ native Chat client may send either spelling, and the decoder prefers
 `max_completion_tokens`, but a translated Chat request still carries
 `max_tokens` and can therefore be refused by a target that accepts only the
 newer spelling.
+
+An Anthropic target request forwards `temperature` (clamped to 0..1), `top_p`
+and `top_k` for older and compatible upstreams. The current Anthropic
+`MessageCreateParamsBase` request type no longer lists those sampling fields,
+so a strict current endpoint may reject them. The forwarding is kept as a
+compatibility choice rather than silently dropping client values; revisit it
+if a live current endpoint is verified to reject them.
 
 Non-streaming translation buffers the full response before committing status;
 a translation failure can therefore return a real error status. A translated

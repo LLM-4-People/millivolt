@@ -839,3 +839,65 @@ func TestEnsureToolsChoiceHelpMatchesRuntime(t *testing.T) {
 		t.Fatal("docs/adapters.md still states the unconditional none rule")
 	}
 }
+
+// TestDocsStateRuntimeContracts pins the round-5 documentation corrections to
+// their runtime owners: boot repair's duplicate-key exception, the strip scope,
+// non-stream vs streamed item status, the quota wire limit, the ensure-tools
+// passthrough qualification, canonical backup replace, Anthropic sampling
+// compatibility, response.cancelled, and the synthetic sequence reset.
+func TestDocsStateRuntimeContracts(t *testing.T) {
+	normalize := func(rel string) string {
+		return strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", rel))), " ")
+	}
+	operations := normalize("operations.md")
+	adapters := normalize("adapters.md")
+	example := exampleHelpText(repositoryText(t, "proxy.example.yaml"))
+	configSource := strings.Join(strings.Fields(repositoryText(t, filepath.Join("internal", "config", "config.go"))), " ")
+
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"boot repair duplicate key", operations, "except an ambiguous duplicate top-level key, which fails closed and stays in place"},
+		{"generated boot repair duplicate key", example, "except an ambiguous duplicate top-level key, which fails closed and stays in place"},
+		{"strip includes Responses", operations, "including a Responses client body"},
+		{"strip is not inbound-limited", operations, "not limited to Chat Completions or Anthropic inbound"},
+		{"streamed item status", adapters, "response.output_item.added"},
+		{"streamed item status transition", adapters, "response.output_item.done"},
+		{"quota wire limit", adapters + " " + example, "OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior"},
+		{"ensure-tools passthrough qualification", configSource, "byte-identical only"},
+		{"ensure-tools rewrite actors", configSource, "when no configured request override or strip also rewrites the body"},
+		{"backup replace canonical", operations, "loads and validates the backup, writes canonical YAML, and preserves CLI-overridden"},
+		{"backup replace in example", example, "replace loads and validates the backup, writes canonical YAML, and preserves CLI-overridden"},
+		{"anthropic sampling compatibility", adapters, "MessageCreateParamsBase"},
+		{"anthropic strict endpoint", adapters, "strict current endpoint may reject them"},
+		{"responses cancelled extension", adapters, "response.cancelled"},
+		{"responses cancelled compatibility", adapters, "forward-compatible extension"},
+		{"synthetic sequence reset", adapters, "restart `sequence_number` at 0 and 1"},
+	} {
+		if !strings.Contains(tc.text, tc.want) {
+			t.Errorf("%s: missing %q", tc.name, tc.want)
+		}
+	}
+
+	quota := FieldByKey("quota_pause_mode")
+	if quota == nil || !strings.Contains(quota.Help, "OpenAI-compatible wire only") {
+		t.Errorf("quota_pause_mode help omits the wire qualifier")
+	}
+	sub := FieldByKey("sub_conversations")
+	if sub == nil || !strings.Contains(sub.Help, "including a Responses client body") {
+		t.Errorf("sub_conversations help omits the strip scope")
+	}
+	var backup *Category
+	for _, category := range Categories() {
+		if category.ID == "backup" {
+			c := category
+			backup = &c
+			break
+		}
+	}
+	if backup == nil || !strings.Contains(backup.Help, "replace loads and validates the backup") {
+		t.Errorf("backup category help still claims replace writes the backup as-is")
+	}
+}
