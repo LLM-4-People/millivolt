@@ -533,6 +533,7 @@ func TestTerminalTailIsDelivered(t *testing.T) {
 		name        string
 		source      string
 		wantBody    []string
+		forbidBody  []string
 		forbidCode  string
 		wantCode    string
 		wantFinish  string
@@ -561,6 +562,7 @@ func TestTerminalTailIsDelivered(t *testing.T) {
 			// replaces the withheld terminal bytes.
 			name:        "empty completion with finish without newline",
 			source:      roleFrame + finishTail,
+			forbidBody:  []string{`"finish_reason":"stop"`},
 			forbidCode:  metrics.CodeTruncated,
 			wantCode:    metrics.CodeEmptyCompletion,
 			wantFinish:  "stop",
@@ -589,6 +591,11 @@ func TestTerminalTailIsDelivered(t *testing.T) {
 			for _, want := range tc.wantBody {
 				if !strings.Contains(got, want) {
 					t.Fatalf("delivered body missing %q: %s", want, got)
+				}
+			}
+			for _, forbid := range tc.forbidBody {
+				if strings.Contains(got, forbid) {
+					t.Fatalf("withheld terminal bytes leaked (%q): %s", forbid, got)
 				}
 			}
 			if strings.Contains(got, `"code":"`+tc.forbidCode+`"`) {

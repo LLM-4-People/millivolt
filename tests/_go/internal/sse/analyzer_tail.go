@@ -31,9 +31,14 @@ func TestAnalyzerTailTerminates(t *testing.T) {
 		`data: {"choices":[{"delta":{}}]}`,
 		``,
 		`event: message_stop`,
+		// A standalone in-band error terminal and a foreign-wire terminal are
+		// terminal for Feed but deliberately outside the delivery classifier:
+		// an unterminated in-band error line is dropped rather than delivered.
+		`data: {"type":"error","code":"x","message":"boom"}`,
+		`data: {"type":"message_stop"}`,
 	} {
 		if chat.TailTerminates([]byte(line)) {
-			t.Fatalf("non-terminal chat tail classified terminal: %q", line)
+			t.Fatalf("non-delivery tail classified terminal: %q", line)
 		}
 	}
 	// The classifier must not commit: no terminator, no token time.
@@ -59,7 +64,12 @@ func TestAnalyzerTailTerminates(t *testing.T) {
 	}
 }
 
-func TestAnalyzerTailTerminatesMatchesFeed(t *testing.T) {
+// TestAnalyzerTailTerminatesRecognizesCompletionTerminals pins the narrowed
+// contract: the classifier owns the completion terminals that decide whether a
+// truncation-class tail is delivered, not every terminal Feed can record.
+// Standalone error terminals and foreign-wire terminals are excluded and
+// asserted false in TestAnalyzerTailTerminates.
+func TestAnalyzerTailTerminatesRecognizesCompletionTerminals(t *testing.T) {
 	now := time.Unix(100, 0)
 	for _, line := range []string{
 		`data: [DONE]`,

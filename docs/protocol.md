@@ -253,14 +253,16 @@ neither counts as relayed content nor as the record's answer content or
 first-answer time, and it does not veto the re-send; only a delivering path
 feeds and writes it, exactly once. Only the truncation class is decided before
 that feed, and only when the analyzer's non-committing tail classifier says the
-line carries no terminal marker: a final `[DONE]` or non-null `finish_reason`
-without a trailing newline is fed and delivered, so a complete answer is not
-reported as truncated. A tail that supplies the missing answer or tool call for
-an already-terminated empty or reasoning-only completion is likewise delivered
-and resolves the stream healthy. A terminator-less partial line that carries
-neither a terminal marker nor a completion, including a partial in-band error
-line, is not delivered, so the stream reports truncation rather than a
-completion or provider error the client never saw.
+line carries no completion terminal marker: a final Chat `[DONE]` or non-null
+`finish_reason` without a trailing newline is fed rather than dropped. A fed
+tail is delivered only when it supplies a complete answer or tool call; an
+empty or reasoning-only completion resolves through the degenerate boundary,
+which withholds or replaces the terminal bytes. A terminator-less partial line
+that carries neither a completion terminal marker nor a completion is not
+delivered, so the stream reports truncation rather than a completion or
+provider error the client never saw. A standalone in-band error line is not a
+delivery terminal and is dropped the same way, and a `[DONE]` on a Responses
+feed is not its terminal marker, so it is also dropped as truncation.
 A translated streaming request whose 200 response body is not SSE is still
 relabelled `text/event-stream`: the upstream bytes are never converted into SSE
 frames, and the relay surfaces the non-SSE body as a truncated-stream error

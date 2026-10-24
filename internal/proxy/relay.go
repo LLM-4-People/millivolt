@@ -2980,12 +2980,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// the boundary drops was never delivered, so it must not set the
 			// answer content or first-answer time on the record. The
 			// truncation class is skipped only when the analyzer's own tail
-			// classifier says the line carries no terminal marker: a final
-			// [DONE] or non-null finish_reason makes the stream complete and
-			// must be delivered. Every other degenerate class (empty
-			// completion, empty tool call, reasoning-only) also runs
-			// finishHold after the feed, because the tail can supply the
-			// missing answer or tool call.
+			// classifier says the line carries no completion terminal marker:
+			// a final Chat [DONE] or non-null finish_reason is fed rather than
+			// dropped. A fed tail is delivered only when it supplies a
+			// complete answer or tool call; an empty or reasoning-only
+			// completion resolves through the degenerate boundary, which
+			// withholds or replaces the terminal bytes. The other degenerate
+			// classes also run finishHold after the feed because the tail can
+			// supply the missing output.
 			preTailCode := a.OutcomeCode()
 			tailDropped := preTailCode == metrics.CodeTruncated && !a.HasInBandError() &&
 				!rec.ClientDisconnected && a.ChatLike() && !holdAborted &&

@@ -1428,12 +1428,17 @@ func (a *Analyzer) UsageInvalid() bool { return a.usageInvalid }
 func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
 
 // TailTerminates reports whether one unterminated trailing line (the bytes
-// after the last newline, without their newline) carries this wire's terminal
-// marker. It reads the same frame grammar as Feed and never mutates analyzer
-// state: the relay uses it to decide whether a tail that would otherwise be
-// dropped at the degenerate boundary must be fed and delivered instead. A
-// Chat [DONE], a non-null finish_reason and a Responses terminal event are the
-// complete terminal set for the chatlike wires that can reach this decision.
+// after the last newline, without their newline) carries a completion terminal
+// marker for the chatlike wires: a Chat [DONE], a non-null Chat finish_reason,
+// or a Responses terminal event. It reads the same frame grammar as Feed and
+// never mutates analyzer state; the relay uses it to decide whether a
+// truncation-class tail is dropped or fed. Standalone in-band error terminals
+// and foreign-wire terminals such as Anthropic message_stop are deliberately
+// excluded: an unterminated in-band error line is dropped rather than
+// delivered, so it is not a delivery terminal. A fed tail is delivered only
+// when it supplies a complete answer or tool call; an empty or reasoning-only
+// completion resolves through the degenerate boundary, which withholds or
+// replaces the terminal bytes.
 func (a *Analyzer) TailTerminates(line []byte) bool {
 	payload, ok := DataPayload(line)
 	if !ok {

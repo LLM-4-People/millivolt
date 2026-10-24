@@ -801,6 +801,11 @@ class PublishedContracts(unittest.TestCase):
         protocol = re.sub(r"\s+", " ", self.read("docs/protocol.md"))
         self.assertIn("More than one top-level member that folds to the same cap name", protocol)
         self.assertIn("fixed 1 MiB quality buffer", protocol)
+        self.assertIn("a final Chat `[DONE]` or non-null `finish_reason`", protocol)
+        self.assertIn("is fed rather than dropped", protocol)
+        self.assertIn("withholds or replaces the terminal bytes", protocol)
+        self.assertIn("A standalone in-band error line is not a delivery terminal", protocol)
+        self.assertIn("a `[DONE]` on a Responses feed is not its terminal marker", protocol)
 
     def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
         operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
