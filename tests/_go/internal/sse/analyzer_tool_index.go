@@ -96,3 +96,33 @@ func TestAnalyzerChatToolCallWithoutID(t *testing.T) {
 		}
 	})
 }
+
+// A malformed index in one tool-call element must not discard its healthy
+// siblings. The bad element contributes no index and falls back to id
+// presence; the valid sibling keeps its index count and name.
+func TestAnalyzerChatToolCallMalformedIndexKeepsSiblings(t *testing.T) {
+	now := time.Now()
+	for _, index := range []string{`"0"`, `0.0`, `0.5`, `-1`, `1e20`} {
+		t.Run(index, func(t *testing.T) {
+			var a Analyzer
+			chunk := `data: {"choices":[{"delta":{"tool_calls":[` +
+				`{"index":` + index + `,"id":"bad","function":{"name":"broken"}},` +
+				`{"index":1,"id":"good","function":{"name":"search"}}]}}]}`
+			a.Feed([]byte(chunk), now)
+			a.Feed([]byte(`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`), now)
+			a.Feed([]byte(`data: [DONE]`), now)
+			if a.toolCalls != 2 {
+				t.Fatalf("toolCalls = %d, want 2 for index %s", a.toolCalls, index)
+			}
+			if code := a.OutcomeCode(); code != "" {
+				t.Fatalf("outcome = %q, want a delivered tool turn", code)
+			}
+			var rec metrics.Record
+			a.Fill(&rec)
+			if rec.ToolCalls != 2 || len(rec.ToolNames) != 2 ||
+				rec.ToolNames[0] != "broken" || rec.ToolNames[1] != "search" {
+				t.Fatalf("record calls/names = %d/%v, want 2/[broken search]", rec.ToolCalls, rec.ToolNames)
+			}
+		})
+	}
+}
