@@ -348,6 +348,10 @@ func TestDroppedTailDoesNotMarkAnswer(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("status = %d, want 200", status)
 			}
+			assertSingleDataEvents(t, got)
+			if !strings.HasSuffix(got, "\n\n") {
+				t.Fatalf("terminal error is not a complete SSE event: %q", got)
+			}
 			if strings.Contains(got, "HELLO") {
 				t.Fatalf("undelivered tail reached the client: %s", got)
 			}
@@ -400,6 +404,10 @@ func TestDeliveredTailStillCounts(t *testing.T) {
 	status, got := streamRequest(t, srv, upstream)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", status)
+	}
+	assertSingleDataEvents(t, got)
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("delivered tail is not a complete SSE event: %q", got)
 	}
 	if !strings.Contains(got, `"content":"TAIL"`) {
 		t.Fatalf("delivered partial tail missing: %s", got)
@@ -496,6 +504,10 @@ func TestDegenerateTailCanCompleteStream(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("status = %d, want 200", status)
 			}
+			assertSingleDataEvents(t, got)
+			if !strings.HasSuffix(got, "\n\n") {
+				t.Fatalf("delivered tail is not a complete SSE event: %q", got)
+			}
 			if !strings.Contains(got, tc.wantBody) {
 				t.Fatalf("partial tail output missing (%s): %s", tc.wantBody, got)
 			}
@@ -588,6 +600,10 @@ func TestTerminalTailIsDelivered(t *testing.T) {
 			if status != http.StatusOK {
 				t.Fatalf("status = %d, want 200", status)
 			}
+			assertSingleDataEvents(t, got)
+			if !strings.HasSuffix(got, "\n\n") {
+				t.Fatalf("delivered tail is not a complete SSE event: %q", got)
+			}
 			for _, want := range tc.wantBody {
 				if !strings.Contains(got, want) {
 					t.Fatalf("delivered body missing %q: %s", want, got)
@@ -616,5 +632,105 @@ func TestTerminalTailIsDelivered(t *testing.T) {
 				t.Fatalf("record error = %v/%q, want %v/%q", rec.IsError(), rec.ErrorCode, tc.wantIsError, tc.wantCode)
 			}
 		})
+	}
+}
+
+// TestTerminalTailSkipsPreContentRescue pins E1: the terminal tail is
+// classified before the pre-content rescues, so a role-only fed prefix plus a
+// content+finish tail is not retried. The default budget would otherwise
+// re-send and could lose the only answer.
+func TestTerminalTailSkipsPreContentRescue(t *testing.T) {
+	const (
+		roleFrame = `data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+		// The answer and the finish marker share the unterminated tail, so the
+		// fed prefix is role-only and the pre-tail truncation gate would
+		// otherwise re-send before the tail is classified.
+		contentFinishTail = `data: {"id":"1","choices":[{"delta":{"content":"hello"},"finish_reason":"stop"}]}`
+	)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		calls.Add(1)
+		w.Write([]byte(roleFrame + contentFinishTail))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (the terminal tail must not be rescued)", n)
+	}
+	assertSingleDataEvents(t, got)
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("delivered tail is not a complete SSE event: %q", got)
+	}
+	if !strings.Contains(got, `"content":"hello"`) || !strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Fatalf("terminal tail was not delivered: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("terminal tail was rescued or truncated: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 0 || rec.FinishReason != "stop" || !rec.HadAnswerContent {
+		t.Fatalf("record = %+v, want a clean one-attempt stop with answer content", rec)
+	}
+}
+
+// TestTailDeliveryIsFramed pins H1: a finish line that opened the hold plus a
+// content tail must reach the client as two complete SSE events, not one
+// payload with two data lines.
+func TestTailDeliveryIsFramed(t *testing.T) {
+	const (
+		roleFrame    = `data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+		contentFrame = `data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"
+		finishLine   = `data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n"
+		contentTail  = `data: {"id":"1","choices":[{"delta":{"content":"TAIL"}}]}`
+	)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		calls.Add(1)
+		w.Write([]byte(roleFrame + contentFrame + finishLine + contentTail))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := newConfigWithQuality(0)
+	cfg.ThinkingRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	assertSingleDataEvents(t, got)
+	if !strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("delivered tail does not end at an event boundary: %q", got)
+	}
+	for _, want := range []string{`"content":"hello"`, `"finish_reason":"stop"`, `"content":"TAIL"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("delivered body missing %q: %s", want, got)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || !rec.HadAnswerContent || rec.FinishReason != "stop" {
+		t.Fatalf("record = %+v, want the delivered tail counted", rec)
 	}
 }

@@ -257,7 +257,12 @@ line carries no completion terminal marker: a final Chat `[DONE]` or non-null
 `finish_reason` without a trailing newline is fed rather than dropped. A fed
 tail is delivered only when it supplies a complete answer or tool call; an
 empty or reasoning-only completion resolves through the degenerate boundary,
-which withholds or replaces the terminal bytes. A terminator-less partial line
+which withholds or replaces the terminal bytes. A terminal tail is classified
+before the pre-content rescues, so it is never re-sent. A delivered tail is
+written as its own complete SSE event: a pending event is closed first and a
+blank boundary follows. Answer content that the source places after its finish
+marker is therefore relayed as a later event, and a client that stops at the
+finish reason may ignore it. A terminator-less partial line
 that carries neither a completion terminal marker nor a completion is not
 delivered, so the stream reports truncation rather than a completion or
 provider error the client never saw. A standalone in-band error line is not a

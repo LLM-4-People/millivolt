@@ -2395,6 +2395,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	)
 	a := s.analyzerFor(rec)
 	a.SetWire(wire)
+	// boundaryDrops reports whether finishHold will replace this attempt's
+	// terminal region with the in-band degenerate error instead of writing the
+	// held bytes. The tail-drop decision and finishHold share this predicate so
+	// delivery and record accounting cannot drift.
+	boundaryDrops := func(code string) bool {
+		return code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
+			a.ChatLike() && !holdAborted
+	}
 	// clientGone records a write-detected abort: the disconnect stamps
 	// the 499, and the analyzer's in-band error - when one reached the
 	// wire - still fills the record, so the abort counts like its 200
@@ -2501,8 +2509,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// blank separator, and a trailing partial line was never received and
 		// must be dropped. Without this boundary the error becomes a second
 		// data line in the open payload, or concatenates on the same line.
-		degenerate := code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
-			a.ChatLike() && !holdAborted
+		degenerate := boundaryDrops(code)
 		if degenerate {
 			if !writeRescueBoundary() {
 				return false
@@ -2543,6 +2550,16 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 			}
 		} else if len(hold) > 0 {
+			// A released terminal region is a complete SSE event: close the
+			// final line and add the blank boundary a spec parser needs at
+			// EOF. A held [DONE] or full terminal document already ends with
+			// a blank separator and is unchanged.
+			if !bytes.HasSuffix(hold, []byte("\n\n")) {
+				if !bytes.HasSuffix(hold, []byte("\n")) {
+					hold = append(hold, '\n')
+				}
+				hold = append(hold, '\n')
+			}
 			if _, werr := w.Write(hold); werr != nil {
 				clientGone()
 				return false
@@ -2891,7 +2908,19 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				a.Feed(tail, now)
 				if holding {
+					// Close any pending event, then write the tail as its own
+					// event with a blank boundary. Without this framing a
+					// finish line and a content tail would form one SSE payload
+					// with two data lines, which no spec parser can dispatch at
+					// EOF.
+					if len(hold) > 0 && !bytes.HasSuffix(hold, []byte("\n\n")) {
+						if !bytes.HasSuffix(hold, []byte("\n")) {
+							hold = append(hold, '\n')
+						}
+						hold = append(hold, '\n')
+					}
 					hold = append(hold, tail...)
+					hold = append(hold, '\n', '\n')
 				} else {
 					out.Write(tail)
 				}
@@ -2906,6 +2935,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				pendingName = ""
 				a.FlushEventWithName(name, now)
 			}
+			// An unterminated final line can itself carry the terminal marker.
+			// Decide before any pre-tail rescue so a complete answer is not
+			// re-sent or discarded. The classifier never commits analyzer
+			// state; the feed below is the only commit.
+			tailTerminates := a.TailTerminates(tail)
 			if err != io.EOF {
 				// A mid-thinking death by read error (connection reset,
 				// unexpected EOF from the upstream) is the same rescuable
@@ -2917,7 +2951,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// stays clean when it kills the read - reject the deadline
 				// sentinel itself (and any error wrapping it): a re-send
 				// would mint a fresh deadline the client did not ask for.
-				if allowThinkingRescue && ctx.Err() == nil &&
+				if allowThinkingRescue && ctx.Err() == nil && !tailTerminates &&
 					!errors.Is(err, context.DeadlineExceeded) &&
 					a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 					if !writeRescueBoundary() {
@@ -2962,13 +2996,13 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// holding implies a seen terminator. A committed verbatim relay
 			// (holdAborted) must never be re-sent: the client already saw the
 			// oversized bytes.
-			if allowTruncationRetry && ctx.Err() == nil && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
+			if !tailTerminates && allowTruncationRetry && ctx.Err() == nil && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
 				if !writeRescueBoundary() {
 					return rescueNone
 				}
 				return rescueEmptyTruncation
 			}
-			if allowThinkingRescue && ctx.Err() == nil && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+			if !tailTerminates && allowThinkingRescue && ctx.Err() == nil && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 				if !writeRescueBoundary() {
 					return rescueNone
 				}
@@ -2988,12 +3022,18 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// withholds or replaces the terminal bytes. The other degenerate
 			// classes also run finishHold after the feed because the tail can
 			// supply the missing output.
-			preTailCode := a.OutcomeCode()
-			tailDropped := preTailCode == metrics.CodeTruncated && !a.HasInBandError() &&
-				!rec.ClientDisconnected && a.ChatLike() && !holdAborted &&
-				!a.TailTerminates(tail)
-			if !tailDropped {
+			if tailTerminates {
+				// Feed the terminal tail into the withheld region and let
+				// finishHold decide healthy, degenerate or reasoning-stop. It
+				// is released as its own framed SSE event.
+				holding = true
 				releaseTail()
+			} else {
+				preTailCode := a.OutcomeCode()
+				tailDropped := preTailCode == metrics.CodeTruncated && boundaryDrops(preTailCode)
+				if !tailDropped {
+					releaseTail()
+				}
 			}
 			if !finishHold() {
 				return rescueNone
