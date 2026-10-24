@@ -258,6 +258,12 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				d.sawStopReason = true
 			}
 			d.closeOpenBlocks()
+			// The non-streaming decoder records a stop_reason approximation
+			// warning for model_context_window_exceeded. This path committed
+			// the target status line before message_delta arrived, and
+			// TranslateStreamBetween has no warning channel, so the same
+			// length finish is applied silently. The terminal status, reason
+			// and usage stay identical to the non-streaming path.
 			finish := &ir.Finish{Reason: anthropicFinishReason(delta.StopReason)}
 			if delta.StopSequence != nil {
 				finish.StopSequence = *delta.StopSequence
