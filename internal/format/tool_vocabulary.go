@@ -199,6 +199,12 @@ func toolAllowedCallers(raw json.RawMessage) (present bool, err error) {
 	if !wireValuePresent(raw) {
 		return false, nil
 	}
+	// The outer tools array is already bounded, but one tool can carry this
+	// array alone at the request-body cap. Bound it lexically before the
+	// typed []string decode materializes it.
+	if err := checkWireArray(raw, "allowed_callers", WireCollectionMax); err != nil {
+		return true, err
+	}
 	var callers []string
 	if err := json.Unmarshal(raw, &callers); err != nil {
 		return true, fmt.Errorf("allowed_callers: %w", err)
