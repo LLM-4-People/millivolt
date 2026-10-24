@@ -687,14 +687,20 @@ func TestTypeLineDurationRange(t *testing.T) {
 // OpenAI-only/Anthropic-ensure_tools/first-occurrence claims.
 func TestSchemaHelpStatesTranslationScope(t *testing.T) {
 	cases := []struct {
-		key     string
-		want    string
-		notWant string
+		key  string
+		want string
+		// helpNotWant and exampleNotWant are separate because a legitimate
+		// mention in another key's example text must not weaken the field
+		// assertion. The providers help must never return to the broad
+		// "Anthropic client bodies" promise, while the example legitimately
+		// contains that phrase in request_overrides.
+		helpNotWant    string
+		exampleNotWant string
 	}{
-		{"providers", "on a Chat outbound wire", "relayed Chat Completions or Anthropic client bodies missing them"},
-		{"request_overrides", "on a Chat Completions or Anthropic client body", "on the OpenAI wire"},
-		{"request_overrides", "Responses client body is not rewritten", "translated-anthropic requests"},
-		{"sub_conversations", "a duplicate top-level key drops the identity", "resolve by their first occurrence"},
+		{"providers", "on a Chat outbound wire", "Anthropic client bodies", ""},
+		{"request_overrides", "on a Chat Completions or Anthropic client body", "on the OpenAI wire", "on the OpenAI wire"},
+		{"request_overrides", "Responses client body is not rewritten", "translated-anthropic requests", "translated-anthropic requests"},
+		{"sub_conversations", "a duplicate top-level key drops the identity", "resolve by their first occurrence", "resolve by their first occurrence"},
 	}
 	for _, tc := range cases {
 		field := FieldByKey(tc.key)
@@ -704,8 +710,8 @@ func TestSchemaHelpStatesTranslationScope(t *testing.T) {
 		if !strings.Contains(field.Help, tc.want) {
 			t.Fatalf("%s help does not state %q: %s", tc.key, tc.want, field.Help)
 		}
-		if strings.Contains(field.Help, tc.notWant) {
-			t.Fatalf("%s help still states %q: %s", tc.key, tc.notWant, field.Help)
+		if tc.helpNotWant != "" && strings.Contains(field.Help, tc.helpNotWant) {
+			t.Fatalf("%s help still states %q: %s", tc.key, tc.helpNotWant, field.Help)
 		}
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "proxy.example.yaml"))
@@ -719,8 +725,8 @@ func TestSchemaHelpStatesTranslationScope(t *testing.T) {
 		if !strings.Contains(example, tc.want) {
 			t.Fatalf("proxy.example.yaml does not carry the corrected %s text %q", tc.key, tc.want)
 		}
-		if strings.Contains(example, tc.notWant) {
-			t.Fatalf("proxy.example.yaml still carries the old %s text %q", tc.key, tc.notWant)
+		if tc.exampleNotWant != "" && strings.Contains(example, tc.exampleNotWant) {
+			t.Fatalf("proxy.example.yaml still carries the old %s text %q", tc.key, tc.exampleNotWant)
 		}
 	}
 }
