@@ -84,6 +84,12 @@ type Analyzer struct {
 	// the OpenAI degenerate substitution or rescue rules.
 	anthropicWire bool
 
+	// responsesWire marks a feed routed to the Responses API before any frame
+	// arrives. A zero-event, comment-only or ping-only body carries no typed
+	// event to set responsesStream, so the routed wire owns its terminal shape
+	// (response.failed, never an OpenAI error chunk plus [DONE]).
+	responsesWire bool
+
 	// responsesStream marks a Responses-API-shaped feed (typed "response.*"
 	// events). Those events carry a per-response monotonic sequence_number
 	// used to order the stream, so appending a re-send's restarted event
@@ -235,9 +241,30 @@ func (a *Analyzer) SetWire(p ir.Protocol) {
 	switch p {
 	case ir.Anthropic:
 		a.anthropicWire = true
-	case ir.Chat, ir.Responses, ir.Cursor:
+	case ir.Responses:
+		a.responsesWire = true
+		a.chatlike = true
+	case ir.Chat, ir.Cursor:
 		a.chatlike = true
 	}
+}
+
+// DoneTerminates reports whether the [DONE] sentinel is this wire's
+// documented end-of-stream marker. It belongs to the Chat Completions family
+// (and the unknown-protocol fallback); Anthropic Messages closes with
+// message_stop or a stop_reason, and the Responses API closes with a typed
+// terminal event. An observed Responses event identifies the feed even when
+// the route did not seed it.
+func (a *Analyzer) DoneTerminates() bool {
+	return !a.anthropicWire && !a.responsesWire && !a.responsesStream
+}
+
+// ResponsesFeed reports whether this stream follows the Responses API: the
+// routed wire before any event arrived, or an observed typed response.* event.
+// It owns the Responses terminal substitution shape and the [DONE] hold
+// decision, so a zero-event Responses body still closes with response.failed.
+func (a *Analyzer) ResponsesFeed() bool {
+	return a.responsesWire || a.responsesStream
 }
 
 // Feed ingests one raw SSE line (the bytes between \n delimiters, NOT
@@ -265,9 +292,13 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 
 	// Fast-path: check for the [DONE] sentinel. Tolerate "data:[DONE]" (no
 	// space) and a trailing \r. Anything else (e.g. "[DONE]extra") falls
-	// through to the normal JSON scan.
+	// through to the normal JSON scan. Only the Chat-completions family (and
+	// the unknown-protocol fallback) treats the sentinel as its terminator;
+	// Responses and Anthropic Messages have their own terminal events.
 	if isDonePayload(payload) {
-		a.terminatorSeen = true
+		if a.DoneTerminates() {
+			a.terminatorSeen = true
+		}
 		return
 	}
 
@@ -289,7 +320,9 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 		return
 	}
 	if isDonePayload(data) {
-		a.terminatorSeen = true
+		if a.DoneTerminates() {
+			a.terminatorSeen = true
+		}
 		return
 	}
 	// A terminal marker already signed the stream: a repeated terminal event
@@ -576,13 +609,6 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		a.captureCost(payload)
 		a.captureResponsesTerminalFinish(eventType, payload, now)
 	}
-	// A Responses failure states its provider error under response.error, not
-	// the top-level error key the frame gate looks for. Decode it only on the
-	// terminal failure event (the hot path for every other frame stays a byte
-	// scan), and let the first real error win like every other in-band path.
-	if eventType == "response.failed" {
-		a.captureResponseFailedError(payload)
-	}
 	// Refusal and deprecated function_call deltas are answer-shaped bytes:
 	// a rescue appending a fresh attempt after them would duplicate visible
 	// output-shaped text, so they disqualify the thinking rescue.
@@ -672,6 +698,14 @@ func (a *Analyzer) flushEvent(now time.Time) {
 			a.captureResponsesTerminalFinish(typ, a.eventData, now)
 		}
 	}
+	// A standalone error event ({"type":"error","code":...,"message":...})
+	// carries no error object and never decodes line by line when it is
+	// pretty-printed. Resolve the reassembled document at this same boundary
+	// so its provider error is recorded and the stream stops as failed instead
+	// of being re-sent as a truncation.
+	if len(a.eventData) > 0 {
+		a.captureStandaloneError(a.eventData)
+	}
 	a.eventData = a.eventData[:0]
 	a.eventDataSeen = false
 	a.eventSkipAccum = false
@@ -721,6 +755,42 @@ func (a *Analyzer) captureStreamError(payload []byte) {
 	a.setStreamError(metrics.ParseErrorEnvelope(payload))
 }
 
+// captureStandaloneError classifies one reassembled standalone error event:
+// a document whose code and message are top-level siblings of "type":"error"
+// (the Responses error shape) instead of a nested error object. A per-line
+// scan cannot see a pretty-printed event, and the document has no top-level
+// "error" key for captureStreamError, so only the event-boundary owner can
+// classify it. An error event is a terminal statement on every wire that
+// carries one; the first real error still wins.
+func (a *Analyzer) captureStandaloneError(payload []byte) {
+	var ev struct {
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Message json.RawMessage `json:"message"`
+	}
+	if json.Unmarshal(payload, &ev) != nil || ev.Type != "error" {
+		return
+	}
+	a.recordStandaloneError(ev.Code, ev.Message)
+}
+
+// recordStandaloneError registers the top-level code/message of an error
+// event that carries no nested error object. The error event itself is the
+// stream's terminal statement even when it names neither field.
+func (a *Analyzer) recordStandaloneError(code, message json.RawMessage) {
+	a.terminatorSeen = true
+	if a.errType != "" {
+		return
+	}
+	var msg string
+	_ = json.Unmarshal(message, &msg)
+	codeString := errorCodeString(code)
+	if codeString == "" && msg == "" {
+		return
+	}
+	a.setStreamError("provider_error", codeString, msg)
+}
+
 // captureResponseFailedError records the nested provider error of a Responses
 // response.failed event. The same first-real-error rule applies.
 func (a *Analyzer) captureResponseFailedError(payload []byte) {
@@ -752,6 +822,14 @@ func responsesTerminalEvent(eventType string) bool {
 // The terminal document may also be the only place the turn's output appears,
 // so text, refusal and reasoning presence are recorded here before classifying.
 func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte, now time.Time) {
+	// A Responses failure states its provider error under response.error, not
+	// the top-level error key the per-line gate looks for. Decode it here so
+	// every terminal path - line-oriented, buffered event, and reassembled
+	// document at its blank-line boundary - shares one owner. The first real
+	// error wins like every other in-band path.
+	if eventType == "response.failed" {
+		a.captureResponseFailedError(payload)
+	}
 	var ev struct {
 		Response struct {
 			ID                string `json:"id"`

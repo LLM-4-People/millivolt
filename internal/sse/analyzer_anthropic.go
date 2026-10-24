@@ -144,20 +144,15 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 	case "error":
 		if ev.Error != nil {
 			a.setStreamError(ev.Error.Type, "", ev.Error.Message)
+			// An error event is a terminal statement on every wire that
+			// carries one; never leave the analyzer waiting for a marker
+			// after it.
+			a.terminatorSeen = true
 		} else {
 			// A standalone Responses error event has no nested error object:
-			// its code and message are top-level siblings of the type. The
-			// message is a plain string, decoded from the raw field.
-			var msg string
-			_ = json.Unmarshal(ev.Message, &msg)
-			code := errorCodeString(ev.Code)
-			if code != "" || msg != "" {
-				a.setStreamError("provider_error", code, msg)
-			}
+			// its code and message are top-level siblings of the type.
+			a.recordStandaloneError(ev.Code, ev.Message)
 		}
-		// An error event is a terminal statement on every wire that carries
-		// one; never leave the analyzer waiting for a marker after it.
-		a.terminatorSeen = true
 		return true
 	case "ping":
 		return true

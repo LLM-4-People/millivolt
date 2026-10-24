@@ -2375,7 +2375,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					rescueRequested = rescueReasoningStop
 					return true
 				}
-				if a.ResponsesStream() {
+				if a.ResponsesFeed() {
 					emitDegenerateResponses(w, &a, time.Now(), code, rec)
 				} else {
 					emitDegenerateSSE(w, &a, time.Now(), code, rec)
@@ -2525,6 +2525,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				blank := len(bytes.TrimSpace(line)) == 0
 				prev := a.Terminated()
+				// A [DONE] on a Responses feed is not its terminal marker, but
+				// the line must still be withheld: a zero-event Responses body
+				// replaces it with one response.failed at the end. Other wires
+				// relay it as the foreign line it is.
+				heldDone := sse.DoneLine(line) && a.ResponsesFeed()
 				if blank {
 					eventHasData = false
 					if pendingName != "" {
@@ -2557,10 +2562,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				case holding:
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
-					if sse.TerminalLine(line) {
+					if sse.TerminalLine(line) && (a.DoneTerminates() || !sse.DoneLine(line)) {
 						deferredFinish = true
 					}
-					if sse.DoneLine(line) {
+					if sse.DoneLine(line) && a.DoneTerminates() {
 						// [DONE] ends the stream at the line itself; emit the
 						// blank line its SSE block would have carried.
 						hold = append(hold, '\n')
@@ -2586,22 +2591,22 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						a.Fill(rec)
 						return rescueNone
 					}
-				case !prev && a.Terminated() && !blank:
+				case !prev && (a.Terminated() || heldDone) && !blank:
 					// This line opened the terminal region: withhold it (and
 					// everything after) until the outcome is decided.
 					holding = true
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
-					if sse.DoneLine(line) {
+					if sse.DoneLine(line) && a.DoneTerminates() {
 						hold = append(hold, '\n')
 					}
-					if sse.TerminalLine(line) {
+					if sse.TerminalLine(line) && (a.DoneTerminates() || !sse.DoneLine(line)) {
 						deferredFinish = true
 					}
 					if !writeOut() {
 						return rescueNone
 					}
-					if sse.DoneLine(line) {
+					if sse.DoneLine(line) && a.DoneTerminates() {
 						if !finishHold() {
 							return rescueNone
 						}
