@@ -114,3 +114,33 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		t.Fatalf("stream created_at not truncated to 1: %s", out)
 	}
 }
+
+// TestAnthropicUsageNullCacheCounts pins NEW-1: the Anthropic schema declares
+// both cache counters number or null, so an explicit null must decode as zero.
+// The value-typed jsonnum.Int64 rejected null and turned a valid response into
+// a translated 502.
+func TestAnthropicUsageNullCacheCounts(t *testing.T) {
+	body := `{"id":"msg_1","type":"message","role":"assistant","model":"m",` +
+		`"content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn",` +
+		`"usage":{"input_tokens":5,"output_tokens":7,` +
+		`"cache_creation_input_tokens":null,"cache_read_input_tokens":null}}`
+	resp, err := DecodeAnthropicResponse([]byte(body))
+	if err != nil {
+		t.Fatalf("explicit null cache counts rejected: %v", err)
+	}
+	if resp.Usage.InputTokens != 5 || resp.Usage.OutputTokens != 7 || resp.Usage.TotalTokens != 12 ||
+		resp.Usage.CacheReadTokens != 0 || resp.Usage.CacheWriteTokens != 0 {
+		t.Fatalf("usage = %+v, want input 5 output 7 total 12 and zero cache counts", resp.Usage)
+	}
+
+	// Omitted cache counters keep the same zero result; a present number is
+	// still honored beside an explicit null sibling.
+	mixed := strings.Replace(body, `"cache_creation_input_tokens":null`, `"cache_creation_input_tokens":2`, 1)
+	resp, err = DecodeAnthropicResponse([]byte(mixed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage.CacheWriteTokens != 2 || resp.Usage.CacheReadTokens != 0 || resp.Usage.InputTokens != 7 {
+		t.Fatalf("mixed usage = %+v, want input 7 cache write 2 cache read 0", resp.Usage)
+	}
+}

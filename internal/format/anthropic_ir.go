@@ -1594,10 +1594,13 @@ type anthropicWireResponse struct {
 }
 
 type anthropicWireUsage struct {
-	InputTokens              jsonnum.Int64 `json:"input_tokens"`
-	OutputTokens             jsonnum.Int64 `json:"output_tokens"`
-	CacheCreationInputTokens jsonnum.Int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     jsonnum.Int64 `json:"cache_read_input_tokens"`
+	InputTokens  jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens jsonnum.Int64 `json:"output_tokens"`
+	// The Anthropic schema declares both cache counters number or null, so an
+	// explicit null must decode as zero rather than fail the whole response.
+	// The streaming owner uses the same pointer shape.
+	CacheCreationInputTokens *jsonnum.Int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *jsonnum.Int64 `json:"cache_read_input_tokens"`
 	// ServiceTier and Speed describe the serving tier of this usage. They
 	// exist only on the response side; the request spells the tier through
 	// service_tier/speed as well.
@@ -1704,12 +1707,19 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 }
 
 func anthropicUsageToIR(u anthropicWireUsage) (ir.Usage, error) {
+	var cacheRead, cacheWrite int64
+	if u.CacheReadInputTokens != nil {
+		cacheRead = int64(*u.CacheReadInputTokens)
+	}
+	if u.CacheCreationInputTokens != nil {
+		cacheWrite = int64(*u.CacheCreationInputTokens)
+	}
 	out := ir.Usage{
 		OutputTokens:     int64(u.OutputTokens),
-		CacheReadTokens:  int64(u.CacheReadInputTokens),
-		CacheWriteTokens: int64(u.CacheCreationInputTokens),
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
 	}
-	input, err := metrics.SumCounts(int64(u.InputTokens), int64(u.CacheReadInputTokens), int64(u.CacheCreationInputTokens))
+	input, err := metrics.SumCounts(int64(u.InputTokens), cacheRead, cacheWrite)
 	if err != nil {
 		return ir.Usage{}, fmt.Errorf("usage: %w", err)
 	}
