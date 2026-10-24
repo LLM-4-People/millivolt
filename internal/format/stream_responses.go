@@ -587,23 +587,51 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// reasoning_text is a content part of the reasoning item, so its
 			// deltas belong to the part block the added event opened (C12).
 			// reasoning_summary_text has no content part and stays on the item
-			// block. An empty delta must not materialize a deferred part.
+			// block. An empty delta must not materialize a deferred part. A
+			// provider is not required to announce the part first: derive the
+			// identity exactly like the done fallback and emit on the open
+			// reasoning item block when the part block was never seeded.
 			if ev.Delta == "" {
 				continue
 			}
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			itemID := d.itemIDByOutput[ev.OutputIndex]
 			key := d.keyByPart[pos]
 			if key == "" {
+				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			}
+			if _, announced := d.announcedParts[key]; !announced {
+				admitted, err := d.announcePart(key)
+				if err != nil {
+					return nil, err
+				}
+				if !admitted {
+					continue
+				}
+			}
+			if _, owned := d.partOwner[key]; !owned {
+				d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
+			}
+			if _, kind := d.partKind[key]; !kind {
+				d.partKind[key] = partChannelReasoning
+			}
+			delta := pendingValueSuffix(d.emittedValue(key), ev.Delta)
+			if delta == "" {
 				continue
 			}
-			idx, ok := d.startPartBlock(key)
-			if !ok {
-				continue
-			}
-			if err := d.appendEmittedText(key, ev.Delta); err != nil {
+			if err := d.appendEmittedText(key, delta); err != nil {
 				return nil, err
 			}
-			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
+			if idx, ok := d.startPartBlock(key); ok {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
+			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
+			} else {
+				d.terminalPending = append(d.terminalPending, terminalEmission{
+					block: ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}},
+					delta: &ir.Delta{Reasoning: delta},
+				})
+			}
 		case "response.reasoning_text.done":
 			// The done payload is authoritative. Emit it only when no delta
 			// carried the part's bytes. A provider may omit the part-start
