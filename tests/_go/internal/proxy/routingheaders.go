@@ -285,3 +285,41 @@ func TestRoutingHeaderErrorEchoBounded(t *testing.T) {
 		t.Fatalf("hostile timeout response = %d/%d bytes, want 400 with a bounded body", rec.Code, rec.Body.Len())
 	}
 }
+
+// TestMixedTokenCapSpellingsRejectedInRange pins DUP-5: the conflict rule is
+// independent of the hostile range bound, on both client wire families.
+func TestMixedTokenCapSpellingsRejectedInRange(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "responses client",
+			path: "/v1/responses",
+			body: `{"model":"m","input":"hi","max_tokens":1,"max_output_tokens":2}`,
+		},
+		{
+			name: "chat client",
+			path: "/v1/chat/completions",
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"max_output_tokens":2}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "application/json", 200, `{}`)
+			s := New(config.Default(), metrics.Noop{})
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+			w := proxyRequest(t, s, tc.path, "anthropic", tc.body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "cannot be combined") {
+				t.Fatalf("rejection does not name the conflict: %s", w.Body.String())
+			}
+			if up.calls.Load() != 0 {
+				t.Fatalf("upstream was called %d times before the conflict rejection", up.calls.Load())
+			}
+		})
+	}
+}

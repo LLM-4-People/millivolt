@@ -689,8 +689,10 @@ func TestProviderOverrides(t *testing.T) {
 	}
 }
 
-// Invalid overlay values are skipped at LoadFile (boot must succeed). Validate
-// still rejects a Config that actually holds those values.
+// LoadFile is the lenient library read: an invalid recognized value is
+// skipped. Boot uses LoadFileRepair and operational consumers use
+// LoadFileStrict, both of which fail closed. Validate still rejects a Config
+// that actually holds those values.
 func TestLoadFileSkipsInvalidValues(t *testing.T) {
 	cases := []struct {
 		name string

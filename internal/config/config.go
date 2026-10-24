@@ -467,7 +467,8 @@ type Config struct {
 
 	// RequestOverrides is the opt-in list of scoped rewrites applied to the
 	// UPSTREAM request before relay: set/replace/remove HTTP headers and set
-	// OpenAI-wire body token ceilings (max_tokens / max_completion_tokens),
+	// Chat Completions or Anthropic client body token ceilings
+	// (max_tokens / max_completion_tokens),
 	// scoped per client, provider and/or model. Default nil: the feature is
 	// fully off and the request path is untouched. Matching is exact-leaf
 	// (an empty scope field is a wildcard); all matching rules apply in list

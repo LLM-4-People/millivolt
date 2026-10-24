@@ -86,9 +86,12 @@ target cannot consume them:
 - A non-function tool type and malformed tool arguments are rejected before any
   upstream send.
 
-`translation_loss` selects the policy. `warn` (default) drops optional fields
-the target cannot represent and reports each one in `X-Proxy-Warnings`.
-`reject` fails the request with 400 naming the fields before any upstream send,
+`translation_loss` selects the policy. `warn` (default) drops the optional
+fields this proxy models but the target cannot represent, and reports each one
+in `X-Proxy-Warnings`. Provider-specific extension fields outside that modeled
+vocabulary are not inspected or reported; the passthrough path relays them
+unchanged. `reject` fails the request with 400 naming the fields before any
+upstream send,
 and it refuses every recorded loss, including a documented approximation such
 as a clamped temperature, a moved system message, a generated tool-call id or
 a `json_object` response format, not only a field the target cannot represent
@@ -116,6 +119,12 @@ closes it before `message_delta`; Responses emits `response.created`, per-item
 lifecycle events and one terminal event; Chat emits the role chunk, deltas, one
 `finish_reason` chunk and one `[DONE]`. A truncated upstream is closed with the
 client protocol's own error event, never a fabricated clean finish.
+
+Streaming citations are not translated. A Responses
+`response.output_text.annotation.added` event is not decoded, and a streamed
+target does not emit citations or annotations; non-streaming responses do carry
+url citations. A citation stream event is a separate feature, not a silent
+claim of streaming parity.
 
 ## Bundled compatibility profiles
 
@@ -203,7 +212,9 @@ must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
 
 Stored parameter and conversation-composition metadata describe the translated
-upstream body, not an exact copy of the original request. If the caller omits
+upstream body, not an exact copy of the original request. A body that combines the Responses `max_output_tokens` spelling with a Chat
+`max_tokens` or `max_completion_tokens` spelling is rejected with HTTP 400
+before translation or any upstream send. If the caller omits
 all three output-limit spellings (`max_tokens`, `max_completion_tokens` and
 `max_output_tokens`), translation supplies `anthropic_default_max_tokens`,
 which can therefore appear in request details as a captured value. When a

@@ -35,13 +35,15 @@ config, opening a database or starting runtime services.
 
 Precedence is built-in defaults, then the YAML file, then CLI overrides.
 A missing file loads defaults; verify the path rather than assuming a typo
-created a new empty overlay. On startup and reload, unknown keys, invalid
-types/ranges, conflicting overlay values and extra YAML documents are dropped
-(the built-in default stays) and the file is rewritten without them so a typo
-cannot block boot. An unparseable file is moved to `PATH.invalid` and replaced
-with the documented defaults. Settings POST still rejects those inputs.
-CLI-overridden fields cannot be saved from Settings. Healthcheck loads the
-file read-only and does not rewrite it.
+created a new empty overlay. On startup, unknown keys, unknown nested fields and
+extra YAML documents are dropped and the file is rewritten without them. An
+invalid recognized value fails startup without rewriting the file, and an
+unparseable file is moved to `PATH.invalid` and replaced with the documented
+defaults. Reload rejects an invalid document without rewriting it. Settings,
+backup capture, restore merge and healthcheck read the file fail-closed and
+report an error instead of substituting a default. Settings POST still rejects
+those inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck
+loads the file read-only and never rewrites it.
 
 To regenerate the public example after changing its canonical owners:
 

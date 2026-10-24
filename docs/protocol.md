@@ -32,7 +32,7 @@ otherwise unknown path is translated when that header names the inbound wire;
 without the override, paths outside the three known endpoints are never
 translated. A translated request addresses the outbound protocol's canonical
 endpoint (`/v1/chat/completions`, `/v1/responses` or `/v1/messages`) instead of
-forwarding the client's path. A same-protocol request on one of those three
+forwarding the client's path, unless `X-Proxy-Path` overrides that endpoint. A same-protocol request on one of those three
 endpoints normalizes to the same canonical spelling, while one on any other path
 keeps the path the client chose.
 
@@ -150,7 +150,10 @@ are rejected with HTTP 413 without an upstream send. A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for any spelling (`max_tokens`,
-`max_completion_tokens` or `max_output_tokens`). A valid request is also
+`max_completion_tokens` or `max_output_tokens`). A body that combines the
+Responses `max_output_tokens` spelling with a Chat `max_tokens` or
+`max_completion_tokens` spelling is rejected with HTTP 400 before an upstream
+send because the wire families are ambiguous. A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
 entries in a `messages`, `tools`, `functions`, `input` or `stop` array, more
 than 10,000 members in a `metadata` object, more than 1,024 aggregate
@@ -158,9 +161,12 @@ than 10,000 members in a `metadata` object, more than 1,024 aggregate
 members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
 top-level objects. Content composition has two independent limits. A content
 array above
-4,096 parts is not rejected for that reason: within the aggregate budget it
-still relays unchanged, but composition skips it, so it contributes no
-dashboard composition counts. Composition reads the Chat `messages`/`system`
+4,096 parts is not rejected for that reason on the byte-transparent
+passthrough path: within the aggregate budget it still relays unchanged, but
+composition skips it, so it contributes no dashboard composition counts. On a
+translated request the codec applies its own limit: Chat drops the oversized
+content with a warning, while Responses and Anthropic reject the request with
+HTTP 400; `translation_loss: reject` turns any recorded loss into a 400. Composition reads the Chat `messages`/`system`
 and Anthropic `messages`/`system` shapes; a byte-transparent Responses body's
 `input`/`instructions` items contribute no composition counts (their model,
 stream flag and output cap are still recorded). Separately, the aggregate
