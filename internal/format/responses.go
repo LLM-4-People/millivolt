@@ -1208,22 +1208,22 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		if typ == "" && item.Role != "" {
 			typ = "message"
 		}
-		switch typ {
-		case "message":
+		switch {
+		case typ == "message":
 			blocks, warns, err := decodeResponsesContent(item.Content, ir.RoleAssistant)
 			if err != nil {
 				return nil, fmt.Errorf("responses output item %d: %w", i, err)
 			}
 			resp.Blocks = append(resp.Blocks, blocks...)
 			resp.Warnings = append(resp.Warnings, warns...)
-		case "function_call":
+		case typ == "function_call":
 			call, warns, err := decodeResponsesFunctionCall(item)
 			if err != nil {
 				return nil, fmt.Errorf("responses output item %d: %w", i, err)
 			}
 			resp.Blocks = append(resp.Blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 			resp.Warnings = append(resp.Warnings, warns...)
-		case "reasoning":
+		case typ == "reasoning":
 			if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
 				return nil, err
 			}
@@ -1250,6 +1250,14 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 				ID: item.ID, Text: reasoningText.String(), Summary: summary,
 				Encrypted: item.EncryptedContent, Provider: ir.Responses,
 			}})
+		case sse.ResponsesToolCallItem(typ):
+			// A provider-executed tool item (custom, local shell, MCP,
+			// computer, ...) has no cross-protocol block. It is still tool
+			// activity: count it so the finish is tool_calls and the record
+			// does not bill its argument output as answer generation. The
+			// translated wire keeps the existing dropped-item warning.
+			resp.ProviderToolCalls++
+			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
 		default:
 			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
 		}
@@ -1270,7 +1278,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		resp.Finish = ir.FinishOther
 	} else if in.Status == "cancelled" {
 		resp.Finish = ir.FinishCancelled
-	} else if hasToolCall(resp.Blocks) {
+	} else if hasToolCall(resp.Blocks) || resp.ProviderToolCalls > 0 {
 		resp.Finish = ir.FinishToolCalls
 	} else {
 		resp.Finish = ir.FinishStop

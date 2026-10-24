@@ -430,6 +430,13 @@ type Response struct {
 	// it as a protocol-native error instead of a completion.
 	Error *Error `json:"error,omitempty"`
 
+	// ProviderToolCalls counts Responses provider-executed tool items
+	// (custom_tool_call, local_shell_call, mcp_call, computer_call, ...) that
+	// have no cross-protocol Block representation. function_call items are
+	// already ir.BlockToolCall entries. The record and finish classification
+	// count both forms as tool activity.
+	ProviderToolCalls int `json:"provider_tool_calls,omitempty"`
+
 	Warnings Warnings `json:"warnings,omitempty"`
 }
 

@@ -491,14 +491,15 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 			Item struct {
 				Type             string `json:"type"`
 				CallID           string `json:"call_id"`
+				ID               string `json:"id"`
 				Name             string `json:"name"`
 				EncryptedContent string `json:"encrypted_content"`
 			} `json:"item"`
 		}
 		if json.Unmarshal(payload, &ev) == nil {
 			switch {
-			case responsesToolCallItem(ev.Item.Type):
-				a.countResponsesToolCall(ev.Item.CallID, ev.Item.Name)
+			case ResponsesToolCallItem(ev.Item.Type):
+				a.countResponsesToolCall(ev.Item.CallID, ev.Item.ID, ev.Item.Name)
 				hasToolDelta = true
 			case ev.Item.Type != "" && ev.Item.Type != "message" && ev.Item.Type != "reasoning":
 				a.responsesOutputSeen = true
@@ -840,6 +841,7 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				Type             string          `json:"type"`
 				Role             string          `json:"role"`
 				CallID           string          `json:"call_id"`
+				ID               string          `json:"id"`
 				Name             string          `json:"name"`
 				EncryptedContent string          `json:"encrypted_content"`
 				Content          json.RawMessage `json:"content"`
@@ -862,13 +864,13 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				typ = "message"
 			}
 			switch {
-			case responsesToolCallItem(typ):
+			case ResponsesToolCallItem(typ):
 				// A function call may appear only in the terminal document;
-				// count each call once per call_id so a legitimate tool turn
+				// count each call once per identity so a legitimate tool turn
 				// is never classified as empty and replaced by a failure. A
 				// call that was not announced by a streamed item contributes
 				// the chunk that announcement would have counted.
-				if a.countResponsesToolCall(item.CallID, item.Name) {
+				if a.countResponsesToolCall(item.CallID, item.ID, item.Name) {
 					a.recordTerminalToolUnit(now)
 				}
 			case typ == "message":
@@ -1331,12 +1333,13 @@ func (a *Analyzer) OutcomeCode() string {
 		hadAnswer, hadReasoning, a.responsesOutputSeen, a.toolCalls, a.chatlike)
 }
 
-// responsesToolCallItem reports whether one Responses output item is a model
+// ResponsesToolCallItem reports whether one Responses output item is a model
 // tool invocation. These items are tool activity even when they carry no
 // function-call arguments, and they must never be classified as an empty
 // completion. Provider-executed output items (web search, file search, image
-// generation, code interpreter) are output presence instead.
-func responsesToolCallItem(typ string) bool {
+// generation, code interpreter) are output presence instead. The streaming
+// analyzer and the non-stream Responses decoder share this one vocabulary.
+func ResponsesToolCallItem(typ string) bool {
 	switch typ {
 	case "function_call", "custom_tool_call", "local_shell_call", "mcp_call",
 		"shell_call", "apply_patch_call", "computer_call", "tool_search_call":
@@ -1568,16 +1571,24 @@ func responsesContentEvent(eventType string, keys *frameKeys) bool {
 // per call id. The name is retained in first-seen order like the Chat path.
 // It reports whether this call is new, so the caller can add the one chunk an
 // announced or terminal-only call contributes without double counting.
-func (a *Analyzer) countResponsesToolCall(callID, name string) bool {
-	if callID != "" {
+func (a *Analyzer) countResponsesToolCall(callID, id, name string) bool {
+	// function_call and custom_tool_call carry call_id; MCPToolCall (and some
+	// provider items) carry only id. Either identity dedupes the streamed
+	// announcement against the terminal document; an item with neither is
+	// still counted but cannot be deduped.
+	key := callID
+	if key == "" {
+		key = id
+	}
+	if key != "" {
 		if a.toolCallIDs == nil {
 			a.toolCallIDs = make(map[string]struct{}, 4)
 		}
-		if _, seen := a.toolCallIDs[callID]; seen {
+		if _, seen := a.toolCallIDs[key]; seen {
 			return false
 		}
 		if len(a.toolCallIDs) < metrics.RetainedToolCallIDsMax {
-			a.toolCallIDs[callID] = struct{}{}
+			a.toolCallIDs[key] = struct{}{}
 		}
 	}
 	a.toolCalls++

@@ -473,6 +473,11 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 	if len(names) > 0 {
 		rec.ToolNames = names
 	}
+	// Provider-executed Responses call items have no block (the translated
+	// wire drops them with a warning), but they are model tool invocations:
+	// count them so the record's finish and tool-only token settlement agree
+	// with the streaming analyzer.
+	rec.ToolCalls += resp.ProviderToolCalls
 }
 
 // applyNativeNonChatStructure stamps the canonical structure of a native
