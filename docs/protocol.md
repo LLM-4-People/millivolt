@@ -54,20 +54,20 @@ Routing validation and request construction live in
 
 | Request header | Meaning |
 | --- | --- |
-| `X-Proxy-Base-URL` | Absolute HTTP(S) upstream base; no userinfo, query or fragment. |
+| `X-Proxy-Base-URL` | Absolute HTTP(S) upstream base; no userinfo, query or fragment, including a bare trailing `?` or `#` (a percent-encoded `%23` remains path data). |
 | `X-Proxy-Key` | Upstream key; takes precedence over `Authorization`. Without it, a Bearer credential or the supplied Authorization value is used. No credential is also allowed. |
 | `X-Proxy-Auth-Header` | Key's upstream header; defaults to `Authorization`. |
 | `X-Proxy-Auth-Prefix` | Prefix before the key; defaults to `Bearer `. A present empty header selects no prefix. |
 | `X-Proxy-Path` | HTTP relay: replace the incoming path before joining it to the base URL. Cursor uses its [native path rule](adapters.md#cursor-connect-bridge); model discovery ignores this header. |
 | `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Cursor and model discovery ignore both. |
-| `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. `accept-encoding` and `range` are proxy-owned and rejected with 400. Not applied to model discovery or the Cursor bridge. |
+| `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. `accept-encoding` and `range` are proxy-owned and rejected with 400. A JSON `null` member is treated as an omitted header. Not applied to model discovery or the Cursor bridge. |
 | `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
 | `X-Proxy-Format` | Upstream format: `openai` (Chat Completions), `openai-responses` (Responses), `anthropic` (Messages), or `cursor` (agent.v1). Absent means passthrough; configured request rewrites can still change the body. See [supported combinations](adapters.md#client-and-upstream-compatibility). |
 | `X-Proxy-In-Format` | Optional client-protocol override: `openai`, `openai-chat` or `chat` (Chat Completions), `openai-responses` or `responses` (Responses), or `anthropic` (Messages). Aliases normalize to the canonical wire. Normally unnecessary because the request path selects the protocol. |
 | `X-Proxy-Client` | Observability/client label; one that only repeats the user agent's product name records the fuller user-agent identity instead. Otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise a configured tracked body param or automatic grouping applies. |
 | `X-Proxy-Parent-Session` | Direct declared parent; requires an explicit own session on the same request. |
-| `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent provider-wide control. |
+| `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent provider-wide control, and not applied to model discovery, which returns before inference admission. |
 | `X-Proxy-Limit-Concurrency` | Sticky provider-wide in-flight cap. |
 | `X-Proxy-Limit-Requests` | Sticky provider-wide request rate as `COUNT/WINDOW`. |
 | `X-Proxy-Limit-Tokens` | Sticky provider-wide token rate as `COUNT/WINDOW`. |

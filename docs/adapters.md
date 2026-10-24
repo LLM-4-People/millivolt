@@ -103,6 +103,13 @@ target cannot consume them:
   it and reports an `assistant.image` or `assistant.document` approximation
   warning; runtime acceptance of assistant media is not verified. User media
   is carried without that warning.
+- A translated non-streaming response assumes a schema-valid source identity.
+  A source that omits `id` or `model` yields an empty string on the target
+  rather than an invented identity. The Responses envelope carries protocol
+  defaults for request-echo fields (`parallel_tool_calls: true`, `tools: []`,
+  `tool_choice: "auto"`, null `instructions`/`temperature`/`top_p`,
+  `store: false`); a translated response cannot echo the source request's
+  parameters without threading the request IR into the encoder.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
@@ -175,6 +182,16 @@ tool turn is reported there, not by rewriting an item's status. In a
 translated stream, `response.output_item.added` carries `status:
 "in_progress"` and the closing `response.output_item.done` carries
 `"completed"`; the terminal response status still owns the turn lifecycle.
+
+Parallel tool calls translated to Anthropic open their indexed content blocks
+concurrently (for example start 0, start 1, delta 0, delta 1, stop 0, stop 1).
+The blocks carry the index the streaming contract requires, and SDKs accumulate
+by index; a strict assumption of sequential block lifecycles would need a
+separate encoder design, not a per-request special case. A Chat `[DONE]`
+without a preceding non-null finish reason is a clean transport terminator but
+an empty finish: a Responses target receives `response.incomplete` with
+`incomplete_details: null`, and the record reports `finish=other`. That
+degenerate classification is deliberate rather than a fabricated completion.
 
 ## Bundled compatibility profiles
 
