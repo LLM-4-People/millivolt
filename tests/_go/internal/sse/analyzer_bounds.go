@@ -22,7 +22,10 @@ func toolNameFeedLines(unique, perChunk int) [][]byte {
 			if i > start {
 				b.WriteByte(',')
 			}
-			fmt.Fprintf(&b, `{"index":%d,"id":"call-%d","type":"function","function":{"name":"tool-%06d","arguments":""}}`, i-start, i, i)
+			// Indexes are per-response, so the synthetic stream must keep
+			// them unique across chunks; reusing an index would describe a
+			// continuation of the same call under the index-counting contract.
+			fmt.Fprintf(&b, `{"index":%d,"id":"call-%d","type":"function","function":{"name":"tool-%06d","arguments":""}}`, i, i, i)
 		}
 		b.WriteString(`]}}]}`)
 		lines = append(lines, []byte(b.String()))
@@ -65,7 +68,7 @@ func TestAnalyzerToolNamesDeduplicateAndCount(t *testing.T) {
 	now := time.Now()
 	var a Analyzer
 	for i := 0; i < 3; i++ {
-		a.Feed([]byte(fmt.Sprintf(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-%d","function":{"name":"search"}}]}}]}`, i)), now)
+		a.Feed([]byte(fmt.Sprintf(`data: {"choices":[{"delta":{"tool_calls":[{"index":%d,"id":"call-%d","function":{"name":"search"}}]}}]}`, i, i)), now)
 	}
 	var rec metrics.Record
 	a.Fill(&rec)

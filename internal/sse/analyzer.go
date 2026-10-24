@@ -60,10 +60,14 @@ type Analyzer struct {
 	// metrics.RetainedToolCallIDsMax while the stream is still running, so a
 	// hostile stream cannot grow either map without limit. Every tool call is
 	// counted independently; a call past the id bound is simply not deduped.
-	toolNames    []string
-	toolNameSet  map[string]struct{}
-	toolCallIDs  map[string]struct{}
-	finishReason string
+	toolNames   []string
+	toolNameSet map[string]struct{}
+	toolCallIDs map[string]struct{}
+	// toolCallIndexes records the Chat delta indexes already counted, so an
+	// id-less first fragment and its later id-bearing continuation count once.
+	// It is bounded by metrics.RetainedToolCallIDsMax like the Responses id set.
+	toolCallIndexes map[int]struct{}
+	finishReason    string
 	// responseID is the Responses terminal document's id, retained so a
 	// synthetic failure frame uses a resp_-shaped identity instead of the
 	// proxy request id.
@@ -538,16 +542,18 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		}
 	}
 
-	// Count tool calls and capture their names. Each distinct tool call carries
-	// an "id" in its first delta chunk; subsequent argument chunks repeat the
-	// tool_calls key but do not include "id". The outer chunk `"id":"1"` is
-	// excluded by searching only within the tool_calls array. The retained name
-	// set is first-seen order and capped while streaming: dedupe is one map
-	// probe instead of a scan over every earlier name, and once the cap is
-	// reached new names are dropped (calls are still counted) so neither the
-	// list nor the set can grow with a hostile stream.
+	// Count tool calls and capture their names. A Chat tool call is identified
+	// by its required delta index; the id may be omitted on the first fragment
+	// (the official stream decoders synthesize one) and continuations repeat the
+	// index without the id. Count one call for a new index whose fragment
+	// carries a name or id, and retain a name from any fragment. A fragment with
+	// no index keeps the older id-presence fallback. The outer chunk `"id":"1"`
+	// is excluded by searching only within the tool_calls array. The retained
+	// name and index sets are bounded while streaming, so neither can grow with
+	// a hostile stream.
 	if hasToolCall {
 		var calls []struct {
+			Index    *int   `json:"index"`
 			ID       string `json:"id"`
 			Function struct {
 				Name string `json:"name"`
@@ -555,8 +561,25 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		}
 		if json.Unmarshal(toolBlock, &calls) == nil {
 			for _, call := range calls {
-				if call.ID == "" {
+				if call.Index == nil {
+					a.retainToolName(call.Function.Name)
+					if call.ID != "" {
+						a.toolCalls++
+					}
 					continue
+				}
+				if _, counted := a.toolCallIndexes[*call.Index]; counted {
+					a.retainToolName(call.Function.Name)
+					continue
+				}
+				if call.ID == "" && call.Function.Name == "" {
+					continue
+				}
+				if a.toolCallIndexes == nil {
+					a.toolCallIndexes = make(map[int]struct{}, 4)
+				}
+				if len(a.toolCallIndexes) < metrics.RetainedToolCallIDsMax {
+					a.toolCallIndexes[*call.Index] = struct{}{}
 				}
 				a.toolCalls++
 				a.retainToolName(call.Function.Name)
