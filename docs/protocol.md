@@ -177,12 +177,18 @@ every occurrence, so accepting duplicates would let the validated and recorded
 value differ from the bytes the upstream reads. A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
 entries in a `messages`, `tools`, `functions`, `input`, `stop`,
-`stop_sequences` or `modalities` array, more than 10,000 entries in an
-`allowed_callers` array inside a tool, more than 10,000 members in a
+`stop_sequences` or `modalities` array, more than 10,000 members in a
 `metadata` or `stream_options` object, more than 1,024 aggregate
 `tool_calls` members across every message, more than 10,000 distinct top-level
 members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
-top-level objects. Content composition has two independent limits. A content
+top-level objects. Those preflight bounds apply to native and translated
+requests alike. A translated request also passes through its target codec,
+which rejects with HTTP 400 more than 10,000 entries in a Responses `include`
+array or in a tool `allowed_callers` array, or more than 4,096 blocks in an
+Anthropic `system` list. A native passthrough is byte-transparent and does not
+apply those codec-only collection bounds: the body is relayed unchanged, so
+there is no materialization to bound. Content composition has two independent
+limits. A content
 array above
 4,096 parts is not rejected for that reason on the byte-transparent
 passthrough path: within the aggregate budget it still relays unchanged, but

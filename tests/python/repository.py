@@ -818,7 +818,10 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("withholds or replaces the terminal bytes", protocol)
         self.assertIn("A standalone in-band error line is not a delivery terminal", protocol)
         self.assertIn("a `[DONE]` on a Responses feed is not its terminal marker", protocol)
-        self.assertIn("more than 10,000 entries in an `allowed_callers` array inside a tool", protocol)
+        self.assertIn("more than 10,000 entries in a Responses `include` array or in a tool `allowed_callers` array", protocol)
+        self.assertIn("more than 4,096 blocks in an Anthropic `system` list", protocol)
+        self.assertIn("A native passthrough is byte-transparent and does not apply those codec-only collection bounds", protocol)
+        self.assertIn("capped at 16,384", protocol)
         self.assertIn("surfaces the non-SSE body as a truncated-stream error", protocol)
         self.assertIn("Discovery authenticates with the resolved target auth header and prefix", protocol)
 
