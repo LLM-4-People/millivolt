@@ -1722,7 +1722,7 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	out, err := NewResponsesEnvelope(ResponsesEnvelope{
 		ID: resp.ID, Model: resp.Model, Created: created, Status: status,
 		IncompleteReason: incompleteReason,
-		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, &resp.Warnings)),
+		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, status, &resp.Warnings)),
 		Error:            resp.Error, Usage: resp.Usage,
 		Metadata: resp.Metadata, ServiceTier: tier,
 	})
@@ -1768,16 +1768,20 @@ func responsesTerminalStatus(finish ir.FinishReason, incompleteReason string) (s
 	}
 }
 
-func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
+func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings) []map[string]any {
 	var out []map[string]any
 	var textBlocks []ir.Block
+	messageStatus := "completed"
+	if status != "completed" {
+		messageStatus = "incomplete"
+	}
 	flushText := func() {
 		if len(textBlocks) == 0 {
 			return
 		}
 		out = append(out, map[string]any{
 			"id": newResponsesItemID(ir.BlockText), "type": "message", "role": "assistant",
-			"status": "completed", "content": encodeResponsesOutputContent(textBlocks, warns),
+			"status": messageStatus, "content": encodeResponsesOutputContent(textBlocks, warns),
 		})
 		textBlocks = nil
 	}
