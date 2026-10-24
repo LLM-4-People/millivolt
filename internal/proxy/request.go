@@ -1901,12 +1901,7 @@ type requestParameters struct {
 	// format/verbosity pair and the logprob opt-in. They are raw so a valid
 	// but unusual shape cannot trigger a typed-decode failure that erases the
 	// rest of the record.
-	Text *struct {
-		Format *struct {
-			Type string `json:"type"`
-		} `json:"format"`
-		Verbosity string `json:"verbosity"`
-	} `json:"text"`
+	Text    json.RawMessage `json:"text"`
 	Include json.RawMessage `json:"include"`
 	// Functions and FunctionCall are the deprecated Chat spellings the codec
 	// still converts. Keep them raw so a schema-invalid member records a
@@ -3413,12 +3408,30 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	// Additional non-content params: capture shape only, never values that
 	// could carry content (logit_bias keys are token ids, metadata is counted
 	// not copied).
+	// Native Responses text governs both the response format and verbosity.
+	// Decode it after the merged pass and ignore a malformed shape for
+	// metadata only; a scalar must not erase the rest of the record.
+	var textFormat, textVerbosity string
+	if len(req.Text) > 0 {
+		var text struct {
+			Format *struct {
+				Type string `json:"type"`
+			} `json:"format"`
+			Verbosity string `json:"verbosity"`
+		}
+		if json.Unmarshal(req.Text, &text) == nil {
+			if text.Format != nil {
+				textFormat = text.Format.Type
+			}
+			textVerbosity = text.Verbosity
+		}
+	}
 	if req.ResponseFormat != nil {
 		rec.ReqResponseFormat = req.ResponseFormat.Type
 	} else if req.OutputConfig != nil && req.OutputConfig.Format != nil {
 		rec.ReqResponseFormat = req.OutputConfig.Format.Type
-	} else if req.Text != nil && req.Text.Format != nil {
-		rec.ReqResponseFormat = req.Text.Format.Type
+	} else {
+		rec.ReqResponseFormat = textFormat
 	}
 	if req.ParallelTools != nil {
 		rec.ReqParallelTools = req.ParallelTools
@@ -3465,8 +3478,8 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 		rec.ReqReasoningEffort = effort
 	}
 	rec.ReqVerbosity = configToken(req.Verbosity)
-	if rec.ReqVerbosity == "" && req.Text != nil {
-		rec.ReqVerbosity = configToken(req.Text.Verbosity)
+	if rec.ReqVerbosity == "" {
+		rec.ReqVerbosity = configToken(textVerbosity)
 	}
 	// Prompt composition: per-role character sizes, multimodal counts, and the
 	// role of the last turn (what the model is actually responding to). Sizes
