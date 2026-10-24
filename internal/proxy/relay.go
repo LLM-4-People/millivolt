@@ -284,7 +284,12 @@ func applyNonStreamAnalysis(rec *metrics.Record, a metrics.NonStreamAnalysis) {
 	// the body's usage/model/id/tool detail did not type-decode, and it only
 	// ran at all while the record had no output tokens yet.
 	if a.RecordFieldsOK && rec.Usage.OutputTokens == 0 {
-		if a.HasUsage {
+		// Usage fills only a record that has no canonical usage yet. A native
+		// non-Chat body stamps its folded source usage before this analysis
+		// (including a zero-output body, whose raw Chat view would otherwise
+		// erase the cache folding), and an unrepresentable provider count is
+		// explicitly invalid rather than repopulated field by field.
+		if a.HasUsage && rec.Usage == (metrics.Usage{}) && !rec.UsageInvalid {
 			rec.Usage = a.Usage
 		}
 		if a.Model != "" && rec.ProviderModel == "" {
@@ -409,10 +414,10 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 	// The record keeps the canonical source reason (for example Anthropic's
 	// pause_turn or refusal); only the Chat wire mapper approximates it.
 	rec.FinishReason = string(resp.Finish)
-	if resp.Usage != (ir.Usage{}) {
+	if resp.Usage != (ir.Usage{}) && !rec.UsageInvalid {
 		// The canonical usage is already normalized (Anthropic cache counts
 		// folded into input, total derived); the translated wire may omit the
-		// total field entirely.
+		// total field entirely. An explicitly invalid usage stays zeroed.
 		rec.Usage = metrics.Usage{
 			InputTokens:     resp.Usage.InputTokens,
 			OutputTokens:    resp.Usage.OutputTokens,
@@ -475,7 +480,9 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 // cannot see those wires, so finish reason, tool calls, answer presence,
 // preview and folded cache usage would stay empty. Best-effort by design: a
 // body the codec cannot decode keeps the existing analysis and relays
-// unchanged, because metrics must never block the client.
+// unchanged, because metrics must never block the client. Unrepresentable
+// source usage is the exception: it is parsed independently so accounting is
+// invalidated even when the envelope cannot be decoded into the canonical IR.
 func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spooled []byte) {
 	if rec == nil || t == nil {
 		return
@@ -486,20 +493,30 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 	default:
 		return
 	}
+	// The provider's usage object is authoritative and honors custom
+	// usage_keys; the canonical decoder folds Anthropic's cache counts and
+	// derives the total only for its own documented shape. Parse it before
+	// the structural decode so an overflow cannot escape invalidation when
+	// DecodeResponse rejects the same envelope.
+	usage, ok, usageErr := providerformat.SourceUsage(wire, spooled, s.usageKeysFor(rec.Provider))
 	resp, err := providerformat.DecodeResponse(wire, spooled)
 	if err != nil || resp == nil {
+		if usageErr != nil {
+			invalidateUsage(rec, usageErr)
+		}
 		return
 	}
 	applyTranslatedStructure(rec, resp, s.cfg().CaptureBodyPreview)
-	// The provider's usage object is authoritative and honors custom
-	// usage_keys; the canonical decoder folds Anthropic's cache counts and
-	// derives the total only for its own documented shape.
-	usage, ok, usageErr := providerformat.SourceUsage(wire, spooled, s.usageKeysFor(rec.Provider))
+	if resp.Error != nil {
+		stampNativeResponseError(rec, resp.Error)
+	}
 	if usageErr != nil {
+		// Invalidate after the provider error is stamped so its type/code
+		// classification is preserved (invalidateUsage owns that rule).
 		invalidateUsage(rec, usageErr)
 		return
 	}
-	if ok {
+	if ok && !rec.UsageInvalid {
 		rec.Usage = metrics.Usage{
 			InputTokens:     usage.InputTokens,
 			OutputTokens:    usage.OutputTokens,
@@ -508,6 +525,34 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 			CacheWrite:      usage.CacheWriteTokens,
 			ReasoningTokens: usage.ReasoningTokens,
 		}
+	}
+}
+
+// stampNativeResponseError records a terminal failure carried inside a native
+// Responses 2xx body. A provider error object keeps its own classification;
+// a provider code without a type keeps the canonical provider_error fallback;
+// a bare status:"failed" (error null or absent) is an upstream lifecycle
+// failure. Existing error detail is never overwritten, and the native body and
+// HTTP status stay untouched.
+func stampNativeResponseError(rec *metrics.Record, e *ir.Error) {
+	if rec == nil || e == nil {
+		return
+	}
+	if rec.ErrorType == "" {
+		switch {
+		case e.Type != "":
+			rec.ErrorType = e.Type
+		case e.Code != "":
+			rec.ErrorType = "provider_error"
+		default:
+			rec.ErrorType = sse.TypeUpstreamError
+		}
+	}
+	if rec.ErrorCode == "" {
+		rec.ErrorCode = e.Code
+	}
+	if rec.ErrorMsg == "" {
+		rec.ErrorMsg = e.Message
 	}
 }
 
