@@ -242,8 +242,27 @@ func isNonCompletionStatus(status int) bool {
 // relayNonCompletionStatus relays a non-completion status verbatim with the
 // upstream headers. It is the one writer for 202/204/205 on the native and
 // non-streaming translated paths, so neither translation nor completion
-// classification can replace the upstream status.
-func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record) {
+// classification can replace the upstream status. When a streaming pacer has
+// not committed yet, applyStatus owns the commit so the body mode comes from
+// Content-Type: a JSON acknowledgement stays quiet while an event-stream body
+// may receive keepalives. A 202 arriving after the pacer already committed a
+// keepalive 200 cannot be represented as the status, so it fails closed in
+// band instead of corrupting the committed stream.
+func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record, inbound ir.Protocol) {
+	if p := pacerOf(w); p != nil {
+		if p.applyStatus(resp.Header, resp.StatusCode) {
+			s.relayNonCompletionBody(ctx, w, resp, rec)
+			return
+		}
+		if p.statusCommitted() {
+			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+			rec.ErrorType, rec.ErrorMsg = typ, msg
+			if werr := writeProtocolStreamError(w, rec, inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
+				markClientGone(rec)
+			}
+			return
+		}
+	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	s.relayNonCompletionBody(ctx, w, resp, rec)
@@ -729,7 +748,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// path invents an empty completion or translates a non-completion
 		// acknowledgement body.
 		if isNonCompletionStatus(resp.StatusCode) {
-			s.relayNonCompletionStatus(ctx, w, resp, rec)
+			s.relayNonCompletionStatus(ctx, w, resp, rec, t.inbound)
 			return
 		}
 

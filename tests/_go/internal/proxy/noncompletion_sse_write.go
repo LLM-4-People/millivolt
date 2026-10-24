@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -40,7 +41,7 @@ func TestNonCompletionSSEClientWriteFailureIsPlain499(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader("data: {\"accepted\":true}\n\n")),
 	}
 	s := New(config.Default(), metrics.Noop{})
-	s.relayNonCompletionStatus(context.Background(), failingSSEWriter{}, resp, rec)
+	s.relayNonCompletionStatus(context.Background(), failingSSEWriter{}, resp, rec, ir.Chat)
 
 	if rec.StatusCode != metrics.StatusClientClosedRequest {
 		t.Fatalf("status = %d, want %d", rec.StatusCode, metrics.StatusClientClosedRequest)
@@ -64,7 +65,7 @@ func TestNonCompletionSSEUpstreamReadErrorStillStamped(t *testing.T) {
 		Body:       io.NopCloser(&errorReader{data: []byte("data: {}\n\n"), err: errors.New("upstream reset")}),
 	}
 	s := New(config.Default(), metrics.Noop{})
-	s.relayNonCompletionStatus(context.Background(), httptest.NewRecorder(), resp, rec)
+	s.relayNonCompletionStatus(context.Background(), httptest.NewRecorder(), resp, rec, ir.Chat)
 
 	if rec.ClientDisconnected {
 		t.Fatal("a genuine upstream read error was marked as a client disconnect")

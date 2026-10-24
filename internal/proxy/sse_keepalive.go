@@ -102,6 +102,18 @@ func (p *ssePacer) applyStatus(hdr http.Header, status int) bool {
 	return true
 }
 
+// statusCommitted reports whether this pacer already wrote a status line and
+// body mode and is still running. A non-completion status arriving after that
+// point can no longer be represented as the response status.
+func (p *ssePacer) statusCommitted() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.started && !p.stopped
+}
+
 func (p *ssePacer) Unwrap() http.ResponseWriter { return p.w }
 
 func (p *ssePacer) WriteHeader(code int) {

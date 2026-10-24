@@ -344,7 +344,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		// the status and its body through the same owner as the generic relay;
 		// synthesizing SSE under it would invent a completion the provider
 		// never sent.
-		s.relayNonCompletionStatus(ctx, w, resp, rec)
+		s.relayNonCompletionStatus(ctx, w, resp, rec, ir.Chat)
 		upstreamCancel()
 		pw.Close()
 		resp.Body.Close()
