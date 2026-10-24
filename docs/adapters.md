@@ -68,9 +68,11 @@ accounting.
 A malformed Chat `stop` value is rejected before the upstream send on a
 translated request. Absent, null, a string and an array of strings are the
 accepted shapes; any other type returns 400 instead of silently dropping the
-stop filter. Native Chat passthrough is not decoded: the body is relayed
-unchanged, so `stop: 5` reaches the upstream and its response is returned. An
-empty string and an empty array still mean no stops.
+stop filter. An array element that is null or not a string is also rejected:
+Go would otherwise decode it as an empty stop sequence. The same element rule
+applies to Anthropic `stop_sequences`. Native Chat passthrough is not decoded:
+the body is relayed unchanged, so `stop: 5` reaches the upstream and its
+response is returned. An empty string and an empty array still mean no stops.
 
 Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:

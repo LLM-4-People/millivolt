@@ -749,6 +749,10 @@ class PublishedContracts(unittest.TestCase):
             # Round 8 verification follow-up: each corrected claim is pinned so
             # the docs cannot drift back to the stronger behavior.
             "rejected before the upstream send on a translated request",
+            "An array element that is null or not a string is also rejected",
+            "Go would otherwise decode it as an empty stop sequence",
+            "The same element rule",
+            "applies to Anthropic `stop_sequences`",
             "Native Chat passthrough is not decoded",
             "`stop: 5` reaches the upstream",
             "A Responses `failed` terminal is not covered by that rule",

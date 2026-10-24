@@ -29,7 +29,7 @@ func TestChatMalformedStopRejected(t *testing.T) {
 	s := New(cfg, metrics.Noop{})
 	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
 
-	for _, raw := range []string{`5`, `{}`, `["a",1]`, `true`} {
+	for _, raw := range []string{`5`, `{}`, `["a",1]`, `["END",null]`, `[null]`, `true`} {
 		w := proxyRequest(t, s, "/v1/chat/completions", "anthropic", chatStopBody(raw))
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("stop %s status = %d, want 400 (body %s)", raw, w.Code, w.Body.String())
@@ -101,5 +101,36 @@ func TestChatMalformedStopNativePassthrough(t *testing.T) {
 	}
 	if !strings.Contains(string(up.lastBody()), `"stop":5`) {
 		t.Fatalf("native passthrough changed the stop value: %s", up.lastBody())
+	}
+}
+
+func TestAnthropicStopNullElementRejected(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", http.StatusOK,
+		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	body := func(raw string) string {
+		return `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"stop_sequences":` + raw + `}`
+	}
+	for _, raw := range []string{`["END",null]`, `[null]`} {
+		w := proxyRequest(t, s, "/v1/messages", "openai", body(raw))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("stop_sequences %s status = %d, want 400 (body %s)", raw, w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "stop_sequences") {
+			t.Fatalf("stop_sequences %s rejection does not name the field: %s", raw, w.Body.String())
+		}
+	}
+	if n := up.calls.Load(); n != 0 {
+		t.Fatalf("malformed stop_sequences reached the upstream %d times", n)
+	}
+
+	w := proxyRequest(t, s, "/v1/messages", "openai", body(`["END"]`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("valid stop_sequences status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	if n := up.calls.Load(); n != 1 {
+		t.Fatalf("valid stop_sequences upstream calls = %d, want 1", n)
 	}
 }

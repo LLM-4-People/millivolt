@@ -176,6 +176,28 @@ func addWireArray(total *int, raw json.RawMessage, field string, max int) error 
 	return nil
 }
 
+// checkStringArray rejects an array with a null or non-string element before
+// a typed []string decode. Go decodes JSON null into an empty string, so a
+// null stop element would otherwise become an empty stop sequence. A
+// non-array value passes because the caller's shape check owns it.
+func checkStringArray(raw json.RawMessage, field string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return fmt.Errorf("%s must be an array of strings", field)
+	}
+	for i, item := range items {
+		value := bytes.TrimSpace(item)
+		if len(value) == 0 || value[0] != '"' {
+			return fmt.Errorf("%s[%d] must be a string", field, i)
+		}
+	}
+	return nil
+}
+
 // checkWireObject rejects an over-bound JSON object before its typed map
 // decode. Absent, null and non-object values pass.
 func checkWireObject(raw json.RawMessage, field string, max int) error {

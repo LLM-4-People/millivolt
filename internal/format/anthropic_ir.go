@@ -149,6 +149,9 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 			return nil, err
 		}
 	}
+	if err := checkStringArray(bounds.StopSequences, "stop_sequences"); err != nil {
+		return nil, err
+	}
 	// System citations and every nested tool_result/document content array
 	// share one aggregate: bounded parent arrays alone multiply through
 	// nesting. This runs before the typed request decode.

@@ -166,6 +166,9 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 			return nil, errParseOpenAIBody(err)
 		}
 	}
+	if err := checkStringArray(bounds.Stop, "stop"); err != nil {
+		return nil, errParseOpenAIBody(err)
+	}
 	for _, b := range []struct {
 		raw   json.RawMessage
 		field string
