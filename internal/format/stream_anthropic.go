@@ -68,6 +68,12 @@ type AnthropicStreamDecoder struct {
 	toolInitialBytes int
 	toolInitial      map[int]int
 	openBlocks       map[int]bool
+	// seenBlocks is a lifetime set of content-block indexes. Anthropic's
+	// stream contract assigns each block index to one position in the final
+	// content array; reusing a closed index would make the target terminal
+	// repeat the same position and could amplify a bounded event into a huge
+	// terminal.
+	seenBlocks map[int]struct{}
 }
 
 // NewAnthropicStreamDecoder builds a decoder over one upstream body. observe,
@@ -79,6 +85,7 @@ func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *Anthr
 		observe:     observe,
 		toolInitial: map[int]int{},
 		openBlocks:  map[int]bool{},
+		seenBlocks:  map[int]struct{}{},
 	}
 }
 
@@ -150,6 +157,13 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			if d.openBlocks[ev.Index] {
 				return nil, fmt.Errorf("duplicate native tool index %d", ev.Index)
 			}
+			if _, seen := d.seenBlocks[ev.Index]; seen {
+				return nil, fmt.Errorf("reused native content block index %d", ev.Index)
+			}
+			if len(d.seenBlocks) >= WireCollectionMax {
+				return nil, fmt.Errorf("anthropic stream exceeds %d content block indexes", WireCollectionMax)
+			}
+			d.seenBlocks[ev.Index] = struct{}{}
 			d.openBlocks[ev.Index] = true
 			if len(ev.ContentBlock.Input) > toolInitialBytesMax-d.toolInitialBytes {
 				return nil, errNativeToolInitialBytes

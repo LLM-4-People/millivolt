@@ -339,6 +339,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 						continue
 					}
 					partKey := summaryPartKey(key, summaryIndex)
+					if _, err := d.announcePart(partKey); err != nil {
+						return nil, err
+					}
 					d.partOwner[partKey] = key
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
 					if err := d.setEmittedText(partKey, part.Text); err != nil {
@@ -510,6 +513,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			key := d.keyByOutput[ev.OutputIndex]
 			if ev.Delta != "" && key != "" {
 				partKey := summaryPartKey(key, ev.SummaryIndex)
+				if _, err := d.announcePart(partKey); err != nil {
+					return nil, err
+				}
 				d.partOwner[partKey] = key
 				if err := d.appendEmittedText(partKey, ev.Delta); err != nil {
 					return nil, err
@@ -531,6 +537,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
+			if _, err := d.announcePart(partKey); err != nil {
+				return nil, err
+			}
 			d.partOwner[partKey] = key
 			emit := pendingValueSuffix(d.emittedValue(partKey), part.Text)
 			if emit == "" {
@@ -549,6 +558,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
+			if _, err := d.announcePart(partKey); err != nil {
+				return nil, err
+			}
 			d.partOwner[partKey] = key
 			emit := pendingValueSuffix(d.emittedValue(partKey), ev.Text)
 			if emit == "" {
@@ -790,6 +802,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
+			if _, err := d.announcePart(partKey); err != nil {
+				return nil, err
+			}
 			d.partOwner[partKey] = key
 			emit := pendingValueSuffix(d.emittedValue(partKey), text)
 			if emit != "" {
@@ -1379,6 +1394,12 @@ func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, out
 // channels, whether the payload arrived in output_item.done or in the terminal
 // document. The open item block receives only the missing bytes.
 func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, key string, outputIndex int, pending *[]terminalEmission) error {
+	// A reasoning item's id is used to build content-part keys. Validate it at
+	// this shared owner so output_item.done and the terminal document cannot
+	// retain an over-bound identity after the added event was accepted.
+	if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
+		return err
+	}
 	// Summary parts are one concatenated reasoning channel; content
 	// parts are another. Reconcile each as a whole before emitting so
 	// a terminal re-partition cannot repeat streamed bytes.
@@ -1397,6 +1418,9 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 	}
 	summaryRec := d.reconcileChannel("summary_partition", d.emittedSummaryParts(key), summaryTerminal)
 	for _, part := range summaryRec.emit {
+		if _, err := d.announcePart(part.key); err != nil {
+			return err
+		}
 		before := d.emittedValue(part.key)
 		d.appendReasoningValue(item, key, part.value, pending)
 		if err := d.setEmittedText(part.key, before+part.value); err != nil {
@@ -2469,6 +2493,9 @@ func reasoningItem(item *responsesItemState, text string) map[string]any {
 // document within ResponsesStreamFrameMaxBytes even when the source opens
 // thousands of empty items.
 func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*responsesItemState, error) {
+	if e.items[index] != nil {
+		return nil, fmt.Errorf("responses stream item index %d already started", index)
+	}
 	if len(e.order) >= WireCollectionMax {
 		return nil, fmt.Errorf("responses stream exceeds %d items", WireCollectionMax)
 	}

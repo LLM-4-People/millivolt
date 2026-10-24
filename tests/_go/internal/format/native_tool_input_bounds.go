@@ -73,9 +73,9 @@ func TestNativeToolInitialBudgetPreservesNormalStream(t *testing.T) {
 	stream := "data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n" +
 		"data: " + nativeToolStartLine(0, `{"city":"NY"}`) + "\n\n" +
 		"data: " + `{"type":"content_block_stop","index":0}` + "\n\n" +
-		"data: " + nativeToolStartLine(0, "") + "\n\n" +
-		"data: " + `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}` + "\n\n" +
-		"data: " + `{"type":"content_block_stop","index":0}` + "\n\n" +
+		"data: " + nativeToolStartLine(1, "") + "\n\n" +
+		"data: " + `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}` + "\n\n" +
+		"data: " + `{"type":"content_block_stop","index":1}` + "\n\n" +
 		"data: " + `{"type":"message_stop"}` + "\n\n"
 	var out strings.Builder
 	if err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil); err != nil {
