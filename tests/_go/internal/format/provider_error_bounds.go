@@ -140,3 +140,29 @@ func TestNonStreamProviderErrorFieldsBounded(t *testing.T) {
 		check(t, e, ir.Responses)
 	})
 }
+
+// TestFailedTerminalErrorFieldsBounded is the C1 regression: the
+// response.failed terminal branch copied error.type and code without the
+// shared bound, and the Chat encoder echoes both verbatim.
+func TestFailedTerminalErrorFieldsBounded(t *testing.T) {
+	long := strings.Repeat("T", 200_000)
+	source := "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"status\":\"failed\"," +
+		"\"error\":{\"type\":\"" + long + "\",\"code\":\"" + long + "\",\"message\":\"m\"},\"output\":[]}}\n\n"
+	for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic} {
+		t.Run(string(target), func(t *testing.T) {
+			out, err := translateStreamSource(t, ir.Responses, target, source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out) >= 1024 {
+				t.Fatalf("failed-terminal %s output is %d bytes, want the bounded error", target, len(out))
+			}
+			if strings.Contains(out, long[:1024]) {
+				t.Fatalf("failed-terminal %s output carries the unbounded provider value", target)
+			}
+			if !strings.Contains(out, "upstream response failed") && !strings.Contains(out, `"message":"m"`) {
+				t.Fatalf("failed-terminal %s output lost the error message: %s", target, out)
+			}
+		})
+	}
+}
