@@ -512,7 +512,11 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 				// A client replaying a prior Chat response carries its
 				// message-level annotations. Attach them exactly like the
 				// response decoder so the extension is preserved.
-				blocks, w = attachChatAnnotations(blocks, m.Annotations)
+				annotated, w, aerr := attachChatAnnotations(blocks, m.Annotations)
+				if aerr != nil {
+					return nil, nil, fmt.Errorf("message %d: %w", i, aerr)
+				}
+				blocks = annotated
 				warns = append(warns, w...)
 			}
 			if m.Audio != nil {
@@ -935,22 +939,25 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 // citations on the last text block. The Chat response decoder and the assistant
 // request decoder (a client replaying a prior response) share this owner, so
 // the non-standard extension is preserved instead of silently dropped.
-func attachChatAnnotations(blocks []ir.Block, annotations []chatWireAnnotation) ([]ir.Block, ir.Warnings) {
-	citations, warns := decodeChatAnnotations(annotations)
+func attachChatAnnotations(blocks []ir.Block, annotations []chatWireAnnotation) ([]ir.Block, ir.Warnings, error) {
+	citations, warns, err := decodeChatAnnotations(annotations)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(citations) == 0 {
-		return blocks, warns
+		return blocks, warns, nil
 	}
 	for i := len(blocks) - 1; i >= 0; i-- {
 		if blocks[i].Type == ir.BlockText {
 			blocks[i].Citations = append(blocks[i].Citations, citations...)
-			return blocks, warns
+			return blocks, warns, nil
 		}
 	}
 	warns.Add(ir.WarningDropped, "annotations", "Chat annotations have no text block to attach to")
-	return blocks, warns
+	return blocks, warns, nil
 }
 
-func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings) {
+func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings, error) {
 	var (
 		out   []ir.Citation
 		warns ir.Warnings
@@ -968,12 +975,20 @@ func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings)
 			warns.Add(ir.WarningDropped, "annotations.url_citation", "url_citation has no url")
 			continue
 		}
+		start, err := intFromJSONIndex("url_citation.start_index", a.URLCitation.StartIndex)
+		if err != nil {
+			return nil, nil, err
+		}
+		end, err := intFromJSONIndex("url_citation.end_index", a.URLCitation.EndIndex)
+		if err != nil {
+			return nil, nil, err
+		}
 		out = append(out, ir.Citation{
 			Type: "url_citation", URL: a.URLCitation.URL, Title: a.URLCitation.Title,
-			StartIndex: int(a.URLCitation.StartIndex), EndIndex: int(a.URLCitation.EndIndex),
+			StartIndex: start, EndIndex: end,
 		})
 	}
-	return out, warns
+	return out, warns, nil
 }
 
 func decodeChatImage(raw json.RawMessage) (*ir.Image, error) {
@@ -1863,7 +1878,10 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		return nil, err
 	}
 	if len(choice.Message.Annotations) > 0 {
-		annotated, annotationWarns := attachChatAnnotations(blocks, choice.Message.Annotations)
+		annotated, annotationWarns, aerr := attachChatAnnotations(blocks, choice.Message.Annotations)
+		if aerr != nil {
+			return nil, aerr
+		}
 		blocks = annotated
 		warns = append(warns, annotationWarns...)
 	}
