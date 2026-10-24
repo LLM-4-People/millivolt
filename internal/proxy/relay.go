@@ -1202,6 +1202,20 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			}
 			return
 		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !isEventStream(resp.Header.Get("Content-Type")) {
+			// The first attempt committed an event-stream socket. A retry
+			// that answers a non-SSE 2xx completion (for example JSON) must
+			// not be scanned and injected as raw stream bytes; surface one
+			// protocol-native in-band error and stop before streamBody reads
+			// the document as SSE.
+			rec.ErrorType = sse.TypeUpstreamError
+			rec.ErrorCode = metrics.CodeTruncated
+			rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, rec.ErrorType, rec.ErrorCode, rec.ErrorMsg); werr != nil {
+				markClientGone(rec)
+			}
+			return
+		}
 	}
 }
 
