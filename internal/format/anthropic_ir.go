@@ -1841,23 +1841,8 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 		return nil, err
 	}
 	blocks := encodeAnthropicBlocks(encodeAnthropicResponseBlocks(resp.Blocks, &resp.Warnings), ir.RoleAssistant, &resp.Warnings)
-	usage := map[string]any{
-		"input_tokens":                nonNegative(resp.Usage.InputTokens - resp.Usage.CacheReadTokens - resp.Usage.CacheWriteTokens),
-		"output_tokens":               resp.Usage.OutputTokens,
-		"cache_creation_input_tokens": resp.Usage.CacheWriteTokens,
-		"cache_read_input_tokens":     resp.Usage.CacheReadTokens,
-	}
-	if resp.Usage.ReasoningTokens != 0 {
-		usage["output_tokens_details"] = map[string]any{"thinking_tokens": resp.Usage.ReasoningTokens}
-	}
 	serviceTier, speed, tierWarns := anthropicResponseUsageTier(resp.ServiceTier)
 	resp.Warnings = append(resp.Warnings, tierWarns...)
-	if serviceTier != "" {
-		usage["service_tier"] = serviceTier
-	}
-	if speed != "" {
-		usage["speed"] = speed
-	}
 	out := map[string]any{
 		"id":            resp.ID,
 		"type":          "message",
@@ -1866,7 +1851,10 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 		"content":       blocks,
 		"stop_reason":   anthropicStopReason(resp.Finish),
 		"stop_sequence": nil,
-		"usage":         usage,
+		"stop_details":  nil,
+		"container":     nil,
+		"diagnostics":   nil,
+		"usage":         anthropicMessageUsage(resp.Usage, serviceTier, speed),
 	}
 	if resp.StopSequence != "" {
 		out["stop_sequence"] = resp.StopSequence
@@ -1882,6 +1870,54 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 			"Anthropic Messages has no equivalent terminal reason")
 	}
 	return sse.MarshalWireJSON(out)
+}
+
+// anthropicMessageUsage renders the full Message.usage shape. The current
+// Anthropic interface marks cache_creation, inference_geo, output_tokens_details,
+// server_tool_use, service_tier and speed as required nullable members, so every
+// one is present; the members with no canonical source stay null rather than
+// disappearing. Reasoning maps to output_tokens_details.
+func anthropicMessageUsage(u ir.Usage, serviceTier, speed string) map[string]any {
+	out := map[string]any{
+		"input_tokens":                nonNegative(u.InputTokens - u.CacheReadTokens - u.CacheWriteTokens),
+		"output_tokens":               u.OutputTokens,
+		"cache_creation_input_tokens": u.CacheWriteTokens,
+		"cache_read_input_tokens":     u.CacheReadTokens,
+		"cache_creation":              nil,
+		"inference_geo":               nil,
+		"output_tokens_details":       nil,
+		"server_tool_use":             nil,
+		"service_tier":                nil,
+		"speed":                       nil,
+	}
+	if u.ReasoningTokens != 0 {
+		out["output_tokens_details"] = map[string]any{"thinking_tokens": u.ReasoningTokens}
+	}
+	if serviceTier != "" {
+		out["service_tier"] = serviceTier
+	}
+	if speed != "" {
+		out["speed"] = speed
+	}
+	return out
+}
+
+// anthropicDeltaUsage renders MessageDeltaUsage. Its type carries only the
+// cumulative counters and the two detail objects; tier, speed and
+// cache_creation are not members, so a message_delta must not gain them.
+func anthropicDeltaUsage(u ir.Usage) map[string]any {
+	out := map[string]any{
+		"input_tokens":                nonNegative(u.InputTokens - u.CacheReadTokens - u.CacheWriteTokens),
+		"output_tokens":               u.OutputTokens,
+		"cache_creation_input_tokens": u.CacheWriteTokens,
+		"cache_read_input_tokens":     u.CacheReadTokens,
+		"output_tokens_details":       nil,
+		"server_tool_use":             nil,
+	}
+	if u.ReasoningTokens != 0 {
+		out["output_tokens_details"] = map[string]any{"thinking_tokens": u.ReasoningTokens}
+	}
+	return out
 }
 
 // encodeAnthropicResponseBlocks filters assistant blocks that are valid only

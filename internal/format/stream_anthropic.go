@@ -614,22 +614,6 @@ func NewAnthropicStreamEncoder(w io.Writer, flusher http.Flusher) *AnthropicStre
 	}
 }
 
-// anthropicStreamUsage renders the full cumulative usage a translated stream
-// can carry. Anthropic reports non-cached input separately, so the cache
-// counts travel beside it, and reasoning rides in output_tokens_details.
-func anthropicUsageJSON(u ir.Usage) map[string]any {
-	out := map[string]any{
-		"input_tokens":                nonNegative(u.InputTokens - u.CacheReadTokens - u.CacheWriteTokens),
-		"output_tokens":               u.OutputTokens,
-		"cache_creation_input_tokens": u.CacheWriteTokens,
-		"cache_read_input_tokens":     u.CacheReadTokens,
-	}
-	if u.ReasoningTokens != 0 {
-		out["output_tokens_details"] = map[string]any{"thinking_tokens": u.ReasoningTokens}
-	}
-	return out
-}
-
 // startStream emits the mandatory message_start once, synthesizing identity for
 // a source stream that never delivered its own start event.
 func (e *AnthropicStreamEncoder) startStream() error {
@@ -652,7 +636,8 @@ func (e *AnthropicStreamEncoder) startStream() error {
 		"message": map[string]any{
 			"id": e.id, "type": "message", "role": "assistant", "content": []any{},
 			"model": model, "stop_reason": nil, "stop_sequence": nil,
-			"usage": anthropicUsageJSON(e.usage),
+			"stop_details": nil, "container": nil, "diagnostics": nil,
+			"usage": anthropicMessageUsage(e.usage, "", ""),
 		},
 	})
 }
@@ -819,7 +804,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		return e.emit("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": stopSequence},
-			"usage": anthropicUsageJSON(e.usage),
+			"usage": anthropicDeltaUsage(e.usage),
 		})
 	case ir.EventDone:
 		if !e.finishSent {
@@ -827,7 +812,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			if err := e.emit("message_delta", map[string]any{
 				"type":  "message_delta",
 				"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-				"usage": anthropicUsageJSON(e.usage),
+				"usage": anthropicDeltaUsage(e.usage),
 			}); err != nil {
 				return err
 			}

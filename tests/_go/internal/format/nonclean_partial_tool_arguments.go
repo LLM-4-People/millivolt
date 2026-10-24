@@ -85,7 +85,9 @@ func TestNonCleanPartialToolArgumentsAreDropped(t *testing.T) {
 			if !strings.Contains(wire, tc.want) {
 				t.Fatalf("client lost the answer text %q: %s", tc.want, wire)
 			}
-			if strings.Contains(wire, "tool_use") || strings.Contains(wire, "tool_calls") {
+			// Match the content-block shape, not the usage member
+			// server_tool_use, which is always present.
+			if strings.Contains(wire, `"type":"tool_use"`) || strings.Contains(wire, "tool_calls") {
 				t.Fatalf("dropped call still reached the client: %s", wire)
 			}
 			if !strings.Contains(wire, tc.wantFinish) {
