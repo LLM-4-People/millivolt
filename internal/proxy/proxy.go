@@ -232,6 +232,23 @@ type target struct {
 	streamIncludeUsage bool
 }
 
+// wire is the upstream response protocol. X-Proxy-Format selects an explicit
+// outbound wire; without it the request is a native passthrough on the path
+// protocol. Cursor and unknown paths have no inferred wire.
+func (t *target) wire() ir.Protocol {
+	if t == nil {
+		return ""
+	}
+	if t.outbound != "" {
+		return t.outbound
+	}
+	switch t.inbound {
+	case ir.Chat, ir.Responses, ir.Anthropic:
+		return t.inbound
+	}
+	return ""
+}
+
 // livePublisher is the narrow interface for emitting per-request lifecycle
 // events (begin/update/end) to live SSE subscribers. The metrics.Buffer
 // implements it; the durable store does NOT (it must persist exactly one

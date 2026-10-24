@@ -480,12 +480,13 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 	if rec == nil || t == nil {
 		return
 	}
-	switch t.outbound {
+	wire := t.wire()
+	switch wire {
 	case ir.Responses, ir.Anthropic:
 	default:
 		return
 	}
-	resp, err := providerformat.DecodeResponse(t.outbound, spooled)
+	resp, err := providerformat.DecodeResponse(wire, spooled)
 	if err != nil || resp == nil {
 		return
 	}
@@ -493,7 +494,7 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 	// The provider's usage object is authoritative and honors custom
 	// usage_keys; the canonical decoder folds Anthropic's cache counts and
 	// derives the total only for its own documented shape.
-	usage, ok, usageErr := providerformat.SourceUsage(t.outbound, spooled, s.usageKeysFor(rec.Provider))
+	usage, ok, usageErr := providerformat.SourceUsage(wire, spooled, s.usageKeysFor(rec.Provider))
 	if usageErr != nil {
 		invalidateUsage(rec, usageErr)
 		return
@@ -1031,10 +1032,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		// Seed the analyzer from the routed wire before any frame arrives.
 		// The request-shape fallback stays for an endpoint the router does
 		// not classify.
-		wire := t.outbound
-		if wire == "" {
-			wire = t.inbound
-		}
+		wire := t.wire()
 		if wire == "" && chatShapedResponse(t, body) {
 			wire = ir.Chat
 		}

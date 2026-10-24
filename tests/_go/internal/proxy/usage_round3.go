@@ -24,9 +24,10 @@ func TestAnthropicThinkingTokensUsage(t *testing.T) {
 		body   string
 	}{
 		{
+			// The default native passthrough carries no format header.
 			name:   "native",
 			path:   "/v1/messages",
-			format: "anthropic",
+			format: "",
 			body:   `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
 		},
 		{
