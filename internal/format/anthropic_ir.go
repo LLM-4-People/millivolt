@@ -1840,7 +1840,7 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}
-	blocks := encodeAnthropicBlocks(resp.Blocks, ir.RoleAssistant, &resp.Warnings)
+	blocks := encodeAnthropicBlocks(encodeAnthropicResponseBlocks(resp.Blocks, &resp.Warnings), ir.RoleAssistant, &resp.Warnings)
 	usage := map[string]any{
 		"input_tokens":                nonNegative(resp.Usage.InputTokens - resp.Usage.CacheReadTokens - resp.Usage.CacheWriteTokens),
 		"output_tokens":               resp.Usage.OutputTokens,
@@ -1882,6 +1882,32 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 			"Anthropic Messages has no equivalent terminal reason")
 	}
 	return sse.MarshalWireJSON(out)
+}
+
+// encodeAnthropicResponseBlocks filters assistant blocks that are valid only
+// in a request MessageParam.Content list. Anthropic's response Message.content
+// is a ContentBlock list, whose union has no image or document block, so the
+// shared request encoder's block plus approximation warning would emit a wire
+// the target rejects. Request encoding keeps its current block-and-warn
+// behavior.
+func encodeAnthropicResponseBlocks(blocks []ir.Block, warns *ir.Warnings) []ir.Block {
+	filtered := make([]ir.Block, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case ir.BlockImage:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "response.assistant.image", "Anthropic Message.content has no image block")
+			}
+			continue
+		case ir.BlockFile:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "response.assistant.document", "Anthropic Message.content has no document block")
+			}
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
 }
 
 func anthropicStopReason(r ir.FinishReason) string {

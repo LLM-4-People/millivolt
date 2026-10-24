@@ -206,11 +206,14 @@ target cannot consume them:
   non-streaming translated response drops it with a warning. A translated
   Anthropic stream cannot report response-side warnings after its status line
   is committed.
-- An image or document inside an Anthropic assistant turn is schema-valid
-  because assistant content shares the message content type. The proxy keeps
-  it and reports an `assistant.image` or `assistant.document` approximation
-  warning; runtime acceptance of assistant media is not verified. User media
-  is carried without that warning.
+- An image or document inside an Anthropic assistant request turn is
+  schema-valid because assistant request content shares the message content
+  type. The request encoder keeps it and reports an `assistant.image` or
+  `assistant.document` approximation warning; runtime acceptance of assistant
+  media is not verified. Anthropic's response `Message.content` union has no
+  image or document block, so the response encoder drops it with a
+  `response.assistant.image` or `response.assistant.document` dropped warning.
+  User media is carried without that warning.
 - A Responses `input_file` with inline `file_data` but no media-type
   declaration has one inferred from a data-URL prefix, a `.pdf` or common
   plain-text filename extension, or a base64 `%PDF-` signature. Unrecognized
