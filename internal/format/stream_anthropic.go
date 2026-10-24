@@ -132,8 +132,10 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				// A stop_reason delivered without message_stop is the server
 				// closing the turn; only a stream with neither is truncated.
 				if d.sawStopReason {
+					if err := d.closeOpenBlocks(true); err != nil {
+						return nil, err
+					}
 					d.terminal = true
-					d.closeOpenBlocks()
 					d.flushMessageDelta()
 					d.pushTerminal()
 					continue
@@ -336,12 +338,16 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			if delta.StopSequence != nil {
 				d.pendingStopSequence = delta.StopSequence
 			}
-			d.closeOpenBlocks()
+			if err := d.closeOpenBlocks(true); err != nil {
+				return nil, err
+			}
 			// The canonical MessageDelta is emitted once at message_stop so an
 			// interim usage-only delta cannot send a premature empty finish.
 		case "message_stop":
+			if err := d.closeOpenBlocks(true); err != nil {
+				return nil, err
+			}
 			d.terminal = true
-			d.closeOpenBlocks()
 			d.flushMessageDelta()
 			d.pushTerminal()
 		case "ping":
@@ -349,7 +355,9 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 		case "error":
 			d.terminal = true
 			d.errorSeen = true
-			d.closeOpenBlocks()
+			// The provider already failed the turn; its error is the terminal
+			// statement, so an incomplete argument value is not reclassified.
+			_ = d.closeOpenBlocks(false)
 			if ev.Error == nil || (ev.Error.Type == "" && ev.Error.Message == "") {
 				// An empty error object is not a provider statement; treat it
 				// exactly like a missing completion marker.
@@ -410,12 +418,27 @@ func (d *AnthropicStreamDecoder) pushTerminal() {
 // terminal event arrives, in index order. Anthropic normally sends an explicit
 // content_block_stop, but a provider may omit it before message_delta or
 // message_stop; every target encoder requires the block lifecycle to close.
-func (d *AnthropicStreamDecoder) closeOpenBlocks() {
+// validateToolArguments is true on every clean close and false on a provider
+// error or the truncation flush, where an incomplete value is expected and the
+// stream already terminates with an error.
+func (d *AnthropicStreamDecoder) closeOpenBlocks(validateToolArguments bool) error {
 	indices := make([]int, 0, len(d.openBlocks))
 	for idx := range d.openBlocks {
 		indices = append(indices, idx)
 	}
 	sort.Ints(indices)
+	if validateToolArguments {
+		for _, idx := range indices {
+			if d.skipped[idx] {
+				continue
+			}
+			if builder, ok := d.toolInput[idx]; ok {
+				if err := validateStreamedToolArguments(builder.String()); err != nil {
+					return fmt.Errorf("anthropic stream tool input: %w", err)
+				}
+			}
+		}
+	}
 	for _, idx := range indices {
 		// A skipped provider block never announced a target block, so it must
 		// not receive a stop when the terminal event closes open blocks.
@@ -431,13 +454,17 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks() {
 	d.openToolBlocks = 0
 	d.toolInitialBytes = 0
 	d.toolInputBytes = 0
+	return nil
 }
 
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
 func (d *AnthropicStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
-	d.closeOpenBlocks()
+	// FlushBlocks runs only for ErrTruncatedStream; the canonical truncation
+	// error already refuses a clean terminal, so do not validate an
+	// incomplete argument value here.
+	_ = d.closeOpenBlocks(false)
 	return drainQueue(&d.q), nil
 }
 
