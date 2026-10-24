@@ -336,9 +336,22 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// (redacted audit headers, request-id aliases, server, processing time,
 	// echoed model, rate-limit state).
 	captureUpstreamHeaders(resp, rec, t.authHeader)
-	if resp.StatusCode >= 400 {
-		// Connect streaming is HTTP 200 + envelopes. A 4xx/5xx means the
-		// Run never started - do not drive it as a live bidi body.
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		// Connect streaming is HTTP 200 + envelopes.
+	case isNonCompletionStatus(resp.StatusCode):
+		// 202/204/205 acknowledges the request without a bidi Run body. Relay
+		// the status and its body through the same owner as the generic relay;
+		// synthesizing SSE under it would invent a completion the provider
+		// never sent.
+		s.relayNonCompletionStatus(ctx, w, resp, rec)
+		upstreamCancel()
+		pw.Close()
+		resp.Body.Close()
+		return
+	case resp.StatusCode >= 400:
+		// A 4xx/5xx means the Run never started - do not drive it as a live
+		// bidi body.
 		s.captureErrorFromResponse(r.Context(), resp, rec)
 		upstreamCancel() // tears down the h2 stream - the transport closes the REAL body (the cursor path never reaches ServeHTTP's body defer)
 		pw.Close()
@@ -348,6 +361,16 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		resp.Body.Close()
 		typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 		writeClientError(w, rec, ir.Chat, typ, msg, resp.StatusCode)
+		return
+	default:
+		// 304 and every other non-200 status cannot carry a Run. Fail closed
+		// through the transport sink instead of delivering an empty success
+		// whose body net/http would discard.
+		upstreamCancel()
+		pw.Close()
+		resp.Body.Close()
+		rec.StatusCode = http.StatusBadGateway
+		s.writeTransportFailure(w, rec, ir.Chat, fmt.Errorf("cursor run returned HTTP %d", resp.StatusCode))
 		return
 	}
 	// Build and start the resumable run over the live stream
