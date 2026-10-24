@@ -98,11 +98,12 @@ with `…`; normal values are unchanged. These record bounds do not alter debug
 capture bodies, retained headers, content previews or request-parameter JSON.
 
 One caller setting `X-Proxy-Limit-*` affects every key/client of that provider.
-Absent headers preserve limits; a present empty `X-Proxy-Max-Concurrency` or
-`X-Proxy-Timeout-Ms` value is also treated as absent (whitespace-only max
-concurrency is empty after trimming, while a whitespace-only timeout is a
-malformed value). `0`, `off`, `none` or `unlimited` clear a `X-Proxy-Limit-*`
-policy.
+Absent headers preserve limits. A present `X-Proxy-Max-Concurrency` or
+`X-Proxy-Timeout-Ms` value follows Go's HTTP field parsing: leading and
+trailing optional whitespace is removed before the handler reads it, so a
+whitespace-only value arrives empty and is treated as absent, while a padded
+numeric value is read as its trimmed spelling. `0`, `off`, `none` or
+`unlimited` clear a `X-Proxy-Limit-*` policy.
 Windows accept Go durations from 1 second through 24 hours, plus `1d`.
 Malformed limit values reject the request without applying any of its limit
 headers. The Limits menu shows the policy and its source. Rates use continuously
