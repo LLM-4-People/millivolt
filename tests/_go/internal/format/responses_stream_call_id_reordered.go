@@ -94,11 +94,37 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 				if len(ids) != 1 || ids[0] != "call_proxy_5" {
 					t.Fatalf("tool call ids = %v, want one call_proxy_5: %s", ids, out)
 				}
-				if inputs := anthropicToolInputs(t, out); len(inputs) != 1 {
-					t.Fatalf("Anthropic inputs = %v, want one tool_use block", inputs)
+				thinkingIndex, toolIndex := -1, -1
+				var toolArgs strings.Builder
+				for _, payload := range mustAnthropicPayloads(t, out) {
+					index, _ := payload["index"].(float64)
+					switch payload["type"] {
+					case "content_block_start":
+						block, _ := payload["content_block"].(map[string]any)
+						switch block["type"] {
+						case "thinking":
+							thinkingIndex = int(index)
+						case "tool_use":
+							toolIndex = int(index)
+						}
+					case "content_block_delta":
+						delta, _ := payload["delta"].(map[string]any)
+						if delta["type"] != "input_json_delta" {
+							continue
+						}
+						if int(index) == thinkingIndex || (toolIndex >= 0 && int(index) != toolIndex) {
+							t.Fatalf("input_json_delta landed on block %d (thinking=%d tool=%d): %s", int(index), thinkingIndex, toolIndex, out)
+						}
+						if value, _ := delta["partial_json"].(string); value != "" {
+							toolArgs.WriteString(value)
+						}
+					}
 				}
-				if !strings.Contains(out, "partial_json") || !strings.Contains(out, `\"q\":1`) {
-					t.Fatalf("Anthropic stream lost the terminal arguments: %s", out)
+				if thinkingIndex < 0 || toolIndex < 0 {
+					t.Fatalf("Anthropic stream missing thinking=%d or tool=%d block: %s", thinkingIndex, toolIndex, out)
+				}
+				if toolArgs.String() != `{"q":1}` {
+					t.Fatalf("Anthropic tool arguments = %q, want the terminal object: %s", toolArgs.String(), out)
 				}
 			case ir.Responses:
 				if !strings.Contains(out, `"arguments":"{\"q\":1}"`) {
