@@ -620,18 +620,9 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 	return true, ""
 }
 
-// applyTokenCaps decodes the request's token-ceiling spellings from body with
-// one minimal unmarshal and stamps the effective ceiling onto the record
-// through MergeTokenCaps' precedence (max_completion_tokens over max_tokens
-// over max_output_tokens; none present stamps nil). A malformed spelling
-// leaves the ceiling unset here; ServeHTTP's tokenCapViolation rejects it
-// before the request can proceed. Both cap re-reads share it:
-// restampReqMaxTokens re-reads a rewritten body, and parseLLMRequest's
-// split-decode recovery re-reads a body whose parameter block failed its
-// strict decode.
 // resolveRequestTokenCap owns the three wire spellings the metadata decoder
 // accepts: the Chat pair (max_completion_tokens over max_tokens) first, then the
-// Responses max_output_tokens spelling. Both metadata decode paths call it, so
+// Responses max_output_tokens spelling. Every metadata decode path calls it, so
 // the hostile-cap trust boundary cannot see a different ceiling per path.
 func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 	if v := providerformat.MergeTokenCaps(maxCompletion, maxTokens); v != nil {
@@ -640,9 +631,17 @@ func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 	return maxOutput
 }
 
+// applyTokenCaps stamps the effective token ceiling onto the record through
+// MergeTokenCaps' precedence (max_completion_tokens over max_tokens over
+// max_output_tokens; none present stamps nil). The occurrence scan rejects a
+// duplicate cap spelling, and a malformed spelling leaves the ceiling unset
+// here; ServeHTTP's tokenCapViolation rejects either before the request can
+// proceed. Both cap re-reads share it: restampReqMaxTokens re-reads a rewritten
+// body, and parseLLMRequest re-reads a body whose parameter block failed its
+// strict decode.
 func applyTokenCaps(body []byte, rec *metrics.Record) {
-	var caps tokenCapMembers
-	if json.Unmarshal(body, &caps) != nil {
+	caps, err := scanTokenCaps(body)
+	if err != nil {
 		return
 	}
 	rec.ReqMaxTokens = resolveRequestTokenCap(
@@ -1727,11 +1726,11 @@ func hostileTokenCap(v *int) bool {
 	return v != nil && *v > maxRequestOutputTokens
 }
 
-// tokenCapMembers decodes the three accepted token-ceiling spellings as raw
-// JSON. A typed *int decode rejects a representable value spelled 1e6 or
-// 1000000.0 and, worse, fails the whole struct decode, so every member looks
-// absent to both the bound and the conflict checks. Presence and exact value
-// validation therefore live on the raw member.
+// tokenCapMembers holds the first raw occurrence of each accepted token-ceiling
+// spelling. It is the occurrence scan's container, not an independently decoded
+// record: encoding/json folds member names case-insensitively and keeps the
+// last duplicate, while the relay sends the body byte-for-byte, so a second
+// occurrence could describe a different value to the record and the wire.
 type tokenCapMembers struct {
 	MaxTokens       json.RawMessage `json:"max_tokens"`
 	MaxCompTokens   json.RawMessage `json:"max_completion_tokens"`
@@ -1743,6 +1742,76 @@ type tokenCapMembers struct {
 func tokenCapPresent(raw json.RawMessage) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
+// scanTokenCaps walks the top-level object once and collects the first raw
+// value of each accepted token-ceiling spelling. A second occurrence of any
+// member that folds to a cap name fails instead of letting the record and
+// reservation validate one value while the relay sends every occurrence
+// upstream. Invalid JSON returns an empty scan so the existing passthrough
+// path is preserved.
+func scanTokenCaps(body []byte) (tokenCapMembers, error) {
+	var caps tokenCapMembers
+	var seen [3]bool
+	i := metrics.SkipSpace(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return caps, nil
+	}
+	i = metrics.SkipSpace(body, i+1)
+	for i < len(body) && body[i] != '}' {
+		keyStart := i
+		end := skipJSONString(body, i)
+		if end < 0 {
+			return tokenCapMembers{}, nil
+		}
+		key, ok := decodeRequestKey(body[keyStart:end])
+		if !ok {
+			return tokenCapMembers{}, nil
+		}
+		i = metrics.SkipSpace(body, end)
+		if i >= len(body) || body[i] != ':' {
+			return tokenCapMembers{}, nil
+		}
+		i = metrics.SkipSpace(body, i+1)
+		if i >= len(body) {
+			return tokenCapMembers{}, nil
+		}
+		valueStart := i
+		next := skipJSONValue(body, i)
+		if next < 0 {
+			return tokenCapMembers{}, nil
+		}
+		switch {
+		case key.equal("max_tokens"):
+			if seen[0] {
+				return tokenCapMembers{}, errors.New("max_tokens appears more than once")
+			}
+			seen[0] = true
+			caps.MaxTokens = json.RawMessage(body[valueStart:next])
+		case key.equal("max_completion_tokens"):
+			if seen[1] {
+				return tokenCapMembers{}, errors.New("max_completion_tokens appears more than once")
+			}
+			seen[1] = true
+			caps.MaxCompTokens = json.RawMessage(body[valueStart:next])
+		case key.equal("max_output_tokens"):
+			if seen[2] {
+				return tokenCapMembers{}, errors.New("max_output_tokens appears more than once")
+			}
+			seen[2] = true
+			caps.MaxOutputTokens = json.RawMessage(body[valueStart:next])
+		}
+		i = metrics.SkipSpace(body, next)
+		if i < len(body) && body[i] == ',' {
+			i = metrics.SkipSpace(body, i+1)
+			continue
+		}
+		if i < len(body) && body[i] == '}' {
+			break
+		}
+		return tokenCapMembers{}, nil
+	}
+	return caps, nil
 }
 
 // tokenCapValue validates one raw token-ceiling member. An absent or JSON null
@@ -1767,13 +1836,13 @@ func tokenCapValue(raw json.RawMessage, field string) (*int, error) {
 
 // conflictingTokenCapSpellings reports a body that mixes the Responses
 // max_output_tokens spelling with a Chat max_tokens/max_completion_tokens
-// spelling. Presence is decided on the raw member, so an unrepresentable
-// spelling cannot hide the mix by failing a typed decode. The wire families
-// are distinct, so accepting both would make the recorded ceiling depend on
-// decode precedence rather than the client's wire.
+// spelling. Presence is decided on the occurrence scan, so an unrepresentable
+// spelling cannot hide the mix. The wire families are distinct, so accepting
+// both would make the recorded ceiling depend on decode precedence rather than
+// the client's wire.
 func conflictingTokenCapSpellings(body []byte) bool {
-	var caps tokenCapMembers
-	if json.Unmarshal(body, &caps) != nil {
+	caps, err := scanTokenCaps(body)
+	if err != nil {
 		return false
 	}
 	return tokenCapPresent(caps.MaxOutputTokens) &&
@@ -1781,27 +1850,28 @@ func conflictingTokenCapSpellings(body []byte) bool {
 }
 
 // tokenCapViolation returns the client-facing 400 reason for the first token
-// ceiling spelling that is hostile or malformed, or the empty string when every
-// spelling is valid. It checks EVERY spelling the body carries, not only the
-// one that wins the record precedence: a Responses body can carry both
-// max_tokens and max_output_tokens, and checking only the winner let the other
-// spelling reach the upstream unbounded. The body is authoritative because it
-// carries the client's actual field names; the record's effective ceiling is a
-// fallback for a body whose cap fields did not decode.
+// ceiling spelling that is hostile, malformed or duplicated, or the empty
+// string when every occurrence is valid. It checks every occurrence the body
+// carries, not only the one that wins the record precedence: a Responses body
+// can carry both max_tokens and max_output_tokens, and checking only the winner
+// let the other spelling reach the upstream unbounded. The body is authoritative
+// because it carries the client's actual field names; the record's effective
+// ceiling is a fallback for a body whose cap fields did not decode.
 func tokenCapViolation(body []byte, rec *metrics.Record) string {
-	var caps tokenCapMembers
-	if json.Unmarshal(body, &caps) == nil {
-		for _, cap := range []struct {
-			name string
-			raw  json.RawMessage
-		}{
-			{"max_completion_tokens", caps.MaxCompTokens},
-			{"max_tokens", caps.MaxTokens},
-			{"max_output_tokens", caps.MaxOutputTokens},
-		} {
-			if _, err := tokenCapValue(cap.raw, cap.name); err != nil {
-				return err.Error()
-			}
+	caps, err := scanTokenCaps(body)
+	if err != nil {
+		return err.Error()
+	}
+	for _, cap := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"max_completion_tokens", caps.MaxCompTokens},
+		{"max_tokens", caps.MaxTokens},
+		{"max_output_tokens", caps.MaxOutputTokens},
+	} {
+		if _, err := tokenCapValue(cap.raw, cap.name); err != nil {
+			return err.Error()
 		}
 	}
 	if rec != nil && hostileTokenCap(rec.ReqMaxTokens) {
@@ -1828,11 +1898,6 @@ type requestMessage[C any] struct {
 }
 
 type requestParameters struct {
-	// The three cap members stay raw so an accepted integral spelling such as
-	// 1e6 or 1000000.0 cannot fail the whole parameter decode. They are the
-	// same wire spellings tokenCapMembers owns; tokenCapValue turns each into
-	// the effective ceiling and tokenCapViolation rejects a malformed one.
-	tokenCapMembers
 	Temperature    *float64          `json:"temperature"`
 	TopP           *float64          `json:"top_p"`
 	Tools          []discardedJSON   `json:"tools"`
@@ -3129,17 +3194,10 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 		}
 	}
 	rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
-	// Prefer max_completion_tokens, matching the Anthropic translator's
-	// pick: the translated body re-decodes through this same
-	// MergeTokenCaps precedence, so the trust-boundary check in ServeHTTP
-	// must see the one field a translated body can actually carry upstream.
-	// The cap members stay raw through the decode so every integral spelling
-	// the trust boundary accepts also records the rest of this parameter block.
-	rec.ReqMaxTokens = resolveRequestTokenCap(
-		tokenCapOptional(req.MaxCompTokens, "max_completion_tokens"),
-		tokenCapOptional(req.MaxTokens, "max_tokens"),
-		tokenCapOptional(req.MaxOutputTokens, "max_output_tokens"),
-	)
+	// The occurrence scan owns the cap value, so the record describes the same
+	// occurrence the trust boundary validated. Prefer max_completion_tokens,
+	// matching the Anthropic translator's pick.
+	applyTokenCaps(body, rec)
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
 	rec.ReqToolsCount = len(req.Tools)

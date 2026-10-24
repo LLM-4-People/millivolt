@@ -41,6 +41,15 @@ func TestHostileTokenCapValuesRejected(t *testing.T) {
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":1e9}`, "", "max_completion_tokens"},
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_output_tokens":1e9}`, "", "max_output_tokens"},
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_output_tokens":"1000000000"}`, "", "max_output_tokens"},
+		// A later case variant must not replace the validated value: the
+		// relay sends both members, so a first-wins or strict upstream would
+		// still see the over-bound occurrence.
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1000001,"MAX_TOKENS":10}`, "", "max_tokens"},
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"MAX_TOKENS":1000001}`, "", "max_tokens"},
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1000001,"MAX_TOKENS":null}`, "", "max_tokens"},
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":99999999999999999999,"MAX_TOKENS":10}`, "", "max_tokens"},
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"max_tokens":20}`, "", "max_tokens"},
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":10,"max\u005ftokens":20}`, "", "max_tokens"},
 	}
 	for _, tc := range rejected {
 		t.Run(tc.payload+tc.format, func(t *testing.T) {
@@ -68,6 +77,7 @@ func TestHostileTokenCapValuesRejected(t *testing.T) {
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":0}`, ""},
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":-1}`, ""},
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":null}`, ""},
+		{`{"model":"m","messages":[{"role":"user","content":"hi"}],"MAX_TOKENS":1000000}`, ""},
 		{`{"model":"m","messages":[{"role":"user","content":"hi"}]}`, ""},
 	}
 	for _, tc := range accepted {
@@ -117,6 +127,9 @@ func TestApplyTokenCapsRawSpellings(t *testing.T) {
 		{`{"max_tokens":"1000000"}`, nil},
 		{`{"max_completion_tokens":1e6,"max_tokens":7}`, intPtr(1000000)},
 		{`{"max_output_tokens":1e6}`, intPtr(1000000)},
+		{`{"MAX_TOKENS":1e6}`, intPtr(1000000)},
+		{`{"max_tokens":1000001,"MAX_TOKENS":10}`, nil},
+		{`{"max_tokens":10,"MAX_TOKENS":10}`, nil},
 	} {
 		t.Run(tc.payload, func(t *testing.T) {
 			rec := &metrics.Record{}

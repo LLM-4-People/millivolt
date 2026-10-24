@@ -39,7 +39,11 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 		{"trailing document", `{"model":"m","stream":true,"max_tokens":7} {}`, "", false, false},
 		{"array root", `[{"model":"m","stream":true,"max_tokens":7}]`, "", false, false},
 		{"null root", `null`, "", false, false},
-		{"case insensitive duplicate", `{"MODEL":"old","model":"m","STREAM":false,"Stream":true,"MAX_TOKENS":3,"max_tokens":7}`, "m", true, true},
+		// A duplicate cap spelling is rejected at the trust boundary instead
+		// of letting a last-wins decode pick one value for the record while
+		// the relay sends every occurrence; the parser therefore records no
+		// ceiling for this body.
+		{"case insensitive duplicate", `{"MODEL":"old","model":"m","STREAM":false,"Stream":true,"MAX_TOKENS":3,"max_tokens":7}`, "m", true, false},
 		{"null routing duplicate", `{"model":"m","model":null,"stream":true,"stream":null,"max_tokens":7}`, "m", true, true},
 		{"overflow in tools", `{"model":"m","stream":true,"max_tokens":7,"tools":[{"nested":1e999}]}`, "m", true, true},
 		{"overflow in metadata", `{"model":"m","stream":true,"max_tokens":7,"metadata":{"x":1e999}}`, "m", true, true},
