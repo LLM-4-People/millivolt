@@ -1460,11 +1460,7 @@ func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
 		out["incomplete_details"] = map[string]any{"reason": env.IncompleteReason}
 	}
 	if env.Error != nil {
-		code := env.Error.Code
-		if code == "" {
-			code = "server_error"
-		}
-		failure := map[string]any{"code": code, "message": env.Error.Message}
+		failure := map[string]any{"code": responsesErrorCode(env.Error.Code), "message": env.Error.Message}
 		// ResponseError.type is the source error spelling when the provider
 		// recorded one; an absent type stays absent rather than inventing a
 		// vocabulary value.
@@ -1497,6 +1493,27 @@ func responsesAnyItems(items []map[string]any) []any {
 		out[i] = item
 	}
 	return out
+}
+
+// responsesErrorCode maps an internal or provider error code onto the closed
+// ResponseErrorCode enum. The failed envelope may carry only one of those 21
+// values; the free-form error event and the record keep the specific internal
+// code. A documented synonym is translated exactly, and anything else falls
+// back to server_error rather than emitting an invalid enum member.
+func responsesErrorCode(code string) string {
+	if code == "rate_limit_error" {
+		return "rate_limit_exceeded"
+	}
+	switch code {
+	case "server_error", "rate_limit_exceeded", "invalid_prompt", "data_residency_mismatch",
+		"bio_policy", "misalignment_policy_violation", "vector_store_timeout", "invalid_image",
+		"invalid_image_format", "invalid_base64_image", "invalid_image_url", "image_too_large",
+		"image_too_small", "image_parse_error", "image_content_policy_violation", "invalid_image_mode",
+		"image_file_too_large", "unsupported_image_media_type", "empty_image_file",
+		"failed_to_download_image", "image_file_not_found":
+		return code
+	}
+	return "server_error"
 }
 
 // ResponsesSyntheticEvent builds one complete synthetic Responses SSE event
