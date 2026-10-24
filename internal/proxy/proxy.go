@@ -1025,11 +1025,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		} else if sseBody {
-			pacer.commitStatus(resp.StatusCode)
 			if resp.StatusCode != http.StatusOK {
-				s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
+				// A 2xx-non-200 event-stream body is still an SSE body, not a
+				// buffered completion. Commit it under its own status and relay
+				// it verbatim; entering the quality/buffer owner after a
+				// commit could write a retry's JSON under this status and
+				// content type.
+				if pacer.applyStatus(resp.Header, resp.StatusCode) {
+					s.relayNonCompletionBody(ctx, w, resp, rec)
+				}
 				return
 			}
+			pacer.commitStatus(resp.StatusCode)
 		} else {
 			s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 			return
