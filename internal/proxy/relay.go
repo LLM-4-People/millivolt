@@ -2303,6 +2303,24 @@ type upstreamErrorRescue struct {
 	reasoning      bool
 }
 
+// endsWithUnframedDataLine reports whether b ends with a complete SSE data
+// line and no blank separator after it. Framing the next data line as a new
+// event prevents two payloads from concatenating into one event no spec
+// parser can dispatch.
+func endsWithUnframedDataLine(b []byte) bool {
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		return false
+	}
+	end := len(b) - 1
+	start := bytes.LastIndexByte(b[:end], '\n') + 1
+	line := bytes.TrimRight(b[start:end], "\r")
+	if len(bytes.TrimSpace(line)) == 0 {
+		return false
+	}
+	_, ok := sse.DataPayload(line)
+	return ok
+}
+
 // streamBody forwards an SSE body, preserving bytes exactly, and flushes after
 // each event boundary so TTFT == upstream TTFT. Alongside the copy it scans
 // for token timestamps and the final usage chunk using an SSE analyzer.
@@ -2340,24 +2358,6 @@ type upstreamErrorRescue struct {
 // With the budget spent (rescueNone), the truncation or degenerate class
 // surfaces in-band exactly as before: finish_reason length is a terminator
 // and never rescuable. uerr receives the provider's envelope for a
-// endsWithUnframedDataLine reports whether b ends with a complete SSE data
-// line and no blank separator after it. Framing the next data line as a new
-// event prevents two payloads from concatenating into one event no spec
-// parser can dispatch.
-func endsWithUnframedDataLine(b []byte) bool {
-	if len(b) == 0 || b[len(b)-1] != '\n' {
-		return false
-	}
-	end := len(b) - 1
-	start := bytes.LastIndexByte(b[:end], '\n') + 1
-	line := bytes.TrimRight(b[start:end], "\r")
-	if len(bytes.TrimSpace(line)) == 0 {
-		return false
-	}
-	_, ok := sse.DataPayload(line)
-	return ok
-}
-
 // rescueUpstreamError return (the caller's attempt bookkeeping); it is
 // untouched for every other outcome.
 func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue, wire ir.Protocol) (rescue streamRescue) {
