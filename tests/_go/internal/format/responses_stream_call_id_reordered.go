@@ -867,3 +867,54 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+// An unannounced identified terminal call at a position held by one of several
+// same-name open calls must not take that call's block. The positional branch
+// is only a tie-breaker among candidates whose identity is compatible with the
+// terminal item; a different identity leaves the open calls untouched and the
+// unannounced entry is dropped.
+func TestResponsesSameNamePositionalMatchRequiresIdentity(t *testing.T) {
+	source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_a","name":"f","arguments":""}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_b","name":"f","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","call_id":"call_new","name":"f","arguments":"{\"x\":1}"}]}}
+
+`
+	for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+		t.Run(string(target), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			out := buf.String()
+			calls := streamedToolCalls(t, target, out)
+			args := map[string]string{}
+			for _, call := range calls {
+				args[call.id] = strings.TrimSpace(call.args.String())
+			}
+			if len(calls) != 2 {
+				t.Fatalf("tool calls = %d, want the two open calls: %v\n%s", len(calls), args, out)
+			}
+			// An open call closed without arguments renders as {} on Chat and
+			// Responses and as an empty argument string on Anthropic; both mean
+			// the unannounced entry assigned nothing.
+			emptyArgs := func(value string) bool {
+				value = strings.TrimSpace(value)
+				return value == "" || value == "{}"
+			}
+			if !emptyArgs(args["call_a"]) {
+				t.Fatalf("call_a arguments = %q, want no assignment (the unannounced call_new must not fill it): %v\n%s", args["call_a"], args, out)
+			}
+			if !emptyArgs(args["call_b"]) {
+				t.Fatalf("call_b arguments = %q, want no assignment: %v\n%s", args["call_b"], args, out)
+			}
+			if _, ok := args["call_new"]; ok {
+				t.Fatalf("unannounced call_new was emitted: %v\n%s", args, out)
+			}
+		})
+	}
+}

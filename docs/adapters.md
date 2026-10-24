@@ -183,8 +183,10 @@ target cannot consume them:
   name and effective argument value agree with a closed id-less call is
   skipped as that call's repeat. An unannounced id-less call at a colliding
   announced position cannot be distinguished from a repeat and is dropped
-  rather than assigned to a different call. The non-streaming decoder still
-  rejects a call with both identities absent.
+  rather than assigned to a different call. An identified terminal call also
+  matches only a same-name candidate whose identity it can address, so a
+  different call at that position cannot take the block. The non-streaming
+  decoder still rejects a call with both identities absent.
 - A legacy Chat `message.function_call` is treated as answer-shaped for retry
   safety because the deprecated shape can represent either a tool invocation or
   a final answer, and it is not counted as a tool call. A Chat source that uses

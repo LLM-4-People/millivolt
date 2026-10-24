@@ -1662,10 +1662,13 @@ func (d *ResponsesStreamDecoder) matchTerminalToolCall(item responsesWireItem, i
 		default:
 			// Several open calls share the name. Only the announcement at the
 			// terminal position can disambiguate them, and only when that
-			// announcement is one of the same-name candidates.
+			// announcement is one of the same-name candidates and the terminal
+			// identity can address it. Position is not an identity: an
+			// unannounced call at the same position must not take the block.
 			if positional, ok := d.keyByOutput[index]; ok {
 				for _, candidate := range named {
-					if candidate.key == positional {
+					if candidate.key == positional &&
+						terminalToolIdentityCompatible(item.CallID, item.ID, candidate.key) {
 						return candidate.key, candidate.idx, true
 					}
 				}
