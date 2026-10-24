@@ -753,20 +753,23 @@ func TestToolArgumentsFingerprintFallsBackOverBounds(t *testing.T) {
 	}{
 		{
 			name: "over size",
-			raw:  `{"a":"` + strings.Repeat("x", toolArgumentsCanonicalBytesMax) + `"}`,
+			raw:  `{ "z" : 0 , "a" : "` + strings.Repeat("x", toolArgumentsCanonicalBytesMax) + `" }`,
 		},
 		{
 			name: "over depth",
-			raw: `{"a":` + strings.Repeat("[", toolArgumentsCanonicalDepthMax+1) +
-				strings.Repeat("]", toolArgumentsCanonicalDepthMax+1) + `}`,
+			raw: `{ "z" : 0 , "a" : ` + strings.Repeat("[ ", toolArgumentsCanonicalDepthMax+1) +
+				strings.Repeat("] ", toolArgumentsCanonicalDepthMax+1) + `}`,
 		},
 		{
 			name: "over separators",
-			raw: `{"a":[` + strings.Repeat("0,", toolArgumentsCanonicalSeparatorsMax+1) +
-				`0]}`,
+			raw: `{ "z" : 0 , "a" : [ ` + strings.Repeat("0, ", toolArgumentsCanonicalSeparatorsMax+1) +
+				`0 ] }`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if toolArgumentsWithinCanonicalBounds([]byte(tc.raw)) {
+				t.Fatalf("fixture is canonicalizable; it cannot distinguish the raw fallback")
+			}
 			if got, want := toolArgumentsFingerprint(tc.raw), sha256.Sum256([]byte(tc.raw)); got != want {
 				t.Fatalf("fingerprint = %x, want the raw bytes %x", got, want)
 			}
