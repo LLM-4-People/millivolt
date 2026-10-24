@@ -81,6 +81,7 @@ type ChatStreamDecoder struct {
 	toolArguments  map[int]*strings.Builder
 	toolArgBytes   int
 	toolIDs        map[string]struct{}
+	openToolBlocks int
 	open           []int
 
 	finishSeen    bool
@@ -342,6 +343,10 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 		}
 		if err := checkNativeIdentity("tool name", name); err != nil {
 			return err
+		}
+		d.openToolBlocks++
+		if d.openToolBlocks > toolBlocksMax {
+			return fmt.Errorf("chat stream exceeds %d concurrent tool calls", toolBlocksMax)
 		}
 		irIndex = d.nextIndex
 		id = d.commitToolID(id, irIndex)
