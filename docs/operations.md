@@ -277,8 +277,10 @@ client's spelling reaches the upstream wire only on OpenAI-wire passthrough.
 
 When a tracked value was extracted and the request translates to the Anthropic
 wire, the translated body gains a top-level `prompt_cache_key` carrying the
-value, Anthropic's native cache field. Injection follows extraction alone:
-`strip` governs the passthrough body, never the injected field.
+value. This is a proxy tracking extension, not an Anthropic cache field:
+Anthropic caching uses `cache_control`, and an upstream that rejects unknown
+top-level fields will reject the injected request. Injection follows extraction
+alone: `strip` governs the passthrough body, never the injected field.
 
 Validation runs at the load boundary for YAML and Settings saves alike: at most
 16 entries, at most 4 params per entry, param names one JSON key segment each

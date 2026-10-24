@@ -631,8 +631,8 @@ func TestAnthropicErrorEventSurfaces(t *testing.T) {
 }
 
 // TestTranslateRequestPromptCacheKey pins the sub-conversation injection: a
-// non-empty tracked value lands as Anthropic's native top-level
-// prompt_cache_key; an empty one adds nothing.
+// non-empty tracked value lands as a top-level prompt_cache_key tracking
+// extension (not an Anthropic cache field), and an empty one adds nothing.
 func TestTranslateRequestPromptCacheKey(t *testing.T) {
 	in := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 	out, err := TranslateRequest([]byte(in), 4096, "task-7")

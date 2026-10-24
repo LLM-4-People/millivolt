@@ -429,7 +429,9 @@ identity the same way, leaving the request on automatic grouping. The body is
 relayed unchanged unless the entry sets `strip`, which removes the entry's
 configured fields from the top level of the relayed upstream body. A
 request translated to the Anthropic wire gains a top-level `prompt_cache_key`
-carrying the tracked value. An absent or dropped identity is never a client
+carrying the tracked value. That field is a proxy tracking extension, not an
+Anthropic cache control, and only upstreams that tolerate unknown top-level
+fields accept it. An absent or dropped identity is never a client
 error. A tracked identity never declares a parent: `X-Proxy-Parent-Session`
 still requires its explicit session pair, and the session wins identity. The
 identity rules, name grammar, caps and the settings surface live in

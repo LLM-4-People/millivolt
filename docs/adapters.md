@@ -206,8 +206,11 @@ images, tools and results, thinking blocks, cache control, selected parameters,
 usage and streaming events. Fields with no target representation follow the
 [translation loss policy](#cross-protocol-translation). A configured
 [sub-conversation tracking](operations.md#sub-conversation-tracking) value is
-injected as the native top-level `prompt_cache_key`; the client's own spelling
-of the tracked field is otherwise dropped by the allowlist. The caller
+injected as a top-level `prompt_cache_key`. That field is a proxy tracking
+extension, not an Anthropic cache control: Anthropic caching uses
+`cache_control`, and the injection is only safe for upstreams that tolerate
+unknown top-level fields. The client's own spelling of the tracked field is
+otherwise dropped by the allowlist. The caller
 must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
 
