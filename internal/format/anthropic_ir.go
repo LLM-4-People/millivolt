@@ -1125,7 +1125,12 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			}
 			block := map[string]any{"type": "document", "source": source}
 			if b.File != nil && b.File.Filename != "" {
-				block["title"] = b.File.Filename
+				if utf8.RuneCountInString(b.File.Filename) <= anthropicDocumentTitleMax {
+					block["title"] = b.File.Filename
+				} else if warns != nil {
+					warns.Add(ir.WarningDropped, "document.title",
+						"Anthropic document titles are limited to 500 characters")
+				}
 			}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
@@ -1239,6 +1244,10 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 // anthropicUserIDMax is the official metadata.user_id maxLength. It counts
 // Unicode characters, matching the JSON Schema maxLength semantics.
 const anthropicUserIDMax = 512
+
+// anthropicDocumentTitleMax is the official DocumentBlockParam title maxLength,
+// counted in Unicode characters.
+const anthropicDocumentTitleMax = 500
 
 // anthropicImageMediaTypes is the Base64ImageSource media-type allowlist from
 // the Anthropic Messages schema.

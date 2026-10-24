@@ -117,6 +117,9 @@ target cannot consume them:
   truncated, because truncation can collide two distinct identifiers.
   Chat/Responses `service_tier: priority` maps to Anthropic `speed: fast` with
   an approximation warning; `fast` maps without one.
+- An Anthropic document `title` is limited to 500 characters. A longer source
+  filename is dropped with a `document.title` warning while the document bytes
+  still translate; strict mode rejects the loss before any upstream send.
 - A response metadata map has no field on the Anthropic Message object, so a
   non-streaming translated response drops it with a warning. A translated
   Anthropic stream cannot report response-side warnings after its status line
