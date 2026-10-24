@@ -184,8 +184,10 @@ target cannot consume them:
   skipped as that call's repeat. An unannounced id-less call at a colliding
   announced position cannot be distinguished from a repeat and is dropped
   rather than assigned to a different call. An identified terminal call also
-  matches only a same-name candidate whose identity it can address, so a
-  different call at that position cannot take the block. The non-streaming
+  matches only a same-name candidate whose identity kind is compatible: a
+  candidate keyed by the same identity kind must carry that identity, while a
+  cross-kind candidate stays eligible under the mixed-spelling rule. Position
+  alone never moves arguments to a conflicting identity. The non-streaming
   decoder still rejects a call with both identities absent.
 - A legacy Chat `message.function_call` is treated as answer-shaped for retry
   safety because the deprecated shape can represent either a tool invocation or
