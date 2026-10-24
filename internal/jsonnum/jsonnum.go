@@ -116,7 +116,8 @@ func (n *Int64) UnmarshalJSON(raw []byte) error {
 type UnixSeconds int64
 
 // UnmarshalJSON decodes one non-negative JSON number and truncates any
-// fractional part. It rejects negative values and overflow.
+// fractional part. It rejects every negative value (an exact negative zero
+// decodes as zero) and overflow.
 func (s *UnixSeconds) UnmarshalJSON(raw []byte) error {
 	lit := strings.TrimSpace(string(raw))
 	if lit == "" {
@@ -130,6 +131,11 @@ func (s *UnixSeconds) UnmarshalJSON(raw []byte) error {
 	if sig == "" {
 		*s = 0
 		return nil
+	}
+	if negative {
+		// Reject the sign before truncation: -0.5 is a negative value even
+		// though its whole-second part is zero.
+		return ErrNegative
 	}
 	if scale < 0 {
 		drop := -scale
@@ -147,9 +153,6 @@ func (s *UnixSeconds) UnmarshalJSON(raw []byte) error {
 			return ErrOutOfRange
 		}
 		sig += strings.Repeat("0", scale)
-	}
-	if negative {
-		return ErrNegative
 	}
 	n, err := strconv.ParseInt(sig, 10, 64)
 	if err != nil {
