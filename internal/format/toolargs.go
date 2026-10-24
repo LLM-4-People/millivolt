@@ -48,11 +48,15 @@ func parseToolArguments(raw string) (json.RawMessage, error) {
 // bytes that are already on the client wire. Unlike parseToolArguments it must
 // not normalize: streaming cannot rewrite bytes the client already received, so
 // a completed streamed value that is null, an array, or another non-object is a
-// translation failure. Empty is allowed because no bytes were emitted.
+// translation failure. No bytes are allowed; whitespace bytes are not a valid
+// argument value and must not pass as the empty object.
 func validateStreamedToolArguments(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil
+		if raw == "" {
+			return nil
+		}
+		return errToolArgumentsJSON
 	}
 	if !json.Valid([]byte(trimmed)) {
 		return errToolArgumentsJSON

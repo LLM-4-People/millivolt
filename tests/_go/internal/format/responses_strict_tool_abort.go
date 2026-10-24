@@ -8,11 +8,30 @@ package format
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
+
+func responsesWhitespaceDeltaStream(t *testing.T, eventType, status string, extra map[string]any, deltas ...string) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(terminalStreamCreated)
+	appendResponsesEvent(t, &b, "response.output_item.added", map[string]any{
+		"type": "response.output_item.added", "output_index": 0,
+		"item": responsesFunctionCallItem(""),
+	})
+	for _, delta := range deltas {
+		appendResponsesEvent(t, &b, "response.function_call_arguments.delta", map[string]any{
+			"type": "response.function_call_arguments.delta", "output_index": 0, "delta": delta,
+		})
+	}
+	appendResponsesTerminalPayload(t, &b, eventType, status, nil, extra)
+	return b.String()
+}
 
 func TestResponsesStrictToolArgumentsAbortMatrix(t *testing.T) {
 	incompleteExtra := map[string]any{"incomplete_details": map[string]any{"reason": "max_output_tokens"}}
@@ -39,6 +58,18 @@ func TestResponsesStrictToolArgumentsAbortMatrix(t *testing.T) {
 		{
 			name:   "cancelled no arguments",
 			source: responsesTerminalArgsStream(t, "response.cancelled", "cancelled", []any{responsesFunctionCallItem("")}, nil),
+		},
+		{
+			name:   "announced whitespace delta on incomplete",
+			source: responsesWhitespaceDeltaStream(t, "response.incomplete", "incomplete", incompleteExtra, "   "),
+		},
+		{
+			name:   "announced whitespace delta on cancelled",
+			source: responsesWhitespaceDeltaStream(t, "response.cancelled", "cancelled", nil, "   "),
+		},
+		{
+			name:   "terminal whitespace on incomplete",
+			source: responsesTerminalArgsStream(t, "response.incomplete", "incomplete", []any{responsesFunctionCallItem("   ")}, incompleteExtra),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,5 +141,34 @@ func TestResponsesStrictToolArgumentsExplicitEmptyAllowed(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// A whitespace-only delta is not argument evidence, but whitespace followed by
+// a real object accumulates to valid JSON and must still complete the call.
+func TestResponsesWhitespaceThenObjectDeltaCompletes(t *testing.T) {
+	incompleteExtra := map[string]any{"incomplete_details": map[string]any{"reason": "max_output_tokens"}}
+	source := responsesWhitespaceDeltaStream(t, "response.incomplete", "incomplete", incompleteExtra, "   ", `{"q":1}`)
+	var buf bytes.Buffer
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+		t.Fatalf("whitespace-prefixed object failed: %v", err)
+	}
+	got := chatToolArgumentValues(t, buf.String())
+	if strings.TrimSpace(got) != `{"q":1}` || !json.Valid([]byte(got)) {
+		t.Fatalf("Chat arguments = %q, want a JSON object with the leading whitespace", got)
+	}
+}
+
+func TestValidateStreamedToolArgumentsWhitespace(t *testing.T) {
+	if err := validateStreamedToolArguments(""); err != nil {
+		t.Fatalf("no emitted bytes = %v, want nil", err)
+	}
+	for _, raw := range []string{" ", "\n", " \t "} {
+		if err := validateStreamedToolArguments(raw); !errors.Is(err, errToolArgumentsJSON) {
+			t.Fatalf("validateStreamedToolArguments(%q) = %v, want errToolArgumentsJSON", raw, err)
+		}
+	}
+	if err := validateStreamedToolArguments("{}"); err != nil {
+		t.Fatalf("explicit empty object = %v, want nil", err)
 	}
 }

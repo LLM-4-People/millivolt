@@ -1994,7 +1994,9 @@ func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, 
 	if delta == "" || key == "" {
 		return
 	}
-	d.argumentEvidence[key] = true
+	if strings.TrimSpace(delta) != "" {
+		d.argumentEvidence[key] = true
+	}
 	if d.argsEmitted[key] == nil {
 		if initial := d.initialArgs[key]; initial != "" {
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: initial}})
@@ -2040,6 +2042,13 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: suffix}})
 			d.recordEmittedArguments(key, suffix)
 			emitted += suffix
+		}
+		if policy == responsesToolArgumentsRequired && strings.TrimSpace(emitted) == "" {
+			// A whitespace-only delta supplied no argument evidence. Empty
+			// bytes are allowed only when nothing was emitted; whitespace
+			// already reached the client and cannot become an executable
+			// object.
+			return errToolArgumentsMissing
 		}
 		if policy == responsesToolArgumentsSkip {
 			// The bytes already streamed are the client's only copy. A

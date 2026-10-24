@@ -290,8 +290,8 @@ tool call is validated by its terminal class. A completed terminal fails closed
 on a partial function-call value. Incomplete and cancelled terminals do the
 same, because both are normal turn boundaries and an executable empty object
 must never close a call the model did not finish. On those two terminals a call
-with missing or null arguments is also rejected unless the source explicitly
-sent `{}`. When validation fails, the target abort closes non-tool blocks but
+with missing, null or whitespace arguments is also rejected unless the source
+explicitly sent `{}`. When validation fails, the target abort closes non-tool blocks but
 leaves an open tool block unclosed: Anthropic emits no `content_block_stop` over
 empty input, and Responses emits no done function-call item with empty
 arguments. The proxy error frame terminates the stream, so a client that keeps

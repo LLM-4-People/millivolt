@@ -752,7 +752,7 @@ class PublishedContracts(unittest.TestCase):
             "it returns the provider error envelope and discards the output",
             "leaves an open tool block unclosed",
             "Anthropic emits no `content_block_stop` over empty input",
-            "missing or null arguments is also rejected unless the source explicitly sent `{}`",
+            "missing, null or whitespace arguments is also rejected unless the source explicitly sent `{}`",
             "first still-open id-less announced call in output order",
             "rather than synthesizing a second call",
         ):
