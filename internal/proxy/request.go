@@ -2207,9 +2207,12 @@ func (m *requestMetadataKeys) count() int { return len(m.keys) }
 // can otherwise expand into hundreds of MiB of empty objects or raw values;
 // this is an internal DoS guardrail, not a wire-format limit, and 10k
 // messages/tools/logit_bias/stop entries or top-level keys is far above a
-// normal request. The wire codecs use the same ceiling for their own decode
-// preflight, so the proxy can never reject a document the translator would
-// accept (or the reverse).
+// normal request. The wire codecs share this top-level collection ceiling for
+// their own decode preflight. Nested content and duplicate-occurrence bounds
+// can still be stricter on either side: the preflight accumulates every
+// duplicate top-level system member while the Anthropic codec decodes only the
+// last, and the codec's per-array content cap is smaller than the shared
+// aggregate.
 const requestMetadataMaxElements = providerformat.WireCollectionMax
 
 // requestContentPartsMax bounds the aggregate content-part arrays over every
