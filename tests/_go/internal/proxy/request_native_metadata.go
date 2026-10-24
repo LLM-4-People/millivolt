@@ -64,3 +64,34 @@ func TestResponsesNativeRequestMetadata(t *testing.T) {
 		t.Fatalf("other include row lost metadata: format %q verbosity %q", rec.ReqResponseFormat, rec.ReqVerbosity)
 	}
 }
+
+// TestAnthropicThinkingDisabledNotRequested pins what the record's
+// req_thinking means: the client asked for a thinking budget. A disabled
+// thinking object is schema-valid but requests nothing.
+func TestAnthropicThinkingDisabledNotRequested(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		thinking string
+		want     bool
+	}{
+		{name: "disabled", thinking: `{"type":"disabled"}`, want: false},
+		{name: "enabled", thinking: `{"type":"enabled","budget_tokens":2048}`, want: true},
+		{name: "adaptive", thinking: `{"type":"adaptive"}`, want: true},
+		{name: "between tools", thinking: `{"type":"between_tools"}`, want: true},
+		{name: "null", thinking: `null`, want: false},
+		{name: "malformed", thinking: `"nope"`, want: false},
+		{name: "absent", thinking: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","max_tokens":4096,"messages":[{"role":"user","content":"hi"}]`
+			if tc.thinking != "" {
+				body += `,"thinking":` + tc.thinking
+			}
+			body += `}`
+			rec := parseRequestRecord(t, body)
+			if rec.ReqThinking != tc.want {
+				t.Fatalf("req_thinking = %v, want %v for %s", rec.ReqThinking, tc.want, tc.thinking)
+			}
+		})
+	}
+}

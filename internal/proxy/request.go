@@ -3376,8 +3376,18 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	rec.ReqLogitBias = len(req.LogitBias)
 	rec.ReqMetadataKeys = req.Metadata.count()
 	if len(req.Thinking) > 0 {
-		// Any non-null "thinking" object means extended thinking was requested.
-		rec.ReqThinking = string(req.Thinking) != "null"
+		// Record extended thinking only when the object asks for it. The
+		// codec decodes type "disabled" as Enabled=false, so the presence of
+		// a thinking object alone is not a request.
+		var thinking struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(req.Thinking, &thinking) == nil {
+			switch thinking.Type {
+			case "enabled", "adaptive", "between_tools":
+				rec.ReqThinking = true
+			}
+		}
 	}
 	if tok := configToken(req.ReasoningEffort); tok != "" {
 		rec.ReqReasoningEffort = tok
