@@ -217,7 +217,16 @@ Parallel tool calls translated to Anthropic open their indexed content blocks
 concurrently (for example start 0, start 1, delta 0, delta 1, stop 0, stop 1).
 The blocks carry the index the streaming contract requires, and SDKs accumulate
 by index; a strict assumption of sequential block lifecycles would need a
-separate encoder design, not a per-request special case. A Chat `[DONE]`
+separate encoder design, not a per-request special case. A streamed Responses
+tool call is validated by its terminal class. A completed terminal fails closed
+on a partial function-call value. Incomplete and cancelled terminals do the
+same, because both are normal turn boundaries and an executable empty object
+must never close a call the model did not finish. A failed, errored or
+truncated terminal instead drops only the unparseable call and keeps the
+provider error or truncation. An already-announced call on one of those three
+terminals can still close with `{}` because its block already reached the
+client; Chat reports a cancelled finish as `stop`, so that accepted limit is
+not distinguishable there. A Chat `[DONE]`
 without a preceding non-null finish reason is a clean transport terminator but
 an empty finish: a Responses target receives `response.incomplete` with
 `incomplete_details: null`, and the record reports `finish=other`. That

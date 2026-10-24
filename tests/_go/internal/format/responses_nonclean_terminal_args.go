@@ -1,11 +1,13 @@
 package format
 
-// Round 7 verifier NEW-1 regression: a non-clean Responses terminal must keep
-// its provider error or finish. A partial terminal function-call value and a
-// partial buffered output_item.added value are both incomplete on failed,
-// incomplete and cancelled terminals, so they are dropped instead of becoming a
-// translation error. A clean completion still fails closed on the same value,
-// and a complete terminal value on an incomplete terminal is still emitted.
+// Round 7 verifier NEW-1 and round 8 H1 regression: the Responses terminal
+// class decides how an incomplete function-call value is treated. Failed,
+// errored and truncated terminals drop the unparseable call so the provider
+// error or truncation survives. Incomplete and cancelled are normal turn
+// boundaries, so a partial terminal or buffered value fails closed instead of
+// closing the tool block with an executable empty object. A completed terminal
+// fails closed on the same bytes, and a complete value on an incomplete
+// terminal is still emitted.
 
 import (
 	"bytes"
@@ -94,21 +96,30 @@ func TestResponsesNonCleanTerminalPartialArguments(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:   "incomplete terminal partial",
-			source: responsesTerminalArgsStream(t, "response.incomplete", "incomplete", []any{responsesFunctionCallItem(partial)}, incompleteExtra),
-			want:   `"finish_reason":"length"`,
-		},
-		{
-			name:     "incomplete buffered added partial",
-			source:   responsesBufferedTerminalArgsStream(t, partial, "response.incomplete", "incomplete", incompleteExtra),
-			want:     `"finish_reason":"length"`,
+			name:     "failed buffered added partial keeps the accepted empty block",
+			source:   responsesBufferedTerminalArgsStream(t, partial, "response.failed", "failed", failedExtra),
+			want:     `"code":"overloaded"`,
 			wantArgs: "{}",
 		},
 		{
-			name:     "cancelled buffered added partial",
-			source:   responsesBufferedTerminalArgsStream(t, partial, "response.cancelled", "cancelled", nil),
-			want:     `"finish_reason":"stop"`,
-			wantArgs: "{}",
+			name:    "incomplete terminal partial fails closed",
+			source:  responsesTerminalArgsStream(t, "response.incomplete", "incomplete", []any{responsesFunctionCallItem(partial)}, incompleteExtra),
+			wantErr: true,
+		},
+		{
+			name:    "incomplete buffered added partial fails closed",
+			source:  responsesBufferedTerminalArgsStream(t, partial, "response.incomplete", "incomplete", incompleteExtra),
+			wantErr: true,
+		},
+		{
+			name:    "cancelled terminal partial fails closed",
+			source:  responsesTerminalArgsStream(t, "response.cancelled", "cancelled", []any{responsesFunctionCallItem(partial)}, nil),
+			wantErr: true,
+		},
+		{
+			name:    "cancelled buffered added partial fails closed",
+			source:  responsesBufferedTerminalArgsStream(t, partial, "response.cancelled", "cancelled", nil),
+			wantErr: true,
 		},
 		{
 			name:     "incomplete terminal complete value",
@@ -128,6 +139,9 @@ func TestResponsesNonCleanTerminalPartialArguments(t *testing.T) {
 			if tc.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "arguments") {
 					t.Fatalf("error = %v, want the incomplete-argument rejection", err)
+				}
+				if bytes.Contains(buf.Bytes(), []byte(`"arguments":"{}"`)) {
+					t.Fatalf("a partial call closed with an executable empty object: %s", buf.String())
 				}
 				return
 			}

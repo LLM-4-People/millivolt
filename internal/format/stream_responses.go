@@ -961,10 +961,22 @@ const (
 	responsesTerminalTruncated
 )
 
-// clean reports whether the source completed the turn normally. Only a clean
-// terminal makes a partial tool-argument value a translator failure; every
-// other class is the turn's authoritative outcome and must survive.
+// clean reports whether the source completed the turn normally.
 func (c responsesTerminalClass) clean() bool { return c == responsesTerminalCompleted }
+
+// skipToolArguments reports whether an incomplete argument value may be
+// discarded instead of failing the translation. A failed, errored or truncated
+// terminal carries no usable completion, so the source outcome wins. An
+// incomplete or cancelled terminal is still a normal turn boundary: a partial
+// value there fails closed rather than closing the tool block with an
+// executable empty object.
+func (c responsesTerminalClass) skipToolArguments() bool {
+	switch c {
+	case responsesTerminalFailed, responsesTerminalError, responsesTerminalTruncated:
+		return true
+	}
+	return false
+}
 
 func responsesTerminalClassFor(eventType string) responsesTerminalClass {
 	switch eventType {
@@ -997,7 +1009,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	pending := d.terminalPending
 	d.terminalPending = nil
 	clear(d.terminalPendingByKey)
-	more, err := d.collectTerminalOutput(output, class.clean())
+	more, err := d.collectTerminalOutput(output, !class.skipToolArguments())
 	if err != nil {
 		return err
 	}
@@ -1005,14 +1017,15 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	for i := range pending {
 		pending[i].materialize()
 	}
-	// A clean terminal can arrive before the streamed value was complete: the
-	// buffered added payload is then the only argument bytes the source
-	// produced, so flush it before the block closes. The identities are sorted
-	// so the emitted delta order is deterministic. Every non-clean terminal
-	// instead discards the buffer below without parsing or emitting it: a
-	// partial value must neither reach the target nor replace the provider
-	// error, the length finish or the cancellation with a translator failure.
-	if class.clean() {
+	// A terminal that validates tool arguments can arrive before the streamed
+	// value was complete: the buffered added payload is then the only argument
+	// bytes the source produced, so flush it before the block closes. The
+	// identities are sorted so the emitted delta order is deterministic. A
+	// failed, errored or truncated terminal instead discards the buffer below
+	// without parsing or emitting it: a partial value must neither reach the
+	// target nor replace the provider error or truncation with a translator
+	// failure.
+	if !class.skipToolArguments() {
 		toolKeys := make([]string, 0, len(d.initialArgs))
 		for key := range d.initialArgs {
 			toolKeys = append(toolKeys, key)
@@ -1020,7 +1033,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 		sort.Strings(toolKeys)
 		for _, key := range toolKeys {
 			if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-				if err := d.flushToolArguments(key, idx, "", class.clean()); err != nil {
+				if err := d.flushToolArguments(key, idx, "", true); err != nil {
 					return err
 				}
 			}
@@ -1418,9 +1431,10 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				if strict {
 					return nil, err
 				}
-				// A non-clean terminal owns the outcome; drop the call whose
-				// arguments the source never completed rather than replacing
-				// the provider error or finish with a translator failure.
+				// A failed, errored or truncated terminal owns the outcome;
+				// drop the call whose arguments the source never completed
+				// rather than replacing the provider error or truncation with
+				// a translator failure.
 				continue
 			}
 			d.sawToolCall = true
