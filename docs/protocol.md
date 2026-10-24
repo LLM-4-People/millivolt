@@ -242,7 +242,9 @@ before the client status line commits, so the retry is delivered as one
 ordinary response with no post-commit keepalive gap or partial payload. A
 stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
-the in-band error for the client to retry. A provider error event streamed
+the in-band error for the client to retry. A trailing partial line that the
+rescue drops was never delivered, so it does not count as relayed content and
+does not veto the re-send; a delivering path feeds and writes it exactly once. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
 relayed: the error classes the OpenAI API documents as retryable (500
 `server_error`, the 503 overloaded/unavailable family, request timeouts, and

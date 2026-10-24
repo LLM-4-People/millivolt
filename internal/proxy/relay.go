@@ -2873,21 +2873,28 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					return rescueNone
 				}
 			}
-			// Flush any trailing partial line into the analyzer. A partial
-			// line can never be a terminal marker, so it is never withheld.
-			// Its bytes stay in `out` (unflushed) until the outcome below
-			// decides whether to write them - a rescue drops them, so the
-			// client never sees an unterminated line; the fresh attempt
-			// opens a clean new event stream.
+			// Save any trailing partial line without feeding it to the
+			// analyzer yet. The line is never written by a rescue, so its
+			// content, tool call and preview state must not veto the pre-content
+			// rescues below. A partial line can never be a terminal marker, so
+			// it is never withheld. releaseTail feeds and releases it only on
+			// the paths that actually deliver it.
+			var tail []byte
 			if lineBuf.Len() > 0 {
-				b := lineBuf.Bytes()
-				a.Feed(b, now)
-				if holding {
-					hold = append(hold, b...)
-				} else {
-					out.Write(b)
-				}
+				tail = append(tail, lineBuf.Bytes()...)
 				lineBuf.Reset()
+			}
+			releaseTail := func() {
+				if len(tail) == 0 {
+					return
+				}
+				a.Feed(tail, now)
+				if holding {
+					hold = append(hold, tail...)
+				} else {
+					out.Write(tail)
+				}
+				tail = nil
 			}
 			// An event released at the hold bound may also end at EOF without
 			// its blank-line boundary. The buffered prefix and every later
@@ -2921,6 +2928,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// the held bytes verbatim (byte preservation) and never
 				// substitute a synthetic outcome on top.
 				markStreamErr(ctx, rec, err)
+				releaseTail()
 				if holding {
 					if _, werr := w.Write(hold); werr != nil {
 						clientGone()
@@ -2965,6 +2973,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				return rescueReasoningTruncation
 			}
+			// No rescue owns this attempt, so the trailing partial line is
+			// delivered and may now update the record and the degenerate
+			// classification.
+			releaseTail()
 			if !finishHold() {
 				return rescueNone
 			}

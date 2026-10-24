@@ -138,7 +138,7 @@ func TestDegenerateErrorClosesPendingSSEEvent(t *testing.T) {
 		{
 			name:      "single attempt with a partial data line",
 			first:     contentEvent,
-			wantCalls: 1,
+			wantCalls: 2,
 		},
 		{
 			name:      "retry then a complete data line",
@@ -195,5 +195,55 @@ func TestDegenerateErrorClosesPendingSSEEvent(t *testing.T) {
 				t.Fatalf("record = %+v, want the truncated error", recs)
 			}
 		})
+	}
+}
+
+// TestPartialTailDoesNotVetoTruncationRescue pins E1: a partial trailing line
+// is dropped by a rescue, so it must not be fed to the analyzer before the
+// delivery decision. The undelivered content did not reach the client, so the
+// pre-content retry must still run and deliver the fresh attempt.
+func TestPartialTailDoesNotVetoTruncationRescue(t *testing.T) {
+	const contentEvent = `data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}`
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		attempt := calls.Add(1)
+		if attempt == 1 {
+			// A complete data line without its terminating blank line: the
+			// relay saves it as an undelivered tail.
+			w.Write([]byte(contentEvent))
+		} else {
+			w.Write([]byte(contentEvent + "\n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
+		}
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(newConfigWithQuality(1), buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if strings.Count(got, `"content":"hello"`) != 1 {
+		t.Fatalf("content delivered %d times, want once: %s", strings.Count(got, `"content":"hello"`), got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("delivered retry still reported truncation: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one terminal expected: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 {
+		t.Fatalf("record = %+v, want a clean recovered record with retries=1", rec)
 	}
 }
