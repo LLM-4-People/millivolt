@@ -293,6 +293,11 @@ func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 	a.usageSeen = true
 }
 
+// anthropicAnalyzerFinish maps the source reason onto the record vocabulary.
+// Reasons with an exact canonical equivalent are normalized; refusal,
+// pause_turn and unknown provider values keep their source spelling so the
+// record matches the non-stream owner. Only the Chat wire mapper approximates
+// a value outside its enum.
 func anthropicAnalyzerFinish(reason string) string {
 	switch reason {
 	case "end_turn", "stop_sequence":
@@ -301,8 +306,6 @@ func anthropicAnalyzerFinish(reason string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
-	case "refusal":
-		return "content_filter"
 	default:
 		return reason
 	}
