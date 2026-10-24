@@ -1250,6 +1250,21 @@ func (c *Config) mergeOverlay(src *Config, present map[string]any) {
 	}
 }
 
+// ValidURLPort accepts an absent port or a decimal TCP port 1-65535. The
+// allowed-base-url loader and the request routing boundary share it so a
+// loaded allowlist entry can always match a request base URL that the boundary
+// accepts.
+func ValidURLPort(port string) bool {
+	if port == "" {
+		return true
+	}
+	if len(port) > 5 {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
+}
+
 // Validate checks the merged config for type and range sanity, failing closed
 // at the load boundary. Ranges are deliberately permissive guardrails (catch
 // nonsense like a negative count, a negative duration, or a zero idle-per-host
@@ -1279,6 +1294,15 @@ func (c *Config) Validate() error {
 		u, err := url.Parse(entry)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("allowed_base_urls: %q must be an absolute http:// or https:// URL", entry)
+		}
+		// The runtime match is byte-sensitive and the request boundary rejects
+		// a non-lowercase scheme, so an entry that only parses after scheme
+		// folding could never match a normal client base URL.
+		if !strings.HasPrefix(entry, "http://") && !strings.HasPrefix(entry, "https://") {
+			return fmt.Errorf("allowed_base_urls: %q must start with lowercase http:// or https://: the runtime prefix match is byte-sensitive", entry)
+		}
+		if !ValidURLPort(u.Port()) {
+			return fmt.Errorf("allowed_base_urls: %q must use a port between 1 and 65535", entry)
 		}
 		// "http://:8080" parses with a port but no hostname. No request base
 		// URL can be hostless (the request boundary rejects it), so the entry

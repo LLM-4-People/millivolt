@@ -782,20 +782,6 @@ func validProxyQueryHeader(q string) bool {
 	}) < 0
 }
 
-// validBaseURLPort accepts an absent port or a decimal TCP port 1-65535 with
-// at most five digits. net/url validates the syntax but not the range or
-// length; a header-sized or out-of-range port is hostile input, not a target.
-func validBaseURLPort(port string) bool {
-	if port == "" {
-		return true
-	}
-	if len(port) > 5 {
-		return false
-	}
-	n, err := strconv.Atoi(port)
-	return err == nil && n >= 1 && n <= 65535
-}
-
 // clientEchoMax bounds a client-supplied value echoed inside a rejection
 // message. Safety guardrail: a header-sized value must never turn a 400 into a
 // multi-megabyte JSON body through quoting and HTML escaping. Normal routing
@@ -844,7 +830,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	// neither the retained provider label nor an upstream dial ever carries
 	// header-sized data. Normal domains, IPs, ports and operator aliases pass
 	// unchanged.
-	if len(parsed.Hostname()) > maxBaseURLHostBytes || !validBaseURLPort(parsed.Port()) {
+	if len(parsed.Hostname()) > maxBaseURLHostBytes || !config.ValidURLPort(parsed.Port()) {
 		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
 

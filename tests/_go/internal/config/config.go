@@ -1470,8 +1470,14 @@ func TestAllowedBaseURLsValidated(t *testing.T) {
 			`allowed_base_urls: "https://api.openai.com/v1#" must not carry a fragment`},
 		{"uppercase host", "https://API.OPENAI.COM/v1",
 			`allowed_base_urls: "https://API.OPENAI.COM/v1": host must be lowercase (the runtime prefix match is byte-sensitive); use "https://api.openai.com/v1"`},
+		{"uppercase scheme", "HTTP://api.openai.com",
+			`allowed_base_urls: "HTTP://api.openai.com" must start with lowercase http:// or https://`},
 		{"uppercase scheme and host", "HTTP://API.OPENAI.COM",
-			`allowed_base_urls: "HTTP://API.OPENAI.COM": host must be lowercase (the runtime prefix match is byte-sensitive); use "http://api.openai.com"`},
+			`allowed_base_urls: "HTTP://API.OPENAI.COM" must start with lowercase http:// or https://`},
+		{"port above range", "http://api.openai.com:70000",
+			`allowed_base_urls: "http://api.openai.com:70000" must use a port between 1 and 65535`},
+		{"port zero", "http://api.openai.com:0",
+			`allowed_base_urls: "http://api.openai.com:0" must use a port between 1 and 65535`},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1500,7 +1506,7 @@ func TestAllowedBaseURLsValidated(t *testing.T) {
 	// Well-formed entries load cleanly: both spellings from the proxy.yaml
 	// example (an https host and an http host:port), a path suffix, and an
 	// IPv6 host:port (its bracketed host is already canonical lowercase).
-	good := "allowed_base_urls:\n  - \"https://api.example.com\"\n  - \"http://10.0.0.5:8000\"\n  - \"https://gw.example.com/v1\"\n  - \"http://[::1]:8080\"\n"
+	good := "allowed_base_urls:\n  - \"https://api.example.com\"\n  - \"http://10.0.0.5:8000\"\n  - \"https://gw.example.com/v1\"\n  - \"http://[::1]:8080\"\n  - \"http://api.example.com:1\"\n  - \"http://api.example.com:65535\"\n"
 	p := filepath.Join(t.TempDir(), "c.yaml")
 	if err := os.WriteFile(p, []byte(good), 0o644); err != nil {
 		t.Fatal(err)
@@ -1509,8 +1515,8 @@ func TestAllowedBaseURLsValidated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadFile(good allowed_base_urls) = %v, want nil", err)
 	}
-	if len(c.AllowedBaseURLs) != 4 {
-		t.Errorf("allowed_base_urls = %v, want 4 entries", c.AllowedBaseURLs)
+	if len(c.AllowedBaseURLs) != 6 {
+		t.Errorf("allowed_base_urls = %v, want 6 entries", c.AllowedBaseURLs)
 	}
 }
 
