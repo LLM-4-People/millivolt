@@ -1052,17 +1052,34 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			if b.CacheControl != nil && warns != nil {
 				warns.Add(ir.WarningDropped, "reasoning.cache_control", "Anthropic thinking blocks have no cache breakpoint")
 			}
-			if b.Reasoning.Signature != "" || b.Reasoning.Provider == ir.Anthropic {
+			native := b.Reasoning.Signature != "" || b.Reasoning.Provider == ir.Anthropic
+			if native {
 				out = append(out, map[string]any{
 					"type": "thinking", "thinking": b.Reasoning.Text, "signature": b.Reasoning.Signature,
 				})
+				// Anthropic thinking has one text payload; a summary that is
+				// not the same visible text has no separate slot.
+				if len(b.Reasoning.Summary) > 0 && warns != nil {
+					warns.Add(ir.WarningDropped, "reasoning.summary", "Anthropic thinking has no separate reasoning summary")
+				}
 			} else if b.Reasoning.Text != "" {
 				// A reasoning block minted by another family has no Anthropic
 				// signature; emitting it as text preserves the visible content.
 				if warns != nil {
 					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning was emitted as visible text")
+					if len(b.Reasoning.Summary) > 0 {
+						warns.Add(ir.WarningDropped, "reasoning.summary", "Anthropic text has no separate reasoning summary")
+					}
 				}
 				out = append(out, map[string]any{"type": "text", "text": b.Reasoning.Text})
+			} else if len(b.Reasoning.Summary) > 0 {
+				// No raw text is available; the summaries are the only visible
+				// reasoning, so fold them into text with the same approximation
+				// the Chat encoder applies instead of dropping the block.
+				if warns != nil {
+					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning summary was emitted as visible text")
+				}
+				out = append(out, map[string]any{"type": "text", "text": strings.Join(b.Reasoning.Summary, "")})
 			} else if b.Reasoning.Encrypted != "" {
 				if warns != nil {
 					warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
