@@ -1012,3 +1012,21 @@ func TestSchemaHelpPinsValidationRules(t *testing.T) {
 		t.Error("docs/operations.md omits the model_rules cap")
 	}
 }
+
+// TestSSEKeepaliveHelpOmitsTTFB pins the pacer's actual surface: it starts on
+// OnWait (queue), covers an operator hold and mid-stream gaps, and is not
+// started before upstream headers on an admitted-immediately stream. Promising
+// TTFB keepalives would describe a comment the pacer deliberately does not
+// commit before the body mode is known.
+func TestSSEKeepaliveHelpOmitsTTFB(t *testing.T) {
+	field := FieldByKey("sse_keepalive_interval")
+	if field == nil {
+		t.Fatal("sse_keepalive_interval is missing from Schema()")
+	}
+	if !strings.Contains(field.Help, "queue wait, operator hold, mid-stream gaps") {
+		t.Fatalf("help does not name the covered waits: %s", field.Help)
+	}
+	if strings.Contains(field.Help, "TTFB") {
+		t.Fatalf("help still promises a TTFB keepalive: %s", field.Help)
+	}
+}

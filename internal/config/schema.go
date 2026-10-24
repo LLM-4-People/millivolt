@@ -183,7 +183,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Ceiling for whole-document upstream reads. Must cover whole_document_read_timeout and models_discovery_timeout.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "sse_keepalive_interval", Category: "upstream", Label: "SSE keepalive interval",
-			Help: "How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator hold, TTFB, mid-stream gaps). Range " + heartbeatRange() + ". Applies to streams started after reload.",
+			Help: "How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator hold, mid-stream gaps). Range " + heartbeatRange() + ". Applies to streams started after reload.",
 			Kind: KindDuration, HotReload: true, Min: num(float64(HeartbeatIntervalMin)), Max: num(float64(HeartbeatIntervalMax))},
 		{Key: "sse_write_progress_timeout", Category: "upstream", Label: "SSE write progress timeout",
 			Help: "Per-event and keepalive write bound for a client-facing SSE stream. A stalled reader fails that write instead of pinning shutdown. Must not exceed response_write_timeout. Applies to streams started after reload.",

@@ -243,7 +243,7 @@ whole_document_read_timeout: 2m
 whole_document_read_max: 10m
 
 # How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator
-# hold, TTFB, mid-stream gaps). Range 1ns..10m. Applies to streams started after reload.
+# hold, mid-stream gaps). Range 1ns..10m. Applies to streams started after reload.
 # Hot-reload: yes.
 #   type: duration · range 1ns..10m · default 15s
 sse_keepalive_interval: 15s
