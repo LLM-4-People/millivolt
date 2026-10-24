@@ -140,8 +140,12 @@ target cannot consume them:
 - A streamed Responses `function_call` that omits `call_id` uses its item id as
   the target tool id. When both identities are absent, the block starts with a
   stable `call_proxy_<output index>` id instead of an empty id, so Chat does not
-  write an empty tool call and Anthropic does not reject the block. The
-  non-streaming decoder still rejects a call with both identities absent.
+  write an empty tool call and Anthropic does not reject the block. An id-less
+  terminal item first matches the announcement at its own position, then the
+  first still-open id-less announced call in output order, so a reordered
+  terminal array completes the announced block rather than synthesizing a
+  second call. The non-streaming decoder still rejects a call with both
+  identities absent.
 - A legacy Chat `message.function_call` is treated as answer-shaped for retry
   safety because the deprecated shape can represent either a tool invocation or
   a final answer, and it is not counted as a tool call. A Chat source that uses

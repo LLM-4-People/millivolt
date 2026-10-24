@@ -1451,6 +1451,7 @@ func (d *ResponsesStreamDecoder) appendReasoningValue(item responsesWireItem, it
 // announced block already streamed bytes, because its target index is fixed.
 func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, policy responsesToolArgumentPolicy) ([]terminalEmission, error) {
 	var pending []terminalEmission
+	claimedTools := map[string]bool{}
 	for i, item := range output {
 		typ := item.Type
 		if typ == "" && item.Role != "" {
@@ -1461,13 +1462,36 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			key := functionCallKey(item.CallID, item.ID, i)
 			idx, ok := d.itemBlockByKey[key]
 			if !ok && item.CallID == "" && item.ID == "" {
-				// Positional fallback only when the terminal item carries no
-				// identity to match against.
-				if fallback, ok := d.keyByOutput[i]; ok {
-					key, idx, ok = fallback, d.itemBlockByKey[fallback], true
+				// An id-less terminal item first uses the announcement at the
+				// same wire position. If the terminal array reordered the
+				// items, match the first still-open announced id-less call in
+				// output order instead of synthesizing a second call.
+				if fallback, exists := d.keyByOutput[i]; exists {
+					if fallbackIdx, open := d.itemBlockByKey[fallback]; open && !claimedTools[fallback] {
+						key, idx, ok = fallback, fallbackIdx, true
+					}
+				}
+				if !ok {
+					positions := make([]int, 0, len(d.keyByOutput))
+					for outputIndex := range d.keyByOutput {
+						positions = append(positions, outputIndex)
+					}
+					sort.Ints(positions)
+					for _, outputIndex := range positions {
+						fallback := d.keyByOutput[outputIndex]
+						if claimedTools[fallback] || !d.openToolKeys[fallback] ||
+							fallback != functionCallKey("", "", outputIndex) {
+							continue
+						}
+						if fallbackIdx, open := d.itemBlockByKey[fallback]; open && d.open[fallbackIdx] {
+							key, idx, ok = fallback, fallbackIdx, true
+							break
+						}
+					}
 				}
 			}
 			if ok && d.open[idx] {
+				claimedTools[key] = true
 				if err := d.flushToolArguments(key, idx, item.Arguments, policy); err != nil {
 					return nil, err
 				}
