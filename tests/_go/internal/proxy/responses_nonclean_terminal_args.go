@@ -1,10 +1,10 @@
 package proxy
 
-// Round 7 verifier NEW-1 regression: the record must keep the provider error or
-// the incomplete finish when a non-clean Responses terminal carries partial tool
-// arguments. Before this fix the argument parse failed the translation, the
-// client received translation_error, and an incomplete turn was recorded as
-// stream_read_error.
+// Round 7 verifier NEW-1 and round 8 H1 regression: a failed Responses terminal
+// keeps its provider error when it carries partial tool arguments, because the
+// unparseable call is dropped. An incomplete terminal is a normal turn boundary
+// and now fails closed: the client receives translation_error and the record
+// keeps the stream_read_error classification rather than an invented finish.
 
 import (
 	"net/http"
@@ -47,6 +47,9 @@ func TestResponsesNonCleanTerminalPartialArgumentsRecord(t *testing.T) {
 		wantErrMsg  string
 		wantFinish  string
 		wantError   bool
+		// wantTranslationError marks the terminal classes that validate tool
+		// arguments strictly and therefore fail the stream.
+		wantTranslationError bool
 	}{
 		{
 			name:        "failed terminal partial",
@@ -57,14 +60,20 @@ func TestResponsesNonCleanTerminalPartialArgumentsRecord(t *testing.T) {
 			wantError:   true,
 		},
 		{
-			name:       "incomplete terminal partial",
-			source:     responsesIncompletePartialTerminal,
-			wantFinish: "length",
+			name:                 "incomplete terminal partial",
+			source:               responsesIncompletePartialTerminal,
+			wantErrType:          "stream_read_error",
+			wantErrMsg:           "tool call arguments must be valid JSON",
+			wantError:            true,
+			wantTranslationError: true,
 		},
 		{
-			name:       "incomplete buffered added partial",
-			source:     responsesIncompleteBufferedPartial,
-			wantFinish: "length",
+			name:                 "incomplete buffered added partial",
+			source:               responsesIncompleteBufferedPartial,
+			wantErrType:          "stream_read_error",
+			wantErrMsg:           "tool call arguments must be valid JSON",
+			wantError:            true,
+			wantTranslationError: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -83,7 +92,14 @@ func TestResponsesNonCleanTerminalPartialArgumentsRecord(t *testing.T) {
 				t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
 			}
 			got := w.Body.String()
-			if strings.Contains(got, "translation_error") {
+			if tc.wantTranslationError {
+				if !strings.Contains(got, `"code":"translation_error"`) {
+					t.Fatalf("strict terminal did not close with translation_error: %s", got)
+				}
+				if strings.Contains(got, `"arguments":"{}"`) {
+					t.Fatalf("partial call closed with an executable empty object: %s", got)
+				}
+			} else if strings.Contains(got, "translation_error") {
 				t.Fatalf("partial arguments became a translator failure: %s", got)
 			}
 			if got := up.calls.Load(); got != 1 {
@@ -94,10 +110,11 @@ func TestResponsesNonCleanTerminalPartialArgumentsRecord(t *testing.T) {
 				t.Fatalf("records = %d, want 1", len(recs))
 			}
 			rec := recs[0]
-			if rec.ErrorType == "stream_read_error" {
+			if rec.ErrorType == "stream_read_error" && !tc.wantTranslationError {
 				t.Fatalf("record kept the translator failure class: %+v", rec)
 			}
-			if rec.ErrorType != tc.wantErrType || rec.ErrorCode != tc.wantErrCode || rec.ErrorMsg != tc.wantErrMsg {
+			if rec.ErrorType != tc.wantErrType || rec.ErrorCode != tc.wantErrCode ||
+				(tc.wantErrMsg != "" && !strings.Contains(rec.ErrorMsg, tc.wantErrMsg)) {
 				t.Fatalf("record = type %q code %q msg %q, want %q/%q/%q",
 					rec.ErrorType, rec.ErrorCode, rec.ErrorMsg, tc.wantErrType, tc.wantErrCode, tc.wantErrMsg)
 			}
