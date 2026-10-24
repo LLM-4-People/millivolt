@@ -518,8 +518,12 @@ func TestCodecRejectsStatefulReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EncodeChatRequest(req); err == nil {
-		t.Fatal("chat target accepted store=true")
+	chatOut, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatalf("chat target rejected store=true: %v", err)
+	}
+	if got := decodeJSONMap(t, chatOut)["store"]; got != true {
+		t.Fatalf("chat store = %v, want true", got)
 	}
 	if _, err := EncodeAnthropicRequest(req, 4096, ""); err == nil {
 		t.Fatal("anthropic target accepted store=true")
