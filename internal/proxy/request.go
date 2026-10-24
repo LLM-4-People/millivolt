@@ -1897,6 +1897,17 @@ type requestParameters struct {
 	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
+	// Text and Include are the native Responses spellings for the response
+	// format/verbosity pair and the logprob opt-in. They are raw so a valid
+	// but unusual shape cannot trigger a typed-decode failure that erases the
+	// rest of the record.
+	Text *struct {
+		Format *struct {
+			Type string `json:"type"`
+		} `json:"format"`
+		Verbosity string `json:"verbosity"`
+	} `json:"text"`
+	Include         json.RawMessage          `json:"include"`
 	Seed            json.RawMessage          `json:"seed"`
 	ParallelTools   *bool                    `json:"parallel_tool_calls"`
 	LogitBias       map[string]discardedJSON `json:"logit_bias"`
@@ -1984,7 +1995,9 @@ func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
 	switch choice.Type {
 	case "any":
 		t.Value = "required"
-	case "tool":
+	case "tool", "function":
+		// Chat/Anthropic spell the forced tool as type "tool" with name, and
+		// native Responses spells it as type "function" with name.
 		if choice.Name != "" {
 			t.Value = "tool:" + choice.Name
 		}
@@ -2017,6 +2030,40 @@ func requestStopCount(raw json.RawMessage) int {
 		}
 	}
 	return 0
+}
+
+// requestIncludeLogprobs reports whether a raw Responses include array names
+// the output-text logprob option. The scan is lexical: it never materializes
+// the array, and a malformed or non-array value records nothing.
+func requestIncludeLogprobs(raw json.RawMessage) bool {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '[' {
+		return false
+	}
+	const field = `"message.output_text.logprobs"`
+	i = metrics.SkipSpace(raw, i+1)
+	for i < len(raw) && raw[i] != ']' {
+		if raw[i] == '"' {
+			end := skipJSONString(raw, i)
+			if end < 0 {
+				return false
+			}
+			if string(raw[i:end]) == field {
+				return true
+			}
+			i = metrics.SkipSpace(raw, end)
+		} else {
+			next := skipJSONValue(raw, i)
+			if next < 0 {
+				return false
+			}
+			i = metrics.SkipSpace(raw, next)
+		}
+		if i < len(raw) && raw[i] == ',' {
+			i = metrics.SkipSpace(raw, i+1)
+		}
+	}
+	return false
 }
 
 // requestMetadataKeysMax bounds the distinct top-level metadata keys counted
@@ -3295,7 +3342,7 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	rec.ReqToolsCount = len(req.Tools)
 	rec.ReqPresencePen = req.PresencePen
 	rec.ReqFrequencyPen = req.FrequencyPen
-	rec.ReqLogprobs = req.Logprobs
+	rec.ReqLogprobs = req.Logprobs || requestIncludeLogprobs(req.Include)
 	if req.StreamOptions != nil {
 		rec.ReqStreamOpts = true
 	}
@@ -3312,6 +3359,8 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 		rec.ReqResponseFormat = req.ResponseFormat.Type
 	} else if req.OutputConfig != nil && req.OutputConfig.Format != nil {
 		rec.ReqResponseFormat = req.OutputConfig.Format.Type
+	} else if req.Text != nil && req.Text.Format != nil {
+		rec.ReqResponseFormat = req.Text.Format.Type
 	}
 	if req.ParallelTools != nil {
 		rec.ReqParallelTools = req.ParallelTools
@@ -3348,6 +3397,9 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 		rec.ReqReasoningEffort = effort
 	}
 	rec.ReqVerbosity = configToken(req.Verbosity)
+	if rec.ReqVerbosity == "" && req.Text != nil {
+		rec.ReqVerbosity = configToken(req.Text.Verbosity)
+	}
 	// Prompt composition: per-role character sizes, multimodal counts, and the
 	// role of the last turn (what the model is actually responding to). Sizes
 	// count text characters only - never the text itself, and never inline
