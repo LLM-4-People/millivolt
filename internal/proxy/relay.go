@@ -539,8 +539,14 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 	usage, ok, usageErr := providerformat.SourceUsage(wire, spooled, s.usageKeysFor(rec.Provider))
 	resp, err := providerformat.DecodeResponse(wire, spooled)
 	if err != nil || resp == nil {
+		// The canonical envelope is unrepresentable, but its parsed usage is
+		// still authoritative. Apply the folded source counts here; the later
+		// Chat-shaped fallback would otherwise read raw Anthropic counters as
+		// Chat input/output and charge the wrong total.
 		if usageErr != nil {
 			invalidateUsage(rec, usageErr)
+		} else if ok && !rec.UsageInvalid {
+			applyFoldedUsage(rec, usage)
 		}
 		return
 	}
@@ -552,14 +558,20 @@ func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spo
 		return
 	}
 	if ok && !rec.UsageInvalid {
-		rec.Usage = metrics.Usage{
-			InputTokens:     usage.InputTokens,
-			OutputTokens:    usage.OutputTokens,
-			TotalTokens:     usage.TotalTokens,
-			CacheReadTokens: usage.CacheReadTokens,
-			CacheWrite:      usage.CacheWriteTokens,
-			ReasoningTokens: usage.ReasoningTokens,
-		}
+		applyFoldedUsage(rec, usage)
+	}
+}
+
+// applyFoldedUsage copies the canonical source usage onto the record. One
+// owner so the structural-decode success and failure paths cannot diverge.
+func applyFoldedUsage(rec *metrics.Record, usage ir.Usage) {
+	rec.Usage = metrics.Usage{
+		InputTokens:     usage.InputTokens,
+		OutputTokens:    usage.OutputTokens,
+		TotalTokens:     usage.TotalTokens,
+		CacheReadTokens: usage.CacheReadTokens,
+		CacheWrite:      usage.CacheWriteTokens,
+		ReasoningTokens: usage.ReasoningTokens,
 	}
 }
 
