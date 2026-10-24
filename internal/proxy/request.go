@@ -1814,6 +1814,11 @@ const requestContentPartsMax = providerformat.WireContentPartsMax
 // the codec reject the same document class.
 const requestAnnotationsMax = providerformat.WireNestedCollectionMax
 
+// requestAnnotationArrayMax bounds one Responses annotation array. It matches
+// the codec's per-array check in checkResponsesContent, so a single oversized
+// array fails in the preflight instead of after translation begins.
+const requestAnnotationArrayMax = metrics.ContentPartMax
+
 // requestToolCallsMax bounds the aggregate tool_calls array members over every
 // message. Each member expands into a typed tool-call value and, on the
 // translated Anthropic or Cursor wire, a content block/history part. A 300 KiB
@@ -1936,10 +1941,13 @@ func boundRequestMetadata(body []byte) error {
 				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", collection, requestMetadataMaxElements))
 			}
 			if n > 0 {
-				parts, annotations, nestedNext, nestedOK := countResponsesInputNested(
+				parts, annotations, nestedNext, annotationArrayOver, nestedOK := countResponsesInputNested(
 					body, i, requestContentPartsMax-contentParts, requestAnnotationsMax-annotationParts)
 				if !nestedOK {
 					return nil
+				}
+				if annotationArrayOver {
+					return requestMetadataOverflow(body, fmt.Errorf("request annotation array exceeds %d", requestAnnotationArrayMax))
 				}
 				if parts > requestContentPartsMax-contentParts {
 					return requestMetadataOverflow(body, fmt.Errorf("request content parts exceed %d", requestContentPartsMax))
@@ -2261,92 +2269,99 @@ func countRequestMessageContentParts(data []byte, start, budget int) (int, int, 
 // aggregate allowance; a count above it means the bound is exceeded. Duplicate
 // members are each charged because every occurrence reaches the decoder.
 // Non-object items and non-array values contribute zero, matching the typed
-// decoder's shape tolerance. ok is false on malformed input so the document
-// keeps its passthrough behavior.
-func countResponsesInputNested(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, ok bool) {
+// decoder's shape tolerance. annotationArrayOver means one annotation array
+// exceeded requestAnnotationArrayMax. ok is false on malformed input so the
+// document keeps its passthrough behavior.
+func countResponsesInputNested(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, annotationArrayOver bool, ok bool) {
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	if data[i] != '[' {
 		next := skipJSONValue(data, i)
-		return 0, 0, next, next >= 0
+		return 0, 0, next, false, next >= 0
 	}
 	i = metrics.SkipSpace(data, i+1)
 	for i < len(data) && data[i] != ']' {
 		if data[i] == '{' {
-			itemParts, itemAnnotations, itemNext, itemOK := countResponsesInputItemNested(data, i, partBudget-parts, annotationBudget-annotations)
+			itemParts, itemAnnotations, itemNext, itemArrayOver, itemOK := countResponsesInputItemNested(data, i, partBudget-parts, annotationBudget-annotations)
 			if !itemOK {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			parts += itemParts
 			annotations += itemAnnotations
+			if itemArrayOver {
+				return parts, annotations, 0, true, true
+			}
 			if parts > partBudget || annotations > annotationBudget {
-				return parts, annotations, 0, true
+				return parts, annotations, 0, false, true
 			}
 			i = metrics.SkipSpace(data, itemNext)
 		} else {
 			itemNext := skipJSONValue(data, i)
 			if itemNext < 0 {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			i = metrics.SkipSpace(data, itemNext)
 		}
 		if i < len(data) && data[i] == ',' {
 			i = metrics.SkipSpace(data, i+1)
 			if i >= len(data) || data[i] == ']' {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			continue
 		}
 		if i < len(data) && data[i] == ']' {
 			break
 		}
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	if i >= len(data) || data[i] != ']' {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
-	return parts, annotations, i + 1, true
+	return parts, annotations, i + 1, false, true
 }
 
 // countResponsesInputItemNested counts one item object's content and output
 // arrays. A string output or content value contributes no parts.
-func countResponsesInputItemNested(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, ok bool) {
+func countResponsesInputItemNested(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, annotationArrayOver bool, ok bool) {
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) || data[i] != '{' {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	i = metrics.SkipSpace(data, i+1)
 	for i < len(data) && data[i] != '}' {
 		end := skipJSONString(data, i)
 		if end < 0 {
-			return 0, 0, 0, false
+			return 0, 0, 0, false, false
 		}
 		key := data[i:end]
 		i = metrics.SkipSpace(data, end)
 		if i >= len(data) || data[i] != ':' {
-			return 0, 0, 0, false
+			return 0, 0, 0, false, false
 		}
 		i = metrics.SkipSpace(data, i+1)
 		if i >= len(data) {
-			return 0, 0, 0, false
+			return 0, 0, 0, false, false
 		}
 		if requestKeyEqual(key, "content") || requestKeyEqual(key, "output") {
-			partCount, annotationCount, partNext, partOK := countResponsesPartArray(data, i, partBudget-parts, annotationBudget-annotations)
+			partCount, annotationCount, partNext, partArrayOver, partOK := countResponsesPartArray(data, i, partBudget-parts, annotationBudget-annotations)
 			if !partOK {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			parts += partCount
 			annotations += annotationCount
+			if partArrayOver {
+				return parts, annotations, 0, true, true
+			}
 			if parts > partBudget || annotations > annotationBudget {
-				return parts, annotations, 0, true
+				return parts, annotations, 0, false, true
 			}
 			i = metrics.SkipSpace(data, partNext)
 		} else {
 			valueNext := skipJSONValue(data, i)
 			if valueNext < 0 {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			i = metrics.SkipSpace(data, valueNext)
 		}
@@ -2357,104 +2372,111 @@ func countResponsesInputItemNested(data []byte, start, partBudget, annotationBud
 		if i < len(data) && data[i] == '}' {
 			break
 		}
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	if i >= len(data) || data[i] != '}' {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
-	return parts, annotations, i + 1, true
+	return parts, annotations, i + 1, false, true
 }
 
 // countResponsesPartArray counts one content-part array's members and the
 // annotation members inside each part object. A string value contributes no
 // parts, matching function_call_output's string-or-array contract.
-func countResponsesPartArray(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, ok bool) {
+func countResponsesPartArray(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, annotationArrayOver bool, ok bool) {
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	if data[i] != '[' {
 		next := skipJSONValue(data, i)
-		return 0, 0, next, next >= 0
+		return 0, 0, next, false, next >= 0
 	}
 	i = metrics.SkipSpace(data, i+1)
 	for i < len(data) && data[i] != ']' {
 		parts++
 		if parts > partBudget {
-			return parts, annotations, 0, true
+			return parts, annotations, 0, false, true
 		}
 		if data[i] == '{' {
-			annotationCount, partNext, partOK := countResponsesPartAnnotations(data, i, annotationBudget-annotations)
+			annotationCount, partNext, partArrayOver, partOK := countResponsesPartAnnotations(data, i, annotationBudget-annotations)
 			if !partOK {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			annotations += annotationCount
+			if partArrayOver {
+				return parts, annotations, 0, true, true
+			}
 			if annotations > annotationBudget {
-				return parts, annotations, 0, true
+				return parts, annotations, 0, false, true
 			}
 			i = metrics.SkipSpace(data, partNext)
 		} else {
 			partNext := skipJSONValue(data, i)
 			if partNext < 0 {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			i = metrics.SkipSpace(data, partNext)
 		}
 		if i < len(data) && data[i] == ',' {
 			i = metrics.SkipSpace(data, i+1)
 			if i >= len(data) || data[i] == ']' {
-				return 0, 0, 0, false
+				return 0, 0, 0, false, false
 			}
 			continue
 		}
 		if i < len(data) && data[i] == ']' {
 			break
 		}
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
 	if i >= len(data) || data[i] != ']' {
-		return 0, 0, 0, false
+		return 0, 0, 0, false, false
 	}
-	return parts, annotations, i + 1, true
+	return parts, annotations, i + 1, false, true
 }
 
 // countResponsesPartAnnotations counts one part object's annotations array.
 // Duplicate annotations members are each charged for the same reason as
-// duplicate content members.
-func countResponsesPartAnnotations(data []byte, start, budget int) (total, next int, ok bool) {
+// duplicate content members. One array above requestAnnotationArrayMax sets
+// annotationArrayOver before the aggregate check.
+func countResponsesPartAnnotations(data []byte, start, budget int) (total, next int, annotationArrayOver bool, ok bool) {
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) || data[i] != '{' {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	i = metrics.SkipSpace(data, i+1)
 	for i < len(data) && data[i] != '}' {
 		end := skipJSONString(data, i)
 		if end < 0 {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		key := data[i:end]
 		i = metrics.SkipSpace(data, end)
 		if i >= len(data) || data[i] != ':' {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		i = metrics.SkipSpace(data, i+1)
 		if i >= len(data) {
-			return 0, 0, false
+			return 0, 0, false, false
 		}
 		if requestKeyEqual(key, "annotations") {
-			n, valueNext, countOK := metrics.CountJSONArrayBytes(data, i, budget-total)
+			n, valueNext, countOK := metrics.CountJSONArrayBytes(data, i, requestAnnotationArrayMax)
 			if !countOK {
-				return 0, 0, false
+				return 0, 0, false, false
+			}
+			if n > requestAnnotationArrayMax {
+				return total + n, 0, true, true
 			}
 			total += n
 			if total > budget {
-				return total, 0, true
+				return total, 0, false, true
 			}
 			i = metrics.SkipSpace(data, valueNext)
 		} else {
 			valueNext := skipJSONValue(data, i)
 			if valueNext < 0 {
-				return 0, 0, false
+				return 0, 0, false, false
 			}
 			i = metrics.SkipSpace(data, valueNext)
 		}
@@ -2465,12 +2487,12 @@ func countResponsesPartAnnotations(data []byte, start, budget int) (total, next 
 		if i < len(data) && data[i] == '}' {
 			break
 		}
-		return 0, 0, false
+		return 0, 0, false, false
 	}
 	if i >= len(data) || data[i] != '}' {
-		return 0, 0, false
+		return 0, 0, false, false
 	}
-	return total, i + 1, true
+	return total, i + 1, false, true
 }
 
 // countRequestMessagesToolCalls counts the aggregate tool_calls array members
