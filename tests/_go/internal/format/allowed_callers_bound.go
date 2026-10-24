@@ -54,7 +54,7 @@ func TestToolAllowedCallersBound(t *testing.T) {
 			if err != nil {
 				t.Fatalf("10,000-caller array was rejected: %v", err)
 			}
-			if !hasWarningField(req, "tool.allowed_callers") {
+			if !warningField(req.Warnings, "tool.allowed_callers") {
 				t.Fatalf("10,000-caller array recorded no loss warning: %+v", req.Warnings)
 			}
 
@@ -66,13 +66,4 @@ func TestToolAllowedCallersBound(t *testing.T) {
 			}
 		})
 	}
-}
-
-func hasWarningField(req *ir.Request, field string) bool {
-	for _, warning := range req.Warnings {
-		if warning.Field == field {
-			return true
-		}
-	}
-	return false
 }
