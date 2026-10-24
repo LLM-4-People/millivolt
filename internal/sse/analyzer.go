@@ -49,8 +49,9 @@ type Analyzer struct {
 	// Reasoning/answer separation: tracks when reasoning ("thinking") tokens
 	// vs answer tokens arrive. Reasoning tokens are from reasoning_content
 	// (DeepSeek R1, Qwen QwQ, etc.) or thinking blocks (Claude); answer tokens
-	// are from chat delta.content, Responses content deltas, and the legacy
-	// /v1/completions choices[].text field.
+	// are from chat delta.content, a non-empty Chat audio transcript,
+	// Responses content/transcript deltas, and the legacy /v1/completions
+	// choices[].text field.
 	firstReasoningAt time.Time
 	firstAnswerAt    time.Time
 
@@ -120,9 +121,10 @@ type Analyzer struct {
 
 	// responsesOutputSeen marks a Responses output item that is neither
 	// answer text, reasoning, nor a model tool call (for example a web search,
-	// file search, image generation or provider-specific item). It is still
-	// official output, so a completed terminal carrying it must never be
-	// replaced by the empty-completion failure.
+	// file search, image generation or provider-specific item), or a
+	// non-empty audio data delta. It is still official output, so a completed
+	// terminal carrying it must never be replaced by the empty-completion
+	// failure.
 	responsesOutputSeen bool
 
 	// toolChunks counts content-bearing chunks that carry tool-call deltas.
@@ -486,7 +488,8 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	if eventType == "" {
 		eventType = forcedType
 	}
-	hasContent := keys.contentStart() || keys.textStart() || responsesContentEvent(eventType, &keys)
+	hasContent := keys.contentStart() || keys.textStart() || keys.audioTranscriptStart() ||
+		responsesContentEvent(eventType, &keys)
 	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys) ||
 		responsesReasoningSummaryPart(eventType, payload)
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
@@ -497,6 +500,12 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// answer content (the latter used to set HadAnswerContent and TTFT for the
 	// wrong channel).
 	hasToolDelta := eventType == "response.function_call_arguments.delta" && keys.deltaNonEmpty
+	// A Responses audio data delta carries output bytes, never transcript
+	// text: it is official output for the degenerate classifier but not
+	// answer content for HadAnswerContent/TTFT/preview.
+	if eventType == "response.audio.delta" && keys.deltaNonEmpty {
+		a.responsesOutputSeen = true
+	}
 	if eventType == "response.output_item.added" {
 		var ev struct {
 			Item struct {
@@ -534,6 +543,9 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 			a.preview = extractPreview(keys.content)
 			if a.preview == nil {
 				a.preview = extractPreview(keys.text)
+			}
+			if a.preview == nil {
+				a.preview = extractPreview(keys.transcript)
 			}
 			if a.preview == nil && responsesContentEvent(eventType, &keys) {
 				// Responses streams carry answer text in a top-level "delta"
@@ -638,7 +650,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// Refusal and deprecated function_call deltas are answer-shaped bytes:
 	// a rescue appending a fresh attempt after them would duplicate visible
 	// output-shaped text, so they disqualify the thinking rescue.
-	if keys.refusalNonEmpty || keys.functionCallNonEmpty {
+	if keys.refusalNonEmpty || keys.functionCallNonEmpty || keys.audioDataNonEmpty {
 		a.answerishSeen = true
 	}
 
@@ -970,7 +982,12 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 					a.recordTerminalToolUnit(now)
 				}
 			case typ == "message":
-				text, refusal := terminalMessageText(item.Content)
+				text, refusal, audioData := terminalMessageText(item.Content)
+				if audioData {
+					// Audio bytes in a terminal message are official output
+					// even when no transcript accompanies them.
+					a.responsesOutputSeen = true
+				}
 				if text != "" {
 					a.answerishSeen = true
 					// The terminal document repeats the whole answer. Count
@@ -1093,9 +1110,9 @@ func (a *Analyzer) recordTerminalToolUnit(now time.Time) {
 }
 
 // terminalTextUnits counts the non-empty answer text units in a message item's
-// terminal content: one per output_text/input_text/text part, or one for a
-// plain string. Refusal parts are answer-shaped but not content and never
-// count.
+// terminal content: one per output_text/input_text/text part, one per
+// output_audio transcript, or one for a plain string. Refusal parts are
+// answer-shaped but not content and never count.
 func terminalTextUnits(raw json.RawMessage) int {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return 0
@@ -1111,8 +1128,9 @@ func terminalTextUnits(raw json.RawMessage) int {
 		return 0
 	}
 	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		Transcript string `json:"transcript"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
 		return 0
@@ -1124,33 +1142,40 @@ func terminalTextUnits(raw json.RawMessage) int {
 			if part.Text != "" {
 				units++
 			}
+		case "output_audio":
+			if part.Transcript != "" {
+				units++
+			}
 		}
 	}
 	return units
 }
 
-// terminalMessageText returns the first non-empty answer text and refusal text
-// in a message item's terminal content. The value may be a plain string or the
-// documented part array. The two kinds stay separate: only text is answer
-// content, while a refusal is answer-shaped bytes.
-func terminalMessageText(raw json.RawMessage) (text, refusal string) {
+// terminalMessageText returns the first non-empty answer text, refusal text
+// and audio data presence in a message item's terminal content. The value may
+// be a plain string or the documented part array. Text, refusal and audio data
+// stay separate: text (including an output_audio transcript) is answer
+// content, while a refusal and audio data are answer-shaped bytes.
+func terminalMessageText(raw json.RawMessage) (text, refusal string, audioData bool) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", ""
+		return "", "", false
 	}
 	var plain string
 	if json.Unmarshal(raw, &plain) == nil {
-		return plain, ""
+		return plain, "", false
 	}
 	if !metrics.ContentPartsWithinLimit(raw) {
-		return "", ""
+		return "", "", false
 	}
 	var parts []struct {
-		Type    string `json:"type"`
-		Text    string `json:"text"`
-		Refusal string `json:"refusal"`
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		Refusal    string `json:"refusal"`
+		Transcript string `json:"transcript"`
+		Data       string `json:"data"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
-		return "", ""
+		return "", "", false
 	}
 	for _, part := range parts {
 		switch part.Type {
@@ -1158,13 +1183,20 @@ func terminalMessageText(raw json.RawMessage) (text, refusal string) {
 			if part.Text != "" && text == "" {
 				text = part.Text
 			}
+		case "output_audio":
+			if part.Transcript != "" && text == "" {
+				text = part.Transcript
+			}
+			if part.Data != "" {
+				audioData = true
+			}
 		case "refusal":
 			if part.Refusal != "" && refusal == "" {
 				refusal = part.Refusal
 			}
 		}
 	}
-	return text, refusal
+	return text, refusal, audioData
 }
 
 // terminalReasoningUnits counts the non-empty summary and reasoning_text parts
@@ -1725,7 +1757,8 @@ func responsesReasoningSummaryPart(eventType string, payload []byte) bool {
 // as a void (its terminal events carry no finish_reason at all).
 func responsesContentEvent(eventType string, keys *frameKeys) bool {
 	switch eventType {
-	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta":
+	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta",
+		"response.audio.transcript.delta":
 		return keys.deltaNonEmpty
 	}
 	return false

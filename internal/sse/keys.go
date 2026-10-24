@@ -29,7 +29,14 @@ type frameKeys struct {
 	// reasoning part, a Responses content part) never become answer tokens.
 	text         []byte
 	choicesDepth int
-	thought      []byte
+	// audioDepth is the direct-member depth of the first audio object, so
+	// transcript and data are captured only inside that object. A non-empty
+	// transcript is answer content; a non-empty data payload is answer-shaped
+	// output (audio bytes the client received) but not content.
+	audioDepth        int
+	transcript        []byte
+	audioDataNonEmpty bool
+	thought           []byte
 	// eventType is the LAST top-level string "type" value. encoding/json
 	// resolves duplicate keys last-wins but treats a null value as a no-op and
 	// reports non-string values as errors; the candidate decode below preserves
@@ -122,6 +129,9 @@ func (k *frameKeys) scan(payload []byte) {
 			if k.choicesDepth > 0 && depth < k.choicesDepth {
 				k.choicesDepth = 0
 			}
+			if k.audioDepth > 0 && depth < k.audioDepth {
+				k.audioDepth = 0
+			}
 			i++
 		default:
 			i++
@@ -159,6 +169,9 @@ const (
 	keyThinkingBlocks
 	keyReasoningContent
 	keyReasoningDetails
+	keyAudio
+	keyTranscript
+	keyAudioData
 )
 
 func identifyFrameKey(key []byte) frameKey {
@@ -207,6 +220,12 @@ func identifyFrameKey(key []byte) frameKey {
 		return keyReasoningContent
 	case "reasoning_details":
 		return keyReasoningDetails
+	case "audio":
+		return keyAudio
+	case "transcript":
+		return keyTranscript
+	case "data":
+		return keyAudioData
 	}
 	return keyNone
 }
@@ -406,6 +425,19 @@ func (k *frameKeys) observe(id frameKey, value []byte, top bool, depth int) {
 		if !k.reasoningDetailsNonEmpty {
 			k.reasoningDetailsNonEmpty = nonEmptyJSONValue(value)
 		}
+	case keyAudio:
+		if k.audioDepth == 0 && len(value) > 0 && value[0] == '{' {
+			k.audioDepth = depth + 1
+		}
+	case keyTranscript:
+		if k.audioDepth > 0 && depth == k.audioDepth && k.transcript == nil &&
+			startsNonEmptyJSONString(value) {
+			k.transcript = value
+		}
+	case keyAudioData:
+		if k.audioDepth > 0 && depth == k.audioDepth && !k.audioDataNonEmpty {
+			k.audioDataNonEmpty = nonEmptyJSONValue(value)
+		}
 	}
 }
 
@@ -427,6 +459,13 @@ func (k *frameKeys) contentStart() bool {
 // /v1/completions choices[].text answer string. Scoping to the choice object
 // is what keeps a nested "text" key (a reasoning part or a typed content part)
 // from being counted as answer content.
+// audioTranscriptStart reports whether the frame carried a non-empty
+// transcript inside a Chat audio object. A transcript is the spoken answer
+// text, so it counts as answer content exactly like delta.content.
+func (k *frameKeys) audioTranscriptStart() bool {
+	return k.transcript != nil
+}
+
 func (k *frameKeys) textStart() bool {
 	return k.text != nil
 }

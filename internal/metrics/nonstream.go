@@ -73,15 +73,19 @@ type nonStreamChoice struct {
 	FinishReason string          `json:"finish_reason"`
 	Text         json.RawMessage `json:"text"`
 	Message      struct {
-		Role          json.RawMessage   `json:"role"`
-		Content       json.RawMessage   `json:"content"`
-		Refusal       json.RawMessage   `json:"refusal"`
-		FunctionCall  json.RawMessage   `json:"function_call"`
-		Reasoning     json.RawMessage   `json:"reasoning_content"`
-		ReasoningBare json.RawMessage   `json:"reasoning"`
-		ReasoningDet  json.RawMessage   `json:"reasoning_details"`
-		ReasoningText json.RawMessage   `json:"reasoning_text"`
-		ToolCalls     []json.RawMessage `json:"tool_calls"`
+		Role          json.RawMessage `json:"role"`
+		Content       json.RawMessage `json:"content"`
+		Refusal       json.RawMessage `json:"refusal"`
+		FunctionCall  json.RawMessage `json:"function_call"`
+		Reasoning     json.RawMessage `json:"reasoning_content"`
+		ReasoningBare json.RawMessage `json:"reasoning"`
+		ReasoningDet  json.RawMessage `json:"reasoning_details"`
+		ReasoningText json.RawMessage `json:"reasoning_text"`
+		Audio         struct {
+			Transcript json.RawMessage `json:"transcript"`
+			Data       json.RawMessage `json:"data"`
+		} `json:"audio"`
+		ToolCalls []json.RawMessage `json:"tool_calls"`
 	} `json:"message"`
 }
 
@@ -94,9 +98,10 @@ type nonStreamToolCall struct {
 
 // AnalyzeNonStreamBody decodes body once and derives the complete non-stream
 // metrics view: the quality outcome, usage (ParseUsage with provider
-// overrides), model/id, finish reason, answer presence (message content and
-// legacy choices[].text content, plus answer-shaped refusal or deprecated
-// function_call declarations), reasoning presence (contentPresent semantics),
+// overrides), model/id, finish reason, answer presence (message content, an
+// audio transcript, and legacy choices[].text content, plus answer-shaped
+// refusal, audio data or deprecated function_call declarations), reasoning
+// presence (contentPresent semantics),
 // tool calls, bounded preview, cost (the existing ExtractCost key gate) and
 // the canonical top-level error envelope. It is the single analysis owner for
 // both the buffered quality path and the teeing relay.
@@ -191,9 +196,14 @@ func (a *NonStreamAnalysis) analyzeRecordFields(raw nonStreamEnvelope, usageKeys
 	// answer-shaped output (the streaming analyzer's answerishSeen): visible
 	// provider bytes that must never be re-run, even though they are not
 	// content for HadAnswerContent/FirstAnswerAt accounting.
+	// Audio data is answer-shaped output (visible bytes the client received)
+	// while the transcript is its content text. An audio object carrying only
+	// expires_at/id is neither.
+	hadAudioTranscript := nonEmptyAnswerValue(ch.Message.Audio.Transcript)
 	hadAnswerish := nonEmptyAnswerValue(ch.Message.Refusal) ||
-		nonEmptyAnswerValue(ch.Message.FunctionCall)
-	hadAnswer := contentPresent(ch.Message.Content) || hadChoiceText || hadAnswerish
+		nonEmptyAnswerValue(ch.Message.FunctionCall) ||
+		nonEmptyAnswerValue(ch.Message.Audio.Data)
+	hadAnswer := contentPresent(ch.Message.Content) || hadChoiceText || hadAudioTranscript || hadAnswerish
 	hadReasoning := contentPresent(ch.Message.Reasoning) ||
 		contentPresent(ch.Message.ReasoningBare) ||
 		contentPresent(ch.Message.ReasoningDet) ||
@@ -211,6 +221,14 @@ func (a *NonStreamAnalysis) analyzeRecordFields(raw nonStreamEnvelope, usageKeys
 		// body carries only text. Non-string text stays answer-shaped for the
 		// outcome but contributes no preview.
 		if text, ok := FlattenContent(choiceText); ok && text != "" {
+			a.HadAnswerContent = true
+			if preview {
+				a.Preview = TruncatePreview(text)
+			}
+		}
+	} else if hadAudioTranscript {
+		// The spoken transcript is the answer content of an audio-only turn.
+		if text, ok := FlattenContent(ch.Message.Audio.Transcript); ok && text != "" {
 			a.HadAnswerContent = true
 			if preview {
 				a.Preview = TruncatePreview(text)
