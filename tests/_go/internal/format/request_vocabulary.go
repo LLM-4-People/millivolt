@@ -338,3 +338,39 @@ func TestChatTopLogprobsRequiresLogprobs(t *testing.T) {
 		t.Fatalf("chat logprob fields = %v/%v, want 2/true: %s", root["top_logprobs"], root["logprobs"], out)
 	}
 }
+
+// TestChatMetadataWarningOrderDeterministic pins TC1-U5: decoding one body
+// repeatedly must yield one warning order.
+func TestChatMetadataWarningOrderDeterministic(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"metadata":` +
+		`{"delta":{"n":1},"alpha":{"n":1},"charlie":{"n":1},"bravo":{"n":1}}}`
+	var first []string
+	for run := 0; run < 40; run++ {
+		req, err := DecodeChatRequest([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields := make([]string, 0, len(req.Warnings))
+		for _, warning := range req.Warnings {
+			fields = append(fields, warning.Field)
+		}
+		if run == 0 {
+			first = fields
+			continue
+		}
+		if len(fields) != len(first) {
+			t.Fatalf("run %d warning count = %d, want %d: %v", run, len(fields), len(first), fields)
+		}
+		for i := range fields {
+			if fields[i] != first[i] {
+				t.Fatalf("run %d order = %v, want %v", run, fields, first)
+			}
+		}
+	}
+	want := []string{"metadata.alpha", "metadata.bravo", "metadata.charlie", "metadata.delta"}
+	for i := range want {
+		if first[i] != want[i] {
+			t.Fatalf("warning order = %v, want %v", first, want)
+		}
+	}
+}

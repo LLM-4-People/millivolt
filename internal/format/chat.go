@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -371,7 +373,10 @@ func parseStop(raw json.RawMessage) []string {
 func decodeChatMetadata(in map[string]json.RawMessage) (map[string]string, ir.Warnings) {
 	var warns ir.Warnings
 	out := make(map[string]string, len(in))
-	for k, raw := range in {
+	// Sorted keys make the warning order deterministic; a map ranging order
+	// would make the client-visible warning header depend on the run.
+	for _, k := range slices.Sorted(maps.Keys(in)) {
+		raw := in[k]
 		var s string
 		if err := json.Unmarshal(raw, &s); err == nil {
 			out[k] = s
