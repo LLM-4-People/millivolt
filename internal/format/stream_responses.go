@@ -1601,26 +1601,40 @@ func (d *ResponsesStreamDecoder) matchesClosedIdlessCall(item responsesWireItem)
 }
 
 // matchTerminalToolCall resolves a terminal function call that did not match
-// by identity. A unique open announced call with the same name wins; an
-// id-less terminal item then uses its wire position, a lone open call, or the
-// first open id-less call in output order.
+// by identity. A named call matches only an open announced call with the same
+// name; an id-less terminal item then uses its wire position, a lone open call,
+// or the first open id-less call in output order. A named item never falls back
+// to a differently named open call, because the terminal array position is not
+// an identity.
 func (d *ResponsesStreamDecoder) matchTerminalToolCall(item responsesWireItem, index int, claimed map[string]bool) (string, int, bool) {
 	open := d.openAnnouncedToolCalls(claimed)
 	if item.Name != "" {
-		match := -1
-		for i, candidate := range open {
-			if candidate.name != item.Name {
-				continue
+		named := make([]announcedToolCall, 0, len(open))
+		for _, candidate := range open {
+			if candidate.name == item.Name {
+				named = append(named, candidate)
 			}
-			if match >= 0 {
-				match = -2
-				break
+		}
+		switch len(named) {
+		case 1:
+			if terminalToolIdentityCompatible(item.CallID, item.ID, named[0].key) {
+				return named[0].key, named[0].idx, true
 			}
-			match = i
+		case 0:
+			return "", 0, false
+		default:
+			// Several open calls share the name. Only the announcement at the
+			// terminal position can disambiguate them, and only when that
+			// announcement is one of the same-name candidates.
+			if positional, ok := d.keyByOutput[index]; ok {
+				for _, candidate := range named {
+					if candidate.key == positional {
+						return candidate.key, candidate.idx, true
+					}
+				}
+			}
 		}
-		if match >= 0 && terminalToolIdentityCompatible(item.CallID, item.ID, open[match].key) {
-			return open[match].key, open[match].idx, true
-		}
+		return "", 0, false
 	}
 	if item.CallID != "" || item.ID != "" {
 		return "", 0, false
@@ -1657,6 +1671,14 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 		}
 		switch typ {
 		case "function_call":
+			if item.CallID == "" && item.ID == "" && d.matchesClosedIdlessCall(item) {
+				// An id-less entry that repeats a closed id-less call by name
+				// and effective arguments must be skipped before its terminal
+				// position can assign it to a different open call. The closed
+				// call's announcement position and the terminal array position
+				// are independent.
+				continue
+			}
 			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
 			idx, ok := d.itemBlockByKey[key]
 			if d.announcedToolKeys[key] && !d.openToolKeys[key] && d.closedToolCallRepeat(key, item) {
@@ -1681,6 +1703,11 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				// correlation.
 				if matchedKey, matchedIdx, matched := d.matchTerminalToolCall(item, i, claimedTools); matched {
 					key, idx, ok = matchedKey, matchedIdx, true
+				} else {
+					// The position names a different call and no open call
+					// carries this name. Keeping the positional key would
+					// attribute these arguments to the wrong call.
+					ok = false
 				}
 			}
 			if !ok {

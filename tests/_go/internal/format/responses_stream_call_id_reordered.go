@@ -773,3 +773,94 @@ func TestToolArgumentsFingerprintFallsBackOverBounds(t *testing.T) {
 		})
 	}
 }
+
+// A closed id-less call announced at a foreign output position must be skipped
+// before its terminal array position can assign its repeat to another open
+// call. The open call keeps its own arguments and no duplicate appears.
+func TestResponsesClosedIdlessRepeatAtForeignPositionKeepsOpenArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		closedName string
+		openName   string
+	}{
+		{name: "distinct names", closedName: "A", openName: "B"},
+		{name: "same names", closedName: "A", openName: "A"},
+	} {
+		source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":{"type":"function_call","name":"` + tc.closedName + `","arguments":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":5,"item":{"type":"function_call","name":"` + tc.closedName + `","arguments":"{\"a\":1}","status":"completed"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"` + tc.openName + `","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","name":"` + tc.closedName + `","arguments":"{\"a\":1}"},{"type":"function_call","name":"` + tc.openName + `","arguments":"{\"b\":2}"}]}}
+
+`
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					var buf bytes.Buffer
+					if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					out := buf.String()
+					calls := streamedToolCalls(t, target, out)
+					if len(calls) != 2 {
+						t.Fatalf("tool calls = %d, want two: %s", len(calls), out)
+					}
+					byID := map[string]*streamedToolCall{}
+					for _, call := range calls {
+						byID[call.id] = call
+					}
+					for id, want := range map[string][2]string{
+						"call_proxy_5": {tc.closedName, `{"a":1}`},
+						"call_proxy_0": {tc.openName, `{"b":2}`},
+					} {
+						call, ok := byID[id]
+						if !ok {
+							t.Fatalf("call %s missing: %s", id, out)
+						}
+						if call.name != want[0] || strings.TrimSpace(call.args.String()) != want[1] {
+							t.Fatalf("call %s = %s %q, want %s %q: %s", id, call.name, call.args.String(), want[0], want[1], out)
+						}
+					}
+					if _, ok := byID["call_proxy_1"]; ok {
+						t.Fatalf("duplicate call_proxy_1 present: %s", out)
+					}
+				})
+			}
+		})
+	}
+}
+
+// A new unannounced id-less call at an open call's announced position cannot
+// be distinguished from a repeat. The accepted policy drops it rather than
+// assigning its arguments to the open call or synthesizing a duplicate.
+func TestResponsesUnannouncedIdlessAtCollidingPositionDropped(t *testing.T) {
+	source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"B","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","name":"A","arguments":"{\"a\":1}"},{"type":"function_call","name":"B","arguments":"{\"b\":2}"}]}}
+
+`
+	for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+		t.Run(string(target), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			out := buf.String()
+			calls := streamedToolCalls(t, target, out)
+			if len(calls) != 1 {
+				t.Fatalf("tool calls = %d, want one: %s", len(calls), out)
+			}
+			if calls[0].id != "call_proxy_0" || calls[0].name != "B" || strings.TrimSpace(calls[0].args.String()) != `{"b":2}` {
+				t.Fatalf("call = %s %s %q, want call_proxy_0 B {\"b\":2}: %s", calls[0].id, calls[0].name, calls[0].args.String(), out)
+			}
+		})
+	}
+}

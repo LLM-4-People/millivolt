@@ -773,7 +773,12 @@ class PublishedContracts(unittest.TestCase):
             "formatting and key-order differences in such a value do",
             "whose name and",
             "effective argument value agree with a closed id-less call",
-            "the proxy does not guess further",
+            "An id-less repeat is skipped before its array position is resolved",
+            "A named terminal item matches only an open announced call",
+            "no same-name candidate starts",
+            "An unannounced id-less call at a colliding",
+            "announced position cannot be distinguished from a repeat",
+            "is dropped",
         ):
             self.assertIn(phrase, adapters)
         for stale in (

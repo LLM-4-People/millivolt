@@ -153,21 +153,27 @@ target cannot consume them:
   call with the same name. A terminal entry that repeats an announced call
   whose block already closed is skipped before open matching when its identity
   and name agree; an id-less entry also requires its effective argument value
-  to agree. Formatting differences and object key order do not affect that
+  to agree. An id-less repeat is skipped before its array position is resolved,
+  so a closed call announced at a foreign position cannot claim a different
+  open call. Formatting differences and object key order do not affect that
   agreement, but numeric literals are compared as written, so `1` and `1.0`
   do not agree. A value above the canonicalization size, nesting or
   member-separator bounds keeps the byte-exact rule, as does a partial or
   otherwise invalid value, so formatting and key-order differences in such a
-  value do not agree. An id-less terminal item then matches a unique open
-  announced call with the same name, then the announcement at its own
-  position, then a lone or first still-open id-less announced call in output
-  order, so a reordered terminal array completes the announced block rather
-  than synthesizing a second call. If no open call matches, an id-less entry
-  whose name and effective argument value agree with a closed id-less call is
-  skipped as that call's repeat. When several open calls share a name and carry
-  no identity, the positional fallback remains and the proxy does not guess
-  further. The non-streaming decoder still rejects a call with both identities
-  absent.
+  value do not agree. A named terminal item matches only an open announced call
+  with the same name; several same-name candidates are disambiguated only by
+  the announcement at the terminal position, and no same-name candidate starts
+  a new call instead of taking a differently named open call. An id-less
+  terminal item then matches a unique open announced call with the same name,
+  then the announcement at its own position among same-name candidates, then a
+  lone or first still-open id-less announced call in output order, so a
+  reordered terminal array completes the announced block rather than
+  synthesizing a second call. If no open call matches, an id-less entry whose
+  name and effective argument value agree with a closed id-less call is
+  skipped as that call's repeat. An unannounced id-less call at a colliding
+  announced position cannot be distinguished from a repeat and is dropped
+  rather than assigned to a different call. The non-streaming decoder still
+  rejects a call with both identities absent.
 - A legacy Chat `message.function_call` is treated as answer-shaped for retry
   safety because the deprecated shape can represent either a tool invocation or
   a final answer, and it is not counted as a tool call. A Chat source that uses
