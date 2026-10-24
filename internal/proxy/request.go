@@ -645,18 +645,22 @@ func applyTokenCaps(body []byte, rec *metrics.Record) {
 	if json.Unmarshal(body, &caps) != nil {
 		return
 	}
-	value := func(raw json.RawMessage, field string) *int {
-		v, err := tokenCapValue(raw, field)
-		if err != nil {
-			return nil
-		}
-		return v
-	}
 	rec.ReqMaxTokens = resolveRequestTokenCap(
-		value(caps.MaxCompTokens, "max_completion_tokens"),
-		value(caps.MaxTokens, "max_tokens"),
-		value(caps.MaxOutputTokens, "max_output_tokens"),
+		tokenCapOptional(caps.MaxCompTokens, "max_completion_tokens"),
+		tokenCapOptional(caps.MaxTokens, "max_tokens"),
+		tokenCapOptional(caps.MaxOutputTokens, "max_output_tokens"),
 	)
+}
+
+// tokenCapOptional decodes one cap member for the request record. A missing or
+// malformed spelling contributes nothing here; ServeHTTP's tokenCapViolation is
+// the trust boundary that rejects a malformed cap before the request proceeds.
+func tokenCapOptional(raw json.RawMessage, field string) *int {
+	v, err := tokenCapValue(raw, field)
+	if err != nil {
+		return nil
+	}
+	return v
 }
 
 // restampReqMaxTokens re-reads the effective token ceiling from a rewritten
@@ -1824,20 +1828,22 @@ type requestMessage[C any] struct {
 }
 
 type requestParameters struct {
-	MaxTokens       *int              `json:"max_tokens"`
-	MaxCompTokens   *int              `json:"max_completion_tokens"`
-	MaxOutputTokens *int              `json:"max_output_tokens"`
-	Temperature     *float64          `json:"temperature"`
-	TopP            *float64          `json:"top_p"`
-	Tools           []discardedJSON   `json:"tools"`
-	ToolChoice      requestToolChoice `json:"tool_choice"`
-	StreamOptions   *struct{}         `json:"stream_options"`
-	N               *int              `json:"n"`
-	Stop            json.RawMessage   `json:"stop"`
-	Logprobs        bool              `json:"logprobs"`
-	PresencePen     *float64          `json:"presence_penalty"`
-	FrequencyPen    *float64          `json:"frequency_penalty"`
-	ResponseFormat  *struct {
+	// The three cap members stay raw so an accepted integral spelling such as
+	// 1e6 or 1000000.0 cannot fail the whole parameter decode. They are the
+	// same wire spellings tokenCapMembers owns; tokenCapValue turns each into
+	// the effective ceiling and tokenCapViolation rejects a malformed one.
+	tokenCapMembers
+	Temperature    *float64          `json:"temperature"`
+	TopP           *float64          `json:"top_p"`
+	Tools          []discardedJSON   `json:"tools"`
+	ToolChoice     requestToolChoice `json:"tool_choice"`
+	StreamOptions  *struct{}         `json:"stream_options"`
+	N              *int              `json:"n"`
+	Stop           json.RawMessage   `json:"stop"`
+	Logprobs       bool              `json:"logprobs"`
+	PresencePen    *float64          `json:"presence_penalty"`
+	FrequencyPen   *float64          `json:"frequency_penalty"`
+	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
 	Seed            *int64                   `json:"seed"`
@@ -3127,7 +3133,13 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) 
 	// pick: the translated body re-decodes through this same
 	// MergeTokenCaps precedence, so the trust-boundary check in ServeHTTP
 	// must see the one field a translated body can actually carry upstream.
-	rec.ReqMaxTokens = resolveRequestTokenCap(req.MaxCompTokens, req.MaxTokens, req.MaxOutputTokens)
+	// The cap members stay raw through the decode so every integral spelling
+	// the trust boundary accepts also records the rest of this parameter block.
+	rec.ReqMaxTokens = resolveRequestTokenCap(
+		tokenCapOptional(req.MaxCompTokens, "max_completion_tokens"),
+		tokenCapOptional(req.MaxTokens, "max_tokens"),
+		tokenCapOptional(req.MaxOutputTokens, "max_output_tokens"),
+	)
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
 	rec.ReqToolsCount = len(req.Tools)
