@@ -183,9 +183,12 @@ free tier gated on that wire signature rather than on TLS, header order or
 credentials: with the id headers in shape and a chat `tools` array containing
 the `bash` and `read` tool names, the gated free models served even under
 the anonymous `public` bearer. `ensure_tools` injects missing names as inert
-stubs and adds `tool_choice: none` when the client sent no tools of its own,
-so the stubs can never be invoked; a body that already satisfies the
-signature is relayed unchanged, apart from any configured request override or
+stubs. When the client sent no tools of its own, an absent, null, or `auto`
+`tool_choice` is forced to `none`, while an explicit `none` stays; a
+`required`, named, or malformed choice skips injection entirely, because
+forcing `none` would contradict the client and injecting would let the model
+call an undeclared stub. A body that already satisfies the signature is
+relayed unchanged, apart from any configured request override or
 sub-conversation strip that runs before it. The stubs are Chat-shaped, so they
 are injected only into an OpenAI Chat client body on a Chat outbound wire; an
 Anthropic, Responses, Cursor, or arbitrary body is never rewritten.

@@ -803,3 +803,39 @@ func TestProtocolDocsQualifyPassthrough(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureToolsChoiceHelpMatchesRuntime pins the A3/D3/G2 rule on every
+// prose owner: absent, null, or auto becomes none; explicit none stays;
+// required, named, or malformed skips injection.
+func TestEnsureToolsChoiceHelpMatchesRuntime(t *testing.T) {
+	const rule = "absent, null, or auto tool_choice is forced to none"
+	const old = "tool_choice none added when the client sent no tools"
+	field := FieldByKey("providers")
+	if field == nil {
+		t.Fatal("providers schema key missing")
+	}
+	if !strings.Contains(field.Help, rule) || strings.Contains(field.Help, old) {
+		t.Fatalf("providers help does not state the choice rule: %s", field.Help)
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "proxy.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	example := exampleHelpText(string(raw))
+	if !strings.Contains(example, rule) || strings.Contains(example, old) {
+		t.Fatalf("generated example does not state the choice rule")
+	}
+	doc := strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", "adapters.md"))), " ")
+	for _, want := range []string{
+		"an absent, null, or `auto`",
+		"`tool_choice` is forced to `none`",
+		"`required`, named, or malformed choice skips injection entirely",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("docs/adapters.md omits %q", want)
+		}
+	}
+	if strings.Contains(doc, "adds `tool_choice: none` when the client sent no tools of its own") {
+		t.Fatal("docs/adapters.md still states the unconditional none rule")
+	}
+}

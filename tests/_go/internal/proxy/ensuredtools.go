@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -343,5 +344,64 @@ func TestOpencodeIDFormat(t *testing.T) {
 			t.Fatalf("opencodeID collided: %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+// TestEnsureToolsForcesNoneForImplicitChoices pins the exact inertness rule
+// when the client supplied no tools: absent, null, or auto becomes none before
+// the stubs land; an explicit none keeps its spelling; required, named, or a
+// malformed choice skips injection entirely rather than contradicting the
+// client or letting it call an undeclared stub.
+func TestEnsureToolsForcesNoneForImplicitChoices(t *testing.T) {
+	const messages = `"messages":[{"role":"user","content":"hi"}]`
+	named := map[string]any{"type": "function", "function": map[string]any{"name": "client_tool"}}
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantStubs  bool
+		wantChoice any
+		wantExtra  []string
+	}{
+		{name: "absent", body: `{"model":"m",` + messages + `}`, wantStubs: true, wantChoice: "none"},
+		{name: "null", body: `{"model":"m",` + messages + `,"tool_choice":null}`, wantStubs: true, wantChoice: "none"},
+		{name: "auto", body: `{"model":"m",` + messages + `,"tool_choice":"auto"}`, wantStubs: true, wantChoice: "none"},
+		{name: "none", body: `{"model":"m",` + messages + `,"tool_choice":"none"}`, wantStubs: true, wantChoice: "none"},
+		{name: "empty tools auto", body: `{"model":"m",` + messages + `,"tools":[],"tool_choice":"auto"}`, wantStubs: true, wantChoice: "none"},
+		{name: "required", body: `{"model":"m",` + messages + `,"tool_choice":"required"}`, wantChoice: "required"},
+		{name: "named", body: `{"model":"m",` + messages + `,"tool_choice":{"type":"function","function":{"name":"client_tool"}}}`, wantChoice: named},
+		{name: "malformed", body: `{"model":"m",` + messages + `,"tool_choice":5}`, wantChoice: float64(5)},
+		{
+			name:       "client tools auto",
+			body:       `{"model":"m",` + messages + `,"tools":[{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`,
+			wantStubs:  true,
+			wantChoice: "auto",
+			wantExtra:  []string{"get_weather"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, cap := captureBodies(t)
+			defer upstream.Close()
+			srv := httptest.NewServer(New(ensuredCfg(upstreamLabel(upstream.URL)), metrics.Noop{}))
+			defer srv.Close()
+
+			postChatBody(t, srv.URL, upstream.URL, tc.body)
+			names, choice, hasTools := toolNames(t, cap.snapshot()[0])
+			if tc.wantStubs {
+				want := append(append([]string{}, tc.wantExtra...), "bash", "read")
+				if !hasTools || len(names) != len(want) {
+					t.Fatalf("tool names = %v (hasTools=%v), want %v", names, hasTools, want)
+				}
+				for i := range want {
+					if names[i] != want[i] {
+						t.Fatalf("tool names = %v, want %v", names, want)
+					}
+				}
+			} else if hasTools || len(names) != 0 {
+				t.Fatalf("tools changed for an explicit choice: %v", names)
+			}
+			if !reflect.DeepEqual(choice, tc.wantChoice) {
+				t.Fatalf("tool_choice = %#v, want %#v", choice, tc.wantChoice)
+			}
+		})
 	}
 }

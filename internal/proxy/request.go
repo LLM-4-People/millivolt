@@ -522,10 +522,12 @@ type ensureToolStub struct {
 // chat-shaped bodies qualify (a top-level messages array), so discovery,
 // responses-style and embeddings bodies stay untouched; a tools value that
 // does not decode as an array skips the actor rather than corrupting the
-// body. A body whose own tools array is absent or empty and that carries no
-// tool_choice also receives tool_choice "none": the injected stubs then
-// cannot be invoked, matching what a client that sent no tools expects
-// back. A body that already carries every name is returned unchanged - the
+// body. When the client supplied no tools of its own, the injected stubs are
+// inert only if the model cannot choose them: an absent, null, or auto
+// tool_choice becomes none. An explicit none keeps its spelling. A required,
+// named, or malformed choice skips injection entirely - forcing none would
+// contradict the client, and injecting would let it call an undeclared stub.
+// A body that already carries every name is returned unchanged - the
 // passthrough invariant survives satisfied signatures.
 func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (changed bool, why string) {
 	rawMessages, ok := doc["messages"]
@@ -576,8 +578,36 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 			tools = append(tools, additions...)
 		}
 	} else {
+		// The injected stubs are the body's only tools. Decide the choice
+		// once: force none for an implicit choice, keep an explicit none, and
+		// skip injection for anything that would contradict the client or let
+		// it select an undeclared stub.
+		forceNone := false
+		if raw, ok := doc["tool_choice"]; ok {
+			var choice any
+			if err := json.Unmarshal(raw, &choice); err != nil {
+				return false, ""
+			}
+			switch value := choice.(type) {
+			case nil:
+				forceNone = true
+			case string:
+				switch value {
+				case "auto":
+					forceNone = true
+				case "none":
+					// Already inert; keep the client's spelling.
+				default:
+					return false, ""
+				}
+			default:
+				return false, ""
+			}
+		} else {
+			forceNone = true
+		}
 		tools = additions
-		if _, ok := doc["tool_choice"]; !ok {
+		if forceNone {
 			doc["tool_choice"] = json.RawMessage(`"none"`)
 		}
 	}
