@@ -121,7 +121,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected with 413.",
 			Kind: KindBytes, HotReload: true, Min: num(MaxRequestBytesMin), Max: num(MaxRequestBytesMax)},
 		{Key: "allowed_base_urls", Category: "request", Label: "Allowed base URLs",
-			Help: "SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted operator). Each entry must be an absolute http:// or https:// URL with a host.",
+			Help: "SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted operator). Each entry must be an absolute http:// or https:// URL with a lowercase hostname, no userinfo, query, fragment or trailing slash, and a port only after a hostname.",
 			Kind: KindStrings, HotReload: true},
 		{Key: "capture_body_preview", Category: "request", Label: "Capture body preview",
 			Help: "Store a short bounded preview of the last user prompt / response in metrics. Off by default so content is not persisted.",
@@ -398,7 +398,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindAliases, HotReload: true},
 		// ---- models ----
 		{Key: "model_rules", Category: "models", Label: "Model grouping rules",
-			Help: "Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
+			Help: "Capped at 64 rules. Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
 			Kind: KindModelRules, HotReload: true},
 		// ---- overrides ----
 		{Key: "request_overrides", Category: "overrides", Label: "Request override rules",

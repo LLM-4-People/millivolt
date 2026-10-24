@@ -115,7 +115,9 @@ go_memory_limit: 0B
 max_request_bytes: 32MiB
 
 # SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
-# operator). Each entry must be an absolute http:// or https:// URL with a host.
+# operator). Each entry must be an absolute http:// or https:// URL with a lowercase
+# hostname, no userinfo, query, fragment or trailing slash, and a port only after a
+# hostname.
 # Hot-reload: yes.
 #   type: list of string
 allowed_base_urls: []
@@ -725,14 +727,14 @@ dash_background_refresh: false
 # ---- Models ----
 # Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same
 # model in every grouped surface. Records keep their exact spelling; hot-reloads.
-# Ordered rewrite pipeline that merges spelling variants of the same model in every
-# grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs
-# optgroups, and the request-log leaf’s displayed name). Each rule is one step: exact
-# (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture
-# refs), lower (fold case). Rules apply once in order; the shipped default folds case,
-# strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing
-# architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies
-# `.` with `-` between digits. An explicitly empty list groups by the exact stored
+# Capped at 64 rules. Ordered rewrite pipeline that merges spelling variants of the same
+# model in every grouped surface (explorer model dimension, scope filters, debug
+# checklist, Clear/Logs optgroups, and the request-log leaf’s displayed name). Each rule
+# is one step: exact (whole-string merge old → new), pattern (regex rewrite of all
+# occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped
+# default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a
+# trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and
+# unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored
 # spelling. Stored values remain unchanged; purge/export match them exactly and request
 # details show the original. Debug matching uses separate native base-model normalization,
 # not these display rules. Hot-reloads.

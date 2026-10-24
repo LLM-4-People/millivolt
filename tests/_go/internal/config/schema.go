@@ -969,3 +969,31 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		t.Errorf("backup category help still claims replace writes the backup as-is")
 	}
 }
+
+func TestSchemaHelpPinsValidationRules(t *testing.T) {
+	baseURLs := FieldByKey("allowed_base_urls")
+	if baseURLs == nil {
+		t.Fatal("allowed_base_urls is not registered")
+	}
+	for _, phrase := range []string{
+		"lowercase hostname",
+		"no userinfo, query, fragment or trailing slash",
+		"port only after a hostname",
+	} {
+		if !strings.Contains(baseURLs.Help, phrase) {
+			t.Errorf("allowed_base_urls help omits %q: %s", phrase, baseURLs.Help)
+		}
+	}
+
+	rules := FieldByKey("model_rules")
+	if rules == nil {
+		t.Fatal("model_rules is not registered")
+	}
+	if !strings.Contains(rules.Help, "Capped at 64 rules.") {
+		t.Errorf("model_rules help omits the 64-rule cap: %s", rules.Help)
+	}
+	operations := repositoryText(t, filepath.Join("docs", "operations.md"))
+	if !strings.Contains(operations, "The list is capped at 64 rules.") {
+		t.Error("docs/operations.md omits the model_rules cap")
+	}
+}

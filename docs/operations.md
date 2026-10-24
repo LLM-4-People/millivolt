@@ -140,9 +140,9 @@ a temporary view: removing the alias does not reconstruct original labels.
 Existing in-memory ring records can retain their previous label until they age
 out or the process restarts. Back up before an intentional history rename.
 
-`model_rules` instead controls display/grouping. Its ordered exact, pattern and
-lowercase steps keep stored model spellings unchanged; an empty rule list groups
-by those raw spellings. The Settings editor supports reordering, parking and
+`model_rules` instead controls display/grouping. The list is capped at 64 rules.
+Its ordered exact, pattern and lowercase steps keep stored model spellings
+unchanged; an empty rule list groups by those raw spellings. The Settings editor supports reordering, parking and
 previewing rules. Raw export/delete predicates do not silently expand to a
 display group. Debug's native-model normalization is separate from these rules.
 
