@@ -54,21 +54,20 @@ func setResolvedAuth(h http.Header, t *target, key string) {
 func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *target, key string, body []byte) (*http.Request, error) {
 	path := t.path
 	if path == "" {
-		path = r.URL.Path
+		// EscapedPath preserves the client's percent-encoding: Path alone
+		// would turn %2F, %3F and %23 into path separators or query/fragment
+		// delimiters before the upstream sees them.
+		path = r.URL.EscapedPath()
+		if path == "" {
+			path = "/"
+		}
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	targetURL := joinUpstreamURL(t.baseURL, path)
-	u, err := url.Parse(targetURL)
+	u, err := upstreamURL(t.baseURL, path, t.query, r.URL.RawQuery)
 	if err != nil {
-		return nil, fmt.Errorf("invalid base URL %q: %w", clientEcho(t.baseURL), err)
-	}
-	// Query override takes precedence; otherwise pass the client's query along.
-	if t.query != "" {
-		u.RawQuery = t.query
-	} else {
-		u.RawQuery = r.URL.RawQuery
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, u.String(), bytes.NewReader(body))
@@ -644,10 +643,93 @@ func joinUpstreamURL(baseURL, path string) string {
 	return base + path
 }
 
+// upstreamURL builds the request target structurally. The path is already an
+// escaped path (client request or validated X-Proxy-Path) and is never
+// re-parsed as part of a concatenated URL, so an encoded ? or # cannot become
+// a query or fragment delimiter.
+func upstreamURL(baseURL, escapedPath, queryOverride, clientQuery string) (*url.URL, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL %q: %w", clientEcho(baseURL), err)
+	}
+	joined := joinUpstreamEscapedPath(base.EscapedPath(), escapedPath)
+	decoded, err := url.PathUnescape(joined)
+	if err != nil {
+		return nil, fmt.Errorf("invalid request path: %w", err)
+	}
+	u := *base
+	u.Path = decoded
+	u.RawPath = joined
+	// Query override takes precedence; otherwise pass the client's query along.
+	if queryOverride != "" {
+		u.RawQuery = queryOverride
+	} else {
+		u.RawQuery = clientQuery
+	}
+	return &u, nil
+}
+
+// joinUpstreamEscapedPath joins two escaped paths and drops the request path's
+// first segment when it duplicates the base's last non-empty segment. Segment
+// comparison uses the decoded spelling so an encoded character still matches;
+// joining uses the escaped spelling so %2F never becomes a separator.
+func joinUpstreamEscapedPath(basePath, escapedPath string) string {
+	base := strings.TrimRight(basePath, "/")
+	if !strings.HasPrefix(escapedPath, "/") {
+		escapedPath = "/" + escapedPath
+	}
+	var baseSegs, pathSegs []string
+	if base != "" {
+		baseSegs = strings.Split(strings.Trim(base, "/"), "/")
+	}
+	trailingSlash := escapedPath == "/" || strings.HasSuffix(escapedPath, "/")
+	if trimmed := strings.Trim(escapedPath, "/"); trimmed != "" {
+		pathSegs = strings.Split(trimmed, "/")
+	}
+	if len(baseSegs) > 0 && len(pathSegs) > 0 && decodedPathSegment(baseSegs[len(baseSegs)-1]) == decodedPathSegment(pathSegs[0]) {
+		pathSegs = pathSegs[1:]
+	}
+	joined := "/" + strings.Join(append(baseSegs, pathSegs...), "/")
+	if trailingSlash && joined != "/" {
+		joined += "/"
+	}
+	return joined
+}
+
+func decodedPathSegment(segment string) string {
+	decoded, err := url.PathUnescape(segment)
+	if err != nil {
+		return segment
+	}
+	return decoded
+}
+
 // maxBaseURLHostBytes is the DNS presentation limit for one hostname (RFC
 // 1035, without a trailing dot). It bounds the authority a client can claim
 // through X-Proxy-Base-URL before providerFromURL derives a retained label.
 const maxBaseURLHostBytes = 253
+
+// validProxyPathHeader accepts one escaped path override. Literal ? and #
+// would be reinterpreted as query/fragment delimiters, and controls or spaces
+// cannot travel in a request target; percent escapes must be well formed.
+func validProxyPathHeader(p string) bool {
+	if strings.IndexFunc(p, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f || r == '?' || r == '#'
+	}) >= 0 {
+		return false
+	}
+	_, err := url.PathUnescape(p)
+	return err == nil
+}
+
+// validProxyQueryHeader accepts one raw query override. # would start a
+// fragment and controls or spaces are invalid in a request target; a literal ?
+// and well-formed percent escapes are query data.
+func validProxyQueryHeader(q string) bool {
+	return strings.IndexFunc(q, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f || r == '#'
+	}) < 0
+}
 
 // validBaseURLPort accepts an absent port or a decimal TCP port 1-65535 with
 // at most five digits. net/url validates the syntax but not the range or
@@ -732,9 +814,15 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		t.authPrefix = p
 	}
 	if p := strings.TrimSpace(r.Header.Get(hdrPath)); p != "" {
+		if !validProxyPathHeader(p) {
+			return nil, fmt.Errorf("invalid %s header", hdrPath)
+		}
 		t.path = p
 	}
 	if q := strings.TrimSpace(r.Header.Get(hdrQuery)); q != "" {
+		if !validProxyQueryHeader(q) {
+			return nil, fmt.Errorf("invalid %s header", hdrQuery)
+		}
 		t.query = q
 	}
 	if f := strings.TrimSpace(r.Header.Get(hdrFormat)); f != "" {

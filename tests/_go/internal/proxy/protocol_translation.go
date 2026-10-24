@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,6 +22,8 @@ import (
 type fixtureUpstream struct {
 	server      *httptest.Server
 	path        atomic.Value
+	escapedPath atomic.Value
+	rawQuery    atomic.Value
 	body        atomic.Value
 	contentType string
 	status      int
@@ -35,6 +38,8 @@ func newFixtureUpstream(t *testing.T, contentType string, status int, response s
 		f.calls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		f.path.Store(r.URL.Path)
+		f.escapedPath.Store(r.URL.EscapedPath())
+		f.rawQuery.Store(r.URL.RawQuery)
 		f.body.Store(body)
 		w.Header().Set("Content-Type", f.contentType)
 		w.WriteHeader(f.status)
@@ -44,8 +49,10 @@ func newFixtureUpstream(t *testing.T, contentType string, status int, response s
 	return f
 }
 
-func (f *fixtureUpstream) lastPath() string { return f.path.Load().(string) }
-func (f *fixtureUpstream) lastBody() []byte { return f.body.Load().([]byte) }
+func (f *fixtureUpstream) lastPath() string        { return f.path.Load().(string) }
+func (f *fixtureUpstream) lastEscapedPath() string { return f.escapedPath.Load().(string) }
+func (f *fixtureUpstream) lastRawQuery() string    { return f.rawQuery.Load().(string) }
+func (f *fixtureUpstream) lastBody() []byte        { return f.body.Load().([]byte) }
 
 func proxyRequest(t *testing.T, s *Server, path, format, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -963,11 +970,14 @@ type rewriteTransport struct{ target string }
 
 func (t rewriteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	clone := r.Clone(r.Context())
-	u, err := http.NewRequest(r.Method, t.target+r.URL.Path, r.Body)
+	u, err := url.Parse(t.target)
 	if err != nil {
 		return nil, err
 	}
-	clone.URL = u.URL
+	u.Path = r.URL.Path
+	u.RawPath = r.URL.RawPath
+	u.RawQuery = r.URL.RawQuery
+	clone.URL = u
 	clone.Host = u.Host
 	return http.DefaultTransport.RoundTrip(clone)
 }
