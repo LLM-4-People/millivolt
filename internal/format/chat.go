@@ -274,6 +274,12 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	if len(stops) > 0 {
 		req.Stop = stops
 	}
+	if n != nil && (*n < 1 || *n > 128) {
+		// The Chat schema documents 1..128. Zero, a negative value and an
+		// out-of-range count have no representable one-choice translation,
+		// so fail closed instead of silently emitting one choice.
+		return nil, errParseOpenAIBody(fmt.Errorf("n must be between 1 and 128"))
+	}
 	if n != nil && *n > 1 {
 		req.Warnings.Add(ir.WarningDropped, "n", "only one choice can be translated")
 	}
