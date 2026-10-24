@@ -39,7 +39,9 @@ func TestResponsesResponseIndexAndSpanSpellings(t *testing.T) {
 	body := func(start, end string) string {
 		return `{"id":"r1","object":"response","created_at":1,"status":"completed","model":"m","max_output_tokens":100.0,"output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hi","annotations":[{"type":"url_citation","url":"https://example.com","title":"t","start_index":` + start + `,"end_index":` + end + `,"index":0.0}]}]}]}`
 	}
-	resp, err := DecodeResponsesResponse([]byte(body("0.0", "1e3")))
+	// The message-relative span must stay inside the two-rune text part; the
+	// exponent spelling still exercises exact integral narrowing.
+	resp, err := DecodeResponsesResponse([]byte(body("0.0", "1e0")))
 	if err != nil {
 		t.Fatalf("integral spans or unused echoes rejected: %v", err)
 	}
@@ -47,8 +49,8 @@ func TestResponsesResponseIndexAndSpanSpellings(t *testing.T) {
 		t.Fatalf("blocks = %+v, want one citation", resp.Blocks)
 	}
 	citation := resp.Blocks[0].Citations[0]
-	if citation.StartIndex != 0 || citation.EndIndex != 1000 {
-		t.Fatalf("citation = %+v, want span 0..1000", citation)
+	if citation.StartIndex != 0 || citation.EndIndex != 1 {
+		t.Fatalf("citation = %+v, want span 0..1", citation)
 	}
 	if _, err := DecodeResponsesResponse([]byte(body("0.5", "1"))); err == nil {
 		t.Fatal("fractional Responses start_index accepted")
