@@ -234,6 +234,7 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 		req.Header.Set("Content-Type", "application/proto")
 	} else {
 		s.applyProviderHeaders(req.Header, t.provider)
+		stripTransportModeHeaders(req.Header)
 	}
 	resp, err := s.httpClient().Do(req)
 	if err != nil {

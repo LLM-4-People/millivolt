@@ -80,10 +80,12 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	req.URL = u
 
 	// Forward client headers, dropping proxy control, hop-by-hop, and the
-	// upstream auth header (re-added below from the extracted key). Drop
-	// Accept-Encoding so the transport adds its own gzip preference and
-	// auto-decompresses upstream responses (letting us analyze the plaintext
-	// and relay readable bytes downstream).
+	// upstream auth header (re-added below from the extracted key). Transport
+	// mode headers (Accept-Encoding, Range) never pass through: the shared
+	// transport must own gzip negotiation and auto-decompression, and the relay
+	// always forwards a complete body, so a caller-supplied value would
+	// desynchronize the framing. The final assembly strips them again after
+	// every configured source.
 	//
 	// RFC 7230 §6.1: a header nominated by the Connection header is itself
 	// hop-by-hop and must not be forwarded. The static isHopByHop list alone
@@ -93,7 +95,7 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	for k, vs := range r.Header {
 		// Inbound names are already canonical, so the direct predicates avoid
 		// three lowercasing allocations per forwarded header.
-		if isProxyControlHeaderCanonical(k) || isHopByHopCanonical(k) || nominated[k] || strings.EqualFold(k, "Accept-Encoding") {
+		if isProxyControlHeaderCanonical(k) || isHopByHopCanonical(k) || nominated[k] || isTransportModeHeader(k) {
 			continue
 		}
 		req.Header[k] = append([]string(nil), vs...)
@@ -116,7 +118,7 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 
 	// Extra headers the app asked us to add (or override), filtered.
 	for k, vs := range t.extraHeader {
-		if isHopByHop(k) || isProxyControlHeader(k) {
+		if isHopByHop(k) || isProxyControlHeader(k) || isTransportModeHeader(k) {
 			continue
 		}
 		req.Header.Del(k)
@@ -129,6 +131,11 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	// the chain (its set/replace entries, then its removals), with the
 	// credential safety belt inside applyOverrideHeaders.
 	applyOverrideHeaders(req.Header, t.override, t.authHeader)
+	// Transport-mode headers are invariant regardless of which source tried to
+	// set them: the shared transport's own Accept-Encoding enables
+	// auto-decompression, and Range would request a partial body the relay
+	// cannot forward as a completion.
+	stripTransportModeHeaders(req.Header)
 
 	return req, nil
 }
@@ -954,10 +961,28 @@ func isValidAuthHeader(h string) bool {
 	if !config.ValidHeaderName(h) {
 		return false
 	}
-	if isHopByHop(h) || isProxyControlHeader(h) || strings.EqualFold(h, "host") {
+	if isHopByHop(h) || isProxyControlHeader(h) || isTransportModeHeader(h) || strings.EqualFold(h, "host") {
 		return false
 	}
 	return true
+}
+
+// isTransportModeHeader reports whether a header selects a transport-level
+// response mode the proxy must own. Accept-Encoding controls gzip negotiation
+// and net/http's automatic decompression; Range asks for a partial body. A
+// supplied value from any source would make the relay forward bytes whose
+// framing no longer matches the status and headers it emits.
+func isTransportModeHeader(h string) bool {
+	return strings.EqualFold(h, "Accept-Encoding") || strings.EqualFold(h, "Range")
+}
+
+// stripTransportModeHeaders removes the transport-mode headers after every
+// header source has run. The shared transport then adds its own
+// Accept-Encoding, auto-decompresses gzip upstream bodies, and never sends a
+// partial-range request.
+func stripTransportModeHeaders(h http.Header) {
+	h.Del("Accept-Encoding")
+	h.Del("Range")
 }
 
 // remoteIP returns the client's IP (host part of RemoteAddr), honoring
