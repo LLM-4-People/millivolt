@@ -34,7 +34,12 @@ const (
 	// It is exported because the SSE analyzer applies the same cap while the
 	// stream is still running, so its dedupe set can never grow past what the
 	// record boundary would retain.
-	RetainedToolNamesMax          = 64
+	RetainedToolNamesMax = 64
+	// RetainedToolCallIDsMax bounds the Responses call-id dedupe set. It is
+	// exported because the SSE analyzer owns that set while the stream runs.
+	// Distinct calls past the bound still count; only their ids are no longer
+	// retained, so a hostile stream cannot grow the map without limit.
+	RetainedToolCallIDsMax        = 1024
 	retainedRecordDebugSessionMax = 128
 )
 

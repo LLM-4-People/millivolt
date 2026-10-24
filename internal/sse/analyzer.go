@@ -55,9 +55,11 @@ type Analyzer struct {
 
 	toolCalls int
 	// toolNames is the retained first-seen name list and toolNameSet is its
-	// O(1) membership index. Both are bounded by metrics.RetainedToolNamesMax
-	// while the stream is still running, so the record cap cannot be exceeded
-	// before Fill; every tool call is counted independently.
+	// O(1) membership indexes. Names are bounded by
+	// metrics.RetainedToolNamesMax and Responses call ids by
+	// metrics.RetainedToolCallIDsMax while the stream is still running, so a
+	// hostile stream cannot grow either map without limit. Every tool call is
+	// counted independently; a call past the id bound is simply not deduped.
 	toolNames    []string
 	toolNameSet  map[string]struct{}
 	toolCallIDs  map[string]struct{}
@@ -1409,7 +1411,9 @@ func (a *Analyzer) countResponsesToolCall(callID, name string) bool {
 		if _, seen := a.toolCallIDs[callID]; seen {
 			return false
 		}
-		a.toolCallIDs[callID] = struct{}{}
+		if len(a.toolCallIDs) < metrics.RetainedToolCallIDsMax {
+			a.toolCallIDs[callID] = struct{}{}
+		}
 	}
 	a.toolCalls++
 	a.retainToolName(name)
