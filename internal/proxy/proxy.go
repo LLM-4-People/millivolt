@@ -978,19 +978,43 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				resp.Header.Set("Content-Type", "application/json")
 			}
 		}
-		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode != http.StatusOK {
-			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
-			// The status line is already committed, so this in-band error is
-			// the turn's outcome: stamp the same owners the envelope uses.
-			// A 201 or other committed 2xx would otherwise look healthy to
-			// the record even though the client received an error.
-			rec.ErrorType, rec.ErrorMsg = typ, msg
-			if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
-				// The in-band error hit a dead socket: the client is gone.
-				// The decided error status stays on the record (markClientGone
-				// stamps 499 only when no error outcome is decided).
-				markClientGone(rec)
+		// The body mode is decided by the (possibly translated) content type;
+		// the status commit is separate. A non-SSE body reaches its buffered
+		// owner with the status line still open, so a translation or spool
+		// failure carries a real 502 instead of writing one under a committed
+		// 201.
+		alreadySSE := pacer.applyUpstream(resp.Header)
+		sseBody := isEventStream(resp.Header.Get("Content-Type"))
+		if alreadySSE {
+			// Keepalive comments already committed 200 SSE. A non-SSE body
+			// cannot be served under that status, and a non-200 SSE body is
+			// the turn's failure: both are in-band errors whose status the
+			// client already has.
+			if !sseBody || resp.StatusCode != http.StatusOK {
+				typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+				// The status line is already committed, so this in-band error
+				// is the turn's outcome: stamp the same owners the envelope
+				// uses. A 201 or other committed 2xx would otherwise look
+				// healthy to the record even though the client received an
+				// error.
+				rec.ErrorType, rec.ErrorMsg = typ, msg
+				if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
+					// The in-band error hit a dead socket: the client is gone.
+					// The decided error status stays on the record
+					// (markClientGone stamps 499 only when no error outcome is
+					// decided).
+					markClientGone(rec)
+				}
+				return
 			}
+		} else if sseBody {
+			pacer.commitStatus(resp.StatusCode)
+			if resp.StatusCode != http.StatusOK {
+				s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
+				return
+			}
+		} else {
+			s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 			return
 		}
 

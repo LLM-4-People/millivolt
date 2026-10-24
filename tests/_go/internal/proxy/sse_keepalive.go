@@ -16,7 +16,7 @@ func TestPacerApplyUpstreamAfterStartIsSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p := newSSEPacer(rec, 15*time.Second, time.Minute)
 	p.Start()
-	if !p.applyUpstream(http.Header{"X-A": {"1"}}, http.StatusTooManyRequests) {
+	if !p.applyUpstream(http.Header{"X-A": {"1"}}) {
 		t.Fatal("applyUpstream after Start must report already SSE")
 	}
 	if rec.Code != http.StatusOK {
@@ -27,8 +27,11 @@ func TestPacerApplyUpstreamAfterStartIsSSE(t *testing.T) {
 func TestPacerApplyUpstream2xxEnablesComments(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p := newSSEPacer(rec, 15*time.Second, time.Minute)
-	if p.applyUpstream(http.Header{"Content-Type": {"text/event-stream"}}, http.StatusOK) {
+	if p.applyUpstream(http.Header{"Content-Type": {"text/event-stream"}}) {
 		t.Fatal("first applyUpstream must not report already SSE")
+	}
+	if !p.commitStatus(http.StatusOK) {
+		t.Fatal("commitStatus must commit the SSE body")
 	}
 	if !p.writeComment(true) {
 		t.Fatal("writeComment after 200 stream")
@@ -48,7 +51,7 @@ func TestWriteSSEHeadersOnPacer(t *testing.T) {
 	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
-	if !p.applyUpstream(nil, http.StatusOK) {
+	if !p.applyUpstream(nil) {
 		t.Fatal("writeSSEHeaders on *ssePacer must go through applyUpstream")
 	}
 }

@@ -110,7 +110,8 @@ func writeSSEHeaders(w http.ResponseWriter, status int) {
 	hdr := make(http.Header, 3)
 	metrics.SetStreamHeaders(hdr)
 	if p := pacerOf(w); p != nil {
-		p.applyUpstream(hdr, status)
+		p.applyUpstream(hdr)
+		p.commitStatus(status)
 		return
 	}
 	copyResponseHeaders(w.Header(), hdr)

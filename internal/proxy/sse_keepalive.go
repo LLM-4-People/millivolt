@@ -37,13 +37,17 @@ var _ http.Flusher = (*ssePacer)(nil)
 // their sockets stay open on this server (no WriteTimeout) but a client
 // TTFB timeout can still drop them.
 type ssePacer struct {
-	mu            sync.Mutex
-	w             http.ResponseWriter
-	stop          chan struct{}
-	done          chan struct{}
-	armed         bool
-	started       bool
-	sse           bool // true only after commitSSELocked (not a JSON status)
+	mu      sync.Mutex
+	w       http.ResponseWriter
+	stop    chan struct{}
+	done    chan struct{}
+	armed   bool
+	started bool
+	sse     bool // true only after commitSSELocked (not a JSON status)
+	// modeSet records that the body mode was assigned from the upstream
+	// content type before any status commit, so WriteHeader must not treat a
+	// 2xx as SSE by default.
+	modeSet       bool
 	stopped       bool
 	stopClosed    bool
 	lastWrite     time.Time
@@ -82,6 +86,7 @@ func (p *ssePacer) applyStatus(hdr http.Header, status int) bool {
 		copyResponseHeaders(p.w.Header(), hdr)
 	}
 	p.started = true
+	p.modeSet = true
 	p.lastWrite = time.Now()
 	p.w.WriteHeader(status)
 	return true
@@ -99,9 +104,10 @@ func (p *ssePacer) WriteHeader(code int) {
 		return
 	}
 	p.started = true
-	if code < 400 {
+	if !p.modeSet && code < 400 {
 		p.sse = true
 	}
+	p.modeSet = true
 	p.lastWrite = time.Now()
 	p.w.WriteHeader(code)
 }
@@ -152,6 +158,7 @@ func (p *ssePacer) commitSSELocked() {
 	}
 	writeSSEHeaders(p.w, http.StatusOK)
 	p.started = true
+	p.modeSet = true
 	p.sse = true
 	p.lastWrite = time.Now()
 }
@@ -276,32 +283,46 @@ func (p *ssePacer) Stop() {
 	}
 }
 
-// applyUpstream copies hdr and writes status if headers are still open.
-// Returns true when SSE was already committed (caller must not stream a
-// raw 4xx JSON body onto that socket).
-func (p *ssePacer) applyUpstream(hdr http.Header, status int) (alreadySSE bool) {
+// applyUpstream copies hdr and records the body mode (SSE or buffered JSON)
+// without committing the status line. The split is required by the stream
+// branch: a non-SSE body keeps its status open so the buffered owner can still
+// fail with a real 502 instead of writing one under an already committed 201.
+// Returns true when keepalive comments already committed SSE; the caller must
+// then relay a non-SSE or failed body in-band, never write a contradicting
+// status.
+func (p *ssePacer) applyUpstream(hdr http.Header) (alreadySSE bool) {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.stopped {
-		return p.sse
-	}
-	if p.started {
+	if p.stopped || p.started {
 		return p.sse
 	}
 	if hdr != nil {
 		copyResponseHeaders(p.w.Header(), hdr)
 	}
-	p.started = true
-	// The pacer's SSE mode describes the committed body, not the status
-	// class. A slow 200/201 JSON body must never receive SSE comments while
-	// the relay spools it.
 	p.sse = isEventStream(p.w.Header().Get("Content-Type"))
+	p.modeSet = true
+	return false
+}
+
+// commitStatus writes the upstream status once the body mode is known to be
+// SSE, where the body streams under exactly that status. It reports whether it
+// won the race against a keepalive commit.
+func (p *ssePacer) commitStatus(status int) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.stopped || p.started {
+		return false
+	}
+	p.started = true
 	p.lastWrite = time.Now()
 	p.w.WriteHeader(status)
-	return false
+	return true
 }
 
 // commitError writes a protocol-native JSON HTTP error under p.mu if headers

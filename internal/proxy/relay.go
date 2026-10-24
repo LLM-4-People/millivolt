@@ -2016,6 +2016,13 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		now := time.Now()
 		if _, err := w.Write(frame); err != nil {
 			markClientGone(rec)
+			// An in-band provider error that already reached the client is
+			// the turn's outcome even though the following write failed; the
+			// native streamBody twin fills it in clientGone. Without this the
+			// 499 erases the provider classification.
+			if a.HasInBandError() {
+				a.Fill(rec)
+			}
 			return false
 		}
 		rec.ResponseBytes += int64(len(frame))
