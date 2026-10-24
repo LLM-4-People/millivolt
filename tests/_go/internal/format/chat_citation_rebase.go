@@ -88,8 +88,8 @@ func TestChatCitationMessageRelativeSpans(t *testing.T) {
 		t.Fatalf("valid span warned: %+v", warns)
 	}
 	spans := chatToResponsesAnnotations(t, chatAnnotationBody(parts, "5", "6"))
-	if got := spans["bar"]; len(got) != 1 || got[0] != [2]int{2, 3} {
-		t.Fatalf("Responses spans = %v, want bar 2..3", spans)
+	if got := spans["bar"]; len(got) != 1 || got[0] != [2]int{5, 6} {
+		t.Fatalf("Responses spans = %v, want the message-relative bar 5..6", spans)
 	}
 	if len(spans["foo"]) != 0 {
 		t.Fatalf("citation attached to the wrong part: %v", spans)

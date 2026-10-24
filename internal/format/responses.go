@@ -1808,10 +1808,12 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 }
 
 // responsesAnnotations maps the citations an output_text part can carry. The
-// Responses url_citation spelling is flat, unlike Chat's wrapper. A citation
-// with no URL (for example an Anthropic character location) cannot be
-// represented and is reported.
-func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[string]any {
+// Responses url_citation spelling is flat, unlike Chat's wrapper; its span is
+// relative to the message, so offset (the rune length of preceding output text)
+// is added to every block-relative IR span. A citation with no URL (for
+// example an Anthropic character location) cannot be represented and is
+// reported.
+func responsesAnnotations(citations []ir.Citation, offset int, warns *ir.Warnings) []map[string]any {
 	var out []map[string]any
 	// Anthropic's web_search_result_location carries url/title but no
 	// character span, while Responses requires both span fields. The zero span
@@ -1835,7 +1837,7 @@ func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[str
 		}
 		out = append(out, map[string]any{
 			"type": "url_citation", "url": c.URL, "title": c.Title,
-			"start_index": c.StartIndex, "end_index": c.EndIndex,
+			"start_index": offset + c.StartIndex, "end_index": offset + c.EndIndex,
 		})
 	}
 	return out
@@ -1843,16 +1845,21 @@ func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[str
 
 func encodeResponsesOutputContent(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(blocks))
+	// textOffset is the running rune length of preceding output text. A
+	// Responses url_citation span is message-relative, while an IR citation is
+	// block-relative.
+	textOffset := 0
 	for _, b := range blocks {
 		switch b.Type {
 		case ir.BlockText:
 			part := map[string]any{
 				"type": "output_text", "text": b.Text, "annotations": []any{}, "logprobs": []any{},
 			}
-			if annotations := responsesAnnotations(b.Citations, warns); len(annotations) > 0 {
+			if annotations := responsesAnnotations(b.Citations, textOffset, warns); len(annotations) > 0 {
 				part["annotations"] = annotations
 			}
 			out = append(out, part)
+			textOffset += utf8.RuneCountInString(b.Text)
 		case ir.BlockRefusal:
 			if len(b.Citations) > 0 && warns != nil {
 				warns.Add(ir.WarningDropped, "citations", "refusal parts have no citation mapping")
