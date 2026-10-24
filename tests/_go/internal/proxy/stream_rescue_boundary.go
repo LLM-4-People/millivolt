@@ -734,3 +734,61 @@ func TestTailDeliveryIsFramed(t *testing.T) {
 		t.Fatalf("record = %+v, want the delivered tail counted", rec)
 	}
 }
+
+// TestTerminalHoldFramesCompleteLines is the NEW-1 regression: a complete
+// content line that follows or precedes a complete finish line without an
+// intervening blank must not share one SSE event with the terminal. Each
+// delivered event has exactly one data line, and the turn has exactly one
+// terminal marker.
+func TestTerminalHoldFramesCompleteLines(t *testing.T) {
+	const (
+		roleFrame   = `data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+		contentLine = `data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n"
+		finishLine  = `data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n"
+	)
+	cases := []struct {
+		name   string
+		source string
+	}{
+		{"finish then complete content", roleFrame + finishLine + contentLine},
+		{"complete content then finish", roleFrame + contentLine + finishLine},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				calls.Add(1)
+				w.Write([]byte(tc.source))
+				w.(http.Flusher).Flush()
+			}))
+			defer upstream.Close()
+
+			cfg := newConfigWithQuality(0)
+			cfg.ThinkingRetries = 0
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, got := streamRequest(t, srv, upstream)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", status, got)
+			}
+			assertSingleDataEvents(t, got)
+			if !strings.Contains(got, `"content":"hello"`) {
+				t.Fatalf("delivered body missing the complete content line: %s", got)
+			}
+			if n := strings.Count(got, `"finish_reason":"stop"`); n != 1 {
+				t.Fatalf("terminal markers = %d, want exactly 1: %s", n, got)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("upstream calls = %d, want 1", n)
+			}
+			rec := waitForRecord(t, buf, 1)[0]
+			if rec.IsError() || rec.Retries != 0 || !rec.HadAnswerContent || rec.FinishReason != "stop" {
+				t.Fatalf("record = %+v, want one healthy delivered answer and terminal", rec)
+			}
+		})
+	}
+}

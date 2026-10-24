@@ -2357,6 +2357,24 @@ type upstreamErrorRescue struct {
 // With the budget spent (rescueNone), the truncation or degenerate class
 // surfaces in-band exactly as before: finish_reason length is a terminator
 // and never rescuable. uerr receives the provider's envelope for a
+// endsWithUnframedDataLine reports whether b ends with a complete SSE data
+// line and no blank separator after it. Framing the next data line as a new
+// event prevents two payloads from concatenating into one event no spec
+// parser can dispatch.
+func endsWithUnframedDataLine(b []byte) bool {
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		return false
+	}
+	end := len(b) - 1
+	start := bytes.LastIndexByte(b[:end], '\n') + 1
+	line := bytes.TrimRight(b[start:end], "\r")
+	if len(bytes.TrimSpace(line)) == 0 {
+		return false
+	}
+	_, ok := sse.DataPayload(line)
+	return ok
+}
+
 // rescueUpstreamError return (the caller's attempt bookkeeping); it is
 // untouched for every other outcome.
 func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue, wire ir.Protocol) (rescue streamRescue) {
@@ -2413,6 +2431,17 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	boundaryDrops := func(code string) bool {
 		return code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
 			a.ChatLike() && !holdAborted
+	}
+	// appendHeld frames one complete line into the withheld region. A second
+	// data line in the same event would concatenate onto the first payload
+	// (the SSE client joins data lines with a newline), so start a new event
+	// before it. A field line stays with the data line it introduces.
+	appendHeld := func(line []byte) {
+		if _, isData := sse.DataPayload(line); isData && endsWithUnframedDataLine(hold) {
+			hold = append(hold, '\n')
+		}
+		hold = append(hold, line...)
+		hold = append(hold, '\n')
 	}
 	// clientGone records a write-detected abort: the disconnect stamps
 	// the 499, and the analyzer's in-band error - when one reached the
@@ -2754,8 +2783,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				switch {
 				case holding:
-					hold = append(hold, line...)
-					hold = append(hold, '\n')
+					appendHeld(line)
 					if sse.TerminalLine(line) && (a.DoneTerminates() || !sse.DoneLine(line)) {
 						deferredFinish = true
 					}
@@ -2791,10 +2819,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					}
 				case !prev && (a.Terminated() || heldDone) && !blank:
 					// This line opened the terminal region: withhold it (and
-					// everything after) until the outcome is decided.
+					// everything after) until the outcome is decided. A data
+					// line already flushed in out is its own event; separate
+					// it before the held event starts.
 					holding = true
-					hold = append(hold, line...)
-					hold = append(hold, '\n')
+					if endsWithUnframedDataLine(out.Bytes()) {
+						hold = append(hold, '\n')
+					}
+					appendHeld(line)
 					if sse.DoneLine(line) && a.DoneTerminates() {
 						hold = append(hold, '\n')
 					}
@@ -2939,6 +2971,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, tail...)
 					hold = append(hold, '\n', '\n')
 				} else {
+					if _, isData := sse.DataPayload(tail); isData && endsWithUnframedDataLine(out.Bytes()) {
+						out.WriteByte('\n')
+					}
 					out.Write(tail)
 				}
 				tail = nil
