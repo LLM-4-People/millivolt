@@ -792,6 +792,7 @@ class PublishedContracts(unittest.TestCase):
             "has no schema length bound, so a provider id longer than 64 characters is relayed unchanged",
             "1..64 character reference rule",
             "A Chat stream chunk is decoded from its first choice only",
+            "A Chat stream must carry `chat.completion.chunk` documents",
             "A source in-band error followed by the protocol terminal is deliberate",
             "A streamed tool `arguments` value that is exactly `null`",
             "Anthropic `content_block_start` text is not counted as answer content",

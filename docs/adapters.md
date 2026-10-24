@@ -327,6 +327,10 @@ terminal event is final for the turn.
   so the limit is unreachable for compliant traffic; a noncompliant upstream
   that interleaves several choices in one stream would mix them in the
   translated stream.
+- A Chat stream must carry `chat.completion.chunk` documents. A full
+  completion document, or a choice carrying `message` instead of `delta`, is
+  rejected instead of becoming a successful empty answer; a chunk without
+  `object` stays accepted when it carries a delta.
 - A source in-band error followed by the protocol terminal is deliberate: Chat
   and Responses clients receive the provider error and then `[DONE]` or the
   terminal event, matching the source order. The relay does not suppress the

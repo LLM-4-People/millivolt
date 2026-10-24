@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,10 @@ type chatWireChunk struct {
 			} `json:"function_call"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
+		// Message is the non-streaming completion shape. A stream chunk
+		// carries delta; a message here is a complete document that must not
+		// become a successful empty answer.
+		Message json.RawMessage `json:"message"`
 	} `json:"choices"`
 	Usage       *chatWireUsage `json:"usage"`
 	ServiceTier string         `json:"service_tier"`
@@ -161,6 +166,19 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
 				chunk.Error.Type, stringifyCode(chunk.Error.Code), chunk.Error.Message)})
 			continue
+		}
+		if chunk.Object != "" && chunk.Object != "chat.completion.chunk" {
+			// A full completion document is not a stream chunk. Its answer
+			// lives in message.content, which this decoder never reads, so
+			// relaying it would close an empty successful answer.
+			return nil, fmt.Errorf("chat stream object %q is not a chunk", boundedEcho(chunk.Object))
+		}
+		for _, choice := range chunk.Choices {
+			if message := bytes.TrimSpace(choice.Message); len(message) > 0 && !bytes.Equal(message, []byte("null")) {
+				// A gateway that omits object still must not smuggle a
+				// non-streaming message past the delta decoder.
+				return nil, fmt.Errorf("chat stream choice carries a message instead of a delta")
+			}
 		}
 		if !d.started {
 			if err := checkNativeIdentity("id", chunk.ID); err != nil {
