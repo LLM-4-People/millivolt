@@ -1115,8 +1115,11 @@ sidecar. Editing or stopping a named existing session remains available.
 
 Retained request headers use the same policy as recorded response headers:
 names are visited in sorted order for the budget, each value is capped at 4 KiB
-and marked with `…` when cut, at most 16 values are kept per name, and ordinary
-headers share a 16 KiB total budget per header map. Credential headers (the
+and marked with `…` when cut, at most 16 values are kept per name, ordinary
+headers share a 16 KiB total budget per header map, a header name is capped at
+512 bytes, and at most 256 names are retained per map. A longer name or an extra
+name is omitted without a marker, exactly like a value beyond the budget.
+Credential headers (the
 configured auth header, `Authorization`, cookies, and token-, API-key- or
 secret-bearing names) become `[REDACTED]` before any truncation, so a cut
 value is never a credential prefix. Headers or values beyond the budget are
