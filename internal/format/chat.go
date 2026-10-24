@@ -936,9 +936,11 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 // decodeChatAnnotations maps the message-level URL citation wrapper onto the
 // IR citation fields. Other annotation types have no IR representation.
 // attachChatAnnotations decodes message-level url_citation annotations into
-// citations on the last text block. The Chat response decoder and the assistant
-// request decoder (a client replaying a prior response) share this owner, so
-// the non-standard extension is preserved instead of silently dropped.
+// citations on the text block that contains each message-relative span. The
+// Chat response decoder and the assistant request decoder (a client replaying a
+// prior response) share this owner, so the non-standard extension is preserved
+// instead of silently dropped. A span outside the message, or one that crosses
+// a text-block boundary, has no IR representation and is reported.
 func attachChatAnnotations(blocks []ir.Block, annotations []chatWireAnnotation) ([]ir.Block, ir.Warnings, error) {
 	citations, warns, err := decodeChatAnnotations(annotations)
 	if err != nil {
@@ -947,14 +949,54 @@ func attachChatAnnotations(blocks []ir.Block, annotations []chatWireAnnotation) 
 	if len(citations) == 0 {
 		return blocks, warns, nil
 	}
-	for i := len(blocks) - 1; i >= 0; i-- {
-		if blocks[i].Type == ir.BlockText {
-			blocks[i].Citations = append(blocks[i].Citations, citations...)
-			return blocks, warns, nil
+	hasText := false
+	for _, b := range blocks {
+		if b.Type == ir.BlockText {
+			hasText = true
+			break
 		}
 	}
-	warns.Add(ir.WarningDropped, "annotations", "Chat annotations have no text block to attach to")
+	if !hasText {
+		warns.Add(ir.WarningDropped, "annotations", "Chat annotations have no text block to attach to")
+		return blocks, warns, nil
+	}
+	offsets := make([]int, len(blocks))
+	textLength := 0
+	for i, b := range blocks {
+		offsets[i] = textLength
+		if b.Type == ir.BlockText {
+			textLength += utf8.RuneCountInString(b.Text)
+		}
+	}
+	for _, c := range citations {
+		if c.StartIndex < 0 || c.EndIndex < c.StartIndex || c.EndIndex > textLength {
+			warns.Add(ir.WarningDropped, "annotations.span", "url_citation span falls outside the message text")
+			continue
+		}
+		if !attachChatCitation(blocks, offsets, c) {
+			warns.Add(ir.WarningDropped, "annotations.span", "url_citation span crosses a text block boundary")
+		}
+	}
 	return blocks, warns, nil
+}
+
+// attachChatCitation assigns one message-relative citation to the text block
+// whose rune range contains it, rebasing the span to that block.
+func attachChatCitation(blocks []ir.Block, offsets []int, c ir.Citation) bool {
+	for i := range blocks {
+		if blocks[i].Type != ir.BlockText {
+			continue
+		}
+		end := offsets[i] + utf8.RuneCountInString(blocks[i].Text)
+		if c.StartIndex < offsets[i] || c.EndIndex > end {
+			continue
+		}
+		c.StartIndex -= offsets[i]
+		c.EndIndex -= offsets[i]
+		blocks[i].Citations = append(blocks[i].Citations, c)
+		return true
+	}
+	return false
 }
 
 func decodeChatAnnotations(in []chatWireAnnotation) ([]ir.Citation, ir.Warnings, error) {

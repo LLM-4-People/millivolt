@@ -36,14 +36,14 @@ func TestCitationSpansFailClosedOnNarrowInt(t *testing.T) {
 			t.Fatalf("32-bit Chat error = %v, want the range rejection", err)
 		}
 	} else {
+		// The value narrows exactly to a span beyond the two-rune message, so
+		// the Chat owner drops it with a warning. An aliased 0..1 would have
+		// attached instead.
 		if err != nil {
 			t.Fatalf("64-bit Chat span rejected: %v", err)
 		}
-		if len(chat.Blocks) != 1 || len(chat.Blocks[0].Citations) != 1 {
-			t.Fatalf("64-bit Chat citation missing: %+v", chat.Blocks)
-		}
-		if got := int64(chat.Blocks[0].Citations[0].StartIndex); got != int64(4294967296) {
-			t.Fatalf("64-bit Chat start = %d, want the exact value", got)
+		if len(chat.Blocks) != 1 || len(chat.Blocks[0].Citations) != 0 {
+			t.Fatalf("64-bit Chat span was not dropped: %+v", chat.Blocks)
 		}
 	}
 

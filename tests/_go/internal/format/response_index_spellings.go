@@ -19,7 +19,9 @@ func TestChatResponseIndexAndSpanSpellings(t *testing.T) {
 	body := func(start, end string) string {
 		return `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0.0,"message":{"role":"assistant","content":"hi","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com","title":"t","start_index":` + start + `,"end_index":` + end + `}}]},"finish_reason":"stop"}]}`
 	}
-	resp, err := DecodeChatResponse([]byte(body("0.0", "1e3")))
+	// The message-relative span must stay inside the two-rune content; the
+	// exponent spelling still exercises exact integral narrowing.
+	resp, err := DecodeChatResponse([]byte(body("0.0", "1e0")))
 	if err != nil {
 		t.Fatalf("integral spans rejected: %v", err)
 	}
@@ -27,8 +29,16 @@ func TestChatResponseIndexAndSpanSpellings(t *testing.T) {
 		t.Fatalf("blocks = %+v, want one citation", resp.Blocks)
 	}
 	citation := resp.Blocks[0].Citations[0]
-	if citation.StartIndex != 0 || citation.EndIndex != 1000 {
-		t.Fatalf("citation = %+v, want span 0..1000", citation)
+	if citation.StartIndex != 0 || citation.EndIndex != 1 {
+		t.Fatalf("citation = %+v, want span 0..1", citation)
+	}
+	// An out-of-message exponent span is dropped instead of attached.
+	resp, err = DecodeChatResponse([]byte(body("0.0", "1e3")))
+	if err != nil {
+		t.Fatalf("out-of-range integral span failed the response: %v", err)
+	}
+	if len(resp.Blocks) != 0 && len(resp.Blocks[0].Citations) != 0 {
+		t.Fatalf("out-of-range span attached: %+v", resp.Blocks)
 	}
 	if _, err := DecodeChatResponse([]byte(body("0.5", "1"))); err == nil {
 		t.Fatal("fractional Chat start_index accepted")
