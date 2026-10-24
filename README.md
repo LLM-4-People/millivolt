@@ -31,10 +31,12 @@ Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) and sign in with that
 token. If the container exits, run `docker compose logs --tail 50`.
 
 > [!IMPORTANT]
-> One shared operator credential protects the dashboard and inference listener.
-> There are no user accounts. Keep it on loopback, or put an authenticated proxy
-> in front. With the token unset, the dashboard denies every request. Read
-> [Security](SECURITY.md) before network exposure.
+> One shared operator credential protects the dashboard and operator plane only.
+> Inference is transparent: it forwards your upstream key and does not use the
+> operator token. There are no user accounts. Keep the listener on loopback, or
+> put the network or ingress boundary in front. With the token unset, the
+> dashboard denies every request. Read [Security](SECURITY.md) before network
+> exposure.
 
 [compose.yaml](compose.yaml) publishes only on host loopback. Set
 `MILLIVOLT_PORT` for an unused host port. Named volumes retain history and
@@ -145,8 +147,8 @@ protection with recovery probes. These are operator actions, not per-user
 permissions.
 
 Read [operator workflows](docs/operations.md#operator-and-data-routes) before
-changing state. Dashboard access is protected by the same operator token as
-inference.
+changing state. The shared operator token protects the dashboard and operator
+routes. Inference is transparent and does not use it.
 
 ### Keep your routing and your keys.
 
@@ -178,7 +180,8 @@ millivolt is built for a single operator or small team that controls the host.
 It is not a multi-tenant gateway, a billing system, or a compliance audit log.
 
 - **No multi-tenant isolation.** One operator credential protects the dashboard
-  and inference listener; there are no per-user accounts.
+  and operator plane; inference is transparent and depends on the network or
+  ingress boundary. There are no per-user accounts.
 - **Durable accounting is best-effort.** Sustained overload can drop records
   even when inference succeeds. Backups, capacity, and storage drops are in
   [storage and accounting](docs/operations.md#storage-and-accounting).

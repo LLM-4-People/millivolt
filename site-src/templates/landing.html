@@ -131,7 +131,7 @@
       <div class="control-copy">
         <p class="eyebrow">operator surface</p>
         <h2>Control from the same surface.</h2>
-        <p>These are operator actions, not per-user permissions. The same shared token protects the dashboard and the inference listener.</p>
+        <p>These are operator actions, not per-user permissions. The shared token protects the dashboard and operator plane. Inference is transparent and does not use it.</p>
         <ul class="control-list">
           <li><span>Pause</span>Hold new sends and retries by client, provider, or all traffic.</li>
           <li><span>Limits</span>Set provider-wide concurrency, request-rate, and token-rate policies.</li>
@@ -168,7 +168,7 @@ docker compose up -d</code></pre>
       </div>
       <ol class="steps">
         <li><strong>Fetch the deployment file.</strong><span>The image is published for amd64 and arm64. Named volumes retain history and saved settings.</span></li>
-        <li><strong>Set the operator token.</strong><span>One shared credential protects the dashboard and inference listener. With it unset, the dashboard denies every request.</span></li>
+        <li><strong>Set the operator token.</strong><span>One shared credential protects the dashboard and operator plane. Inference is transparent and depends on the network boundary. With it unset, the dashboard denies every request.</span></li>
         <li><strong>Connect your client.</strong><span>Use <code>http://127.0.0.1:8080/v1</code> as the API base URL. Your upstream key is forwarded; it does not authenticate the dashboard.</span></li>
       </ol>
     </div>
@@ -218,7 +218,7 @@ docker compose up -d</code></pre>
       </div>
       <div class="fact-grid">
         <div><strong>one binary</strong><span>Go service with embedded dashboard assets</span></div>
-        <div><strong>one credential</strong><span>dashboard and inference share the operator boundary</span></div>
+        <div><strong>one credential</strong><span>dashboard and operator plane; inference is transparent</span></div>
         <div><strong>two storage modes</strong><span>SQLite history or an in-memory ring</span></div>
         <div><strong>MIT</strong><span>source available, no hosted dependency</span></div>
       </div>
@@ -233,7 +233,7 @@ docker compose up -d</code></pre>
       <p>millivolt is built for a single operator or small team that controls the host. The limits are part of the contract, not a footnote.</p>
     </div>
     <div class="limit-grid">
-      <article class="limit"><span class="limit-label">tenancy</span><h3>One operator, no user isolation.</h3><p>A single credential protects the dashboard and inference listener. There are no per-user accounts or tenant boundaries.</p></article>
+      <article class="limit"><span class="limit-label">tenancy</span><h3>One operator, no user isolation.</h3><p>A single credential protects the dashboard and operator plane; inference is transparent and depends on the network boundary. There are no per-user accounts or tenant boundaries.</p></article>
       <article class="limit"><span class="limit-label">durability</span><h3>Best-effort accounting.</h3><p>Sustained overload can drop records even when inference succeeds. The dashboard warns about process-local storage drops.</p></article>
       <article class="limit"><span class="limit-label">scope</span><h3>Observability, not billing.</h3><p>Cost is provider-reported. This is not an independent invoice, a complete audit log, or a compliance system.</p></article>
     </div>

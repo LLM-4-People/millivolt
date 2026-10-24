@@ -713,6 +713,21 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("Bearer", reverse_mcp)
         self.assertIn("session cookie", reverse_mcp)
 
+        # The first-run copy and the landing page must not imply that the
+        # operator token authenticates inference. /v1 is transparent and the
+        # network or ingress boundary is what protects it.
+        readme = re.sub(r"\s+", " ", self.read("README.md")).lower()
+        self.assertIn("protects the dashboard and operator plane only", readme)
+        self.assertIn("inference is transparent", readme)
+        self.assertIn("network or ingress boundary", readme)
+        self.assertNotIn("protects the dashboard and inference listener", readme)
+        landing = re.sub(r"\s+", " ", self.read("site-src/templates/landing.html")).lower()
+        self.assertIn("protects the dashboard and operator plane", landing)
+        self.assertIn("inference is transparent", landing)
+        self.assertNotIn("dashboard and inference listener", landing)
+        self.assertNotIn("dashboard and inference share the operator boundary", landing)
+        self.assertNotIn("dashboard and the inference listener", landing)
+
 
 if __name__ == "__main__":
     unittest.main()
