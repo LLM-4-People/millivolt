@@ -597,3 +597,109 @@ func TestQualityExhaustedSinkUsesProtocolEnvelope(t *testing.T) {
 		})
 	}
 }
+
+// responsesFramePayloads decodes the typed payload of every SSE frame in one
+// synthetic Responses body.
+func responsesFramePayloads(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, frame := range strings.Split(strings.TrimSuffix(body, "\n\n"), "\n\n") {
+		var payload string
+		for _, line := range strings.Split(frame, "\n") {
+			if data, ok := strings.CutPrefix(line, "data: "); ok {
+				payload = data
+			}
+		}
+		if payload == "" {
+			t.Fatalf("frame %q has no data line", frame)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+			t.Fatalf("payload %q: %v", payload, err)
+		}
+		out = append(out, doc)
+	}
+	return out
+}
+
+// assertResponsesEnvelopeRequired checks the required Response fields the
+// official schema lists, including keys whose value is null.
+func assertResponsesEnvelopeRequired(t *testing.T, response map[string]any) {
+	t.Helper()
+	for _, key := range []string{
+		"access_programs", "id", "object", "created_at", "error",
+		"incomplete_details", "instructions", "model", "tools", "output",
+		"parallel_tool_calls", "metadata", "tool_choice", "temperature", "top_p",
+	} {
+		if _, ok := response[key]; !ok {
+			t.Fatalf("response envelope is missing required %q: %v", key, response)
+		}
+	}
+}
+
+// TestSyntheticResponsesErrorFramesSchemaComplete pins TC5-4: every synthetic
+// Responses error or failure event carries sequence_number, and the failed
+// event carries the complete required response envelope.
+func TestSyntheticResponsesErrorFramesSchemaComplete(t *testing.T) {
+	t.Run("committed stream error pair", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		rec := &metrics.Record{}
+		if err := writeProtocolStreamError(w, rec, ir.Responses, "req_1", "model-a", "server_error", "", "boom"); err != nil {
+			t.Fatal(err)
+		}
+		payloads := responsesFramePayloads(t, w.Body.String())
+		if len(payloads) != 2 {
+			t.Fatalf("frames = %d, want error + failed: %s", len(payloads), w.Body.String())
+		}
+		errorEvent := payloads[0]
+		if errorEvent["type"] != "error" {
+			t.Fatalf("first frame type = %v", errorEvent["type"])
+		}
+		for _, key := range []string{"type", "code", "message", "param", "sequence_number"} {
+			if _, ok := errorEvent[key]; !ok {
+				t.Fatalf("error event is missing required %q: %v", key, errorEvent)
+			}
+		}
+		failed := payloads[1]
+		if failed["type"] != "response.failed" {
+			t.Fatalf("second frame type = %v", failed["type"])
+		}
+		if _, ok := failed["sequence_number"]; !ok {
+			t.Fatalf("failed event is missing sequence_number: %v", failed)
+		}
+		response, _ := failed["response"].(map[string]any)
+		if response == nil {
+			t.Fatalf("failed event has no response object: %v", failed)
+		}
+		assertResponsesEnvelopeRequired(t, response)
+		if response["status"] != "failed" {
+			t.Fatalf("failed status = %v", response["status"])
+		}
+		failure, _ := response["error"].(map[string]any)
+		if failure["message"] != "boom" {
+			t.Fatalf("failure error = %v", failure)
+		}
+	})
+
+	t.Run("degenerate substitution", func(t *testing.T) {
+		rec := &metrics.Record{ID: "req_2", Model: "model-a"}
+		var a sse.Analyzer
+		w := httptest.NewRecorder()
+		emitDegenerateResponses(w, &a, time.Now(), metrics.CodeTruncated, rec)
+		payloads := responsesFramePayloads(t, w.Body.String())
+		if len(payloads) != 1 || payloads[0]["type"] != "response.failed" {
+			t.Fatalf("payloads = %v", payloads)
+		}
+		if _, ok := payloads[0]["sequence_number"]; !ok {
+			t.Fatalf("degenerate event is missing sequence_number: %v", payloads[0])
+		}
+		response, _ := payloads[0]["response"].(map[string]any)
+		if response == nil {
+			t.Fatalf("degenerate event has no response object: %v", payloads[0])
+		}
+		assertResponsesEnvelopeRequired(t, response)
+		if response["model"] != "model-a" {
+			t.Fatalf("degenerate model = %v", response["model"])
+		}
+	})
+}

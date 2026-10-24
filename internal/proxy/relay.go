@@ -2732,20 +2732,11 @@ func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Ti
 	if id == "" {
 		id = rec.ID
 	}
-	obj := map[string]any{
-		"type": "response.failed",
-		"response": map[string]any{
-			"id": responsesWireID(id), "object": "response", "status": "failed",
-			"error":  map[string]any{"code": code, "message": metrics.DegenerateMessage(code)},
-			"output": []any{},
-		},
-	}
-	payload, err := sse.MarshalWireJSON(obj)
+	payload, frame, err := providerformat.ResponsesSyntheticEvent(
+		"response.failed", 0, id, rec.Model, code, metrics.DegenerateMessage(code))
 	if err != nil {
 		return
 	}
-	frame := append([]byte("event: response.failed\ndata: "), payload...)
-	frame = append(frame, '\n', '\n')
 	a.Feed(append([]byte("data: "), payload...), now)
 	if _, werr := w.Write(frame); werr != nil {
 		markClientGone(rec)

@@ -2142,36 +2142,12 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 }
 
 func (e *ResponsesStreamEncoder) responseObject(status, incompleteReason string, output []map[string]any) (map[string]any, error) {
-	if output == nil {
-		output = []map[string]any{}
-	}
-	obj := map[string]any{
-		"id": e.id, "object": "response", "created_at": e.created, "status": status,
-		"error": nil, "incomplete_details": nil, "instructions": nil,
-		"max_output_tokens": nil, "model": e.model, "output": output,
-		"parallel_tool_calls": true, "previous_response_id": nil, "reasoning": nil,
-		"store": false, "temperature": nil,
-		"text":        map[string]any{"format": map[string]any{"type": "text"}},
-		"tool_choice": "auto", "tools": []any{}, "top_p": nil, "truncation": "disabled",
-	}
-	if status == "incomplete" && incompleteReason != "" {
-		obj["incomplete_details"] = map[string]any{"reason": incompleteReason}
-	}
-	if status == "failed" && e.failed != nil {
-		code := e.failed.Code
-		if code == "" {
-			code = "server_error"
-		}
-		obj["error"] = map[string]any{"code": code, "message": e.failed.Message}
-	}
-	if e.usage != (ir.Usage{}) {
-		usage, err := encodeResponsesUsage(e.usage)
-		if err != nil {
-			return nil, err
-		}
-		obj["usage"] = usage
-	}
-	return obj, nil
+	return NewResponsesEnvelope(ResponsesEnvelope{
+		ID: e.id, Model: e.model, Created: e.created, Status: status,
+		IncompleteReason: incompleteReason,
+		Output:           responsesAnyItems(output),
+		Error:            e.failed, Usage: e.usage,
+	})
 }
 
 func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
