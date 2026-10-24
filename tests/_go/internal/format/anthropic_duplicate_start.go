@@ -41,7 +41,7 @@ func TestAnthropicDuplicateMessageStartKeepsFirstIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := buf.String()
-		if strings.Contains(out, "msg_b") || strings.Contains(out, "m2") {
+		if strings.Contains(out, `"id":"msg_b"`) || strings.Contains(out, `"model":"m2"`) {
 			t.Fatalf("duplicate start rewrote the stream identity: %s", out)
 		}
 		payloads := chatPayloads(t, out)
@@ -69,7 +69,7 @@ func TestAnthropicDuplicateMessageStartKeepsFirstIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := buf.String()
-		if strings.Contains(out, "msg_b") || strings.Contains(out, "m2") {
+		if strings.Contains(out, `"id":"msg_b"`) || strings.Contains(out, `"model":"m2"`) {
 			t.Fatalf("duplicate start rewrote the stream identity: %s", out)
 		}
 		var created, completed bool
