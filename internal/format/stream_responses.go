@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1865,7 +1864,7 @@ func functionCallTerminalEmission(item responsesWireItem, index int, policy resp
 		return terminalEmission{}, false, err
 	}
 	if policy == responsesToolArgumentsRequired && toolArgumentsMissing(item.Arguments) {
-		return terminalEmission{}, false, errors.New("tool call arguments are missing")
+		return terminalEmission{}, false, errToolArgumentsMissing
 	}
 	args, err := parseToolArguments(item.Arguments)
 	if err != nil {
@@ -2027,7 +2026,7 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 			return nil
 		}
 		if policy == responsesToolArgumentsRequired && !d.argumentEvidence[key] {
-			return errors.New("tool call arguments are missing")
+			return errToolArgumentsMissing
 		}
 		if full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
 			if policy == responsesToolArgumentsSkip {
@@ -2062,7 +2061,7 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 		d.argumentEvidence[key] = true
 	}
 	if policy == responsesToolArgumentsRequired && !d.argumentEvidence[key] {
-		return errors.New("tool call arguments are missing")
+		return errToolArgumentsMissing
 	}
 	if d.argsEmitted[key] == nil {
 		d.argsEmitted[key] = &toolArgumentCoverage{}

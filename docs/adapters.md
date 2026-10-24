@@ -131,13 +131,13 @@ target cannot consume them:
   retargeting could answer the wrong tool. A system or developer turn before
   the first emitted turn is still lifted to the top-level prompt even when a
   dropped assistant or an empty user turn preceded it.
-- A non-clean non-streaming terminal can carry the prefix of a tool-call
-  argument value the source never finished: a Chat finish other than `stop`,
-  `tool_calls` or `function_call`, or a Responses `incomplete` or `cancelled`
-  terminal, including a `completed` response that still carries an incomplete
-  reason. The proxy drops only the unparseable call with one
-  `tool_calls.arguments` or `function_call.arguments` warning and keeps the
-  text, refusal and source finish. A Responses `failed` terminal is not covered
+- A non-clean non-streaming terminal can carry a missing, null, whitespace or
+  partial tool-call argument value the source never finished: a Chat finish
+  other than `stop`, `tool_calls` or `function_call`, or a Responses
+  `incomplete` or `cancelled` terminal, including a `completed` response that
+  still carries an incomplete reason. The proxy drops only the unusable call
+  with one `tool_calls.arguments` or `function_call.arguments` warning and
+  keeps the text, refusal and source finish. A Responses `failed` terminal is not covered
   by that rule: it returns the provider error envelope and discards the output,
   so no block or warning is produced. A clean terminal fails closed on the same
   bytes, and structural failures such as a missing name or id remain fatal on

@@ -382,7 +382,7 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 				out = append(out, ir.Message{Role: role, Content: blocks})
 			}
 		case "function_call":
-			call, w, err := decodeResponsesFunctionCall(item)
+			call, w, err := decodeResponsesFunctionCall(item, false)
 			if err != nil {
 				return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
 			}
@@ -567,10 +567,13 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 	return out, warns
 }
 
-func decodeResponsesFunctionCall(item responsesWireItem) (*ir.ToolCall, ir.Warnings, error) {
+func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool) (*ir.ToolCall, ir.Warnings, error) {
 	var warns ir.Warnings
 	if item.Name == "" {
 		return nil, nil, errors.New("function_call has no name")
+	}
+	if requireEvidence && toolArgumentsMissing(item.Arguments) {
+		return nil, nil, errToolArgumentsMissing
 	}
 	args, err := parseToolArguments(item.Arguments)
 	if err != nil {
@@ -1364,7 +1367,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			resp.Blocks = append(resp.Blocks, blocks...)
 			resp.Warnings = append(resp.Warnings, warns...)
 		case typ == "function_call":
-			call, warns, err := decodeResponsesFunctionCall(item)
+			call, warns, err := decodeResponsesFunctionCall(item, !cleanTerminal)
 			if err != nil {
 				if !cleanTerminal && isToolArgumentsError(err) {
 					resp.Warnings.AddOnce(ir.WarningDropped, "function_call.arguments",

@@ -735,6 +735,8 @@ class PublishedContracts(unittest.TestCase):
             "messages.orphan_tool_result",
             "Pairing happens before the drop",
             "A non-clean non-streaming terminal",
+            "missing, null, whitespace or partial tool-call argument value",
+            "drops only the unusable call",
             "`call_proxy_<output index>`",
             "legacy Chat `message.function_call`",
             "content delta after `message_delta`",

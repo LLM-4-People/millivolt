@@ -6,18 +6,22 @@ import (
 	"strings"
 )
 
-// errToolArgumentsJSON and errToolArgumentsObject mark an argument value the
-// source never completed. A non-clean non-stream terminal drops only the call
-// carrying one of these; a clean terminal and the request path stay strict.
+// errToolArgumentsJSON, errToolArgumentsObject and errToolArgumentsMissing
+// mark an argument value the source never completed. A non-clean non-stream
+// terminal drops only the call carrying one of these; a clean terminal and the
+// request path stay strict.
 var (
-	errToolArgumentsJSON   = errors.New("tool call arguments must be valid JSON")
-	errToolArgumentsObject = errors.New("tool call arguments must be a JSON object")
+	errToolArgumentsJSON    = errors.New("tool call arguments must be valid JSON")
+	errToolArgumentsObject  = errors.New("tool call arguments must be a JSON object")
+	errToolArgumentsMissing = errors.New("tool call arguments are missing")
 )
 
 // isToolArgumentsError reports whether err is an argument-value failure rather
 // than a structural tool-call failure such as a missing name or id.
 func isToolArgumentsError(err error) bool {
-	return errors.Is(err, errToolArgumentsJSON) || errors.Is(err, errToolArgumentsObject)
+	return errors.Is(err, errToolArgumentsJSON) ||
+		errors.Is(err, errToolArgumentsObject) ||
+		errors.Is(err, errToolArgumentsMissing)
 }
 
 // parseToolArguments normalizes a tool-call argument string into a JSON

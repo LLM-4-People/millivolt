@@ -7,6 +7,7 @@ package format
 // source finish survive. A clean terminal still fails closed on the same bytes.
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -110,4 +111,144 @@ func TestNonCleanPartialToolArgumentsAreDropped(t *testing.T) {
 			t.Fatalf("error = %v, want the clean-terminal rejection", err)
 		}
 	})
+}
+
+func responsesCallResponse(status, reason, arguments string) string {
+	incomplete := ""
+	if reason != "" {
+		incomplete = `"incomplete_details":{"reason":"` + reason + `"},`
+	}
+	return `{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"` + status + `",` + incomplete + `"output":[` +
+		`{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"partial text"}]},` +
+		`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":` + arguments + `}]}`
+}
+
+// translatedToolCall reports the translated tool-call count and accumulated
+// arguments. A call that carries no argument bytes reports {} because each
+// target encodes an empty object as either an empty input or an empty value.
+func translatedToolCall(t *testing.T, target ir.Protocol, wire string) (int, string) {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(wire), &doc); err != nil {
+		t.Fatalf("translated body is not JSON: %v\n%s", err, wire)
+	}
+	switch target {
+	case ir.Chat:
+		choices, _ := doc["choices"].([]any)
+		if len(choices) == 0 {
+			return 0, ""
+		}
+		message, _ := choices[0].(map[string]any)["message"].(map[string]any)
+		calls, _ := message["tool_calls"].([]any)
+		var args strings.Builder
+		for _, raw := range calls {
+			function, _ := raw.(map[string]any)["function"].(map[string]any)
+			if value, _ := function["arguments"].(string); value != "" {
+				args.WriteString(value)
+			}
+		}
+		if len(calls) > 0 && args.Len() == 0 {
+			args.WriteString("{}")
+		}
+		return len(calls), args.String()
+	case ir.Anthropic:
+		content, _ := doc["content"].([]any)
+		count := 0
+		var args strings.Builder
+		for _, raw := range content {
+			block, _ := raw.(map[string]any)
+			if block["type"] != "tool_use" {
+				continue
+			}
+			count++
+			if input, ok := block["input"].(map[string]any); ok && len(input) > 0 {
+				encoded, _ := json.Marshal(input)
+				args.Write(encoded)
+			}
+		}
+		if count > 0 && args.Len() == 0 {
+			args.WriteString("{}")
+		}
+		return count, args.String()
+	case ir.Responses:
+		output, _ := doc["output"].([]any)
+		count := 0
+		var args strings.Builder
+		for _, raw := range output {
+			item, _ := raw.(map[string]any)
+			if item["type"] != "function_call" {
+				continue
+			}
+			count++
+			if value, _ := item["arguments"].(string); value != "" {
+				args.WriteString(value)
+			}
+		}
+		if count > 0 && args.Len() == 0 {
+			args.WriteString("{}")
+		}
+		return count, args.String()
+	}
+	return 0, ""
+}
+
+func TestResponsesNonCleanTerminalMissingArguments(t *testing.T) {
+	const empty = `""`
+	const null = `null`
+	const whitespace = `"   "`
+	const explicitEmpty = `"{}"`
+	const complete = `"{\"q\":1}"`
+	for _, tc := range []struct {
+		name      string
+		status    string
+		reason    string
+		arguments string
+		wantCall  bool
+		wantArgs  string
+	}{
+		{"incomplete empty", "incomplete", "max_output_tokens", empty, false, ""},
+		{"incomplete null", "incomplete", "max_output_tokens", null, false, ""},
+		{"incomplete whitespace", "incomplete", "max_output_tokens", whitespace, false, ""},
+		{"cancelled empty", "cancelled", "", empty, false, ""},
+		{"cancelled null", "cancelled", "", null, false, ""},
+		{"cancelled whitespace", "cancelled", "", whitespace, false, ""},
+		{"completed with incomplete reason empty", "completed", "max_output_tokens", empty, false, ""},
+		{"incomplete explicit empty", "incomplete", "max_output_tokens", explicitEmpty, true, "{}"},
+		{"cancelled explicit empty", "cancelled", "", explicitEmpty, true, "{}"},
+		{"incomplete complete", "incomplete", "max_output_tokens", complete, true, `{"q":1}`},
+		{"completed empty", "completed", "", empty, true, "{}"},
+		{"completed complete", "completed", "", complete, true, `{"q":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(responsesCallResponse(tc.status, tc.reason, tc.arguments))
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					out, warnings, err := TranslateResponseBetween(target, ir.Responses, body)
+					if err != nil {
+						t.Fatalf("translation failed: %v", err)
+					}
+					wire := string(out)
+					if !strings.Contains(wire, "partial text") {
+						t.Fatalf("client lost the answer text: %s", wire)
+					}
+					count, args := translatedToolCall(t, target, wire)
+					if got := warningCount(warnings, ir.WarningDropped, "function_call.arguments"); got != 0 && tc.wantCall {
+						t.Fatalf("kept call carried %d argument warnings: %+v", got, warnings)
+					}
+					if !tc.wantCall {
+						if count != 0 {
+							t.Fatalf("unusable call reached the client: count=%d args=%q\n%s", count, args, wire)
+						}
+						if got := warningCount(warnings, ir.WarningDropped, "function_call.arguments"); got != 1 {
+							t.Fatalf("argument warnings = %d, want 1: %+v", got, warnings)
+						}
+						return
+					}
+					if count != 1 || args != tc.wantArgs {
+						t.Fatalf("tool calls = %d args = %q, want one %q\n%s", count, args, tc.wantArgs, wire)
+					}
+				})
+			}
+		})
+	}
 }
