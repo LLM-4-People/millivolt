@@ -1045,10 +1045,15 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	fallbackOutput := rec.Usage.OutputTokens
 	if a.usage != nil {
 		decodeUsage(a.usage, rec, a.UsageKeys)
-		// A present-but-all-zero usage object is the translated wire's
-		// placeholder. Keep the chunk fallback rather than publishing zero.
-		if rec.Usage == (metrics.Usage{}) && fallbackOutput > 0 {
+		// A present usage object may omit output_tokens (a truncated
+		// Anthropic stream reported only message_start) or be the translated
+		// wire's all-zero placeholder. The streamed chunks are then the only
+		// output count; restore both the output and the tool-excluded
+		// generation count so FinalizeRecord cannot inflate either with
+		// tool-argument chunks.
+		if rec.Usage.OutputTokens == 0 && fallbackOutput > 0 {
 			rec.Usage.OutputTokens = fallbackOutput
+			rec.GenTokens = a.chunkCount - a.toolChunks
 		}
 		// Provider usage-key paths may live beside the usage object in the
 		// raw chunk root; merge them without clobbering normalized counts.
