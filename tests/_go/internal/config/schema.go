@@ -891,6 +891,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"streamed item done status", adapters, "`response.output_item.done` carries `\"completed\"`"},
 		{"translated response identity default", adapters, "A translated non-streaming response assumes a schema-valid source identity"},
 		{"parallel Anthropic blocks", adapters, "open their indexed content blocks concurrently"},
+		{"degenerate Responses sequence reset", adapters, "The degenerate terminal-region substitution emits the same error plus `response.failed` pair at 0 and 1"},
 		{"null header member", protocol, "A JSON `null` member is treated as an omitted header"},
 		{"retained header name cap", operations, "a header name is capped at 512 bytes"},
 		{"retained header name count", operations, "at most 256 names are retained per map"},

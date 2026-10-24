@@ -437,6 +437,13 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 	if errorEvent["type"] != "error" || errorEvent["code"] != metrics.CodeTruncated {
 		t.Fatalf("error event = %v, want the specific truncated code", errorEvent)
 	}
+	// The synthetic pair owns its own 0,1 sequence because the relay does not
+	// track the provider's per-response counter. The stream is already
+	// terminating; the order within the pair is what matters.
+	if errorEvent["sequence_number"] != float64(0) || payloads[1]["sequence_number"] != float64(1) {
+		t.Fatalf("synthetic sequence numbers = %v/%v, want 0/1",
+			errorEvent["sequence_number"], payloads[1]["sequence_number"])
+	}
 	doc := payloads[1]
 	if doc["type"] != "response.failed" {
 		t.Fatalf("event type = %v", doc["type"])

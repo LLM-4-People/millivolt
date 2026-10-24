@@ -166,8 +166,11 @@ event is kept as a forward-compatible extension and a strict client may treat
 it as unknown. Synthetic Responses error and terminal frames emitted on a
 committed socket after an accepted non-completion status restart
 `sequence_number` at 0 and 1; relayed events before that keep their original
-sequence. The reset is a documented contract gap, not a reproduced client
-failure.
+sequence. The degenerate terminal-region substitution emits the same error plus
+`response.failed` pair at 0 and 1 even when earlier streamed events carried
+higher numbers, because the relay does not retain the provider's counter. Both
+reset cases are documented contract gaps, not reproduced client failures; the
+terminal event is final for the turn.
 
 Streaming citations are not translated. A Responses
 `response.output_text.annotation.added` event is not decoded, and a streamed
