@@ -1677,6 +1677,13 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
 		return nil, err
 	}
+	for _, block := range resp.Blocks {
+		if block.Type == ir.BlockToolCall {
+			if err := validateChatToolCall(block.ToolCall); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}

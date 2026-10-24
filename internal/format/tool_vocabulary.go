@@ -23,7 +23,8 @@ func toolVocabularyError(target, field, value, pattern string) error {
 }
 
 // validateChatToolVocabulary enforces the Chat target's name class on every
-// tool and on a named tool choice.
+// declared tool, a named tool choice, and every history tool call. Chat tool
+// ids are not pattern-constrained, so only the name is checked.
 func validateChatToolVocabulary(req *ir.Request) error {
 	for _, tool := range req.Tools {
 		if !chatToolNamePattern.MatchString(tool.Name) {
@@ -33,6 +34,29 @@ func validateChatToolVocabulary(req *ir.Request) error {
 	if req.ToolChoice != nil && req.ToolChoice.Mode == ir.ToolChoiceTool &&
 		!chatToolNamePattern.MatchString(req.ToolChoice.Name) {
 		return toolVocabularyError("chat", "tool_choice.name", req.ToolChoice.Name, "^[a-zA-Z0-9_-]{1,64}$")
+	}
+	for _, message := range req.Messages {
+		for _, block := range message.Content {
+			if block.Type == ir.BlockToolCall {
+				if err := validateChatToolCall(block.ToolCall); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateChatToolCall enforces the Chat target's name class on one tool call.
+// The request and response encoders share it so a call the target would reject
+// fails at the same owner instead of reaching the wire. Chat tool ids have no
+// pattern, so only the name is validated.
+func validateChatToolCall(tc *ir.ToolCall) error {
+	if tc == nil {
+		return nil
+	}
+	if !chatToolNamePattern.MatchString(tc.Name) {
+		return toolVocabularyError("chat", "tool name", tc.Name, "^[a-zA-Z0-9_-]{1,64}$")
 	}
 	return nil
 }

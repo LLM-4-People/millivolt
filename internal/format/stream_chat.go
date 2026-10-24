@@ -410,6 +410,9 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		}
 		e.blockTypes[ev.Index] = ev.Block.Type
 		if ev.Block.Type == ir.BlockToolCall && ev.Block.ToolCall != nil {
+			if err := validateChatToolCall(ev.Block.ToolCall); err != nil {
+				return err
+			}
 			idx := e.nextTool
 			e.nextTool++
 			e.toolIndex[ev.Index] = idx
