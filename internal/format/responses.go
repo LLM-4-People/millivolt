@@ -1287,7 +1287,11 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		resp.Finish = ir.FinishError
 		return resp, nil
 	}
+	outputPhaseSeen := false
 	for i, item := range in.Output {
+		if item.Phase != "" {
+			outputPhaseSeen = true
+		}
 		typ := item.Type
 		if typ == "" && item.Role != "" {
 			typ = "message"
@@ -1345,6 +1349,11 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		default:
 			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
 		}
+	}
+	if outputPhaseSeen {
+		// One warning per response: phase is a per-item hint, and repeating
+		// it for every item would amplify the warning header.
+		resp.Warnings.Add(ir.WarningDropped, "output.phase", "output item phase has no cross-protocol equivalent")
 	}
 	if in.IncompleteDetails != nil && in.IncompleteDetails.Reason != "" {
 		resp.IncompleteReason = in.IncompleteDetails.Reason
