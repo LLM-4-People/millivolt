@@ -908,6 +908,10 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"quota recovery consecutive probes", operations, "consecutive successful probes (the default 1 closes on the first 2xx)"},
 		{"quota recovery protocol wording", protocol, "consecutive successful probes (the default 1 closes on the first 2xx)"},
 		{"quota recovery example wording", example, "consecutive successful probes (the default 1 closes on the first 2xx)"},
+		{"memory limit precedence operations", operations, "With the setting at 0, an operator `GOMEMLIMIT` wins"},
+		{"memory limit override wording", operations, "A set value overrides `GOMEMLIMIT`, not `GOGC`"},
+		{"memory limit precedence example", example, "With the setting at 0, an operator GOMEMLIMIT wins"},
+		{"memory limit override example", example, "a set value overrides GOMEMLIMIT, not GOGC"},
 	} {
 		if !strings.Contains(tc.text, tc.want) {
 			t.Errorf("%s: missing %q", tc.name, tc.want)

@@ -1654,14 +1654,13 @@ record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
 
 `go_memory_limit` is the operator's steady-state RSS lever: a soft cap on Go
 runtime managed memory (heap, stacks, runtime structures) applied once at
-startup. The default `0` uses a detected cgroup ceiling when one exists and
-otherwise leaves the runtime unbounded. `GOMEMLIMIT` wins when set; `GOGC`
-remains independent. With the setting at 0 and no `GOMEMLIMIT`, a finite cgroup
-memory ceiling of at least 80MiB (v2 `memory.max` or v1
+startup. With the setting at 0, an operator `GOMEMLIMIT` wins and otherwise a
+detected finite cgroup memory ceiling of at least 80MiB (v2 `memory.max` or v1
 `memory.limit_in_bytes`) becomes a soft limit at 80% of that ceiling so a
 container's own bound actually reaches the Go runtime; smaller ceilings are
-ignored. A set value overrides `GOMEMLIMIT`, not `GOGC`, for the process
-lifetime. The limit is soft - exceeding it makes the collector
+ignored and, with no `GOMEMLIMIT`, the runtime stays unbounded. A set value
+overrides `GOMEMLIMIT`, not `GOGC`, for the process lifetime. `GOGC` remains
+independent. The limit is soft - exceeding it makes the collector
 more aggressive (capped near 50% of CPU time) instead of failing requests - and
 bounds Go-managed memory only, never SQLite's page cache or OS overhead.
 
