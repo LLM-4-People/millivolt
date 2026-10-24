@@ -501,7 +501,12 @@ function backupRestoreOptionsHTML(b) {
     html += `<label class="st-check"><input type="radio" name="backup-mode" value="replace"${merge ? '' : ' checked'}> replace</label>` +
       `<label class="st-check"><input type="radio" name="backup-mode" value="merge"${merge ? ' checked' : ''}> merge</label>`;
     const hints = [];
-    if (wantCfg) hints.push(merge ? 'overlays keys that differ from default' : 'writes every key from the backup');
+    const cliKeys = cliOverrideKeys();
+    if (wantCfg) {
+      if (merge) hints.push('overlays keys that differ from default');
+      else if (cliKeys.length) hints.push('writes every key from the backup except CLI-overridden ' + cliKeys.join(' and '));
+      else hints.push('writes every key from the backup');
+    }
     if (wantDb) hints.push(merge ? 'inserts request ids that are not already stored' : 'replaces the live database on restart');
     html += `<span class="st-hint">${escapeHtml(hints.join('. '))}.</span>`;
   }
@@ -547,6 +552,14 @@ function backupScalar(v) {
   return String(v);
 }
 
+// cliOverrideKeys names the settings the process-start CLI flags keep pinned
+// through a restore. prepareRestoreConfig applies the live listen/db_path after
+// either mode, so the preview must not claim a replace resets them.
+function cliOverrideKeys() {
+  const overrides = (settingsDoc && settingsDoc.overrides) || {};
+  return ['listen', 'db_path'].filter(k => Object.prototype.hasOwnProperty.call(overrides, k));
+}
+
 function backupDiffRowsHTML(doc) {
   if (!backupInspect || !backupInspect.data) return '';
   const cfg = backupInspect.data.config || {};
@@ -570,6 +583,7 @@ function backupDiffRowsHTML(doc) {
   const live = (doc && doc.values) || (settingsDoc && settingsDoc.values) || {};
   const values = cfg.values || {};
   const merge = backupMode === 'merge';
+  const cliKeys = cliOverrideKeys();
   return keys.map((key, i) => {
     const label = (byKey[key] && byKey[key].label) || key;
     const val = backupScalar(values[key]);
@@ -578,7 +592,8 @@ function backupDiffRowsHTML(doc) {
     let hint = inBackup ? 'default ' + backupScalar(defaults[key]) : 'backup default ' + backupScalar(defaults[key]);
     if (differsLive) hint += ' · live ' + backupScalar(live[key]);
     else if (inBackup) hint += ' · same as live';
-    if (!inBackup) hint += merge ? ' · merge leaves it unchanged' : ' · replace resets it';
+    if (cliKeys.includes(key)) hint += ' · preserved by the CLI override';
+    else if (!inBackup) hint += merge ? ' · merge leaves it unchanged' : ' · replace resets it';
     const id = i === 0 ? ' id="backup-preview"' : '';
     return `<div class="st-row" data-cat="backup" data-backup="diff" data-key="${escapeHtml(key)}" data-label="${escapeHtml(label)} restore"${id}>
       <div class="st-name">${escapeHtml(label)}</div>
