@@ -1485,12 +1485,14 @@ func encodeChatResponseFormat(rf *ir.ResponseFormat) any {
 // bounded choices each carrying a large tool_calls array must not expand every
 // choice before the first is chosen.
 type chatWireResponse struct {
-	ID      string            `json:"id"`
-	Object  string            `json:"object"`
-	Created int64             `json:"created"`
-	Model   string            `json:"model"`
-	Choices []json.RawMessage `json:"choices"`
-	Usage   *chatWireUsage    `json:"usage"`
+	ID          string            `json:"id"`
+	Object      string            `json:"object"`
+	Created     int64             `json:"created"`
+	Model       string            `json:"model"`
+	Choices     []json.RawMessage `json:"choices"`
+	Usage       *chatWireUsage    `json:"usage"`
+	Metadata    map[string]string `json:"metadata"`
+	ServiceTier string            `json:"service_tier"`
 }
 
 type chatWireChoice struct {
@@ -1571,8 +1573,10 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		// decode error from the missing choices.
 		resp := &ir.Response{
 			ID: in.ID, Model: in.Model, Created: in.Created,
-			Error:  &ir.Error{Type: typ, Code: code, Message: msg},
-			Finish: ir.FinishError,
+			Error:       &ir.Error{Type: typ, Code: code, Message: msg},
+			Finish:      ir.FinishError,
+			Metadata:    in.Metadata,
+			ServiceTier: in.ServiceTier,
 		}
 		if in.Usage != nil {
 			resp.Usage = decodeChatUsage(in.Usage)
@@ -1621,12 +1625,14 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	}
 	finish, exactFinish := irFinishReason(choice.Finish)
 	resp := &ir.Response{
-		ID:       in.ID,
-		Model:    in.Model,
-		Created:  in.Created,
-		Blocks:   blocks,
-		Finish:   finish,
-		Warnings: warns,
+		ID:          in.ID,
+		Model:       in.Model,
+		Created:     in.Created,
+		Blocks:      blocks,
+		Finish:      finish,
+		Warnings:    warns,
+		Metadata:    in.Metadata,
+		ServiceTier: in.ServiceTier,
 	}
 	if in.Usage != nil {
 		resp.Usage = decodeChatUsage(in.Usage)
@@ -1709,6 +1715,12 @@ func EncodeChatResponse(resp *ir.Response) ([]byte, error) {
 			// this proxy never requests log probabilities, so it is null.
 			"logprobs": nil,
 		}},
+	}
+	if len(resp.Metadata) > 0 {
+		out["metadata"] = resp.Metadata
+	}
+	if resp.ServiceTier != "" {
+		out["service_tier"] = resp.ServiceTier
 	}
 	if resp.Usage != (ir.Usage{}) {
 		usage, err := encodeChatUsage(resp.Usage)

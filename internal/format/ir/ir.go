@@ -415,6 +415,12 @@ type Response struct {
 
 	Usage Usage `json:"usage"`
 
+	// Metadata and ServiceTier are response-envelope fields the providers echo
+	// back: a string map (bounded by the schema's 16 pairs) and the processing
+	// tier actually used to serve the request.
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	ServiceTier string            `json:"service_tier,omitempty"`
+
 	// Status is the Responses lifecycle status when the source carried one.
 	Status           string `json:"status,omitempty"`
 	IncompleteReason string `json:"incomplete_reason,omitempty"`

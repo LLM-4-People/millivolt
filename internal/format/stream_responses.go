@@ -255,6 +255,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
 				ID: d.id, Model: d.model, Created: d.created, Usage: u,
+				Metadata: resp.Metadata, ServiceTier: resp.ServiceTier,
 			}})
 		case "response.output_item.added":
 			var item responsesWireItem
@@ -2062,6 +2063,8 @@ type ResponsesStreamEncoder struct {
 	order       []int
 	finish      ir.FinishReason
 	usage       ir.Usage
+	metadata    map[string]string
+	serviceTier string
 	failed      *ir.Error
 	retained    int
 	doneSent    bool
@@ -2141,6 +2144,8 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			}
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
 			e.usage = ev.Response.Usage
+			e.metadata = ev.Response.Metadata
+			e.serviceTier = ev.Response.ServiceTier
 		}
 		return e.startStream()
 	case ir.EventBlockStart:
@@ -2337,6 +2342,7 @@ func (e *ResponsesStreamEncoder) responseObject(status, incompleteReason string,
 		IncompleteReason: incompleteReason,
 		Output:           responsesAnyItems(output),
 		Error:            e.failed, Usage: e.usage,
+		Metadata: e.metadata, ServiceTier: e.serviceTier,
 	})
 }
 

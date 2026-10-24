@@ -38,8 +38,9 @@ type chatWireChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *chatWireUsage `json:"usage"`
-	Error *struct {
+	Usage       *chatWireUsage `json:"usage"`
+	ServiceTier string         `json:"service_tier"`
+	Error       *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 		Code    any    `json:"code"`
@@ -157,7 +158,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				d.created = time.Now().Unix()
 			}
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
-				ID: d.id, Model: d.model, Created: d.created,
+				ID: d.id, Model: d.model, Created: d.created, ServiceTier: chunk.ServiceTier,
 			}})
 		}
 		if len(chunk.Choices) > 0 {
@@ -370,6 +371,7 @@ type ChatStreamEncoder struct {
 	finishSent  bool
 	usage       *ir.Usage
 	usageSent   bool
+	serviceTier string
 	// includeUsage is the client's stream_options.include_usage. Official
 	// Chat streaming sends a usage chunk only when the client asked for one.
 	includeUsage bool
@@ -393,6 +395,7 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 	case ir.EventStart:
 		if ev.Response != nil {
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			e.serviceTier = ev.Response.ServiceTier
 		}
 		if e.created == 0 {
 			e.created = time.Now().Unix()
@@ -542,6 +545,12 @@ func (e *ChatStreamEncoder) releaseBlock(index int) {
 }
 
 func (e *ChatStreamEncoder) emit(delta map[string]any, finish any, extra map[string]any) error {
+	if e.serviceTier != "" {
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["service_tier"] = e.serviceTier
+	}
 	obj := sse.Chunk(e.id, e.created, e.model, []map[string]any{sse.DeltaChoice(delta, finish)}, extra)
 	return sse.EmitFrame(e.w, e.flusher, obj)
 }

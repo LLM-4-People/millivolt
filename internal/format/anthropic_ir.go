@@ -1427,6 +1427,12 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		resp.Warnings.Add(ir.WarningApproximated, "stop_reason",
 			"model context window exhaustion is represented as a length finish")
 	}
+	if in.StopReason == "" {
+		// Chat has the same warning on a missing finish_reason; Anthropic
+		// omitted a completion marker, so a Responses target becomes
+		// incomplete and the loss is explicit on every wire.
+		resp.Warnings.Add(ir.WarningApproximated, "stop_reason", "provider omitted the completion marker")
+	}
 	usage, err := anthropicUsageToIR(in.Usage)
 	if err != nil {
 		return nil, err

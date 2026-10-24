@@ -1077,6 +1077,8 @@ type responsesWireResponse struct {
 	Instructions       json.RawMessage     `json:"instructions"`
 	MaxOutputTokens    *int                `json:"max_output_tokens"`
 	Model              string              `json:"model"`
+	Metadata           map[string]string   `json:"metadata"`
+	ServiceTier        string              `json:"service_tier"`
 	Output             []responsesWireItem `json:"output"`
 	ParallelToolCalls  *bool               `json:"parallel_tool_calls"`
 	PreviousResponseID *string             `json:"previous_response_id"`
@@ -1168,10 +1170,12 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		return nil, fmt.Errorf("responses response is not terminal (status %q)", in.Status)
 	}
 	resp := &ir.Response{
-		ID:      in.ID,
-		Model:   in.Model,
-		Created: in.CreatedAt,
-		Status:  in.Status,
+		ID:          in.ID,
+		Model:       in.Model,
+		Created:     in.CreatedAt,
+		Status:      in.Status,
+		Metadata:    in.Metadata,
+		ServiceTier: in.ServiceTier,
 	}
 	if in.Usage != nil {
 		resp.Usage = responsesUsageToIR(in.Usage)
@@ -1312,6 +1316,8 @@ type ResponsesEnvelope struct {
 	Output           []any
 	Error            *ir.Error
 	Usage            ir.Usage
+	Metadata         map[string]string
+	ServiceTier      string
 }
 
 // NewResponsesEnvelope builds the complete response object required by the
@@ -1330,6 +1336,10 @@ func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
 	if output == nil {
 		output = []any{}
 	}
+	metadata := env.Metadata
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
 	out := map[string]any{
 		"id":                   env.ID,
 		"object":               "response",
@@ -1340,7 +1350,7 @@ func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
 		"incomplete_details":   nil,
 		"instructions":         nil,
 		"max_output_tokens":    nil,
-		"metadata":             map[string]any{},
+		"metadata":             metadata,
 		"model":                env.Model,
 		"output":               output,
 		"parallel_tool_calls":  true,
@@ -1363,6 +1373,9 @@ func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
 			code = "server_error"
 		}
 		out["error"] = map[string]any{"code": code, "message": env.Error.Message}
+	}
+	if env.ServiceTier != "" {
+		out["service_tier"] = env.ServiceTier
 	}
 	if env.Usage != (ir.Usage{}) {
 		usage, err := encodeResponsesUsage(env.Usage)
@@ -1461,6 +1474,7 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 		IncompleteReason: incompleteReason,
 		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, &resp.Warnings)),
 		Error:            resp.Error, Usage: resp.Usage,
+		Metadata: resp.Metadata, ServiceTier: resp.ServiceTier,
 	})
 	if err != nil {
 		return nil, err
