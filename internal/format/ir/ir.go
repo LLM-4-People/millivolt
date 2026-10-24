@@ -335,6 +335,11 @@ type Request struct {
 	SafetyIdentifier string `json:"safety_identifier,omitempty"`
 	PromptCacheKey   string `json:"prompt_cache_key,omitempty"`
 
+	// Moderation, when set, asks the target to moderate the input and output.
+	// Chat and Responses share the ModerationParam shape; Anthropic has no
+	// equivalent and drops it with a warning.
+	Moderation *Moderation `json:"moderation,omitempty"`
+
 	// Instructions is the Responses top-level instructions string. Leading
 	// system/developer messages are folded into it by the Responses encoder.
 	Instructions *string `json:"instructions,omitempty"`
@@ -346,6 +351,14 @@ type Request struct {
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 
 	Warnings Warnings `json:"warnings,omitempty"`
+}
+
+// Moderation is the shared Chat/Responses moderation configuration. Policy is
+// retained as its wire subdocument because both request schemas spell the
+// same ModerationParam object.
+type Moderation struct {
+	Model  string          `json:"model"`
+	Policy json.RawMessage `json:"policy,omitempty"`
 }
 
 // FinishReason is the normalized completion cause.
@@ -470,6 +483,9 @@ func ValidateRequest(r *Request) error {
 	}
 	if r.TopK != nil && *r.TopK < 0 {
 		return fmt.Errorf("ir: top_k must not be negative")
+	}
+	if r.Moderation != nil && strings.TrimSpace(r.Moderation.Model) == "" {
+		return fmt.Errorf("ir: moderation.model is required")
 	}
 	if r.TopLogprobs != nil && (*r.TopLogprobs < 0 || *r.TopLogprobs > 20) {
 		return fmt.Errorf("ir: top_logprobs must be between 0 and 20")

@@ -54,6 +54,7 @@ type chatWireRequest struct {
 	Verbosity        string                     `json:"verbosity"`
 	SafetyIdentifier string                     `json:"safety_identifier"`
 	PromptCacheKey   string                     `json:"prompt_cache_key"`
+	Moderation       *ir.Moderation             `json:"moderation"`
 	Store            *bool                      `json:"store"`
 	N                *int                       `json:"n"`
 
@@ -215,6 +216,7 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		Verbosity:         in.Verbosity,
 		SafetyIdentifier:  in.SafetyIdentifier,
 		PromptCacheKey:    in.PromptCacheKey,
+		Moderation:        in.Moderation,
 	}
 	if in.StreamOptions != nil {
 		req.StreamIncludeUsage = in.StreamOptions.IncludeUsage
@@ -1000,6 +1002,9 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.Store != nil {
 		out["store"] = *req.Store
+	}
+	if req.Moderation != nil {
+		out["moderation"] = req.Moderation
 	}
 	tier, tierWarns := mapServiceTier(ir.Chat, req.ServiceTier)
 	req.Warnings = append(req.Warnings, tierWarns...)
