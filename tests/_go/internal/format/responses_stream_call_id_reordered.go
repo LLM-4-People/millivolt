@@ -137,3 +137,261 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+type streamedToolCall struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// streamedToolCalls extracts the tool calls a translated stream opened, keyed
+// by the target's block or tool index.
+func streamedToolCalls(t *testing.T, target ir.Protocol, out string) []*streamedToolCall {
+	t.Helper()
+	byIndex := map[int]*streamedToolCall{}
+	var order []int
+	get := func(index int) *streamedToolCall {
+		call := byIndex[index]
+		if call == nil {
+			call = &streamedToolCall{}
+			byIndex[index] = call
+			order = append(order, index)
+		}
+		return call
+	}
+	for _, frame := range parseWireFrames(t, out) {
+		switch target {
+		case ir.Chat:
+			choices, _ := frame.data["choices"].([]any)
+			if len(choices) == 0 {
+				continue
+			}
+			delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+			calls, _ := delta["tool_calls"].([]any)
+			for _, raw := range calls {
+				call, _ := raw.(map[string]any)
+				index, _ := call["index"].(float64)
+				function, _ := call["function"].(map[string]any)
+				entry := get(int(index))
+				if id, _ := call["id"].(string); id != "" {
+					entry.id = id
+				}
+				if name, _ := function["name"].(string); name != "" {
+					entry.name = name
+				}
+				if args, _ := function["arguments"].(string); args != "" {
+					entry.args.WriteString(args)
+				}
+			}
+		case ir.Anthropic:
+			index, _ := frame.data["index"].(float64)
+			switch frame.event {
+			case "content_block_start":
+				block, _ := frame.data["content_block"].(map[string]any)
+				if block["type"] != "tool_use" {
+					continue
+				}
+				entry := get(int(index))
+				entry.id, _ = block["id"].(string)
+				entry.name, _ = block["name"].(string)
+			case "content_block_delta":
+				delta, _ := frame.data["delta"].(map[string]any)
+				if delta["type"] != "input_json_delta" {
+					continue
+				}
+				if args, _ := delta["partial_json"].(string); args != "" {
+					get(int(index)).args.WriteString(args)
+				}
+			}
+		case ir.Responses:
+			switch frame.event {
+			case "response.output_item.added":
+				item, _ := frame.data["item"].(map[string]any)
+				if item["type"] != "function_call" {
+					continue
+				}
+				index, _ := frame.data["output_index"].(float64)
+				entry := get(int(index))
+				entry.id, _ = item["call_id"].(string)
+				if entry.id == "" {
+					entry.id, _ = item["id"].(string)
+				}
+				entry.name, _ = item["name"].(string)
+				if args, _ := item["arguments"].(string); args != "" && args != "{}" {
+					entry.args.WriteString(args)
+				}
+			case "response.function_call_arguments.delta":
+				index, _ := frame.data["output_index"].(float64)
+				if args, _ := frame.data["delta"].(string); args != "" {
+					get(int(index)).args.WriteString(args)
+				}
+			case "response.output_item.done":
+				item, _ := frame.data["item"].(map[string]any)
+				if item["type"] != "function_call" {
+					continue
+				}
+				index, _ := frame.data["output_index"].(float64)
+				entry := get(int(index))
+				if entry.args.Len() == 0 {
+					if args, _ := item["arguments"].(string); args != "" {
+						entry.args.WriteString(args)
+					}
+				}
+			}
+		}
+	}
+	calls := make([]*streamedToolCall, 0, len(order))
+	for _, index := range order {
+		calls = append(calls, byIndex[index])
+	}
+	return calls
+}
+
+func chatCallID(t *testing.T, target ir.Protocol, call *streamedToolCall) string {
+	t.Helper()
+	if call.name == "" {
+		t.Fatalf("%s call has no name", target)
+	}
+	return call.id
+}
+
+func TestResponsesReorderedIdlessTerminalMatchesIdentifiedAnnouncement(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		announced string
+		wantID    string
+	}{
+		{"announced item id", `{"type":"function_call","id":"fc_a","name":"lookup","arguments":""}`, "fc_a"},
+		{"announced call id", `{"type":"function_call","call_id":"call_a","name":"lookup","arguments":""}`, "call_a"},
+	} {
+		source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":` + tc.announced + `}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","name":"lookup","arguments":"{\"q\":1}"}]}}
+
+`
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					var buf bytes.Buffer
+					if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					out := buf.String()
+					calls := streamedToolCalls(t, target, out)
+					if len(calls) != 1 {
+						t.Fatalf("tool calls = %d, want one: %s", len(calls), out)
+					}
+					if got := chatCallID(t, target, calls[0]); got != tc.wantID {
+						t.Fatalf("tool id = %q, want %q: %s", got, tc.wantID, out)
+					}
+					if strings.TrimSpace(calls[0].args.String()) != `{"q":1}` {
+						t.Fatalf("arguments = %q, want the terminal object: %s", calls[0].args.String(), out)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestResponsesTerminalIdentitySpellingMatchesAnnouncement(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		announced string
+		terminal  string
+		wantID    string
+	}{
+		{
+			name:      "both to item id",
+			announced: `{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}`,
+			terminal:  `{"type":"function_call","id":"fc_1","name":"lookup","arguments":"{\"q\":1}"}`,
+			wantID:    "call_1",
+		},
+		{
+			name:      "both to call id",
+			announced: `{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}`,
+			terminal:  `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}`,
+			wantID:    "call_1",
+		},
+		{
+			name:      "call id to item id",
+			announced: `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":""}`,
+			terminal:  `{"type":"function_call","id":"fc_1","name":"lookup","arguments":"{\"q\":1}"}`,
+			wantID:    "call_1",
+		},
+		{
+			name:      "item id to call id",
+			announced: `{"type":"function_call","id":"fc_1","name":"lookup","arguments":""}`,
+			terminal:  `{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}`,
+			wantID:    "fc_1",
+		},
+	} {
+		source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":` + tc.announced + `}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[` + tc.terminal + `]}}
+
+`
+		t.Run(tc.name, func(t *testing.T) {
+			for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+				t.Run(string(target), func(t *testing.T) {
+					var buf bytes.Buffer
+					if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					out := buf.String()
+					calls := streamedToolCalls(t, target, out)
+					if len(calls) != 1 {
+						t.Fatalf("tool calls = %d, want one: %s", len(calls), out)
+					}
+					if got := chatCallID(t, target, calls[0]); got != tc.wantID {
+						t.Fatalf("tool id = %q, want %q: %s", got, tc.wantID, out)
+					}
+					if strings.TrimSpace(calls[0].args.String()) != `{"q":1}` {
+						t.Fatalf("arguments = %q, want the terminal object: %s", calls[0].args.String(), out)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestResponsesReorderedIdlessTerminalMatchesByName(t *testing.T) {
+	source := terminalStreamCreated + `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","name":"first","arguments":""}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":5,"item":{"type":"function_call","name":"second","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","name":"second","arguments":"{\"s\":2}"},{"type":"function_call","name":"first","arguments":"{\"f\":1}"}]}}
+
+`
+	for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
+		t.Run(string(target), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			out := buf.String()
+			calls := streamedToolCalls(t, target, out)
+			if len(calls) != 2 {
+				t.Fatalf("tool calls = %d, want two: %s", len(calls), out)
+			}
+			want := map[string]string{"first": `{"f":1}`, "second": `{"s":2}`}
+			for _, call := range calls {
+				if got, ok := want[call.name]; !ok {
+					t.Fatalf("unexpected call name %q: %s", call.name, out)
+				} else if strings.TrimSpace(call.args.String()) != got {
+					t.Fatalf("%s arguments = %q, want %q: %s", call.name, call.args.String(), got, out)
+				}
+				delete(want, call.name)
+			}
+			if len(want) != 0 {
+				t.Fatalf("missing calls: %v: %s", want, out)
+			}
+		})
+	}
+}

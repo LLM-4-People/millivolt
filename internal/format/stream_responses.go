@@ -122,6 +122,16 @@ type ResponsesStreamDecoder struct {
 	// openToolKeys names every announced function call whose target block may
 	// still be open, including a call that never carried argument bytes.
 	openToolKeys map[string]bool
+	// toolAliases maps an alternate identity spelling of an announced call to
+	// its canonical key. A terminal entry can carry only the item id after the
+	// announcement used the call id, or the reverse.
+	toolAliases map[string]string
+	// toolAliasByKey maps a canonical call key to the alias it registered, so
+	// closing the call removes both.
+	toolAliasByKey map[string]string
+	// toolNames maps an announced call key to its function name for
+	// identity-free terminal matching.
+	toolNames map[string]string
 	// Announcement identity. A provider's terminal output array is not
 	// required to preserve output_index positions, so dedupe and terminal
 	// completion use stable identities (call id, item id, content index) and
@@ -189,6 +199,9 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		argsEmitted:          map[string]*toolArgumentCoverage{},
 		argumentEvidence:     map[string]bool{},
 		openToolKeys:         map[string]bool{},
+		toolAliases:          map[string]string{},
+		toolAliasByKey:       map[string]string{},
+		toolNames:            map[string]string{},
 		announcedOutputs:     map[int]bool{},
 		announcedItems:       map[string]bool{},
 		announcedParts:       map[string]bool{},
@@ -317,6 +330,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 				d.sawToolCall = true
 				d.openToolKeys[key] = true
+				d.toolNames[key] = item.Name
 				d.openToolItems++
 				if d.openToolItems > toolBlocksMax {
 					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", toolBlocksMax)
@@ -326,6 +340,15 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.itemBlockByKey[key] = idx
 				d.keyByOutput[ev.OutputIndex] = key
 				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				if item.CallID != "" && item.ID != "" {
+					alias := functionCallKey("", item.ID, ev.OutputIndex)
+					if _, exists := d.toolAliases[alias]; !exists {
+						if _, exists := d.itemBlockByKey[alias]; !exists {
+							d.toolAliases[alias] = key
+							d.toolAliasByKey[key] = alias
+						}
+					}
+				}
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
 						ID: toolID, Name: item.Name, Arguments: json.RawMessage(`{}`),
@@ -1107,6 +1130,9 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	clear(d.argsEmitted)
 	clear(d.argumentEvidence)
 	clear(d.openToolKeys)
+	clear(d.toolAliases)
+	clear(d.toolAliasByKey)
+	clear(d.toolNames)
 	clear(d.keyByOutput)
 	clear(d.keyByPart)
 	clear(d.partSeed)
@@ -1443,6 +1469,100 @@ func (d *ResponsesStreamDecoder) appendReasoningValue(item responsesWireItem, it
 	*pending = append(*pending, terminalEmission{block: reasoningTerminalBlock(item), delta: &ir.Delta{Reasoning: value}})
 }
 
+// announcedToolCall is one open, unclaimed function call in output order.
+type announcedToolCall struct {
+	key  string
+	idx  int
+	name string
+}
+
+// resolveToolCallKey maps an alternate identity spelling to the announced
+// call's canonical key.
+func (d *ResponsesStreamDecoder) resolveToolCallKey(key string) string {
+	if canonical, ok := d.toolAliases[key]; ok {
+		return canonical
+	}
+	return key
+}
+
+// openAnnouncedToolCalls lists the open announced function calls the terminal
+// walk has not claimed yet, in output order.
+func (d *ResponsesStreamDecoder) openAnnouncedToolCalls(claimed map[string]bool) []announcedToolCall {
+	positions := make([]int, 0, len(d.keyByOutput))
+	for outputIndex := range d.keyByOutput {
+		positions = append(positions, outputIndex)
+	}
+	sort.Ints(positions)
+	out := make([]announcedToolCall, 0, len(positions))
+	for _, outputIndex := range positions {
+		key := d.keyByOutput[outputIndex]
+		if !d.openToolKeys[key] || claimed[key] {
+			continue
+		}
+		idx, ok := d.itemBlockByKey[key]
+		if !ok || !d.open[idx] {
+			continue
+		}
+		out = append(out, announcedToolCall{key: key, idx: idx, name: d.toolNames[key]})
+	}
+	return out
+}
+
+// terminalToolIdentityCompatible reports whether an identified terminal call
+// may still be the announced call. A call id on both sides with different
+// values is a different call; the name fallback is for mixed item-id and
+// call-id spellings and for id-less entries.
+func terminalToolIdentityCompatible(callID, itemID, candidateKey string) bool {
+	if callID != "" && strings.HasPrefix(candidateKey, "call:") {
+		return false
+	}
+	if callID == "" && itemID != "" && strings.HasPrefix(candidateKey, "item:") {
+		return false
+	}
+	return true
+}
+
+// matchTerminalToolCall resolves a terminal function call that did not match
+// by identity. A unique open announced call with the same name wins; an
+// id-less terminal item then uses its wire position, a lone open call, or the
+// first open id-less call in output order.
+func (d *ResponsesStreamDecoder) matchTerminalToolCall(item responsesWireItem, index int, claimed map[string]bool) (string, int, bool) {
+	open := d.openAnnouncedToolCalls(claimed)
+	if item.Name != "" {
+		match := -1
+		for i, candidate := range open {
+			if candidate.name != item.Name {
+				continue
+			}
+			if match >= 0 {
+				match = -2
+				break
+			}
+			match = i
+		}
+		if match >= 0 && terminalToolIdentityCompatible(item.CallID, item.ID, open[match].key) {
+			return open[match].key, open[match].idx, true
+		}
+	}
+	if item.CallID != "" || item.ID != "" {
+		return "", 0, false
+	}
+	if fallback, exists := d.keyByOutput[index]; exists && d.openToolKeys[fallback] && !claimed[fallback] {
+		if fallbackIdx, open := d.itemBlockByKey[fallback]; open && d.open[fallbackIdx] {
+			return fallback, fallbackIdx, true
+		}
+	}
+	if len(open) == 1 {
+		return open[0].key, open[0].idx, true
+	}
+	for _, candidate := range open {
+		if strings.HasPrefix(candidate.key, "output:") {
+			return candidate.key, candidate.idx, true
+		}
+	}
+	return "", 0, false
+}
+
 // collectTerminalOutput walks the terminal document in its own order. It
 // fills announced blocks that are still open, queues every block that must
 // start fresh (unannounced parts/items and deferred empty announcements), and
@@ -1459,7 +1579,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 		}
 		switch typ {
 		case "function_call":
-			key := functionCallKey(item.CallID, item.ID, i)
+			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
 			idx, ok := d.itemBlockByKey[key]
 			if ok && !d.openToolKeys[key] {
 				// An identity can also name an announced non-tool item at the
@@ -1468,33 +1588,18 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				ok = false
 				idx = 0
 			}
-			if !ok && item.CallID == "" && item.ID == "" {
-				// An id-less terminal item first uses the announcement at the
-				// same wire position. If the terminal array reordered the
-				// items, match the first still-open announced id-less call in
-				// output order instead of synthesizing a second call.
-				if fallback, exists := d.keyByOutput[i]; exists && d.openToolKeys[fallback] {
-					if fallbackIdx, open := d.itemBlockByKey[fallback]; open && !claimedTools[fallback] {
-						key, idx, ok = fallback, fallbackIdx, true
-					}
+			if ok && item.CallID == "" && item.ID == "" && item.Name != "" && d.toolNames[key] != item.Name {
+				// An id-less terminal item has only its name and its array
+				// position. When the position names a different call but a
+				// unique open call carries this name, the name is the stronger
+				// correlation.
+				if matchedKey, matchedIdx, matched := d.matchTerminalToolCall(item, i, claimedTools); matched {
+					key, idx, ok = matchedKey, matchedIdx, true
 				}
-				if !ok {
-					positions := make([]int, 0, len(d.keyByOutput))
-					for outputIndex := range d.keyByOutput {
-						positions = append(positions, outputIndex)
-					}
-					sort.Ints(positions)
-					for _, outputIndex := range positions {
-						fallback := d.keyByOutput[outputIndex]
-						if claimedTools[fallback] || !d.openToolKeys[fallback] ||
-							fallback != functionCallKey("", "", outputIndex) {
-							continue
-						}
-						if fallbackIdx, open := d.itemBlockByKey[fallback]; open && d.open[fallbackIdx] {
-							key, idx, ok = fallback, fallbackIdx, true
-							break
-						}
-					}
+			}
+			if !ok {
+				if matchedKey, matchedIdx, matched := d.matchTerminalToolCall(item, i, claimedTools); matched {
+					key, idx, ok = matchedKey, matchedIdx, true
 				}
 			}
 			if ok && d.open[idx] {
@@ -2140,6 +2245,11 @@ func (d *ResponsesStreamDecoder) clearToolState(key string) {
 	d.dropInitialArgs(key)
 	delete(d.argumentEvidence, key)
 	delete(d.openToolKeys, key)
+	delete(d.toolNames, key)
+	if alias, ok := d.toolAliasByKey[key]; ok {
+		delete(d.toolAliases, alias)
+		delete(d.toolAliasByKey, key)
+	}
 	if cov := d.argsEmitted[key]; cov != nil {
 		d.argsEmittedBytes -= cov.emitted.Len()
 		delete(d.argsEmitted, key)

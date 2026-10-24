@@ -755,6 +755,9 @@ class PublishedContracts(unittest.TestCase):
             "missing, null or whitespace arguments is also rejected unless the source explicitly sent `{}`",
             "first still-open id-less announced call in output order",
             "rather than synthesizing a second call",
+            "accepts either spelling on the terminal item",
+            "unique open announced call with the same name",
+            "the proxy does not guess further",
         ):
             self.assertIn(phrase, adapters)
         for stale in (
