@@ -46,11 +46,14 @@ type chatWireRequest struct {
 	StreamOptions       *struct {
 		IncludeUsage bool `json:"include_usage"`
 	} `json:"stream_options"`
-	Metadata    map[string]json.RawMessage `json:"metadata"`
-	ServiceTier string                     `json:"service_tier"`
-	User        string                     `json:"user"`
-	Store       *bool                      `json:"store"`
-	N           *int                       `json:"n"`
+	Metadata         map[string]json.RawMessage `json:"metadata"`
+	ServiceTier      string                     `json:"service_tier"`
+	User             string                     `json:"user"`
+	Verbosity        string                     `json:"verbosity"`
+	SafetyIdentifier string                     `json:"safety_identifier"`
+	PromptCacheKey   string                     `json:"prompt_cache_key"`
+	Store            *bool                      `json:"store"`
+	N                *int                       `json:"n"`
 
 	// Legacy and provider-specific request fields that the canonical model
 	// does not carry. Present values are reported or converted below.
@@ -207,6 +210,9 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		ServiceTier:       in.ServiceTier,
 		Store:             in.Store,
 		User:              in.User,
+		Verbosity:         in.Verbosity,
+		SafetyIdentifier:  in.SafetyIdentifier,
+		PromptCacheKey:    in.PromptCacheKey,
 	}
 	if in.StreamOptions != nil {
 		req.StreamIncludeUsage = in.StreamOptions.IncludeUsage
@@ -987,6 +993,15 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.User != "" {
 		out["user"] = req.User
+	}
+	if req.Verbosity != "" {
+		out["verbosity"] = req.Verbosity
+	}
+	if req.SafetyIdentifier != "" {
+		out["safety_identifier"] = req.SafetyIdentifier
+	}
+	if req.PromptCacheKey != "" {
+		out["prompt_cache_key"] = req.PromptCacheKey
 	}
 	return sse.MarshalWireJSON(out)
 }

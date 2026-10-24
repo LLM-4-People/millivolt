@@ -48,6 +48,8 @@ type responsesWireRequest struct {
 	Metadata           map[string]string `json:"metadata"`
 	ServiceTier        string            `json:"service_tier"`
 	User               string            `json:"user"`
+	SafetyIdentifier   string            `json:"safety_identifier"`
+	PromptCacheKey     string            `json:"prompt_cache_key"`
 	Include            []string          `json:"include"`
 	Truncation         string            `json:"truncation"`
 	Background         bool              `json:"background"`
@@ -147,6 +149,8 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		Metadata:           in.Metadata,
 		ServiceTier:        in.ServiceTier,
 		User:               in.User,
+		SafetyIdentifier:   in.SafetyIdentifier,
+		PromptCacheKey:     in.PromptCacheKey,
 	}
 	if len(in.Include) > 0 {
 		otherInclude := false
@@ -183,9 +187,7 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		if warn != "" {
 			req.Warnings.Add(ir.WarningDropped, "text.format", warn)
 		}
-		if in.Text.Verbosity != "" {
-			req.Warnings.Add(ir.WarningDropped, "text.verbosity", "no cross-protocol equivalent")
-		}
+		req.Verbosity = in.Text.Verbosity
 	}
 	if in.Truncation != "" && in.Truncation != "disabled" {
 		req.Warnings.Add(ir.WarningDropped, "truncation", "server-side truncation is not translated")
@@ -666,8 +668,15 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 			out["reasoning"] = r
 		}
 	}
-	if req.ResponseFormat != nil {
-		out["text"] = map[string]any{"format": encodeResponsesFormat(req.ResponseFormat)}
+	if req.ResponseFormat != nil || req.Verbosity != "" {
+		text := map[string]any{}
+		if req.ResponseFormat != nil {
+			text["format"] = encodeResponsesFormat(req.ResponseFormat)
+		}
+		if req.Verbosity != "" {
+			text["verbosity"] = req.Verbosity
+		}
+		out["text"] = text
 	}
 	if req.Stream {
 		out["stream"] = true
@@ -688,6 +697,12 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.User != "" {
 		out["user"] = req.User
+	}
+	if req.SafetyIdentifier != "" {
+		out["safety_identifier"] = req.SafetyIdentifier
+	}
+	if req.PromptCacheKey != "" {
+		out["prompt_cache_key"] = req.PromptCacheKey
 	}
 	if req.Logprobs != nil && *req.Logprobs {
 		out["include"] = []string{"message.output_text.logprobs"}

@@ -326,6 +326,14 @@ type Request struct {
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	ServiceTier        string            `json:"service_tier,omitempty"`
 	User               string            `json:"user,omitempty"`
+	// Verbosity is the Chat top-level / Responses text.verbosity level
+	// (low, medium, high). Anthropic has no equivalent.
+	Verbosity string `json:"verbosity,omitempty"`
+	// SafetyIdentifier and PromptCacheKey are shared OpenAI request identity
+	// fields. They cross Chat and Responses unchanged; Anthropic has no
+	// equivalent.
+	SafetyIdentifier string `json:"safety_identifier,omitempty"`
+	PromptCacheKey   string `json:"prompt_cache_key,omitempty"`
 
 	// Instructions is the Responses top-level instructions string. Leading
 	// system/developer messages are folded into it by the Responses encoder.

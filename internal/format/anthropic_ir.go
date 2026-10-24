@@ -565,6 +565,15 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.TopLogprobs != nil {
 		req.Warnings.Add(ir.WarningDropped, "top_logprobs", "Anthropic Messages has no top_logprobs")
 	}
+	if req.Verbosity != "" {
+		req.Warnings.Add(ir.WarningDropped, "verbosity", "Anthropic Messages has no verbosity")
+	}
+	if req.SafetyIdentifier != "" {
+		req.Warnings.Add(ir.WarningDropped, "safety_identifier", "Anthropic Messages has no safety identifier")
+	}
+	if req.PromptCacheKey != "" {
+		req.Warnings.Add(ir.WarningDropped, "prompt_cache_key", "Anthropic Messages has no prompt_cache_key")
+	}
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
 		req.Warnings.Add(ir.WarningApproximated, "response_format.json_object", "Anthropic only supports json_schema")
 	}
