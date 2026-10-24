@@ -222,9 +222,22 @@ func checkChatMessageAnnotations(messages json.RawMessage, field string) error {
 	return nil
 }
 
-// addResponsesContentAnnotations bounds every annotation array of one
-// Responses content-part list and adds its members to the shared aggregate.
-func addResponsesContentAnnotations(total *int, content json.RawMessage, field string) error {
+// responsesNestedBudget is the shared aggregate over every nested Responses
+// content-part and annotation array in one document. Per-array limits alone
+// let thousands of lists at that cap multiply into a typed slice and a warning
+// list that are both far larger than the request.
+type responsesNestedBudget struct {
+	parts       int
+	annotations int
+}
+
+// checkResponsesContent charges one Responses content-part array (message
+// content, reasoning content, or function-call output) to the shared budgets.
+// It enforces the per-array part limit, the aggregate part limit, every nested
+// annotation array's per-array limit and the aggregate annotation limit before
+// the typed decode materializes either. An absent, null or non-array value
+// contributes nothing: function_call_output legitimately accepts a string.
+func checkResponsesContent(budget *responsesNestedBudget, content json.RawMessage, field string) error {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return nil
@@ -238,12 +251,16 @@ func addResponsesContentAnnotations(total *int, content json.RawMessage, field s
 	if err := json.Unmarshal(trimmed, &parts); err != nil {
 		return fmt.Errorf("parse %s: %w", field, err)
 	}
+	if len(parts) > WireNestedCollectionMax-budget.parts {
+		return fmt.Errorf("%s: nested content parts exceed %d", field, WireNestedCollectionMax)
+	}
+	budget.parts += len(parts)
 	for i, part := range parts {
 		annotationField := fmt.Sprintf("%s[%d].annotations", field, i)
 		if err := checkWireArray(part.Annotations, annotationField, metrics.ContentPartMax); err != nil {
 			return err
 		}
-		if err := addWireArray(total, part.Annotations, annotationField, WireNestedCollectionMax); err != nil {
+		if err := addWireArray(&budget.annotations, part.Annotations, annotationField, WireNestedCollectionMax); err != nil {
 			return err
 		}
 	}

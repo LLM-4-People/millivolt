@@ -251,15 +251,18 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 	// Reasoning items carry a summary array that the typed item decode would
 	// materialize unbounded. The enclosing item array is bounded above; the
 	// summaries also share one aggregate budget so thousands of items at the
-	// per-item cap cannot multiply.
+	// per-item cap cannot multiply. Every item's content and function-call
+	// output share one part and annotation budget for the same reason.
 	var itemBounds []struct {
 		Summary json.RawMessage `json:"summary"`
 		Content json.RawMessage `json:"content"`
+		Output  json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(raw, &itemBounds); err != nil {
 		return nil, nil, fmt.Errorf("responses input: %w", err)
 	}
-	summaryTotal, annotationTotal := 0, 0
+	summaryTotal := 0
+	var nested responsesNestedBudget
 	for i, item := range itemBounds {
 		if err := checkWireArray(item.Summary, "input.summary", metrics.ContentPartMax); err != nil {
 			return nil, nil, err
@@ -267,7 +270,10 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 		if err := addWireArray(&summaryTotal, item.Summary, "input.summary", WireNestedCollectionMax); err != nil {
 			return nil, nil, err
 		}
-		if err := addResponsesContentAnnotations(&annotationTotal, item.Content, fmt.Sprintf("input[%d].content", i)); err != nil {
+		if err := checkResponsesContent(&nested, item.Content, fmt.Sprintf("input[%d].content", i)); err != nil {
+			return nil, nil, err
+		}
+		if err := checkResponsesContent(&nested, item.Output, fmt.Sprintf("input[%d].output", i)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1109,7 +1115,8 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		if err := json.Unmarshal(probe.Output, &itemBounds); err != nil {
 			return nil, fmt.Errorf("parse responses response: %w", err)
 		}
-		summaryTotal, annotationTotal := 0, 0
+		summaryTotal := 0
+		var nested responsesNestedBudget
 		for i, item := range itemBounds {
 			if err := checkWireArray(item.Summary, "output.summary", metrics.ContentPartMax); err != nil {
 				return nil, err
@@ -1117,7 +1124,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 			if err := addWireArray(&summaryTotal, item.Summary, "output.summary", WireNestedCollectionMax); err != nil {
 				return nil, err
 			}
-			if err := addResponsesContentAnnotations(&annotationTotal, item.Content, fmt.Sprintf("output[%d].content", i)); err != nil {
+			if err := checkResponsesContent(&nested, item.Content, fmt.Sprintf("output[%d].content", i)); err != nil {
 				return nil, err
 			}
 		}
