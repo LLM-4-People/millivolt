@@ -1382,11 +1382,20 @@ func encodeChatToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {
 
 // chatMessageAnnotations maps IR url citations to the Chat message-level
 // annotation wrapper. Chat accepts url_citation only, so a citation without a
-// URL has no representation and is reported.
+// URL has no representation and is reported. The span is relative to the
+// message content, while each IR citation is relative to its own text block,
+// so the running rune length of preceding text blocks is added to every span.
+// A message encoded as a parts array (an image is present) has no precise
+// message-level span definition; the concatenated-text offset is the best
+// available mapping and matches what text-only clients see.
 func chatMessageAnnotations(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
 	var out []map[string]any
+	offset := 0
 	for _, b := range blocks {
 		if len(b.Citations) == 0 {
+			if b.Type == ir.BlockText {
+				offset += utf8.RuneCountInString(b.Text)
+			}
 			continue
 		}
 		if b.Type != ir.BlockText {
@@ -1417,10 +1426,11 @@ func chatMessageAnnotations(blocks []ir.Block, warns *ir.Warnings) []map[string]
 				"type": "url_citation",
 				"url_citation": map[string]any{
 					"url": c.URL, "title": c.Title,
-					"start_index": c.StartIndex, "end_index": c.EndIndex,
+					"start_index": offset + c.StartIndex, "end_index": offset + c.EndIndex,
 				},
 			})
 		}
+		offset += utf8.RuneCountInString(b.Text)
 	}
 	return out
 }
