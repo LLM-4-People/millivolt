@@ -2690,8 +2690,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					}
 					// A Responses/Anthropic terminal document stays held until
 					// its blank-line boundary so a late event name can follow
-					// in its original position.
-					if blank && (deferredFinish || (!prev && a.Terminated())) {
+					// in its original position. A standalone error event is a
+					// terminal statement of its own and must not wait for EOF:
+					// a provider may keep the connection open after it. This
+					// release is scoped to an observed in-band error, so a
+					// Chat finish-reason hold still waits for usage/[DONE].
+					if blank && (deferredFinish || (!prev && a.Terminated()) || a.HasInBandError()) {
 						if !finishHold() {
 							return rescueNone
 						}
