@@ -848,10 +848,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if ev.Type == "response.failed" {
 				e := &ir.Error{Message: "upstream response failed"}
-				if resp.Error != nil {
-					e.Code, e.Type = resp.Error.Code, resp.Error.Type
-					if resp.Error.Message != "" {
-						e.Message = resp.Error.Message
+				if typ, code, msg := metrics.ParseErrorComponents(resp.Error); typ != "" || code != "" || msg != "" {
+					e.Type, e.Code = typ, code
+					if msg != "" {
+						e.Message = msg
 					}
 				}
 				d.q.push(&ir.Event{Type: ir.EventError, Error: e})

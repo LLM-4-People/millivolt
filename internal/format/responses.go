@@ -1043,11 +1043,14 @@ func encodeResponsesFormat(rf *ir.ResponseFormat) map[string]any {
 }
 
 type responsesWireResponse struct {
-	ID                string              `json:"id"`
-	Object            string              `json:"object"`
-	CreatedAt         int64               `json:"created_at"`
-	Status            string              `json:"status"`
-	Error             *responsesWireError `json:"error"`
+	ID        string `json:"id"`
+	Object    string `json:"object"`
+	CreatedAt int64  `json:"created_at"`
+	Status    string `json:"status"`
+	// Error is raw because the shared envelope parser deliberately accepts a
+	// string value and a numeric code; a typed object would reject those
+	// shapes before the proxy can record the provider's failure.
+	Error             json.RawMessage `json:"error"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
@@ -1065,13 +1068,6 @@ type responsesWireResponse struct {
 	TopP               *float64            `json:"top_p"`
 	Truncation         string              `json:"truncation"`
 	Usage              *responsesWireUsage `json:"usage"`
-}
-
-type responsesWireError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Param   string `json:"param"`
-	Type    string `json:"type"`
 }
 
 type responsesWireUsage struct {
@@ -1165,11 +1161,10 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	}
 	if in.Status == "failed" {
 		e := &ir.Error{Message: "upstream response failed"}
-		if in.Error != nil {
-			e.Code = in.Error.Code
-			e.Type = in.Error.Type
-			if in.Error.Message != "" {
-				e.Message = in.Error.Message
+		if typ, code, msg := metrics.ParseErrorComponents(in.Error); typ != "" || code != "" || msg != "" {
+			e.Type, e.Code = typ, code
+			if msg != "" {
+				e.Message = msg
 			}
 		}
 		resp.Error = e

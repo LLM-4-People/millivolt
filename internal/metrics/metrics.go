@@ -561,11 +561,23 @@ func ParseResponseFailedEnvelope(b []byte) (typ, code, msg string) {
 	return parseErrorValue(probe.Response.Error)
 }
 
-// parseErrorValue applies the canonical envelope rules to an already-captured
-// top-level "error" value. ParseErrorEnvelope and the one-pass non-stream
-// analysis share it so both surfaces read the same decoys, string/numeric
-// codes, fallback type and bounded message.
-func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+// ParseErrorValue applies the canonical envelope rules to an already-captured
+// "error" value and supplies the provider_error classification when the source
+// carried no type. Callers that hold the raw member on a typed wire struct use
+// it instead of re-marshalling a probe object.
+func ParseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+	typ, code, msg = ParseErrorComponents(raw)
+	if typ == "" && (code != "" || msg != "") {
+		typ = "provider_error"
+	}
+	return typ, code, msg
+}
+
+// ParseErrorComponents applies the canonical envelope rules and returns the
+// source's own type, which may be empty. A protocol encoder owns its catch-all
+// spelling (OpenAI's api_error, Anthropic's mapping), so the classification
+// fallback belongs to ParseErrorValue and the record, not to every wire.
+func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return "", "", ""
@@ -597,10 +609,13 @@ func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
 	if typ == "" && code == "" && msg == "" {
 		return "", "", "" // empty object/string: a decoy, not a failure
 	}
-	if typ == "" {
-		typ = "provider_error"
-	}
 	return typ, code, TruncatePreview(msg)
+}
+
+// parseErrorValue is the classification view every record path uses: the
+// source components plus the provider_error fallback.
+func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+	return ParseErrorValue(raw)
 }
 
 // nonRetryableQuotaClasses are provider error type/code strings that, when
