@@ -620,7 +620,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			d.toolArgumentsDelta(d.keyByOutput[outputIndex], idx, ev.Delta)
+			key := d.keyByOutput[outputIndex]
+			if !d.announcedToolKeys[key] || !d.openToolKeys[key] {
+				// itemBlock is an index cache: a reasoning or message
+				// announcement also sets it. Argument bytes belong to a tool
+				// block that is still open; anything else is a stray event.
+				continue
+			}
+			d.toolArgumentsDelta(key, idx, ev.Delta)
 		case "response.reasoning_summary_text.delta":
 			idx, ok := d.itemBlock[outputIndex]
 			if !ok {
@@ -926,7 +933,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			if err := d.flushToolArguments(d.keyByOutput[outputIndex], idx, ev.Arguments, responsesToolArgumentsComplete); err != nil {
+			key := d.keyByOutput[outputIndex]
+			if !d.announcedToolKeys[key] || !d.openToolKeys[key] {
+				continue
+			}
+			if err := d.flushToolArguments(key, idx, ev.Arguments, responsesToolArgumentsComplete); err != nil {
 				return nil, err
 			}
 		case "response.reasoning_summary_part.done":
