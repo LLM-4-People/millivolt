@@ -166,6 +166,10 @@ type ResponsesStreamDecoder struct {
 	usage       ir.Usage
 	finish      ir.FinishReason
 	sawToolCall bool
+	// phaseSeen records that a streamed or terminal item carried the
+	// Responses output phase hint. The target wire has no equivalent, so the
+	// terminal reports it once.
+	phaseSeen bool
 }
 
 // NewResponsesStreamDecoder builds a decoder over one upstream body.
@@ -272,6 +276,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			var item responsesWireItem
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
+			}
+			if item.Phase != "" {
+				d.phaseSeen = true
 			}
 			admitted, err := d.announceOutput(ev.OutputIndex)
 			if err != nil {
@@ -885,10 +892,19 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.usageReported = true
 			}
 			d.terminal = true
-			// The terminal class owns the turn's outcome. Only a clean
-			// completion may turn an incomplete argument value into a
-			// translator failure; failed, incomplete and cancelled terminals
-			// keep their own class and drop the incomplete value.
+			for _, item := range resp.Output {
+				if item.Phase != "" {
+					d.phaseSeen = true
+					break
+				}
+			}
+			if d.phaseSeen {
+				d.warnings.AddOnce(ir.WarningDropped, "output.phase",
+					"Responses output phase has no cross-protocol equivalent")
+			}
+			// The terminal class owns the turn's outcome: completed,
+			// incomplete and cancelled validate tool arguments strictly, while
+			// failed, error and truncated drop the unparseable call.
 			if err := d.closeAll(resp.Output, responsesTerminalClassFor(ev.Type)); err != nil {
 				return nil, err
 			}

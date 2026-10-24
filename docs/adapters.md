@@ -85,6 +85,10 @@ target cannot consume them:
   merging them would corrupt genuinely distinct summary and content text.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
+- A Responses item `phase` is a wire hint with no target equivalent. A
+  non-streaming request or response records one `input.phase` or `output.phase`
+  warning, and a translated stream records one `output.phase` warning on its
+  terminal. The phase text never reaches the client wire.
 - Responses provider-executed tool calls in the shared tool-item vocabulary
   (`custom_tool_call`, `local_shell_call`, `mcp_call`, `computer_call`,
   `tool_search_call` and their peers) are tool activity: they count toward a
