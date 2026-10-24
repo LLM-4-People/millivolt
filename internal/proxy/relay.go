@@ -158,6 +158,13 @@ func markStreamErr(ctx context.Context, rec *metrics.Record, err error) {
 		markClientGone(rec)
 		return
 	}
+	if rec.ClientDisconnected {
+		// The write that failed already classified this as the local client
+		// leaving (a 499/plain disconnect). The same error must not be
+		// re-stamped as an upstream read failure just because a write-progress
+		// deadline, rather than the request context, surfaced it.
+		return
+	}
 	rec.ErrorType = errStreamRead
 	rec.ErrorMsg = err.Error()
 }
