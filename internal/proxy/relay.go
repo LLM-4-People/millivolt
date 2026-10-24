@@ -2955,6 +2955,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 							hold = append(hold, '\n')
 						}
 						hold = append(hold, '\n')
+					} else if len(hold) == 0 && lastLineIsData() {
+						// The content line was already flushed into its own
+						// event. Start the held tail with a separator; a plain
+						// if followed by the boundary block would add a third
+						// newline.
+						hold = append(hold, '\n')
 					}
 					hold = append(hold, tail...)
 					hold = append(hold, '\n', '\n')
@@ -3001,8 +3007,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				// A real read failure is the transport's own error - release
 				// the held bytes verbatim (byte preservation) and never
-				// substitute a synthetic outcome on top.
+				// substitute a synthetic outcome on top. A terminal tail is
+				// still delivered as its own framed event: the non-holding arm
+				// would write it without a trailing blank and the client would
+				// discard it at EOF.
 				markStreamErr(ctx, rec, err)
+				if tailTerminates {
+					holding = true
+				}
 				releaseTail()
 				if holding {
 					if _, werr := writeCounted(w, rec, hold); werr != nil {

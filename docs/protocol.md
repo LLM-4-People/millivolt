@@ -262,7 +262,8 @@ empty or reasoning-only completion resolves through the degenerate boundary,
 which withholds or replaces the terminal bytes. A terminal tail is classified
 before the pre-content rescues, so it is never re-sent. A delivered tail is
 written as its own complete SSE event: a pending event is closed first and a
-blank boundary follows. Answer content that the source places after its finish
+blank boundary follows, on clean EOF and on a read error. Answer content that
+the source places after its finish
 marker is therefore relayed as a later event, and a client that stops at the
 finish reason may ignore it. A terminator-less partial line
 that carries neither a completion terminal marker nor a completion is not

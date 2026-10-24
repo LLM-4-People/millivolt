@@ -856,3 +856,86 @@ func TestTerminalHoldFramesAfterFlushedDataLine(t *testing.T) {
 		t.Fatalf("record = %+v, want a healthy delivered answer and terminal", rec)
 	}
 }
+
+// tailFramingUpstream serves a complete content line, flushes it, then serves
+// an unterminated terminal tail. abort controls whether the body ends cleanly
+// or the connection dies mid-stream.
+func tailFramingUpstream(t *testing.T, abort bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`data: {"id":"1","choices":[{"delta":{"content":"hello"}}]}` + "\n"))
+		w.(http.Flusher).Flush()
+		w.Write([]byte(`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`))
+		w.(http.Flusher).Flush()
+		if abort {
+			panic(http.ErrAbortHandler) // abort mid-body: the proxy sees an unexpected EOF
+		}
+	}))
+}
+
+// assertFramedTerminalTail pins the E1 acceptance shape: the content line and
+// the unterminated terminal tail are separate events and the terminal event has
+// its own blank boundary.
+func assertFramedTerminalTail(t *testing.T, got string) {
+	t.Helper()
+	assertSingleDataEvents(t, got)
+	finish := `data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	if !strings.HasSuffix(got, finish) {
+		t.Fatalf("terminal tail is not framed at EOF: %q", got)
+	}
+	if strings.Contains(got, "\n\n\n") {
+		t.Fatalf("terminal framing added a blank line: %q", got)
+	}
+	if !strings.Contains(got, `"content":"hello"`) {
+		t.Fatalf("content line missing: %q", got)
+	}
+}
+
+// TestTailFramesFlushedDataLineBeforeUnterminatedTerminal is the E1 clean-EOF
+// regression: the content line is flushed in its own event and the terminal
+// tail arrives without a newline. The empty hold must start the tail with a
+// separator instead of joining the flushed data line.
+func TestTailFramesFlushedDataLineBeforeUnterminatedTerminal(t *testing.T) {
+	upstream := tailFramingUpstream(t, false)
+	defer upstream.Close()
+	cfg := newConfigWithQuality(0)
+	cfg.ThinkingRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d (body %q)", status, got)
+	}
+	assertFramedTerminalTail(t, got)
+	rec := waitForRecord(t, buf, 1)[0]
+	if rec.IsError() || !rec.HadAnswerContent || rec.FinishReason != "stop" {
+		t.Fatalf("record = %+v, want a healthy delivered answer and terminal", rec)
+	}
+}
+
+// TestTailFramesFlushedDataLineBeforeUnterminatedTerminalOnReadError is the E1
+// read-error regression: a terminal tail after a flushed content line must be
+// held and framed even though the connection died before EOF.
+func TestTailFramesFlushedDataLineBeforeUnterminatedTerminalOnReadError(t *testing.T) {
+	upstream := tailFramingUpstream(t, true)
+	defer upstream.Close()
+	cfg := newConfigWithQuality(0)
+	cfg.ThinkingRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d (body %q)", status, got)
+	}
+	assertFramedTerminalTail(t, got)
+	rec := waitForRecord(t, buf, 1)[0]
+	if !rec.IsError() {
+		t.Fatalf("record = %+v, want the read failure recorded", rec)
+	}
+}
