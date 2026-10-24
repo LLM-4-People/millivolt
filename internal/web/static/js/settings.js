@@ -2099,7 +2099,7 @@ function scCardHTML(e, i) {
     `<div class="prov-lb"><span>params</span><span class="prov-sub">exact top-level request body fields, checked in order - the first present field decides</span></div>` +
     `<div class="sc-params">${params.map(p => scParamRowHTML(String(p == null ? '' : p))).join('')}</div>` +
     `<div class="prov-add"><input class="sc-param-in" placeholder="body field - e.g. promptCacheKey ↵" aria-label="add tracked body field"><button type="button" class="btn prov-addbtn" data-sc-param-add aria-label="add tracked body field">+</button></div>` +
-    `<label class="st-check"><input type="checkbox" class="st-switch sc-strip"${e.strip ? ' checked' : ''}><span>strip every configured field from the top level of the relayed upstream body - unchecked forwards it unchanged</span></label>` +
+    `<label class="st-check"><input type="checkbox" class="st-switch sc-strip"${e.strip ? ' checked' : ''}><span>strip every configured field from the top level of the client request body before relay or translation - unchecked forwards it unchanged</span></label>` +
     `<div class="mr-err sc-err" aria-live="polite"></div>` +
     `</div>`;
 }

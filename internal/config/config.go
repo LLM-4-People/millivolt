@@ -488,7 +488,8 @@ type Config struct {
 	// request under a k: conversation identity (after the X-Proxy-Session
 	// header, before automatic client+key grouping); an absent or dropped
 	// identity is never rejected, and strip removes every configured field
-	// present at the top level of the relayed upstream body.
+	// present at the top level of the client request body before relay or
+	// translation, including a Responses client body.
 	// validateSubConversations owns the normalization and validation.
 	SubConversations []SubConversation `yaml:"sub_conversations" json:"sub_conversations"`
 }
@@ -697,7 +698,7 @@ const storageWriteChanCapMax = 1_000_000
 // identity: the client whose requests are tracked, the ordered top-level
 // request body field names whose value supplies the identity (the first
 // present one decides), and whether the configured fields are stripped from
-// the relayed upstream body.
+// the top level of the client request body before relay or translation.
 type SubConversation struct {
 	// Client matches the request's classified client name exactly: no
 	// wildcard, no case folding. validateSubConversations trims it.
@@ -711,9 +712,10 @@ type SubConversation struct {
 	// checkSubConversationParam); validateSubConversations trims every name.
 	Params []string `yaml:"params" json:"params"`
 	// Strip removes every configured field present at the top level of the
-	// relayed upstream body for this client, not only the one that supplied
-	// the tracked value. Default false: the configured fields are forwarded
-	// unchanged.
+	// client request body before relay or translation for this client, not
+	// only the one that supplied the tracked value. It applies to any JSON
+	// body, including a Responses client body. Default false: the configured
+	// fields are forwarded unchanged.
 	Strip bool `yaml:"strip" json:"strip"`
 }
 

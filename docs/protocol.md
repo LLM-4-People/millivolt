@@ -448,7 +448,8 @@ rules drops the identity for the request - no later field is consulted. A
 top-level field that occurs more than once is ambiguous and drops the
 identity the same way, leaving the request on automatic grouping. The body is
 relayed unchanged unless the entry sets `strip`, which removes the entry's
-configured fields from the top level of the relayed upstream body. A
+configured fields from the top level of the client request body before relay or
+translation. It applies to any JSON body, including a Responses client body. A
 request translated to the Anthropic wire gains a top-level `prompt_cache_key`
 carrying the tracked value. That field is a proxy tracking extension, not an
 Anthropic cache control, and only upstreams that tolerate unknown top-level

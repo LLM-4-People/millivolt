@@ -698,8 +698,9 @@ func TestSubConversationsTopLevelBoundaryWithStrip(t *testing.T) {
 // TestSubConversationsStripRemovesEveryPresentParam pins strip's
 // deny-completeness for an entry with more than one param: with both
 // configured fields present at the top level, BOTH are removed from the
-// relayed upstream body - not only the one that supplied the tracked value -
-// while the extraction still takes the first present param's value.
+// client request body before relay - not only the one that supplied the
+// tracked value - while the extraction still takes the first present param's
+// value.
 func TestSubConversationsStripRemovesEveryPresentParam(t *testing.T) {
 	upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
 	defer upstream.Close()

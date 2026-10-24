@@ -858,7 +858,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	operations := normalize("operations.md")
 	adapters := normalize("adapters.md")
 	example := exampleHelpText(repositoryText(t, "proxy.example.yaml"))
-	configSource := strings.Join(strings.Fields(repositoryText(t, filepath.Join("internal", "config", "config.go"))), " ")
+	configSource := strings.Join(strings.Fields(strings.ReplaceAll(repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
 
 	for _, tc := range []struct {
 		name string
@@ -869,6 +869,10 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"generated boot repair duplicate key", example, "except an ambiguous duplicate top-level key, which fails closed and stays in place"},
 		{"strip includes Responses", operations, "including a Responses client body"},
 		{"strip is not inbound-limited", operations, "not limited to Chat Completions or Anthropic inbound"},
+		{"strip operations wording", operations, "tracked client-body fields"},
+		{"strip protocol scope", strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", "protocol.md"))), " "), "client request body before relay or translation. It applies to any JSON body, including a Responses client body"},
+		{"strip config list comment", configSource, "client request body before relay or translation, including a Responses client body"},
+		{"strip config field comment", configSource, "It applies to any JSON body, including a Responses client body"},
 		{"streamed item status", adapters, "response.output_item.added"},
 		{"streamed item status transition", adapters, "response.output_item.done"},
 		{"quota wire limit", adapters + " " + example, "OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior"},
@@ -885,6 +889,24 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		if !strings.Contains(tc.text, tc.want) {
 			t.Errorf("%s: missing %q", tc.name, tc.want)
 		}
+	}
+
+	settings := repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings.js"))
+	for name, text := range map[string]string{
+		"config comments": configSource,
+		"protocol doc":    strings.Join(strings.Fields(repositoryText(t, filepath.Join("docs", "protocol.md"))), " "),
+		"operations doc":  operations,
+		"settings label":  settings,
+	} {
+		if strings.Contains(text, "relayed upstream body") {
+			t.Errorf("%s still scopes strip to the relayed upstream body", name)
+		}
+	}
+	if strings.Contains(operations, "governs the passthrough body") {
+		t.Error("operations still calls the stripped fields the passthrough body")
+	}
+	if !strings.Contains(settings, "client request body before relay or translation") {
+		t.Error("settings strip label omits the pre-translation scope")
 	}
 
 	quota := FieldByKey("quota_pause_mode")
