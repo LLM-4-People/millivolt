@@ -289,9 +289,15 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks() {
 	}
 	sort.Ints(indices)
 	for _, idx := range indices {
+		// A skipped provider block never announced a target block, so it must
+		// not receive a stop when the terminal event closes open blocks.
+		if d.skipped[idx] {
+			continue
+		}
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	clear(d.openBlocks)
+	clear(d.skipped)
 	clear(d.toolInitial)
 	d.openToolBlocks = 0
 	d.toolInitialBytes = 0
