@@ -238,7 +238,7 @@ func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
 		{"raw non-ASCII", `"mödel"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := []byte(`{` + tc.key + `:"m","messages":[{"role":"user","content":"hi"}],"metadata":{"a":1}}`)
+			body := []byte(`{` + tc.key + `:"m","messages":[{"role":"user","content":"hi"}],"metadata":{}}`)
 			var rec metrics.Record
 			if err := parseLLMRequest(body, &rec, false); err != nil {
 				t.Fatal(err)

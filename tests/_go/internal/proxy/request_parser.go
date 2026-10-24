@@ -317,8 +317,10 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 		t.Logf("metadata flood: %d bytes, %d bytes/op, %d allocs/op", len(raw), alloc, res.AllocsPerOp())
 	}
 	// The former map decode made one allocation per key (about 87k for this
-	// fixture); a counting scan with a bounded key set stays far below that.
-	if allocs := res.AllocsPerOp(); allocs > 10_000 {
+	// fixture). The merge-aware distinct-key scan retains at most the 10,000-key
+	// bound, and each retained key costs a decoded string plus its map entry;
+	// 25k still keeps the work proportional to the bound, not the body.
+	if allocs := res.AllocsPerOp(); allocs > 25_000 {
 		t.Fatalf("%d-byte metadata map made %d allocs/op, want a bounded key scan", len(raw), allocs)
 	}
 }

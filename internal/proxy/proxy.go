@@ -711,7 +711,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
-			if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
 			}

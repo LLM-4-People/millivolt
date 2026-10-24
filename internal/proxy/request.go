@@ -1851,6 +1851,11 @@ func boundRequestMetadata(body []byte) error {
 	// occurrence still reaches its decoder, so each is counted below.
 	var logitSeen map[string]struct{}
 	logitOver := false
+	// metadata is also a map field. Duplicate metadata objects merge in
+	// encoding/json, so every occurrence contributes distinct keys to the
+	// decoded map and the aggregate must follow the same merge.
+	var metadataSeen map[string]struct{}
+	metadataOver := false
 	// memberSeen counts distinct top-level keys because the rewrite engine and
 	// metadata decode both keep one entry per distinct key; duplicate members
 	// must stay cheap and accepted. Encoding/json retains the last duplicate
@@ -1961,15 +1966,25 @@ func boundRequestMetadata(body []byte) error {
 			}
 			i = next
 		case "metadata":
-			// The metadata map is decoded into a typed map; a hostile member
-			// count would expand there even though the top-level preflight saw
-			// only one value.
-			if !metrics.ObjectWithinLimit(body[i:], requestMetadataMaxElements) {
-				return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
+			// The metadata map is decoded into a typed map and duplicate
+			// objects merge, so count distinct keys across every occurrence.
+			if metadataOver {
+				next := skipJSONValue(body, i)
+				if next < 0 {
+					return nil
+				}
+				i = next
+				break
 			}
-			next := skipJSONValue(body, i)
-			if next < 0 {
+			if metadataSeen == nil {
+				metadataSeen = make(map[string]struct{})
+			}
+			n, next, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements, metadataSeen)
+			if !ok {
 				return nil
+			}
+			if n > requestMetadataMaxElements {
+				metadataOver = true
 			}
 			i = next
 		case "stop":
@@ -1996,7 +2011,7 @@ func boundRequestMetadata(body []byte) error {
 			if logitSeen == nil {
 				logitSeen = make(map[string]struct{})
 			}
-			n, next, ok := countJSONLogitBias(body, i, requestMetadataMaxElements, logitSeen)
+			n, next, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements, logitSeen)
 			if !ok {
 				return nil
 			}
@@ -2041,6 +2056,9 @@ func boundRequestMetadata(body []byte) error {
 	}
 	if logitOver {
 		return requestMetadataOverflow(body, fmt.Errorf("request logit_bias exceeds %d entries", requestMetadataMaxElements))
+	}
+	if metadataOver {
+		return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
 	}
 	return nil
 }
@@ -2619,14 +2637,14 @@ func asciiKeyEqual(raw []byte, name string) bool {
 	return true
 }
 
-// countJSONLogitBias accumulates the distinct keys of one logit_bias object
+// countJSONObjectKeys accumulates the distinct keys of one JSON map value
 // into seen. encoding/json reuses the non-nil map field across duplicate
-// top-level logit_bias objects, so distinct keys, not raw members, are the
-// decoded size. Duplicate members of one object therefore do not consume the
-// bound. Once seen exceeds max, the map is cleared and the rest of the object
-// is skipped without decoding keys; the caller preserves the overflow state
-// and skips later logit_bias occurrences entirely.
-func countJSONLogitBias(data []byte, i, max int, seen map[string]struct{}) (int, int, bool) {
+// top-level map members (metadata, logit_bias), so distinct keys, not raw
+// members, are the decoded size. Duplicate members of one object therefore do
+// not consume the bound. Once seen exceeds max, the map is cleared and the rest
+// of the object is skipped without decoding keys; the caller preserves the
+// overflow state and skips later occurrences entirely.
+func countJSONObjectKeys(data []byte, i, max int, seen map[string]struct{}) (int, int, bool) {
 	i = metrics.SkipSpace(data, i)
 	if i >= len(data) {
 		return 0, 0, false
@@ -2821,17 +2839,32 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
 	if !preview && parseLLMRequestFast(body, rec) {
 		return nil
 	}
-	return parseLLMRequestSlow(body, rec, preview)
+	return parseLLMRequestSlow(body, rec, preview, true)
 }
 
-func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview bool) error {
+// parseGeneratedLLMRequest decodes the proxy's own translated request body.
+// Translation can legitimately add structured content blocks beyond the
+// inbound content-part count (for example one tool result becomes a block and
+// media parts split), so the client-facing aggregate must not reject a body
+// the codec just built. UTF-8 expansion, the typed metadata decode and the
+// token-cap recheck remain active.
+func parseGeneratedLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+	if !preview && parseLLMRequestFast(body, rec) {
+		return nil
+	}
+	return parseLLMRequestSlow(body, rec, preview, false)
+}
+
+func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) error {
 	// Reject replacement expansion before the first typed decode so raw
 	// invalid UTF-8 cannot multiply the request in memory.
 	if requestStringExpansionExceeded(body) {
 		return fmt.Errorf("request body contains invalid UTF-8 that expands beyond the request size")
 	}
-	if err := boundRequestMetadata(body); err != nil {
-		return err
+	if bound {
+		if err := boundRequestMetadata(body); err != nil {
+			return err
+		}
 	}
 	var req struct {
 		requestRouting
