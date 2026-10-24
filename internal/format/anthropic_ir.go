@@ -1074,7 +1074,9 @@ func encodeAnthropicToolChoice(tc *ir.ToolChoice, parallel *bool) map[string]any
 	default:
 		out["type"] = "auto"
 	}
-	if parallel != nil {
+	// ToolChoiceNone carries only its type in the Anthropic schema; the
+	// parallel-use modifier is declared on auto/any/tool only.
+	if parallel != nil && mode != ir.ToolChoiceNone {
 		out["disable_parallel_tool_use"] = !*parallel
 	}
 	return out

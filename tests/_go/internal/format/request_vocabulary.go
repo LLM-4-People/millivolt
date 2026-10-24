@@ -280,3 +280,33 @@ func TestChatTargetEmitsStore(t *testing.T) {
 		t.Fatal("anthropic target accepted store=true")
 	}
 }
+
+// TestAnthropicToolChoiceNoneOmitsParallel pins TC1-U3: ToolChoiceNone has no
+// disable_parallel_tool_use field in the Anthropic schema.
+func TestAnthropicToolChoiceNoneOmitsParallel(t *testing.T) {
+	const tools = `"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]`
+	for _, tc := range []struct {
+		name     string
+		choice   string
+		parallel string
+		want     bool
+	}{
+		{name: "none", choice: `"tool_choice":"none"`, parallel: `"parallel_tool_calls":false`, want: false},
+		{name: "auto", choice: `"tool_choice":"auto"`, parallel: `"parallel_tool_calls":false`, want: true},
+		{name: "required", choice: `"tool_choice":"required"`, parallel: `"parallel_tool_calls":false`, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+				tools + `,` + tc.choice + `,` + tc.parallel + `}`
+			out, _, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := decodeJSONObject(t, out)
+			choice, _ := root["tool_choice"].(map[string]any)
+			if _, ok := choice["disable_parallel_tool_use"]; ok != tc.want {
+				t.Fatalf("disable_parallel_tool_use present = %v, want %v: %s", ok, tc.want, out)
+			}
+		})
+	}
+}
