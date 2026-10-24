@@ -502,6 +502,10 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 	var (
 		out   []ir.Block
 		warns ir.Warnings
+		// textOffset is the running rune length of the text parts before the
+		// current one. A Responses url_citation span is message-relative while
+		// the IR citation is block-relative.
+		textOffset int
 	)
 	for _, p := range parts {
 		if rawPresent(p.PromptCacheBreakpoint) {
@@ -510,10 +514,15 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 		switch p.Type {
 		case "input_text", "output_text", "text", "reasoning_text":
 			block := ir.TextBlock(p.Text)
-			citations, w := decodeResponsesAnnotations(p.Annotations)
+			partRunes := utf8.RuneCountInString(p.Text)
+			citations, w, err := decodeResponsesAnnotations(p.Annotations, textOffset, partRunes)
+			if err != nil {
+				return nil, nil, err
+			}
 			block.Citations = citations
 			warns = append(warns, w...)
 			out = append(out, block)
+			textOffset += partRunes
 		case "refusal":
 			out = append(out, ir.Block{Type: ir.BlockRefusal, Refusal: p.Refusal})
 		case "input_image":
@@ -556,8 +565,11 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 
 // decodeResponsesAnnotations maps the annotation shapes the IR can represent.
 // A url_citation becomes a citation on its text block; a type whose source
-// identity cannot be carried is reported rather than silently discarded.
-func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir.Warnings) {
+// identity cannot be carried is reported rather than silently discarded. The
+// source span is message-relative, so offset (the rune length of preceding text
+// parts) is subtracted and a span outside this part is dropped instead of
+// emitting a negative or out-of-range block span.
+func decodeResponsesAnnotations(in []responsesWireAnnotation, offset, partRunes int) ([]ir.Citation, ir.Warnings, error) {
 	var (
 		out   []ir.Citation
 		warns ir.Warnings
@@ -569,9 +581,23 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 				warns.Add(ir.WarningDropped, "annotations.url_citation", "url_citation has no url")
 				continue
 			}
+			start, err := intFromJSONIndex("url_citation.start_index", a.StartIndex)
+			if err != nil {
+				return nil, nil, err
+			}
+			end, err := intFromJSONIndex("url_citation.end_index", a.EndIndex)
+			if err != nil {
+				return nil, nil, err
+			}
+			start -= offset
+			end -= offset
+			if start < 0 || end < start || end > partRunes {
+				warns.Add(ir.WarningDropped, "annotations.span", "url_citation span falls outside its text part")
+				continue
+			}
 			out = append(out, ir.Citation{
 				Type: "url_citation", URL: a.URL, Title: a.Title,
-				StartIndex: int(a.StartIndex), EndIndex: int(a.EndIndex),
+				StartIndex: start, EndIndex: end,
 			})
 		case "":
 			warns.Add(ir.WarningDropped, "annotations", "annotation has no type")
@@ -579,7 +605,7 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 			warns.Add(ir.WarningDropped, "annotations."+a.Type, "annotation has no cross-protocol equivalent")
 		}
 	}
-	return out, warns
+	return out, warns, nil
 }
 
 // decodeResponsesFunctionCall decodes one function-call item. requireEvidence
