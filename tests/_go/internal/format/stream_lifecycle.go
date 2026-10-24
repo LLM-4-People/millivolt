@@ -250,8 +250,23 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 					}
 				}
 			} else {
-				if !strings.Contains(buf.String(), "event: response.failed") {
-					t.Fatalf("truncated Responses stream has no response.failed: %s", buf.String())
+				names, _ := responseFrameTypes(t, buf.String())
+				position := func(want string) int {
+					for i, name := range names {
+						if name == want {
+							return i
+						}
+					}
+					return -1
+				}
+				partDone := position("response.content_part.done")
+				itemDone := position("response.output_item.done")
+				failed := position("response.failed")
+				if partDone < 0 || itemDone < 0 || failed < 0 {
+					t.Fatalf("truncated Responses stream missed a closing frame: %v", names)
+				}
+				if partDone > failed || itemDone > failed {
+					t.Fatalf("closing frames must precede response.failed: %v", names)
 				}
 				if strings.Contains(buf.String(), "data: [DONE]") {
 					t.Fatalf("Responses stream leaked a Chat sentinel: %s", buf.String())
