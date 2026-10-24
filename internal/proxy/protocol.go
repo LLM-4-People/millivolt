@@ -246,9 +246,12 @@ func writeProtocolStreamError(w io.Writer, rec *metrics.Record, inbound ir.Proto
 }
 
 // translationLossFields lists the distinct fields a strict translation
-// policy must reject. Every warning kind is a recorded loss, including an
-// opaque provider artifact that cannot be replayed across families. Each field
-// is bounded because a decoder can interpolate a body-controlled name.
+// policy must reject on the request side. Every warning kind there is a
+// recorded loss, including an opaque provider artifact that cannot be replayed
+// across families. Response-side warnings are never fatal: they stay in the
+// warning header (non-streaming) or are dropped after the status commit
+// (streaming), regardless of this policy. Each field is bounded because a
+// decoder can interpolate a body-controlled name.
 func translationLossFields(warnings ir.Warnings) []string {
 	var out []string
 	seen := map[string]struct{}{}

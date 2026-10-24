@@ -368,6 +368,7 @@ func TestEnsureToolsForcesNoneForImplicitChoices(t *testing.T) {
 		{name: "auto", body: `{"model":"m",` + messages + `,"tool_choice":"auto"}`, wantStubs: true, wantChoice: "none"},
 		{name: "none", body: `{"model":"m",` + messages + `,"tool_choice":"none"}`, wantStubs: true, wantChoice: "none"},
 		{name: "empty tools auto", body: `{"model":"m",` + messages + `,"tools":[],"tool_choice":"auto"}`, wantStubs: true, wantChoice: "none"},
+		{name: "empty tools absent", body: `{"model":"m",` + messages + `,"tools":[]}`, wantStubs: true, wantChoice: "none"},
 		{name: "required", body: `{"model":"m",` + messages + `,"tool_choice":"required"}`, wantChoice: "required"},
 		{name: "named", body: `{"model":"m",` + messages + `,"tool_choice":{"type":"function","function":{"name":"client_tool"}}}`, wantChoice: named},
 		{name: "malformed", body: `{"model":"m",` + messages + `,"tool_choice":5}`, wantChoice: float64(5)},

@@ -109,3 +109,105 @@ func TestConfiguredTransportModeHeadersAreStripped(t *testing.T) {
 		t.Fatalf("client body lost the completion: %s", w.Body.String())
 	}
 }
+
+func TestRequestOverrideTransportHeadersStripped(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(chatCompletionBody))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.RequestOverrides = []config.RequestOverride{{
+		Headers: map[string]string{
+			"Accept-Encoding": "br",
+			"Range":           "bytes=0-9",
+			"X-Override":      "yes",
+		},
+	}}
+	s := New(cfg, metrics.Noop{})
+	capture := &captureRoundTripper{base: rewriteTransport{target: upstream.URL}}
+	s.client.Store(&http.Client{Transport: capture})
+
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	r.Header.Set("Authorization", "Bearer sk-test")
+	r.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	if got := capture.hdr.Get("Accept-Encoding"); got != "" {
+		t.Fatalf("override Accept-Encoding reached the transport as %q", got)
+	}
+	if got := capture.hdr.Get("Range"); got != "" {
+		t.Fatalf("override Range reached the transport as %q", got)
+	}
+	if got := capture.hdr.Get("X-Override"); got != "yes" {
+		t.Fatalf("ordinary override header = %q, want yes", got)
+	}
+}
+
+func TestModelDiscoveryStripsTransportHeaders(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", http.StatusOK, `{"data":[{"id":"m"}]}`)
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderOverride{
+		"fixture.example": {Headers: map[string]string{
+			"Accept-Encoding": "gzip",
+			"Range":           "bytes=0-1",
+			"X-Keep":          "yes",
+		}},
+	}
+	s := New(cfg, metrics.Noop{})
+	capture := &captureRoundTripper{base: rewriteTransport{target: up.server.URL}}
+	s.client.Store(&http.Client{Transport: capture})
+
+	r := httptest.NewRequest(http.MethodGet, "http://proxy.example/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer sk-test")
+	r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	if got := capture.hdr.Get("Accept-Encoding"); got != "" {
+		t.Fatalf("discovery Accept-Encoding reached the transport as %q", got)
+	}
+	if got := capture.hdr.Get("Range"); got != "" {
+		t.Fatalf("discovery Range reached the transport as %q", got)
+	}
+	if got := capture.hdr.Get("X-Keep"); got != "yes" {
+		t.Fatalf("ordinary discovery header = %q, want yes", got)
+	}
+}
+
+func TestCursorIdentityStripsTransportHeaders(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderOverride{
+		"fixture.example": {Headers: map[string]string{
+			"Accept-Encoding": "gzip",
+			"Range":           "bytes=0-1",
+			"X-Keep":          "yes",
+		}},
+	}
+	s := New(cfg, metrics.Noop{})
+	req := httptest.NewRequest(http.MethodPost, "http://cursor.example/agent.v1.Run", nil)
+	target := &target{provider: "fixture.example", authHeader: "Authorization", authPrefix: "Bearer "}
+	s.setCursorIdentity(req, target, "secret")
+	if got := req.Header.Get("Accept-Encoding"); got != "" {
+		t.Fatalf("cursor Accept-Encoding = %q, want stripped", got)
+	}
+	if got := req.Header.Get("Range"); got != "" {
+		t.Fatalf("cursor Range = %q, want stripped", got)
+	}
+	if got := req.Header.Get("X-Keep"); got != "yes" {
+		t.Fatalf("ordinary cursor header = %q, want yes", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer secret" {
+		t.Fatalf("cursor auth = %q, want the resolved credential", got)
+	}
+	if got := req.Header.Get("Connect-Protocol-Version"); got != "1" {
+		t.Fatalf("cursor protocol header = %q, want 1", got)
+	}
+}
