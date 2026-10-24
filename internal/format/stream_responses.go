@@ -278,9 +278,18 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		if ev.Type == "" {
 			ev.Type = raw.Name
 		}
-		outputIndex := int(ev.OutputIndex)
-		contentIndex := int(ev.ContentIndex)
-		summaryIndex := int(ev.SummaryIndex)
+		outputIndex, err := intFromJSONIndex("output_index", ev.OutputIndex)
+		if err != nil {
+			return nil, err
+		}
+		contentIndex, err := intFromJSONIndex("content_index", ev.ContentIndex)
+		if err != nil {
+			return nil, err
+		}
+		summaryIndex, err := intFromJSONIndex("summary_index", ev.SummaryIndex)
+		if err != nil {
+			return nil, err
+		}
 		switch ev.Type {
 		case "response.created", "response.in_progress":
 			if d.started {

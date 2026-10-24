@@ -7,10 +7,12 @@ package format
 import (
 	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 )
 
 func TestChatResponseIndexAndSpanSpellings(t *testing.T) {
@@ -91,5 +93,31 @@ func TestResponsesStreamIndexSpellings(t *testing.T) {
 		if err := json.Unmarshal([]byte(body), &probe); err == nil {
 			t.Fatalf("fractional %s accepted", field)
 		}
+	}
+}
+
+// TestIntFromJSONIndexPlatformGuard pins the shared narrowing rule: an index
+// beyond the platform int range fails closed on a 32-bit build instead of
+// aliasing onto another map key, while a 64-bit build retains it exactly.
+func TestIntFromJSONIndexPlatformGuard(t *testing.T) {
+	huge := jsonnum.Int64(1 << 32)
+	got, err := intFromJSONIndex("output_index", huge)
+	if strconv.IntSize == 32 {
+		if err == nil {
+			t.Fatalf("32-bit index %d aliased to %d", int64(huge), got)
+		}
+		if !strings.Contains(err.Error(), "out of range") {
+			t.Fatalf("error = %v, want the range rejection", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("64-bit index %d rejected: %v", int64(huge), err)
+	}
+	if int64(got) != int64(huge) {
+		t.Fatalf("index = %d, want %d", got, int64(huge))
+	}
+	if small, err := intFromJSONIndex("content_index", 7); err != nil || small != 7 {
+		t.Fatalf("small index = %d/%v, want 7", small, err)
 	}
 }

@@ -204,9 +204,12 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				// The schema's index is non-negative, and the reserved legacy
 				// index is negative; a negative modern index would merge two
 				// distinct source calls, so reject it at the boundary.
-				chatIndex := int(tc.Index)
-				if tc.Index < 0 || int64(chatIndex) != int64(tc.Index) {
-					return nil, fmt.Errorf("chat stream tool call index %d is negative or out of range", tc.Index)
+				chatIndex, err := intFromJSONIndex("chat stream tool call index", tc.Index)
+				if err != nil {
+					return nil, err
+				}
+				if tc.Index < 0 {
+					return nil, fmt.Errorf("chat stream tool call index %d is negative", tc.Index)
 				}
 				if err := d.toolCall(chatIndex, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
 					return nil, err
