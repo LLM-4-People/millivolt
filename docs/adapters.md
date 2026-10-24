@@ -203,7 +203,10 @@ client sees it, at most 64 KiB, under `whole_document_read_timeout` (default 2
 minutes), so a provider that holds an error stream open can delay the client
 until that bound expires. Pre-commit failures (routing, request validation,
 translation, or an oversized translated body) answer in the client protocol's
-own error envelope.
+own error envelope. Non-streaming translation reads the complete upstream 200
+body and the translated document under a fixed 32 MiB cap each; exceeding
+either fails closed with 502 `response_too_large` before any client bytes. The
+cap is an internal safety constant, not a configurable limit.
 
 Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and

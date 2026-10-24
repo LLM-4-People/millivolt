@@ -573,9 +573,10 @@ Download lists how many live settings differ from default and how many stored
 requests would be packed. Picking a file first inspects the archive: created
 time, size, request span, and each config key as default vs modified vs the
 live file. Inspect loads the live file through the same strict, bounded reader
-as boot and restore: an unknown nested field, an extra YAML document, a
-non-regular file, or a file above the 16 MiB document bound fails the inspect
-instead of comparing against a repaired or partial view. Inspect validates and
+used by config reload and restore, not the boot repair path: an unknown nested
+field, an extra YAML document, a non-regular file, or a file above the 16 MiB
+document bound fails the inspect instead of comparing against a repaired or
+partial view. Inspect validates and
 counts the decoded database file in place and computes its overlap with the
 live store without writing another copy.
 Config **replace** loads and validates the backup, writes canonical YAML, and
@@ -1676,9 +1677,12 @@ storage guarantees.
 
 - Recognized provider fields drive usage/cost; this is not independent billing.
 - Non-streaming usage/cost inspection keeps a bounded prefix, so larger valid
-  responses can forward completely without complete accounting. Optional
-  non-streaming translation buffers the entire body; discovery budgets do not
-  bound that path.
+  responses can forward completely without complete accounting.
+- Optional non-streaming translation reads the complete upstream 200 body and
+  the translated document under a fixed 32 MiB cap each. Exceeding either
+  fails closed with 502 `response_too_large` before any client bytes; the cap
+  is an internal safety constant, not a setting, and discovery budgets do not
+  bound the path.
 - General multi-line SSE accounting/native event assembly remains incomplete;
   some split terminal/content shapes can affect classification, not just metrics.
 - SQL result limits do not bound every intermediate SQLite allocation.

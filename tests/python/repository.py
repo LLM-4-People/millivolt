@@ -728,6 +728,22 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("dashboard and inference share the operator boundary", landing)
         self.assertNotIn("dashboard and the inference listener", landing)
 
+    def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
+        operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
+        self.assertIn("fixed 32 MiB cap each", operations)
+        self.assertIn("502 `response_too_large`", operations)
+        self.assertIn("internal safety constant, not a setting", operations)
+        self.assertIn(
+            "same strict, bounded reader used by config reload and restore, not the boot repair path",
+            operations,
+        )
+        self.assertNotIn("same strict, bounded reader as boot and restore", operations)
+
+        adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
+        self.assertIn("fixed 32 MiB cap each", adapters)
+        self.assertIn("502 `response_too_large`", adapters)
+        self.assertIn("internal safety constant, not a configurable limit", adapters)
+
 
 if __name__ == "__main__":
     unittest.main()
