@@ -1,6 +1,8 @@
 package format
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 
@@ -131,4 +133,26 @@ func validateAnthropicResponseToolVocabulary(resp *ir.Response) error {
 		}
 	}
 	return nil
+}
+
+// toolAllowedCallers validates the allowed_callers knob shared by the
+// Responses and Anthropic tool decoders. The IR and every target can invoke a
+// tool only directly, so a supplied list must still permit "direct"; a
+// programmatic-only list would otherwise become directly callable when the
+// knob is dropped. present reports a non-null value so the caller records the
+// loss. A malformed list fails closed instead of silently widening the tool.
+func toolAllowedCallers(raw json.RawMessage) (present bool, err error) {
+	if !wireValuePresent(raw) {
+		return false, nil
+	}
+	var callers []string
+	if err := json.Unmarshal(raw, &callers); err != nil {
+		return true, fmt.Errorf("allowed_callers: %w", err)
+	}
+	for _, caller := range callers {
+		if caller == "direct" {
+			return true, nil
+		}
+	}
+	return true, errors.New("allowed_callers excludes direct calls, which the target requires")
 }

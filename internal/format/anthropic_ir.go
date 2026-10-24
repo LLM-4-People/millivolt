@@ -531,11 +531,15 @@ func decodeAnthropicTools(in []anthropicWireTool) ([]ir.Tool, ir.Warnings, error
 		if t.Type != "" && t.Type != "custom" {
 			return nil, nil, fmt.Errorf("anthropic tool %d: provider-defined type %q has no cross-protocol equivalent", i, t.Type)
 		}
+		allowedCallers, err := toolAllowedCallers(t.AllowedCallers)
+		if err != nil {
+			return nil, nil, fmt.Errorf("anthropic tool %d: %w", i, err)
+		}
 		for _, field := range []struct {
 			name    string
 			present bool
 		}{
-			{"tool.allowed_callers", len(bytes.TrimSpace(t.AllowedCallers)) > 0 && !bytes.Equal(bytes.TrimSpace(t.AllowedCallers), []byte("null"))},
+			{"tool.allowed_callers", allowedCallers},
 			{"tool.defer_loading", t.DeferLoading != nil},
 			{"tool.input_examples", len(bytes.TrimSpace(t.InputExamples)) > 0 && !bytes.Equal(bytes.TrimSpace(t.InputExamples), []byte("null"))},
 			{"tool.eager_input_streaming", t.EagerInputStreaming != nil},

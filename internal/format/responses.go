@@ -60,14 +60,20 @@ type responsesWireRequest struct {
 	Conversation         json.RawMessage        `json:"conversation"`
 	Prompt               json.RawMessage        `json:"prompt"`
 	ContextManagement    json.RawMessage        `json:"context_management"`
+	AccessPrograms       json.RawMessage        `json:"access_programs"`
+	StreamOptions        json.RawMessage        `json:"stream_options"`
 }
 
 type responsesWireTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"`
-	Strict      *bool           `json:"strict"`
+	Type           string          `json:"type"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	Parameters     json.RawMessage `json:"parameters"`
+	Strict         *bool           `json:"strict"`
+	AllowedCallers json.RawMessage `json:"allowed_callers"`
+	Async          *bool           `json:"async"`
+	DeferLoading   *bool           `json:"defer_loading"`
+	OutputSchema   json.RawMessage `json:"output_schema"`
 }
 
 // responsesWireAnnotation is one output_text annotation. The flat url shape
@@ -208,6 +214,17 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	}
 	if in.MaxToolCalls != nil {
 		req.Warnings.Add(ir.WarningDropped, "max_tool_calls", "no cross-protocol equivalent")
+	}
+	if wireValuePresent(in.AccessPrograms) {
+		req.Warnings.Add(ir.WarningDropped, "access_programs", "provider access programs have no cross-protocol equivalent")
+	}
+	if wireValuePresent(in.StreamOptions) {
+		var opts struct {
+			IncludeObfuscation *bool `json:"include_obfuscation"`
+		}
+		if err := json.Unmarshal(in.StreamOptions, &opts); err == nil && opts.IncludeObfuscation != nil {
+			req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation", "stream obfuscation settings have no cross-protocol equivalent")
+		}
 	}
 	if len(in.Tools) > 0 {
 		tools, warns, err := decodeResponsesTools(in.Tools)
@@ -532,6 +549,22 @@ func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error
 	for i, t := range in {
 		if t.Type != "" && t.Type != "function" {
 			return nil, nil, fmt.Errorf("responses tool %d: provider-defined type %q has no cross-protocol equivalent", i, t.Type)
+		}
+		present, err := toolAllowedCallers(t.AllowedCallers)
+		if err != nil {
+			return nil, nil, fmt.Errorf("responses tool %d: %w", i, err)
+		}
+		if present {
+			warns.Add(ir.WarningDropped, "tool.allowed_callers", "only direct invocation is representable")
+		}
+		if t.Async != nil && *t.Async {
+			warns.Add(ir.WarningDropped, "tool.async", "asynchronous execution has no cross-protocol equivalent")
+		}
+		if t.DeferLoading != nil && *t.DeferLoading {
+			warns.Add(ir.WarningDropped, "tool.defer_loading", "deferred tool loading has no cross-protocol equivalent")
+		}
+		if wireValuePresent(t.OutputSchema) {
+			warns.Add(ir.WarningDropped, "tool.output_schema", "tool output schemas have no cross-protocol equivalent")
 		}
 		if strings.TrimSpace(t.Name) == "" {
 			return nil, nil, fmt.Errorf("responses tool %d: name is required", i)
@@ -955,10 +988,11 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 			}
 			out = append(out, part)
 		case ir.BlockAudio:
-			out = append(out, map[string]any{
-				"type":        "input_audio",
-				"input_audio": map[string]any{"data": b.Audio.Data, "format": b.Audio.Format},
-			})
+			// The current Responses InputContent union is text, image and
+			// file only; an input_audio part would be rejected upstream.
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "content.input_audio", "Responses input has no audio part")
+			}
 		}
 	}
 	return out
