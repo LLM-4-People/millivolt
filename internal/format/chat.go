@@ -1717,7 +1717,7 @@ type chatWireResponse struct {
 	Model       string            `json:"model"`
 	Choices     []json.RawMessage `json:"choices"`
 	Usage       *chatWireUsage    `json:"usage"`
-	Metadata    map[string]string `json:"metadata"`
+	Metadata    boundedStringMap  `json:"metadata"`
 	ServiceTier string            `json:"service_tier"`
 }
 
@@ -1762,20 +1762,13 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	// the first choice is translated, and a body of tiny objects must not
 	// expand into an unbounded slice.
 	var probe struct {
-		Choices  json.RawMessage `json:"choices"`
-		Metadata json.RawMessage `json:"metadata"`
+		Choices json.RawMessage `json:"choices"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
 		return nil, fmt.Errorf("parse chat response: %w", err)
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Choices) {
 		return nil, fmt.Errorf("chat response choices exceed %d items", metrics.ContentPartMax)
-	}
-	// The metadata map is retained on the canonical response and re-emitted.
-	// Bound it before the typed map decode so a body of tiny members cannot
-	// expand a response into hundreds of MiB.
-	if err := checkWireObject(probe.Metadata, "metadata", WireCollectionMax); err != nil {
-		return nil, err
 	}
 	// The first choice is the one translated; decode it alone from its raw
 	// bytes and bound its tool_calls array so the other choices' arrays are
@@ -1826,7 +1819,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 			ID: in.ID, Model: in.Model, Created: int64(in.Created),
 			Error:       &ir.Error{Type: typ, Code: code, Message: msg},
 			Finish:      ir.FinishError,
-			Metadata:    in.Metadata,
+			Metadata:    in.Metadata.values,
 			ServiceTier: in.ServiceTier,
 		}
 		if in.Usage != nil {
@@ -1917,7 +1910,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		Blocks:      blocks,
 		Finish:      finish,
 		Warnings:    warns,
-		Metadata:    in.Metadata,
+		Metadata:    in.Metadata.values,
 		ServiceTier: in.ServiceTier,
 	}
 	if in.Usage != nil {

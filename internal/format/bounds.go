@@ -220,6 +220,58 @@ func checkWireObject(raw json.RawMessage, field string, max int) error {
 	return fmt.Errorf("%s exceeds %d members", field, max)
 }
 
+// boundedStringMap decodes an optional string map while counting distinct keys
+// across duplicate object members. encoding/json merges duplicate occurrences
+// into the same map, so a per-occurrence check cannot see the combined size.
+// Each occurrence is lexically bounded before its typed decode, then the
+// merged distinct-key total is checked before any key is stored. A null
+// occurrence resets the map, matching encoding/json's last-wins behavior.
+//
+// encoding/json keeps invoking UnmarshalJSON for later duplicate members even
+// after one returns an error, so the first failure is sticky: later calls
+// return it without decoding or allocating another occurrence's map.
+type boundedStringMap struct {
+	values map[string]string
+	err    error
+}
+
+func (m *boundedStringMap) UnmarshalJSON(raw []byte) error {
+	if m.err != nil {
+		return m.err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		m.values = nil
+		return nil
+	}
+	if !metrics.ObjectWithinLimit(trimmed, WireCollectionMax) {
+		m.err = fmt.Errorf("metadata exceeds %d members", WireCollectionMax)
+		return m.err
+	}
+	var decoded map[string]string
+	if err := json.Unmarshal(trimmed, &decoded); err != nil {
+		m.err = err
+		return err
+	}
+	if m.values == nil {
+		m.values = make(map[string]string, len(decoded))
+	}
+	added := 0
+	for key := range decoded {
+		if _, exists := m.values[key]; !exists {
+			added++
+		}
+	}
+	if len(m.values)+added > WireCollectionMax {
+		m.err = fmt.Errorf("metadata exceeds %d members", WireCollectionMax)
+		return m.err
+	}
+	for key, value := range decoded {
+		m.values[key] = value
+	}
+	return nil
+}
+
 // anthropicNestedDepthMax bounds the nesting of content arrays inside one
 // Anthropic block. The schema's deepest representable path is a tool_result
 // whose document source carries content (roughly three levels), so 16 is

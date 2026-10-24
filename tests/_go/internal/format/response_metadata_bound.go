@@ -72,3 +72,75 @@ func TestResponseMetadataBound(t *testing.T) {
 		})
 	}
 }
+
+// TestResponseMetadataDuplicateObjectsMergedBound is the NEW-2 regression:
+// encoding/json merges duplicate metadata members into one map, so a bound
+// applied to each occurrence separately misses the merged size.
+func TestResponseMetadataDuplicateObjectsMergedBound(t *testing.T) {
+	chat := func(objects ...string) (int, error) {
+		body := `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"metadata":` +
+			strings.Join(objects, `,"metadata":`) + `}`
+		resp, err := DecodeChatResponse([]byte(body))
+		if err != nil {
+			return 0, err
+		}
+		return len(resp.Metadata), nil
+	}
+	responses := func(objects ...string) (int, error) {
+		body := `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[],"metadata":` +
+			strings.Join(objects, `,"metadata":`) + `}`
+		resp, err := DecodeResponsesResponse([]byte(body))
+		if err != nil {
+			return 0, err
+		}
+		return len(resp.Metadata), nil
+	}
+	cases := []struct {
+		name   string
+		decode func(...string) (int, error)
+	}{
+		{"chat", chat},
+		{"responses", responses},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disjoint := []string{numberedStringObject("a", 5_001), numberedStringObject("b", 5_001)}
+			if _, err := tc.decode(disjoint...); err == nil {
+				t.Fatal("two disjoint 5,001-member metadata objects were accepted")
+			} else if !strings.Contains(err.Error(), "metadata exceeds 10000 members") {
+				t.Fatalf("error = %v, want the merged metadata member bound", err)
+			}
+
+			identical := []string{numberedStringObject("a", 5_001), numberedStringObject("a", 5_001)}
+			got, err := tc.decode(identical...)
+			if err != nil {
+				t.Fatalf("two identical 5,001-member objects were rejected: %v", err)
+			}
+			if got != 5_001 {
+				t.Fatalf("merged metadata members = %d, want 5001 distinct", got)
+			}
+		})
+	}
+}
+
+// TestResponseMetadataDuplicateAllocationBounded pins the allocation guard:
+// duplicate objects are rejected at the merged bound before their members
+// accumulate, so a body of many 5,000-member objects cannot expand into a map
+// proportional to every occurrence.
+func TestResponseMetadataDuplicateAllocationBounded(t *testing.T) {
+	objects := make([]string, 100)
+	for i := range objects {
+		objects[i] = numberedStringObject(fmt.Sprintf("k%d_", i), 5_000)
+	}
+	body := `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"metadata":` +
+		strings.Join(objects, `,"metadata":`) + `}`
+	alloc := allocDelta(func() {
+		if _, err := DecodeChatResponse([]byte(body)); err == nil {
+			t.Fatal("100 duplicate 5,000-member metadata objects were accepted")
+		}
+	})
+	if alloc > 16<<20 {
+		t.Fatalf("%d-byte duplicate metadata allocated %d bytes, want <= 16 MiB", len(body), alloc)
+	}
+	t.Logf("duplicate metadata: %d bytes, %d bytes allocated", len(body), alloc)
+}

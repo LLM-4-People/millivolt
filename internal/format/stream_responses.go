@@ -318,7 +318,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
 				ID: d.id, Model: d.model, Created: d.created, Usage: u,
-				Metadata: resp.Metadata, ServiceTier: resp.ServiceTier,
+				Metadata: resp.Metadata.values, ServiceTier: resp.ServiceTier,
 			}})
 		case "response.output_item.added":
 			var item responsesWireItem
