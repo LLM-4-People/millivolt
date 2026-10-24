@@ -1202,12 +1202,13 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			}
 			return
 		}
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !isEventStream(resp.Header.Get("Content-Type")) {
-			// The first attempt committed an event-stream socket. A retry
-			// that answers a non-SSE 2xx completion (for example JSON) must
-			// not be scanned and injected as raw stream bytes; surface one
-			// protocol-native in-band error and stop before streamBody reads
-			// the document as SSE.
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 || !isEventStream(resp.Header.Get("Content-Type")) {
+			// The first attempt committed an event-stream socket. Only another
+			// 2xx event stream can continue that socket. A retry answering a
+			// 1xx, a redirect, or a non-SSE 2xx completion (for example JSON)
+			// must not be scanned and injected as raw stream bytes, and a
+			// redirect is never followed: surface one protocol-native in-band
+			// error and stop before streamBody reads the document as SSE.
 			rec.ErrorType = sse.TypeUpstreamError
 			rec.ErrorCode = metrics.CodeTruncated
 			rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
@@ -1215,8 +1216,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				markClientGone(rec)
 			}
 			return
-		}
-	}
+		}	}
 }
 
 // parseErrorBody extracts the provider's structured error detail (type, code,

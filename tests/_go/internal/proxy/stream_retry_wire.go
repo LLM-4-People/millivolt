@@ -59,3 +59,54 @@ func TestStreamingRetryNonSSE200StaysInBand(t *testing.T) {
 		t.Fatalf("retries = %d, want 1", rec.Retries)
 	}
 }
+
+func TestStreamingRetryRedirectStaysInBand(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Location", "http://elsewhere.example/steal")
+		w.WriteHeader(http.StatusFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"moved-away","type":"api_error"}}`))
+	}))
+	defer upstream.Close()
+	buf := metrics.NewBuffer(8)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequestTo(t, srv, upstream, "/v1/chat/completions",
+		`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", status, got)
+	}
+	if strings.Contains(got, "moved-away") || strings.Contains(got, `{"error":{"message":"moved-away"`) {
+		t.Fatalf("redirect body was injected into the stream: %s", got)
+	}
+	if strings.Count(got, `"code":"truncated"`) != 1 {
+		t.Fatalf("want exactly one in-band truncated error: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("want exactly one [DONE]: %s", got)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls.Load())
+	}
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.StatusCode != http.StatusFound || rec.ErrorType != "upstream_error" ||
+		rec.ErrorCode != metrics.CodeTruncated || !rec.IsError() {
+		t.Fatalf("record = status %d type %q code %q error %v, want 302/upstream_error/truncated",
+			rec.StatusCode, rec.ErrorType, rec.ErrorCode, rec.IsError())
+	}
+	if rec.Retries != 1 {
+		t.Fatalf("retries = %d, want 1", rec.Retries)
+	}
+}
