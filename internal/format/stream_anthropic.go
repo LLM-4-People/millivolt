@@ -85,6 +85,11 @@ type AnthropicStreamDecoder struct {
 	openToolBlocks   int
 	toolInitialBytes int
 	toolInitial      map[int]int
+	// toolStartNonEmpty records tool blocks whose content_block_start carried
+	// a complete input beyond the official empty object. A later
+	// input_json_delta cannot be combined with it: the start is a complete
+	// JSON object, not a prefix fragment, so raw concatenation is invalid.
+	toolStartNonEmpty map[int]bool
 	// toolInput accumulates input_json_delta fragments per open tool block so
 	// the completed value can be validated as a JSON object before the target
 	// receives a clean block end. The bytes are forwarded as they arrive;
@@ -108,13 +113,14 @@ type AnthropicStreamDecoder struct {
 // when non-nil, receives every raw data payload synchronously.
 func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *AnthropicStreamDecoder {
 	return &AnthropicStreamDecoder{
-		r:           newSSEReader(r),
-		skipped:     map[int]bool{},
-		observe:     observe,
-		toolInitial: map[int]int{},
-		toolInput:   map[int]*strings.Builder{},
-		openBlocks:  map[int]bool{},
-		seenBlocks:  map[int]struct{}{},
+		r:                 newSSEReader(r),
+		skipped:           map[int]bool{},
+		observe:           observe,
+		toolInitial:       map[int]int{},
+		toolStartNonEmpty: map[int]bool{},
+		toolInput:         map[int]*strings.Builder{},
+		openBlocks:        map[int]bool{},
+		seenBlocks:        map[int]struct{}{},
 	}
 }
 
@@ -241,6 +247,9 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if err := validateStreamedToolArguments(string(block.Input)); err != nil {
 					return nil, fmt.Errorf("anthropic stream tool %q: %w", boundedEcho(block.Name), err)
 				}
+				if input := strings.TrimSpace(string(block.Input)); input != "" && input != "{}" {
+					d.toolStartNonEmpty[ev.Index] = true
+				}
 			}
 			irBlock, ok := anthropicStreamBlock(block)
 			if !ok {
@@ -271,6 +280,13 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			case "text_delta":
 				out.Text = delta.Text
 			case "input_json_delta":
+				if d.toolStartNonEmpty[ev.Index] {
+					// The official start input is {}. A complete object at
+					// start plus a delta is not a prefix continuation, and
+					// concatenating them yields invalid arguments no target
+					// can represent. Fail closed before forwarding the delta.
+					return nil, fmt.Errorf("anthropic stream tool index %d carries a non-empty start input and input_json_delta", ev.Index)
+				}
 				out.Arguments = delta.PartialJSON
 				if _, open := d.toolInitial[ev.Index]; open && delta.PartialJSON != "" {
 					if len(delta.PartialJSON) > streamToolArgumentsMax-d.toolInputBytes {
@@ -301,6 +317,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				d.openToolBlocks--
 				d.toolInitialBytes -= n
 				delete(d.toolInitial, ev.Index)
+				delete(d.toolStartNonEmpty, ev.Index)
 			}
 			if d.skipped[ev.Index] {
 				delete(d.skipped, ev.Index)
@@ -455,6 +472,7 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks(validateToolArguments bool) err
 	clear(d.openBlocks)
 	clear(d.skipped)
 	clear(d.toolInitial)
+	clear(d.toolStartNonEmpty)
 	clear(d.toolInput)
 	d.openToolBlocks = 0
 	d.toolInitialBytes = 0
