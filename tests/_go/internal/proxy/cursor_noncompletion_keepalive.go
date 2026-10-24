@@ -136,4 +136,7 @@ func TestCommittedPacer202FailsClosed(t *testing.T) {
 	if rec.ErrorType != "api_error" {
 		t.Fatalf("record error type = %q, want api_error", rec.ErrorType)
 	}
+	if rec.StatusCode != http.StatusOK {
+		t.Fatalf("record status = %d, want the committed 200", rec.StatusCode)
+	}
 }

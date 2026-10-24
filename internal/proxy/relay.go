@@ -256,6 +256,9 @@ func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWr
 		}
 		if p.statusCommitted() {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+			// The pacer's kept-alive status line is the success 200; the
+			// record must describe the status the client actually saw.
+			rec.StatusCode = http.StatusOK
 			rec.ErrorType, rec.ErrorMsg = typ, msg
 			if werr := writeProtocolStreamError(w, rec, inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 				markClientGone(rec)
