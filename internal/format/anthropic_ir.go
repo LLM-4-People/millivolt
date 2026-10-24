@@ -1010,7 +1010,51 @@ func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir
 			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(contentBlocks, m.Role, warns))
 		}
 	}
+	out = liftMisplacedAnthropicSystemRuns(out, &systemBlocks, warns)
 	return anthropicTextContent(systemBlocks), out
+}
+
+// liftMisplacedAnthropicSystemRuns applies the emitted-role placement rule as
+// a post-pass. Placement is decided from the source roles during the loop, but
+// an empty assistant turn or an unrepresentable user turn can encode to
+// nothing, leaving the system run between two emitted user turns - a shape
+// Anthropic rejects. A system run is valid only before an emitted assistant
+// turn or at the end; every other kept run moves to the top-level prompt with
+// one approximation warning. The pass may leave adjacent user turns; Anthropic
+// merges them server-side, and the tool_result adjacency the encoder owns is
+// not disturbed.
+func liftMisplacedAnthropicSystemRuns(out []anthropicOutMessage, systemBlocks *[]map[string]any, warns *ir.Warnings) []anthropicOutMessage {
+	if len(out) == 0 {
+		return out
+	}
+	kept := out[:0]
+	for i, turn := range out {
+		if turn.Role == "system" && i+1 < len(out) && out[i+1].Role != "assistant" {
+			blocks := anthropicOutSystemBlocks(turn.Content)
+			*systemBlocks = append(*systemBlocks, blocks...)
+			if len(blocks) > 0 && warns != nil {
+				warns.AddOnce(ir.WarningApproximated, "system", "a system message was moved before the conversation because Anthropic only accepts one after a user turn and before an assistant turn")
+			}
+			continue
+		}
+		kept = append(kept, turn)
+	}
+	return kept
+}
+
+// anthropicOutSystemBlocks converts one already-rendered in-conversation
+// system turn back to the block form the top-level system field uses.
+func anthropicOutSystemBlocks(content any) []map[string]any {
+	switch rendered := content.(type) {
+	case string:
+		if rendered == "" {
+			return nil
+		}
+		return []map[string]any{{"type": "text", "text": rendered}}
+	case []map[string]any:
+		return rendered
+	}
+	return nil
 }
 
 // appendAnthropicTurn appends one rendered turn and merges it into a
