@@ -115,6 +115,15 @@ func checkWireObject(raw json.RawMessage, field string, max int) error {
 	return fmt.Errorf("%s exceeds %d members", field, max)
 }
 
+// anthropicNestedDepthMax bounds the nesting of content arrays inside one
+// Anthropic block. The schema's deepest representable path is a tool_result
+// whose document source carries content (roughly three levels), so 16 is
+// generous. The bound is required rather than cosmetic: the preflight
+// re-unmarshals the remaining subtree at every level and the typed decode
+// re-walks each nested content array, so an unbounded chain is cubic in the
+// request body and can exhaust CPU and heap at the JSON depth limit.
+const anthropicNestedDepthMax = 16
+
 // checkAnthropicCitations bounds every citations array and nested content
 // array in one Anthropic content-block list before the typed decode
 // materializes them. A block list is already bounded by ContentPartMax, but
@@ -141,6 +150,9 @@ type anthropicNestedBudget struct {
 // deeper arrays are the nested tool_result/document content that can multiply
 // through their parents.
 func checkAnthropicBlockList(raw json.RawMessage, field string, depth int, budget *anthropicNestedBudget) error {
+	if depth > anthropicNestedDepthMax {
+		return fmt.Errorf("%s exceeds %d nested content levels", field, anthropicNestedDepthMax)
+	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return nil
