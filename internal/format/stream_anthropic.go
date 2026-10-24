@@ -551,6 +551,7 @@ type AnthropicStreamEncoder struct {
 	open       map[int]bool
 	skipped    map[int]bool
 	unopened   map[int]bool
+	blockTypes map[int]ir.BlockType
 	blockArgs  map[int]json.RawMessage
 	argSent    map[int]bool
 	finishSent bool
@@ -562,11 +563,12 @@ type AnthropicStreamEncoder struct {
 func NewAnthropicStreamEncoder(w io.Writer, flusher http.Flusher) *AnthropicStreamEncoder {
 	return &AnthropicStreamEncoder{
 		w: w, flusher: flusher,
-		open:      map[int]bool{},
-		skipped:   map[int]bool{},
-		unopened:  map[int]bool{},
-		blockArgs: map[int]json.RawMessage{},
-		argSent:   map[int]bool{},
+		open:       map[int]bool{},
+		skipped:    map[int]bool{},
+		unopened:   map[int]bool{},
+		blockTypes: map[int]ir.BlockType{},
+		blockArgs:  map[int]json.RawMessage{},
+		argSent:    map[int]bool{},
 	}
 }
 
@@ -640,6 +642,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		if ev.Block == nil {
 			return nil
 		}
+		e.blockTypes[ev.Index] = ev.Block.Type
 		switch ev.Block.Type {
 		case ir.BlockText, ir.BlockRefusal:
 			e.open[ev.Index] = true
@@ -747,6 +750,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				return err
 			}
 		}
+		delete(e.blockTypes, ev.Index)
 		delete(e.blockArgs, ev.Index)
 		delete(e.argSent, ev.Index)
 		delete(e.skipped, ev.Index)
@@ -869,11 +873,18 @@ func (e *AnthropicStreamEncoder) finish() error {
 // Close finishes the stream if the caller did not deliver EventDone.
 func (e *AnthropicStreamEncoder) Close() error { return e.finish() }
 
-// Abort closes every content block this encoder opened without flushing any
-// retained tool input. The proxy terminates the committed stream with its
+// Abort closes every non-tool content block this encoder opened without
+// flushing any retained tool input. An open tool block has no validated
+// argument value: content_block_stop would finalize the empty input object its
+// start announced, so it is left open and the proxy's error frame terminates
+// the stream. The proxy terminates the committed stream with its
 // protocol-native error frame immediately afterwards.
 func (e *AnthropicStreamEncoder) Abort() error {
 	for _, idx := range sortedKeys(e.open) {
+		if e.blockTypes[idx] == ir.BlockToolCall {
+			delete(e.open, idx)
+			continue
+		}
 		if err := e.emit("content_block_stop", map[string]any{
 			"type": "content_block_stop", "index": idx,
 		}); err != nil {
@@ -881,6 +892,7 @@ func (e *AnthropicStreamEncoder) Abort() error {
 		}
 		delete(e.open, idx)
 	}
+	clear(e.blockTypes)
 	clear(e.blockArgs)
 	clear(e.argSent)
 	clear(e.skipped)

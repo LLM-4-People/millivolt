@@ -115,7 +115,11 @@ func TestResponsesEncoderFrameCapAbortsOpenPart(t *testing.T) {
 	}
 }
 
-func TestAnthropicAbortClosesOnlyOpenedBlocks(t *testing.T) {
+// TestAnthropicAbortClosesOnlyOpenedNonToolBlocks pins the round 8 NEW-1
+// contract: an open tool block has no validated argument value, so Abort must
+// not emit the content_block_stop that would finalize its empty input object.
+// The proxy error frame terminates the stream instead.
+func TestAnthropicAbortClosesOnlyOpenedNonToolBlocks(t *testing.T) {
 	var buf bytes.Buffer
 	enc := NewAnthropicStreamEncoder(&buf, nil)
 	for _, ev := range []*ir.Event{
@@ -145,8 +149,8 @@ func TestAnthropicAbortClosesOnlyOpenedBlocks(t *testing.T) {
 			t.Fatalf("abort emitted a terminal frame: %v", frame.data)
 		}
 	}
-	if len(stops) != 2 || stops[0] != 0 || stops[1] != 2 {
-		t.Fatalf("closed block indices = %v, want only the opened blocks [0 2]", stops)
+	if len(stops) != 1 || stops[0] != 0 {
+		t.Fatalf("closed block indices = %v, want only the non-tool block [0]", stops)
 	}
 }
 

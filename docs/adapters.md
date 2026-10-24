@@ -280,12 +280,18 @@ separate encoder design, not a per-request special case. A streamed Responses
 tool call is validated by its terminal class. A completed terminal fails closed
 on a partial function-call value. Incomplete and cancelled terminals do the
 same, because both are normal turn boundaries and an executable empty object
-must never close a call the model did not finish. A failed, errored or
-truncated terminal instead drops only the unparseable call and keeps the
-provider error or truncation. An already-announced call on one of those three
-terminals can still close with `{}` because its block already reached the
-client; Chat reports a cancelled finish as `stop`, so that accepted limit is
-not distinguishable there. A Chat `[DONE]`
+must never close a call the model did not finish. On those two terminals a call
+with missing or null arguments is also rejected unless the source explicitly
+sent `{}`. When validation fails, the target abort closes non-tool blocks but
+leaves an open tool block unclosed: Anthropic emits no `content_block_stop` over
+empty input, and Responses emits no done function-call item with empty
+arguments. The proxy error frame terminates the stream, so a client that keeps
+reading cannot execute an empty call. A failed, errored or truncated terminal
+instead drops only the unparseable call and keeps the provider error or
+truncation. An already-announced call on one of those three terminals can still
+close with `{}` because its block already reached the client; Chat reports a
+cancelled finish as `stop`, so that accepted limit is not distinguishable
+there. A Chat `[DONE]`
 without a preceding non-null finish reason is a clean transport terminator but
 an empty finish: a Responses target receives `response.incomplete` with
 `incomplete_details: null`, and the record reports `finish=other`. That

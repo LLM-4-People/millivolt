@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,6 +116,13 @@ type ResponsesStreamDecoder struct {
 	// bounded by toolInitialBytesMax.
 	argsEmitted      map[string]*toolArgumentCoverage
 	argsEmittedBytes int
+	// argumentEvidence records that the source supplied argument bytes for a
+	// call. An incomplete or cancelled terminal needs it to distinguish an
+	// explicit empty object from a call that never carried arguments.
+	argumentEvidence map[string]bool
+	// openToolKeys names every announced function call whose target block may
+	// still be open, including a call that never carried argument bytes.
+	openToolKeys map[string]bool
 	// Announcement identity. A provider's terminal output array is not
 	// required to preserve output_index positions, so dedupe and terminal
 	// completion use stable identities (call id, item id, content index) and
@@ -180,6 +188,8 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		partBlock:            map[[2]int]int{},
 		initialArgs:          map[string]string{},
 		argsEmitted:          map[string]*toolArgumentCoverage{},
+		argumentEvidence:     map[string]bool{},
+		openToolKeys:         map[string]bool{},
 		announcedOutputs:     map[int]bool{},
 		announcedItems:       map[string]bool{},
 		announcedParts:       map[string]bool{},
@@ -307,6 +317,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				d.sawToolCall = true
+				d.openToolKeys[key] = true
 				d.openToolItems++
 				if d.openToolItems > toolBlocksMax {
 					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", toolBlocksMax)
@@ -321,6 +332,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 						ID: toolID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 					},
 				}})
+				if !toolArgumentsMissing(item.Arguments) {
+					d.argumentEvidence[key] = true
+				}
 				// output_item.added may carry a prefix of the arguments, or the
 				// whole object. Buffer it: a partial prefix emitted alone would
 				// be invalid JSON when no delta follows. The first delta or the
@@ -793,7 +807,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				key := d.keyByOutput[ev.OutputIndex]
-				if err := d.flushToolArguments(key, idx, item.Arguments, true); err != nil {
+				if err := d.flushToolArguments(key, idx, item.Arguments, responsesToolArgumentsComplete); err != nil {
 					return nil, err
 				}
 				delete(d.itemBlock, ev.OutputIndex)
@@ -841,7 +855,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			if err := d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments, true); err != nil {
+			if err := d.flushToolArguments(d.keyByOutput[ev.OutputIndex], idx, ev.Arguments, responsesToolArgumentsComplete); err != nil {
 				return nil, err
 			}
 		case "response.reasoning_summary_part.done":
@@ -977,18 +991,42 @@ const (
 	responsesTerminalTruncated
 )
 
-// skipToolArguments reports whether an incomplete argument value may be
-// discarded instead of failing the translation. A failed, errored or truncated
-// terminal carries no usable completion, so the source outcome wins. An
-// incomplete or cancelled terminal is still a normal turn boundary: a partial
-// value there fails closed rather than closing the tool block with an
-// executable empty object.
-func (c responsesTerminalClass) skipToolArguments() bool {
+// responsesToolArgumentPolicy tells the terminal output walker how much
+// argument evidence a function call needs before it may reach the target.
+type responsesToolArgumentPolicy uint8
+
+const (
+	// responsesToolArgumentsComplete requires a valid value but accepts an
+	// empty one as the historical empty object.
+	responsesToolArgumentsComplete responsesToolArgumentPolicy = iota
+	// responsesToolArgumentsSkip discards a call whose value cannot be
+	// validated. A failed, errored or truncated terminal owns the outcome.
+	responsesToolArgumentsSkip
+	// responsesToolArgumentsRequired rejects an empty or unvalidated value.
+	// Incomplete and cancelled terminals are normal turn boundaries, so a
+	// call the model did not finish must not close as an executable empty
+	// object.
+	responsesToolArgumentsRequired
+)
+
+// toolArgumentPolicy maps the terminal class to its argument evidence rule.
+func (c responsesTerminalClass) toolArgumentPolicy() responsesToolArgumentPolicy {
 	switch c {
 	case responsesTerminalFailed, responsesTerminalError, responsesTerminalTruncated:
-		return true
+		return responsesToolArgumentsSkip
+	case responsesTerminalIncomplete, responsesTerminalCancelled:
+		return responsesToolArgumentsRequired
+	default:
+		return responsesToolArgumentsComplete
 	}
-	return false
+}
+
+// toolArgumentsMissing reports whether a raw value carries no evidence that
+// the source supplied arguments. Empty and JSON null are not evidence; the
+// explicit empty object is.
+func toolArgumentsMissing(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	return trimmed == "" || trimmed == "null"
 }
 
 func responsesTerminalClassFor(eventType string) responsesTerminalClass {
@@ -1022,7 +1060,8 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	pending := d.terminalPending
 	d.terminalPending = nil
 	clear(d.terminalPendingByKey)
-	more, err := d.collectTerminalOutput(output, !class.skipToolArguments())
+	policy := class.toolArgumentPolicy()
+	more, err := d.collectTerminalOutput(output, policy)
 	if err != nil {
 		return err
 	}
@@ -1038,15 +1077,18 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	// without parsing or emitting it: a partial value must neither reach the
 	// target nor replace the provider error or truncation with a translator
 	// failure.
-	if !class.skipToolArguments() {
-		toolKeys := make([]string, 0, len(d.initialArgs))
-		for key := range d.initialArgs {
+	if policy != responsesToolArgumentsSkip {
+		// Every open tool call is validated, including one that never carried
+		// argument bytes: the required policy must reject the missing
+		// evidence instead of letting the block close as an empty object.
+		toolKeys := make([]string, 0, len(d.openToolKeys))
+		for key := range d.openToolKeys {
 			toolKeys = append(toolKeys, key)
 		}
 		sort.Strings(toolKeys)
 		for _, key := range toolKeys {
 			if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-				if err := d.flushToolArguments(key, idx, "", true); err != nil {
+				if err := d.flushToolArguments(key, idx, "", policy); err != nil {
 					return err
 				}
 			}
@@ -1063,6 +1105,8 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class resp
 	clear(d.initialArgs)
 	d.initialArgsBytes = 0
 	clear(d.argsEmitted)
+	clear(d.argumentEvidence)
+	clear(d.openToolKeys)
 	clear(d.keyByOutput)
 	clear(d.keyByPart)
 	clear(d.partSeed)
@@ -1405,7 +1449,7 @@ func (d *ResponsesStreamDecoder) appendReasoningValue(item responsesWireItem, it
 // keeps each queued value's event position. The caller closes streamed blocks
 // before emitting the queue; perfect ordering is impossible only when a later
 // announced block already streamed bytes, because its target index is fixed.
-func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, strict bool) ([]terminalEmission, error) {
+func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, policy responsesToolArgumentPolicy) ([]terminalEmission, error) {
 	var pending []terminalEmission
 	for i, item := range output {
 		typ := item.Type
@@ -1424,7 +1468,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 			}
 			if ok && d.open[idx] {
-				if err := d.flushToolArguments(key, idx, item.Arguments, strict); err != nil {
+				if err := d.flushToolArguments(key, idx, item.Arguments, policy); err != nil {
 					return nil, err
 				}
 				continue
@@ -1439,16 +1483,16 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			if !admitted {
 				continue
 			}
-			emission, ok, err := functionCallTerminalEmission(item, i, strict)
+			emission, ok, err := functionCallTerminalEmission(item, i, policy)
 			if err != nil {
-				if strict {
-					return nil, err
+				if policy == responsesToolArgumentsSkip {
+					// A failed, errored or truncated terminal owns the
+					// outcome; drop the call whose arguments the source never
+					// completed rather than replacing the provider error or
+					// truncation with a translator failure.
+					continue
 				}
-				// A failed, errored or truncated terminal owns the outcome;
-				// drop the call whose arguments the source never completed
-				// rather than replacing the provider error or truncation with
-				// a translator failure.
-				continue
+				return nil, err
 			}
 			d.sawToolCall = true
 			if ok {
@@ -1780,7 +1824,7 @@ func (d *ResponsesStreamDecoder) syntheticBlock(block ir.Block, delta *ir.Delta)
 
 // functionCallTerminalEmission builds the complete block for a function call
 // that appeared only in the terminal document.
-func functionCallTerminalEmission(item responsesWireItem, index int, strict bool) (terminalEmission, bool, error) {
+func functionCallTerminalEmission(item responsesWireItem, index int, policy responsesToolArgumentPolicy) (terminalEmission, bool, error) {
 	toolID := responsesFunctionCallID(item.CallID, item.ID, index)
 	if err := checkNativeIdentity("tool id", toolID); err != nil {
 		return terminalEmission{}, false, err
@@ -1788,9 +1832,12 @@ func functionCallTerminalEmission(item responsesWireItem, index int, strict bool
 	if err := checkNativeIdentity("tool name", item.Name); err != nil {
 		return terminalEmission{}, false, err
 	}
+	if policy == responsesToolArgumentsRequired && toolArgumentsMissing(item.Arguments) {
+		return terminalEmission{}, false, errors.New("tool call arguments are missing")
+	}
 	args, err := parseToolArguments(item.Arguments)
 	if err != nil {
-		if !strict {
+		if policy == responsesToolArgumentsSkip {
 			return terminalEmission{}, false, nil
 		}
 		return terminalEmission{}, false, err
@@ -1916,6 +1963,7 @@ func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, 
 	if delta == "" || key == "" {
 		return
 	}
+	d.argumentEvidence[key] = true
 	if d.argsEmitted[key] == nil {
 		if initial := d.initialArgs[key]; initial != "" {
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: initial}})
@@ -1934,17 +1982,23 @@ func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, 
 // coverage is partial, the retained bytes are only a truncated prefix of what
 // the client already received: they cannot be reconciled or validated as the
 // final value, so the streamed bytes stand and reconciliation stops.
-func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string, strict bool) error {
+func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string, policy responsesToolArgumentPolicy) error {
 	if key == "" {
 		return nil
+	}
+	if !toolArgumentsMissing(full) {
+		d.argumentEvidence[key] = true
 	}
 	if d.argsEmitted[key] != nil {
 		emitted, complete := d.emittedArguments(key)
 		if !complete {
 			return nil
 		}
+		if policy == responsesToolArgumentsRequired && !d.argumentEvidence[key] {
+			return errors.New("tool call arguments are missing")
+		}
 		if full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
-			if !strict {
+			if policy == responsesToolArgumentsSkip {
 				// Only append a suffix whose complete value is a valid tool
 				// object; a partial terminal value must not reach the wire.
 				if err := validateStreamedToolArguments(full); err != nil {
@@ -1956,7 +2010,7 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 			d.recordEmittedArguments(key, suffix)
 			emitted += suffix
 		}
-		if !strict {
+		if policy == responsesToolArgumentsSkip {
 			// The bytes already streamed are the client's only copy. A
 			// non-clean terminal must not reclassify them.
 			return nil
@@ -1972,12 +2026,18 @@ func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, 
 		args = d.initialArgs[key]
 	}
 	d.dropInitialArgs(key)
+	if !toolArgumentsMissing(args) {
+		d.argumentEvidence[key] = true
+	}
+	if policy == responsesToolArgumentsRequired && !d.argumentEvidence[key] {
+		return errors.New("tool call arguments are missing")
+	}
 	if d.argsEmitted[key] == nil {
 		d.argsEmitted[key] = &toolArgumentCoverage{}
 	}
 	normalized, err := parseToolArguments(args)
 	if err != nil {
-		if !strict {
+		if policy == responsesToolArgumentsSkip {
 			return nil
 		}
 		return err
@@ -2038,6 +2098,8 @@ func (d *ResponsesStreamDecoder) dropInitialArgs(key string) {
 // clearToolState releases every per-call entry once a function call closes.
 func (d *ResponsesStreamDecoder) clearToolState(key string) {
 	d.dropInitialArgs(key)
+	delete(d.argumentEvidence, key)
+	delete(d.openToolKeys, key)
 	if cov := d.argsEmitted[key]; cov != nil {
 		d.argsEmittedBytes -= cov.emitted.Len()
 		delete(d.argsEmitted, key)
@@ -2802,6 +2864,14 @@ func (e *ResponsesStreamEncoder) Abort() error {
 		}
 		item := e.items[idx]
 		if item == nil {
+			continue
+		}
+		if item.kind == "function_call" {
+			// An open function_call has no validated argument value. Its done
+			// item would carry arguments {}, an executable empty call, so it
+			// stays incomplete and the proxy's error frame terminates the
+			// stream.
+			delete(e.open, idx)
 			continue
 		}
 		if err := e.abortItem(item); err != nil {
