@@ -623,12 +623,16 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 	switch ev.Type {
 	case ir.EventStart:
 		// message_start is already committed after the first non-start event;
-		// a late start must not rewrite the identity the client received.
-		if ev.Response != nil && !e.started {
+		// a late start must not rewrite the identity the client received. Its
+		// usage is still real data the target's terminal frame can carry, and
+		// an invalid value must fail like every other usage owner.
+		if ev.Response != nil {
 			if err := validateUsage(ev.Response.Usage); err != nil {
 				return err
 			}
-			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			if !e.started {
+				e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			}
 			e.usage = ev.Response.Usage
 		}
 		return e.startStream()
