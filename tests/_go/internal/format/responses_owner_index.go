@@ -112,3 +112,47 @@ func BenchmarkResponsesTerminalReconciliation(b *testing.B) {
 		}
 	}
 }
+
+// TestResponsesOwnerIndexScalesSublinearly guards the owner index against a
+// regression to a full-map scan. The lookup count is fixed while the owner
+// population grows tenfold: the index stays proportional to one item's parts,
+// while a full emittedText scan would visit every owner per lookup. The bound
+// is deliberately wide (5x plus 100µs) to avoid a wall-clock threshold.
+func TestResponsesOwnerIndexScalesSublinearly(t *testing.T) {
+	small := benchmarkResponsesOwnerLookup(1_000)
+	large := benchmarkResponsesOwnerLookup(10_000)
+	limit := small.NsPerOp()*5 + 100_000
+	if large.NsPerOp() > limit {
+		t.Fatalf("owner lookup grew from %d ns/op at 1,000 owners to %d ns/op at 10,000 (limit %d)",
+			small.NsPerOp(), large.NsPerOp(), limit)
+	}
+	t.Logf("owner lookup: 1,000 owners %d ns/op, 10,000 owners %d ns/op",
+		small.NsPerOp(), large.NsPerOp())
+}
+
+func benchmarkResponsesOwnerLookup(owners int) testing.BenchmarkResult {
+	const lookups = 1_000
+	return testing.Benchmark(func(b *testing.B) {
+		d := NewResponsesStreamDecoder(strings.NewReader(""))
+		names := make([]string, owners)
+		for i := 0; i < owners; i++ {
+			partKey := fmt.Sprintf("part:rs_%d:%d", i, i)
+			owner := fmt.Sprintf("item:rs_%d", i)
+			names[i] = owner
+			var value strings.Builder
+			value.WriteString("x")
+			d.emittedText[partKey] = &value
+			d.partKind[partKey] = partChannelText
+			d.setPartOwner(partKey, owner)
+		}
+		b.ResetTimer()
+		for b.Loop() {
+			for i := 0; i < lookups; i++ {
+				owner := names[i%owners]
+				if parts := d.emittedContentParts(owner, partChannelText); len(parts) != 1 {
+					b.Fatalf("owner %s parts = %d, want 1", owner, len(parts))
+				}
+			}
+		}
+	})
+}
