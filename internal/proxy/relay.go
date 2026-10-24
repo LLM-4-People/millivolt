@@ -2056,7 +2056,12 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			costKeys := s.costKeysFor(rec.Provider)
 			// The source analyzer owns provider usage/cost keys; the
 			// translated wire is normalized and must not be read with them.
+			// Seed its wire so a zero-event source (empty body, comments or
+			// pings) still classifies as the routed protocol's truncation
+			// instead of returning an empty outcome and losing the canonical
+			// upstream_error/truncated stamp.
 			sourceAnalyzer := s.analyzerFor(rec)
+			sourceAnalyzer.SetWire(t.wire())
 			var sourceRec metrics.Record
 			var sourceCost float64
 			var sourceCostReported bool
