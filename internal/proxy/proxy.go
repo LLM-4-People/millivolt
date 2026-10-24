@@ -839,7 +839,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if debugTap != nil {
 		w = debugTap.wrapWriter(w)
 	}
-	defer pacer.Stop()
+	defer func() { pacer.Stop() }()
 	// hookMu serializes the four lifecycle-hook bodies below. The scheduler
 	// fires them from two goroutines: a seeded hold dispatches OnHold on the
 	// AddHold caller's goroutine (fireSeededHold) while the request's own
@@ -974,7 +974,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A non-streaming request can still receive an event-stream response;
 		// its pacer is created here, unarmed, only to own the status commit.
 		if pacer == nil {
+			// A non-streaming request can still receive an event-stream
+			// response. Assign the late pacer back to w so body writes pass
+			// through the short write-progress bound; the debug tap already
+			// wraps this writer in order, so it still sees every byte. The
+			// deferred Stop reads the variable, not a nil receiver captured
+			// before this branch.
 			pacer = s.newSSEPacerFor(w)
+			w = pacer
 		}
 		// A 202 acceptance or a status-only 204/205 is not an SSE stream, even
 		// when the request asked for one and a target format is configured.
