@@ -78,6 +78,10 @@ Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:
 
 - Anthropic thinking and redacted-thinking blocks keep their opaque signatures.
+  A Responses reasoning item has no Anthropic signature, so translating it to
+  Anthropic emits a `thinking` block with an empty `signature`. The proxy keeps
+  the reasoning text and does not invent a signature; resending that block is a
+  client choice and the target may reject it.
 - OpenAI Responses reasoning items keep `encrypted_content` and item ids.
   A cross-family encrypted reasoning artifact is never replayed into another
   provider's field. A non-streaming surface drops it with a warning; a stream
@@ -219,6 +223,12 @@ target cannot consume them:
   `tool_choice: "auto"`, null `instructions`/`temperature`/`top_p`,
   `store: false`); a translated response cannot echo the source request's
   parameters without threading the request IR into the encoder.
+- A Responses output tool-call `call_id` has no schema length bound, so a
+  provider id longer than 64 characters is relayed unchanged. If the client
+  replays that call as request history, the Responses request boundary enforces
+  its 1..64 character reference rule and rejects the request with 400. The
+  proxy never shortens or drops the output id, because that would break the
+  correlation the client already received.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but

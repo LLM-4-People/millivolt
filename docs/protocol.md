@@ -98,7 +98,11 @@ with `…`; normal values are unchanged. These record bounds do not alter debug
 capture bodies, retained headers, content previews or request-parameter JSON.
 
 One caller setting `X-Proxy-Limit-*` affects every key/client of that provider.
-Absent headers preserve limits; `0`, `off`, `none` or `unlimited` clear them.
+Absent headers preserve limits; a present empty `X-Proxy-Max-Concurrency` or
+`X-Proxy-Timeout-Ms` value is also treated as absent (whitespace-only max
+concurrency is empty after trimming, while a whitespace-only timeout is a
+malformed value). `0`, `off`, `none` or `unlimited` clear a `X-Proxy-Limit-*`
+policy.
 Windows accept Go durations from 1 second through 24 hours, plus `1d`.
 Malformed limit values reject the request without applying any of its limit
 headers. The Limits menu shows the policy and its source. Rates use continuously
@@ -245,7 +249,11 @@ stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
 the in-band error for the client to retry. A trailing partial line that the
 rescue drops was never delivered, so it does not count as relayed content and
-does not veto the re-send; a delivering path feeds and writes it exactly once. A provider error event streamed
+does not veto the re-send; a delivering path feeds and writes it exactly once.
+A translated streaming request whose 200 response body is not SSE is still
+relabelled `text/event-stream`: the upstream bytes are never converted into SSE
+frames, and the relay surfaces the non-SSE body as a truncated-stream error
+rather than translating it. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
 relayed: the error classes the OpenAI API documents as retryable (500
 `server_error`, the 503 overloaded/unavailable family, request timeouts, and

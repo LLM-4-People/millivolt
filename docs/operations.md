@@ -1289,7 +1289,15 @@ Money stays USD in storage and APIs. The shared UI formatter uses cents below
 $1, including fractional cents, and dollars for larger magnitudes. Usage/cost
 comes from recognized upstream fields or configured field mappings; unavailable
 reporting and a displayed zero do not establish a zero bill. Reasoning/cache
-splits depend on what the upstream actually reports.
+splits depend on what the upstream actually reports. When a stream carries no
+usage object, or carries one whose output count is zero, the recorded output
+token count is restored from the streamed chunk count, which includes
+tool-argument fragments; the count is an estimate, not a provider report. Chat
+tool calls are deduplicated by delta index while the retained index set holds
+up to 1,024 distinct indexes. Once the set is full a further index cannot be
+retained, so each of its fragments counts again; a hostile stream of repeated
+indexes can overstate the tool-call count without growing memory past the
+bound.
 
 Errors count affected requests with a genuine failure, including recovered
 upstream failures. HTTP 429 counts requests that encountered a final or retried
