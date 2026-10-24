@@ -36,6 +36,13 @@ type chatWireChunk struct {
 					Arguments string `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls"`
+			// FunctionCall is the deprecated tool-call shape the official
+			// schema still defines. tool_calls wins when one delta carries
+			// both.
+			FunctionCall *struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function_call"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -192,7 +199,23 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: d.refusalIndex, Delta: &ir.Delta{Text: *delta.Refusal}})
 			}
 			for _, tc := range delta.ToolCalls {
+				// The schema's index is non-negative, and the reserved legacy
+				// index is negative; a negative modern index would merge two
+				// distinct source calls, so reject it at the boundary.
+				if tc.Index < 0 {
+					return nil, fmt.Errorf("chat stream tool call index %d is negative", tc.Index)
+				}
 				if err := d.toolCall(tc.Index, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+					return nil, err
+				}
+			}
+			// The deprecated function_call object is a single call with no
+			// index. It shares one reserved index and uses the function name
+			// as its id, matching the non-stream message decoder. A delta
+			// carrying tool_calls is authoritative and its legacy twin is
+			// ignored.
+			if delta.FunctionCall != nil && len(delta.ToolCalls) == 0 {
+				if err := d.legacyFunctionCall(delta.FunctionCall.Name, delta.FunctionCall.Arguments); err != nil {
 					return nil, err
 				}
 			}
@@ -280,6 +303,26 @@ func (d *ChatStreamDecoder) ensureRefusal() {
 	d.nextIndex++
 	d.open = append(d.open, d.refusalIndex)
 	d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: d.refusalIndex, Block: &ir.Block{Type: ir.BlockRefusal}})
+}
+
+// chatLegacyToolIndex is the reserved index for the deprecated
+// delta.function_call shape. The legacy protocol carries no index and allows
+// one function call per assistant message, so a fixed negative index cannot
+// collide with any tool_calls index.
+const chatLegacyToolIndex = -1
+
+// legacyFunctionCall decodes one deprecated function_call delta. The name is
+// required on the fragment that opens the call and becomes its id, matching
+// the non-stream decoder. A later fragment carries only arguments, so a
+// missing name is accepted once the reserved block is open.
+func (d *ChatStreamDecoder) legacyFunctionCall(name, args string) error {
+	if _, open := d.toolBlocks[chatLegacyToolIndex]; !open {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("chat stream function_call needs a name")
+		}
+		return d.toolCall(chatLegacyToolIndex, name, "function", name, args)
+	}
+	return d.toolCall(chatLegacyToolIndex, "", "function", name, args)
 }
 
 func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) error {
