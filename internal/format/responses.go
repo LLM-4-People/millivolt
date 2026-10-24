@@ -988,11 +988,11 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 		}
 		switch b.Type {
 		case ir.BlockText:
-			textType := "input_text"
-			if role == ir.RoleAssistant {
-				textType = "output_text"
-			}
-			out = append(out, map[string]any{"type": textType, "text": b.Text})
+			// This encoder serves the request input only. EasyInputMessage's
+			// content union accepts input_text for every role; output_text is
+			// an OutputMessage part and would make an assistant input item
+			// match none of the valid input variants.
+			out = append(out, map[string]any{"type": "input_text", "text": b.Text})
 		case ir.BlockRefusal:
 			out = append(out, map[string]any{"type": "refusal", "refusal": b.Refusal})
 		case ir.BlockImage:
