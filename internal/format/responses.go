@@ -1032,9 +1032,34 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 			if warns != nil {
 				warns.Add(ir.WarningDropped, "content.input_audio", "Responses input has no audio part")
 			}
+		default:
+			// The content-part union has no representation for a tool call,
+			// reasoning or another structured block. Report the loss instead
+			// of emitting a silently shortened message; the assistant branch
+			// already carries its own representable blocks explicitly.
+			if warns != nil {
+				field := string(b.Type)
+				if b.Type == ir.BlockRedactedReasoning {
+					field = "reasoning"
+				}
+				warns.Add(ir.WarningDropped, "content."+field, responsesContentRoleDetail(role))
+			}
 		}
 	}
 	return out
+}
+
+// responsesContentRoleDetail describes what a Responses content part can carry
+// for one role, so a dropped block's warning names the role-specific reason.
+func responsesContentRoleDetail(role ir.Role) string {
+	switch role {
+	case ir.RoleAssistant:
+		return "assistant content accepts text and refusal only"
+	case ir.RoleSystem, ir.RoleDeveloper:
+		return "system and developer content accepts text only"
+	default:
+		return "user content accepts text, images, files and audio only"
+	}
 }
 
 func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]any {
