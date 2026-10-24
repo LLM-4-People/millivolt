@@ -1285,3 +1285,25 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+// TestAnthropicAllEmptyRequestRejectedBeforeUpstream pins NEW-4 at the proxy
+// boundary: when every Chat input part is empty, translation produces no
+// Anthropic message, so the request fails with 400 before any upstream send.
+func TestAnthropicAllEmptyRequestRejectedBeforeUpstream(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", 200,
+		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	w := proxyRequest(t, s, "/v1/chat/completions", "anthropic",
+		`{"model":"m","messages":[{"role":"user","content":""}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "at least one non-empty message") {
+		t.Fatalf("rejection does not name the empty-message rule: %s", w.Body.String())
+	}
+	if up.calls.Load() != 0 {
+		t.Fatalf("upstream was called %d times for an all-empty request", up.calls.Load())
+	}
+}
