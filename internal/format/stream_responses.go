@@ -960,6 +960,9 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 		return err
 	}
 	pending = append(pending, more...)
+	for i := range pending {
+		pending[i].materialize()
+	}
 	// A truncated stream can end before a terminal document supplies the full
 	// value. The buffered added payload is then the only argument bytes the
 	// source produced, so flush it before the block closes. The identities are
@@ -1585,37 +1588,69 @@ func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, con
 // part cap.
 func (d *ResponsesStreamDecoder) queueTerminal(key string, block ir.Block, delta *ir.Delta) error {
 	if idx, ok := d.terminalPendingByKey[key]; ok {
-		mergeTerminalDelta(d.terminalPending[idx].delta, delta)
+		d.terminalPending[idx].add(delta)
 		return nil
 	}
 	if len(d.terminalPending) >= WireNestedCollectionMax {
 		return fmt.Errorf("responses stream exceeds %d pending terminal parts", WireNestedCollectionMax)
 	}
+	emission := terminalEmission{block: block, delta: &ir.Delta{}}
+	emission.add(delta)
 	d.terminalPendingByKey[key] = len(d.terminalPending)
-	d.terminalPending = append(d.terminalPending, terminalEmission{block: block, delta: delta})
+	d.terminalPending = append(d.terminalPending, emission)
 	return nil
 }
 
-// mergeTerminalDelta appends the incremental bytes of one delta into a queued
-// emission. Only the field the queued emission carries is populated.
-func mergeTerminalDelta(dst, src *ir.Delta) {
-	if dst == nil || src == nil {
-		return
-	}
-	dst.Text += src.Text
-	dst.Reasoning += src.Reasoning
-	dst.Arguments += src.Arguments
-	if src.Citation != nil {
-		dst.Citation = src.Citation
-	}
+// terminalAccumulator buffers repeated unannounced deltas for one part. A
+// strings.Builder grows amortized O(1), so n one-byte deltas allocate O(n)
+// rather than the O(n^2) of repeated string concatenation on the ir.Delta. The
+// builders are pointer fields because terminalEmission values are copied; a
+// strings.Builder must never be copied after use.
+type terminalAccumulator struct {
+	text      strings.Builder
+	reasoning strings.Builder
+	arguments strings.Builder
+	citation  *ir.Citation
 }
 
 // terminalEmission is a terminal value that belongs to a block which has
 // already ended, or to a terminal-only channel. It is emitted after every
-// streamed block has closed so target lifecycles never nest.
+// streamed block has closed so target lifecycles never nest. Entries created
+// by the coalescing queue carry an accumulator that materializes into delta
+// once, at emission time; direct terminal-document entries leave it nil.
 type terminalEmission struct {
 	block ir.Block
 	delta *ir.Delta
+	acc   *terminalAccumulator
+}
+
+func (e *terminalEmission) add(src *ir.Delta) {
+	if src == nil {
+		return
+	}
+	if e.acc == nil {
+		e.acc = &terminalAccumulator{}
+	}
+	e.acc.text.WriteString(src.Text)
+	e.acc.reasoning.WriteString(src.Reasoning)
+	e.acc.arguments.WriteString(src.Arguments)
+	if src.Citation != nil {
+		e.acc.citation = src.Citation
+	}
+}
+
+// materialize joins the buffered fragments into the emission delta exactly
+// once. Builder.String returns its buffer without copying, and no write follows
+// this call, so the buffer is never mutated again.
+func (e *terminalEmission) materialize() {
+	if e.acc == nil || e.delta == nil {
+		return
+	}
+	e.delta.Text = e.acc.text.String()
+	e.delta.Reasoning = e.acc.reasoning.String()
+	e.delta.Arguments = e.acc.arguments.String()
+	e.delta.Citation = e.acc.citation
+	e.acc = nil
 }
 
 // terminalAnnouncedItemKey resolves the announcement identity of a terminal

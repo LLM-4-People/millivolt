@@ -7,6 +7,7 @@ package format
 
 import (
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -98,5 +99,46 @@ func TestResponsesUndeclaredReasoningPartsKeepOrder(t *testing.T) {
 	}
 	if got := reasoning[starts[0]] + reasoning[starts[1]]; got != "acbd" {
 		t.Fatalf("reasoning order = %q, want acbd", got)
+	}
+}
+
+// The coalescing queue must also be linear in allocation. Repeated string
+// concatenation on the pending delta allocated O(n^2); 100k one-byte deltas
+// measured about 5.1 GiB. The builder-backed accumulator stays far below this
+// generous ceiling while preserving the one-block/one-delta result.
+func TestResponsesUndeclaredReasoningCoalesceAllocationBound(t *testing.T) {
+	const deltas = 100_000
+	parts := make([]string, deltas)
+	for i := range parts {
+		parts[i] = "0:x"
+	}
+	source := unannouncedReasoningStream(parts)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	events := drainResponseEvents(t, source)
+	runtime.ReadMemStats(&after)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	const limit = 256 << 20
+	if allocated > limit {
+		t.Fatalf("coalescing allocated %d bytes for %d deltas, above the %d-byte bound", allocated, deltas, limit)
+	}
+
+	starts, outDeltas := 0, 0
+	var reasoning strings.Builder
+	for _, ev := range events {
+		switch ev.Type {
+		case ir.EventBlockStart:
+			starts++
+		case ir.EventBlockDelta:
+			if ev.Delta != nil && ev.Delta.Reasoning != "" {
+				outDeltas++
+				reasoning.WriteString(ev.Delta.Reasoning)
+			}
+		}
+	}
+	if starts != 1 || outDeltas != 1 || reasoning.Len() != deltas {
+		t.Fatalf("starts=%d deltas=%d reasoning=%d, want 1/1/%d", starts, outDeltas, reasoning.Len(), deltas)
 	}
 }
