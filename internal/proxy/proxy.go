@@ -824,8 +824,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// silently defaulted (same contract as X-Proxy-Timeout-Ms).
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
-				errInvalidHeader(hdrMaxConcurrency, v).Error())
+			// The record is already installed and committed by the defer, so
+			// stamp the rejection through the shared client-error owner; a
+			// bare protocol write left it at status 0 with no error type.
+			writeClientErrorHdr(w, rec, t.inbound, typeInvalidRequestError,
+				errInvalidHeader(hdrMaxConcurrency, v).Error(), http.StatusBadRequest, nil)
 			return
 		}
 		maxConc = n
