@@ -5,6 +5,7 @@ package format
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -46,7 +47,7 @@ func TestAnthropicSkipsEmptyTextBlock(t *testing.T) {
 	}
 }
 
-func TestAnthropicAllEmptyTurnOmitted(t *testing.T) {
+func TestAnthropicAllEmptyTurnRejected(t *testing.T) {
 	maxTokens := 16
 	req := &ir.Request{
 		Model: "m", MaxOutputTokens: &maxTokens,
@@ -54,12 +55,31 @@ func TestAnthropicAllEmptyTurnOmitted(t *testing.T) {
 			{Type: ir.BlockText, Text: ""},
 		}}},
 	}
+	if _, err := EncodeAnthropicRequest(req, 16, ""); err == nil ||
+		!strings.Contains(err.Error(), "at least one non-empty message") {
+		t.Fatalf("all-empty request error = %v, want the non-empty-message rejection", err)
+	}
+}
+
+func TestAnthropicEmptyTurnSkippedBesideNonEmpty(t *testing.T) {
+	maxTokens := 16
+	req := &ir.Request{
+		Model: "m", MaxOutputTokens: &maxTokens,
+		Messages: []ir.Message{
+			{Role: ir.RoleUser, Content: []ir.Block{{Type: ir.BlockText, Text: ""}}},
+			{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}},
+		},
+	}
 	out, err := EncodeAnthropicRequest(req, 16, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if messages := anthropicRequestMessages(t, out); len(messages) != 0 {
-		t.Fatalf("messages = %v, want none: %s", messages, out)
+	messages := anthropicRequestMessages(t, out)
+	if len(messages) != 1 {
+		t.Fatalf("messages = %v, want one", messages)
+	}
+	if messages[0].(map[string]any)["content"] != "hi" {
+		t.Fatalf("message = %v, want hi: %s", messages[0], out)
 	}
 }
 

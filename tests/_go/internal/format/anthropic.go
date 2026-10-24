@@ -721,7 +721,7 @@ func TestTranslateRequestSystemAllocationLinear(t *testing.T) {
 			}
 			b.WriteString(`{"role":"system","content":"a"}`)
 		}
-		b.WriteString(`]}`)
+		b.WriteString(`,{"role":"user","content":"hi"}]}`)
 		return []byte(b.String())
 	}
 	wantFor := func(n int) string {
@@ -861,7 +861,7 @@ func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
+			body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
 			if tc.raw != "" {
 				body += `,"tool_choice":` + tc.raw
 			}
@@ -902,7 +902,7 @@ func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 // map[string]any decode paid for even though only function.name is retained.
 func hostileToolChoiceBody(shape string) []byte {
 	var body strings.Builder
-	body.WriteString(`{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}],"tool_choice":{"function":`)
+	body.WriteString(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}],"tool_choice":{"function":`)
 	switch shape {
 	case "function":
 		body.WriteString(`{"name":"f","x":[`)

@@ -160,7 +160,7 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 	if status, _ := post(decoy, ""); status != http.StatusOK {
 		t.Errorf("in-range cap with tools decoy (passthrough): status = %d, want 200", status)
 	}
-	translatable := `{"model":"m","max_tokens":100,"tools":[{"type":"function","function":{"name":"f","parameters":{"x":1}}}]}`
+	translatable := `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"x":1}}}]}`
 	if status, _ := post(translatable, "anthropic"); status != http.StatusOK {
 		t.Errorf("in-range cap with valid tools: status = %d, want 200", status)
 	}

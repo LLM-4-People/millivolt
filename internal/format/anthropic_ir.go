@@ -649,9 +649,16 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
 		req.Warnings.Add(ir.WarningApproximated, "response_format.json_object", "Anthropic only supports json_schema")
 	}
+	messages := encodeAnthropicMessages(req.Messages, &req.Warnings)
+	if len(messages) == 0 {
+		// Anthropic requires a non-empty messages array. Every input part can
+		// be empty after translation, so fail closed before any upstream call
+		// instead of emitting JSON null.
+		return nil, errors.New("anthropic target requires at least one non-empty message")
+	}
 	out := map[string]any{
 		"model":    req.Model,
-		"messages": encodeAnthropicMessages(req.Messages, &req.Warnings),
+		"messages": messages,
 	}
 	if req.MaxOutputTokens != nil {
 		out["max_tokens"] = *req.MaxOutputTokens

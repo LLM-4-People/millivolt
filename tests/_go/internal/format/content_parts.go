@@ -118,13 +118,16 @@ func TestChatSystemAndAssistantPartsAreTextOnly(t *testing.T) {
 }
 
 func TestAnthropicSystemDropsWarn(t *testing.T) {
-	req := &ir.Request{Model: "m", Messages: []ir.Message{{
-		Role: ir.RoleSystem,
-		Content: []ir.Block{
-			{Type: ir.BlockText, Text: "rules", Citations: []ir.Citation{{Type: "char_location", CitedText: "x"}}},
-			{Type: ir.BlockImage, Image: &ir.Image{URL: "https://example.com/a.png"}},
+	req := &ir.Request{Model: "m", Messages: []ir.Message{
+		{
+			Role: ir.RoleSystem,
+			Content: []ir.Block{
+				{Type: ir.BlockText, Text: "rules", Citations: []ir.Citation{{Type: "char_location", CitedText: "x"}}},
+				{Type: ir.BlockImage, Image: &ir.Image{URL: "https://example.com/a.png"}},
+			},
 		},
-	}}}
+		{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}},
+	}}
 	body, err := EncodeAnthropicRequest(req, 8, "")
 	if err != nil {
 		t.Fatal(err)
