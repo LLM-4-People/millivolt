@@ -370,15 +370,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Part, &part); err != nil {
 				return nil, err
 			}
-			var block ir.Block
-			switch part.Type {
-			case "output_text", "input_text", "text":
-				block = ir.Block{Type: ir.BlockText, Text: part.Text}
-			case "refusal":
-				block = ir.Block{Type: ir.BlockRefusal, Refusal: part.Refusal}
-			case "reasoning_text":
-				block = ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: part.Text, Provider: ir.Responses}}
-			default:
+			block, supported := responsesPartBlock(part.Type, part.Text, part.Refusal)
+			if !supported {
 				// Allocate the block only after the part type is accepted: an
 				// unsupported part must not consume an index or leave an open
 				// block whose stop would reach the client without a start.
@@ -655,11 +648,29 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 			}
-			value := part.Text
-			blockType := ir.BlockText
-			if part.Type == "refusal" {
-				value = part.Refusal
-				blockType = ir.BlockRefusal
+			// Map the done payload through the same owner as the added
+			// event. A reasoning_text part must stay on the reasoning
+			// channel: once emitted as text it becomes visible answer
+			// content and, on Anthropic, a text delta inside a thinking
+			// block. A type-less done payload reuses the channel the added
+			// event announced.
+			var block ir.Block
+			var supported bool
+			if hasPart && part.Type != "" {
+				block, supported = responsesPartBlock(part.Type, part.Text, part.Refusal)
+			} else {
+				typ := "text"
+				switch d.partKind[key] {
+				case partChannelRefusal:
+					typ = "refusal"
+				case partChannelReasoning:
+					typ = "reasoning_text"
+				}
+				block, supported = responsesPartBlock(typ, part.Text, part.Refusal)
+			}
+			value := ""
+			if supported {
+				value = responsesPartValue(block)
 			}
 			if value != "" {
 				if _, announced := d.announcedParts[key]; !announced {
@@ -675,13 +686,16 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					d.partOwner[key] = streamItemKey(itemID, ev.OutputIndex)
 				}
 				if _, kind := d.partKind[key]; !kind {
-					d.partKind[key] = partChannelForBlock(blockType)
+					d.partKind[key] = partChannelForBlock(block.Type)
 				}
 				emit := pendingValueSuffix(d.emittedValue(key), value)
 				if emit != "" {
+					// A queued block is a type-only start template: the
+					// value travels in the delta, so a block that also
+					// carried it would emit the same text twice.
 					d.appendContentValue(channelPart{
-						key: key, value: emit, channel: partChannelForBlock(blockType),
-						block: ir.Block{Type: blockType},
+						key: key, value: emit, channel: partChannelForBlock(block.Type),
+						block: responsesPartBlockStart(block),
 					}, &d.terminalPending)
 					if err := d.setEmittedText(key, value); err != nil {
 						return nil, err
@@ -921,6 +935,54 @@ const (
 	partChannelRefusal
 	partChannelReasoning
 )
+
+// responsesPartBlock maps one Responses content-part payload to its canonical
+// block. It reports false for a provider part with no target representation.
+// The added and done events share this owner so a part's channel cannot change
+// between them.
+func responsesPartBlock(typ, text, refusal string) (ir.Block, bool) {
+	switch typ {
+	case "output_text", "input_text", "text":
+		return ir.Block{Type: ir.BlockText, Text: text}, true
+	case "refusal":
+		return ir.Block{Type: ir.BlockRefusal, Refusal: refusal}, true
+	case "reasoning_text":
+		return ir.Block{
+			Type: ir.BlockReasoning,
+			Reasoning: &ir.Reasoning{
+				Text: text, Provider: ir.Responses,
+			},
+		}, true
+	}
+	return ir.Block{}, false
+}
+
+// responsesPartBlockStart returns the type-only block a queued done payload
+// starts. The payload's value is emitted as a delta after the start, so the
+// block must not repeat it in its start payload.
+func responsesPartBlockStart(block ir.Block) ir.Block {
+	switch block.Type {
+	case ir.BlockReasoning:
+		return ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}
+	case ir.BlockRefusal:
+		return ir.Block{Type: ir.BlockRefusal}
+	}
+	return ir.Block{Type: ir.BlockText}
+}
+
+// responsesPartValue returns the text a mapped part carries on its channel.
+func responsesPartValue(block ir.Block) string {
+	switch block.Type {
+	case ir.BlockRefusal:
+		return block.Refusal
+	case ir.BlockReasoning:
+		if block.Reasoning != nil {
+			return block.Reasoning.Text
+		}
+		return ""
+	}
+	return block.Text
+}
 
 func partChannelForBlock(t ir.BlockType) partChannel {
 	switch t {
