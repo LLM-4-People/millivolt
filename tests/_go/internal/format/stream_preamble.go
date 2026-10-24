@@ -482,11 +482,13 @@ func responsesToolArguments(t *testing.T, out string) string {
 	return ""
 }
 
-// TestResponsesInitialToolArgumentsSurviveTruncation pins the fallback half of
-// N10: when the source ends before a done/terminal value, the buffered
-// output_item.added payload is the only argument text to flush before the
-// truncation error closes the stream.
-func TestResponsesInitialToolArgumentsTruncationFailsClosed(t *testing.T) {
+// TestResponsesInitialToolArgumentsTruncationKeepsClass pins the truncation
+// path after C1: the buffered output_item.added payload is incomplete when the
+// source ends without a terminal, so it is dropped without parsing or
+// emitting. The stream closes with the canonical upstream_error/truncated
+// frame instead of a translator failure, and no partial argument bytes reach
+// the client.
+func TestResponsesInitialToolArgumentsTruncationKeepsClass(t *testing.T) {
 	source := `event: response.created
 data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
 
@@ -495,8 +497,20 @@ data: {"type":"response.output_item.added","output_index":0,"item":{"type":"func
 
 `
 	var buf bytes.Buffer
-	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
-	if err == nil || !strings.Contains(err.Error(), "tool call arguments must be") {
-		t.Fatalf("truncated partial arguments error = %v", err)
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+		t.Fatalf("truncation became a translator failure: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "translation_error") {
+		t.Fatalf("truncation emitted a translation_error frame: %s", out)
+	}
+	if !strings.Contains(out, `"code":"truncated"`) {
+		t.Fatalf("truncation lost the canonical code: %s", out)
+	}
+	if strings.Contains(out, `"arguments":"{\"q\":1"`) {
+		t.Fatalf("partial initial arguments reached the client: %s", out)
+	}
+	if !strings.Contains(out, "data: [DONE]") {
+		t.Fatalf("truncation left no terminal sentinel: %s", out)
 	}
 }
