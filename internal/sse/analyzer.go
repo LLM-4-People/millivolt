@@ -1258,6 +1258,18 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 		if rec.Usage.OutputTokens == 0 && fallbackOutput > 0 {
 			rec.Usage.OutputTokens = fallbackOutput
 			rec.GenTokens = a.chunkCount - a.toolChunks
+			// A provider total captured before the restored output (the
+			// truncated Anthropic message_start shape) is now too small.
+			// Raise only a non-zero total, and never lower one: a zero total
+			// deliberately lets settlement derive input+output, while a
+			// provider total at or above the sum stays authoritative.
+			if rec.Usage.TotalTokens > 0 {
+				if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
+					a.usageInvalid = true
+				} else if rec.Usage.TotalTokens < total {
+					rec.Usage.TotalTokens = total
+				}
+			}
 		}
 		// Provider usage-key paths may live beside the usage object in the
 		// raw chunk root; merge them without clobbering normalized counts.

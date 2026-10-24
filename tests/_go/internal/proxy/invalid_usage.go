@@ -88,3 +88,40 @@ func TestAnthropicUsageOverflowMarksInvalid(t *testing.T) {
 		})
 	}
 }
+
+func TestTruncatedAnthropicUsageSettlesRestoredTotal(t *testing.T) {
+	const stream = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":10,"output_tokens":0}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+`
+	up := newFixtureUpstream(t, "text/event-stream", http.StatusOK, stream)
+	buf := metrics.NewBuffer(8)
+	cfg := config.Default()
+	cfg.QualityRetries = 0
+	cfg.ThinkingRetries = 0
+	s := New(cfg, buf)
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	w := proxyRequest(t, s, "/v1/messages", "",
+		`{"model":"m","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+	}
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.UsageInvalid {
+		t.Fatalf("truncated usage marked invalid: %+v", rec)
+	}
+	if want := (metrics.Usage{InputTokens: 10, OutputTokens: 1, TotalTokens: 11}); rec.Usage != want {
+		t.Fatalf("usage = %+v, want %+v", rec.Usage, want)
+	}
+	if got := settleTokens(rec); got != 11 {
+		t.Fatalf("settled tokens = %d, want 11", got)
+	}
+}
