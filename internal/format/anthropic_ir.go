@@ -895,6 +895,7 @@ type anthropicOutMessage struct {
 func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOutMessage {
 	var out []anthropicOutMessage
 	seenNonSystem := false
+	leadingAssistantDropped := false
 	for _, m := range in {
 		if m.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
@@ -906,6 +907,20 @@ func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOut
 			continue
 		}
 		if m.Role == ir.RoleSystem && !seenNonSystem {
+			continue
+		}
+		// Anthropic requires the first emitted turn to use the user role. A
+		// source history may begin with an assistant turn (or a leading user
+		// turn may have encoded to nothing), so drop the leading assistant
+		// turns rather than prepending a fabricated user turn. One warning
+		// covers every dropped turn.
+		if m.Role == ir.RoleAssistant && len(out) == 0 {
+			if !leadingAssistantDropped {
+				leadingAssistantDropped = true
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "messages.leading_assistant", "Anthropic Messages requires the first turn to use the user role")
+				}
+			}
 			continue
 		}
 		role := string(m.Role)
