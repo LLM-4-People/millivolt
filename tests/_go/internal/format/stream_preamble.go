@@ -188,8 +188,44 @@ data: {"type":"message_stop"}
 	if len(indices) != 2 || indices[0] != 0 || indices[1] != 1 {
 		t.Fatalf("output indices = %v, want [0 1]: %s", indices, buf.String())
 	}
-	if !strings.Contains(buf.String(), `"encrypted_content":"opaque"`) {
-		t.Fatalf("opaque redacted reasoning was not preserved: %s", buf.String())
+	if strings.Contains(buf.String(), `"encrypted_content":"opaque"`) {
+		t.Fatalf("foreign redacted reasoning was replayed as Responses encrypted_content: %s", buf.String())
+	}
+}
+
+func TestResponsesStreamEncryptedReasoningProviderGate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider ir.Protocol
+		want     bool
+	}{
+		{name: "responses artifact", provider: ir.Responses, want: true},
+		{name: "anthropic artifact", provider: ir.Anthropic, want: false},
+		{name: "provider-less artifact", provider: "", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := []*ir.Event{
+				{Type: ir.EventStart, Response: &ir.Response{ID: "s1", Model: "m", Created: 1}},
+				{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockReasoning,
+					Reasoning: &ir.Reasoning{Encrypted: "opaque", Provider: tc.provider}}},
+				{Type: ir.EventBlockEnd, Index: 0},
+				{Type: ir.EventDone},
+			}
+			var buf bytes.Buffer
+			enc := NewResponsesStreamEncoder(&buf, nil)
+			for _, ev := range events {
+				if err := enc.Write(ev); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := enc.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got := strings.Contains(buf.String(), `"encrypted_content":"opaque"`)
+			if got != tc.want {
+				t.Fatalf("encrypted_content present = %v, want %v: %s", got, tc.want, buf.String())
+			}
+		})
 	}
 }
 

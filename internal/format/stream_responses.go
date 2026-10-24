@@ -2822,9 +2822,12 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			item.kind = "reasoning"
 			initial := ""
 			if ev.Block.Reasoning != nil {
-				item.encrypted = ev.Block.Reasoning.Encrypted
-				if err := e.retain(len(item.encrypted), "reasoning artifact"); err != nil {
-					return err
+				if ev.Block.Reasoning.Encrypted != "" &&
+					(ev.Block.Reasoning.Provider == "" || ev.Block.Reasoning.Provider == ir.Responses) {
+					item.encrypted = ev.Block.Reasoning.Encrypted
+					if err := e.retain(len(item.encrypted), "reasoning artifact"); err != nil {
+						return err
+					}
 				}
 				initial = ev.Block.Reasoning.Text
 				if initial == "" && len(ev.Block.Reasoning.Summary) > 0 {

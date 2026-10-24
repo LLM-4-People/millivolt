@@ -80,7 +80,8 @@ target cannot consume them:
 - Anthropic thinking and redacted-thinking blocks keep their opaque signatures.
 - OpenAI Responses reasoning items keep `encrypted_content` and item ids.
   A cross-family encrypted reasoning artifact is never replayed into another
-  provider's field; it is dropped with a warning.
+  provider's field. A non-streaming surface drops it with a warning; a stream
+  has no warning sink and drops it silently.
 - A Responses reasoning item exposes two independent text channels: the
   summary parts and the content reasoning text. A translated stream emits both
   as they arrive, so text the source places in both channels appears in two
