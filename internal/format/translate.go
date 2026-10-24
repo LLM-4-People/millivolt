@@ -166,6 +166,14 @@ func TranslateRequestBetweenIR(inbound, outbound ir.Protocol, body []byte, defau
 	if outbound == ir.Chat && inbound != ir.Chat && req.Stream {
 		req.StreamIncludeUsage = true
 	}
+	// A translated request to Responses must opt out of provider-side storage.
+	// OpenAI's Responses default is store=true with retention of at least 30
+	// days, while the source protocol never asked for retention and the proxy
+	// has no retrieval path. An explicit source value is preserved.
+	if outbound == ir.Responses && inbound != ir.Responses && req.Store == nil {
+		store := false
+		req.Store = &store
+	}
 	out, err := EncodeRequest(outbound, req, defaultMaxTokens, promptCacheKey)
 	if err != nil {
 		return req, nil, req.Warnings, err

@@ -77,7 +77,13 @@ target cannot consume them:
 - `previous_response_id`, `item_reference`, `background`, `conversation` and
   prompt templates require provider-side state and are rejected when the
   target cannot honor them. `store: true` is honored by Chat Completions and
-  Responses targets and rejected by Anthropic.
+  Responses targets and rejected by Anthropic. A Chat or Anthropic request
+  translated to a Responses target sets `store: false` when the source never
+  chose storage, because the Responses default retains data for at least 30
+  days while the source protocol has no such opt-in and the proxy has no
+  retrieval path. Explicit source values are preserved. A Responses source's
+  implicit storage cannot be honored on Chat or Anthropic, and no response id
+  is returned for later retrieval.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
