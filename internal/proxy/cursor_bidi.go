@@ -339,7 +339,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	if resp.StatusCode >= 400 {
 		// Connect streaming is HTTP 200 + envelopes. A 4xx/5xx means the
 		// Run never started - do not drive it as a live bidi body.
-		captureErrorFromResponse(resp, rec)
+		s.captureErrorFromResponse(r.Context(), resp, rec)
 		upstreamCancel() // tears down the h2 stream - the transport closes the REAL body (the cursor path never reaches ServeHTTP's body defer)
 		pw.Close()
 		// resp.Body here is captureErrorFromResponse's NopCloser re-wrap, so

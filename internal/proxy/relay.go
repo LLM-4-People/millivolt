@@ -565,7 +565,7 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 	rec.StatusCode = next.StatusCode
 	if next.StatusCode >= 400 {
-		captureErrorFromResponse(next, rec)
+		s.captureErrorFromResponse(ctx, next, rec)
 	}
 	captureUpstreamHeaders(next, rec, t.authHeader)
 	return next, nextCancel, true
@@ -607,15 +607,31 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				// upstream status, and fall back to a bounded generic error
 				// when the body is not a recognizable envelope.
 				full, rerr := s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes)
+				status := resp.StatusCode
 				out, terr := providerformat.TranslateErrorBetween(t.inbound, t.outbound, resp.StatusCode, full)
-				if rerr != nil || terr != nil {
+				if rerr != nil {
+					// The provider's error document could not be read within
+					// the whole-document bound. Fail closed with a real
+					// gateway status instead of asserting the upstream status
+					// over a partial or missing envelope.
+					status = http.StatusBadGateway
+					rec.StatusCode = status
+					if rec.ErrorType == "" {
+						rec.ErrorType = "upstream_error"
+						rec.ErrorMsg = "upstream error body could not be read"
+					}
+					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
+						Type: "api_error", Status: status,
+						Message: "upstream error: " + transportErrText(rerr),
+					})
+				} else if terr != nil {
 					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
 						Type: "api_error", Message: fmt.Sprintf("upstream HTTP %d", resp.StatusCode),
 					})
 				}
 				copyResponseHeaders(w.Header(), resp.Header)
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(resp.StatusCode)
+				w.WriteHeader(status)
 				if _, werr := w.Write(out); werr != nil {
 					markClientGone(rec)
 				} else {
@@ -1124,7 +1140,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
 			// committed-SSE contract), never as raw JSON on the stream.
-			captureErrorFromResponse(resp, rec)
+			s.captureErrorFromResponse(ctx, resp, rec)
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 				markClientGone(rec)
@@ -1270,21 +1286,19 @@ func captureUpstreamMeta(at *metrics.RetryAttempt, resp *http.Response, authHead
 	at.RateLimitLimit = m.RateLimitLimit
 }
 
-// captureErrorFromResponse reads a bounded portion of an error response body
-// to record the provider's error type/message, then rewinds the body so it
-// can still be relayed to the client. The rewind REPLACES resp.Body with a
-// NopCloser: a caller that must close the real body has to register its
-// body-Close defer BEFORE this call (defer evaluates resp.Body at
-// registration, so an early-registered defer still closes the real body).
-func captureErrorFromResponse(resp *http.Response, rec *metrics.Record) {
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
+// captureErrorFromResponse reads a bounded prefix of an error response body
+// under the shared whole-document bound, then re-serves the captured prefix
+// followed by the live remainder so the client still receives the full
+// original body. The bound is what keeps a provider that holds or drips a
+// small error body from delaying the handler past whole_document_read_timeout
+// before the translated or buffered owner performs its own bounded read. A
+// timed-out read closes the body; the captured prefix is still re-served and
+// the owner's read then fails closed.
+func (s *Server) captureErrorFromResponse(ctx context.Context, resp *http.Response, rec *metrics.Record) {
+	b, err := s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes)
 	if err == nil && len(b) > 0 {
 		rec.ErrorType, rec.ErrorCode, rec.ErrorMsg = parseErrorBody(b)
 	}
-	// Re-serve the captured prefix followed by the live remainder so the client
-	// still receives the FULL original body byte-for-byte (the prefix alone
-	// would truncate a large error payload). resp.Body is still open, positioned
-	// right after the prefix we read.
 	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(b), resp.Body))
 }
 

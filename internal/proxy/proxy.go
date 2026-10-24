@@ -938,7 +938,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Capture error detail from 4xx/5xx response bodies (read before streaming).
 	if resp.StatusCode >= 400 {
-		captureErrorFromResponse(resp, rec)
+		s.captureErrorFromResponse(ctx, resp, rec)
 	}
 
 	// Capture upstream response headers for the audit view; the quality loops
