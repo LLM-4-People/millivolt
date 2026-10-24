@@ -28,9 +28,9 @@ const sseKeepaliveComment = ": keepalive\n"
 var _ http.Flusher = (*ssePacer)(nil)
 
 // ssePacer is the lowest choke point for a streaming request: the
-// ResponseWriter itself. Queue wait, operator hold, retry backoff, and
-// mid-stream reasoning gaps all go silent here. A ticker
-// writes `: keepalive` whenever the socket has been idle for
+// ResponseWriter itself. Queue wait, operator hold, and mid-stream reasoning
+// gaps all go silent here. A ticker writes `: keepalive` whenever the socket
+// has been idle for
 // sseKeepaliveInterval. Start() commits SSE immediately for a known wait;
 // Arm() only runs the ticker, which stays silent until an actual event-stream
 // body has committed, so a slow JSON response never gets SSE comments.
