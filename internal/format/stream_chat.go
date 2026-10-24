@@ -2,6 +2,7 @@ package format
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -70,6 +71,8 @@ type ChatStreamDecoder struct {
 	reasoningIndex int
 	refusalIndex   int
 	toolBlocks     map[int]int
+	toolArguments  map[int]*strings.Builder
+	toolArgBytes   int
 	open           []int
 
 	finishSeen    bool
@@ -88,6 +91,7 @@ func NewChatStreamDecoder(r io.Reader) *ChatStreamDecoder {
 		reasoningIndex: -1,
 		refusalIndex:   -1,
 		toolBlocks:     map[int]int{},
+		toolArguments:  map[int]*strings.Builder{},
 	}
 }
 
@@ -109,7 +113,9 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			// provider may close the connection without the optional [DONE]
 			// sentinel; that is a complete stream, not a truncation.
 			if d.finishSeen {
-				d.closeAll()
+				if err := d.closeAll(); err != nil {
+					return nil, err
+				}
 				d.flushFinish()
 				d.terminal = true
 				d.q.push(&ir.Event{Type: ir.EventDone})
@@ -127,7 +133,9 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			d.observe(raw.Name, raw.Data)
 		}
 		if strings.TrimSpace(string(raw.Data)) == "[DONE]" {
-			d.closeAll()
+			if err := d.closeAll(); err != nil {
+				return nil, err
+			}
 			d.flushFinish()
 			d.terminal = true
 			d.q.push(&ir.Event{Type: ir.EventDone})
@@ -138,7 +146,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			return nil, err
 		}
 		if chunk.Error != nil {
-			d.closeAll()
+			_ = d.closeAll()
 			d.terminal = true
 			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
 				Type: chunk.Error.Type, Code: stringifyCode(chunk.Error.Code), Message: chunk.Error.Message,
@@ -189,7 +197,9 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				d.closeAll()
+				if err := d.closeAll(); err != nil {
+					return nil, err
+				}
 				d.finishSeen = true
 				reason, _ := irFinishReason(*choice.FinishReason)
 				d.pendingFinish = &ir.Finish{Reason: reason}
@@ -287,12 +297,18 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 		irIndex = d.nextIndex
 		d.nextIndex++
 		d.toolBlocks[chatIndex] = irIndex
+		d.toolArguments[chatIndex] = &strings.Builder{}
 		d.open = append(d.open, irIndex)
 		d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: irIndex, Block: &ir.Block{
 			Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{ID: id, Name: name, Arguments: json.RawMessage(`{}`)},
 		}})
 	}
 	if args != "" {
+		if len(args) > streamToolArgumentsMax-d.toolArgBytes {
+			return fmt.Errorf("chat stream exceeds %d accumulated tool-argument bytes", streamToolArgumentsMax)
+		}
+		d.toolArgBytes += len(args)
+		d.toolArguments[chatIndex].WriteString(args)
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: irIndex, Delta: &ir.Delta{Arguments: args}})
 	}
 	return nil
@@ -334,7 +350,15 @@ func (d *ChatStreamDecoder) closeOpen(idx int) {
 	}
 }
 
-func (d *ChatStreamDecoder) closeAll() {
+func (d *ChatStreamDecoder) closeAll() error {
+	// Tool-argument fragments are forwarded verbatim, so the completed value
+	// can only be validated here. A null, array, fragment or non-JSON value
+	// must fail the translation before the target receives a clean terminal.
+	for chatIndex, builder := range d.toolArguments {
+		if err := validateStreamedToolArguments(builder.String()); err != nil {
+			return fmt.Errorf("chat stream tool call %d: %w", chatIndex, err)
+		}
+	}
 	d.closeText()
 	d.closeReasoning()
 	d.closeRefusal()
@@ -343,14 +367,17 @@ func (d *ChatStreamDecoder) closeAll() {
 	}
 	d.open = nil
 	d.toolBlocks = map[int]int{}
+	d.toolArguments = map[int]*strings.Builder{}
+	d.toolArgBytes = 0
+	return nil
 }
 
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
 func (d *ChatStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
-	d.closeAll()
-	return drainQueue(&d.q), nil
+	err := d.closeAll()
+	return drainQueue(&d.q), err
 }
 
 // ChatStreamEncoder renders canonical events as Chat Completions SSE.

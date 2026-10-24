@@ -34,6 +34,13 @@ const toolBlocksMax = 1024
 // stream through deltas. Internal safety guardrail, not user-tunable.
 const toolInitialBytesMax = 4 << 20
 
+// streamToolArgumentsMax bounds the total tool-argument bytes a stream decoder
+// accumulates to validate the completed JSON object. Arguments are forwarded
+// as they arrive, so this is a validation buffer, not a wire cap: normal tool
+// calls are measured in kilobytes, and a source that streams megabytes into a
+// single call without finishing it fails closed before a clean terminal.
+const streamToolArgumentsMax = 4 << 20
+
 // WireNestedCollectionMax bounds an aggregate of nested collections that a
 // single top-level bound cannot cover, such as every reasoning summary array in
 // an output list or every citation array in a content list.

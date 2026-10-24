@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -83,7 +84,13 @@ type AnthropicStreamDecoder struct {
 	openToolBlocks   int
 	toolInitialBytes int
 	toolInitial      map[int]int
-	openBlocks       map[int]bool
+	// toolInput accumulates input_json_delta fragments per open tool block so
+	// the completed value can be validated as a JSON object before the target
+	// receives a clean block end. The bytes are forwarded as they arrive;
+	// this buffer exists only for validation.
+	toolInput      map[int]*strings.Builder
+	toolInputBytes int
+	openBlocks     map[int]bool
 	// errorSeen records an explicit error event. A terminal stop reason of
 	// "error" without one still needs a failure event; with one, the explicit
 	// provider error already owns the terminal.
@@ -104,6 +111,7 @@ func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *Anthr
 		skipped:     map[int]bool{},
 		observe:     observe,
 		toolInitial: map[int]int{},
+		toolInput:   map[int]*strings.Builder{},
 		openBlocks:  map[int]bool{},
 		seenBlocks:  map[int]struct{}{},
 	}
@@ -224,6 +232,9 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if d.toolInitialBytes > toolInitialBytesMax {
 					return nil, errNativeToolInitialBytes
 				}
+				if err := validateStreamedToolArguments(string(block.Input)); err != nil {
+					return nil, fmt.Errorf("anthropic stream tool %q: %w", boundedEcho(block.Name), err)
+				}
 			}
 			irBlock, ok := anthropicStreamBlock(block)
 			if !ok {
@@ -255,6 +266,18 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				out.Text = delta.Text
 			case "input_json_delta":
 				out.Arguments = delta.PartialJSON
+				if _, open := d.toolInitial[ev.Index]; open && delta.PartialJSON != "" {
+					if len(delta.PartialJSON) > streamToolArgumentsMax-d.toolInputBytes {
+						return nil, fmt.Errorf("anthropic stream exceeds %d accumulated tool-argument bytes", streamToolArgumentsMax)
+					}
+					builder := d.toolInput[ev.Index]
+					if builder == nil {
+						builder = &strings.Builder{}
+						d.toolInput[ev.Index] = builder
+					}
+					d.toolInputBytes += len(delta.PartialJSON)
+					builder.WriteString(delta.PartialJSON)
+				}
 			case "thinking_delta":
 				out.Reasoning = delta.Thinking
 			case "signature_delta":
@@ -281,6 +304,13 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				// A terminal event already closed this block; a late stop must
 				// not emit a second BlockEnd for an index the client saw closed.
 				continue
+			}
+			if builder, ok := d.toolInput[ev.Index]; ok {
+				if err := validateStreamedToolArguments(builder.String()); err != nil {
+					return nil, fmt.Errorf("anthropic stream tool input: %w", err)
+				}
+				d.toolInputBytes -= builder.Len()
+				delete(d.toolInput, ev.Index)
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: ev.Index})
 		case "message_delta":
@@ -397,8 +427,10 @@ func (d *AnthropicStreamDecoder) closeOpenBlocks() {
 	clear(d.openBlocks)
 	clear(d.skipped)
 	clear(d.toolInitial)
+	clear(d.toolInput)
 	d.openToolBlocks = 0
 	d.toolInitialBytes = 0
+	d.toolInputBytes = 0
 }
 
 // FlushBlocks closes every block this decoder still holds open. The
