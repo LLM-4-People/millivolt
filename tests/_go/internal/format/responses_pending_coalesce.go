@@ -6,8 +6,10 @@ package format
 // still allowed millions of queued events.
 
 import (
+	"fmt"
 	"io"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -140,5 +142,101 @@ func TestResponsesUndeclaredReasoningCoalesceAllocationBound(t *testing.T) {
 	}
 	if starts != 1 || outDeltas != 1 || reasoning.Len() != deltas {
 		t.Fatalf("starts=%d deltas=%d reasoning=%d, want 1/1/%d", starts, outDeltas, reasoning.Len(), deltas)
+	}
+}
+
+// A provider may omit content_part.added and send only growing done events for
+// one part. Each done payload is the authoritative full value, so the emitted
+// suffix must coalesce into one synthetic block and one concatenated delta.
+func unannouncedDoneStream(eventType string, partTexts map[int]string) string {
+	var b strings.Builder
+	b.WriteString(terminalStreamCreated)
+	indices := make([]int, 0, len(partTexts))
+	for index := range partTexts {
+		indices = append(indices, index)
+	}
+	slices.Sort(indices)
+	for _, index := range indices {
+		text := partTexts[index]
+		for end := 1; end <= len(text); end++ {
+			b.WriteString("event: " + eventType + "\n")
+			fmt.Fprintf(&b, `data: {"type":%q,"output_index":0,"content_index":%d,"text":%q}`+"\n\n", eventType, index, text[:end])
+		}
+	}
+	b.WriteString(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`)
+	return b.String()
+}
+
+func TestResponsesUndeclaredDoneEventsCoalesce(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		blockType ir.BlockType
+		deltaKind string
+	}{
+		{name: "output text done", eventType: "response.output_text.done", blockType: ir.BlockText, deltaKind: "text"},
+		{name: "reasoning text done", eventType: "response.reasoning_text.done", blockType: ir.BlockReasoning, deltaKind: "reasoning"},
+	} {
+		t.Run(tc.name+" one part", func(t *testing.T) {
+			events := drainResponseEvents(t, unannouncedDoneStream(tc.eventType, map[int]string{0: "abcdef"}))
+			starts, deltas := 0, 0
+			var value strings.Builder
+			for _, ev := range events {
+				switch ev.Type {
+				case ir.EventBlockStart:
+					starts++
+					if ev.Block == nil || ev.Block.Type != tc.blockType {
+						t.Fatalf("synthetic block type = %+v, want %s", ev.Block, tc.blockType)
+					}
+				case ir.EventBlockDelta:
+					if ev.Delta == nil {
+						continue
+					}
+					if tc.deltaKind == "text" && ev.Delta.Text != "" {
+						deltas++
+						value.WriteString(ev.Delta.Text)
+					}
+					if tc.deltaKind == "reasoning" && ev.Delta.Reasoning != "" {
+						deltas++
+						value.WriteString(ev.Delta.Reasoning)
+					}
+				}
+			}
+			if starts != 1 || deltas != 1 || value.String() != "abcdef" {
+				t.Fatalf("starts=%d deltas=%d value=%q, want 1/1/abcdef", starts, deltas, value.String())
+			}
+		})
+
+		t.Run(tc.name+" two parts keep order", func(t *testing.T) {
+			events := drainResponseEvents(t, unannouncedDoneStream(tc.eventType, map[int]string{0: "abc", 1: "xyz"}))
+			var starts []int
+			values := map[int]string{}
+			current := -1
+			for _, ev := range events {
+				switch ev.Type {
+				case ir.EventBlockStart:
+					starts = append(starts, ev.Index)
+					current = ev.Index
+				case ir.EventBlockDelta:
+					if ev.Delta == nil {
+						continue
+					}
+					if tc.deltaKind == "text" {
+						values[current] += ev.Delta.Text
+					} else {
+						values[current] += ev.Delta.Reasoning
+					}
+				}
+			}
+			if len(starts) != 2 {
+				t.Fatalf("synthetic block starts = %d, want 2", len(starts))
+			}
+			if values[starts[0]] != "abc" || values[starts[1]] != "xyz" {
+				t.Fatalf("part values = %q/%q, want abc/xyz", values[starts[0]], values[starts[1]])
+			}
+		})
 	}
 }
