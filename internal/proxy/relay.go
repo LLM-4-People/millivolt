@@ -438,8 +438,11 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 				}
 			}
 		case ir.BlockRefusal:
+			// A refusal is answer-shaped output, but not answer content, on
+			// every path (streamed delta and non-stream native alike). Only
+			// the preview sees it; marking HadAnswerContent would keep a
+			// refusal+tool turn out of the tool-only settlement.
 			if b.Refusal != "" {
-				rec.HadAnswerContent = true
 				if preview && rec.ResponsePreview == "" {
 					rec.ResponsePreview = metrics.TruncatePreview(b.Refusal)
 				}

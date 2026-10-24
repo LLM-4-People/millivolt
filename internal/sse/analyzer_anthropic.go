@@ -30,8 +30,11 @@ type anthropicAnalyzerEvent struct {
 	// Message is raw because it is an object on message_start and a plain
 	// string on a standalone error event; a typed object field would reject
 	// the whole error frame.
-	Message      json.RawMessage `json:"message"`
-	Code         string          `json:"code"`
+	Message json.RawMessage `json:"message"`
+	// Code is raw because the Responses error event allows a string or a
+	// numeric code; a typed string would reject the whole event and lose the
+	// error entirely.
+	Code         json.RawMessage `json:"code"`
 	ContentBlock struct {
 		Type  string `json:"type"`
 		Name  string `json:"name"`
@@ -147,8 +150,9 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 			// message is a plain string, decoded from the raw field.
 			var msg string
 			_ = json.Unmarshal(ev.Message, &msg)
-			if ev.Code != "" || msg != "" {
-				a.setStreamError("provider_error", ev.Code, msg)
+			code := errorCodeString(ev.Code)
+			if code != "" || msg != "" {
+				a.setStreamError("provider_error", code, msg)
 			}
 		}
 		// An error event is a terminal statement on every wire that carries
@@ -159,6 +163,26 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		return true
 	}
 	return false
+}
+
+// errorCodeString renders an error code that may be a JSON string, number or
+// null. Structured or boolean values have no single printable code and yield
+// an empty string. json.Number preserves the exact wire spelling.
+func errorCodeString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var n json.Number
+	if dec.Decode(&n) == nil {
+		return n.String()
+	}
+	return ""
 }
 
 func (a *Analyzer) recordAnthropicToken(now time.Time, answer bool) {
