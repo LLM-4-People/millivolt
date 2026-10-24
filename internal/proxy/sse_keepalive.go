@@ -10,7 +10,10 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-const sseKeepaliveComment = ": keepalive\n\n"
+// A comment line needs only its own newline. A trailing blank line would
+// dispatch a pending multi-line event if the upstream pauses between its
+// event: and data: lines, so the keepalive must never terminate an event.
+const sseKeepaliveComment = ": keepalive\n"
 
 // sseKeepaliveInterval is how often a quiet SSE socket gets a comment.
 // Chat Completions is data-only SSE: spec-compliant clients (including the
