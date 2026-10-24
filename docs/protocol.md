@@ -185,10 +185,12 @@ top-level objects. Those preflight bounds apply to native and translated
 requests alike. A translated request also passes through its protocol codec,
 which rejects with HTTP 400 more than 10,000 entries in a Responses `include`
 array or in a tool `allowed_callers` array, or more than 4,096 blocks in an
-Anthropic `system` list. A native passthrough is byte-transparent and does not
-apply those codec-only collection bounds: the body is relayed unchanged, so
-there is no materialization to bound. Content composition has two independent
-limits. A content
+Anthropic `system` list. A native passthrough without a configured body
+rewrite does not apply those codec-only collection bounds: the body is relayed
+unchanged, so there is no materialization to bound. A configured
+`request_overrides` rule, a sub-conversation strip or an ensured tool can still
+rewrite that body, but those rewrites are not a codec decode. Content
+composition has two independent limits. A content
 array above
 4,096 parts is not rejected for that reason on the byte-transparent
 passthrough path: within the aggregate budget it still relays unchanged, but
