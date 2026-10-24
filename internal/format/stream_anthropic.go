@@ -152,6 +152,14 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			}
 			block := ev.ContentBlock
 			if block.Type == "tool_use" {
+				if block.ID == "" {
+					// A streamed tool call without its required id still
+					// needs one on the target wire; the index keeps it
+					// unique within the response. Streaming cannot report
+					// the approximation in a header, so it is synthesized
+					// silently.
+					block.ID = syntheticToolID(ev.Index)
+				}
 				if err := checkNativeIdentity("tool id", block.ID); err != nil {
 					return nil, err
 				}

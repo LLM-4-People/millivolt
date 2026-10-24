@@ -294,12 +294,19 @@ func decodeAnthropicContent(raw json.RawMessage) ([]ir.Block, ir.Warnings, error
 	return decodeAnthropicBlocks(parts)
 }
 
+// syntheticToolID is a bounded, schema-conforming id for an Anthropic tool
+// call that omitted its required id. The block index keeps it unique within
+// one response.
+func syntheticToolID(index int) string {
+	return fmt.Sprintf("toolu_proxy_%d", index)
+}
+
 func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings, error) {
 	var (
 		blocks []ir.Block
 		warns  ir.Warnings
 	)
-	for _, p := range parts {
+	for i, p := range parts {
 		switch p.Type {
 		case "text":
 			blocks = append(blocks, ir.Block{
@@ -337,9 +344,17 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			if args[0] != '{' {
 				return nil, nil, errors.New("anthropic tool_use input must be a JSON object")
 			}
+			id := p.ID
+			if id == "" {
+				// Anthropic requires a non-empty tool_use id. Synthesize a
+				// conforming one and report the approximation rather than
+				// emitting an empty id on the target wire.
+				id = syntheticToolID(i)
+				warns.Add(ir.WarningApproximated, "tool_use.id", "generated a missing tool id")
+			}
 			blocks = append(blocks, ir.Block{
 				Type: ir.BlockToolCall, CacheControl: p.CacheControl, ToolCall: &ir.ToolCall{
-					ID: p.ID, Name: p.Name, Arguments: args,
+					ID: id, Name: p.Name, Arguments: args,
 				},
 			})
 		case "tool_result":
