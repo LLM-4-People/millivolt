@@ -2424,11 +2424,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		return true
 	}
 	// writeRescueBoundary closes the client's pending SSE event before a rescue
-	// return. Complete lines already in out are written; the trailing partial
-	// line was never received by the client and is dropped. One newline ends the
-	// open event (and is a harmless blank separator between complete events), so
-	// the fresh attempt's first data line cannot join an existing payload. The
-	// withheld terminal region is discarded with the attempt.
+	// return or the degenerate terminal error. Complete lines already in out are
+	// written; the trailing partial line was never received by the client and is
+	// dropped. One newline ends the open event (and is a harmless blank
+	// separator between complete events), so the next data line cannot join an
+	// existing payload. The withheld terminal region is discarded with the
+	// attempt or replaced by the degenerate error.
 	writeRescueBoundary := func() bool {
 		o := out.Bytes()
 		if n := bytes.LastIndexByte(o, '\n'); n >= 0 {
