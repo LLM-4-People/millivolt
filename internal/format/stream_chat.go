@@ -158,9 +158,8 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 		if chunk.Error != nil {
 			_ = d.closeAll(false)
 			d.terminal = true
-			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-				Type: chunk.Error.Type, Code: stringifyCode(chunk.Error.Code), Message: chunk.Error.Message,
-			}})
+			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
+				chunk.Error.Type, stringifyCode(chunk.Error.Code), chunk.Error.Message)})
 			continue
 		}
 		if !d.started {

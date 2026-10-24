@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"unicode/utf8"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -145,6 +146,18 @@ func boundedEcho(value string) string {
 		cut--
 	}
 	return value[:cut] + "..."
+}
+
+// boundedProviderError is the single owner for a provider-controlled stream
+// error tuple. All three fields are copied into the client event and echoed by
+// the target encoders, so each is cut with the shared preview bound before it
+// can carry a request-sized value onto the wire.
+func boundedProviderError(typ, code, message string) *ir.Error {
+	return &ir.Error{
+		Type:    metrics.TruncatePreview(typ),
+		Code:    metrics.TruncatePreview(code),
+		Message: metrics.TruncatePreview(message),
+	}
 }
 
 // checkWireArray rejects an over-bound JSON array before its typed decode.

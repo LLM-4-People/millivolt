@@ -1020,9 +1020,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := d.closeAll(nil, responsesTerminalError); err != nil {
 				return nil, err
 			}
-			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-				Type: "api_error", Code: ev.Code, Message: ev.Message,
-			}})
+			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
+				"api_error", ev.Code, ev.Message)})
 		default:
 			// response.output_text.done, function_call_arguments.done,
 			// reasoning_summary_* and provider-specific events are already
