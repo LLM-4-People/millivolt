@@ -85,6 +85,9 @@ func (p *ssePacer) applyStatus(hdr http.Header, status int) bool {
 	if hdr != nil {
 		copyResponseHeaders(p.w.Header(), hdr)
 	}
+	// The accepted status owns the body mode exactly like applyUpstream: an
+	// event-stream body keeps the idle ticker alive, a JSON body stays quiet.
+	p.sse = isEventStream(p.w.Header().Get("Content-Type"))
 	p.started = true
 	p.modeSet = true
 	p.lastWrite = time.Now()
