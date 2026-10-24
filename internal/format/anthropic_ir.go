@@ -742,7 +742,7 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
 		req.Warnings.Add(ir.WarningApproximated, "response_format.json_object", "Anthropic only supports json_schema")
 	}
-	messages := encodeAnthropicMessages(req.Messages, &req.Warnings)
+	system, messages := encodeAnthropicTurns(req.Messages, req.Instructions, &req.Warnings)
 	if len(messages) == 0 {
 		// Anthropic requires a non-empty messages array. Every input part can
 		// be empty after translation, so fail closed before any upstream call
@@ -779,7 +779,7 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if len(req.Stop) > 0 {
 		out["stop_sequences"] = req.Stop
 	}
-	if system := encodeAnthropicSystem(req.Messages, req.Instructions, &req.Warnings); system != nil {
+	if system != nil {
 		out["system"] = system
 	}
 	if len(req.Tools) > 0 {
@@ -830,35 +830,9 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	return sse.MarshalWireJSON(out)
 }
 
-// encodeAnthropicSystem lifts the Responses instructions and leading
-// system/developer messages into the top-level system field. A system message
-// after the conversation has started is representable as SystemMessageParam
-// and stays in messages at its original position. A later developer message
-// has no Anthropic role and is lifted with an approximation warning.
-func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *ir.Warnings) any {
-	var blocks []map[string]any
-	if instructions != nil && *instructions != "" {
-		blocks = append(blocks, map[string]any{"type": "text", "text": *instructions})
-	}
-	seenNonSystem := false
-	moved := false
-	for _, m := range messages {
-		if m.Role != ir.RoleSystem && m.Role != ir.RoleDeveloper {
-			seenNonSystem = true
-			continue
-		}
-		if m.Role == ir.RoleSystem && seenNonSystem {
-			continue
-		}
-		if m.Role == ir.RoleDeveloper && seenNonSystem && !moved {
-			moved = true
-			if warns != nil {
-				warns.Add(ir.WarningApproximated, "system", "Anthropic Messages has no developer role; a later developer message was moved before the conversation")
-			}
-		}
-		blocks = append(blocks, anthropicSystemTextBlocks(m.Content, warns)...)
-	}
-	return anthropicTextContent(blocks)
+type anthropicOutMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
 }
 
 // anthropicSystemTextBlocks renders the text-only part of a system or
@@ -914,92 +888,110 @@ func anthropicTextContent(blocks []map[string]any) any {
 	return strings.Join(parts, "\n\n")
 }
 
-type anthropicOutMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
-}
-
-func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOutMessage {
+// encodeAnthropicTurns renders the message history and the top-level system
+// field in one pass. The top-level field owns the Responses instructions and
+// every system or developer turn that arrives before the first emitted
+// conversation turn. "First emitted turn" is out's emptiness, not the presence
+// of a non-system input: a leading assistant turn can be dropped and an empty
+// leading user turn can encode to nothing, so neither may push a later system
+// turn into messages where Anthropic rejects it. A system turn after an emitted
+// turn stays in messages at its position. A later developer turn has no
+// Anthropic role and is lifted with one approximation warning.
+func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir.Warnings) (any, []anthropicOutMessage) {
+	var systemBlocks []map[string]any
+	if instructions != nil && *instructions != "" {
+		systemBlocks = append(systemBlocks, map[string]any{"type": "text", "text": *instructions})
+	}
 	var out []anthropicOutMessage
-	seenNonSystem := false
 	leadingAssistantDropped := false
 	droppedToolCalls := map[string]struct{}{}
 	orphanResultDropped := false
-	for _, m := range in {
+	developerLifted := false
+	for _, m := range messages {
 		if m.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
 		}
-		// Developer messages are lifted at the top level. A leading system
-		// message is lifted too; a later system turn stays here as the
-		// SystemMessageParam the Messages schema accepts.
-		if m.Role == ir.RoleDeveloper {
-			continue
-		}
-		if m.Role == ir.RoleSystem && !seenNonSystem {
-			continue
-		}
-		// Anthropic requires the first emitted turn to use the user role. A
-		// source history may begin with an assistant turn (or a leading user
-		// turn may have encoded to nothing), so drop the leading assistant
-		// turns rather than prepending a fabricated user turn. One warning
-		// covers every dropped turn.
-		if m.Role == ir.RoleAssistant && len(out) == 0 {
-			for _, b := range m.Content {
-				if b.Type == ir.BlockToolCall && b.ToolCall != nil && b.ToolCall.ID != "" {
-					droppedToolCalls[b.ToolCall.ID] = struct{}{}
-				}
+		switch m.Role {
+		case ir.RoleSystem:
+			if len(out) == 0 {
+				systemBlocks = append(systemBlocks, anthropicSystemTextBlocks(m.Content, warns)...)
+				continue
 			}
-			if !leadingAssistantDropped {
-				leadingAssistantDropped = true
+			out = appendAnthropicTurn(out, string(m.Role),
+				anthropicTextContent(anthropicSystemTextBlocks(m.Content, warns)))
+		case ir.RoleDeveloper:
+			if len(out) != 0 && !developerLifted {
+				developerLifted = true
 				if warns != nil {
-					warns.Add(ir.WarningDropped, "messages.leading_assistant", "Anthropic Messages requires the first turn to use the user role")
+					warns.Add(ir.WarningApproximated, "system", "Anthropic Messages has no developer role; a later developer message was moved before the conversation")
 				}
 			}
-			continue
-		}
-		contentBlocks := m.Content
-		if m.Role == ir.RoleUser && len(droppedToolCalls) > 0 {
-			// A result whose tool_use was in a dropped leading assistant turn
-			// would be an orphan: Anthropic requires every tool_result to
-			// answer a preceding assistant tool_use. Keep the user turn's
-			// other blocks and report the loss once.
-			filtered := make([]ir.Block, 0, len(m.Content))
-			for _, b := range m.Content {
-				if b.Type == ir.BlockToolResult && b.ToolResult != nil {
-					if _, orphan := droppedToolCalls[b.ToolResult.CallID]; orphan {
-						if !orphanResultDropped {
-							orphanResultDropped = true
-							if warns != nil {
-								warns.Add(ir.WarningDropped, "messages.orphan_tool_result", "tool results for dropped leading assistant tool calls were dropped")
-							}
-						}
-						continue
+			systemBlocks = append(systemBlocks, anthropicSystemTextBlocks(m.Content, warns)...)
+		case ir.RoleAssistant:
+			// Anthropic requires the first emitted turn to use the user role.
+			// A source history may begin with an assistant turn (or a leading
+			// user turn may have encoded to nothing), so drop the leading
+			// assistant turns rather than prepending a fabricated user turn.
+			// One warning covers every dropped turn, and the tool-call ids are
+			// retained so their results can be dropped as orphans.
+			if len(out) == 0 {
+				for _, b := range m.Content {
+					if b.Type == ir.BlockToolCall && b.ToolCall != nil && b.ToolCall.ID != "" {
+						droppedToolCalls[b.ToolCall.ID] = struct{}{}
 					}
 				}
-				filtered = append(filtered, b)
+				if !leadingAssistantDropped {
+					leadingAssistantDropped = true
+					if warns != nil {
+						warns.Add(ir.WarningDropped, "messages.leading_assistant", "Anthropic Messages requires the first turn to use the user role")
+					}
+				}
+				continue
 			}
-			contentBlocks = filtered
+			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(m.Content, m.Role, warns))
+		default:
+			contentBlocks := m.Content
+			if m.Role == ir.RoleUser && len(droppedToolCalls) > 0 {
+				// A result whose tool_use was in a dropped leading assistant
+				// turn would be an orphan: Anthropic requires every tool_result
+				// to answer a preceding assistant tool_use. Keep the user
+				// turn's other blocks and report the loss once.
+				filtered := make([]ir.Block, 0, len(m.Content))
+				for _, b := range m.Content {
+					if b.Type == ir.BlockToolResult && b.ToolResult != nil {
+						if _, orphan := droppedToolCalls[b.ToolResult.CallID]; orphan {
+							if !orphanResultDropped {
+								orphanResultDropped = true
+								if warns != nil {
+									warns.Add(ir.WarningDropped, "messages.orphan_tool_result", "tool results for dropped leading assistant tool calls were dropped")
+								}
+							}
+							continue
+						}
+					}
+					filtered = append(filtered, b)
+				}
+				contentBlocks = filtered
+			}
+			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(contentBlocks, m.Role, warns))
 		}
-		role := string(m.Role)
-		var content any
-		if m.Role == ir.RoleSystem {
-			content = anthropicTextContent(anthropicSystemTextBlocks(contentBlocks, warns))
-		} else {
-			seenNonSystem = true
-			content = encodeAnthropicContent(contentBlocks, m.Role, warns)
-		}
-		if content == nil {
-			continue
-		}
-		// Anthropic merges consecutive same-role turns; doing it here keeps
-		// tool_result blocks immediately after their tool_use turn.
-		if n := len(out); n > 0 && out[n-1].Role == role {
-			out[n-1].Content = mergeAnthropicContent(out[n-1].Content, content)
-			continue
-		}
-		out = append(out, anthropicOutMessage{Role: role, Content: content})
 	}
-	return out
+	return anthropicTextContent(systemBlocks), out
+}
+
+// appendAnthropicTurn appends one rendered turn and merges it into a
+// consecutive same-role predecessor. Anthropic merges consecutive same-role
+// turns, and doing it here keeps tool_result blocks immediately after their
+// tool_use turn.
+func appendAnthropicTurn(out []anthropicOutMessage, role string, content any) []anthropicOutMessage {
+	if content == nil {
+		return out
+	}
+	if n := len(out); n > 0 && out[n-1].Role == role {
+		out[n-1].Content = mergeAnthropicContent(out[n-1].Content, content)
+		return out
+	}
+	return append(out, anthropicOutMessage{Role: role, Content: content})
 }
 
 // encodeAnthropicContent renders a simple all-text turn as a string (the

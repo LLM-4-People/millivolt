@@ -101,11 +101,12 @@ target cannot consume them:
   retrieval path. Explicit source values are preserved. A Responses source's
   implicit storage cannot be honored on Chat or Anthropic, and no response id
   is returned for later retrieval.
-- A leading system or developer message and the Responses instructions become
-  the top-level Anthropic `system` prompt. A system turn after the conversation
-  starts stays in `messages` as a `system` turn at its original position. A
-  later developer turn has no Anthropic role and is lifted to the prompt with
-  an approximation warning, which reports the positional change.
+- Every system or developer message before the first emitted conversation
+  turn, together with the Responses instructions, becomes the top-level
+  Anthropic `system` prompt. A system turn after the conversation starts stays
+  in `messages` as a `system` turn at its original position. A later developer
+  turn has no Anthropic role and is lifted to the prompt with an approximation
+  warning, which reports the positional change.
 - Anthropic `metadata.user_id` is limited to 512 characters. A longer Chat or
   Responses `user` value is rejected before any upstream send rather than
   truncated, because truncation can collide two distinct identifiers.
