@@ -315,6 +315,26 @@ higher numbers, because the relay does not retain the provider's counter. Both
 reset cases are documented contract gaps, not reproduced client failures; the
 terminal event is final for the turn.
 
+- A Chat stream chunk is decoded from its first choice only. A translated
+  request never emits `n` above 1 because only one choice can be translated,
+  so the limit is unreachable for compliant traffic; a noncompliant upstream
+  that interleaves several choices in one stream would mix them in the
+  translated stream.
+- A source in-band error followed by the protocol terminal is deliberate: Chat
+  and Responses clients receive the provider error and then `[DONE]` or the
+  terminal event, matching the source order. The relay does not suppress the
+  terminal after an error.
+- A streamed tool `arguments` value that is exactly `null` is emitted literally
+  and fails the block-close validation, while the non-streaming decoder
+  normalizes it to `{}`. The stream cannot rewrite bytes it already delivered,
+  and no official provider shape emits this value, so the inconsistency is an
+  accepted limit rather than a normalization path.
+- Anthropic `content_block_start` text is not counted as answer content,
+  first-answer time or a preview. The Anthropic wire is exempt from the OpenAI
+  degenerate substitution, so a completed start-text-only stream stays healthy
+  and records no answer content. Official start text is normally empty; this is
+  an accepted accounting limit.
+
 Streaming citations are not translated. A Responses
 `response.output_text.annotation.added` event is not decoded, and a streamed
 target does not emit citations or annotations; non-streaming responses do carry
