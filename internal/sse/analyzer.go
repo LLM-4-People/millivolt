@@ -513,30 +513,9 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
 	// or a tool call) - not on the empty role chunk.
-	if hasContent || hasReasoning || hasToolCall || hasToolDelta {
-		if a.firstTokenAt.IsZero() {
-			a.firstTokenAt = now
-		}
-		a.lastTokenAt = now
-		a.chunkCount++
-		// A chunk that carries ONLY a tool call (no content, no reasoning) is
-		// not a generation token - track it separately so the output-token
-		// fallback can exclude tool-call argument chunks from gen TPS.
-		if (hasToolCall || hasToolDelta) && !hasContent && !hasReasoning {
-			a.toolChunks++
-		}
-		if hasContent {
-			a.textChunks++
-		}
-		if hasReasoning {
-			a.reasoningChunks++
-		}
-	}
+	a.recordPresence(hasContent, hasReasoning, hasToolCall, hasToolDelta, now)
 
 	// Reasoning/answer separation for thinking models.
-	if hasReasoning && a.firstReasoningAt.IsZero() {
-		a.firstReasoningAt = now
-	}
 	if hasContent && a.firstAnswerAt.IsZero() {
 		a.firstAnswerAt = now
 		// Capture a short preview of the first content chunk (only when the
@@ -657,6 +636,35 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	}
 }
 
+// recordPresence applies one parsed event's content/reasoning/tool presence to
+// the turn timers and chunk counters. feedData calls it per data line;
+// flushEvent calls it for a reassembled event whose payload only became
+// parseable at the SSE boundary, so the two paths cannot drift.
+func (a *Analyzer) recordPresence(hasContent, hasReasoning, hasToolCall, hasToolDelta bool, now time.Time) {
+	if hasContent || hasReasoning || hasToolCall || hasToolDelta {
+		if a.firstTokenAt.IsZero() {
+			a.firstTokenAt = now
+		}
+		a.lastTokenAt = now
+		a.chunkCount++
+		// A chunk that carries ONLY a tool call (no content, no reasoning) is
+		// not a generation token - track it separately so the output-token
+		// fallback can exclude tool-call argument chunks from gen TPS.
+		if (hasToolCall || hasToolDelta) && !hasContent && !hasReasoning {
+			a.toolChunks++
+		}
+		if hasContent {
+			a.textChunks++
+		}
+		if hasReasoning {
+			a.reasoningChunks++
+		}
+	}
+	if hasReasoning && a.firstReasoningAt.IsZero() {
+		a.firstReasoningAt = now
+	}
+}
+
 // extractCost runs the cost-key scan over a raw JSON document (the chunk
 // root or the bare usage object). Returns (0, false) when the bytes are
 // absent or unparseable - "no cost reported", never a fabricated number.
@@ -707,6 +715,18 @@ func (a *Analyzer) flushEvent(now time.Time) {
 	// of being re-sent as a truncation.
 	if len(a.eventData) > 0 {
 		a.captureStandaloneError(a.eventData)
+	}
+	// A pretty-printed non-terminal event carries the same visible presence as
+	// its single-line twin. The summary-part announcement keeps its text under
+	// "part", which the flat key probe cannot see, so a reassembled
+	// announcement needs this boundary owner to record reasoning presence.
+	// A complete single-line event never reaches here with accumulated bytes.
+	if len(a.eventData) > 0 {
+		var keys frameKeys
+		keys.scan(a.eventData)
+		if typ := keys.responseEventType(a.eventData); responsesReasoningSummaryPart(typ, a.eventData) {
+			a.recordPresence(false, true, false, false, now)
+		}
 	}
 	a.eventData = a.eventData[:0]
 	a.eventDataSeen = false
