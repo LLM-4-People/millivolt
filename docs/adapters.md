@@ -98,6 +98,11 @@ target cannot consume them:
   non-streaming translated response drops it with a warning. A translated
   Anthropic stream cannot report response-side warnings after its status line
   is committed.
+- An image or document inside an Anthropic assistant turn is schema-valid
+  because assistant content shares the message content type. The proxy keeps
+  it and reports an `assistant.image` or `assistant.document` approximation
+  warning; runtime acceptance of assistant media is not verified. User media
+  is carried without that warning.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
@@ -219,8 +224,10 @@ stubs. When the client sent no tools of its own, an absent, null, or `auto`
 `tool_choice` is forced to `none`, while an explicit `none` stays; a
 `required`, named, or malformed choice skips injection entirely, because
 forcing `none` would contradict the client and injecting would let the model
-call an undeclared stub. A body that already satisfies the signature is
-relayed unchanged, apart from any configured request override or
+call an undeclared stub. When the client already declares at least one tool,
+the configured names are added to that list and an explicit `required` or
+named `tool_choice` stays in force. A body that already satisfies the
+signature is relayed unchanged, apart from any configured request override or
 sub-conversation strip that runs before it. The stubs are Chat-shaped, so they
 are injected only into an OpenAI Chat client body on a Chat outbound wire; an
 Anthropic, Responses, Cursor, or arbitrary body is never rewritten.

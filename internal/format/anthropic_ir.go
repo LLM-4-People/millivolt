@@ -914,7 +914,7 @@ func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOut
 			content = anthropicTextContent(anthropicSystemTextBlocks(m.Content, warns))
 		} else {
 			seenNonSystem = true
-			content = encodeAnthropicContent(m.Content, warns)
+			content = encodeAnthropicContent(m.Content, m.Role, warns)
 		}
 		if content == nil {
 			continue
@@ -933,7 +933,7 @@ func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOut
 // encodeAnthropicContent renders a simple all-text turn as a string (the
 // shape the Chat translator historically emitted) and every structured turn as
 // a block array.
-func encodeAnthropicContent(blocks []ir.Block, warns *ir.Warnings) any {
+func encodeAnthropicContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) any {
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -955,7 +955,7 @@ func encodeAnthropicContent(blocks []ir.Block, warns *ir.Warnings) any {
 		}
 		return text.String()
 	}
-	return encodeAnthropicBlocks(blocks, ir.RoleUser, warns)
+	return encodeAnthropicBlocks(blocks, role, warns)
 }
 
 func mergeAnthropicContent(prev, next any) any {
@@ -1038,6 +1038,14 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			if source == nil {
 				continue
 			}
+			if role == ir.RoleAssistant && warns != nil {
+				// AssistantMessageParam.content uses the shared
+				// MessageContentParam type, so the block is schema-valid, but
+				// assistant media is unusual and provider acceptance is not
+				// verified. Keep the representable block and report the
+				// approximation.
+				warns.Add(ir.WarningApproximated, "assistant.image", "assistant media is schema-valid on Anthropic but runtime acceptance is not verified")
+			}
 			block := map[string]any{"type": "image", "source": source}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
@@ -1047,6 +1055,9 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			source := encodeAnthropicFile(b.File, warns)
 			if source == nil {
 				continue
+			}
+			if role == ir.RoleAssistant && warns != nil {
+				warns.Add(ir.WarningApproximated, "assistant.document", "assistant media is schema-valid on Anthropic but runtime acceptance is not verified")
 			}
 			block := map[string]any{"type": "document", "source": source}
 			if b.File != nil && b.File.Filename != "" {
@@ -1152,16 +1163,15 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			out = append(out, block)
 		}
 	}
-	_ = role
 	return out
 }
 
-// anthropicImageMediaTypes is the Base64ImageSource media-type allowlist from
-// the Anthropic Messages schema.
 // anthropicUserIDMax is the official metadata.user_id maxLength. It counts
 // Unicode characters, matching the JSON Schema maxLength semantics.
 const anthropicUserIDMax = 512
 
+// anthropicImageMediaTypes is the Base64ImageSource media-type allowlist from
+// the Anthropic Messages schema.
 var anthropicImageMediaTypes = map[string]bool{
 	"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
 }
