@@ -87,8 +87,31 @@ func TestResponsesEncoderFrameCapAbortsOpenPart(t *testing.T) {
 	if partDone < 0 || itemDone < 0 || partDone > itemDone {
 		t.Fatalf("content part was not closed before the item: %s", out)
 	}
-	if !strings.Contains(out, `"text":""`) || !strings.Contains(out, `"status":"incomplete"`) {
-		t.Fatalf("abort flushed retained payload or missed the incomplete status: %s", out)
+	payloads := mustResponsePayloads(t, out)
+	sawIncomplete := false
+	for _, payload := range payloads {
+		switch payload["type"] {
+		case "response.content_part.done":
+			part, _ := payload["part"].(map[string]any)
+			if text, _ := part["text"].(string); text != "" {
+				t.Fatalf("aborted done payload retained text %q: %s", text, out)
+			}
+		case "response.output_item.done":
+			item, _ := payload["item"].(map[string]any)
+			if item["status"] == "incomplete" {
+				sawIncomplete = true
+			}
+			content, _ := item["content"].([]any)
+			for _, raw := range content {
+				part, _ := raw.(map[string]any)
+				if text, _ := part["text"].(string); text != "" {
+					t.Fatalf("aborted item retained text %q: %s", text, out)
+				}
+			}
+		}
+	}
+	if !sawIncomplete {
+		t.Fatalf("abort missed the incomplete status: %s", out)
 	}
 }
 
