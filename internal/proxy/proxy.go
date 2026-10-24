@@ -497,7 +497,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Resolve it before target validation so an early failure on a known
 	// Anthropic or Responses path still answers in that protocol's envelope;
 	// resolveTarget calls the same owner for the authoritative value.
-	inbound, _ := inboundProtocol(r)
+	// Discovery GETs always answer in the OpenAI envelope, even when an
+	// inference client-wire override is present; every other early sink
+	// follows the client protocol.
+	envelope := envelopeProtocol(r)
 	// Reserve the declared upload now. A chunked body has no length yet, so it
 	// reserves the configured request cap; admission therefore bounds both the
 	// handler set and the heap those bodies can occupy before routing.
@@ -516,19 +519,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// what a client would otherwise control. The directive writer above
 		// carries the no-retry header like every other error sink.
 		w.Header().Set("Retry-After", "1")
-		writeProtocolHTTPError(w, inbound, http.StatusServiceUnavailable, typeAPIError,
+		writeProtocolHTTPError(w, envelope, http.StatusServiceUnavailable, typeAPIError,
 			"proxy is at its in-flight request limit")
 		return
 	}
 	defer s.inflight.release(reserve)
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
-		writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 	session, parentSession, err := requestConversation(r.Header)
 	if err != nil {
-		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
@@ -541,11 +544,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// record, and request-overrides matching: classify once, use everywhere.
 	client := classifyClient(r)
 	if err := s.applyThrottleHeaders(r, t.provider, client); err != nil {
-		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
-	if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models") {
+	if isModelsRequest(r) {
 		// Model discovery keeps its separate transparent-refresh contract for
 		// every mechanism: use the refreshed key without returning tokens.
 		s.serveModels(w, r, t, extractKey(r))

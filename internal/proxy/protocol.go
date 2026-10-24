@@ -39,6 +39,25 @@ func inboundProtocol(r *http.Request) (ir.Protocol, error) {
 	return pathProtocol(r.URL.Path), nil
 }
 
+// isModelsRequest reports whether the request targets the OpenAI-compatible
+// model-discovery route. Discovery is not an inference request, so
+// X-Proxy-In-Format (the inference client-wire override) does not change its
+// envelope.
+func isModelsRequest(r *http.Request) bool {
+	return r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models")
+}
+
+// envelopeProtocol returns the protocol an early error sink must render for
+// this request. Discovery GETs stay OpenAI-shaped; every other request follows
+// the client wire.
+func envelopeProtocol(r *http.Request) ir.Protocol {
+	if isModelsRequest(r) {
+		return ir.Chat
+	}
+	p, _ := inboundProtocol(r)
+	return p
+}
+
 // pathProtocol maps one client endpoint to its wire protocol.
 func pathProtocol(path string) ir.Protocol {
 	switch path {
