@@ -789,6 +789,8 @@ class PublishedContracts(unittest.TestCase):
             "An unannounced id-less call at a colliding",
             "announced position cannot be distinguished from a repeat",
             "is dropped",
+            "has no schema length bound, so a provider id longer than 64 characters is relayed unchanged",
+            "1..64 character reference rule",
         ):
             self.assertIn(phrase, adapters)
         for stale in (
@@ -809,10 +811,14 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("withholds or replaces the terminal bytes", protocol)
         self.assertIn("A standalone in-band error line is not a delivery terminal", protocol)
         self.assertIn("a `[DONE]` on a Responses feed is not its terminal marker", protocol)
+        self.assertIn("surfaces the non-SSE body as a truncated-stream error", protocol)
+        self.assertIn("Discovery authenticates with the resolved target auth header and prefix", protocol)
 
     def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
         operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
         self.assertIn("fixed 32 MiB cap each", operations)
+        self.assertIn("restored from the streamed chunk count", operations)
+        self.assertIn("up to 1,024 distinct indexes", operations)
         self.assertIn("502 `response_too_large`", operations)
         self.assertIn("internal safety constant, not a setting", operations)
         self.assertIn(
