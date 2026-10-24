@@ -340,6 +340,12 @@ type Request struct {
 	// equivalent and drops it with a warning.
 	Moderation *Moderation `json:"moderation,omitempty"`
 
+	// PromptCacheOptions and PromptCacheRetention are the shared Chat/Responses
+	// prompt caching fields. Anthropic uses cache_control instead and reports
+	// both as dropped; the breakpoint mapping is a separate feature.
+	PromptCacheOptions   *PromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
+
 	// Instructions is the Responses top-level instructions string. Leading
 	// system/developer messages are folded into it by the Responses encoder.
 	Instructions *string `json:"instructions,omitempty"`
@@ -359,6 +365,16 @@ type Request struct {
 type Moderation struct {
 	Model  string          `json:"model"`
 	Policy json.RawMessage `json:"policy,omitempty"`
+}
+
+// PromptCacheOptions is the shared prompt caching configuration. ChatGPT and
+// Responses share ttl and mode; Prewarm and ComparisonResponseID are
+// Responses-only and are reported when a Chat target drops them.
+type PromptCacheOptions struct {
+	TTL                  string `json:"ttl,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
+	Prewarm              *bool  `json:"prewarm,omitempty"`
+	ComparisonResponseID string `json:"comparison_response_id,omitempty"`
 }
 
 // FinishReason is the normalized completion cause.

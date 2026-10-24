@@ -114,3 +114,50 @@ func TestChatIncludeObfuscationWarns(t *testing.T) {
 		t.Fatalf("obfuscation warning without the flag: %+v", warnings)
 	}
 }
+
+func TestPromptCacheOptionsCrossWire(t *testing.T) {
+	chatBody := `{"model":"m","messages":[{"role":"user","content":"hi"}],` +
+		`"prompt_cache_options":{"ttl":"30m","mode":"explicit"},"prompt_cache_retention":"24h"}`
+	out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Responses, []byte(chatBody), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decodeJSONObject(t, out)
+	options, _ := root["prompt_cache_options"].(map[string]any)
+	if options["ttl"] != "30m" || options["mode"] != "explicit" || root["prompt_cache_retention"] != "24h" {
+		t.Fatalf("responses cache fields = %v/%v: %s", options, root["prompt_cache_retention"], out)
+	}
+	if warningField(warnings, "prompt_cache_options") || warningField(warnings, "prompt_cache_retention") {
+		t.Fatalf("chat to responses reported a cache drop: %+v", warnings)
+	}
+
+	responsesBody := `{"model":"m","input":"hi",` +
+		`"prompt_cache_options":{"ttl":"30m","mode":"explicit","prewarm":true,"comparison_response_id":"resp_1"}}`
+	out, warnings, err = TranslateRequestBetween(ir.Responses, ir.Chat, []byte(responsesBody), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = decodeJSONObject(t, out)
+	options, _ = root["prompt_cache_options"].(map[string]any)
+	if options["ttl"] != "30m" || options["mode"] != "explicit" {
+		t.Fatalf("chat cache fields = %v: %s", options, out)
+	}
+	if _, ok := options["prewarm"]; ok {
+		t.Fatalf("chat body carried prewarm: %s", out)
+	}
+	if !warningField(warnings, "prompt_cache_options.prewarm") ||
+		!warningField(warnings, "prompt_cache_options.comparison_response_id") {
+		t.Fatalf("chat target did not report dropped options: %+v", warnings)
+	}
+
+	out, warnings, err = TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(chatBody), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warningField(warnings, "prompt_cache_options") || !warningField(warnings, "prompt_cache_retention") {
+		t.Fatalf("anthropic did not report cache fields dropped: %+v", warnings)
+	}
+	if strings.Contains(string(out), "prompt_cache_options") || strings.Contains(string(out), "prompt_cache_retention") {
+		t.Fatalf("anthropic body carried cache options: %s", out)
+	}
+}

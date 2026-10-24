@@ -42,22 +42,24 @@ type responsesWireRequest struct {
 		Format    json.RawMessage `json:"format"`
 		Verbosity string          `json:"verbosity"`
 	} `json:"text"`
-	Stream             bool              `json:"stream"`
-	Store              *bool             `json:"store"`
-	PreviousResponseID string            `json:"previous_response_id"`
-	Metadata           map[string]string `json:"metadata"`
-	ServiceTier        string            `json:"service_tier"`
-	User               string            `json:"user"`
-	SafetyIdentifier   string            `json:"safety_identifier"`
-	PromptCacheKey     string            `json:"prompt_cache_key"`
-	Moderation         *ir.Moderation    `json:"moderation"`
-	Include            []string          `json:"include"`
-	Truncation         string            `json:"truncation"`
-	Background         bool              `json:"background"`
-	MaxToolCalls       *int              `json:"max_tool_calls"`
-	Conversation       json.RawMessage   `json:"conversation"`
-	Prompt             json.RawMessage   `json:"prompt"`
-	ContextManagement  json.RawMessage   `json:"context_management"`
+	Stream               bool                   `json:"stream"`
+	Store                *bool                  `json:"store"`
+	PreviousResponseID   string                 `json:"previous_response_id"`
+	Metadata             map[string]string      `json:"metadata"`
+	ServiceTier          string                 `json:"service_tier"`
+	User                 string                 `json:"user"`
+	SafetyIdentifier     string                 `json:"safety_identifier"`
+	PromptCacheKey       string                 `json:"prompt_cache_key"`
+	Moderation           *ir.Moderation         `json:"moderation"`
+	PromptCacheOptions   *ir.PromptCacheOptions `json:"prompt_cache_options"`
+	PromptCacheRetention string                 `json:"prompt_cache_retention"`
+	Include              []string               `json:"include"`
+	Truncation           string                 `json:"truncation"`
+	Background           bool                   `json:"background"`
+	MaxToolCalls         *int                   `json:"max_tool_calls"`
+	Conversation         json.RawMessage        `json:"conversation"`
+	Prompt               json.RawMessage        `json:"prompt"`
+	ContextManagement    json.RawMessage        `json:"context_management"`
 }
 
 type responsesWireTool struct {
@@ -145,22 +147,24 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		return nil, errors.New("responses request: prompt templates are not supported")
 	}
 	req := &ir.Request{
-		Model:              in.Model,
-		Instructions:       in.Instructions,
-		MaxOutputTokens:    in.MaxOutputTokens,
-		Temperature:        in.Temperature,
-		TopP:               in.TopP,
-		TopLogprobs:        in.TopLogprobs,
-		ParallelToolCalls:  in.ParallelToolCalls,
-		Stream:             in.Stream,
-		Store:              in.Store,
-		PreviousResponseID: in.PreviousResponseID,
-		Metadata:           in.Metadata,
-		ServiceTier:        in.ServiceTier,
-		User:               in.User,
-		SafetyIdentifier:   in.SafetyIdentifier,
-		PromptCacheKey:     in.PromptCacheKey,
-		Moderation:         in.Moderation,
+		Model:                in.Model,
+		Instructions:         in.Instructions,
+		MaxOutputTokens:      in.MaxOutputTokens,
+		Temperature:          in.Temperature,
+		TopP:                 in.TopP,
+		TopLogprobs:          in.TopLogprobs,
+		ParallelToolCalls:    in.ParallelToolCalls,
+		Stream:               in.Stream,
+		Store:                in.Store,
+		PreviousResponseID:   in.PreviousResponseID,
+		Metadata:             in.Metadata,
+		ServiceTier:          in.ServiceTier,
+		User:                 in.User,
+		SafetyIdentifier:     in.SafetyIdentifier,
+		PromptCacheKey:       in.PromptCacheKey,
+		Moderation:           in.Moderation,
+		PromptCacheOptions:   in.PromptCacheOptions,
+		PromptCacheRetention: in.PromptCacheRetention,
 	}
 	if len(in.Include) > 0 {
 		otherInclude := false
@@ -732,6 +736,12 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.Moderation != nil {
 		out["moderation"] = req.Moderation
+	}
+	if req.PromptCacheOptions != nil {
+		out["prompt_cache_options"] = req.PromptCacheOptions
+	}
+	if req.PromptCacheRetention != "" {
+		out["prompt_cache_retention"] = req.PromptCacheRetention
 	}
 	if req.Logprobs != nil && *req.Logprobs {
 		out["include"] = []string{"message.output_text.logprobs"}

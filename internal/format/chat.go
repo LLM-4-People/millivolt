@@ -49,15 +49,17 @@ type chatWireRequest struct {
 		IncludeUsage       bool `json:"include_usage"`
 		IncludeObfuscation bool `json:"include_obfuscation"`
 	} `json:"stream_options"`
-	Metadata         map[string]json.RawMessage `json:"metadata"`
-	ServiceTier      string                     `json:"service_tier"`
-	User             string                     `json:"user"`
-	Verbosity        string                     `json:"verbosity"`
-	SafetyIdentifier string                     `json:"safety_identifier"`
-	PromptCacheKey   string                     `json:"prompt_cache_key"`
-	Moderation       *ir.Moderation             `json:"moderation"`
-	Store            *bool                      `json:"store"`
-	N                *int                       `json:"n"`
+	Metadata             map[string]json.RawMessage `json:"metadata"`
+	ServiceTier          string                     `json:"service_tier"`
+	User                 string                     `json:"user"`
+	Verbosity            string                     `json:"verbosity"`
+	SafetyIdentifier     string                     `json:"safety_identifier"`
+	PromptCacheKey       string                     `json:"prompt_cache_key"`
+	Moderation           *ir.Moderation             `json:"moderation"`
+	PromptCacheOptions   *ir.PromptCacheOptions     `json:"prompt_cache_options"`
+	PromptCacheRetention string                     `json:"prompt_cache_retention"`
+	Store                *bool                      `json:"store"`
+	N                    *int                       `json:"n"`
 
 	// Legacy and provider-specific request fields that the canonical model
 	// does not carry. Present values are reported or converted below.
@@ -199,25 +201,27 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 
 	var warns ir.Warnings
 	req := &ir.Request{
-		Model:             in.Model,
-		MaxOutputTokens:   MergeTokenCaps(in.MaxCompletionTokens, in.MaxTokens),
-		Temperature:       in.Temperature,
-		TopP:              in.TopP,
-		Seed:              in.Seed,
-		PresencePenalty:   in.PresencePenalty,
-		FrequencyPenalty:  in.FrequencyPenalty,
-		LogitBias:         in.LogitBias,
-		Logprobs:          in.Logprobs,
-		TopLogprobs:       in.TopLogprobs,
-		ParallelToolCalls: in.ParallelToolCalls,
-		Stream:            in.Stream,
-		ServiceTier:       in.ServiceTier,
-		Store:             in.Store,
-		User:              in.User,
-		Verbosity:         in.Verbosity,
-		SafetyIdentifier:  in.SafetyIdentifier,
-		PromptCacheKey:    in.PromptCacheKey,
-		Moderation:        in.Moderation,
+		Model:                in.Model,
+		MaxOutputTokens:      MergeTokenCaps(in.MaxCompletionTokens, in.MaxTokens),
+		Temperature:          in.Temperature,
+		TopP:                 in.TopP,
+		Seed:                 in.Seed,
+		PresencePenalty:      in.PresencePenalty,
+		FrequencyPenalty:     in.FrequencyPenalty,
+		LogitBias:            in.LogitBias,
+		Logprobs:             in.Logprobs,
+		TopLogprobs:          in.TopLogprobs,
+		ParallelToolCalls:    in.ParallelToolCalls,
+		Stream:               in.Stream,
+		ServiceTier:          in.ServiceTier,
+		Store:                in.Store,
+		User:                 in.User,
+		Verbosity:            in.Verbosity,
+		SafetyIdentifier:     in.SafetyIdentifier,
+		PromptCacheKey:       in.PromptCacheKey,
+		Moderation:           in.Moderation,
+		PromptCacheOptions:   in.PromptCacheOptions,
+		PromptCacheRetention: in.PromptCacheRetention,
 	}
 	if in.StreamOptions != nil {
 		req.StreamIncludeUsage = in.StreamOptions.IncludeUsage
@@ -1010,6 +1014,23 @@ func EncodeChatRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.Moderation != nil {
 		out["moderation"] = req.Moderation
+	}
+	if req.PromptCacheOptions != nil {
+		options := *req.PromptCacheOptions
+		if options.Prewarm != nil {
+			req.Warnings.Add(ir.WarningDropped, "prompt_cache_options.prewarm", "Chat has no prompt cache prewarm")
+			options.Prewarm = nil
+		}
+		if options.ComparisonResponseID != "" {
+			req.Warnings.Add(ir.WarningDropped, "prompt_cache_options.comparison_response_id", "Chat has no prompt cache diagnostics")
+			options.ComparisonResponseID = ""
+		}
+		if options.TTL != "" || options.Mode != "" {
+			out["prompt_cache_options"] = options
+		}
+	}
+	if req.PromptCacheRetention != "" {
+		out["prompt_cache_retention"] = req.PromptCacheRetention
 	}
 	tier, tierWarns := mapServiceTier(ir.Chat, req.ServiceTier)
 	req.Warnings = append(req.Warnings, tierWarns...)

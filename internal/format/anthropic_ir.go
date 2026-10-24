@@ -580,6 +580,12 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.Moderation != nil {
 		req.Warnings.Add(ir.WarningDropped, "moderation", "Anthropic Messages has no moderation configuration")
 	}
+	if req.PromptCacheOptions != nil {
+		req.Warnings.Add(ir.WarningDropped, "prompt_cache_options", "Anthropic Messages uses cache_control, not prompt_cache_options")
+	}
+	if req.PromptCacheRetention != "" {
+		req.Warnings.Add(ir.WarningDropped, "prompt_cache_retention", "Anthropic Messages uses cache_control, not prompt_cache_retention")
+	}
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
 		req.Warnings.Add(ir.WarningApproximated, "response_format.json_object", "Anthropic only supports json_schema")
 	}
