@@ -1594,14 +1594,19 @@ func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, con
 // queueTerminal coalesces one authoritative terminal value into the pending
 // queue by part identity. A repeated delta for the same unopened part appends
 // its bytes to the existing emission, so a stream cannot turn the 8 MiB text
-// bound into one entry per delta. The key set is bounded by the same announced
-// part cap.
+// bound into one entry per delta. Every caller announces the part first, and
+// announcePart caps distinct keys at WireNestedCollectionMax, so the queue
+// shares that real bound.
 func (d *ResponsesStreamDecoder) queueTerminal(key string, block ir.Block, delta *ir.Delta) error {
 	if idx, ok := d.terminalPendingByKey[key]; ok {
 		d.terminalPending[idx].add(delta)
 		return nil
 	}
 	if len(d.terminalPending) >= WireNestedCollectionMax {
+		// Defensive only: the announced-part gate above already bounds the
+		// distinct keys, so no current call path reaches this branch. It stays
+		// as a local invariant for a future caller that queues a terminal
+		// value without announcing its part first.
 		return fmt.Errorf("responses stream exceeds %d pending terminal parts", WireNestedCollectionMax)
 	}
 	emission := terminalEmission{block: block, delta: &ir.Delta{}}
