@@ -153,7 +153,7 @@ func (p *ssePacer) Flush() {
 }
 
 func (p *ssePacer) commitSSELocked() {
-	if p.started || p.stopped {
+	if p.started || p.stopped || (p.modeSet && !p.sse) {
 		return
 	}
 	writeSSEHeaders(p.w, http.StatusOK)
@@ -199,6 +199,12 @@ func (p *ssePacer) Start() {
 		return
 	}
 	p.ensureArmedLocked()
+	// A body mode already proven non-SSE belongs to the buffered owner. Do
+	// not commit the status line or write a comment over its Content-Type.
+	if p.modeSet && !p.sse {
+		p.mu.Unlock()
+		return
+	}
 	first := !p.started
 	if first {
 		p.commitSSELocked()
