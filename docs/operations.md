@@ -284,7 +284,7 @@ rides the same body-rewrite engine: one document decode when both features
 match one request, the original bytes used unchanged by the rewrite stage when
 the body is not a JSON object or the rewrite would exceed
 `max_request_bytes`, and cursor targets skipping the body section. The
-client's spelling reaches the upstream wire only on OpenAI-wire passthrough.
+client's spelling reaches the upstream wire on a same-protocol passthrough; a translated body carries the value in `prompt_cache_key` or drops it.
 
 When a tracked value was extracted and the request translates to the Anthropic
 wire, the translated body gains a top-level `prompt_cache_key` carrying the

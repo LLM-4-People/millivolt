@@ -912,6 +912,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"memory limit override wording", operations, "A set value overrides `GOMEMLIMIT`, not `GOGC`"},
 		{"memory limit precedence example", example, "With the setting at 0, an operator GOMEMLIMIT wins"},
 		{"memory limit override example", example, "a set value overrides GOMEMLIMIT, not GOGC"},
+		{"strip passthrough scope", operations, "client's spelling reaches the upstream wire on a same-protocol passthrough"},
 	} {
 		if !strings.Contains(tc.text, tc.want) {
 			t.Errorf("%s: missing %q", tc.name, tc.want)
@@ -934,6 +935,9 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	}
 	if !strings.Contains(settings, "client request body before relay or translation") {
 		t.Error("settings strip label omits the pre-translation scope")
+	}
+	if !strings.Contains(settings, "strip removes every configured field present at the top level of the client request body before relay or translation") {
+		t.Error("settings strip hint still scopes the fields to the relayed body")
 	}
 
 	providers := FieldByKey("providers")

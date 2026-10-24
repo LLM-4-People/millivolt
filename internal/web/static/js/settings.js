@@ -2108,7 +2108,7 @@ function scCardHTML(e, i) {
 function subConversationsEditorHTML(val) {
   const entries = Array.isArray(val) ? val : [];
   return `<div class="prov-sec mr-wrap sc-wrap">` +
-    `<div class="mr-hint">each entry tracks one classified client's sub-conversation identity from top-level request body fields · the first present field decides: a present value that is not a JSON string counts as absent and the next field is checked, while a present string that cannot be decoded or fails the identity rules drops the identity for the request - no later field is consulted, never a client error · the value groups requests under a k: identity, after X-Proxy-Session and before client+key grouping · strip removes every configured field present at the top level of the relayed body</div>` +
+    `<div class="mr-hint">each entry tracks one classified client's sub-conversation identity from top-level request body fields · the first present field decides: a present value that is not a JSON string counts as absent and the next field is checked, while a present string that cannot be decoded or fails the identity rules drops the identity for the request - no later field is consulted, never a client error · the value groups requests under a k: identity, after X-Proxy-Session and before client+key grouping · strip removes every configured field present at the top level of the client request body before relay or translation</div>` +
     `<div class="mr-tools"><button type="button" class="btn" data-sc-add aria-label="add entry">+ add entry</button><span class="mr-count muted"></span></div>` +
     `<div class="sc-rows">${entries.map((e, i) => scCardHTML(e, i)).join('')}</div>` +
     scDatalistHTML() +

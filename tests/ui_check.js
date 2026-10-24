@@ -5891,6 +5891,8 @@ async function main() {
       cards()[0].querySelector('.sc-strip').checked === true &&
       cards()[1].querySelector('.sc-client').value === 'zed-cli' &&
       !cards()[1].querySelector('.sc-strip').checked);
+    check('the strip hint names the pre-relay client body scope',
+      scWrap.querySelector('.mr-hint').textContent.includes('strip removes every configured field present at the top level of the client request body before relay or translation'));
     check('watermark examples ride the empty fields',
       cards()[0].querySelector('.sc-client').placeholder.includes('e.g. opencode') &&
       cards()[0].querySelector('.prov-add .sc-param-in').placeholder.includes('e.g. promptCacheKey') &&
