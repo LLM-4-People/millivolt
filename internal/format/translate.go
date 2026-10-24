@@ -1,10 +1,12 @@
 package format
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -89,6 +91,35 @@ func fileMediaType(file *ir.File) string {
 	}
 	if media, _, ok := splitBase64DataURL(file.FileData); ok {
 		return media
+	}
+	return ""
+}
+
+// inferFileMediaType resolves an inline file's media type at the file-data
+// owner: the declared field or data-URL prefix first, then a filename
+// extension, then a PDF signature in the base64 payload. The empty string means
+// the bytes cannot be typed; a caller with a media-type allowlist decides
+// whether to drop them.
+func inferFileMediaType(file *ir.File) string {
+	if file == nil {
+		return ""
+	}
+	if media := fileMediaType(file); media != "" {
+		return media
+	}
+	switch strings.ToLower(path.Ext(file.Filename)) {
+	case ".pdf":
+		return "application/pdf"
+	case ".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".log", ".xml":
+		return "text/plain"
+	}
+	// "%PDF-" base64-encodes to JVBERi0. Decoding the first eight characters
+	// covers the five-byte signature and any continuation bits.
+	if len(file.FileData) >= 8 {
+		if head, err := base64.StdEncoding.DecodeString(file.FileData[:8]); err == nil &&
+			strings.HasPrefix(string(head), "%PDF-") {
+			return "application/pdf"
+		}
 	}
 	return ""
 }

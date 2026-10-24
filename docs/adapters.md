@@ -126,6 +126,12 @@ target cannot consume them:
   it and reports an `assistant.image` or `assistant.document` approximation
   warning; runtime acceptance of assistant media is not verified. User media
   is carried without that warning.
+- A Responses `input_file` with inline `file_data` but no media-type
+  declaration has one inferred from a data-URL prefix, a `.pdf` or common
+  plain-text filename extension, or a base64 `%PDF-` signature. Unrecognized
+  bytes are dropped with one warning while a file id or URL on the same part
+  survives; a part with no remaining payload is dropped. Chat file parts keep
+  their existing PDF-only default.
 - A translated non-streaming response assumes a schema-valid source identity.
   A source that omits `id` or `model` yields an empty string on the target
   rather than an invented identity. The Responses envelope carries protocol
