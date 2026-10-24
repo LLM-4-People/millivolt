@@ -975,7 +975,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A 4xx/5xx body after that commit cannot change the status - emit
 		// it in-band so the SDK sees a retryable error, not raw JSON on 200.
 		// A non-streaming request can still receive an event-stream response;
-		// its pacer is created here, unarmed, only to own the status commit.
+		// its pacer is created here to own the status commit and body writes,
+		// then armed so the confirmed stream gets idle keepalives.
 		if pacer == nil {
 			// A non-streaming request can still receive an event-stream
 			// response. Assign the late pacer back to w so body writes pass
