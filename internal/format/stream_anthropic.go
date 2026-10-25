@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -546,16 +547,17 @@ func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 
 // emptyToolInputObject reports whether an already-validated tool input is
 // absent, null or an object with no members. JSON whitespace is insignificant,
-// so "{ }" is the same empty object as "{}".
+// so "{ }" is the same empty object as "{}". It classifies bytes directly so a
+// large non-empty start does not copy its payload into a string.
 func emptyToolInputObject(raw json.RawMessage) bool {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return true
 	}
 	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
 		return false
 	}
-	return strings.TrimSpace(trimmed[1:len(trimmed)-1]) == ""
+	return len(bytes.TrimSpace(trimmed[1:len(trimmed)-1])) == 0
 }
 
 func anthropicStreamBlock(b anthropicWireBlock) (ir.Block, bool) {
