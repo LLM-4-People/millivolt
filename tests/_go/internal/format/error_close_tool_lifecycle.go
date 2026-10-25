@@ -4,36 +4,11 @@ package format
 // call, and an Anthropic error event is the stream's terminal statement.
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
-
-type errorCloseFrame struct {
-	name string
-	data string
-}
-
-func errorCloseFrames(out string) []errorCloseFrame {
-	var frames []errorCloseFrame
-	for _, block := range strings.Split(out, "\n\n") {
-		var frame errorCloseFrame
-		for _, line := range strings.Split(block, "\n") {
-			switch {
-			case strings.HasPrefix(line, "event: "):
-				frame.name = strings.TrimPrefix(line, "event: ")
-			case strings.HasPrefix(line, "data: "):
-				frame.data = strings.TrimPrefix(line, "data: ")
-			}
-		}
-		if frame.data != "" {
-			frames = append(frames, frame)
-		}
-	}
-	return frames
-}
 
 func errorCloseSource(t *testing.T, source ir.Protocol) string {
 	t.Helper()
@@ -64,39 +39,35 @@ func assertOpenToolNotClosed(t *testing.T, target ir.Protocol, out string, err e
 	if err != nil {
 		t.Fatalf("%s became a translator failure: %v", failure, err)
 	}
-	frames := errorCloseFrames(out)
+	frames := parseWireFrames(t, out)
 	if len(frames) == 0 {
 		t.Fatalf("no client frames: %q", out)
 	}
 	switch target {
 	case ir.Anthropic:
 		for _, frame := range frames {
-			if frame.name == "content_block_stop" && strings.Contains(frame.data, `"index":0`) {
+			if frame.event == "content_block_stop" && frame.data["index"] == float64(0) {
 				t.Fatalf("failure close emitted content_block_stop for the open tool: %s", out)
 			}
 		}
-		if last := frames[len(frames)-1]; last.name != "error" {
-			t.Fatalf("last Anthropic frame = %q, want the terminal error: %s", last.name, out)
+		if last := frames[len(frames)-1]; last.event != "error" {
+			t.Fatalf("last Anthropic frame = %q, want the terminal error: %s", last.event, out)
 		}
 		if strings.Contains(out, "event: message_stop") {
 			t.Fatalf("Anthropic error was followed by message_stop: %s", out)
 		}
 	case ir.Responses:
 		for _, frame := range frames {
-			if frame.name == "response.function_call_arguments.done" {
+			if frame.event == "response.function_call_arguments.done" {
 				t.Fatalf("failure close finalized the partial call: %s", out)
 			}
 		}
 		var terminal map[string]any
 		for _, frame := range frames {
-			if frame.name != "response.failed" {
+			if frame.event != "response.failed" {
 				continue
 			}
-			var event map[string]any
-			if err := json.Unmarshal([]byte(frame.data), &event); err != nil {
-				t.Fatalf("parse response.failed: %v", err)
-			}
-			terminal, _ = event["response"].(map[string]any)
+			terminal, _ = frame.data["response"].(map[string]any)
 		}
 		if terminal == nil {
 			t.Fatalf("no response.failed terminal: %s", out)
@@ -114,7 +85,7 @@ func assertOpenToolNotClosed(t *testing.T, target ir.Protocol, out string, err e
 		// present.
 		found := false
 		for _, frame := range frames {
-			if strings.Contains(frame.data, `"error"`) {
+			if frame.data["error"] != nil {
 				found = true
 			}
 		}
@@ -193,12 +164,12 @@ func TestAnthropicErrorIsTerminal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("in-band error became a translator failure: %v", err)
 			}
-			frames := errorCloseFrames(out)
+			frames := parseWireFrames(t, out)
 			if len(frames) == 0 {
 				t.Fatalf("no Anthropic frames: %q", out)
 			}
-			if last := frames[len(frames)-1]; last.name != "error" {
-				t.Fatalf("last frame = %q, want error: %s", last.name, out)
+			if last := frames[len(frames)-1]; last.event != "error" {
+				t.Fatalf("last frame = %q, want error: %s", last.event, out)
 			}
 			if strings.Contains(out, "event: message_stop") {
 				t.Fatalf("Anthropic error was followed by message_stop: %s", out)

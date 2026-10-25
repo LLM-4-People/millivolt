@@ -97,35 +97,31 @@ func TestResponsesIncompleteItemStatus(t *testing.T) {
 // response.* envelope.
 func responsesStreamItemStatus(t *testing.T, out string) (doneStatus string, terminal responsesItemStatusDoc) {
 	t.Helper()
-	frames := errorCloseFrames(out)
+	frames := parseWireFrames(t, out)
 	if len(frames) == 0 {
 		t.Fatalf("no client frames: %q", out)
 	}
 	for _, frame := range frames {
-		if frame.name != "response.output_item.done" {
+		if frame.event != "response.output_item.done" {
 			continue
 		}
-		var event struct {
-			Item struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-			} `json:"item"`
-		}
-		if err := json.Unmarshal([]byte(frame.data), &event); err != nil {
-			t.Fatalf("parse output_item.done: %v", err)
-		}
-		if event.Item.Type == "message" {
-			doneStatus = event.Item.Status
+		item, _ := frame.data["item"].(map[string]any)
+		if item["type"] == "message" {
+			doneStatus, _ = item["status"].(string)
 		}
 	}
 	last := frames[len(frames)-1]
-	if last.name != "response.completed" && last.name != "response.incomplete" && last.name != "response.failed" {
-		t.Fatalf("last frame = %q, want a terminal response event: %s", last.name, out)
+	if last.event != "response.completed" && last.event != "response.incomplete" && last.event != "response.failed" {
+		t.Fatalf("last frame = %q, want a terminal response event: %s", last.event, out)
 	}
 	var event struct {
 		Response responsesItemStatusDoc `json:"response"`
 	}
-	if err := json.Unmarshal([]byte(last.data), &event); err != nil {
+	raw, err := json.Marshal(last.data)
+	if err != nil {
+		t.Fatalf("encode terminal frame: %v", err)
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
 		t.Fatalf("parse terminal response: %v", err)
 	}
 	return doneStatus, event.Response
@@ -203,20 +199,14 @@ func TestResponsesStreamClosedItemStatus(t *testing.T) {
 func responsesDoneItemStatuses(t *testing.T, out string) map[string]string {
 	t.Helper()
 	statuses := map[string]string{}
-	for _, frame := range errorCloseFrames(out) {
-		if frame.name != "response.output_item.done" {
+	for _, frame := range parseWireFrames(t, out) {
+		if frame.event != "response.output_item.done" {
 			continue
 		}
-		var event struct {
-			Item struct {
-				Type   string `json:"type"`
-				Status string `json:"status"`
-			} `json:"item"`
-		}
-		if err := json.Unmarshal([]byte(frame.data), &event); err != nil {
-			t.Fatalf("parse output_item.done: %v", err)
-		}
-		statuses[event.Item.Type] = event.Item.Status
+		item, _ := frame.data["item"].(map[string]any)
+		typ, _ := item["type"].(string)
+		status, _ := item["status"].(string)
+		statuses[typ] = status
 	}
 	return statuses
 }
@@ -304,8 +294,8 @@ func TestResponsesStreamOpenMessageAtTerminal(t *testing.T) {
 				terminal.Output[0].Status != "incomplete" {
 				t.Fatalf("terminal output = %+v, want one incomplete open message: %s", terminal.Output, buf.String())
 			}
-			for _, frame := range errorCloseFrames(buf.String()) {
-				if frame.name == "response.output_item.done" {
+			for _, frame := range parseWireFrames(t, buf.String()) {
+				if frame.event == "response.output_item.done" {
 					t.Fatalf("an open item emitted a done frame: %s", buf.String())
 				}
 			}
