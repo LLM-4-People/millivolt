@@ -1025,7 +1025,7 @@ func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir
 				if len(out) == 0 {
 					systemBlocks = append(systemBlocks, blocks...)
 				} else {
-					out = appendAnthropicTurn(out, string(m.Role), anthropicTextContent(blocks))
+					out = appendAnthropicTurn(out, string(m.Role), anthropicTextContent(blocks), warns)
 				}
 			} else {
 				systemBlocks = append(systemBlocks, blocks...)
@@ -1063,7 +1063,7 @@ func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir
 				}
 				continue
 			}
-			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(m.Content, m.Role, warns))
+			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(m.Content, m.Role, warns), warns)
 		default:
 			contentBlocks := m.Content
 			if m.Role == ir.RoleUser && len(droppedToolCalls) > 0 {
@@ -1088,7 +1088,7 @@ func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir
 				}
 				contentBlocks = filtered
 			}
-			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(contentBlocks, m.Role, warns))
+			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(contentBlocks, m.Role, warns), warns)
 		}
 	}
 	out = liftMisplacedAnthropicSystemRuns(out, &systemBlocks, warns)
@@ -1141,16 +1141,63 @@ func anthropicOutSystemBlocks(content any) []map[string]any {
 // appendAnthropicTurn appends one rendered turn and merges it into a
 // consecutive same-role predecessor. Anthropic merges consecutive same-role
 // turns, and doing it here keeps tool_result blocks immediately after their
-// tool_use turn.
-func appendAnthropicTurn(out []anthropicOutMessage, role string, content any) []anthropicOutMessage {
+// tool_use turn. A merge appends the later turn after the earlier one, so the
+// assembled user turn can put text before a tool_result; re-apply the
+// results-first rule the per-turn encoder already owns and report the move.
+func appendAnthropicTurn(out []anthropicOutMessage, role string, content any, warns *ir.Warnings) []anthropicOutMessage {
 	if content == nil {
 		return out
 	}
 	if n := len(out); n > 0 && out[n-1].Role == role {
-		out[n-1].Content = mergeAnthropicContent(out[n-1].Content, content)
+		merged := mergeAnthropicContent(out[n-1].Content, content)
+		if blocks, ok := merged.([]map[string]any); ok {
+			if ordered, moved := orderAnthropicRenderedResultsFirst(blocks); moved {
+				merged = ordered
+				if warns != nil {
+					warns.AddOnce(ir.WarningApproximated, "messages.tool_result",
+						"tool results were moved before other content in a merged user turn")
+				}
+			}
+		}
+		out[n-1].Content = merged
 		return out
 	}
 	return append(out, anthropicOutMessage{Role: role, Content: content})
+}
+
+// orderAnthropicRenderedResultsFirst moves every rendered tool_result block to
+// the front of one user turn, preserving the relative order within each group.
+// It reports whether a move occurred. The canonical-block twin is the ordering
+// step in encodeAnthropicBlocks; this owner covers a turn assembled from
+// already-rendered pieces.
+func orderAnthropicRenderedResultsFirst(blocks []map[string]any) ([]map[string]any, bool) {
+	seenOther := false
+	moved := false
+	for _, block := range blocks {
+		if block["type"] == "tool_result" {
+			if seenOther {
+				moved = true
+				break
+			}
+			continue
+		}
+		seenOther = true
+	}
+	if !moved {
+		return blocks, false
+	}
+	ordered := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		if block["type"] == "tool_result" {
+			ordered = append(ordered, block)
+		}
+	}
+	for _, block := range blocks {
+		if block["type"] != "tool_result" {
+			ordered = append(ordered, block)
+		}
+	}
+	return ordered, true
 }
 
 // encodeAnthropicContent renders a simple all-text turn as a string (the
