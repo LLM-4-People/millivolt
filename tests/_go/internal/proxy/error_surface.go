@@ -228,14 +228,18 @@ func TestCommittedNonOKStatusIsInBand(t *testing.T) {
 	}
 	var queued *metrics.Record
 	for _, rec := range waitForRecord(t, buf, 2) {
-		if rec.StatusCode == http.StatusCreated {
+		if rec.ErrorType != "" {
 			queued = rec
 		}
 	}
 	if queued == nil {
-		t.Fatalf("no record for the queued 201 request: %s", secondBody)
+		t.Fatalf("no record for the queued in-band error: %s", secondBody)
 	}
-	if queued.ErrorType == "" || queued.ErrorMsg == "" || !queued.IsError() {
+	if queued.StatusCode != http.StatusOK {
+		t.Fatalf("committed queued record status = %d, want the client's 200 rather than the unrelayable 201: %+v",
+			queued.StatusCode, queued)
+	}
+	if queued.ErrorMsg == "" || !queued.IsError() {
 		t.Fatalf("committed 201 record must carry the in-band outcome: %+v", queued)
 	}
 }
