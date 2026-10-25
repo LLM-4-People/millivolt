@@ -400,21 +400,26 @@ func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
 	if len(a.eventData) > 0 && !a.terminatorSeen {
 		typ, _ := ResolveResponsesTerminal(name, a.eventData)
 		if typ != "" {
-			a.terminatorSeen = true
-			a.responsesStream = true
-			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
-			a.captureCost(a.eventData)
-			// The reassembled document is the whole event, so its usage
-			// object may span several data: lines that no per-line scan could
-			// parse. Capture it here exactly like feedData does for a
-			// single-line document.
-			var keys frameKeys
-			keys.scan(a.eventData)
-			a.captureUsage(&keys, a.eventData)
-			a.captureResponsesTerminalFinish(typ, a.eventData, now)
+			a.captureTerminalEvent(typ, a.eventData, now)
 		}
 	}
 	a.flushEvent(now)
+}
+
+// captureTerminalEvent records one Responses terminal document at any
+// boundary: line-oriented, buffered or reassembled. A reassembled document is
+// the whole event, so its usage object may span several data lines that no
+// per-line scan could parse. This owner keeps the terminal flag, wire family,
+// raw tail, cost, usage and finish in one place.
+func (a *Analyzer) captureTerminalEvent(eventType string, payload []byte, now time.Time) {
+	a.terminatorSeen = true
+	a.responsesStream = true
+	a.usageChunk = append(a.usageChunk[:0], payload...)
+	a.captureCost(payload)
+	var keys frameKeys
+	keys.scan(payload)
+	a.captureUsage(&keys, payload)
+	a.captureResponsesTerminalFinish(eventType, payload, now)
 }
 
 // captureUsage records the last usage object of one payload. The enclosing
@@ -650,10 +655,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		a.responsesStream = true
 	}
 	if responsesTerminalEvent(eventType) {
-		a.terminatorSeen = true
-		a.usageChunk = append(a.usageChunk[:0], payload...)
-		a.captureCost(payload)
-		a.captureResponsesTerminalFinish(eventType, payload, now)
+		a.captureTerminalEvent(eventType, payload, now)
 	}
 	// Refusal and deprecated function_call deltas are answer-shaped bytes:
 	// a rescue appending a fresh attempt after them would duplicate visible
@@ -767,10 +769,7 @@ func (a *Analyzer) flushEvent(now time.Time) {
 		var keys frameKeys
 		keys.scan(a.eventData)
 		if typ := keys.responseEventType(a.eventData); responsesTerminalEvent(typ) {
-			a.terminatorSeen = true
-			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
-			a.captureCost(a.eventData)
-			a.captureResponsesTerminalFinish(typ, a.eventData, now)
+			a.captureTerminalEvent(typ, a.eventData, now)
 		}
 	}
 	// A standalone error event ({"type":"error","code":...,"message":...})
