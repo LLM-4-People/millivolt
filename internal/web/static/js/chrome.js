@@ -663,9 +663,18 @@ function applyDashValues(v) {
 // chrome.js keeps only the Settings shell: the header trigger, the one-shot
 // versioned loader, the sheet's open-state probe, the shared status line and
 // the single close entry point. The sheet's state, rendering, editors,
-// apply/revert and backup/restore/purge controls live in settings.js and
-// load on the first open. Until they arrive, close is a DOM-only no-op and
-// Escape cannot touch a draft that does not exist.
+// apply/revert and backup/restore/purge controls live in the settings
+// modules named by SETTINGS_MODULES and load on the first open. Until they
+// arrive, close is a DOM-only no-op and Escape cannot touch a draft that
+// does not exist.
+//
+// SETTINGS_MODULES is the one owner list of the sheet's deferred classic
+// scripts, in execution order: the entry (state + shell) first, the editor
+// modules next and the collection/apply/delegation wiring last. The loader
+// appends them one at a time, so no module runs before the module it was
+// split from, and index.html never references one (first paint stays free
+// of the whole sheet). A new settings module joins this list only.
+const SETTINGS_MODULES = ['settings.js'];
 let settingsLoadPromise = null;
 let settingsLoading = false;
 let settingsWantOpen = false;
@@ -686,27 +695,37 @@ function settingsStatus(text, kind) {
 // form builder (both render the same unavailable-config state).
 const SETTINGS_LOAD_FAIL = 'could not load config';
 
-function settingsScriptURL() {
+function settingsModuleURL(name) {
   const version = document.querySelector('meta[name="dashboard-version"]')?.content || '';
-  return '/dash/js/settings.js?v=' + encodeURIComponent(version);
+  return '/dash/js/' + name + '?v=' + encodeURIComponent(version);
 }
 
-// loadSettingsModule is the single-flight loader: concurrent or repeated
-// opens share one promise and one script request for the page's lifetime.
-function loadSettingsModule() {
+// loadSettingsModule is the single-flight sequential loader: concurrent or
+// repeated opens share one promise and one pass over SETTINGS_MODULES for the
+// page's lifetime, and the promise resolves only after the last module's
+// onload registered the sheet owners. from is the list index to start at: the
+// production trigger always starts at 0, while a page that included the entry
+// directly (the jsdom fixture) resumes after it instead of injecting it twice.
+function loadSettingsModule(from = 0) {
   if (window.settingsModule) return Promise.resolve(window.settingsModule);
   if (settingsLoadPromise) return settingsLoadPromise;
   settingsLoadPromise = new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = settingsScriptURL();
-    script.async = true;
-    script.onload = () => {
-      const module = window.settingsModule;
-      if (module && typeof module.open === 'function' && typeof module.close === 'function') resolve(module);
-      else reject(new Error(SETTINGS_LOAD_FAIL));
+    let at = from;
+    const append = () => {
+      if (at >= SETTINGS_MODULES.length) {
+        const module = window.settingsModule;
+        if (module && typeof module.open === 'function' && typeof module.close === 'function') resolve(module);
+        else reject(new Error(SETTINGS_LOAD_FAIL));
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = settingsModuleURL(SETTINGS_MODULES[at++]);
+      script.async = true;
+      script.onload = append;
+      script.onerror = () => reject(new Error(SETTINGS_LOAD_FAIL));
+      document.head.appendChild(script);
     };
-    script.onerror = () => reject(new Error(SETTINGS_LOAD_FAIL));
-    document.head.appendChild(script);
+    append();
   }).catch(err => {
     settingsStatus(SETTINGS_LOAD_FAIL);
     console.error('settings module failed to load:', err && err.message ? err.message : err);

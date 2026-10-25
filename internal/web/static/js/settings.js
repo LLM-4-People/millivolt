@@ -3242,3 +3242,10 @@ async function purgeMetrics(filter) {
 
 // The chrome.js shell delegates close/open here after this module loads.
 window.settingsModule = { open: openSettings, close: settingsClose };
+
+// The entry is SETTINGS_MODULES[0] (chrome.js owns the list). A page that
+// included this script directly, without the production loader - the jsdom
+// suite does - still gets the rest of the sheet: resume the one sequential
+// pass after this module. Under the production loader that promise is
+// already in flight, so this call only returns it.
+loadSettingsModule(1).catch(() => {});
