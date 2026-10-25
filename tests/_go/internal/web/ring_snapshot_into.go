@@ -256,3 +256,48 @@ func TestKPIFoldReusesRingScratch(t *testing.T) {
 	}
 	t.Logf("repeated cold KPI fold at %d slots: %d B/op %d allocs/op", slots, res.AllocedBytesPerOp(), res.AllocsPerOp())
 }
+
+// TestKPIFoldReleasesRetainedScratchRecords pins the ownership boundary of the
+// retained scratch: the memo keeps the backing array for reuse but must not
+// keep any record pointer after a fold. Buffer.Reset retires the ring's own
+// references, so a scratch that still held them would pin every record and its
+// strings for the life of the process.
+func TestKPIFoldReleasesRetainedScratchRecords(t *testing.T) {
+	buf := metrics.NewBuffer(16)
+	seed := func(count int) {
+		for i := 0; i < count; i++ {
+			buf.Record(&metrics.Record{
+				ID:         fmt.Sprintf("scratch-%d-%d", count, i),
+				Provider:   "fixture.example",
+				Model:      "fixture-model",
+				Start:      time.UnixMilli(1_800_000_000_000 + int64(i)),
+				StatusCode: 200,
+			})
+		}
+	}
+
+	api := NewAggAPI(buf, nil, time.Second)
+	seed(6)
+	_ = api.kpi()
+	retained := cap(api.kpiMemo.ring)
+	if retained < 6 {
+		t.Fatalf("KPI scratch capacity = %d, want >= 6", retained)
+	}
+	for index, record := range api.kpiMemo.ring[:retained] {
+		if record != nil {
+			t.Fatalf("after fold, retained KPI scratch slot %d still pins %q", index, record.ID)
+		}
+	}
+
+	buf.Reset()
+	seed(2)
+	_ = api.kpi()
+	if got := cap(api.kpiMemo.ring); got != retained {
+		t.Fatalf("KPI scratch capacity after reset = %d, want retained %d", got, retained)
+	}
+	for index, record := range api.kpiMemo.ring[:retained] {
+		if record != nil {
+			t.Fatalf("after reset and fold, retained KPI scratch slot %d still pins %q", index, record.ID)
+		}
+	}
+}

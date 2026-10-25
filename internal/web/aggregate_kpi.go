@@ -143,14 +143,19 @@ func (a *AggAPI) kpi() kpiPayload {
 		// The cold fold is serialized by foldKPI, so the retained scratch is
 		// owned here. TotalsAndUnwritten may shorten the view in place; the
 		// memo keeps the original backing array for the next fold.
-		ring := a.buf.SnapshotInto(a.kpiMemo.ring)
-		a.kpiMemo.ring = ring[:0]
+		scratch := a.buf.SnapshotInto(a.kpiMemo.ring)
+		a.kpiMemo.ring = scratch[:0]
+		ring := scratch
 		if a.store != nil {
 			t, ring = a.store.TotalsAndUnwritten(ring)
 		}
 		for _, r := range ring {
 			t.Add(r)
 		}
+		// Release the consumed prefix before the memo keeps the backing array:
+		// a retained pointer would pin every folded record and its strings for
+		// the process lifetime, surviving Buffer.Reset.
+		clear(scratch)
 		// Publishing only when the witnesses are unchanged keeps a concurrent
 		// commit's data from being labeled with a stale revision (the same
 		// before/after discipline as aggregateUnchanged).
