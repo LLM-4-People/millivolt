@@ -681,6 +681,135 @@ func TestRestoreDatabaseWithoutStoreFailsBeforeStaging(t *testing.T) {
 	assertNoRestoreStaging(t, temp)
 }
 
+// restoreDatabaseSnapshot builds one packed database member with a single
+// request, for mixed archives that must be decoded without a live store.
+func restoreDatabaseSnapshot(t *testing.T) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	src, err := storage.Open(filepath.Join(dir, "src.db"), storage.Options{
+		WriteChanCap:  8,
+		BatchCap:      4,
+		FlushInterval: config.Default().StorageFlushInterval,
+		QueryTimeout:  config.Default().StorageQueryTimeout,
+		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
+		QueryMaxRows:  int(config.Default().StorageQueryMaxRows),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Record(&metrics.Record{ID: "mixed-member", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	src.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestRestoreMixedArchiveConfigOnlyWithoutStore pins G5: a mixed archive can
+// apply or preview its config member when durable storage is disabled, while a
+// database request still fails closed.
+func TestRestoreMixedArchiveConfigOnlyWithoutStore(t *testing.T) {
+	liveReloadFixture(t)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	dir := t.TempDir()
+	bak := config.Default()
+	bak.CaptureBodyPreview = true
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, bak); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: restoreDatabaseSnapshot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config-only restore status %d body %s", rr.Code, rr.Body.String())
+	}
+	got, err := config.LoadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CaptureBodyPreview {
+		t.Fatalf("config-only restore did not write the archive config: %+v", got)
+	}
+	assertNoRestoreStaging(t, temp)
+
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), storage.ErrStorageDisabled.Error()) {
+		t.Fatalf("database-only status %d body %s, want 400 storage disabled", rr.Code, rr.Body.String())
+	}
+	assertNoRestoreStaging(t, temp)
+}
+
+// TestRestoreInspectMixedArchiveWithoutStore pins the honest store-less
+// preview: config keys and diff are available, the database member reports its
+// decoded size but is not inspectable and has no request span.
+func TestRestoreInspectMixedArchiveWithoutStore(t *testing.T) {
+	liveReloadFixture(t)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	dir := t.TempDir()
+	live := config.Default()
+	live.MaxRetries = 9
+	if err := config.WriteFile(liveConfigPath, live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	bak := config.Default()
+	bak.CaptureBodyPreview = true
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, bak); err != nil {
+		t.Fatal(err)
+	}
+	db := restoreDatabaseSnapshot(t)
+	raw, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("inspect status %d body %s", rr.Code, rr.Body.String())
+	}
+	ins := decodeRestoreInspectStrict(t, rr.Body.Bytes())
+	if !ins.OK || !ins.Config.Present || ins.Config.Values["capture_body_preview"] != true {
+		t.Fatalf("config preview = %+v", ins.Config)
+	}
+	vsLive := map[string]bool{}
+	for _, key := range ins.Config.VsLive {
+		vsLive[key] = true
+	}
+	if !vsLive["capture_body_preview"] || !vsLive["max_retries"] {
+		t.Fatalf("vs_live = %v, want capture_body_preview and max_retries", ins.Config.VsLive)
+	}
+	if !ins.Database.Present || ins.Database.Bytes != len(db) {
+		t.Fatalf("database preview = %+v, want present with %d bytes", ins.Database, len(db))
+	}
+	if ins.Database.Inspectable == nil || *ins.Database.Inspectable {
+		t.Fatalf("database inspectable = %v, want false", ins.Database.Inspectable)
+	}
+	if ins.Database.Reason == "" || ins.Database.Requests != 0 || ins.Database.Overlap != 0 ||
+		ins.Database.OldestMs != 0 || ins.Database.NewestMs != 0 {
+		t.Fatalf("store-less database preview = %+v", ins.Database)
+	}
+	assertNoRestoreStaging(t, temp)
+}
+
 func defaultConfigYAMLForRestore(t *testing.T) []byte {
 	t.Helper()
 	var yaml bytes.Buffer
@@ -1089,13 +1218,15 @@ type restoreInspectWire struct {
 		VsLive   []string       `json:"vs_live"`
 	} `json:"config"`
 	Database struct {
-		Present  bool  `json:"present"`
-		Bytes    int   `json:"bytes"`
-		Requests int64 `json:"requests"`
-		Debug    int64 `json:"debug"`
-		OldestMs int64 `json:"oldest_ms"`
-		NewestMs int64 `json:"newest_ms"`
-		Overlap  int64 `json:"overlap"`
+		Present     bool   `json:"present"`
+		Bytes       int    `json:"bytes"`
+		Requests    int64  `json:"requests"`
+		Debug       int64  `json:"debug"`
+		OldestMs    int64  `json:"oldest_ms"`
+		NewestMs    int64  `json:"newest_ms"`
+		Overlap     int64  `json:"overlap"`
+		Inspectable *bool  `json:"inspectable"`
+		Reason      string `json:"reason"`
 	} `json:"database"`
 }
 

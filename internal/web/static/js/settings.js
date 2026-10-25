@@ -484,7 +484,7 @@ function backupRestoreOptionsHTML(b) {
   const cfg = j.config || {};
   const db = j.database || {};
   const canCfg = !!b.config && !!cfg.present;
-  const canDb = !!b.database && !!db.present;
+  const canDb = !!b.database && !!db.present && db.inspectable !== false;
   const wantCfg = backupCheckOn('backup-include-config', canCfg);
   const wantDb = backupCheckOn('backup-include-database', canDb);
   const merge = backupMode === 'merge';
@@ -495,7 +495,7 @@ function backupRestoreOptionsHTML(b) {
   }
   if (db.present) {
     html += backupMemberCheck('backup-include-database', 'database', canDb);
-    if (!canDb) html += '<span class="st-hint">durable storage is disabled</span>';
+    if (!canDb) html += `<span class="st-hint">${escapeHtml(db.inspectable === false && db.reason ? db.reason : 'durable storage is disabled')}</span>`;
   }
   if (wantCfg || wantDb) {
     html += `<label class="st-check"><input type="radio" name="backup-mode" value="replace"${merge ? '' : ' checked'}> replace</label>` +
@@ -522,7 +522,7 @@ function backupWantConfig() {
 function backupWantDatabase() {
   const b = (settingsDoc && settingsDoc.backup) || {};
   const db = (backupInspect && backupInspect.data && backupInspect.data.database) || {};
-  return backupCheckOn('backup-include-database', !!(b.database && db.present));
+  return backupCheckOn('backup-include-database', !!(b.database && db.present && db.inspectable !== false));
 }
 
 function backupQuery(forRestore = false) {

@@ -2083,6 +2083,19 @@ async function main() {
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
     w.fetch = originalFetch;
     w.HTMLAnchorElement.prototype.click = origClick;
+    // A store-less preview carries the database member but marks it
+    // uninspectable. The selection must stay disabled and unchecked so the
+    // apply request cannot ask for a database the endpoint cannot stage.
+    w.eval("backupInspect = { data: { config: { present: true }, database: { present: true, inspectable: false, reason: 'durable storage is disabled' } } }; backupIncludeConfig = true; backupIncludeDatabase = true;");
+    const storeless = d.createElement('div');
+    storeless.innerHTML = w.eval("backupRestoreOptionsHTML({ config: true, database: true })");
+    d.getElementById('settings-fields').appendChild(storeless);
+    const storelessDb = storeless.querySelector('#backup-include-database');
+    check('store-less preview disables and unchecks the database member',
+      !!storelessDb && storelessDb.disabled && !storelessDb.checked);
+    check('store-less preview shows the inspectable reason',
+      storeless.textContent.includes('durable storage is disabled'));
+    storeless.remove();
     w.eval("operatorCredential = ''; backupInspect = null; backupIncludeConfig = true; backupIncludeDatabase = true; backupMode = 'replace'; backupBusy = false; backupReq = 0;");
   }
 
