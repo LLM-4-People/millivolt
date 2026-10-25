@@ -1484,11 +1484,21 @@ func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel par
 	return out
 }
 
+// isSummaryPartKey reports whether one part key belongs to the summary
+// channel. The key owner encodes the channel as a prefix, so a reasoning
+// content part sharing the same item and index is a different channel.
+func isSummaryPartKey(key string) bool {
+	return strings.HasPrefix(key, "summary:")
+}
+
 // emittedSummaryParts returns the non-empty streamed summary bytes for one
 // reasoning item, ordered by summary index.
 func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
 	var out []channelPart
 	for key := range d.ownerParts[itemKey] {
+		if !isSummaryPartKey(key) {
+			continue
+		}
 		builder := d.emittedText[key]
 		if builder == nil {
 			continue
