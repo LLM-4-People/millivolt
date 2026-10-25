@@ -76,31 +76,42 @@ func TestSnapshotIntoMatchesSnapshot(t *testing.T) {
 	}
 }
 
-// TestRingSnapshotCopiesNotAliases pins the aggregate reader's contract after
-// it started borrowing a pooled scratch: the returned records are a private
-// slice (a filter built from the ring view), so changing it cannot corrupt the
-// ring and cannot affect the next read.
-func TestRingSnapshotCopiesNotAliases(t *testing.T) {
+// TestRingSnapshotBorrowsNotRing pins the aggregate reader's contract after it
+// started borrowing a pooled scratch: the view aliases the scratch, never the
+// ring, so changing it cannot corrupt the buffer and the next read still sees
+// every record. The returned scratch must be released exactly once.
+func TestRingSnapshotBorrowsNotRing(t *testing.T) {
 	buf := metrics.NewBuffer(64)
 	seedRing(buf, 40)
 	api := NewAggAPI(buf, nil, time.Second)
 
-	first := api.ringSnapshot(0)
-	second := api.ringSnapshot(0)
-	if len(first) == 0 || len(first) != len(second) {
-		t.Fatalf("ringSnapshot lengths = %d/%d, want equal and non-zero", len(first), len(second))
+	firstScratch, first := api.ringSnapshot(0)
+	if len(first) == 0 {
+		t.Fatal("ringSnapshot returned no records")
 	}
-	for i := range first {
-		if first[i] != second[i] {
-			t.Fatalf("record %d differs between two reads", i)
+	for i, r := range first {
+		if r == nil {
+			t.Fatalf("record %d is nil", i)
 		}
 	}
-	first[0] = nil
-	if third := api.ringSnapshot(0); third[0] == nil {
-		t.Fatal("ringSnapshot result aliases the ring or the shared scratch")
+	first[0] = nil // scribble over the scratch before handing it back
+	releaseRing(firstScratch, first)
+
+	secondScratch, second := api.ringSnapshot(0)
+	defer releaseRing(secondScratch, second)
+	if len(second) != 40 {
+		t.Fatalf("second read returned %d records, want 40", len(second))
+	}
+	for i, r := range second {
+		if r == nil {
+			t.Fatalf("second read record %d is nil (stale scratch reused without a fresh copy)", i)
+		}
 	}
 	if got := buf.Len(); got != 40 {
 		t.Fatalf("ring length = %d, want 40", got)
+	}
+	if fresh := buf.Snapshot(); fresh[0] == nil {
+		t.Fatal("ringSnapshot aliased the ring: mutating the view changed the buffer")
 	}
 }
 

@@ -182,7 +182,8 @@ func TestProjectionCommitAfterRingCaptureCountsExactlyOnce(t *testing.T) {
 	api.buf.Record(r)
 	// Capture before the commit (the order enforced by streamWindow). Its
 	// fresh durable projection must subsequently suppress this candidate.
-	ring := api.ringSnapshot(0)
+	scratch, ring := api.ringSnapshot(0)
+	defer releaseRing(scratch, ring)
 	if len(ring) != 1 {
 		t.Fatalf("initial unflushed candidates = %d, want 1", len(ring))
 	}

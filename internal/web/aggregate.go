@@ -498,9 +498,9 @@ type ringScratch []*metrics.Record
 var ringScratchPool = sync.Pool{New: func() any { return new(ringScratch) }}
 
 // acquireRing copies the ring into a pooled scratch, oldest to newest. The
-// view aliases the scratch until releaseRing, so it must not outlive the fold
-// that holds it (a filtered result must be built in its own slice, as
-// ringSnapshot does).
+// view aliases the scratch until releaseRing, so it must not outlive the read
+// that holds it; both readers (the KPI fold and ringSnapshot) release it with a
+// defer at their own scope.
 func (a *AggAPI) acquireRing() (*ringScratch, []*metrics.Record) {
 	buf := ringScratchPool.Get().(*ringScratch)
 	return buf, a.buf.SnapshotInto(*buf)
@@ -514,14 +514,18 @@ func releaseRing(buf *ringScratch, view []*metrics.Record) {
 	ringScratchPool.Put(buf)
 }
 
-// ringSnapshot captures potentially unflushed records with start >= since.
+// ringSnapshot captures potentially unflushed records with start >= since into
+// a borrowed scratch view, oldest to newest. The caller must hand the scratch
+// back with releaseRing(scratch, view) once it has finished reading the view
+// (a defer at the caller is the intended shape): the view aliases the pooled
+// buffer, and filtering happens inside it, so a read allocates nothing.
+//
 // Filter BEFORE the durable snapshot: commits arriving afterward are still
 // deduped by its exact ID set, while already-written rows that were deleted
 // externally can never be resurrected from their obsolete ring copies.
-func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
+func (a *AggAPI) ringSnapshot(since int64) (*ringScratch, []*metrics.Record) {
 	scratch, view := a.acquireRing()
-	defer releaseRing(scratch, view)
-	out := make([]*metrics.Record, 0, 64)
+	out := view[:0]
 	for _, r := range view {
 		if r == nil {
 			continue
@@ -532,7 +536,7 @@ func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
 		out = append(out, r)
 	}
 	if a.store == nil || len(out) == 0 {
-		return out
+		return scratch, out
 	}
 	ids := make([]string, len(out))
 	for i, r := range out {
@@ -540,10 +544,10 @@ func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
 	}
 	unwritten := a.store.FilterUnwritten(ids)
 	if len(unwritten) == len(out) {
-		return out
+		return scratch, out
 	}
 	if len(unwritten) == 0 {
-		return nil
+		return scratch, nil
 	}
 	keep := make(map[string]struct{}, len(unwritten))
 	for _, id := range unwritten {
@@ -556,7 +560,7 @@ func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
 			n++
 		}
 	}
-	return out[:n]
+	return scratch, out[:n]
 }
 
 // streamWindow is the shared analytical read boundary. Snapshot the ring
@@ -567,7 +571,8 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ring := a.ringSnapshot(since)
+	scratch, ring := a.ringSnapshot(since)
+	defer releaseRing(scratch, ring)
 	return a.withProjection(ctx, func(p *projectionData) error {
 		if prepare != nil {
 			prepare(p)
@@ -1143,7 +1148,8 @@ func minStartScoped(ctx context.Context, a *AggAPI, mcz *modelCanonizer, fs []sc
 			min = c.start
 		}
 	}
-	ring := a.ringSnapshot(0)
+	scratch, ring := a.ringSnapshot(0)
+	defer releaseRing(scratch, ring)
 	err := a.withProjection(ctx, func(p *projectionData) error {
 		if p != nil {
 			fs = bindScope(fs, p, mcz)
@@ -1186,7 +1192,8 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ring := a.ringSnapshot(0)
+	scratch, ring := a.ringSnapshot(0)
+	defer releaseRing(scratch, ring)
 	return a.withProjection(ctx, func(p *projectionData) error {
 		if p != nil {
 			fs = bindScope(fs, p, mcz)
