@@ -93,7 +93,7 @@ data: {"type":"message_stop"}
 `
 	var buf bytes.Buffer
 	dec := NewAnthropicStreamDecoder(strings.NewReader(in), nil)
-	enc := NewChatStreamEncoder(&buf, nil)
+	enc := NewChatStreamEncoder(&buf, nil, false)
 	collectStream(t, dec, enc)
 	frames := chatDataFrames(t, &buf)
 	if len(frames) < 5 {
@@ -228,7 +228,9 @@ data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_1"
 `
 	var buf bytes.Buffer
 	dec := NewResponsesStreamDecoder(strings.NewReader(in))
-	enc := NewChatStreamEncoder(&buf, nil)
+	// This fixture pins that a reported source usage reaches the Chat wire;
+	// the client requests the usage chunk, as official streaming requires.
+	enc := NewChatStreamEncoder(&buf, nil, true)
 	collectStream(t, dec, enc)
 	frames := chatDataFrames(t, &buf)
 	var sawText, sawFinish bool
@@ -441,7 +443,7 @@ data: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_1"
 
 `
 		var buf bytes.Buffer
-		collectStream(t, NewResponsesStreamDecoder(strings.NewReader(in)), NewChatStreamEncoder(&buf, nil))
+		collectStream(t, NewResponsesStreamDecoder(strings.NewReader(in)), NewChatStreamEncoder(&buf, nil, false))
 		var sawRefusal bool
 		for _, frame := range chatDataFrames(t, &buf) {
 			choices, _ := frame["choices"].([]any)
@@ -571,7 +573,7 @@ data: [DONE]
 `
 	var buf bytes.Buffer
 	dec := NewChatStreamDecoder(strings.NewReader(in))
-	enc := NewChatStreamEncoder(&buf, nil)
+	enc := NewChatStreamEncoder(&buf, nil, false)
 	collectStream(t, dec, enc)
 	if !strings.Contains(buf.String(), `"arguments":"{}"`) {
 		t.Fatalf("zero-argument tool call did not flush {}:\n%s", buf.String())

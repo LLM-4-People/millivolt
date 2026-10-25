@@ -462,3 +462,37 @@ func TestSettingsDocWireKeysStrict(t *testing.T) {
 		t.Fatalf("failed-reload response omitted the state sections: %s", post.Body.String())
 	}
 }
+
+// TestSettingsRejectsInvalidBaseConfig pins TC7-1: an invalid recognized value
+// in the base file must fail the Settings read with 500 and leave the bytes
+// untouched, never silently load a default and write it back.
+func TestSettingsRejectsInvalidBaseConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{Path: path}
+	rr := settingsPost(h, "revision", `{}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", rr.Code, rr.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("invalid base file was rewritten: %v\n%s", err, got)
+	}
+}
+
+// TestSettingsMissingConfigUsesDefaults pins the Settings read path for a
+// missing file: the documented default document, not a failed read. An
+// unreadable or invalid document still fails closed.
+func TestSettingsMissingConfigUsesDefaults(t *testing.T) {
+	h := &Handler{Path: filepath.Join(t.TempDir(), "missing.yaml")}
+	got, err := h.fileConfig()
+	if err != nil {
+		t.Fatalf("fileConfig missing file = %v", err)
+	}
+	if !reflect.DeepEqual(got, Default()) {
+		t.Fatalf("missing file config = %+v, want the built-in defaults", got)
+	}
+}

@@ -131,6 +131,11 @@ type Archive struct {
 	// streams the file and Validate inspects it in place, so neither copies
 	// the database onto the heap. The caller owns the file and its cleanup.
 	DatabasePath string
+	// DatabasePresent records that the archive declares a database member,
+	// including when a selection-aware decode stream-discarded it. Database
+	// bytes and path are empty in that case; DatabaseBytes is its decoded size.
+	DatabasePresent bool
+	DatabaseBytes   int64
 }
 
 func (a Archive) flags() byte {
@@ -695,6 +700,14 @@ func decodeLimited(raw []byte, maxPayload int64) (Archive, error) {
 // error the decoder removes the decoded file and its staging directory and
 // returns no Archive.
 func DecodeFile(stageDir, path string) (Archive, error) {
+	return DecodeFileSelected(stageDir, path, true)
+}
+
+// DecodeFileSelected is DecodeFile with an explicit database selection. When
+// keepDatabase is false, a declared database member is stream-discarded while
+// the outer payload hash and framing are still checked, so a config-only
+// restore or preview needs no live database volume and no SQLite staging.
+func DecodeFileSelected(stageDir, path string, keepDatabase bool) (Archive, error) {
 	if path == "" {
 		return Archive{}, fmt.Errorf("backup path is required")
 	}
@@ -703,13 +716,17 @@ func DecodeFile(stageDir, path string) (Archive, error) {
 		return Archive{}, fmt.Errorf("open backup: %w", err)
 	}
 	defer f.Close()
-	return decodeFile(stageDir, f, payloadMax)
+	return decodeFileSelected(stageDir, f, payloadMax, keepDatabase)
 }
 
-// decodeFile is the one file-backed decode owner. Its member sink writes the
-// database body straight to a private file while the shared framing owner
-// keeps the payload hash, cap and admission checks in one place.
 func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, error) {
+	return decodeFileSelected(stageDir, src, maxPayload, true)
+}
+
+// decodeFileSelected is the one file-backed decode owner. Its member sink
+// writes the database body straight to a private file while the shared framing
+// owner keeps the payload hash, cap and admission checks in one place.
+func decodeFileSelected(stageDir string, src io.Reader, maxPayload int64, keepDatabase bool) (Archive, error) {
 	if maxPayload <= 0 {
 		return Archive{}, fmt.Errorf("backup payload limit is invalid")
 	}
@@ -724,7 +741,7 @@ func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, erro
 	if err != nil {
 		return Archive{}, err
 	}
-	if h.flags&flagDatabase != 0 && stageDir == "" {
+	if h.flags&flagDatabase != 0 && stageDir == "" && keepDatabase {
 		return Archive{}, ErrSnapshotStaging
 	}
 	dec, err := newPayloadDecoder(src, maxPayload)
@@ -762,6 +779,18 @@ func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, erro
 			a.Config = data
 			return nil
 		case memberDatabase:
+			a.DatabasePresent = true
+			a.DatabaseBytes = size
+			if !keepDatabase {
+				n, err := io.CopyBuffer(io.Discard, r, make([]byte, selfCheckBuffer))
+				if err != nil {
+					return err
+				}
+				if n != size {
+					return fmt.Errorf("backup member is truncated")
+				}
+				return nil
+			}
 			if db == nil {
 				dir, err := os.MkdirTemp(stageDir, RestoreDatabaseStagingPattern)
 				if err != nil {
@@ -945,11 +974,25 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 // file-backed member, which is integrity-checked in place without a second
 // copy.
 func Validate(stageDir string, a Archive) error {
+	return ValidateSelected(stageDir, a, true)
+}
+
+// ValidateSelected is Validate with an explicit database selection. An
+// unselected database member was stream-discarded after its framing and outer
+// hash were checked, so only config semantics remain to validate.
+func ValidateSelected(stageDir string, a Archive, validateDatabase bool) error {
 	if err := a.checkMemberSources(); err != nil {
 		return err
 	}
-	if a.flags() == 0 {
+	if a.flags() == 0 && !a.DatabasePresent {
 		return ErrEmptyArchive
+	}
+	// A selection-aware decode stream-discards an unselected database member
+	// after checking its framing: it stays present and sized, with no bytes or
+	// path to inspect. A caller that explicitly requests database validation
+	// must not receive success for a member that was never materialized.
+	if validateDatabase && a.DatabasePresent && !a.hasDatabase() {
+		return fmt.Errorf("backup database member was not decoded")
 	}
 	if len(a.Config) > 0 {
 		cfg, skipped, err := config.LoadBytes(a.Config)
@@ -963,14 +1006,16 @@ func Validate(stageDir string, a Archive) error {
 			return fmt.Errorf("backup config: %w", err)
 		}
 	}
-	switch {
-	case len(a.Database) > 0:
-		if err := CheckDatabase(stageDir, a.Database); err != nil {
-			return fmt.Errorf("backup database: %w", err)
-		}
-	case a.DatabasePath != "":
-		if err := CheckDatabaseFile(a.DatabasePath); err != nil {
-			return fmt.Errorf("backup database: %w", err)
+	if validateDatabase {
+		switch {
+		case len(a.Database) > 0:
+			if err := CheckDatabase(stageDir, a.Database); err != nil {
+				return fmt.Errorf("backup database: %w", err)
+			}
+		case a.DatabasePath != "":
+			if err := CheckDatabaseFile(a.DatabasePath); err != nil {
+				return fmt.Errorf("backup database: %w", err)
+			}
 		}
 	}
 	return nil

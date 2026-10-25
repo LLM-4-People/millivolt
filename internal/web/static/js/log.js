@@ -802,6 +802,26 @@ function reqIdentityText(r) {
   return `${clientLabel(r && r.client) || '?'} · ${(r && r.provider) || '?'} · ${canonicalModel(r && r.model) || '-'}`;
 }
 
+// retryAttempts returns the absorbed retry attempts paired with their index in
+// the record's attempts array. An in-band entry records the upstream status a
+// committed keepalive 200 could not relay; it is health evidence, not a retry,
+// so every retry disclosure excludes it while data-attempt keeps the original
+// index for the attempt drawer.
+function retryAttempts(r) {
+  const out = [];
+  (r && r.attempts ? r.attempts : []).forEach((a, index) => {
+    if (!a.in_band) out.push({ a, index });
+  });
+  return out;
+}
+
+// retryOrdinal maps an attempts-array index to its 1-based position among the
+// retry attempts, so a hidden in-band entry never shifts "attempt N of M".
+function retryOrdinal(r, index) {
+  const pos = retryAttempts(r).findIndex(entry => entry.index === index);
+  return pos < 0 ? index + 1 : pos + 1;
+}
+
 function reqRow(r, sepLabel) {
   const sep = daySepHTML(r.id, sepLabel);
   // In-flight (a "begin" lifecycle record): not yet finalized - no status_code
@@ -812,9 +832,9 @@ function reqRow(r, sepLabel) {
     // Live retry visibility: absorbed attempts arrive via "update" events while
     // the request is still in flight, so the row shows a retry badge as they
     // happen (before the final outcome). Hover lists the attempt errors so far.
-    const liveAttempts = r.attempts || [];
+    const liveAttempts = retryAttempts(r);
     const liveRetry = liveAttempts.length
-      ? ` <span class="pill warn" title="${liveAttempts.length} retr${liveAttempts.length>1?'ies':'y'} so far (in flight): ${escapeHtml(liveAttempts.map(a => a.error_type || (a.status_code ? 'http '+a.status_code : 'transport')).join(', '))}">↻${liveAttempts.length}</span>`
+      ? ` <span class="pill warn" title="${liveAttempts.length} retr${liveAttempts.length>1?'ies':'y'} so far (in flight): ${escapeHtml(liveAttempts.map(({ a }) => a.error_type || (a.status_code ? 'http '+a.status_code : 'transport')).join(', '))}">↻${liveAttempts.length}</span>`
       : '';
     // Input tokens may already carry a real estimate while a request streams
     // (cursor's parked turn reports an estimated prompt), but a plain 0 is
@@ -841,7 +861,7 @@ function reqRow(r, sepLabel) {
   // 429) - rate_limited means 429/503, otherwise it was a transient 5xx. When
   // the request has absorbed attempts, the badge is a toggle that expands one
   // sub-row per attempt (collapsed by default).
-  const attempts = r.attempts || [];
+  const attempts = retryAttempts(r);
   const retryBadge = attempts.length
     ? ` <button type="button" class="pill warn retry-toggle" data-retry-for="${escapeHtml(r.id)}" aria-expanded="false" title="${attempts.length} transparent retr${attempts.length>1?'ies':'y'} absorbed before this response - click to expand">↻${attempts.length} <span class="retry-caret">▸</span></button>`
     : (r.retries ? ` <span class="pill warn" title="${r.retries} retries">↻${r.retries}</span>` : '');
@@ -884,13 +904,13 @@ function reqRow(r, sepLabel) {
   // rides the shared attemptPillClass while the text stays this surface's
   // own ('-' for a status-less transport failure).
   if (!attempts.length) return sep + main;
-  const subs = attempts.map((a, i) => {
+  const subs = attempts.map(({ a, index: i }, pos) => {
     const asc = attemptPillClass(a);
     const when = a.at ? new Date(a.at).toLocaleTimeString() : '-';
     const label = a.error_type || (a.status_code ? 'http ' + a.status_code : 'transport');
-    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${i + 1})" hidden>
+    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" hidden>
       <td>${when}</td>
-      <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${i + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
+      <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${pos + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
       <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}"><span class="retry-sub-text">${escapeHtml(a.error_msg || '-')}</span></td>
     </tr>`;
   }).join('');
@@ -1281,8 +1301,9 @@ function formatDetail(r) {
   // Absorbed retry attempts: the upstream errors the client never saw. Show
   // each transparently-retried response (status + provider error detail) in
   // order, before the final outcome.
-  if (r.attempts && r.attempts.length) {
-    const items = r.attempts.map((a, i) => {
+  const retryEntries = retryAttempts(r);
+  if (retryEntries.length) {
+    const items = retryEntries.map(({ a, index: i }, pos) => {
       // Transport failures have no HTTP status (0); the shared attemptPill
       // shows the transport pill instead of a meaningless "0".
       const isTransport = !a.status_code;
@@ -1306,7 +1327,7 @@ function formatDetail(r) {
       // Each attempt belongs to this same request id; data-attempt names its
       // index, so clicking opens THAT attempt in the drawer (the parent
       // request stays selected and highlighted).
-      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" data-attempt="${i}" role="button" tabindex="0" title="open this request"><span class="k">#${i+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}${rid}</span></div>`;
+      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" data-attempt="${i}" role="button" tabindex="0" title="open this request"><span class="k">#${pos+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}${rid}</span></div>`;
     }).join('');
     S.push(`<div class="detail-section"><h4>Retry attempts (absorbed, transparent to client)</h4>${items}</div>`);
   }
@@ -1347,7 +1368,7 @@ function formatAttemptDetail(r, i) {
   const S = [];
   S.push(sec('Attempt', [
     kv('request', `<span style="color:var(--muted)">${escapeHtml(r.id)}</span>`),
-    kv('attempt', (i + 1) + ' of ' + r.attempts.length),
+    kv('attempt', retryOrdinal(r, i) + ' of ' + retryAttempts(r).length),
     kv('status', attemptPill(a)),
     kv('when', fmtT(a.at)),
     // Type, code and message are distinct fields - one row each, like the
@@ -1482,7 +1503,7 @@ function renderDrawer() {
     // for status-less failures) and the provider request id that matches a
     // provider-side failure report to this exact attempt.
     const status = a.status_code ? String(a.status_code) : 'transport';
-    const ident = ` · attempt ${drawerAttempt + 1} of ${r.attempts.length} · ${status}`
+    const ident = ` · attempt ${retryOrdinal(r, drawerAttempt)} of ${retryAttempts(r).length} · ${status}`
       + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
     $('drawer-title').innerHTML = `<button type="button" class="btn" id="drawer-back" onclick="drawerBackToRequest()" title="back to request">‹ request</button> ${escapeHtml(base + ident)}`;
     body.innerHTML = formatAttemptDetail(r, drawerAttempt);

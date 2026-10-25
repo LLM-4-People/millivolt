@@ -3,9 +3,10 @@ package proxy
 // Provider-configured ensured tools (config providers.<label>.ensure_tools):
 // the third actor of the single body-rewrite engine. Missing names are
 // injected as inert chat/completions function stubs; a client that sent no
-// tools of its own additionally gets tool_choice none so the stubs can never
-// be invoked; a body that already satisfies the signature relays
-// byte-identical, and non-chat bodies are never rewritten. The mechanism is
+// tools of its own gets its absent, null, or auto tool_choice forced to none,
+// while a required, named, or malformed choice skips injection entirely; a
+// body that already satisfies the signature relays byte-identical, and
+// non-chat bodies are never rewritten. The mechanism is
 // label-blind like the provider-header tests: the profile keys whatever
 // provider label the upstream URL derives.
 
@@ -15,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -214,9 +216,9 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 	const maxBytes = 1 << 20
 	names := []string{"wanted"}
 	for _, tc := range []struct {
-		name string
-		body string
-		chat bool
+		name     string
+		body     string
+		rewrites bool
 	}{
 		{"absent", `{"model":"m"}`, false},
 		{"null", `{"model":"m","messages":null}`, false},
@@ -227,6 +229,13 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 		{"number", `{"model":"m","messages":1}`, false},
 		{"duplicate messages last array", `{"model":"m","messages":null,"messages":[]}`, true},
 		{"duplicate messages last null", `{"model":"m","messages":[],"messages":null}`, false},
+		{"case-variant Messages null", `{"model":"m","messages":[{"role":"user","content":"hi"}],"Messages":null}`, true},
+		{"case-variant Tools satisfied", `{"model":"m","messages":[{"role":"user","content":"hi"}],"Tools":[{"type":"function","function":{"name":"wanted"}}]}`, true},
+		{"canonical satisfied control", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"wanted"}}]}`, false},
+		{"non-array tools object", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":{}}`, false},
+		{"non-array tools string", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":"x"}`, false},
+		{"duplicate tools last satisfied", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[],"tools":[{"type":"function","function":{"name":"wanted"}}]}`, false},
+		{"duplicate tools last empty", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"wanted"}}],"tools":[]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(tc.body)
@@ -246,9 +255,17 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 			if why != "" {
 				t.Fatal(why)
 			}
-			if !tc.chat {
+			// A non-nil override forces the general path. The fast path must
+			// produce exactly the same bytes and rewrite decision as that
+			// authoritative path for the same body.
+			forced, forcedRewrote, forcedWhy := overrideRequestBody(body, &config.OverrideBody{}, nil, names, maxBytes, ir.Chat)
+			if forcedWhy != why || forcedRewrote != rewrote || !bytes.Equal(forced, out) {
+				t.Fatalf("empty override changed the outcome: fast rewrote=%v why=%q vs forced rewrote=%v why=%q\nfast: %s\nforced: %s",
+					rewrote, why, forcedRewrote, forcedWhy, out, forced)
+			}
+			if !tc.rewrites {
 				if rewrote || !bytes.Equal(out, body) {
-					t.Fatalf("non-chat body rewritten:\n got %s\nwant %s", out, body)
+					t.Fatalf("unchanged body was rewritten:\n got %s\nwant %s", out, body)
 				}
 				return
 			}
@@ -277,12 +294,16 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 
 	// Invalid JSON never parses, so the fast path cannot claim satisfaction and
 	// the general path fails closed; the caller relays the original bytes.
-	invalid := []byte(`{"model":"m","messages":`)
-	if ensureToolsSatisfied(invalid, names) {
-		t.Fatal("invalid JSON must not report a satisfied ensure-tools body")
-	}
-	if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes, ir.Chat); rewrote || why == "" || out != nil {
-		t.Fatalf("invalid JSON rewrite = %q/%v/%q, want the fail-closed outcome", out, rewrote, why)
+	for _, invalid := range [][]byte{
+		[]byte(`{"model":"m","messages":`),
+		[]byte(`{"model":"m","messages":[],"tools":[}`),
+	} {
+		if ensureToolsSatisfied(invalid, names) {
+			t.Fatalf("invalid JSON must not report a satisfied ensure-tools body: %s", invalid)
+		}
+		if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes, ir.Chat); rewrote || why == "" || out != nil {
+			t.Fatalf("invalid JSON rewrite = %q/%v/%q, want the fail-closed outcome", out, rewrote, why)
+		}
 	}
 }
 
@@ -343,5 +364,65 @@ func TestOpencodeIDFormat(t *testing.T) {
 			t.Fatalf("opencodeID collided: %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+// TestEnsureToolsForcesNoneForImplicitChoices pins the exact inertness rule
+// when the client supplied no tools: absent, null, or auto becomes none before
+// the stubs land; an explicit none keeps its spelling; required, named, or a
+// malformed choice skips injection entirely rather than contradicting the
+// client or letting it call an undeclared stub.
+func TestEnsureToolsForcesNoneForImplicitChoices(t *testing.T) {
+	const messages = `"messages":[{"role":"user","content":"hi"}]`
+	named := map[string]any{"type": "function", "function": map[string]any{"name": "client_tool"}}
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantStubs  bool
+		wantChoice any
+		wantExtra  []string
+	}{
+		{name: "absent", body: `{"model":"m",` + messages + `}`, wantStubs: true, wantChoice: "none"},
+		{name: "null", body: `{"model":"m",` + messages + `,"tool_choice":null}`, wantStubs: true, wantChoice: "none"},
+		{name: "auto", body: `{"model":"m",` + messages + `,"tool_choice":"auto"}`, wantStubs: true, wantChoice: "none"},
+		{name: "none", body: `{"model":"m",` + messages + `,"tool_choice":"none"}`, wantStubs: true, wantChoice: "none"},
+		{name: "empty tools auto", body: `{"model":"m",` + messages + `,"tools":[],"tool_choice":"auto"}`, wantStubs: true, wantChoice: "none"},
+		{name: "empty tools absent", body: `{"model":"m",` + messages + `,"tools":[]}`, wantStubs: true, wantChoice: "none"},
+		{name: "required", body: `{"model":"m",` + messages + `,"tool_choice":"required"}`, wantChoice: "required"},
+		{name: "named", body: `{"model":"m",` + messages + `,"tool_choice":{"type":"function","function":{"name":"client_tool"}}}`, wantChoice: named},
+		{name: "malformed", body: `{"model":"m",` + messages + `,"tool_choice":5}`, wantChoice: float64(5)},
+		{
+			name:       "client tools auto",
+			body:       `{"model":"m",` + messages + `,"tools":[{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`,
+			wantStubs:  true,
+			wantChoice: "auto",
+			wantExtra:  []string{"get_weather"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, cap := captureBodies(t)
+			defer upstream.Close()
+			srv := httptest.NewServer(New(ensuredCfg(upstreamLabel(upstream.URL)), metrics.Noop{}))
+			defer srv.Close()
+
+			postChatBody(t, srv.URL, upstream.URL, tc.body)
+			names, choice, hasTools := toolNames(t, cap.snapshot()[0])
+			if tc.wantStubs {
+				want := append(append([]string{}, tc.wantExtra...), "bash", "read")
+				if !hasTools || len(names) != len(want) {
+					t.Fatalf("tool names = %v (hasTools=%v), want %v", names, hasTools, want)
+				}
+				for i := range want {
+					if names[i] != want[i] {
+						t.Fatalf("tool names = %v, want %v", names, want)
+					}
+				}
+			} else if hasTools || len(names) != 0 {
+				t.Fatalf("tools changed for an explicit choice: %v", names)
+			}
+			if !reflect.DeepEqual(choice, tc.wantChoice) {
+				t.Fatalf("tool_choice = %#v, want %#v", choice, tc.wantChoice)
+			}
+		})
 	}
 }

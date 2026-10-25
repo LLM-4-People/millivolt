@@ -1342,6 +1342,40 @@ async function main() {
   }
 
 
+  // ---- test 7h: in-band upstream entries are health evidence, not retries ----
+  // A committed keepalive 200 can hide an upstream 429; the record keeps it as
+  // an in_band attempt entry so the health predicates see the real status. No
+  // retry disclosure may present it as an absorbed retry.
+  {
+    const atts = [
+      { status_code: 502, error_type: 'bad_gateway', error_msg: 'upstream overloaded',
+        at: new Date(1700000104500).toISOString() },
+      { status_code: 429, error_type: 'rate_limit_error', error_msg: 'slow down', in_band: true,
+        at: new Date(1700000104800).toISOString() },
+    ];
+    fire('end', { record: { ...mkRec('att-inband', 200, 1700000104000),
+      error_type: 'rate_limit_error', error_msg: 'slow down', retries: 1, attempts: atts }, in_flight: 0 });
+    await sleep(20);
+    const row = d.querySelector('#tbl-requests tr.exp-row[data-id="att-inband"]:not(.retry-sub)');
+    const toggle = row && row.querySelector('.retry-toggle');
+    check('an in-band entry does not inflate the retry badge',
+      !!toggle && toggle.textContent.includes('1') && !toggle.textContent.includes('2'));
+    w.openDrawer('att-inband');
+    const links = [...d.querySelectorAll('.attempt-link[data-open-req]')];
+    check('the drawer retry list has one link at the original index',
+      links.length === 1 && links[0].dataset.attempt === '0');
+    const retrySection = [...d.querySelectorAll('#drawer-body .detail-section')]
+      .find(s => s.querySelector('h4')?.textContent.startsWith('Retry attempts'));
+    check('the drawer retry section lists only the real retry',
+      !!retrySection && retrySection.querySelectorAll('.attempt-link').length === 1);
+    w.closeDrawer();
+    const toggleAgain = d.querySelector('#tbl-requests tr.exp-row[data-id="att-inband"]:not(.retry-sub) .retry-toggle');
+    if (toggleAgain) toggleAgain.click();
+    const subs = [...d.querySelectorAll('tr.retry-sub[data-retry-of="att-inband"]')];
+    check('the log expands one retry sub-row with its original attempt index',
+      subs.length === 1 && subs[0].dataset.attempt === '0' && subs[0].hidden === false);
+  }
+
   // ---- test 8: Logs menu (filter menu + export URL) ----
   const logsMenu = d.getElementById('logs-menu');
   check('logs menu starts hidden', logsMenu && logsMenu.hidden);
@@ -1900,11 +1934,16 @@ async function main() {
   {
     const doc = {
       writable: true,
-      fields: [{ key: 'backup_max_bytes', category: 'backup', label: 'Backup size cap', kind: 'bytes', help: 'cap', hot_reload: true }],
+      fields: [
+        { key: 'backup_max_bytes', category: 'backup', label: 'Backup size cap', kind: 'bytes', help: 'cap', hot_reload: true },
+        { key: 'whole_document_read_max', category: 'providers', label: 'Whole-document read maximum', kind: 'duration', help: 'cap', hot_reload: true },
+        { key: 'db_path', category: 'providers', label: 'Database path', kind: 'string', help: 'path', hot_reload: false },
+        { key: 'listen', category: 'providers', label: 'Listen', kind: 'string', help: 'address', hot_reload: false },
+      ],
       categories: [{ id: 'backup', label: 'Backup', help: 'archives' }],
-      values: { backup_max_bytes: '1GiB' },
-      defaults: { backup_max_bytes: '1GiB' },
-      overrides: {},
+      values: { backup_max_bytes: '1GiB', whole_document_read_max: '10m', db_path: 'live.db', listen: '127.0.0.1:8080' },
+      defaults: { backup_max_bytes: '1GiB', whole_document_read_max: '10m', db_path: 'default.db', listen: '127.0.0.1:8080' },
+      overrides: { listen: '127.0.0.1:9000', db_path: 'cli.db' },
       backup: { config: true, database: true, requests: 12, modified: ['backup_max_bytes'] },
     };
     w.settingsDoc = doc;
@@ -1941,7 +1980,7 @@ async function main() {
         if (u.includes('inspect=1')) {
           return Promise.resolve({ ok: true, json: async () => ({
             ok: true, created: '2026-09-07T12:00:00Z',
-            config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+            config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes', 'whole_document_read_max', 'db_path', 'listen'] },
             database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
           }) });
         }
@@ -1972,7 +2011,7 @@ async function main() {
     calls.length = 0;
     const inspectPayload = {
       ok: true, created: '2026-09-07T12:00:00Z',
-      config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+      config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes', 'whole_document_read_max', 'db_path', 'listen'] },
       database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
     };
     let releaseInspect;
@@ -2025,6 +2064,29 @@ async function main() {
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
       d.getElementById('backup-preview').textContent.includes('default 1GiB') &&
       d.getElementById('backup-preview').textContent.includes('live 1GiB'));
+    const liveOnlyRow = d.querySelector('[data-backup="diff"][data-key="whole_document_read_max"]');
+    check('replace preview shows a live-only key as reset',
+      !!liveOnlyRow && liveOnlyRow.textContent.includes('replace resets it'));
+    const preservedRow = d.querySelector('[data-backup="diff"][data-key="db_path"]');
+    check('replace preview keeps a CLI-overridden live key',
+      !!preservedRow &&
+      preservedRow.textContent.includes('live live.db') &&
+      preservedRow.textContent.includes('preserved by the CLI override') &&
+      !preservedRow.textContent.includes('replace resets it'));
+    check('replace hint excludes CLI-overridden settings',
+      d.querySelector('[data-backup="restore"]').textContent.includes('except CLI-overridden db_path and listen'));
+    const mergeRadio = d.querySelector('input[name="backup-mode"][value="merge"]');
+    mergeRadio.checked = true;
+    mergeRadio.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const mergeRow = d.querySelector('[data-backup="diff"][data-key="whole_document_read_max"]');
+    check('merge preview reports a live-only key as unchanged',
+      !!mergeRow && mergeRow.textContent.includes('merge leaves it unchanged'));
+    const mergePreserved = d.querySelector('[data-backup="diff"][data-key="listen"]');
+    check('merge preview still marks a CLI-overridden key as preserved',
+      !!mergePreserved && mergePreserved.textContent.includes('preserved by the CLI override'));
+    const replaceRadio = d.querySelector('input[name="backup-mode"][value="replace"]');
+    replaceRadio.checked = true;
+    replaceRadio.dispatchEvent(new w.Event('change', { bubbles: true }));
     check('archive facts sit apart from restore options',
       d.querySelector('[data-backup="archive"]') &&
       d.querySelector('[data-backup="archive"]').textContent.includes('t.mvb') &&
@@ -2055,6 +2117,19 @@ async function main() {
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
     w.fetch = originalFetch;
     w.HTMLAnchorElement.prototype.click = origClick;
+    // A store-less preview carries the database member but marks it
+    // uninspectable. The selection must stay disabled and unchecked so the
+    // apply request cannot ask for a database the endpoint cannot stage.
+    w.eval("backupInspect = { data: { config: { present: true }, database: { present: true, inspectable: false, reason: 'durable storage is disabled' } } }; backupIncludeConfig = true; backupIncludeDatabase = true;");
+    const storeless = d.createElement('div');
+    storeless.innerHTML = w.eval("backupRestoreOptionsHTML({ config: true, database: true })");
+    d.getElementById('settings-fields').appendChild(storeless);
+    const storelessDb = storeless.querySelector('#backup-include-database');
+    check('store-less preview disables and unchecks the database member',
+      !!storelessDb && storelessDb.disabled && !storelessDb.checked);
+    check('store-less preview shows the inspectable reason',
+      storeless.textContent.includes('durable storage is disabled'));
+    storeless.remove();
     w.eval("operatorCredential = ''; backupInspect = null; backupIncludeConfig = true; backupIncludeDatabase = true; backupMode = 'replace'; backupBusy = false; backupReq = 0;");
   }
 
@@ -4857,6 +4932,41 @@ async function main() {
     delete w.__settingsUxRestore;
   }
 
+  // (G3) A model_rules list is an array of objects, so String(val) compares as
+  // "[object Object],..." and can fabricate a "default" hint or print that
+  // string. The field must not use the scalar default-hint comparison.
+  {
+    const base = {
+      revision: 'mr-hint-r1',
+      fields: [{ key: 'model_rules', category: 'ux', label: 'Model rules', help: '', kind: 'model_rules', hot_reload: true }],
+      categories: [{ id: 'ux', label: 'UX', help: '' }],
+      defaults: { model_rules: DEF_RULES },
+      effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    const render = values => {
+      const doc = JSON.parse(JSON.stringify(base));
+      doc.values = { model_rules: values };
+      w.__mrHintDoc = doc;
+      w.eval('settingsDoc = window.__mrHintDoc; fillSettingsForm(settingsDoc)');
+      return d.querySelector('#settings-fields .st-row[data-key="model_rules"] .st-hint');
+    };
+    d.getElementById('settings-sheet').hidden = false;
+    const untouched = render(JSON.parse(JSON.stringify(DEF_RULES)));
+    check('an untouched model rule list renders the default hint', !!untouched && untouched.textContent === 'default');
+    const modified = render([
+      { mode: 'lower' },
+      { mode: 'pattern', from: 'a', to: 'b' },
+      { mode: 'pattern', from: 'c', to: 'd' },
+      { mode: 'pattern', from: 'e', to: 'f' },
+      { mode: 'pattern', from: 'g', to: 'h' },
+    ]);
+    check('a modified same-length model rule list shows no default hint', !modified);
+    const shorter = render([{ mode: 'lower' }]);
+    check('a shorter model rule list shows no object string hint', !shorter);
+    delete w.__mrHintDoc;
+    w.closeSettings(true);
+  }
+
   // ---- MCP settings category pin: the schema-driven mcp category must render
   // the enable switch and the six limit fields, every row restart-required, the
   // rail badge resolving through the SETTINGS_CAT_REF mcp entry (the tool
@@ -5856,6 +5966,8 @@ async function main() {
       cards()[0].querySelector('.sc-strip').checked === true &&
       cards()[1].querySelector('.sc-client').value === 'zed-cli' &&
       !cards()[1].querySelector('.sc-strip').checked);
+    check('the strip hint names the pre-relay client body scope',
+      scWrap.querySelector('.mr-hint').textContent.includes('strip removes every configured field present at the top level of the client request body before relay or translation'));
     check('watermark examples ride the empty fields',
       cards()[0].querySelector('.sc-client').placeholder.includes('e.g. opencode') &&
       cards()[0].querySelector('.prov-add .sc-param-in').placeholder.includes('e.g. promptCacheKey') &&
@@ -9448,9 +9560,11 @@ async function main() {
         ['cancel after429', {status_code: 499, attempts: [{status_code: 429}]}, false],
         ['final 499 with in-band error', {status_code: 499, error_type: 'api_error', error_code: 'internal_error'}, true],
         ['final 499 with in-band rate limit error', {status_code: 499, error_type: 'rate_limit_error'}, true],
+        ['committed 200 with an in-band 429', {status_code: 200, error_type: 'rate_limit_error', attempts: [{status_code: 429, in_band: true}]}, true],
+        ['synthetic in-band 500 counts as an absorbed failure', {status_code: 200, attempts: [{status_code: 500, in_band: true}]}, true],
       ];
       const errorMisses = corpus.filter(([, rec, want]) => sw.recordIsError(rec) !== want).map(([name]) => name);
-      check('recordIsError agrees with the 24-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
+      check('recordIsError agrees with the 26-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
 
       // statusClass mirrors contribStatusClass/statusClass in aggregate.go on
@@ -9493,7 +9607,9 @@ async function main() {
       // in-band error does (the client aborted around a real failure), an
       // in-band provider error on a 200 does, and
       // absorbed attempts keep genuine failures (5xx, typed, 4xx) while
-      // skipping flow control and bare non-failures. errorKey mirrors the Go
+      // skipping flow control and bare non-failures. In-band attempt entries
+      // are health evidence, never a second disclosure for the final failure,
+      // including the synthetic in-band 5xx shape. errorKey mirrors the Go
       // type|code|msg identity the explorer error dimension filters by.
       const entsRec = {
         status_code: 200, error_code: '', error_msg: '',
@@ -9503,6 +9619,8 @@ async function main() {
           {status_code: 0, error_type: 'dial_failed'},
           {status_code: 401},
           {status_code: 302},
+          {status_code: 429, in_band: true},
+          {status_code: 500, in_band: true},
         ],
         start: '2026-09-14T00:00:00Z',
       };

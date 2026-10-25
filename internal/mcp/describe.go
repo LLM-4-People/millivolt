@@ -440,7 +440,7 @@ var tableDocs = []TableDoc{
 			{Name: "stream", Type: "INTEGER", Meaning: "1 when the client asked for a streamed response"},
 			{Name: "tool_calls", Type: "INTEGER", Meaning: "count of tool calls in the response"},
 			{Name: "tool_names", Type: "TEXT", Meaning: "JSON array of tool names, or 'null' when none; use json_each or json_extract"},
-			{Name: "attempts", Type: "TEXT", Meaning: "JSON array of absorbed upstream attempts; each has status_code, error_type and at"},
+			{Name: "attempts", Type: "TEXT", Meaning: "JSON array of absorbed retries plus at most one in-band 429; each has status_code and at, a retry also has error_type, and in_band marks a 429 a committed 200 hid (health evidence, not a retry)"},
 			{Name: "final_attempt_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "start of the attempt that produced the returned response"},
 			{Name: "error_type", Type: "TEXT", Meaning: "classified error class; empty on success"},
 			{Name: "error_code", Type: "TEXT", Meaning: "provider-specific error code"},
@@ -473,11 +473,11 @@ var tableDocs = []TableDoc{
 			{Name: "req_top_logprobs", Type: "INTEGER", Meaning: "requested top_logprobs; req_param_presence distinguishes unset from an explicit 0"},
 			{Name: "req_logprobs", Type: "INTEGER", Meaning: "whether logprobs were requested"},
 			{Name: "req_response_format", Type: "TEXT", Meaning: "requested response format, for example json_object"},
-			{Name: "req_service_tier", Type: "TEXT", Meaning: "requested service tier"},
+			{Name: "req_service_tier", Type: "TEXT", Meaning: "client's literal requested service tier when present, otherwise its speed value; pre-translation, so a native body and its record agree"},
 			{Name: "req_thinking", Type: "INTEGER", Meaning: "whether a reasoning/thinking budget was requested"},
 			{Name: "req_reasoning_effort", Type: "TEXT", Meaning: "requested reasoning effort level"},
 			{Name: "req_verbosity", Type: "TEXT", Meaning: "requested verbosity level"},
-			{Name: "req_metadata_keys", Type: "INTEGER", Meaning: "count of client metadata keys; the values are not stored"},
+			{Name: "req_metadata_keys", Type: "INTEGER", Meaning: "count of metadata keys on the upstream request; the values are not stored"},
 			{Name: "req_stream_opts", Type: "INTEGER", Meaning: "stream options bitfield as sent by the client"},
 			{Name: "req_param_presence", Type: "INTEGER", Meaning: "bitmask over the nine tracked optional parameters where an explicit 0/false is distinguishable from absent; " +
 				"a NEGATIVE value marks a pre-tracking row where only nonzero values were known"},
@@ -572,7 +572,9 @@ var predicates = PredicateDoc{
 	RateLimited: `(status_code = 429 OR EXISTS (SELECT 1 FROM json_each(requests.attempts) WHERE json_extract(value, '$.status_code') = 429))`,
 	Note: "err_final counts distinct requests through is_error; rate_limit_requests counts distinct requests through rate_limited. " +
 		"A 429 alone is NOT an error: it is flow control. An absorbed 5xx in attempts IS an error even when a retry recovered. " +
-		"A 499 is a client abort unless error_type is set, which means the upstream had already failed in band.",
+		"A 499 is a client abort unless error_type is set, which means the upstream had already failed in band. " +
+		"An in-band attempt entry records an upstream status a committed 200 could not relay; its 429 still counts as rate-limited, " +
+		"and the same request may also count as an error through its final error_type.",
 }
 
 // The column reference above is curated rather than generated: it states the

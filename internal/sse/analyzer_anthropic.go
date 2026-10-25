@@ -12,16 +12,17 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 type anthropicAnalyzerUsage struct {
-	InputTokens              *int64 `json:"input_tokens"`
-	OutputTokens             *int64 `json:"output_tokens"`
-	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	InputTokens              *jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens             *jsonnum.Int64 `json:"output_tokens"`
+	CacheReadInputTokens     *jsonnum.Int64 `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens *jsonnum.Int64 `json:"cache_creation_input_tokens"`
 	OutputTokensDetails      *struct {
-		ThinkingTokens int64 `json:"thinking_tokens"`
+		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -30,8 +31,11 @@ type anthropicAnalyzerEvent struct {
 	// Message is raw because it is an object on message_start and a plain
 	// string on a standalone error event; a typed object field would reject
 	// the whole error frame.
-	Message      json.RawMessage `json:"message"`
-	Code         string          `json:"code"`
+	Message json.RawMessage `json:"message"`
+	// Code is raw because the Responses error event allows a string or a
+	// numeric code; a typed string would reject the whole event and lose the
+	// error entirely.
+	Code         json.RawMessage `json:"code"`
 	ContentBlock struct {
 		Type  string `json:"type"`
 		Name  string `json:"name"`
@@ -46,10 +50,10 @@ type anthropicAnalyzerEvent struct {
 		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage *anthropicAnalyzerUsage `json:"usage"`
-	Error *struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
+	// Error is raw because the nested object may carry only a message or only
+	// a code; the shared parser classifies those as provider_error and keeps
+	// numeric/string codes.
+	Error json.RawMessage `json:"error"`
 }
 
 // feedAnthropic classifies one Anthropic data payload. It reports false for
@@ -91,7 +95,7 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 			if msg.Usage != nil {
 				a.usageChunk = append(a.usageChunk[:0], payload...)
 				a.setAnthropicUsage(msg.Usage)
-				a.captureAnthropicCustomUsage(payload)
+				a.captureAnthropicCustomUsage(payload, "message.usage")
 			}
 		}
 		return true
@@ -128,10 +132,17 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		if ev.Usage != nil {
 			a.usageChunk = append(a.usageChunk[:0], payload...)
 			a.setAnthropicUsage(ev.Usage)
-			a.captureAnthropicCustomUsage(payload)
+			a.captureAnthropicCustomUsage(payload, "usage")
 		}
 		if ev.Delta.StopReason != "" {
 			a.finishReason = anthropicAnalyzerFinish(ev.Delta.StopReason)
+			// A terminal stop reason of "error" is the provider's failure
+			// statement even when no error event follows, matching the
+			// non-stream decoder and the translated EventError path. An
+			// explicit provider error already owns its classification.
+			if a.finishReason == "error" && a.errType == "" {
+				a.setStreamError(TypeUpstreamError, "", "upstream response failed")
+			}
 			a.terminatorSeen = true
 		}
 		return true
@@ -139,26 +150,56 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		a.terminatorSeen = true
 		return true
 	case "error":
-		if ev.Error != nil {
-			a.setStreamError(ev.Error.Type, "", ev.Error.Message)
+		if len(bytes.TrimSpace(ev.Error)) > 0 && !bytes.Equal(bytes.TrimSpace(ev.Error), []byte("null")) {
+			// Route the nested object through the same parser as the
+			// non-stream owner. A message-only or code-only object is a
+			// provider_error; an empty object is still a failure statement
+			// because the event itself is a terminal error.
+			typ, code, msg := metrics.ParseErrorValue(ev.Error)
+			if typ == "" {
+				typ = TypeUpstreamError
+				msg = "upstream response failed"
+			}
+			// The first real error owns the record. A later nested error is a
+			// duplicate statement; overwriting would report a different
+			// failure than the one the client saw first.
+			if a.errType == "" {
+				a.setStreamError(typ, code, msg)
+			}
+			// An error event is a terminal statement on every wire that
+			// carries one; never leave the analyzer waiting for a marker
+			// after it.
+			a.terminatorSeen = true
 		} else {
 			// A standalone Responses error event has no nested error object:
-			// its code and message are top-level siblings of the type. The
-			// message is a plain string, decoded from the raw field.
-			var msg string
-			_ = json.Unmarshal(ev.Message, &msg)
-			if ev.Code != "" || msg != "" {
-				a.setStreamError("provider_error", ev.Code, msg)
-			}
+			// its code and message are top-level siblings of the type.
+			a.recordStandaloneError(ev.Code, ev.Message)
 		}
-		// An error event is a terminal statement on every wire that carries
-		// one; never leave the analyzer waiting for a marker after it.
-		a.terminatorSeen = true
 		return true
 	case "ping":
 		return true
 	}
 	return false
+}
+
+// errorCodeString renders an error code that may be a JSON string, number or
+// null. Structured or boolean values have no single printable code and yield
+// an empty string. json.Number preserves the exact wire spelling.
+func errorCodeString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var n json.Number
+	if dec.Decode(&n) == nil {
+		return n.String()
+	}
+	return ""
 }
 
 func (a *Analyzer) recordAnthropicToken(now time.Time, answer bool) {
@@ -190,16 +231,29 @@ func (a *Analyzer) recordAnthropicToolToken(now time.Time) {
 }
 
 // captureAnthropicCustomUsage folds provider usage/cost key paths that live
-// beside the standard usage object. Anthropic splits usage across events, so
-// the contribution from each usage-bearing payload is merged independently
-// instead of reading only the final chunk root.
-func (a *Analyzer) captureAnthropicCustomUsage(payload []byte) {
+// beside the standard usage object. usagePath selects the event's usage subtree
+// (message.usage on message_start, usage on message_delta) because usage_keys
+// paths are documented relative to the usage object, not the event root; cost
+// keys remain relative to the whole payload. Anthropic splits usage across
+// events, so the contribution from each usage-bearing payload is merged
+// independently instead of reading only the final chunk root.
+func (a *Analyzer) captureAnthropicCustomUsage(payload []byte, usagePath string) {
 	var root any
 	if json.Unmarshal(payload, &root) != nil {
 		return
 	}
-	parsed := metrics.ParseUsage(root, a.UsageKeys)
-	if mergeUsageValues(&a.anthropicCustomUsage, parsed) {
+	usage, _ := metrics.DigJSON(root, usagePath)
+	// The documented shape addresses the usage object; some gateways place
+	// the same overrides beside it at the event root, so that fallback stays.
+	// Only provider overrides are read: the standard usage document already
+	// owns the built-in paths through setAnthropicUsage's folded counts.
+	parsed := metrics.ParseUsageOverrides(usage, a.UsageKeys)
+	if len(a.UsageKeys) > 0 {
+		beside := metrics.ParseUsageOverrides(root, a.UsageKeys)
+		mergeUsageValues(&beside, parsed)
+		parsed = beside
+	}
+	if mergeUsageValues(&a.anthropicCustomUsage, parsed).merged {
 		a.anthropicCustomSeen = true
 	}
 	if parsed.TotalTokens > 0 {
@@ -215,28 +269,31 @@ func (a *Analyzer) captureAnthropicCustomUsage(payload []byte) {
 // total (input after the last breakpoint plus cache read and write).
 func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 	if u.InputTokens != nil {
-		a.anthropicInput = *u.InputTokens
+		a.anthropicInput = int64(*u.InputTokens)
 	}
 	if u.OutputTokens != nil {
-		a.anthropicOutput = *u.OutputTokens
+		a.anthropicOutput = int64(*u.OutputTokens)
 	}
 	if u.CacheReadInputTokens != nil {
-		a.anthropicCacheRead = *u.CacheReadInputTokens
+		a.anthropicCacheRead = int64(*u.CacheReadInputTokens)
 	}
 	if u.CacheCreationInputTokens != nil {
-		a.anthropicCacheWrite = *u.CacheCreationInputTokens
+		a.anthropicCacheWrite = int64(*u.CacheCreationInputTokens)
 	}
 	if u.OutputTokensDetails != nil {
-		a.anthropicThinking = u.OutputTokensDetails.ThinkingTokens
+		a.anthropicThinking = int64(u.OutputTokensDetails.ThinkingTokens)
 	}
 	input, err := metrics.SumCounts(a.anthropicInput, a.anthropicCacheRead, a.anthropicCacheWrite)
 	if err != nil {
-		// Leave usage unreported rather than publishing a partial document;
-		// the chunk fallback can still recover it from the provider frame.
+		// Leave usage unreported rather than publishing a partial document.
+		// The invalid flag is sticky and tells the proxy not to settle the
+		// chunk fallback as if the source had reported no usage.
+		a.usageInvalid = true
 		return
 	}
 	total, err := metrics.SumCounts(input, a.anthropicOutput)
 	if err != nil {
+		a.usageInvalid = true
 		return
 	}
 	chat, err := json.Marshal(map[string]any{
@@ -256,6 +313,11 @@ func (a *Analyzer) setAnthropicUsage(u *anthropicAnalyzerUsage) {
 	a.usageSeen = true
 }
 
+// anthropicAnalyzerFinish maps the source reason onto the record vocabulary.
+// Reasons with an exact canonical equivalent are normalized; refusal,
+// pause_turn and unknown provider values keep their source spelling so the
+// record matches the non-stream owner. Only the Chat wire mapper approximates
+// a value outside its enum.
 func anthropicAnalyzerFinish(reason string) string {
 	switch reason {
 	case "end_turn", "stop_sequence":
@@ -264,8 +326,6 @@ func anthropicAnalyzerFinish(reason string) string {
 		return "length"
 	case "tool_use":
 		return "tool_calls"
-	case "refusal":
-		return "content_filter"
 	default:
 		return reason
 	}

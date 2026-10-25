@@ -109,12 +109,13 @@ func MergeTokenCaps(maxCompletion, maxTokens *int) *int {
 // records every unrepresentable field as a warning. defaultMaxTokens is sent
 // when the client provides neither max_tokens nor max_completion_tokens
 // (Anthropic requires max_tokens); it comes from config. promptCacheKey, when
-// non-empty, is injected as Anthropic's native top-level prompt_cache_key
-// field - the proxy's sub-conversation tracking value, extracted from the
-// client's own spelling before translation. The whole body must be valid
-// UTF-8: a raw invalid byte is rejected before the typed decode so the
-// standard decoder's three-byte U+FFFD replacement cannot expand a body-sized
-// string in memory.
+// non-empty, is injected as a top-level prompt_cache_key - the proxy's
+// sub-conversation tracking value, extracted from the client's own spelling
+// before translation. It is not an Anthropic cache field (Anthropic uses
+// cache_control); an upstream must tolerate unknown top-level fields. The
+// whole body must be valid UTF-8: a raw invalid byte is rejected before the
+// typed decode so the standard decoder's three-byte U+FFFD replacement cannot
+// expand a body-sized string in memory.
 func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey string) ([]byte, error) {
 	out, _, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, openaiBody, defaultMaxTokens, promptCacheKey)
 	return out, err
@@ -132,11 +133,21 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 // StreamToOpenAI reads an Anthropic SSE stream and writes an OpenAI-compatible
 // SSE stream to dst. It is the Chat-from-Anthropic specialization of
 // TranslateStreamBetween; observe receives every raw upstream data payload for
-// source-only cost accounting and must not retain the borrowed bytes.
+// source-only cost accounting and must not retain the borrowed bytes. The
+// event name is dropped here because this wrapper's callers account the
+// payload only; TranslateStreamBetween callers that need terminal
+// classification receive it.
 func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, observe func([]byte)) error {
 	var f http.Flusher
 	if flusher != nil {
 		f = flusher
 	}
-	return TranslateStreamBetween(ir.Chat, ir.Anthropic, dst, src, f, observe)
+	var typed func(string, []byte)
+	if observe != nil {
+		typed = func(_ string, payload []byte) { observe(payload) }
+	}
+	// This wrapper has no client request to consult, so it keeps its
+	// historical contract of emitting the usage chunk whenever the source
+	// reported usage.
+	return TranslateStreamBetween(ir.Chat, ir.Anthropic, dst, src, f, typed, StreamOptions{IncludeUsage: true})
 }

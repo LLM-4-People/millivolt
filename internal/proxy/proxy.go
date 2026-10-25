@@ -226,6 +226,27 @@ type target struct {
 	// exists, never carries one, and the two inference send owners
 	// (buildUpstreamRequest, setCursorIdentity) are its only consumers.
 	override *resolvedOverride
+	// streamIncludeUsage is the translated Chat client's
+	// stream_options.include_usage. The Chat encoder emits its extra usage
+	// chunk only when requested and the source reported usage.
+	streamIncludeUsage bool
+}
+
+// wire is the upstream response protocol. X-Proxy-Format selects an explicit
+// outbound wire; without it the request is a native passthrough on the path
+// protocol. Cursor and unknown paths have no inferred wire.
+func (t *target) wire() ir.Protocol {
+	if t == nil {
+		return ""
+	}
+	if t.outbound != "" {
+		return t.outbound
+	}
+	switch t.inbound {
+	case ir.Chat, ir.Responses, ir.Anthropic:
+		return t.inbound
+	}
+	return ""
 }
 
 // livePublisher is the narrow interface for emitting per-request lifecycle
@@ -476,7 +497,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Resolve it before target validation so an early failure on a known
 	// Anthropic or Responses path still answers in that protocol's envelope;
 	// resolveTarget calls the same owner for the authoritative value.
-	inbound, _ := inboundProtocol(r)
+	// Discovery GETs always answer in the OpenAI envelope, even when an
+	// inference client-wire override is present; every other early sink
+	// follows the client protocol.
+	envelope := envelopeProtocol(r)
 	// Reserve the declared upload now. A chunked body has no length yet, so it
 	// reserves the configured request cap; admission therefore bounds both the
 	// handler set and the heap those bodies can occupy before routing.
@@ -495,19 +519,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// what a client would otherwise control. The directive writer above
 		// carries the no-retry header like every other error sink.
 		w.Header().Set("Retry-After", "1")
-		writeProtocolHTTPError(w, inbound, http.StatusServiceUnavailable, typeAPIError,
+		writeProtocolHTTPError(w, envelope, http.StatusServiceUnavailable, typeAPIError,
 			"proxy is at its in-flight request limit")
 		return
 	}
 	defer s.inflight.release(reserve)
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
-		writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 	session, parentSession, err := requestConversation(r.Header)
 	if err != nil {
-		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
@@ -520,11 +544,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// record, and request-overrides matching: classify once, use everywhere.
 	client := classifyClient(r)
 	if err := s.applyThrottleHeaders(r, t.provider, client); err != nil {
-		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
-	if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models") {
+	if isModelsRequest(r) {
 		// Model discovery keeps its separate transparent-refresh contract for
 		// every mechanism: use the refreshed key without returning tokens.
 		s.serveModels(w, r, t, extractKey(r))
@@ -612,6 +636,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
 	if rewriteBody {
+		// The rewrite decodes into a map and re-marshals, which collapses
+		// duplicate cap members to one. Run the occurrence scan on the
+		// pre-rewrite bytes so the documented duplicate rejection cannot be
+		// lost before the cap check below sees the rewritten body.
+		if reason := tokenCapViolation(body, nil); reason != "" {
+			writeHostileTokenCap(w, t.inbound, reason)
+			return
+		}
 		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes), t.inbound); why == "" {
 			body = rewritten
 			if changed {
@@ -657,8 +689,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if hostileTokenCap(rec.ReqMaxTokens) || hostileTokenCapInBody(body) {
-		writeHostileTokenCap(w, t.inbound)
+	if reason := tokenCapViolation(body, rec); reason != "" {
+		writeHostileTokenCap(w, t.inbound, reason)
 		return
 	}
 	stream, model := rec.Stream, rec.Model
@@ -698,6 +730,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		body = translated
+		t.streamIncludeUsage = req.StreamIncludeUsage
 		setWarningsHeader(w.Header(), warnings)
 		// Parameter/composition metrics describe the translated upstream body
 		// for the two wire shapes the metadata decoder understands. A
@@ -706,7 +739,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
-			if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
 			}
@@ -721,8 +754,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// anything consumes the record. A decoy type error can keep the
 		// original decode's ReqMaxTokens nil while the translator still
 		// carries the hostile cap into the translated body.
-		if hostileTokenCap(rec.ReqMaxTokens) || hostileTokenCapInBody(body) {
-			writeHostileTokenCap(w, t.inbound)
+		if reason := tokenCapViolation(body, rec); reason != "" {
+			writeHostileTokenCap(w, t.inbound, reason)
 			return
 		}
 	}
@@ -802,11 +835,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// silently defaulted (same contract as X-Proxy-Timeout-Ms).
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
-				errInvalidHeader(hdrMaxConcurrency, v).Error())
+			// The record is already installed and committed by the defer, so
+			// stamp the rejection through the shared client-error owner; a
+			// bare protocol write left it at status 0 with no error type.
+			writeClientErrorHdr(w, rec, t.inbound, typeInvalidRequestError,
+				errInvalidHeader(hdrMaxConcurrency, v).Error(), http.StatusBadRequest, nil)
 			return
 		}
 		maxConc = n
+	}
+	// Wrap the debug tap around the original writer first, then build the
+	// streaming pacer over it. The pacer is the lowest choke point and writes
+	// keepalives and pre-commit JSON errors directly, so a tap above the pacer
+	// would miss exactly those client-facing bytes.
+	if debugTap != nil {
+		w = debugTap.wrapWriter(w)
 	}
 	var pacer *ssePacer
 	if stream {
@@ -814,10 +857,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w = pacer
 		pacer.Arm()
 	}
-	if debugTap != nil {
-		w = debugTap.wrapWriter(w)
-	}
-	defer pacer.Stop()
+	defer func() { pacer.Stop() }()
 	// hookMu serializes the four lifecycle-hook bodies below. The scheduler
 	// fires them from two goroutines: a seeded hold dispatches OnHold on the
 	// AddHold caller's goroutine (fireSeededHold) while the request's own
@@ -933,7 +973,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Capture error detail from 4xx/5xx response bodies (read before streaming).
 	if resp.StatusCode >= 400 {
-		captureErrorFromResponse(resp, rec)
+		s.captureErrorFromResponse(ctx, resp, rec)
 	}
 
 	// Capture upstream response headers for the audit view; the quality loops
@@ -946,13 +986,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// already consuming events) and the terminal-region hold/substitution
 		// happens inside streamBody, after any content already relayed.
 		// The idle pacer may already have committed 200 SSE + comment
-		// frames (queue / hold / TTFB); WriteHeader is then a no-op.
+		// frames (queue / hold); WriteHeader is then a no-op.
 		// A 4xx/5xx body after that commit cannot change the status - emit
 		// it in-band so the SDK sees a retryable error, not raw JSON on 200.
 		// A non-streaming request can still receive an event-stream response;
-		// its pacer is created here, unarmed, only to own the status commit.
+		// its pacer is created here to own the status commit and body writes,
+		// then armed so the confirmed stream gets idle keepalives.
 		if pacer == nil {
+			// A non-streaming request can still receive an event-stream
+			// response. Assign the late pacer back to w so body writes pass
+			// through the short write-progress bound; the debug tap already
+			// wraps this writer in order, so it still sees every byte. Arm it
+			// so the body phase gets idle keepalives too; the ticker still
+			// gates on the committed SSE body mode, so a JSON response stays
+			// silent. The deferred Stop reads the variable, not a nil receiver
+			// captured before this branch.
 			pacer = s.newSSEPacerFor(w)
+			w = pacer
+			pacer.Arm()
 		}
 		// A 202 acceptance or a status-only 204/205 is not an SSE stream, even
 		// when the request asked for one and a target format is configured.
@@ -962,20 +1013,62 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.relayNonCompletionBody(ctx, w, resp, rec)
 			return
 		}
-		// A translated stream always speaks SSE, whatever Content-Type the
-		// upstream used. The translated encoder frames the body itself, so the
-		// upstream type cannot describe it and must not be copied.
+		// A translated 200 stream speaks SSE, whatever Content-Type the
+		// upstream used. A translated non-200 is spooled and rendered as a
+		// JSON error body, so its declared type must stay JSON and the pacer
+		// must not add keepalive comments while it is read.
 		if t.translate {
-			resp.Header.Set("Content-Type", "text/event-stream")
-		}
-		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode != http.StatusOK {
-			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
-			if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
-				// The in-band error hit a dead socket: the client is gone.
-				// The decided error status stays on the record (markClientGone
-				// stamps 499 only when no error outcome is decided).
-				markClientGone(rec)
+			if resp.StatusCode == http.StatusOK {
+				resp.Header.Set("Content-Type", "text/event-stream")
+			} else {
+				resp.Header.Set("Content-Type", "application/json")
 			}
+		}
+		// The body mode is decided by the (possibly translated) content type;
+		// the status commit is separate. A non-SSE body reaches its buffered
+		// owner with the status line still open, so a translation or spool
+		// failure carries a real 502 instead of writing one under a committed
+		// 201.
+		alreadySSE := pacer.applyUpstream(resp.Header)
+		sseBody := isEventStream(resp.Header.Get("Content-Type"))
+		if alreadySSE {
+			// Keepalive comments already committed 200 SSE. A non-SSE body
+			// cannot be served under that status, and a non-200 SSE body is
+			// the turn's failure: both are in-band errors whose status the
+			// client already has.
+			if !sseBody || resp.StatusCode != http.StatusOK {
+				typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+				// The status line is already committed, so this in-band error
+				// is the turn's outcome: stamp the same owners the envelope
+				// uses. The client saw the pacer's committed success 200, so
+				// the record describes that status while stampCommittedErrorStatus
+				// retains an upstream 429 for the distinct rate-limit count.
+				stampCommittedErrorStatus(rec, resp.StatusCode)
+				rec.ErrorType, rec.ErrorMsg = typ, msg
+				if err := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); err != nil {
+					// The in-band error hit a dead socket: the client is gone.
+					// The decided error status stays on the record
+					// (markClientGone stamps 499 only when no error outcome is
+					// decided).
+					markClientGone(rec)
+				}
+				return
+			}
+		} else if sseBody {
+			if resp.StatusCode != http.StatusOK {
+				// A 2xx-non-200 event-stream body is still an SSE body, not a
+				// buffered completion. Commit it under its own status and relay
+				// it verbatim; entering the quality/buffer owner after a
+				// commit could write a retry's JSON under this status and
+				// content type.
+				if pacer.applyStatus(resp.Header, resp.StatusCode) {
+					s.relayNonCompletionBody(ctx, w, resp, rec)
+				}
+				return
+			}
+			pacer.commitStatus(resp.StatusCode)
+		} else {
+			s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 			return
 		}
 

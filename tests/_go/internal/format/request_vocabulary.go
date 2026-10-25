@@ -6,20 +6,10 @@ package format
 // one owner.
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
-
-func decodeJSONObject(t *testing.T, body []byte) map[string]any {
-	t.Helper()
-	var out map[string]any
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("body %q: %v", body, err)
-	}
-	return out
-}
 
 func TestAnthropicJSONSchemaNameSynthesized(t *testing.T) {
 	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
@@ -32,7 +22,7 @@ func TestAnthropicJSONSchemaNameSynthesized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chatDoc := decodeJSONObject(t, chat)
+	chatDoc := decodeJSONMap(t, chat)
 	rf, _ := chatDoc["response_format"].(map[string]any)
 	js, _ := rf["json_schema"].(map[string]any)
 	if js["name"] != defaultResponseFormatName {
@@ -42,7 +32,7 @@ func TestAnthropicJSONSchemaNameSynthesized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, _ := decodeJSONObject(t, responses)["text"].(map[string]any)
+	text, _ := decodeJSONMap(t, responses)["text"].(map[string]any)
 	format, _ := text["format"].(map[string]any)
 	if format["name"] != defaultResponseFormatName {
 		t.Fatalf("Responses json_schema name = %v, want %q: %s", format["name"], defaultResponseFormatName, responses)
@@ -59,7 +49,7 @@ func TestReasoningEffortNoneOmittedForAnthropic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc := decodeJSONObject(t, out)
+	doc := decodeJSONMap(t, out)
 	config, _ := doc["output_config"].(map[string]any)
 	if _, present := config["effort"]; present {
 		t.Fatalf("Anthropic body carries effort:none: %s", out)
@@ -70,7 +60,7 @@ func TestReasoningEffortNoneOmittedForAnthropic(t *testing.T) {
 }
 
 func TestThinkingBudgetMapsToChatEffort(t *testing.T) {
-	body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+	body := `{"model":"m","max_tokens":8192,"messages":[{"role":"user","content":"hi"}],` +
 		`"thinking":{"type":"enabled","budget_tokens":6000}}`
 	req, err := DecodeAnthropicRequest([]byte(body))
 	if err != nil {
@@ -80,7 +70,7 @@ func TestThinkingBudgetMapsToChatEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := decodeJSONObject(t, out)["reasoning_effort"]; got != "medium" {
+	if got := decodeJSONMap(t, out)["reasoning_effort"]; got != "medium" {
 		t.Fatalf("reasoning_effort = %v, want medium: %s", got, out)
 	}
 	if !warned(req.Warnings, "reasoning.budget_tokens") {
@@ -99,14 +89,14 @@ func TestThinkingDisabledMapsToNone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := decodeJSONObject(t, chat)["reasoning_effort"]; got != "none" {
+	if got := decodeJSONMap(t, chat)["reasoning_effort"]; got != "none" {
 		t.Fatalf("Chat reasoning_effort = %v, want none: %s", got, chat)
 	}
 	responses, err := EncodeResponsesRequest(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, _ := decodeJSONObject(t, responses)["reasoning"].(map[string]any)
+	reasoning, _ := decodeJSONMap(t, responses)["reasoning"].(map[string]any)
 	if reasoning["effort"] != "none" {
 		t.Fatalf("Responses reasoning.effort = %v, want none: %s", reasoning["effort"], responses)
 	}
@@ -139,7 +129,7 @@ func TestServiceTierCrossVocabulary(t *testing.T) {
 		{"chat flex stays", ir.Chat, "flex", "flex", false},
 		{"chat flex to anthropic dropped", ir.Anthropic, "flex", "", true},
 		{"responses ultrafast to chat dropped", ir.Chat, "ultrafast", "", true},
-		{"chat scale to responses dropped", ir.Responses, "scale", "", true},
+		{"chat scale to responses passes", ir.Responses, "scale", "scale", false},
 		{"anthropic unknown dropped", ir.Anthropic, "bogus", "", true},
 	}
 	for _, tc := range cases {
@@ -166,7 +156,7 @@ func TestChatStopSequencesClamped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stops, _ := decodeJSONObject(t, out)["stop"].([]any)
+	stops, _ := decodeJSONMap(t, out)["stop"].([]any)
 	if len(stops) != ChatMaxStopSequences {
 		t.Fatalf("stop count = %d, want %d: %s", len(stops), ChatMaxStopSequences, out)
 	}
@@ -190,7 +180,7 @@ func TestResponsesReasoningFieldsDecoded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reasoning, _ := decodeJSONObject(t, out)["reasoning"].(map[string]any)
+	reasoning, _ := decodeJSONMap(t, out)["reasoning"].(map[string]any)
 	if reasoning["summary"] != "auto" || reasoning["context"] != "current_turn" || reasoning["mode"] != "standard" {
 		t.Fatalf("reasoning round trip = %v: %s", reasoning, out)
 	}
@@ -200,5 +190,177 @@ func TestResponsesReasoningFieldsDecoded(t *testing.T) {
 	}
 	if !warned(req.Warnings, "reasoning.summary") || !warned(req.Warnings, "reasoning.context") {
 		t.Fatalf("cross-protocol reasoning losses not reported: %+v", req.Warnings)
+	}
+}
+
+// TestChatScaleTierReachesResponses pins TC1-3: Responses accepts the scale
+// tier, so a Chat scale request must pass through instead of being dropped.
+func TestChatScaleTierReachesResponses(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"service_tier":"scale"}`
+	out, warnings, err := TranslateRequestBetween(ir.Chat, ir.Responses, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decodeJSONMap(t, out)
+	if root["service_tier"] != "scale" {
+		t.Fatalf("service_tier = %v, want scale: %s", root["service_tier"], out)
+	}
+	if warned(warnings, "service_tier") {
+		t.Fatalf("scale recorded a tier warning: %+v", warnings)
+	}
+}
+
+// TestResponsesReasoningBudgetWarnsWithEffort pins TC1-5: Responses has no
+// token budget, so a budget beside an explicit effort must be reported (and a
+// disabled request must report both knobs).
+func TestResponsesReasoningBudgetWarnsWithEffort(t *testing.T) {
+	body := `{"model":"m","max_tokens":8192,"messages":[{"role":"user","content":"hi"}],` +
+		`"thinking":{"type":"enabled","budget_tokens":6000},"output_config":{"effort":"high"}}`
+	out, warnings, err := TranslateRequestBetween(ir.Anthropic, ir.Responses, []byte(body), 8192, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !warned(warnings, "reasoning.budget_tokens") {
+		t.Fatalf("budget beside effort recorded no warning: %+v", warnings)
+	}
+	root := decodeJSONMap(t, out)
+	reasoning, _ := root["reasoning"].(map[string]any)
+	if reasoning["effort"] != "high" {
+		t.Fatalf("reasoning = %v, want effort high: %s", reasoning, out)
+	}
+
+	enabled := false
+	budget := 6000
+	maxTokens := 16
+	req := &ir.Request{
+		Model: "m", MaxOutputTokens: &maxTokens,
+		Messages:  []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}},
+		Reasoning: &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: &budget, Effort: "high"},
+	}
+	if _, err := EncodeResponsesRequest(req); err != nil {
+		t.Fatal(err)
+	}
+	if !warned(req.Warnings, "reasoning.budget_tokens") {
+		t.Fatalf("disabled budget recorded no warning: %+v", req.Warnings)
+	}
+}
+
+// TestChatTargetEmitsStore pins TC1-6: Chat Completions accepts store, so a
+// translated store flag is carried instead of rejected. Anthropic still
+// rejects store=true because it has no stateful storage.
+func TestChatTargetEmitsStore(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"model":"m","input":"hi","store":true}`, true},
+		{`{"model":"m","input":"hi","store":false}`, false},
+	} {
+		out, _, err := TranslateRequestBetween(ir.Responses, ir.Chat, []byte(tc.body), 16, "")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		root := decodeJSONMap(t, out)
+		if got, ok := root["store"].(bool); !ok || got != tc.want {
+			t.Fatalf("chat store = %v, want %v: %s", root["store"], tc.want, out)
+		}
+	}
+	if _, _, err := TranslateRequestBetween(ir.Responses, ir.Anthropic,
+		[]byte(`{"model":"m","input":"hi","store":true}`), 16, ""); err == nil {
+		t.Fatal("anthropic target accepted store=true")
+	}
+}
+
+// TestAnthropicToolChoiceNoneOmitsParallel pins TC1-U3: ToolChoiceNone has no
+// disable_parallel_tool_use field in the Anthropic schema.
+func TestAnthropicToolChoiceNoneOmitsParallel(t *testing.T) {
+	const tools = `"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]`
+	for _, tc := range []struct {
+		name     string
+		choice   string
+		parallel string
+		want     bool
+	}{
+		{name: "none", choice: `"tool_choice":"none"`, parallel: `"parallel_tool_calls":false`, want: false},
+		{name: "auto", choice: `"tool_choice":"auto"`, parallel: `"parallel_tool_calls":false`, want: true},
+		{name: "required", choice: `"tool_choice":"required"`, parallel: `"parallel_tool_calls":false`, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}],` +
+				tools + `,` + tc.choice + `,` + tc.parallel + `}`
+			out, _, err := TranslateRequestBetween(ir.Chat, ir.Anthropic, []byte(body), 16, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := decodeJSONMap(t, out)
+			choice, _ := root["tool_choice"].(map[string]any)
+			if _, ok := choice["disable_parallel_tool_use"]; ok != tc.want {
+				t.Fatalf("disable_parallel_tool_use present = %v, want %v: %s", ok, tc.want, out)
+			}
+		})
+	}
+}
+
+// TestChatTopLogprobsRequiresLogprobs pins TC1-U4: Chat accepts top_logprobs
+// only with logprobs=true, so a count without the include is dropped and
+// reported rather than sent invalid.
+func TestChatTopLogprobsRequiresLogprobs(t *testing.T) {
+	body := `{"model":"m","input":"hi","top_logprobs":2}`
+	out, warnings, err := TranslateRequestBetween(ir.Responses, ir.Chat, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := decodeJSONMap(t, out)
+	if _, ok := root["top_logprobs"]; ok {
+		t.Fatalf("chat body carried top_logprobs without logprobs: %s", out)
+	}
+	if !warned(warnings, "top_logprobs") {
+		t.Fatalf("dropped top_logprobs recorded no warning: %+v", warnings)
+	}
+
+	body = `{"model":"m","input":"hi","top_logprobs":2,"include":["message.output_text.logprobs"]}`
+	out, _, err = TranslateRequestBetween(ir.Responses, ir.Chat, []byte(body), 16, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = decodeJSONMap(t, out)
+	if root["top_logprobs"] != float64(2) || root["logprobs"] != true {
+		t.Fatalf("chat logprob fields = %v/%v, want 2/true: %s", root["top_logprobs"], root["logprobs"], out)
+	}
+}
+
+// TestChatMetadataWarningOrderDeterministic pins TC1-U5: decoding one body
+// repeatedly must yield one warning order.
+func TestChatMetadataWarningOrderDeterministic(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"metadata":` +
+		`{"delta":{"n":1},"alpha":{"n":1},"charlie":{"n":1},"bravo":{"n":1}}}`
+	var first []string
+	for run := 0; run < 40; run++ {
+		req, err := DecodeChatRequest([]byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fields := make([]string, 0, len(req.Warnings))
+		for _, warning := range req.Warnings {
+			fields = append(fields, warning.Field)
+		}
+		if run == 0 {
+			first = fields
+			continue
+		}
+		if len(fields) != len(first) {
+			t.Fatalf("run %d warning count = %d, want %d: %v", run, len(fields), len(first), fields)
+		}
+		for i := range fields {
+			if fields[i] != first[i] {
+				t.Fatalf("run %d order = %v, want %v", run, fields, first)
+			}
+		}
+	}
+	want := []string{"metadata.alpha", "metadata.bravo", "metadata.charlie", "metadata.delta"}
+	for i := range want {
+		if first[i] != want[i] {
+			t.Fatalf("warning order = %v, want %v", first, want)
+		}
 	}
 }

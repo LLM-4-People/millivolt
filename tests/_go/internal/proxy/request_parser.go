@@ -39,7 +39,11 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 		{"trailing document", `{"model":"m","stream":true,"max_tokens":7} {}`, "", false, false},
 		{"array root", `[{"model":"m","stream":true,"max_tokens":7}]`, "", false, false},
 		{"null root", `null`, "", false, false},
-		{"case insensitive duplicate", `{"MODEL":"old","model":"m","STREAM":false,"Stream":true,"MAX_TOKENS":3,"max_tokens":7}`, "m", true, true},
+		// A duplicate cap spelling is rejected at the trust boundary instead
+		// of letting a last-wins decode pick one value for the record while
+		// the relay sends every occurrence; the parser therefore records no
+		// ceiling for this body.
+		{"case insensitive duplicate", `{"MODEL":"old","model":"m","STREAM":false,"Stream":true,"MAX_TOKENS":3,"max_tokens":7}`, "m", true, false},
 		{"null routing duplicate", `{"model":"m","model":null,"stream":true,"stream":null,"max_tokens":7}`, "m", true, true},
 		{"overflow in tools", `{"model":"m","stream":true,"max_tokens":7,"tools":[{"nested":1e999}]}`, "m", true, true},
 		{"overflow in metadata", `{"model":"m","stream":true,"max_tokens":7,"metadata":{"x":1e999}}`, "m", true, true},
@@ -317,8 +321,10 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 		t.Logf("metadata flood: %d bytes, %d bytes/op, %d allocs/op", len(raw), alloc, res.AllocsPerOp())
 	}
 	// The former map decode made one allocation per key (about 87k for this
-	// fixture); a counting scan with a bounded key set stays far below that.
-	if allocs := res.AllocsPerOp(); allocs > 10_000 {
+	// fixture). The merge-aware distinct-key scan retains at most the 10,000-key
+	// bound, and each retained key costs a decoded string plus its map entry;
+	// 25k still keeps the work proportional to the bound, not the body.
+	if allocs := res.AllocsPerOp(); allocs > 25_000 {
 		t.Fatalf("%d-byte metadata map made %d allocs/op, want a bounded key scan", len(raw), allocs)
 	}
 }

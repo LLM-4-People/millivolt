@@ -35,13 +35,18 @@ config, opening a database or starting runtime services.
 
 Precedence is built-in defaults, then the YAML file, then CLI overrides.
 A missing file loads defaults; verify the path rather than assuming a typo
-created a new empty overlay. On startup and reload, unknown keys, invalid
-types/ranges, conflicting overlay values and extra YAML documents are dropped
-(the built-in default stays) and the file is rewritten without them so a typo
-cannot block boot. An unparseable file is moved to `PATH.invalid` and replaced
-with the documented defaults. Settings POST still rejects those inputs.
-CLI-overridden fields cannot be saved from Settings. Healthcheck loads the
-file read-only and does not rewrite it.
+created a new empty overlay. On startup, unknown keys, unknown nested fields and
+extra YAML documents are dropped and the file is rewritten without them. An
+invalid recognized value fails startup without rewriting the file, and an
+unparseable file is moved to `PATH.invalid` and replaced with the documented
+defaults, except an ambiguous duplicate top-level key, which fails closed and
+stays in place. Reload rejects an invalid document without rewriting it.
+Settings, healthcheck and restore merge treat a missing file as defaults, while
+an invalid or unreadable document fails closed and is reported instead of
+substituting a default. Backup capture is stricter: a missing config file is an
+error because there is nothing to archive. Settings POST still rejects invalid
+inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck loads
+the file read-only and never rewrites it.
 
 To regenerate the public example after changing its canonical owners:
 
@@ -137,9 +142,9 @@ a temporary view: removing the alias does not reconstruct original labels.
 Existing in-memory ring records can retain their previous label until they age
 out or the process restarts. Back up before an intentional history rename.
 
-`model_rules` instead controls display/grouping. Its ordered exact, pattern and
-lowercase steps keep stored model spellings unchanged; an empty rule list groups
-by those raw spellings. The Settings editor supports reordering, parking and
+`model_rules` instead controls display/grouping. The list is capped at 64 rules.
+Its ordered exact, pattern and lowercase steps keep stored model spellings
+unchanged; an empty rule list groups by those raw spellings. The Settings editor supports reordering, parking and
 previewing rules. Raw export/delete predicates do not silently expand to a
 display group. Debug's native-model normalization is separate from these rules.
 
@@ -176,25 +181,34 @@ the later rule wins.
 Header rules are the operator's last word on the upstream wire: the resolved
 merge applies after client-forwarded values, configured provider headers and
 the client's `X-Proxy-Headers` map, so a matching override wins over all of
-them. Credential and protocol names (`authorization`, `cookie`,
+them. The proxy-owned transport-mode names `accept-encoding` and `range` are
+the exception: the client header maps (`X-Proxy-Headers` and an
+`X-Proxy-Auth-Header` naming one) reject them with a 400 before any send, and
+configured provider headers or request-override values are stripped from the
+final upstream request, so the transport keeps its own gzip negotiation and
+never sends a partial range. Credential and protocol names (`authorization`, `cookie`,
 `proxy-authorization`, `host`, `content-type`, `content-length`,
 `transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
 `proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control
-prefix are rejected at load in both header lists; at runtime the target's
-configured auth header is skipped even if one slips through, so credentials
-stay at their owner. The fixed list cannot know a provider's configured
+prefix are rejected at load in both header lists, and the client header maps
+reject `content-length` before any send so the transport keeps ownership of
+message framing; at runtime the target's configured auth header is skipped
+even if one slips through, so credentials stay at their owner. The fixed list cannot know a provider's configured
 auth header, so a rule naming the target's (for example `x-api-key`) passes
 config validation and is denied at send time by the runtime belt. Header
 names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
 
-The body rewrite is fail closed. It applies to passthrough and translated
-Anthropic requests; when the body is not a JSON object, or the rewritten
-result would exceed `max_request_bytes`, nothing is written and the original
-bytes are relayed verbatim with one process log line recording the reason. A
-successful rewrite replaces the body for the request's whole life, so every
-relay attempt, absorbed retry and quality re-send reuses it, and the recorded
-request cap is re-stamped from the effective body. A rule sets only the body
+The body rewrite is fail closed. It applies to Chat Completions or Anthropic
+client bodies before translation, whatever the target (a Responses client body
+is not rewritten); when the body is not a JSON object, or the rewritten
+result would exceed `max_request_bytes`, nothing is written: the original
+bytes are used unchanged by the rewrite stage and are still translated when
+translation is active, with one process log line recording the reason. Only a
+passthrough relays them verbatim. A successful rewrite replaces the body for
+the request's whole life, so every relay attempt, absorbed retry and quality
+re-send reuses it, and the recorded request cap is re-stamped from the
+effective body. A rule sets only the body
 fields it names, and the re-read pair keeps the wire's documented precedence -
 `max_completion_tokens` wins over `max_tokens` - so a rule setting only
 `max_tokens` cannot raise a request whose client already sent
@@ -265,18 +279,25 @@ is an ordinary conversation id: lineage, filters, saved views and the request
 drawer read it like any other.
 
 `strip: true` removes every configured field of the entry that is present at
-the body's top level from the relayed upstream bytes; the default `false`
-forwards them unchanged. The removal rides the same body-rewrite engine and
-gate as the [request overrides](#request-overrides) body section: one document
-decode when both features match one request, the original bytes relayed
-unchanged when the body is not a JSON object or the rewrite would exceed
-`max_request_bytes`, and cursor targets skipping the body section. The
-client's spelling reaches the upstream wire only on OpenAI-wire passthrough.
+the body's top level from the client body before relay or translation,
+including a Responses client body; the default `false` forwards them
+unchanged. Unlike the [request overrides](#request-overrides) body fields,
+strip is not limited to Chat Completions or Anthropic inbound. The removal
+rides the same body-rewrite engine: one document decode when both features
+match one request, the original bytes used unchanged by the rewrite stage when
+the body is not a JSON object or the rewrite would exceed
+`max_request_bytes`, and cursor targets skipping the body section. Without
+`strip`, the client's spelling reaches the upstream wire on a same-protocol
+passthrough; a translated body carries the value in `prompt_cache_key` or drops
+it.
 
 When a tracked value was extracted and the request translates to the Anthropic
 wire, the translated body gains a top-level `prompt_cache_key` carrying the
-value, Anthropic's native cache field. Injection follows extraction alone:
-`strip` governs the passthrough body, never the injected field.
+value. This is a proxy tracking extension, not an Anthropic cache field:
+Anthropic caching uses `cache_control`, and an upstream that rejects unknown
+top-level fields will reject the injected request. Injection follows extraction
+alone: `strip` governs the tracked client-body fields, never the injected
+field.
 
 Validation runs at the load boundary for YAML and Settings saves alike: at most
 16 entries, at most 4 params per entry, param names one JSON key segment each
@@ -541,24 +562,36 @@ size or cannot be read fails the encode before an archive is emitted.
 
 Restore streams the upload through the `backup_max_bytes` ceiling into one
 private staging file and decodes it with the same header, zstd, SHA-256 and
-member-framing checks. The database member is written straight into a private
-file on the live database's volume instead of being materialized on the heap;
-config bytes stay buffered within the same 16 MiB config-document bound
+member-framing checks. When a live store can stage it, the database member is
+written straight into a private file on the live database's volume instead of
+being materialized on the heap; a restore that selects the database member
+without a store fails closed before staging, and a member the request did not
+select is stream-discarded after its framing checks. Config bytes stay
+buffered within the same 16 MiB config-document bound
 `Config.Validate` enforces on the canonical rendered YAML, so a config that
 validates can never exceed what an archive may retain. A config member that
 declares a larger size is rejected before its bytes are copied, and encoding
 refuses to emit one, so an older archive whose config member exceeds that bound
 fails restore. The bound covers only the config member; the database member
 stays streamed under the payload ceiling. It validates that hash, the
-zstd frame, config `Validate()`, and `PRAGMA integrity_check` before applying
-anything. Decode refuses an uncompressed payload larger than the Schema maximum
-for `backup_max_bytes`, so a small compressed file cannot expand without bound.
-Download lists how many live settings differ from default and how many stored
-requests would be packed. Picking a file first inspects the archive: created
-time, size, request span, and each config key as default vs modified vs the
-live file. Inspect validates and counts the decoded database file in place and
-computes its overlap with the live store without writing another copy.
-Config **replace** writes the backup document. Config **merge** overlays only
+zstd frame, member framing and config `Validate()` before applying anything,
+and a selected database member additionally passes `PRAGMA integrity_check`
+before it is staged. Decode refuses an uncompressed payload larger than the
+Schema maximum for `backup_max_bytes`, so a small compressed file cannot expand
+without bound. Download lists how many live settings differ from default and how
+many stored requests would be packed. Picking a file first inspects the
+archive: created time, size, member sizes, each config key as default vs
+modified vs the live file, and the database request span when a live store can
+stage the member. Inspect loads the live file through the same strict, bounded
+reader used by config reload and restore, not the boot repair path: an unknown
+nested field, an extra YAML document, a non-regular file, or a file above the
+16 MiB document bound fails the inspect instead of comparing against a repaired
+or partial view. Inspect decodes and counts the database member in place and
+computes its overlap with the live store without writing another copy. Without a
+live store it reports `present:true`, the decoded `bytes`, `inspectable:false`
+and the reason, and produces no request span.
+Config **replace** loads and validates the backup, writes canonical YAML, and
+preserves CLI-overridden `listen` and `db_path`. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values
 stay unless the backup also customized them. An omitted `config_mode` or
 `database_mode` defaults to replace; an explicitly empty or whitespace value is
@@ -769,7 +802,7 @@ both.
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
 | `GET /admin/backup` | Download the self-checked `.mvb` Settings backup archive of config and/or database members. `?config=1` and `?database=1` select members, defaulting to both when no key is given; an explicit empty selection is an error. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
-| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, database request span) without applying anything. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
+| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, and the database request span when a live store stages the member) without applying anything. A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
 | `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
@@ -845,11 +878,13 @@ second list.
   caller's credential is forwarded on the endpoint's internal calls.
 
 Present the credential as `Authorization: Bearer <value>`. A valid Bearer
-request also mints a session cookie, because the dashboard's live feed uses
-EventSource, which cannot send Authorization headers. The cookie is HttpOnly
-(script never reads it), SameSite Strict, scoped to 12 hours, and signed with
-a key derived from the operator token, so a container restart with the same
-credential keeps the session. Rotating the token invalidates outstanding
+request on a dashboard, admin, metrics or dash route also mints a session
+cookie, because the dashboard's live feed uses EventSource, which cannot send
+Authorization headers. The `/mcp` endpoint deliberately returns no cookie: its
+caller forwards the credential on the endpoint's internal calls. The cookie is
+HttpOnly (script never reads it), SameSite Strict, scoped to 12 hours, and
+signed with a key derived from the operator token, so a container restart with
+the same credential keeps the session. Rotating the token invalidates outstanding
 cookies. The cookie deliberately carries no `Secure` flag:
 millivolt's listener is plain HTTP, and the documented TLS deployments
 terminate at the ingress, where the remaining loopback hop is trusted-local.
@@ -883,7 +918,7 @@ response is `429` with a coarse rounded `Retry-After` and a generic body.
 With the variable unset or empty the deny-all state holds: the whole dashboard
 returns 403, the open `POST /session` handshake cannot mint a cookie, and only
 `/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
-or longer than 512 characters fails the boot instead of silently weakening
+or longer than 512 bytes fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart
 or a fresh deployment; the dashboard's restart handoff inherits the parent
@@ -1034,8 +1069,8 @@ error envelope is a durable account condition - `insufficient_quota`,
   OpenAI-wire provider. The triggering request absorbs the 429 and re-sends
   per the error storm recovery delays; every new request to the provider
   parks on the gate (bounded by `storm_max_queue` and `storm_max_wait`); the
-  first send that resolves 2xx closes the gate after
-  `quota_pause_recovery_successes` probes and the queue drains. A provider
+  gate closes after `quota_pause_recovery_successes` consecutive successful
+  probes (the default 1 closes on the first 2xx) and the queue drains. A provider
   `Retry-After` on the quota 429 paces the next probe like any other 429.
 - **manual**: an indefinite provider-scoped pause (an operator hold labeled
   with the quota class) is created automatically; every request, triggering
@@ -1094,8 +1129,11 @@ sidecar. Editing or stopping a named existing session remains available.
 
 Retained request headers use the same policy as recorded response headers:
 names are visited in sorted order for the budget, each value is capped at 4 KiB
-and marked with `…` when cut, at most 16 values are kept per name, and ordinary
-headers share a 16 KiB total budget per header map. Credential headers (the
+and marked with `…` when cut, at most 16 values are kept per name, ordinary
+headers share a 16 KiB total budget per header map, a header name is capped at
+512 bytes, and at most 256 names are retained per map. A longer name or an extra
+name is omitted without a marker, exactly like a value beyond the budget.
+Credential headers (the
 configured auth header, `Authorization`, cookies, and token-, API-key- or
 secret-bearing names) become `[REDACTED]` before any truncation, so a cut
 value is never a credential prefix. Headers or values beyond the budget are
@@ -1114,9 +1152,12 @@ two features also retain different request bytes: on the passthrough wire
 the record's prompt preview is the client's original body, captured at the
 metadata decode before `request_overrides` or the sub-conversations strip
 rewrites it, while a debug capture's request body is the rewritten upstream
-body sent after any rewrite; on translated targets both follow the translated
-body. Both features can retain sensitive content even when credential headers
-are redacted.
+body sent after any rewrite. A translated Chat Completions or Anthropic target
+re-decodes the translated body for its prompt preview; a translated Responses
+target keeps the client-body prompt preview, because the generated item list is
+not re-decoded for preview. The response preview follows the client-facing
+response content on every target. Both features can retain sensitive content
+even when credential headers are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
 
@@ -1260,11 +1301,20 @@ Money stays USD in storage and APIs. The shared UI formatter uses cents below
 $1, including fractional cents, and dollars for larger magnitudes. Usage/cost
 comes from recognized upstream fields or configured field mappings; unavailable
 reporting and a displayed zero do not establish a zero bill. Reasoning/cache
-splits depend on what the upstream actually reports.
+splits depend on what the upstream actually reports. When a stream carries no
+usage object, or carries one whose output count is zero, the recorded output
+token count is restored from the streamed chunk count, which includes
+tool-argument fragments; the count is an estimate, not a provider report. Chat
+tool calls are deduplicated by delta index while the retained index set holds
+up to 1,024 distinct indexes. Once the set is full a further index cannot be
+retained, so each of its fragments counts again; a hostile stream of repeated
+indexes can overstate the tool-call count without growing memory past the
+bound.
 
 Errors count affected requests with a genuine failure, including recovered
-upstream failures. HTTP 429 counts requests that encountered a final or retried
-429; the two signals can overlap, but 429 alone is not an error. Client-local
+upstream failures. HTTP 429 counts requests that encountered a final, retried or
+in-band 429 (a 429 whose status line a committed 200 could not relay); the two
+signals can overlap, but 429 alone is not an error. Client-local
 cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
@@ -1412,12 +1462,14 @@ SELECT r.started_at, r.id, r.retries, r.status_code AS final_status,
 FROM requests r, json_each(r.attempts) j
 WHERE r.started_at >= strftime('%s','now')*1000 - 86400000
   AND json_array_length(r.attempts) > 0
+  AND COALESCE(json_extract(j.value,'$.in_band'),0)=0
 ORDER BY r.started_at, j.key
 ```
 
-One row per absorbed attempt, oldest first. The `json_array_length` gate is
-required: `attempts` defaults to the JSON literal `null`, and `json_each`
-over that literal still yields a row. `retry_after_ms` appears (nonzero)
+One row per absorbed retry, oldest first. The `in_band` filter excludes a 429
+recorded behind a committed 200: that entry is health evidence, not a retry.
+The `json_array_length` gate is required: `attempts` defaults to the JSON
+literal `null`, and `json_each` over that literal still yields a row. `retry_after_ms` appears (nonzero)
 when the provider sent a `Retry-After` header or a ratelimit-reset header
 (`x-ratelimit-reset-requests`/`-tokens`, `anthropic-ratelimit-requests-reset`,
 `anthropic-ratelimit-tokens-reset`), bounded by the proxy's hint ceiling.
@@ -1627,14 +1679,13 @@ record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
 
 `go_memory_limit` is the operator's steady-state RSS lever: a soft cap on Go
 runtime managed memory (heap, stacks, runtime structures) applied once at
-startup. The default `0` uses a detected cgroup ceiling when one exists and
-otherwise leaves the runtime unbounded. `GOMEMLIMIT` wins when set; `GOGC`
-remains independent. With the setting at 0 and no `GOMEMLIMIT`, a finite cgroup
-memory ceiling of at least 80MiB (v2 `memory.max` or v1
+startup. With the setting at 0, an operator `GOMEMLIMIT` wins and otherwise a
+detected finite cgroup memory ceiling of at least 80MiB (v2 `memory.max` or v1
 `memory.limit_in_bytes`) becomes a soft limit at 80% of that ceiling so a
 container's own bound actually reaches the Go runtime; smaller ceilings are
-ignored. A set value overrides `GOMEMLIMIT`, not `GOGC`, for the process
-lifetime. The limit is soft - exceeding it makes the collector
+ignored and, with no `GOMEMLIMIT`, the runtime stays unbounded. A set value
+overrides `GOMEMLIMIT`, not `GOGC`, for the process lifetime. `GOGC` remains
+independent. The limit is soft - exceeding it makes the collector
 more aggressive (capped near 50% of CPU time) instead of failing requests - and
 bounds Go-managed memory only, never SQLite's page cache or OS overhead.
 
@@ -1650,9 +1701,12 @@ storage guarantees.
 
 - Recognized provider fields drive usage/cost; this is not independent billing.
 - Non-streaming usage/cost inspection keeps a bounded prefix, so larger valid
-  responses can forward completely without complete accounting. Optional
-  non-streaming translation buffers the entire body; discovery budgets do not
-  bound that path.
+  responses can forward completely without complete accounting.
+- Optional non-streaming translation reads the complete upstream 200 body and
+  the translated document under a fixed 32 MiB cap each. Exceeding either
+  fails closed with 502 `response_too_large` before any client bytes; the cap
+  is an internal safety constant, not a setting, and discovery budgets do not
+  bound the path.
 - General multi-line SSE accounting/native event assembly remains incomplete;
   some split terminal/content shapes can affect classification, not just metrics.
 - SQL result limits do not bound every intermediate SQLite allocation.

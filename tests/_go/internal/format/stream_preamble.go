@@ -79,7 +79,7 @@ func anthropicEventData(t *testing.T, out string) ([]string, []map[string]any) {
 // still opens the Anthropic stream before its terminal frames.
 func TestAnthropicBareDoneSynthesizesMessageStart(t *testing.T) {
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Anthropic, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween = %v", err)
 	}
 	names, payloads := anthropicEventData(t, buf.String())
@@ -99,7 +99,7 @@ func TestAnthropicBareDoneSynthesizesMessageStart(t *testing.T) {
 // created/in_progress pair precedes the completed terminal.
 func TestResponsesBareDoneSynthesizesCreated(t *testing.T) {
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader("data: [DONE]\n\n"), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween = %v", err)
 	}
 	names, payloads := responseFrameTypes(t, buf.String())
@@ -133,7 +133,7 @@ data: [DONE]
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := TranslateStreamBetween(tc.inbound, ir.Chat, &buf, strings.NewReader(in), nil, nil); err != nil {
+			if err := TranslateStreamBetween(tc.inbound, ir.Chat, &buf, strings.NewReader(in), nil, nil, StreamOptions{}); err != nil {
 				t.Fatalf("TranslateStreamBetween = %v", err)
 			}
 			var names []string
@@ -171,7 +171,7 @@ data: {"type":"message_stop"}
 
 `
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil); err != nil {
+	if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil, StreamOptions{}); err != nil {
 		t.Fatalf("TranslateStreamBetween = %v", err)
 	}
 	var indices []int
@@ -188,8 +188,44 @@ data: {"type":"message_stop"}
 	if len(indices) != 2 || indices[0] != 0 || indices[1] != 1 {
 		t.Fatalf("output indices = %v, want [0 1]: %s", indices, buf.String())
 	}
-	if !strings.Contains(buf.String(), `"encrypted_content":"opaque"`) {
-		t.Fatalf("opaque redacted reasoning was not preserved: %s", buf.String())
+	if strings.Contains(buf.String(), `"encrypted_content":"opaque"`) {
+		t.Fatalf("foreign redacted reasoning was replayed as Responses encrypted_content: %s", buf.String())
+	}
+}
+
+func TestResponsesStreamEncryptedReasoningProviderGate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider ir.Protocol
+		want     bool
+	}{
+		{name: "responses artifact", provider: ir.Responses, want: true},
+		{name: "anthropic artifact", provider: ir.Anthropic, want: false},
+		{name: "provider-less artifact", provider: "", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := []*ir.Event{
+				{Type: ir.EventStart, Response: &ir.Response{ID: "s1", Model: "m", Created: 1}},
+				{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockReasoning,
+					Reasoning: &ir.Reasoning{Encrypted: "opaque", Provider: tc.provider}}},
+				{Type: ir.EventBlockEnd, Index: 0},
+				{Type: ir.EventDone},
+			}
+			var buf bytes.Buffer
+			enc := NewResponsesStreamEncoder(&buf, nil)
+			for _, ev := range events {
+				if err := enc.Write(ev); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := enc.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got := strings.Contains(buf.String(), `"encrypted_content":"opaque"`)
+			if got != tc.want {
+				t.Fatalf("encrypted_content present = %v, want %v: %s", got, tc.want, buf.String())
+			}
+		})
 	}
 }
 
@@ -280,7 +316,7 @@ func TestChatEncoderInitialBlockPayloads(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			enc := NewChatStreamEncoder(&buf, nil)
+			enc := NewChatStreamEncoder(&buf, nil, false)
 			for _, ev := range []*ir.Event{
 				{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
 				{Type: ir.EventBlockStart, Index: 0, Block: tc.block},
@@ -302,7 +338,7 @@ func TestChatEncoderInitialBlockPayloads(t *testing.T) {
 
 	t.Run("text followed by delta", func(t *testing.T) {
 		var buf bytes.Buffer
-		enc := NewChatStreamEncoder(&buf, nil)
+		enc := NewChatStreamEncoder(&buf, nil, false)
 		for _, ev := range []*ir.Event{
 			{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
 			{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText, Text: "hello"}},
@@ -371,9 +407,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		{"partial-then-done", added(`{"q":1`) + done(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
 		{"partial-then-terminal", added(`{"q":1`) + terminal(`{"q":1}`), `{"q":1}`},
 		{"full-then-done", added(`{"q":1}`) + done(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
-		{"full-then-repeated-delta", added(`{"q":1}`) + delta(`{"q":1}`, `{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
 		{"partial-then-suffix-delta", added(`{"q":1`) + delta(`}`, `{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
-		{"partial-no-full-value", added(`{"q":1`) + done("") + terminal(""), `{"q":1`},
 	}
 	for _, proto := range []struct {
 		name     string
@@ -387,7 +421,7 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		for _, variant := range variants {
 			t.Run(proto.name+"/"+variant.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(created+variant.stream), nil, nil); err != nil {
+				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(created+variant.stream), nil, nil, StreamOptions{}); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
 				if got := proto.evidence(t, buf.String()); got != variant.want {
@@ -395,6 +429,30 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 				}
 			})
 		}
+	}
+}
+
+// TestResponsesPartialToolArgumentsWithoutFullValueFailsClosed pins C4: when
+// the source never supplies a complete value, an incomplete buffered prefix
+// must not be emitted as if it were valid JSON.
+func TestResponsesPartialToolArgumentsWithoutFullValueFailsClosed(t *testing.T) {
+	const source = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[]}}
+
+`
+	var buf bytes.Buffer
+	err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{})
+	if err == nil || !strings.Contains(err.Error(), "tool call arguments must be") {
+		t.Fatalf("partial arguments error = %v", err)
 	}
 }
 
@@ -460,11 +518,13 @@ func responsesToolArguments(t *testing.T, out string) string {
 	return ""
 }
 
-// TestResponsesInitialToolArgumentsSurviveTruncation pins the fallback half of
-// N10: when the source ends before a done/terminal value, the buffered
-// output_item.added payload is the only argument text to flush before the
-// truncation error closes the stream.
-func TestResponsesInitialToolArgumentsSurviveTruncation(t *testing.T) {
+// TestResponsesInitialToolArgumentsTruncationKeepsClass pins the truncation
+// path after C1: the buffered output_item.added payload is incomplete when the
+// source ends without a terminal, so it is dropped without parsing or
+// emitting. The stream closes with the canonical upstream_error/truncated
+// frame instead of a translator failure, and no partial argument bytes reach
+// the client.
+func TestResponsesInitialToolArgumentsTruncationKeepsClass(t *testing.T) {
 	source := `event: response.created
 data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
 
@@ -473,13 +533,20 @@ data: {"type":"response.output_item.added","output_index":0,"item":{"type":"func
 
 `
 	var buf bytes.Buffer
-	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
-		t.Fatalf("TranslateStreamBetween: %v", err)
+	if err := TranslateStreamBetween(ir.Chat, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+		t.Fatalf("truncation became a translator failure: %v", err)
 	}
-	if got := chatToolArguments(t, buf.String()); got != `{"q":1` {
-		t.Fatalf("tool arguments = %q, want the buffered initial payload: %s", got, buf.String())
+	out := buf.String()
+	if strings.Contains(out, "translation_error") {
+		t.Fatalf("truncation emitted a translation_error frame: %s", out)
 	}
-	if !strings.Contains(buf.String(), `"code":"truncated"`) {
-		t.Fatalf("truncation was not reported in-band: %s", buf.String())
+	if !strings.Contains(out, `"code":"truncated"`) {
+		t.Fatalf("truncation lost the canonical code: %s", out)
+	}
+	if strings.Contains(out, `"arguments":"{\"q\":1"`) {
+		t.Fatalf("partial initial arguments reached the client: %s", out)
+	}
+	if !strings.Contains(out, "data: [DONE]") {
+		t.Fatalf("truncation left no terminal sentinel: %s", out)
 	}
 }

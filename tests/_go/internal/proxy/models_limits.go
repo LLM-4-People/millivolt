@@ -554,3 +554,57 @@ func TestModelsDiscoveryResponseBufferBudgetRefusesBeforeRead(t *testing.T) {
 		t.Fatalf("discovery admission status=%d Retry-After=%q, want 503 and 1", w.Code, w.Header().Get("Retry-After"))
 	}
 }
+
+// TestAnthropicModelsDiscoveryUsesResolvedAuthHeader pins D-U: discovery has
+// no protocol-specific x-api-key fallback. The resolved target auth header and
+// prefix are used exactly as for a relayed request, so x-api-key requires the
+// explicit client override.
+func TestAnthropicModelsDiscoveryUsesResolvedAuthHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		authHeader string
+		prefix     string
+		setPrefix  bool
+		wantHeader string
+		wantValue  string
+		absent     string
+	}{
+		{
+			name:       "default resolves to authorization",
+			wantHeader: "Authorization", wantValue: "Bearer fixture-key", absent: "x-api-key",
+		},
+		{
+			name:       "explicit x-api-key",
+			authHeader: "x-api-key", setPrefix: true,
+			wantHeader: "x-api-key", wantValue: "fixture-key", absent: "Authorization",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			p := New(cfg, metrics.Noop{})
+			calls := 0
+			p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if got := r.Header.Get(tc.wantHeader); got != tc.wantValue {
+					return nil, fmt.Errorf("%s = %q, want %q", tc.wantHeader, got, tc.wantValue)
+				}
+				if got := r.Header.Get(tc.absent); got != "" {
+					return nil, fmt.Errorf("%s = %q, want it absent", tc.absent, got)
+				}
+				return modelHTTPResponse(r, []byte(`{"data":[{"id":"m"}],"has_more":false}`)), nil
+			})})
+			r := modelsLimitRequest("anthropic")
+			if tc.authHeader != "" {
+				r.Header.Set("X-Proxy-Auth-Header", tc.authHeader)
+			}
+			if tc.setPrefix {
+				r.Header.Set("X-Proxy-Auth-Prefix", tc.prefix)
+			}
+			w := httptest.NewRecorder()
+			p.ServeHTTP(w, r)
+			if w.Code != http.StatusOK || calls == 0 {
+				t.Fatalf("discovery status = %d calls = %d, want 200 with a request", w.Code, calls)
+			}
+		})
+	}
+}

@@ -94,9 +94,15 @@ func TestRequestStopArrayBound(t *testing.T) {
 		{"array over cap", `{"model":"m","stop":` + over + `}`, true, 0},
 		{"case-folded key over cap", `{"model":"m","STOP":` + over + `}`, true, 0},
 		{"escaped key over cap", `{"model":"m","st\u006fp":` + over + `}`, true, 0},
+		{"stop_sequences string", `{"model":"m","stop_sequences":"done"}`, false, 1},
+		{"stop_sequences empty string", `{"model":"m","stop_sequences":""}`, false, 0},
+		{"stop_sequences at cap", `{"model":"m","stop_sequences":` + atCap + `}`, false, requestMetadataMaxElements},
+		{"stop_sequences over cap", `{"model":"m","stop_sequences":` + over + `}`, true, 0},
+		{"stop_sequences case-folded over cap", `{"model":"m","STOP_SEQUENCES":` + over + `}`, true, 0},
+		{"stop_sequences escaped key over cap", `{"model":"m","stop\u005fsequences":` + over + `}`, true, 0},
 		{"object is tolerated", `{"model":"m","stop":{"k":1}}`, false, 0},
 		{"number is tolerated", `{"model":"m","stop":3}`, false, 0},
-		{"null is tolerated", `{"model":"m","stop":null}`, false, 1},
+		{"null is tolerated", `{"model":"m","stop":null}`, false, 0},
 		{"malformed over-cap prefix stays passthrough", `{"model":"m","stop":` + over + `,X}`, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -238,7 +244,7 @@ func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
 		{"raw non-ASCII", `"mödel"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := []byte(`{` + tc.key + `:"m","messages":[{"role":"user","content":"hi"}],"metadata":{"a":1}}`)
+			body := []byte(`{` + tc.key + `:"m","messages":[{"role":"user","content":"hi"}],"metadata":{}}`)
 			var rec metrics.Record
 			if err := parseLLMRequest(body, &rec, false); err != nil {
 				t.Fatal(err)
@@ -536,6 +542,92 @@ func TestRequestAggregateContentPartsReturn400BeforeUpstream(t *testing.T) {
 		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, raw)
 	}
 	if !bytes.Contains(raw, []byte("invalid_request_error")) || !bytes.Contains(raw, []byte("content parts")) {
+		t.Fatalf("body = %q, want the shared bounded invalid_request_error", raw)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("upstream called %d times, want 0", got)
+	}
+}
+
+// requestStopCount counts an accepted stop array lexically: 10,000 entries
+// must not allocate one decoded string per element.
+func TestRequestStopCountDoesNotMaterialize(t *testing.T) {
+	const entries = requestMetadataMaxElements
+	raw := []byte(`{"model":"m","stop_sequences":` + amplificationArray(entries, `"xxx"`) + `}`)
+	var parseErr error
+	var gotStop int
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			var rec metrics.Record
+			parseErr = parseLLMRequest(raw, &rec, false)
+			gotStop = rec.ReqStop
+		}
+	})
+	if parseErr != nil {
+		t.Fatalf("parseLLMRequest error = %v", parseErr)
+	}
+	if gotStop != entries {
+		t.Fatalf("ReqStop = %d, want %d", gotStop, entries)
+	}
+	if alloc := res.AllocedBytesPerOp(); alloc > 256<<10 {
+		t.Fatalf("%d-entry stop_sequences allocated %d bytes/op, want lexical counting", entries, alloc)
+	}
+	t.Logf("stop_sequences accepted: input=%d entries=%d alloc=%d", len(raw), entries, res.AllocedBytesPerOp())
+}
+
+func TestRequestModalitiesBound(t *testing.T) {
+	atCap := amplificationArray(requestMetadataMaxElements, `"audio"`)
+	over := amplificationArray(requestMetadataMaxElements+1, `"audio"`)
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"at cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` + atCap + `}`, false},
+		{"over cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` + over + `}`, true},
+		{"case-folded over cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"MODALITIES":` + over + `}`, true},
+		{"escaped key over cap", `{"model":"m","messages":[{"role":"user","content":"hi"}],"modal\u0069ties":` + over + `}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec metrics.Record
+			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && (!strings.Contains(err.Error(), "modalities") || !strings.Contains(err.Error(), strconv.Itoa(requestMetadataMaxElements))) {
+				t.Fatalf("modalities overflow error = %v, want the bounded modalities wording", err)
+			}
+		})
+	}
+}
+
+func TestRequestModalitiesOverflowReturns400BeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[]}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+	defer srv.Close()
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"modalities":` +
+		amplificationArray(requestMetadataMaxElements+1, `"audio"`) + `}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte("invalid_request_error")) || !bytes.Contains(raw, []byte("modalities")) {
 		t.Fatalf("body = %q, want the shared bounded invalid_request_error", raw)
 	}
 	if got := calls.Load(); got != 0 {

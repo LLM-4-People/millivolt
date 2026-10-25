@@ -19,6 +19,15 @@ import (
 // is the existing X-Proxy-Format selector. Translation runs only when both are
 // known and differ, so a same-protocol request stays byte-transparent.
 
+// routePath returns the request path in its escaped spelling. Route ownership
+// is decided on this spelling: URL.Path decodes %2F and %76, so an encoded
+// spelling of a known route would otherwise read as the route itself and could
+// retarget the upstream or hijack model discovery. The escaped spelling is also
+// what buildUpstreamRequest forwards.
+func routePath(r *http.Request) string {
+	return r.URL.EscapedPath()
+}
+
 // inboundProtocol resolves the client's wire protocol. An empty result means
 // the path is not a known inference endpoint and the request is relayed
 // verbatim. On an invalid override the path-derived protocol is returned with
@@ -33,10 +42,30 @@ func inboundProtocol(r *http.Request) (ir.Protocol, error) {
 		case "anthropic":
 			return ir.Anthropic, nil
 		default:
-			return pathProtocol(r.URL.Path), fmt.Errorf("unsupported %s %q", hdrInFormat, clientEcho(v))
+			return pathProtocol(routePath(r)), fmt.Errorf("unsupported %s %q", hdrInFormat, clientEcho(v))
 		}
 	}
-	return pathProtocol(r.URL.Path), nil
+	return pathProtocol(routePath(r)), nil
+}
+
+// isModelsRequest reports whether the request targets the OpenAI-compatible
+// model-discovery route. Discovery is not an inference request, so
+// X-Proxy-In-Format (the inference client-wire override) does not change its
+// envelope.
+func isModelsRequest(r *http.Request) bool {
+	path := routePath(r)
+	return r.Method == http.MethodGet && (path == "/v1/models" || path == "/models")
+}
+
+// envelopeProtocol returns the protocol an early error sink must render for
+// this request. Discovery GETs stay OpenAI-shaped; every other request follows
+// the client wire.
+func envelopeProtocol(r *http.Request) ir.Protocol {
+	if isModelsRequest(r) {
+		return ir.Chat
+	}
+	p, _ := inboundProtocol(r)
+	return p
 }
 
 // pathProtocol maps one client endpoint to its wire protocol.
@@ -165,28 +194,44 @@ func terminalFrameFor(inbound ir.Protocol) func([]byte) bool {
 	}
 }
 
-// writeCounted writes one complete frame and books it on the record. A short
-// write is an error: the record must describe the bytes the client actually
-// received, not the frame the proxy intended to send.
-func writeCounted(w io.Writer, rec *metrics.Record, frame []byte) error {
+// uncountedWriter is implemented by a response wrapper that counts its own
+// body writes. A counting helper must write through the wrapped writer instead,
+// otherwise the wrapper and the helper book the same accepted bytes twice.
+type uncountedWriter interface {
+	UncountedWriter() io.Writer
+}
+
+// writeCounted writes one complete frame and books the bytes the writer
+// accepted. It is the single owner of that rule: a counting wrapper composed
+// with it (cursorCountWriter) is unwrapped first, so the frame is booked once
+// no matter which layer the caller reaches. A short write is an error: the
+// record must describe what the client actually received, not the frame the
+// proxy intended to send.
+func writeCounted(w io.Writer, rec *metrics.Record, frame []byte) (int, error) {
+	if u, ok := w.(uncountedWriter); ok {
+		w = u.UncountedWriter()
+	}
 	n, err := w.Write(frame)
 	if n > 0 && rec != nil {
 		rec.ResponseBytes += int64(n)
 	}
 	if err != nil {
-		return err
+		return n, err
 	}
 	if n != len(frame) {
-		return io.ErrShortWrite
+		return n, io.ErrShortWrite
 	}
-	return nil
+	return n, nil
 }
 
-// writeProtocolError writes one protocol-native error frame.
+// writeProtocolError writes one protocol-native error frame. A provider-
+// captured type or code is bounded with the same preview bound the format
+// decoders use, so an in-band error cannot echo a request-sized value.
 func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, id, typ, code, msg string) error {
 	if typ == "" {
 		typ = sse.TypeUpstreamError
 	}
+	typ, code = metrics.TruncatePreview(typ), metrics.TruncatePreview(code)
 	var frame []byte
 	switch inbound {
 	case ir.Anthropic:
@@ -197,14 +242,11 @@ func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, i
 		frame = append([]byte("event: error\ndata: "), payload...)
 		frame = append(frame, '\n', '\n')
 	case ir.Responses:
-		payload, err := sse.MarshalWireJSON(map[string]any{
-			"type": "error", "code": code, "message": msg, "param": nil,
-		})
+		_, f, err := providerformat.ResponsesSyntheticEvent("error", 0, id, "", code, msg)
 		if err != nil {
 			return err
 		}
-		frame = append([]byte("event: error\ndata: "), payload...)
-		frame = append(frame, '\n', '\n')
+		frame = f
 	default:
 		var c any
 		if code != "" {
@@ -216,20 +258,8 @@ func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, i
 		}
 		frame = sse.DataFrame(payload)
 	}
-	return writeCounted(w, rec, frame)
-}
-
-// responsesWireID shapes a synthetic Responses identity. Encoder-created
-// responses use the resp_ prefix; a proxy request id must not leak into the
-// Responses envelope as a non-conforming id.
-func responsesWireID(id string) string {
-	if strings.HasPrefix(id, "resp_") {
-		return id
-	}
-	if id == "" {
-		return "resp_proxy"
-	}
-	return "resp_" + id
+	_, err := writeCounted(w, rec, frame)
+	return err
 }
 
 // writeProtocolTerminal writes the inbound protocol's terminal frame.
@@ -239,24 +269,16 @@ func writeProtocolTerminal(w io.Writer, rec *metrics.Record, inbound ir.Protocol
 	case ir.Anthropic:
 		frame = []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	case ir.Responses:
-		obj := map[string]any{
-			"type": "response.failed",
-			"response": map[string]any{
-				"id": responsesWireID(id), "object": "response", "status": "failed",
-				"error":  map[string]any{"code": code, "message": msg},
-				"output": []any{},
-			},
-		}
-		payload, err := sse.MarshalWireJSON(obj)
+		_, f, err := providerformat.ResponsesSyntheticEvent("response.failed", 1, id, model, code, msg)
 		if err != nil {
 			return err
 		}
-		frame = append([]byte("event: response.failed\ndata: "), payload...)
-		frame = append(frame, '\n', '\n')
+		frame = f
 	default:
 		frame = []byte(sse.DoneFrame)
 	}
-	return writeCounted(w, rec, frame)
+	_, err := writeCounted(w, rec, frame)
+	return err
 }
 
 // writeProtocolStreamError writes the inbound protocol's in-band error frame
@@ -271,9 +293,12 @@ func writeProtocolStreamError(w io.Writer, rec *metrics.Record, inbound ir.Proto
 }
 
 // translationLossFields lists the distinct fields a strict translation
-// policy must reject. Every warning kind is a recorded loss, including an
-// opaque provider artifact that cannot be replayed across families. Each field
-// is bounded because a decoder can interpolate a body-controlled name.
+// policy must reject on the request side. Every warning kind there is a
+// recorded loss, including an opaque provider artifact that cannot be replayed
+// across families. Response-side warnings are never fatal: they stay in the
+// warning header (non-streaming) or are dropped after the status commit
+// (streaming), regardless of this policy. Each field is bounded because a
+// decoder can interpolate a body-controlled name.
 func translationLossFields(warnings ir.Warnings) []string {
 	var out []string
 	seen := map[string]struct{}{}
@@ -317,7 +342,17 @@ func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, statu
 // code), sets the proxy-owned content type and nosniff fence, preserves extra
 // headers, and returns the body byte count for callers that book it.
 func writeProtocolHTTPErrorCodeHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, code, msg string, extra http.Header) int {
+	// Provider-captured type and code use the shared preview bound, matching
+	// the format decoders and the in-band writer above.
+	typ, code = metrics.TruncatePreview(typ), metrics.TruncatePreview(code)
 	msg = retainedText(msg, protocolErrorEchoMax)
+	// An unknown path has no inbound protocol. This sink's contract keeps the
+	// historical OpenAI envelope for Chat and unknown paths, so normalize the
+	// zero value instead of letting EncodeError reject it and falling back to
+	// an envelope without the schema-required param field.
+	if inbound == "" {
+		inbound = ir.Chat
+	}
 	body, err := providerformat.EncodeError(inbound, &ir.Error{Type: typ, Code: code, Message: msg, Status: status})
 	if err != nil {
 		body = []byte(errJSONCode(typ, msg, code))

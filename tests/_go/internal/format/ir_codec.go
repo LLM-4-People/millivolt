@@ -100,7 +100,7 @@ func TestChatToAnthropicRequestCodec(t *testing.T) {
 func TestAnthropicToChatRequestCodec(t *testing.T) {
 	in := `{
 		"model":"claude",
-		"max_tokens":512,
+		"max_tokens":4096,
 		"system":[{"type":"text","text":"be careful","cache_control":{"type":"ephemeral"}}],
 		"messages":[
 			{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk="}}]},
@@ -123,7 +123,7 @@ func TestAnthropicToChatRequestCodec(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := decodeJSONMap(t, out)
-	if got["max_tokens"] != float64(512) {
+	if got["max_tokens"] != float64(4096) {
 		t.Fatalf("max_tokens = %v", got["max_tokens"])
 	}
 	if got["user"] != "u1" {
@@ -419,7 +419,7 @@ func TestResponsesToAnthropicRequestCodec(t *testing.T) {
 
 func TestAnthropicToResponsesRequestCodec(t *testing.T) {
 	in := `{
-		"model":"claude","max_tokens":128,
+		"model":"claude","max_tokens":8192,
 		"system":"be brief",
 		"messages":[
 			{"role":"user","content":"hi"},
@@ -440,7 +440,7 @@ func TestAnthropicToResponsesRequestCodec(t *testing.T) {
 	if got["instructions"] != "be brief" {
 		t.Fatalf("instructions = %v", got["instructions"])
 	}
-	if got["max_output_tokens"] != float64(128) {
+	if got["max_output_tokens"] != float64(8192) {
 		t.Fatalf("max_output_tokens = %v", got["max_output_tokens"])
 	}
 	reasoning := got["reasoning"].(map[string]any)
@@ -501,6 +501,26 @@ func TestDecodeChatResponseErrorEnvelope(t *testing.T) {
 	}
 }
 
+// TestChatErrorEnvelopeWithObjectKeepsProviderMessage pins the B2 side-effect
+// order: a 200 error envelope may also carry object "error", and the provider
+// message must win over the completion-shape check.
+func TestChatErrorEnvelopeWithObjectKeepsProviderMessage(t *testing.T) {
+	body := `{"object":"error","error":{"message":"upstream exploded","type":"api_error","code":"boom"}}`
+	resp, err := DecodeChatResponse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Error == nil {
+		t.Fatalf("missing canonical provider error: %+v", resp)
+	}
+	if resp.Error.Type != "api_error" || resp.Error.Code != "boom" || resp.Error.Message != "upstream exploded" {
+		t.Fatalf("error = %+v, want the provider envelope", resp.Error)
+	}
+	if resp.Finish != ir.FinishError {
+		t.Fatalf("finish = %q, want error", resp.Finish)
+	}
+}
+
 func TestCodecRejectsStatefulReplay(t *testing.T) {
 	in := `{"model":"gpt","input":"hi","previous_response_id":"resp_1"}`
 	req, err := DecodeResponsesRequest([]byte(in))
@@ -518,8 +538,12 @@ func TestCodecRejectsStatefulReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := EncodeChatRequest(req); err == nil {
-		t.Fatal("chat target accepted store=true")
+	chatOut, err := EncodeChatRequest(req)
+	if err != nil {
+		t.Fatalf("chat target rejected store=true: %v", err)
+	}
+	if got := decodeJSONMap(t, chatOut)["store"]; got != true {
+		t.Fatalf("chat store = %v, want true", got)
 	}
 	if _, err := EncodeAnthropicRequest(req, 4096, ""); err == nil {
 		t.Fatal("anthropic target accepted store=true")
@@ -665,7 +689,13 @@ func TestCodecWarnsOnUnrepresentableFields(t *testing.T) {
 	}
 
 	budget := 1024
-	reasoning := &ir.Request{Model: "m", Reasoning: &ir.ReasoningConfig{BudgetTokens: &budget, Display: "omitted"}}
+	reasoning := &ir.Request{
+		Model:    "m",
+		Messages: []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}},
+		Reasoning: &ir.ReasoningConfig{
+			BudgetTokens: &budget, Display: "omitted",
+		},
+	}
 	if _, err := EncodeChatRequest(reasoning); err != nil {
 		t.Fatal(err)
 	}
@@ -720,13 +750,14 @@ func TestChatReasoningIsDecoded(t *testing.T) {
 			}
 
 			reqBody := `{"model":"m","messages":[` +
+				`{"role":"user","content":"start"},` +
 				`{"role":"assistant","content":"answer","` + tc.field + `":"thought"},` +
 				`{"role":"user","content":"next"}]}`
 			req, err := DecodeChatRequest([]byte(reqBody))
 			if err != nil {
 				t.Fatal(err)
 			}
-			first := req.Messages[0].Content
+			first := req.Messages[1].Content
 			if len(first) != 2 || first[0].Type != ir.BlockReasoning || first[1].Type != ir.BlockText {
 				t.Fatalf("request blocks = %+v", first)
 			}
@@ -812,11 +843,11 @@ func TestInlineFileDataURLRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
+func TestAnthropicKeepsLateSystemMessage(t *testing.T) {
 	in := `{"model":"m","messages":[` +
 		`{"role":"user","content":"hi"},` +
 		`{"role":"system","content":"late rules"},` +
-		`{"role":"user","content":"more"}]}`
+		`{"role":"assistant","content":"more"}]}`
 	req, err := DecodeChatRequest([]byte(in))
 	if err != nil {
 		t.Fatal(err)
@@ -826,22 +857,18 @@ func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := decodeJSONMap(t, out)
-	if doc["system"] != "late rules" {
-		t.Fatalf("system = %v, want the lifted text", doc["system"])
+	if doc["system"] != nil {
+		t.Fatalf("system = %v, want the late system turn kept in messages", doc["system"])
 	}
 	msgs, _ := doc["messages"].([]any)
-	if len(msgs) != 1 {
-		t.Fatalf("messages = %v, want the two adjacent user turns merged", doc["messages"])
+	if len(msgs) != 3 {
+		t.Fatalf("messages = %v, want user/system/assistant in order", doc["messages"])
 	}
-	if msgs[0].(map[string]any)["role"] != "user" {
-		t.Fatalf("non-user role reached Anthropic messages: %v", doc["messages"])
+	if msgs[1].(map[string]any)["role"] != "system" {
+		t.Fatalf("messages[1] = %v, want the system turn at its original position", msgs[1])
 	}
-	content, _ := msgs[0].(map[string]any)["content"].([]any)
-	if len(content) != 2 {
-		t.Fatalf("merged content = %v, want both user texts", content)
-	}
-	if !warningField(req.Warnings, "system") {
-		t.Fatalf("missing late-system warning: %+v", req.Warnings)
+	if warningField(req.Warnings, "system") {
+		t.Fatalf("kept system turn was reported as moved: %+v", req.Warnings)
 	}
 }
 
@@ -964,20 +991,21 @@ func TestLegacyChatFunctionsTranslate(t *testing.T) {
 
 func TestLegacyChatFunctionCallPairsWithResult(t *testing.T) {
 	in := `{"model":"m","messages":[` +
+		`{"role":"user","content":"go"},` +
 		`{"role":"assistant","content":"","function_call":{"name":"lookup","arguments":"{\"q\":1}"}},` +
 		`{"role":"function","name":"lookup","content":"ok"}]}`
 	req, err := DecodeChatRequest([]byte(in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(req.Messages) != 2 {
+	if len(req.Messages) != 3 {
 		t.Fatalf("messages = %+v", req.Messages)
 	}
-	call := req.Messages[0].Content[len(req.Messages[0].Content)-1]
+	call := req.Messages[1].Content[len(req.Messages[1].Content)-1]
 	if call.Type != ir.BlockToolCall || call.ToolCall.ID != "lookup" || call.ToolCall.Name != "lookup" {
 		t.Fatalf("legacy call = %+v", call)
 	}
-	result := req.Messages[1].Content[0]
+	result := req.Messages[2].Content[0]
 	if result.Type != ir.BlockToolResult || result.ToolResult.CallID != "lookup" {
 		t.Fatalf("legacy result = %+v", result)
 	}
@@ -1185,15 +1213,20 @@ func TestIRValidateRejectsUnknownRole(t *testing.T) {
 // decodes.
 func TestResponseArraysAreBoundedBeforeDecode(t *testing.T) {
 	array := emptyJSONArray
+	// A Chat choice must carry a message object; null filler is now rejected
+	// by the completion-shape check rather than exercising the array bound.
+	choices := func(n int) string {
+		return repeatJSONArray(`{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}`, n)
+	}
 
 	t.Run("chat choices at limit", func(t *testing.T) {
-		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax) + `}`
+		body := `{"id":"c1","choices":` + choices(metrics.ContentPartMax) + `}`
 		if _, err := DecodeChatResponse([]byte(body)); err != nil {
 			t.Fatalf("body at the limit was rejected: %v", err)
 		}
 	})
 	t.Run("chat choices over limit", func(t *testing.T) {
-		body := `{"id":"c1","choices":` + array(metrics.ContentPartMax+1) + `}`
+		body := `{"id":"c1","choices":` + choices(metrics.ContentPartMax+1) + `}`
 		_, err := DecodeChatResponse([]byte(body))
 		if err == nil || !strings.Contains(err.Error(), "exceed") {
 			t.Fatalf("over-bound choices error = %v", err)
@@ -1253,6 +1286,10 @@ func TestWireCollectionsAreBoundedBeforeDecode(t *testing.T) {
 		{
 			"chat request stop", `{"model":"m","messages":[],"stop":` + emptyJSONArray(WireCollectionMax+1) + `}`,
 			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "stop exceeds",
+		},
+		{
+			"chat request modalities", `{"model":"m","messages":[],"modalities":` + emptyJSONArray(WireCollectionMax+1) + `}`,
+			func(b []byte) error { _, err := DecodeChatRequest(b); return err }, "modalities exceeds",
 		},
 		{
 			"chat response tool calls", `{"id":"c1","choices":[{"message":{"role":"assistant","tool_calls":` + emptyJSONArray(metrics.ContentPartMax+1) + `}}]}`,

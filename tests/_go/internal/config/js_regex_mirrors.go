@@ -18,33 +18,39 @@ import (
 	"testing"
 )
 
-// settingsJSSource locates the repository root from this file's compile-time
-// source path (the same self-location rule the web test suite applies;
-// test overlays keep the physical path, so the walk finds the root's
-// go.mod) and reads the dashboard's settings.js from it. A stripped source
-// view (for example a -trimpath build) cannot verify the mirrors and fails
-// here instead of skipping green.
-func settingsJSSource(t *testing.T) []byte {
+// repositoryText locates the repository root from this file's compile-time
+// source path (the same self-location rule the web test suite applies; test
+// overlays keep the physical path, so the walk finds the root's go.mod) and
+// reads one repository file. A stripped source view (for example a -trimpath
+// build) cannot verify repository text and fails here instead of skipping
+// green.
+func repositoryText(t *testing.T, rel string) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
-		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): settings.js regex mirrors cannot be verified")
+		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): repository text cannot be verified")
 	}
 	dir := filepath.Dir(file)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			b, err := os.ReadFile(filepath.Join(dir, "internal", "web", "static", "js", "settings.js"))
+			b, err := os.ReadFile(filepath.Join(dir, rel))
 			if err != nil {
-				t.Fatalf("read settings.js: %v", err)
+				t.Fatalf("read %s: %v", rel, err)
 			}
-			return b
+			return string(b)
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("no go.mod above %s: settings.js regex mirrors cannot be verified without the repository source view", file)
+			t.Fatalf("no go.mod above %s: repository text cannot be verified without the repository source view", file)
 		}
 		dir = parent
 	}
+}
+
+// settingsJSSource reads the dashboard's settings.js from the repository.
+func settingsJSSource(t *testing.T) []byte {
+	t.Helper()
+	return []byte(repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings.js")))
 }
 
 // jsRegexLiteral extracts the pattern text of a `const NAME = /pattern/;`

@@ -15,7 +15,7 @@ forwards the caller's own `Authorization: Bearer` credential on its internal
 calls, so the dashboard session cookie is refused there.
 
 The token length band matches the proxy's own boot check (16 to 512
-characters). A credential the proxy would refuse to arm with is not a
+bytes). A credential the proxy would refuse to arm with is not a
 credential this server can use.
 
 Redirects are refused outright. No operator route redirects, and `net/http` strips

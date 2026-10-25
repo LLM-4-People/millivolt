@@ -415,6 +415,28 @@ func TestValidateRejectsEmptyArchive(t *testing.T) {
 	}
 }
 
+// TestValidateSelectedFailsClosedOnUndecodedDatabase pins the exported
+// selection contract: a stream-discarded member is present and sized but has
+// no bytes or path, so asking for database validation must fail instead of
+// returning success without checking anything. An unselected member stays
+// deliberately unvalidated.
+func TestValidateSelectedFailsClosedOnUndecodedDatabase(t *testing.T) {
+	discarded := Archive{DatabasePresent: true, DatabaseBytes: 4096}
+	if err := ValidateSelected("", discarded, true); err == nil {
+		t.Fatal("ValidateSelected(true) accepted an undecoded database member")
+	}
+	if err := ValidateSelected("", discarded, false); err != nil {
+		t.Fatalf("ValidateSelected(false) = %v, want the unselected member ignored", err)
+	}
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSelected("", Archive{Config: yaml.Bytes(), DatabasePresent: true}, true); err == nil {
+		t.Fatal("config-plus-undecoded-database validation succeeded")
+	}
+}
+
 func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
 	stage := t.TempDir()
 	if err := CheckDatabase(stage, []byte("not sqlite")); !errors.Is(err, ErrInvalidSnapshot) {

@@ -372,7 +372,11 @@ USD in storage/API; missing/unreportable data must not become fabricated prices.
 
 `Record.IsError` and `HasRateLimit` deliberately differ. Final/retried 429
 counts once per affected request, not via the broad pacing flag. A real failure
-and 429 may overlap. `metrics.IsNonRetryableQuotaErr` is the fixed durable
+and 429 may overlap. A 429 whose status line a committed keepalive 200 hid is
+retained as one in-band attempt entry, so the rate-limit count still sees the
+upstream status while the same request counts as an error through its final
+`error_type`; that entry is not a retry and adds no second error entry.
+`metrics.IsNonRetryableQuotaErr` is the fixed durable
 quota/billing classification vocabulary: the retry ladder, storm evidence and
 in-band precedence all consult it, so the account condition never counts as a
 rate limit. A plain 499 (the local client's own abort) is a flow

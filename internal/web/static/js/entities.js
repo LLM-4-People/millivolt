@@ -15,7 +15,9 @@ function recordIsError(r) {
     // A structured error on a 499 is a genuine provider failure.
     if (s === 499 && r.error_type) return true;
     // Flow events: only an absorbed 5xx from an earlier attempt makes one a
-    // genuine failure.
+    // genuine failure. The proxy creates only in-band 429 entries today; a
+    // synthetic in-band 5xx follows the same >= 500 rule as Go and the
+    // published SQL, so the predicates cannot disagree on any entry shape.
     return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
   }
   if (r.error_type) return true;
@@ -320,7 +322,10 @@ function forEachErrorEntry(r, visit) {
   }
   // Absorbed retry attempts: only genuine failures (a 5xx, or a structured
   // error that isn't a rate limit). A 429 attempt is flow control, excluded.
+  // An in-band entry is the hidden status of the final failure, already
+  // visited above, so it never adds a second entry.
   for (const a of (r.attempts || [])) {
+    if (a.in_band) continue;
     const as = a.status_code || 0;
     if (as === 429) continue; // flow control
     const t = a.error_type || (as ? 'http_' + as : 'transport');

@@ -1,25 +1,28 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 // Chat Completions streaming codec.
 
 type chatWireChunk struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
+	ID      string        `json:"id"`
+	Object  string        `json:"object"`
+	Created jsonnum.Int64 `json:"created"`
+	Model   string        `json:"model"`
 	Choices []struct {
-		Index int `json:"index"`
 		Delta struct {
 			Role             string  `json:"role"`
 			Content          *string `json:"content"`
@@ -27,23 +30,31 @@ type chatWireChunk struct {
 			Reasoning        string  `json:"reasoning"`
 			Refusal          *string `json:"refusal"`
 			ToolCalls        []struct {
-				Index    int    `json:"index"`
-				ID       string `json:"id"`
-				Type     string `json:"type"`
+				Index    jsonnum.Int64 `json:"index"`
+				ID       string        `json:"id"`
+				Type     string        `json:"type"`
 				Function struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls"`
+			// FunctionCall is the deprecated tool-call shape the official
+			// schema still defines. tool_calls wins when one delta carries
+			// both.
+			FunctionCall *struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function_call"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
+		// Message is the non-streaming completion shape. A stream chunk
+		// carries delta; a message here is a complete document that must not
+		// become a successful empty answer.
+		Message json.RawMessage `json:"message"`
 	} `json:"choices"`
-	Usage *chatWireUsage `json:"usage"`
-	Error *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    any    `json:"code"`
-	} `json:"error"`
+	Usage       *chatWireUsage  `json:"usage"`
+	ServiceTier string          `json:"service_tier"`
+	Error       json.RawMessage `json:"error"`
 }
 
 // ChatStreamDecoder converts Chat Completions SSE chunks into canonical
@@ -54,10 +65,11 @@ type ChatStreamDecoder struct {
 	started  bool
 	terminal bool
 
-	// observe receives every raw source data payload before it is parsed.
-	// The translation facade uses it for source-only accounting (cost keys
-	// the target wire cannot carry); decoding itself never depends on it.
-	observe func([]byte)
+	// observe receives every raw source event name and data payload before
+	// it is parsed. The translation facade uses it for source-only accounting
+	// (cost keys the target wire cannot carry); decoding itself never depends
+	// on it.
+	observe func(string, []byte)
 
 	id      string
 	model   string
@@ -68,11 +80,18 @@ type ChatStreamDecoder struct {
 	reasoningIndex int
 	refusalIndex   int
 	toolBlocks     map[int]int
+	toolArguments  map[int]*strings.Builder
+	toolArgBytes   int
+	toolIDs        map[string]struct{}
+	openToolBlocks int
 	open           []int
 
 	finishSeen    bool
 	pendingFinish *ir.Finish
 	usage         ir.Usage
+	// usageReported distinguishes a source that reported usage (even all
+	// zeros) from one that never did. Only a reported usage is forwarded.
+	usageReported bool
 }
 
 // NewChatStreamDecoder builds a decoder over one upstream body.
@@ -83,6 +102,8 @@ func NewChatStreamDecoder(r io.Reader) *ChatStreamDecoder {
 		reasoningIndex: -1,
 		refusalIndex:   -1,
 		toolBlocks:     map[int]int{},
+		toolArguments:  map[int]*strings.Builder{},
+		toolIDs:        map[string]struct{}{},
 	}
 }
 
@@ -104,7 +125,9 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			// provider may close the connection without the optional [DONE]
 			// sentinel; that is a complete stream, not a truncation.
 			if d.finishSeen {
-				d.closeAll()
+				if err := d.closeAll(true); err != nil {
+					return nil, err
+				}
 				d.flushFinish()
 				d.terminal = true
 				d.q.push(&ir.Event{Type: ir.EventDone})
@@ -119,10 +142,12 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 		if d.observe != nil {
-			d.observe(raw.Data)
+			d.observe(raw.Name, raw.Data)
 		}
 		if strings.TrimSpace(string(raw.Data)) == "[DONE]" {
-			d.closeAll()
+			if err := d.closeAll(true); err != nil {
+				return nil, err
+			}
 			d.flushFinish()
 			d.terminal = true
 			d.q.push(&ir.Event{Type: ir.EventDone})
@@ -132,13 +157,32 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 		if err := json.Unmarshal(raw.Data, &chunk); err != nil {
 			return nil, err
 		}
-		if chunk.Error != nil {
-			d.closeAll()
-			d.terminal = true
-			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-				Type: chunk.Error.Type, Code: stringifyCode(chunk.Error.Code), Message: chunk.Error.Message,
-			}})
-			continue
+		if rawError := bytes.TrimSpace(chunk.Error); len(rawError) > 0 && !bytes.Equal(rawError, []byte("null")) {
+			typ, code, msg := metrics.ParseErrorComponents(rawError)
+			if typ == "" && code == "" && msg == "" && errorValuePresent(rawError) {
+				msg = genericProviderErrorMessage
+			}
+			if typ != "" || code != "" || msg != "" {
+				_ = d.closeAll(false)
+				d.terminal = true
+				d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(typ, code, msg)})
+				continue
+			}
+			// An empty error object or string is a decoy, not a provider
+			// statement: this chunk's choices stay decodable.
+		}
+		if chunk.Object != "" && chunk.Object != "chat.completion.chunk" {
+			// A full completion document is not a stream chunk. Its answer
+			// lives in message.content, which this decoder never reads, so
+			// relaying it would close an empty successful answer.
+			return nil, fmt.Errorf("chat stream object %q is not a chunk", boundedEcho(chunk.Object))
+		}
+		for _, choice := range chunk.Choices {
+			if message := bytes.TrimSpace(choice.Message); len(message) > 0 && !bytes.Equal(message, []byte("null")) {
+				// A gateway that omits object still must not smuggle a
+				// non-streaming message past the delta decoder.
+				return nil, fmt.Errorf("chat stream choice carries a message instead of a delta")
+			}
 		}
 		if !d.started {
 			if err := checkNativeIdentity("id", chunk.ID); err != nil {
@@ -148,12 +192,12 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 			d.started = true
-			d.id, d.model, d.created = chunk.ID, chunk.Model, chunk.Created
+			d.id, d.model, d.created = chunk.ID, chunk.Model, int64(chunk.Created)
 			if d.created == 0 {
 				d.created = time.Now().Unix()
 			}
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
-				ID: d.id, Model: d.model, Created: d.created,
+				ID: d.id, Model: d.model, Created: d.created, ServiceTier: chunk.ServiceTier,
 			}})
 		}
 		if len(chunk.Choices) > 0 {
@@ -179,14 +223,37 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: d.refusalIndex, Delta: &ir.Delta{Text: *delta.Refusal}})
 			}
 			for _, tc := range delta.ToolCalls {
-				if err := d.toolCall(tc.Index, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+				// The schema's index is non-negative, and the reserved legacy
+				// index is negative; a negative modern index would merge two
+				// distinct source calls, so reject it at the boundary.
+				chatIndex, err := intFromJSONIndex("chat stream tool call index", tc.Index)
+				if err != nil {
+					return nil, err
+				}
+				if tc.Index < 0 {
+					return nil, fmt.Errorf("chat stream tool call index %d is negative", tc.Index)
+				}
+				if err := d.toolCall(chatIndex, tc.ID, tc.Type, tc.Function.Name, tc.Function.Arguments); err != nil {
+					return nil, err
+				}
+			}
+			// The deprecated function_call object is a single call with no
+			// index. It shares one reserved index and uses the function name
+			// as its id, matching the non-stream message decoder. A delta
+			// carrying tool_calls is authoritative and its legacy twin is
+			// ignored.
+			if delta.FunctionCall != nil && len(delta.ToolCalls) == 0 {
+				if err := d.legacyFunctionCall(delta.FunctionCall.Name, delta.FunctionCall.Arguments); err != nil {
 					return nil, err
 				}
 			}
 			if choice.FinishReason != nil && *choice.FinishReason != "" {
-				d.closeAll()
+				if err := d.closeAll(true); err != nil {
+					return nil, err
+				}
 				d.finishSeen = true
-				d.pendingFinish = &ir.Finish{Reason: irFinishReason(*choice.FinishReason)}
+				reason, _ := irFinishReason(*choice.FinishReason)
+				d.pendingFinish = &ir.Finish{Reason: reason}
 			}
 		}
 		if chunk.Usage != nil {
@@ -195,6 +262,7 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 				return nil, err
 			}
 			d.usage = usage
+			d.usageReported = true
 		}
 	}
 }
@@ -203,28 +271,16 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 // arrive in separate chunks (opaque providers do not guarantee their order),
 // so both are held until the stream's terminal marker and delivered once.
 func (d *ChatStreamDecoder) flushFinish() {
-	if d.pendingFinish == nil && d.usage == (ir.Usage{}) {
+	if d.pendingFinish == nil && !d.usageReported {
 		return
 	}
 	ev := &ir.Event{Type: ir.EventMessageDelta, Finish: d.pendingFinish}
-	if d.usage != (ir.Usage{}) {
+	if d.usageReported {
 		u := d.usage
 		ev.Usage = &u
 	}
 	d.pendingFinish = nil
 	d.q.push(ev)
-}
-
-func stringifyCode(v any) string {
-	switch c := v.(type) {
-	case string:
-		return c
-	case nil:
-		return ""
-	default:
-		b, _ := json.Marshal(c)
-		return string(b)
-	}
 }
 
 func (d *ChatStreamDecoder) ensureText() {
@@ -265,6 +321,33 @@ func (d *ChatStreamDecoder) ensureRefusal() {
 	d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: d.refusalIndex, Block: &ir.Block{Type: ir.BlockRefusal}})
 }
 
+// chatLegacyToolIndex is the reserved index for the deprecated
+// delta.function_call shape. The legacy protocol carries no index and allows
+// one function call per assistant message, so a fixed negative index cannot
+// collide with any tool_calls index.
+const chatLegacyToolIndex = -1
+
+// legacyFunctionCall decodes one deprecated function_call delta. The name is
+// required on the fragment that opens the call and becomes its id, matching
+// the non-stream decoder. A later fragment carries only arguments, so a
+// missing name is accepted once the reserved block is open.
+func (d *ChatStreamDecoder) legacyFunctionCall(name, args string) error {
+	if _, open := d.toolBlocks[chatLegacyToolIndex]; !open {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("chat stream function_call needs a name")
+		}
+		id := name
+		if _, taken := d.toolIDs[id]; taken {
+			// A modern call already committed the same id. Keep both calls
+			// distinct rather than merging two source calls into one target
+			// identity.
+			id = ""
+		}
+		return d.toolCall(chatLegacyToolIndex, id, "function", name, args)
+	}
+	return d.toolCall(chatLegacyToolIndex, "", "function", name, args)
+}
+
 func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) error {
 	irIndex, ok := d.toolBlocks[chatIndex]
 	if !ok {
@@ -274,21 +357,63 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 		if err := checkNativeIdentity("tool name", name); err != nil {
 			return err
 		}
+		if err := checkToolCallName(name); err != nil {
+			return err
+		}
+		d.openToolBlocks++
+		if d.openToolBlocks > toolBlocksMax {
+			return fmt.Errorf("chat stream exceeds %d concurrent tool calls", toolBlocksMax)
+		}
+		irIndex = d.nextIndex
+		id, err := d.commitToolID(id, irIndex)
+		if err != nil {
+			return err
+		}
 		d.closeText()
 		d.closeReasoning()
 		d.closeRefusal()
-		irIndex = d.nextIndex
 		d.nextIndex++
 		d.toolBlocks[chatIndex] = irIndex
+		d.toolArguments[chatIndex] = &strings.Builder{}
 		d.open = append(d.open, irIndex)
 		d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: irIndex, Block: &ir.Block{
 			Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{ID: id, Name: name, Arguments: json.RawMessage(`{}`)},
 		}})
 	}
 	if args != "" {
+		if len(args) > streamToolArgumentsMax-d.toolArgBytes {
+			return fmt.Errorf("chat stream exceeds %d accumulated tool-argument bytes", streamToolArgumentsMax)
+		}
+		d.toolArgBytes += len(args)
+		d.toolArguments[chatIndex].WriteString(args)
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: irIndex, Delta: &ir.Delta{Arguments: args}})
 	}
 	return nil
+}
+
+// commitToolID returns the id a newly opened stream tool call commits. The
+// wire requires a non-empty id and the block index is already fixed, so a
+// missing source id is synthesized here on the first fragment; a later id
+// never rewrites it because only the opening path calls this. The reserved
+// prefix and the collision suffix keep a synthesized id distinct from every id
+// the source already provided. A source id that was already committed fails
+// closed: suffixing it would break the client's correlation with the provider's
+// tool result.
+func (d *ChatStreamDecoder) commitToolID(id string, irIndex int) (string, error) {
+	if id == "" {
+		base := fmt.Sprintf("call_proxy_%d", irIndex)
+		id = base
+		for suffix := 2; ; suffix++ {
+			if _, taken := d.toolIDs[id]; !taken {
+				break
+			}
+			id = fmt.Sprintf("%s_%d", base, suffix)
+		}
+	}
+	if err := reserveToolID(d.toolIDs, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func (d *ChatStreamDecoder) closeText() {
@@ -327,23 +452,54 @@ func (d *ChatStreamDecoder) closeOpen(idx int) {
 	}
 }
 
-func (d *ChatStreamDecoder) closeAll() {
+// closeAll closes every open block. validateToolArguments is true on a clean
+// finish, where forwarded fragments must form a JSON object before the target
+// receives a clean terminal. It is false for a provider error and for the
+// truncation flush: those paths already terminate with an error, and an
+// incomplete argument value is expected at a truncation, not a translator
+// failure.
+func (d *ChatStreamDecoder) closeAll(validateToolArguments bool) error {
+	if validateToolArguments {
+		for chatIndex, builder := range d.toolArguments {
+			if err := validateStreamedToolArguments(builder.String()); err != nil {
+				return fmt.Errorf("chat stream tool call %d: %w", chatIndex, err)
+			}
+		}
+	}
 	d.closeText()
 	d.closeReasoning()
 	d.closeRefusal()
+	// A failure close must not finalize an open tool block: BlockEnd reads as
+	// success and would publish a call over partial argument bytes. The error
+	// frame owns the turn. A validating terminal keeps the normal close.
+	skipTools := map[int]struct{}{}
+	if !validateToolArguments {
+		for _, idx := range d.toolBlocks {
+			skipTools[idx] = struct{}{}
+		}
+	}
 	for _, idx := range d.open {
+		if _, skip := skipTools[idx]; skip {
+			continue
+		}
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	d.open = nil
 	d.toolBlocks = map[int]int{}
+	d.toolArguments = map[int]*strings.Builder{}
+	d.toolArgBytes = 0
+	return nil
 }
 
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
-func (d *ChatStreamDecoder) FlushBlocks() []*ir.Event {
-	d.closeAll()
-	return drainQueue(&d.q)
+func (d *ChatStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
+	// FlushBlocks runs only for ErrTruncatedStream. The canonical truncation
+	// error already refuses a clean terminal, so an incomplete argument value
+	// must not be reclassified as a translator failure.
+	err := d.closeAll(false)
+	return drainQueue(&d.q), err
 }
 
 // ChatStreamEncoder renders canonical events as Chat Completions SSE.
@@ -364,35 +520,85 @@ type ChatStreamEncoder struct {
 	finishSent  bool
 	usage       *ir.Usage
 	usageSent   bool
-	doneSent    bool
+	serviceTier string
+	// includeUsage is the client's stream_options.include_usage. Official
+	// Chat streaming sends a usage chunk only when the client asked for one.
+	includeUsage bool
+	doneSent     bool
+	// started records that the mandatory role chunk has been emitted and the
+	// chunk identity is locked. A content-bearing source event without its
+	// start event opens the stream lazily.
+	started bool
+	// fallbackModel names the model when the source omitted its start event.
+	// The proxy passes its recorded request model through StreamOptions.
+	fallbackModel string
 }
 
 // NewChatStreamEncoder builds an encoder over one client response writer.
-func NewChatStreamEncoder(w io.Writer, flusher http.Flusher) *ChatStreamEncoder {
+// includeUsage mirrors the client's stream_options.include_usage: the extra
+// usage chunk is part of the requested contract, not an unconditional frame.
+func NewChatStreamEncoder(w io.Writer, flusher http.Flusher, includeUsage bool) *ChatStreamEncoder {
 	return &ChatStreamEncoder{
-		w: w, flusher: flusher,
+		w: w, flusher: flusher, includeUsage: includeUsage,
 		toolIndex: map[int]int{}, blockTypes: map[int]ir.BlockType{},
 		blockArgs: map[int]json.RawMessage{}, argsEmitted: map[int]bool{},
 	}
+}
+
+// startStream emits the mandatory role chunk once and locks the chunk
+// identity. A translated stream whose source omitted its start event opens
+// here from the first content-bearing event: the role chunk is part of the
+// documented Chat streaming contract, and every later chunk must carry the
+// same synthesized identity. A bare [DONE]-only source never reaches this
+// method, so a content-less stream keeps its content-less shape.
+func (e *ChatStreamEncoder) startStream() error {
+	if e.started {
+		return nil
+	}
+	e.started = true
+	if e.id == "" {
+		e.id = "chatcmpl-" + randomID()
+	}
+	if e.model == "" {
+		e.model = e.fallbackModel
+	}
+	if e.created == 0 {
+		e.created = time.Now().Unix()
+	}
+	if !e.roleSent {
+		e.roleSent = true
+		return e.emit(map[string]any{"role": "assistant"}, nil, nil)
+	}
+	return nil
 }
 
 // Write renders one canonical event.
 func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 	switch ev.Type {
 	case ir.EventStart:
-		if ev.Response != nil {
+		// A late start cannot rewrite the identity the lazy start already
+		// put on the wire; the first content event won the lock.
+		if ev.Response != nil && !e.started {
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			// Chunks repeat the tier on every frame, so an unrepresentable
+			// source value must be dropped here (the Chat vocabulary, not the
+			// Responses one, owns what every chunk may carry).
+			e.serviceTier, _ = mapServiceTier(ir.Chat, ev.Response.ServiceTier)
 		}
-		if e.created == 0 {
-			e.created = time.Now().Unix()
-		}
-		if !e.roleSent {
-			e.roleSent = true
-			return e.emit(map[string]any{"role": "assistant"}, nil, nil)
-		}
+		return e.startStream()
 	case ir.EventBlockStart:
 		if ev.Block == nil {
 			return nil
+		}
+		if ev.Block.Type == ir.BlockToolCall && ev.Block.ToolCall != nil {
+			// Validate before opening the stream: a rejected call must not
+			// leave a role chunk behind on an otherwise empty response.
+			if err := validateChatToolCall(ev.Block.ToolCall); err != nil {
+				return err
+			}
+		}
+		if err := e.startStream(); err != nil {
+			return err
 		}
 		e.blockTypes[ev.Index] = ev.Block.Type
 		if ev.Block.Type == ir.BlockToolCall && ev.Block.ToolCall != nil {
@@ -412,6 +618,9 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 	case ir.EventBlockDelta:
 		if ev.Delta == nil {
 			return nil
+		}
+		if err := e.startStream(); err != nil {
+			return err
 		}
 		switch {
 		case ev.Delta.Text != "":
@@ -446,6 +655,14 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		}
 		e.releaseBlock(ev.Index)
 	case ir.EventMessageDelta:
+		// A source may deliver only a terminal (Anthropic message_stop or an
+		// empty Responses completion). Open the Chat stream first so the
+		// finish chunk carries a non-empty id/model/created and the role
+		// chunk precedes it, matching the other target encoders. EventDone
+		// stays untouched so a bare [DONE] keeps its content-less shape.
+		if err := e.startStream(); err != nil {
+			return err
+		}
 		if ev.Finish != nil && !e.finishSent {
 			e.finishSent = true
 			if err := e.emit(map[string]any{}, ChatFinishReason(ev.Finish.Reason), nil); err != nil {
@@ -471,14 +688,15 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 		return e.done()
 	case ir.EventError:
 		if ev.Error != nil {
-			obj := map[string]any{"error": map[string]any{
-				"message": ev.Error.Message,
-				"type":    firstNonEmptyString(ev.Error.Type, sse.TypeUpstreamError),
-			}}
+			// The OpenAI error object requires type, message, param and code
+			// on this frame exactly like every other in-band path. An empty
+			// code is explicit null, never an omitted member.
+			var code any
 			if ev.Error.Code != "" {
-				obj["error"] = sse.ErrorObject(
-					firstNonEmptyString(ev.Error.Type, sse.TypeUpstreamError), ev.Error.Code, ev.Error.Message)
+				code = ev.Error.Code
 			}
+			obj := map[string]any{"error": sse.ErrorObject(
+				firstNonEmptyString(ev.Error.Type, sse.TypeUpstreamError), code, ev.Error.Message)}
 			if e.id != "" {
 				obj["id"] = e.id
 			}
@@ -531,12 +749,18 @@ func (e *ChatStreamEncoder) releaseBlock(index int) {
 }
 
 func (e *ChatStreamEncoder) emit(delta map[string]any, finish any, extra map[string]any) error {
+	if e.serviceTier != "" {
+		if extra == nil {
+			extra = map[string]any{}
+		}
+		extra["service_tier"] = e.serviceTier
+	}
 	obj := sse.Chunk(e.id, e.created, e.model, []map[string]any{sse.DeltaChoice(delta, finish)}, extra)
 	return sse.EmitFrame(e.w, e.flusher, obj)
 }
 
 func (e *ChatStreamEncoder) emitUsage() error {
-	if e.usage == nil || e.usageSent {
+	if !e.includeUsage || e.usage == nil || e.usageSent {
 		return nil
 	}
 	e.usageSent = true

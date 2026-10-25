@@ -5,6 +5,7 @@ package sse
 // than answer content, and an empty-argument call is a healthy tool turn.
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -80,5 +81,23 @@ func TestResponsesToolCallCountedOnce(t *testing.T) {
 	})
 	if rec.ToolCalls != 1 {
 		t.Fatalf("tool calls = %d, want 1 (same call_id must count once)", rec.ToolCalls)
+	}
+}
+
+// TestResponsesToolCallIDsRetainedBounded pins TC6-2: the call-id dedupe set
+// stops growing at the shared cap while every distinct call is still counted.
+func TestResponsesToolCallIDsRetainedBounded(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	var a Analyzer
+	total := 2 * metrics.RetainedToolCallIDsMax
+	for i := 0; i < total; i++ {
+		line := fmt.Sprintf(`data: {"type":"response.output_item.added","output_index":%d,"item":{"type":"function_call","call_id":"call_%d","name":"lookup","arguments":""}}`, i, i)
+		a.Feed([]byte(line), now)
+	}
+	if a.toolCalls != total {
+		t.Fatalf("tool calls = %d, want all %d distinct calls", a.toolCalls, total)
+	}
+	if len(a.toolCallIDs) != metrics.RetainedToolCallIDsMax {
+		t.Fatalf("retained call ids = %d, want the cap %d", len(a.toolCallIDs), metrics.RetainedToolCallIDsMax)
 	}
 }

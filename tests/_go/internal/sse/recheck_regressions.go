@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -13,7 +14,7 @@ import (
 // first real error becomes the record's error instead of an empty completion.
 func TestResponsesFailedCapturesNestedProviderError(t *testing.T) {
 	var a Analyzer
-	a.SetChatLike(true)
+	a.SetWire(ir.Chat)
 	for _, line := range []string{
 		`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"},"sequence_number":0}`,
 		`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_error","message":"upstream exploded"}},"sequence_number":1}`,
@@ -33,7 +34,7 @@ func TestResponsesFailedCapturesNestedProviderError(t *testing.T) {
 // TestResponsesCompletedStaysHealthy is the PRO-2 control.
 func TestResponsesCompletedStaysHealthy(t *testing.T) {
 	var a Analyzer
-	a.SetChatLike(true)
+	a.SetWire(ir.Chat)
 	for _, line := range []string{
 		`data: {"type":"response.created","response":{"id":"resp_2"},"sequence_number":0}`,
 		`data: {"type":"response.output_text.delta","delta":"hello","sequence_number":1}`,
@@ -51,7 +52,7 @@ func TestResponsesCompletedStaysHealthy(t *testing.T) {
 // a retryable truncation. A chat stream keeps the truncation rescue.
 func TestResponsesTruncationIsNeverRescued(t *testing.T) {
 	var responses Analyzer
-	responses.SetChatLike(true)
+	responses.SetWire(ir.Responses)
 	responses.Feed([]byte(`data: {"type":"response.created","response":{"id":"resp_1"},"sequence_number":0}`), time.Now())
 	if !responses.responsesStream {
 		t.Fatal("response.created did not mark a Responses feed")
@@ -67,7 +68,7 @@ func TestResponsesTruncationIsNeverRescued(t *testing.T) {
 	}
 
 	var chat Analyzer
-	chat.SetChatLike(true)
+	chat.SetWire(ir.Chat)
 	chat.Feed([]byte(`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`), time.Now())
 	if !chat.RetryableTruncation() {
 		t.Fatal("chat truncation stopped being retryable")

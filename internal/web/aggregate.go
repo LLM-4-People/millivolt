@@ -447,6 +447,11 @@ func errorEntries(r *metrics.Record) []errEnt {
 		out = append(out, errEnt{typ: typ, code: code, msg: r.ErrorMsg, at: r.Start.UnixMilli()})
 	}
 	for _, a := range r.Attempts {
+		if a.InBand {
+			// An in-band entry records a status the committed 200 hid; the
+			// final error entry already owns this failure.
+			continue
+		}
 		as := a.StatusCode
 		if as == 429 {
 			continue

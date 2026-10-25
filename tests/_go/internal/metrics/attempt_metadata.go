@@ -62,8 +62,10 @@ func TestAttemptMetadataParity(t *testing.T) {
 		}
 		if !known {
 			switch f.Name {
-			case "StatusCode", "ErrorType", "ErrorCode", "ErrorMsg", "RetryAfterMs", "At":
-				// Attempt-owned fields (the error surface itself).
+			case "StatusCode", "ErrorType", "ErrorCode", "ErrorMsg", "RetryAfterMs", "At", "InBand":
+				// Attempt-owned fields: the error surface itself plus the
+				// in-band marker that distinguishes a hidden upstream status
+				// from a transparent retry.
 			default:
 				t.Errorf("RetryAttempt has metadata-shaped field %q outside the parity set; add its Record twin or extend the contract", f.Name)
 			}

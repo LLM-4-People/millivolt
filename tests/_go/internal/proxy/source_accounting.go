@@ -137,7 +137,7 @@ func TestNativeAnthropicStreamCostKeys(t *testing.T) {
 		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5},"meta":{"out":50},"billing":{"amount":0.02}}`,
 		`data: {"type":"message_stop"}`,
 	}, "\n\n") + "\n\n"
-	s.streamBody(t.Context(), w, strings.NewReader(body), rec, false, false, &upstreamErrorRescue{}, false)
+	s.streamBody(t.Context(), w, strings.NewReader(body), rec, false, false, &upstreamErrorRescue{}, ir.Anthropic)
 
 	want := metrics.Usage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150}
 	if rec.Usage != want {
@@ -204,5 +204,32 @@ func TestInvalidUsageKeepsProviderErrorCode(t *testing.T) {
 	invalidateUsage(plain, metrics.ErrMetricRange)
 	if plain.ErrorType != metrics.CodeInvalidUsage || plain.ErrorCode != metrics.CodeInvalidUsage {
 		t.Fatalf("missing invalid-usage classification: %+v", plain)
+	}
+}
+
+// TestTranslatedStreamUsesSourceCustomUsageKeys pins DUP-2: the translated
+// stream's source observer receives complete events, not bare payloads. A
+// provider usage object using custom key names must therefore reach the
+// source analyzer and the record, even though the client wire is normalized.
+func TestTranslatedStreamUsesSourceCustomUsageKeys(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderOverride{"up.example": {UsageKeys: map[string]string{
+		"input_tokens": "prompt_toks", "output_tokens": "completion_toks",
+	}}}
+	s := New(cfg, metrics.NewBuffer(8))
+	rec := &metrics.Record{StatusCode: 200, Provider: "up.example"}
+	w := httptest.NewRecorder()
+	body := strings.Join([]string{
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`,
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_toks":100,"completion_toks":50,"total_tokens":150}}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n\n"
+	resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}
+	target := &target{format: "openai", inbound: ir.Anthropic, outbound: ir.Chat, translate: true}
+	s.transformResponse(t.Context(), w, resp, rec, target, true)
+
+	want := metrics.Usage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150}
+	if rec.Usage != want {
+		t.Fatalf("source usage = %+v, want %+v (body %s)", rec.Usage, want, w.Body.String())
 	}
 }

@@ -1,6 +1,10 @@
 package metrics
 
-import "unicode/utf8"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"unicode/utf8"
+)
 
 // Exported client-label bounds are the single runtime owner shared with the
 // proxy capture producers (classifyClient, remoteIP, clientLang and the user
@@ -30,11 +34,21 @@ const (
 	// bound plus the two-byte s:/k: namespace prefix.
 	retainedRecordConversationMax = 514
 	retainedRecordToolNameMax     = 128
+	// retainedToolCallIDMax is the byte bound for a retained Responses call-id
+	// key. Short ids are stored verbatim; a longer id is replaced by its
+	// digest key, so the map stays bounded without truncating identities into
+	// collisions.
+	retainedToolCallIDMax = 256
 	// RetainedToolNamesMax is the maximum retained distinct tool-name count.
 	// It is exported because the SSE analyzer applies the same cap while the
 	// stream is still running, so its dedupe set can never grow past what the
 	// record boundary would retain.
-	RetainedToolNamesMax          = 64
+	RetainedToolNamesMax = 64
+	// RetainedToolCallIDsMax bounds the Responses call-id dedupe set. It is
+	// exported because the SSE analyzer owns that set while the stream runs.
+	// Distinct calls past the bound still count; only their ids are no longer
+	// retained, so a hostile stream cannot grow the map without limit.
+	RetainedToolCallIDsMax        = 1024
 	retainedRecordDebugSessionMax = 128
 )
 
@@ -133,6 +147,25 @@ func truncateUTF8(s string, cut int) string {
 	return s[:cut] + recordTruncationSuffix
 }
 
+// RetainToolName applies the shared record tool-name bound. Names are display
+// labels, so the 128-byte truncation is lossy by design; dedupe after calling
+// this so two long names that share the retained prefix become one entry.
+func RetainToolName(name string) string {
+	return retainRecordText(name, retainedRecordToolNameMax)
+}
+
+// RetainToolCallIDKey returns the bounded dedupe key for one Responses call
+// identity. A short id is returned verbatim. An over-long id becomes a
+// sha256 digest key: truncating instead would merge distinct calls that share
+// a prefix, while the digest preserves exact dedupe within the 256-byte bound.
+func RetainToolCallIDKey(id string) string {
+	if len(id) <= retainedToolCallIDMax {
+		return id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // retainedToolNames keeps at most the first RetainedToolNamesMax names, each
 // at most retainedRecordToolNameMax bytes, in order. It returns the input
 // slice unchanged when every name fits, and otherwise returns a new slice so a
@@ -156,7 +189,7 @@ func retainedToolNames(in []string) []string {
 	}
 	out := make([]string, keep)
 	for i := range out {
-		out[i] = retainRecordText(in[i], retainedRecordToolNameMax)
+		out[i] = RetainToolName(in[i])
 	}
 	return out
 }

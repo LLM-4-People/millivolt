@@ -61,12 +61,13 @@ func DegenerateMessage(code string) string {
 // choices[].text) or answer-shaped bytes (a non-empty refusal or deprecated
 // function_call declaration); hadReasoning says reasoning ("thinking")
 // deltas were streamed (auxiliary output, never the completion contract);
+// hadOutput says another official Responses output item was delivered;
 // toolCalls counts distinct tool-call deltas; chatlike gates the whole rule on
 // "this really was a chat-completions/Responses stream" so a foreign SSE
 // protocol proxied through never gets a synthetic error injected. Returns ""
 // for healthy streams, else the error code to surface. The single choke point
 // every relay path (passthrough, translated, cursor-upstream) routes through.
-func ClassifyOutcome(finish string, terminatorSeen bool, hadAnswer, hadReasoning bool, toolCalls int, chatlike bool) string {
+func ClassifyOutcome(finish string, terminatorSeen bool, hadAnswer, hadReasoning, hadOutput bool, toolCalls int, chatlike bool) string {
 	if !chatlike {
 		return ""
 	}
@@ -76,9 +77,10 @@ func ClassifyOutcome(finish string, terminatorSeen bool, hadAnswer, hadReasoning
 	if !terminatorSeen {
 		return CodeTruncated
 	}
-	// Answer content or a real tool call is contract output: whatever the
-	// finish reason says, the completion delivered something usable.
-	if hadAnswer || toolCalls > 0 {
+	// Answer content, a real tool call or any other official output item is
+	// contract output: whatever the finish reason says, the completion
+	// delivered something usable.
+	if hadAnswer || hadOutput || toolCalls > 0 {
 		return ""
 	}
 	switch finish {

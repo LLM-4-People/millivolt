@@ -713,6 +713,139 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("Bearer", reverse_mcp)
         self.assertIn("session cookie", reverse_mcp)
 
+        # The first-run copy and the landing page must not imply that the
+        # operator token authenticates inference. /v1 is transparent and the
+        # network or ingress boundary is what protects it.
+        readme = re.sub(r"\s+", " ", self.read("README.md")).lower()
+        self.assertIn("protects the dashboard and operator plane only", readme)
+        self.assertIn("inference is transparent", readme)
+        self.assertIn("network or ingress boundary", readme)
+        self.assertNotIn("protects the dashboard and inference listener", readme)
+        landing = re.sub(r"\s+", " ", self.read("site-src/templates/landing.html")).lower()
+        self.assertIn("protects the dashboard and operator plane", landing)
+        self.assertIn("inference is transparent", landing)
+        self.assertNotIn("dashboard and inference listener", landing)
+        self.assertNotIn("dashboard and inference share the operator boundary", landing)
+        self.assertNotIn("dashboard and the inference listener", landing)
+
+    def test_adapters_pin_round8_contracts(self):
+        adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
+        for phrase in (
+            "messages.leading_assistant",
+            "messages.orphan_tool_result",
+            "source-supplied result that matches no call",
+            "passes through unchanged as a `tool_result`",
+            "Pairing happens before the drop",
+            "A non-clean non-streaming terminal",
+            "missing, null, whitespace or partial tool-call argument value",
+            "drops only the unusable call",
+            "still maps an omitted, null or whitespace value to the empty object",
+            "fails closed on a partial or otherwise invalid value",
+            "remain fatal on every terminal, even when the arguments are also unusable",
+            "`call_proxy_<output index>`",
+            "legacy Chat `message.function_call`",
+            "content delta after `message_delta`",
+            "one `output.phase` warning",
+            "no client header or stored record carries it",
+            "`output.<type>` warning",
+            "fixed 32 MiB cap each",
+            # Round 8 verification follow-up: each corrected claim is pinned so
+            # the docs cannot drift back to the stronger behavior.
+            "rejected before the upstream send on a translated request",
+            "An array element that is null or not a string is also rejected",
+            "Go would otherwise decode it as an empty stop sequence",
+            "The same element rule",
+            "applies to Anthropic `stop_sequences`",
+            "Native Chat passthrough is not decoded",
+            "`stop: 5` reaches the upstream",
+            "A Responses `failed` terminal is not covered by that rule",
+            "it returns the provider error envelope and discards the output",
+            "leaves an open tool block unclosed",
+            "Anthropic emits no `content_block_stop` over empty input",
+            "missing, null or whitespace arguments is also rejected unless the source explicitly sent `{}`",
+            "first still-open id-less announced call in output order",
+            "rather than synthesizing a second call",
+            "accepts either spelling on the terminal item",
+            "unique open announced call with the same name",
+            "skipped before open matching when its identity and name agree",
+            "an id-less entry also requires its effective argument value",
+            "Formatting differences and object key order do not affect that",
+            "numeric literals are compared as written",
+            "`1` and `1.0` do not agree",
+            "A value above the canonicalization size, nesting or",
+            "member-separator bounds",
+            "keeps the byte-exact rule",
+            "as does a partial or",
+            "otherwise invalid value",
+            "formatting and key-order differences in such a value do",
+            "whose name and",
+            "effective argument value agree with a closed id-less call",
+            "An id-less repeat is skipped before its array position is resolved",
+            "A named terminal item matches only an open announced call",
+            "no same-name candidate starts",
+            "identity kind is compatible",
+            "a candidate keyed by the same identity kind must carry that identity",
+            "cross-kind candidate stays eligible",
+            "Position alone never moves arguments to a conflicting identity",
+            "An unannounced id-less call at a colliding",
+            "announced position cannot be distinguished from a repeat",
+            "is dropped",
+            "has no schema length bound, so a provider id longer than 64 characters is relayed unchanged",
+            "1..64 character reference rule",
+            "A Chat stream chunk is decoded from its first choice only",
+            "A Chat stream must carry `chat.completion.chunk` documents",
+            "A source in-band error followed by the protocol terminal is deliberate",
+            "A streamed tool `arguments` value that is exactly `null`",
+            "Anthropic `content_block_start` text is not counted as answer content",
+            "A translated response has no audio representation",
+            "while a translated stream opens a `thinking` block with an empty `signature`",
+            "The non-streaming Responses decoder reports one `content.output_audio` warning",
+        ):
+            self.assertIn(phrase, adapters)
+        for stale in (
+            "A malformed Chat `stop` value is rejected before any upstream send",
+            "a Responses status other than `completed` with no incomplete reason",
+            "A clean terminal fails closed on the same bytes",
+        ):
+            self.assertNotIn(stale, adapters)
+
+        protocol = re.sub(r"\s+", " ", self.read("docs/protocol.md"))
+        self.assertIn("More than one top-level member that folds to the same cap name", protocol)
+        self.assertIn("fixed 1 MiB quality buffer", protocol)
+        self.assertIn("a final Chat `[DONE]` or non-null `finish_reason`", protocol)
+        self.assertIn("a whitespace-only value arrives empty and is treated as absent", protocol)
+        self.assertIn("a padded numeric value is read as its trimmed spelling", protocol)
+        self.assertNotIn("a whitespace-only timeout is a malformed value", protocol)
+        self.assertIn("is fed rather than dropped", protocol)
+        self.assertIn("withholds or replaces the terminal bytes", protocol)
+        self.assertIn("A standalone in-band error line is not a delivery terminal", protocol)
+        self.assertIn("a `[DONE]` on a Responses feed is not its terminal marker", protocol)
+        self.assertIn("more than 10,000 entries in a Responses `include` array or in a tool `allowed_callers` array", protocol)
+        self.assertIn("more than 4,096 blocks in an Anthropic `system` list", protocol)
+        self.assertIn("A native passthrough without a configured body rewrite does not apply those codec-only collection bounds", protocol)
+        self.assertIn("those rewrites are not a codec decode", protocol)
+        self.assertIn("capped at 16,384", protocol)
+        self.assertIn("surfaces the non-SSE body as a truncated-stream error", protocol)
+        self.assertIn("Discovery authenticates with the resolved target auth header and prefix", protocol)
+
+    def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
+        operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
+        self.assertIn("fixed 32 MiB cap each", operations)
+        self.assertIn("restored from the streamed chunk count", operations)
+        self.assertIn("up to 1,024 distinct indexes", operations)
+        self.assertIn("502 `response_too_large`", operations)
+        self.assertIn("internal safety constant, not a setting", operations)
+        self.assertIn(
+            "same strict, bounded reader used by config reload and restore, not the boot repair path",
+            operations,
+        )
+        self.assertNotIn("same strict, bounded reader as boot and restore", operations)
+
+        adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
+        self.assertIn("fixed 32 MiB cap each", adapters)
+        self.assertIn("502 `response_too_large`", adapters)
+        self.assertIn("internal safety constant, not a configurable limit", adapters)
+
 
 if __name__ == "__main__":
     unittest.main()

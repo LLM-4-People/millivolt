@@ -21,16 +21,21 @@ type Usage struct {
 	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
-// RetryAttempt is one transparently-absorbed upstream response - a 429 or 5xx
-// the proxy retried before returning a final answer to the client. It carries
-// the status and the provider's error detail so the proxy's audit log shows
-// every failure even though the client only ever saw the successful outcome.
+// RetryAttempt is normally one transparently-absorbed upstream response - a
+// 429 or 5xx the proxy retried before returning a final answer to the client.
+// An InBand entry is the exception: an upstream 429 whose status line a
+// committed keepalive 200 could not relay, retained so the health predicates
+// see the real upstream status. Either way it carries the status and the
+// provider's error detail so the proxy's audit log shows every upstream
+// failure even though the client saw only the successful status or an in-band
+// replacement.
 //
 // The upstream-response metadata fields mirror the record's final-response
-// capture exactly (same names, same meaning, same JSON tags): every attempt,
-// absorbed or final, stores the same information, so a provider-side request
-// id can be matched to the exact upstream attempt that produced it.
-// Transport failures have no HTTP response and leave them empty/zero.
+// capture exactly (same names, same meaning, same JSON tags): every retried or
+// final attempt stores the same information, so a provider-side request id can
+// be matched to the exact upstream attempt that produced it. An in-band 429
+// entry is the exception: it carries only the hidden status and time, no
+// metadata. Transport failures have no HTTP response and leave them empty/zero.
 // tests/_go/internal/metrics/attempt_metadata.go pins the field-set parity.
 type RetryAttempt struct {
 	StatusCode   int       `json:"status_code"`
@@ -39,6 +44,14 @@ type RetryAttempt struct {
 	ErrorMsg     string    `json:"error_msg,omitempty"`
 	RetryAfterMs int       `json:"retry_after_ms,omitempty"`
 	At           time.Time `json:"at"`
+
+	// InBand marks an upstream response whose status line the client could not
+	// receive because a keepalive had already committed the success 200. It is
+	// not a retry: Retries is not incremented, retry disclosures exclude it,
+	// and it never adds a second error entry. It exists so the health
+	// predicates stay tied to the real upstream HTTP status, including the
+	// distinct 429 rate-limit count.
+	InBand bool `json:"in_band,omitempty"`
 
 	// Upstream-response metadata, the attempt-log twin of the record's
 	// ProviderRequestID/ProviderServer/ProviderModel/ProcessingMs/
@@ -129,6 +142,14 @@ type Record struct {
 	// concurrency / requests-per-window / tokens-per-window cap. Never persisted.
 	Throttled bool `json:"throttled,omitempty"`
 
+	// UsageInvalid is a live-only accounting flag: the provider reported usage
+	// that cannot be represented, so the record has no trustworthy token
+	// count. It is independent of ErrorCode because a provider error already
+	// owns that field. Settlement retains the admitted reservation rather than
+	// refunding it, and source accounting must not repopulate the usage.
+	// Never persisted or rendered.
+	UsageInvalid bool `json:"-"`
+
 	// Debug is set when an operator debug session matched this request.
 	// The full capture (bodies, headers) lives in the request_debug sidecar,
 	// never on this record - the ring/SSE carry only this flag + session id.
@@ -141,7 +162,9 @@ type Record struct {
 	RateLimited bool  `json:"rate_limited,omitempty"` // scheduler wait or 429/503 pacing; HasRateLimit owns the exact 429 predicate
 	// Attempts records each transparently-retried upstream response (the ones
 	// the client never saw) so the proxy logs the full history, not just the
-	// final outcome. Bounded by max_retries.
+	// final outcome, plus at most one in-band entry for an upstream 429 whose
+	// status line a committed 200 could not relay. Bounded by max_retries plus
+	// that one entry.
 	Attempts []RetryAttempt `json:"attempts,omitempty"`
 
 	// Derived fields populated at record time for the dashboard/storage.
@@ -188,11 +211,12 @@ type Record struct {
 	// See Fill / FinalizeRecord.
 	GenTokens int64 `json:"gen_tokens,omitempty"`
 
-	// Chunks is the count of content-bearing SSE chunks of the analyzed
-	// stream (content, reasoning and tool-call deltas; role/keepalive/
-	// terminal/usage frames are not content-bearing). The generic relay's
-	// SSE analyzer owns it; the cursor bridge synthesizes frames itself and
-	// never populates it, so streamed cursor rows keep 0 - as do
+	// Chunks is the count of content-bearing chunks of the analyzed stream:
+	// content, reasoning and tool-call deltas plus terminal-document answer,
+	// reasoning and tool units that no streamed chunk already represents.
+	// Role, keepalive and usage frames are not content-bearing. The generic
+	// relay's SSE analyzer owns it; the cursor bridge synthesizes frames
+	// itself and never populates it, so streamed cursor rows keep 0 - as do
 	// non-streamed requests. It is the raw stream telemetry behind the
 	// no-usage token fallbacks in Fill.
 	Chunks int64 `json:"chunks,omitempty"`
@@ -218,13 +242,15 @@ type Record struct {
 	// attempt's role/keepalive/reasoning frames genuinely reached the client
 	// and the fresh attempt appends behind them, so the accumulated total
 	// IS the bytes the client received. Proxy-synthesized signaling is NOT
-	// body relay and is NOT counted, in every rendering: the status-line
-	// error envelopes (http.Error 502s, queue-full and storm 429s) and the
-	// in-band SSE rejection pairs (error frame + [DONE] emitted in place of
-	// a response), plus the SSE pacer's keepalives. The one counted
-	// proxy-synthesized pair is the degenerate terminal-region substitution
-	// (emitDegenerateSSE): it replaces withheld content the client would
-	// otherwise have received, so it is delivered body, not signaling. The
+	// body relay and is NOT counted: the status-line error envelopes
+	// (http.Error 502s, queue-full and storm 429s) and the SSE pacer's
+	// keepalives. An in-band SSE rejection pair (error frame plus its
+	// protocol terminal) is different: once the status line is committed it
+	// is delivered body, so its frames count through the same write path as
+	// any other stream bytes. The degenerate terminal-region substitution
+	// (emitDegenerateSSE) is also counted: it replaces withheld content the
+	// client would otherwise have received, so it is delivered body, not
+	// signaling. The
 	// cursor surface is the deliberate exception: the bridge synthesizes the
 	// whole response itself, so its counting writer counts every body byte
 	// it emits, error bodies included.
@@ -288,11 +314,17 @@ type Record struct {
 	ReqResponseFormat string `json:"req_response_format,omitempty"` // text / json_object / json_schema
 	ReqSeed           *int64 `json:"req_seed,omitempty"`
 	ReqParallelTools  *bool  `json:"req_parallel_tools,omitempty"`
-	ReqLogitBias      int    `json:"req_logit_bias,omitempty"`    // number of biased token ids
-	ReqTopLogprobs    *int   `json:"req_top_logprobs,omitempty"`  // top-logprobs count requested
-	ReqServiceTier    string `json:"req_service_tier,omitempty"`  // auto / flex / priority ...
-	ReqThinking       bool   `json:"req_thinking,omitempty"`      // anthropic extended-thinking requested
-	ReqMetadataKeys   int    `json:"req_metadata_keys,omitempty"` // number of metadata entries
+	ReqLogitBias      int    `json:"req_logit_bias,omitempty"`   // number of biased token ids
+	ReqTopLogprobs    *int   `json:"req_top_logprobs,omitempty"` // top-logprobs count requested
+	// ReqServiceTier carries the client's literal service_tier when present,
+	// otherwise its speed value (auto / flex / priority / fast ...). It is the
+	// request's own spelling before any translation: the codec's auto+fast to
+	// fast mapping applies only to a translated target body, and duplicating it
+	// here would make a native request disagree with the bytes the upstream
+	// received.
+	ReqServiceTier  string `json:"req_service_tier,omitempty"`
+	ReqThinking     bool   `json:"req_thinking,omitempty"`      // anthropic extended-thinking requested
+	ReqMetadataKeys int    `json:"req_metadata_keys,omitempty"` // number of metadata entries
 	// ReqReasoningEffort / ReqVerbosity are OpenAI request-config tokens
 	// (reasoning_effort, or reasoning.effort; verbosity). Shape only.
 	ReqReasoningEffort string `json:"req_reasoning_effort,omitempty"`
@@ -451,10 +483,11 @@ func (r *Record) IsError() bool {
 	return absorbedServerFailure(r.Attempts)
 }
 
-// HasRateLimit reports whether this request received HTTP 429, either as its
-// final response or a retried attempt. It counts an affected request once,
-// not its attempts. RateLimited is broader scheduler metadata (queue waits
-// and 503 pacing) and intentionally does not define this observer metric.
+// HasRateLimit reports whether this request received HTTP 429, as its final
+// response, a retried attempt, or an in-band entry whose committed 200 kept
+// the status line from the client. It counts an affected request once, not its
+// attempts. RateLimited is broader scheduler metadata (queue waits and 503
+// pacing) and intentionally does not define this observer metric.
 func (r *Record) HasRateLimit() bool {
 	if r.StatusCode == 429 {
 		return true
@@ -552,35 +585,54 @@ func ParseResponseFailedEnvelope(b []byte) (typ, code, msg string) {
 	return parseErrorValue(probe.Response.Error)
 }
 
-// parseErrorValue applies the canonical envelope rules to an already-captured
-// top-level "error" value. ParseErrorEnvelope and the one-pass non-stream
-// analysis share it so both surfaces read the same decoys, string/numeric
-// codes, fallback type and bounded message.
-func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+// rawErrorString returns a member's decoded string only when it is a JSON
+// string. A non-string member is ignored so the valid siblings survive.
+func rawErrorString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '"' {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
+// ParseErrorValue applies the canonical envelope rules to an already-captured
+// "error" value and supplies the provider_error classification when the source
+// carried no type. Callers that hold the raw member on a typed wire struct use
+// it instead of re-marshalling a probe object.
+func ParseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+	typ, code, msg = ParseErrorComponents(raw)
+	if typ == "" && (code != "" || msg != "") {
+		typ = "provider_error"
+	}
+	return typ, code, msg
+}
+
+// ParseErrorComponents applies the canonical envelope rules and returns the
+// source's own type, which may be empty. A protocol encoder owns its catch-all
+// spelling (OpenAI's api_error, Anthropic's mapping), so the classification
+// fallback belongs to ParseErrorValue and the record, not to every wire.
+func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return "", "", ""
 	}
 	switch raw[0] {
 	case '"':
-		_ = json.Unmarshal(raw, &msg)
+		typ, code, msg = ParseErrorMembers(nil, nil, raw)
 	case '{':
 		var e struct {
-			Type    string          `json:"type"`
+			Type    json.RawMessage `json:"type"`
 			Code    json.RawMessage `json:"code"`
-			Message string          `json:"message"`
+			Message json.RawMessage `json:"message"`
 		}
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return "", "", ""
 		}
-		typ, msg = e.Type, e.Message
-		if c := bytes.TrimSpace(e.Code); len(c) > 0 && !bytes.Equal(c, []byte("null")) {
-			if c[0] == '"' {
-				_ = json.Unmarshal(c, &code)
-			} else {
-				code = string(c) // numeric code, kept verbatim
-			}
-		}
+		typ, code, msg = ParseErrorMembers(e.Type, e.Code, e.Message)
 	default:
 		// A number/bool/array under "error" is not a failure we can classify.
 		return "", "", ""
@@ -588,10 +640,43 @@ func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
 	if typ == "" && code == "" && msg == "" {
 		return "", "", "" // empty object/string: a decoy, not a failure
 	}
-	if typ == "" {
-		typ = "provider_error"
+	return typ, code, msg
+}
+
+// ParseErrorMembers decodes the three independent members of an error value.
+// A wrong-typed member (a gateway that nests a detail object under message, a
+// numeric type, a boolean code) is ignored so its valid siblings survive. Code
+// accepts a JSON string or a bare number. The message is bounded.
+func ParseErrorMembers(typeRaw, codeRaw, messageRaw json.RawMessage) (typ, code, msg string) {
+	typ = rawErrorString(typeRaw)
+	code = rawErrorCode(codeRaw)
+	msg = TruncatePreview(rawErrorString(messageRaw))
+	return typ, code, msg
+}
+
+// rawErrorCode accepts the two documented code spellings, a string or a bare
+// number, and ignores every other JSON shape. Zero is a valid numeric code.
+func rawErrorCode(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
 	}
-	return typ, code, TruncatePreview(msg)
+	if raw[0] == '"' {
+		var s string
+		_ = json.Unmarshal(raw, &s)
+		return s
+	}
+	var n json.Number
+	if json.Unmarshal(raw, &n) == nil {
+		return n.String()
+	}
+	return ""
+}
+
+// parseErrorValue is the classification view every record path uses: the
+// source components plus the provider_error fallback.
+func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+	return ParseErrorValue(raw)
 }
 
 // nonRetryableQuotaClasses are provider error type/code strings that, when

@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -680,6 +681,156 @@ func TestRestoreDatabaseWithoutStoreFailsBeforeStaging(t *testing.T) {
 	assertNoRestoreStaging(t, temp)
 }
 
+// restoreDatabaseSnapshot builds one packed database member with a single
+// request, for mixed archives that must be decoded without a live store.
+func restoreDatabaseSnapshot(t *testing.T) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	src, err := storage.Open(filepath.Join(dir, "src.db"), storage.Options{
+		WriteChanCap:  8,
+		BatchCap:      4,
+		FlushInterval: config.Default().StorageFlushInterval,
+		QueryTimeout:  config.Default().StorageQueryTimeout,
+		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
+		QueryMaxRows:  int(config.Default().StorageQueryMaxRows),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Record(&metrics.Record{ID: "mixed-member", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	src.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestRestoreMixedArchiveConfigOnlyWithoutStore pins G5: a mixed archive can
+// apply or preview its config member when durable storage is disabled, while a
+// database request still fails closed.
+func TestRestoreMixedArchiveConfigOnlyWithoutStore(t *testing.T) {
+	liveReloadFixture(t)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	dir := t.TempDir()
+	bak := config.Default()
+	bak.CaptureBodyPreview = true
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, bak); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: restoreDatabaseSnapshot(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config-only restore status %d body %s", rr.Code, rr.Body.String())
+	}
+	got, err := config.LoadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.CaptureBodyPreview {
+		t.Fatalf("config-only restore did not write the archive config: %+v", got)
+	}
+	assertNoRestoreStaging(t, temp)
+
+	rr = httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), storage.ErrStorageDisabled.Error()) {
+		t.Fatalf("database-only status %d body %s, want 400 storage disabled", rr.Code, rr.Body.String())
+	}
+	assertNoRestoreStaging(t, temp)
+}
+
+// TestRestoreInspectMixedArchiveWithoutStore pins the honest store-less
+// preview: config keys and diff are available, the database member reports its
+// decoded size but is not inspectable and has no request span.
+func TestRestoreInspectMixedArchiveWithoutStore(t *testing.T) {
+	liveReloadFixture(t)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	dir := t.TempDir()
+	live := config.Default()
+	live.MaxRetries = 9
+	if err := config.WriteFile(liveConfigPath, live); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	bak := config.Default()
+	bak.CaptureBodyPreview = true
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, bak); err != nil {
+		t.Fatal(err)
+	}
+	db := restoreDatabaseSnapshot(t)
+	raw, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("inspect status %d body %s", rr.Code, rr.Body.String())
+	}
+	ins := decodeRestoreInspectStrict(t, rr.Body.Bytes())
+	if !ins.OK || !ins.Config.Present || ins.Config.Values["capture_body_preview"] != true {
+		t.Fatalf("config preview = %+v", ins.Config)
+	}
+	vsLive := map[string]bool{}
+	for _, key := range ins.Config.VsLive {
+		vsLive[key] = true
+	}
+	if !vsLive["capture_body_preview"] || !vsLive["max_retries"] {
+		t.Fatalf("vs_live = %v, want capture_body_preview and max_retries", ins.Config.VsLive)
+	}
+	if !ins.Database.Present || ins.Database.Bytes != len(db) {
+		t.Fatalf("database preview = %+v, want present with %d bytes", ins.Database, len(db))
+	}
+	if ins.Database.Inspectable == nil || *ins.Database.Inspectable {
+		t.Fatalf("database inspectable = %v, want false", ins.Database.Inspectable)
+	}
+	if ins.Database.Reason == "" || ins.Database.Requests != 0 || ins.Database.Overlap != 0 ||
+		ins.Database.OldestMs != 0 || ins.Database.NewestMs != 0 {
+		t.Fatalf("store-less database preview = %+v", ins.Database)
+	}
+	assertNoRestoreStaging(t, temp)
+}
+
+// TestStorelessInspectDocsMatchTheWire pins the user-visible store-less
+// preview contract to the route and restore prose: presence and decoded size
+// are reported, the member is not inspectable and has no request span, and a
+// database-selecting apply fails closed before staging.
+func TestStorelessInspectDocsMatchTheWire(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "operations.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(doc)), " ")
+	for _, want := range []string{
+		"A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason.",
+		"a restore that selects the database member without a store fails closed before staging",
+		"Without a live store it reports `present:true`, the decoded `bytes`, `inspectable:false` and the reason, and produces no request span.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("docs/operations.md is missing the store-less contract %q", want)
+		}
+	}
+}
+
 func defaultConfigYAMLForRestore(t *testing.T) []byte {
 	t.Helper()
 	var yaml bytes.Buffer
@@ -1088,13 +1239,15 @@ type restoreInspectWire struct {
 		VsLive   []string       `json:"vs_live"`
 	} `json:"config"`
 	Database struct {
-		Present  bool  `json:"present"`
-		Bytes    int   `json:"bytes"`
-		Requests int64 `json:"requests"`
-		Debug    int64 `json:"debug"`
-		OldestMs int64 `json:"oldest_ms"`
-		NewestMs int64 `json:"newest_ms"`
-		Overlap  int64 `json:"overlap"`
+		Present     bool   `json:"present"`
+		Bytes       int    `json:"bytes"`
+		Requests    int64  `json:"requests"`
+		Debug       int64  `json:"debug"`
+		OldestMs    int64  `json:"oldest_ms"`
+		NewestMs    int64  `json:"newest_ms"`
+		Overlap     int64  `json:"overlap"`
+		Inspectable *bool  `json:"inspectable"`
+		Reason      string `json:"reason"`
 	} `json:"database"`
 }
 
@@ -2417,10 +2570,58 @@ func TestRestoreInspectLiveConfigFailsClosed(t *testing.T) {
 	}
 	assertUnavailable(inspect())
 
+	// Repair semantics would omit an unknown nested field or an extra YAML
+	// document; inspect must fail closed like the strict apply path.
+	for _, strictFailure := range []string{
+		"providers:\n  example:\n    models_path: /v1/models\n    bogus_field: true\n",
+		"max_retries: 2\n---\nmax_retries: 3\n",
+	} {
+		if err := os.WriteFile(liveConfigPath, []byte(strictFailure), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		assertUnavailable(inspect())
+	}
+
+	// The bounded read owner rejects an overgrown document before a whole-file
+	// read, so inspect reports the size limit rather than allocating it.
+	oversized := bytes.Repeat([]byte("a"), config.ConfigDocumentMaxBytes+1)
+	if err := os.WriteFile(liveConfigPath, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertUnavailable(inspect())
+
 	if err := os.Remove(liveConfigPath); err != nil {
 		t.Fatal(err)
 	}
 	assertUnavailable(inspect())
+
+	// A directory is not a regular file; the read owner fails closed instead of
+	// attempting a document read.
+	if err := os.Mkdir(liveConfigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	assertUnavailable(inspect())
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// A FIFO must be rejected from its stat before os.Open, which would block
+	// forever waiting for a writer. Run inspect off the test goroutine so a
+	// reordering regression fails on the timeout instead of hanging the suite.
+	if err := syscall.Mkfifo(liveConfigPath, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	fifoDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { fifoDone <- inspect() }()
+	select {
+	case fifoRR := <-fifoDone:
+		assertUnavailable(fifoRR)
+	case <-time.After(2 * time.Second):
+		t.Fatal("inspect blocked on a FIFO instead of rejecting the non-regular path")
+	}
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
 
 	liveConfigPath = ""
 	rr := inspect()
@@ -2430,5 +2631,165 @@ func TestRestoreInspectLiveConfigFailsClosed(t *testing.T) {
 	ins := decodeRestoreInspectStrict(t, rr.Body.Bytes())
 	if !ins.OK || !slices.Contains(ins.Config.VsLive, "max_retries") {
 		t.Fatalf("no-path inspect vs_live=%v, want the documented Default comparison", ins.Config.VsLive)
+	}
+}
+
+// TestBackupRejectsInvalidBaseConfig pins TC7-1: a backup capture must not
+// silently render built-in defaults from an invalid base file.
+func TestBackupRejectsInvalidBaseConfig(t *testing.T) {
+	liveReloadFixture(t)
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(liveConfigPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?config=1", nil))
+	if rr.Code == http.StatusOK {
+		t.Fatalf("backup accepted an invalid base config: %s", rr.Body.String())
+	}
+	got, err := os.ReadFile(liveConfigPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("backup rewrote the invalid base file: %v\n%s", err, got)
+	}
+}
+
+// TestRestoreMergeRejectsInvalidBaseConfig pins TC7-1: a merge restore must
+// fail before writing when the current base file is invalid.
+func TestRestoreMergeRejectsInvalidBaseConfig(t *testing.T) {
+	liveReloadFixture(t)
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(liveConfigPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var incoming bytes.Buffer
+	if err := config.WriteYAML(&incoming, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareRestoreConfig(incoming.Bytes(), "merge"); err == nil {
+		t.Fatal("merge restore accepted an invalid base config")
+	}
+	got, err := os.ReadFile(liveConfigPath)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("merge restore rewrote the invalid base file: %v\n%s", err, got)
+	}
+}
+
+// TestRestoreConfigCaptureFailsClosed pins the rollback-capture read bound:
+// prepareRestoreConfig must reject a FIFO or an oversized live config before
+// any write, using the same bounded config.ReadDocument owner as inspect. A
+// plain os.ReadFile would block on the FIFO or allocate the oversized file.
+func TestRestoreConfigCaptureFailsClosed(t *testing.T) {
+	liveReloadFixture(t)
+	raw, err := backup.Encode("", backup.Archive{Config: defaultConfigYAMLForRestore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	restore := func() *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", bytes.NewReader(raw)))
+		return rr
+	}
+	assertRejected := func(rr *httptest.ResponseRecorder, want string) {
+		t.Helper()
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("restore status %d body %s, want 400", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), want) {
+			t.Fatalf("restore rejection %q does not contain %q", rr.Body.String(), want)
+		}
+	}
+
+	if err := syscall.Mkfifo(liveConfigPath, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- restore() }()
+	select {
+	case rr := <-done:
+		assertRejected(rr, "not a regular file")
+	case <-time.After(2 * time.Second):
+		t.Fatal("restore blocked on a FIFO instead of rejecting the non-regular live config")
+	}
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	oversized := bytes.Repeat([]byte("a"), config.ConfigDocumentMaxBytes+1)
+	if err := os.WriteFile(liveConfigPath, oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected(restore(), "config document limit")
+}
+
+// TestRestoreConfigKeepsCLIOverrides pins the preview's premise: a replace and
+// a merge both keep the process-start listen and db_path overrides, so the
+// settings panel must not render them as reset by the backup.
+func TestRestoreConfigKeepsCLIOverrides(t *testing.T) {
+	liveReloadFixture(t)
+	liveListenOverride = "127.0.0.1:19090"
+	liveDBOverride = filepath.Join(t.TempDir(), "live.db")
+	liveCfg.Listen = liveListenOverride
+	liveCfg.DBPath = liveDBOverride
+	bootCfg = liveCfg.Clone()
+	if err := config.WriteFile(liveConfigPath, liveCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var incoming bytes.Buffer
+	if err := config.WriteYAML(&incoming, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"replace", "merge"} {
+		t.Run(mode, func(t *testing.T) {
+			plan, err := prepareRestoreConfig(incoming.Bytes(), mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.next.Listen != liveListenOverride {
+				t.Fatalf("restored listen = %q, want the CLI override %q", plan.next.Listen, liveListenOverride)
+			}
+			if plan.dbPath != liveDBOverride {
+				t.Fatalf("staged db path = %q, want the CLI override %q", plan.dbPath, liveDBOverride)
+			}
+		})
+	}
+}
+
+// TestBackupCaptureMissingConfigFailsClosed pins the one consumer that does
+// not substitute defaults: a config backup with no file has nothing to archive
+// and must report the missing document.
+func TestBackupCaptureMissingConfigFailsClosed(t *testing.T) {
+	liveReloadFixture(t)
+	liveConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	_, cleanup, err := buildBackup(t.Context(), true, false)
+	defer cleanup()
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-config backup error = %v, want the missing-file error", err)
+	}
+}
+
+// TestRestoreMergeMissingConfigUsesDefaults pins the restore merge exception:
+// a missing live file merges the archive over the built-in defaults and does
+// not create the missing file during preparation.
+func TestRestoreMergeMissingConfigUsesDefaults(t *testing.T) {
+	liveReloadFixture(t)
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
+	liveConfigPath = missing
+	plan, err := prepareRestoreConfig([]byte("max_retries: 9\n"), "merge")
+	if err != nil {
+		t.Fatalf("prepareRestoreConfig with a missing file = %v", err)
+	}
+	if plan.next.MaxRetries != 9 {
+		t.Fatalf("merged max_retries = %d, want 9", plan.next.MaxRetries)
+	}
+	if plan.previousExists {
+		t.Fatal("missing file was reported as an existing previous document")
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore preparation created the missing config file: %v", err)
 	}
 }

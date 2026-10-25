@@ -2,9 +2,12 @@
 #
 # Every server setting lives here - there are NO hardcoded configurables in the
 # code. All keys are optional; omitting one uses the built-in default (shown for
-# each key below). Every value is validated for type and range on load. A bad
-# or unknown key is dropped (the default stays) and removed from the file on
-# startup/reload; Settings POST still rejects it. Values are never silently applied.
+# each key below). Every value is validated for type and range on load. On boot,
+# unknown keys, unknown nested fields and extra documents are dropped and the
+# file is rewritten; an invalid recognized value fails boot without a rewrite,
+# and an unparseable file is moved to PATH.invalid, except an ambiguous duplicate
+# top-level key, which fails closed and stays in place. Reload rejects an invalid
+# document without rewriting. Settings POST still rejects those inputs.
 #
 # This file is generated from internal/config.Schema (the single registry the
 # dashboard Settings menu also uses). Copy proxy.example.yaml to a private
@@ -94,11 +97,11 @@ request_body_read_timeout: 10m
 response_write_timeout: 10m
 
 # Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup.
-# 0 auto-detects a finite cgroup memory ceiling at 80% (ceilings below 80MiB are ignored)
-# and otherwise leaves the runtime unbounded. GOMEMLIMIT wins when set; GOGC is
-# independent. A set value overrides GOMEMLIMIT, not GOGC. Exceeding it turns the
-# collector more aggressive (capped near 50% CPU), never fails requests. Does not bound
-# SQLite's page cache or OS overhead. Restart required.
+# With the setting at 0, an operator GOMEMLIMIT wins and otherwise a detected finite
+# cgroup memory ceiling applies at 80% (ceilings below 80MiB are ignored); a set value
+# overrides GOMEMLIMIT, not GOGC. Exceeding it turns the collector more aggressive (capped
+# near 50% CPU), never fails requests. Does not bound SQLite's page cache or OS overhead.
+# Restart required.
 # Hot-reload: NO (restart required).
 #   type: bytes · range 32MiB..1024GiB (0B = auto cgroup, else unbounded) · default 0B
 go_memory_limit: 0B
@@ -112,7 +115,9 @@ go_memory_limit: 0B
 max_request_bytes: 32MiB
 
 # SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
-# operator). Each entry must be an absolute http:// or https:// URL with a host.
+# operator). Each entry must be an absolute URL whose prefix is literally lowercase
+# http:// or https://, with a lowercase hostname, no userinfo, query, fragment or trailing
+# slash, and a port after a hostname in 1..65535.
 # Hot-reload: yes.
 #   type: list of string
 allowed_base_urls: []
@@ -238,7 +243,7 @@ whole_document_read_timeout: 2m
 whole_document_read_max: 10m
 
 # How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator
-# hold, TTFB, mid-stream gaps). Range 1ns..10m. Applies to streams started after reload.
+# hold, mid-stream gaps). Range 1ns..10m. Applies to streams started after reload.
 # Hot-reload: yes.
 #   type: duration · range 1ns..10m · default 15s
 sse_keepalive_interval: 15s
@@ -487,14 +492,17 @@ storm_stream_errors: true
 # ---- Quota pause ----
 # Provider-wide reaction to a 429 carrying a durable quota/billing error
 # (insufficient_quota/credits, spend limits): surface it immediately, park the provider
-# behind a recovery gate, or hold it until an operator resumes.
+# behind a recovery gate, or hold it until an operator resumes. OpenAI-compatible wire
+# only; Anthropic and Cursor upstreams keep the off behavior.
 # Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits,
 # spend limits; in-band occurrences included): off surfaces it immediately; retry opens a
 # provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per
 # the storm recovery delays, new requests park on the gate (bounded by
-# storm_max_queue/storm_max_wait), and the first 2xx closes it; manual creates an
-# indefinite provider pause that only an operator resumes. Classification is fixed; only
-# the reaction is configurable.
+# storm_max_queue/storm_max_wait), and the gate closes after
+# quota_pause_recovery_successes consecutive successful probes (the default 1 closes on
+# the first 2xx); manual creates an indefinite provider pause that only an operator
+# resumes. Classification is fixed; only the reaction is configurable. OpenAI-compatible
+# wire only; Anthropic and Cursor upstreams keep the off behavior.
 # Hot-reload: yes.
 #   type: string · default off
 quota_pause_mode: "off"
@@ -521,22 +529,24 @@ conversation_max_open: 64
 # Per-client tracking of a request body field that carries a sub-conversation identity,
 # exemplified by opencode's promptCacheKey. Each entry names one classified client exactly
 # (no wildcard, no case folding) plus 1..4 exact JSON field names matched only at the
-# request body's top level; the first present field decides (duplicate top-level keys
-# resolve by their first occurrence): a present value that is not a JSON string value
-# counts as absent and the next field is checked, while a present string that cannot be
-# decoded or fails the identity rules (non-empty after trimming, valid UTF-8, free of
-# control bytes, at most 512 bytes) drops the identity for the request - no later field is
-# consulted - and a dropped identity is never a client error. The drop is conservative: a
-# value whose raw spelling exceeds the bounded scan window is dropped even when its
-# trimmed form would pass. The value groups the request under a k: conversation identity,
-# after the X-Proxy-Session header (s:) and before automatic client+key grouping;
+# request body's top level; the first present field decides (a duplicate top-level key
+# drops the identity): a present value that is not a JSON string value counts as absent
+# and the next field is checked, while a present string that cannot be decoded or fails
+# the identity rules (non-empty after trimming, valid UTF-8, free of control bytes, at
+# most 512 bytes) drops the identity for the request - no later field is consulted - and a
+# dropped identity is never a client error. The drop is conservative: a value whose raw
+# spelling exceeds the bounded scan window is dropped even when its trimmed form would
+# pass. The value groups the request under a k: conversation identity, after the
+# X-Proxy-Session header (s:) and before automatic client+key grouping;
 # X-Proxy-Parent-Session still owns parent linkage. Requests translated to the Anthropic
 # wire gain a top-level prompt_cache_key carrying the value. strip: true removes the
-# entry's configured fields from the top level of the relayed upstream passthrough body;
-# the default false forwards the body unchanged. Param names are exact printable-ASCII
-# JSON key segments up to 64 bytes, no quotes or backslashes; duplicate clients and
-# duplicate params within an entry are rejected. Caps: 16 entries, 4 params per entry.
-# Default: an empty list, tracking fully off. Hot-reloads.
+# entry's configured fields from the top level of the client body before relay or
+# translation, including a Responses client body; the default false forwards the body
+# unchanged. Unlike the request-overrides body fields, strip is not limited to Chat or
+# Anthropic inbound. Param names are exact printable-ASCII JSON key segments up to 64
+# bytes, no quotes or backslashes; duplicate clients and duplicate params within an entry
+# are rejected. Caps: 16 entries, 4 params per entry. Default: an empty list, tracking
+# fully off. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, params, strip} per-client tracked body params · default []
 sub_conversations:
@@ -622,7 +632,8 @@ storage_query_max_rows: 10000
 # ---- Backup ----
 # Download or restore a self-checked archive of the saved config, the SQLite history, or
 # both. Restore inspects first: merge keeps live defaults and live request ids; replace
-# writes the backup as-is.
+# loads and validates the backup, writes canonical YAML, and preserves CLI-overridden
+# listen and db_path.
 # Maximum size of one Settings backup download or restore upload. Larger archives are
 # refused. Downloads and restores stream through private staging files; this is the
 # admit/reject ceiling, not a heap guarantee.
@@ -635,8 +646,9 @@ backup_max_bytes: 1GiB
 # reserved (404, never inference), and the limits bound what its tools return to a model.
 # Restart to apply; the route table and the endpoint's services are built once at boot.
 # Register the streamable HTTP MCP endpoint at /mcp for LLM tool clients, operator-gated
-# and Bearer-only like /metrics. Off keeps the route reserved (404, never inference); the
-# /mcp/ look-alike reservation and the operator gate stay either way. Restart required.
+# like /metrics and Bearer-only: a session cookie alone is refused. Off keeps the route
+# reserved (404, never inference); the /mcp/ look-alike reservation and the operator gate
+# stay either way. Restart required.
 # Hot-reload: NO (restart required).
 #   type: bool · default true
 mcp_enabled: true
@@ -716,17 +728,18 @@ dash_background_refresh: false
 # ---- Models ----
 # Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same
 # model in every grouped surface. Records keep their exact spelling; hot-reloads.
-# Ordered rewrite pipeline that merges spelling variants of the same model in every
-# grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs
-# optgroups, and the request-log leaf’s displayed name). Each rule is one step: exact
-# (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture
-# refs), lower (fold case). Rules apply once in order; the shipped default folds case,
-# strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing
-# architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies
-# `.` with `-` between digits. An explicitly empty list groups by the exact stored
-# spelling. Stored values remain unchanged; purge/export match them exactly and request
-# details show the original. Debug matching uses separate native base-model normalization,
-# not these display rules. Hot-reloads.
+# Capped at 64 rules. Ordered rewrite pipeline that merges spelling variants of the same
+# model in every grouped surface (explorer model dimension, scope filters, debug
+# checklist, the Logs download and Settings delete-filter model optgroups, and the
+# request-log leaf’s displayed name). Each rule is one step: exact (whole-string merge
+# old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold
+# case). Rules apply once in order; the shipped default folds case, strips a `vendor/`
+# namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix
+# (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between
+# digits. An explicitly empty list groups by the exact stored spelling. Stored values
+# remain unchanged; purge/export match them exactly and request details show the original.
+# Debug matching uses separate native base-model normalization, not these display rules.
+# Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {mode: exact|pattern|lower, from, to} rewrite rules · default: the shipped pipeline (lower · strip vendor/ · strip :tag · strip architecture/quant suffix · unify . and - between digits); restorable in Settings with ↺ default pipeline
 model_rules:
@@ -743,15 +756,19 @@ model_rules:
 # Per-provider cost/usage JSON field paths, optional models_path/models_keys enrichment,
 # ensured tool names and headers (a string map). Field names only, never static prices.
 # Custom cost_keys must report USD; leave cost_in_usd_ticks to automatic unit conversion.
-# ensure_tools names function tools injected as inert stubs into relayed OpenAI-wire chat
-# bodies missing them, with tool_choice none added when the client sent no tools, so a
-# first-party client's tool-signature gate still recognizes the request. Header values
-# expand {{uuid4}} to a fresh UUID, {{platform}} to the server's Rust-style os; arch pair,
-# and {{opencode-msg-id}}/{{opencode-ses-id}} to fresh opencode-format identifiers;
-# unknown templates stay literal. On HTTP relay requests, configured headers override
-# forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor
-# bridge construct headers separately and do not apply X-Proxy-Headers. Headers can
-# contain secrets; keep runtime configuration private.
+# ensure_tools names function tools injected as inert stubs into relayed Chat Completions
+# client bodies on a Chat outbound wire missing them. When the client sent no tools of its
+# own, an absent, null, or auto tool_choice is forced to none; an explicit none stays; a
+# required, named, or malformed choice skips injection entirely. A first-party client's
+# tool-signature gate still recognizes the request. Header values expand {{uuid4}} to a
+# fresh UUID, {{platform}} to the server's Rust-style os; arch pair, and
+# {{opencode-msg-id}}/{{opencode-ses-id}} to fresh opencode-format identifiers; unknown
+# templates stay literal. On HTTP relay requests, configured headers override
+# forwarded/extracted-auth values and X-Proxy-Headers wins. accept-encoding and range are
+# proxy-owned: the X-Proxy-Headers map rejects them with 400, and configured or override
+# values are stripped from the final request. Model discovery and the Cursor bridge
+# construct headers separately and do not apply X-Proxy-Headers. Headers can contain
+# secrets; keep runtime configuration private.
 # Hot-reload: yes.
 #   type: map of provider label → {cost_keys, usage_keys, models_path, models_keys, ensure_tools, headers}
 providers:
@@ -808,21 +825,25 @@ provider_aliases: {}
 # output-token ceilings per client, provider and/or model. Rules match exactly, all
 # matching rules apply in list order, and the later rule wins. Default: an empty list, the
 # feature fully off.
-# Ordered rules that rewrite the upstream request before relay. A rule matches when every
-# non-empty scope field equals the request's value exactly: client as the classified
-# client, provider as the canonical label after provider_aliases, model as the recorded
-# model id; an empty scope field matches anything. All matching rules apply in list order,
-# and for the same header or body field the later rule wins. headers sets or replaces
-# upstream headers (names are canonicalized, values must be non-empty single-line),
-# remove_headers deletes them, and body sets max_tokens / max_completion_tokens
-# (1..1000000) on the OpenAI wire. Credential and protocol headers (such as authorization,
-# cookie, host, content-type, and the whole x-proxy- control prefix) are rejected at load.
-# The override applies after provider headers and the client's X-Proxy-Headers map and
-# wins over both; it covers inference sends only, never model discovery or token refresh.
-# Body rewrites apply to passthrough and translated-anthropic requests and re-stamp the
-# recorded request cap; the Cursor bridge reads no body fields, so body is skipped for
-# cursor targets while header rules still apply. An empty list leaves every request
-# untouched. Hot-reloads.
+# Capped at 64 rules. Ordered rules that rewrite the upstream request before relay. A rule
+# matches when every non-empty scope field equals the request's value exactly: client as
+# the classified client, provider as the canonical label after provider_aliases, model as
+# the recorded model id; an empty scope field matches anything. All matching rules apply
+# in list order, and for the same header or body field the later rule wins. headers sets
+# or replaces upstream headers (names are canonicalized, values must be non-empty
+# single-line), remove_headers deletes them, and body sets max_tokens /
+# max_completion_tokens (1..1000000) on a Chat Completions or Anthropic client body.
+# Credential and protocol headers (such as authorization, cookie, host, content-type, and
+# the whole x-proxy- control prefix) are rejected at load. The override applies after
+# provider headers and the client's X-Proxy-Headers map and wins over both, with two
+# enforced exceptions: the target's resolved auth header and Authorization are never set
+# or removed by an override, and Accept-Encoding and Range are stripped after the override
+# merge because the transport owns them. It covers inference sends only, never model
+# discovery or token refresh. Body rewrites apply to Chat Completions or Anthropic client
+# bodies before translation, whatever the target (a Responses client body is not
+# rewritten), and re-stamp the recorded request cap; the Cursor bridge reads no body
+# fields, so body is skipped for cursor targets while header rules still apply. An empty
+# list leaves every request untouched. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
 request_overrides: []

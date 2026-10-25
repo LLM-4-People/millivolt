@@ -44,7 +44,7 @@ func legacyClassifyNonStreamBody(body []byte) string {
 		legacyContentPresent(ch.Message.ReasoningBare) ||
 		legacyContentPresent(ch.Message.ReasoningDet) ||
 		legacyContentPresent(ch.Message.ReasoningText)
-	return metrics.ClassifyOutcome(ch.FinishReason, true, hadAnswer, hadReasoning, len(ch.Message.ToolCalls), true)
+	return metrics.ClassifyOutcome(ch.FinishReason, true, hadAnswer, hadReasoning, false, len(ch.Message.ToolCalls), true)
 }
 
 // legacyContentPresent is the frozen presence predicate the classifier used.

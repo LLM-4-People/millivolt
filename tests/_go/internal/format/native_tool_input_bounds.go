@@ -44,7 +44,7 @@ func TestNativeToolInitialRetentionBound(t *testing.T) {
 	stream.Grow(blocks * (input + 160))
 	stream.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
 	for i := 0; i < blocks; i++ {
-		stream.WriteString("data: " + nativeToolStartLine(i, `"`+value+`"`) + "\n\n")
+		stream.WriteString("data: " + nativeToolStartLine(i, `{"x":"`+value+`"}`) + "\n\n")
 	}
 	raw := stream.String()
 
@@ -73,9 +73,9 @@ func TestNativeToolInitialBudgetPreservesNormalStream(t *testing.T) {
 	stream := "data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n" +
 		"data: " + nativeToolStartLine(0, `{"city":"NY"}`) + "\n\n" +
 		"data: " + `{"type":"content_block_stop","index":0}` + "\n\n" +
-		"data: " + nativeToolStartLine(0, "") + "\n\n" +
-		"data: " + `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}` + "\n\n" +
-		"data: " + `{"type":"content_block_stop","index":0}` + "\n\n" +
+		"data: " + nativeToolStartLine(1, "") + "\n\n" +
+		"data: " + `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}` + "\n\n" +
+		"data: " + `{"type":"content_block_stop","index":1}` + "\n\n" +
 		"data: " + `{"type":"message_stop"}` + "\n\n"
 	var out strings.Builder
 	if err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil); err != nil {
@@ -85,7 +85,7 @@ func TestNativeToolInitialBudgetPreservesNormalStream(t *testing.T) {
 	if !strings.Contains(got, `"arguments":"{\"city\":\"NY\"}"`) {
 		t.Fatalf("inline start arguments missing from %s", got)
 	}
-	if !strings.Contains(got, `"arguments":"{\"x\":"`) {
+	if !strings.Contains(got, `"arguments":"{\"x\":1}"`) {
 		t.Fatalf("streamed delta arguments missing from %s", got)
 	}
 }
@@ -100,7 +100,7 @@ func TestNativeToolInitialBudgetReleasesStoppedBlocks(t *testing.T) {
 	stream.Grow(blocks * (len(value) + 200))
 	stream.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
 	for i := 0; i < blocks; i++ {
-		stream.WriteString("data: " + nativeToolStartLine(i, `"`+value+`"`) + "\n\n")
+		stream.WriteString("data: " + nativeToolStartLine(i, `{"x":"`+value+`"}`) + "\n\n")
 		stream.WriteString("data: " + fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, i) + "\n\n")
 	}
 	stream.WriteString("data: " + `{"type":"message_stop"}` + "\n\n")
@@ -108,7 +108,7 @@ func TestNativeToolInitialBudgetReleasesStoppedBlocks(t *testing.T) {
 	if err := StreamToOpenAI(&out, strings.NewReader(stream.String()), nil, nil); err != nil {
 		t.Fatalf("sequential stopped blocks exhausted the open-block budget: %v", err)
 	}
-	if n := strings.Count(out.String(), `"arguments":"\"`); n != blocks {
+	if n := strings.Count(out.String(), `"arguments":"{`); n != blocks {
 		t.Fatalf("emitted argument payloads = %d, want %d", n, blocks)
 	}
 }

@@ -494,6 +494,9 @@ func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 		{"at the minimum", minToken, true},
 		{"at the maximum", maxToken, true},
 		{"above the maximum", maxToken + "x", false},
+		{"minimum in two-byte characters", strings.Repeat("é", mcp.OperatorTokenMinLen/2), true},
+		{"below the minimum in two-byte characters", strings.Repeat("é", mcp.OperatorTokenMinLen/2-1), false},
+		{"513 bytes in three-byte characters", strings.Repeat("€", mcp.OperatorTokenMaxLen/3+1), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(mcp.ProxyTokenEnv, tc.token)

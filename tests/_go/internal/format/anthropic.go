@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"io"
 	"runtime"
 	"strings"
@@ -50,6 +51,7 @@ func TestTranslateRequestBasic(t *testing.T) {
 func TestTranslateRequestContentArraysAndToolDefaults(t *testing.T) {
 	in := `{"model":"m","messages":[
 		{"role":"system","content":[{"type":"text","text":"be nice"},{"type":"image"}]},
+		{"role":"user","content":"use the tool"},
 		{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"noargs","arguments":""}}]},
 		{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"result"}]}
 	],"tools":[{"type":"function","function":{"name":"noargs","description":"d"}}]}`
@@ -65,18 +67,25 @@ func TestTranslateRequestContentArraysAndToolDefaults(t *testing.T) {
 		t.Fatalf("array system = %v, want be nice", got["system"])
 	}
 	msgs := got["messages"].([]any)
-	assistant := msgs[0].(map[string]any)
+	if len(msgs) != 3 || msgs[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("history must begin with the user turn: %v", msgs)
+	}
+	assistant := msgs[1].(map[string]any)
 	block := assistant["content"].([]any)[0].(map[string]any)
 	if input, ok := block["input"].(map[string]any); !ok || len(input) != 0 {
 		t.Fatalf("empty tool arguments input = %#v, want {}", block["input"])
 	}
-	toolResult := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	toolResult := msgs[2].(map[string]any)["content"].([]any)[0].(map[string]any)
 	if toolResult["content"] != "result" {
 		t.Fatalf("array tool result = %#v, want result", toolResult["content"])
 	}
 	tool := got["tools"].([]any)[0].(map[string]any)
-	if schema, ok := tool["input_schema"].(map[string]any); !ok || len(schema) != 0 {
-		t.Fatalf("omitted parameters schema = %#v, want {}", tool["input_schema"])
+	schema, ok := tool["input_schema"].(map[string]any)
+	if !ok || schema["type"] != "object" {
+		t.Fatalf("omitted parameters schema = %#v, want a root object schema", tool["input_schema"])
+	}
+	if props, ok := schema["properties"].(map[string]any); !ok || len(props) != 0 {
+		t.Fatalf("omitted parameters properties = %#v, want {}", schema["properties"])
 	}
 }
 
@@ -390,10 +399,10 @@ func TestStreamToOpenAIParallelToolCalls(t *testing.T) {
 		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_B","name":"get_time"}}`,
 		"",
 		"event: content_block_delta",
-		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\":\"NY\"}"}}`,
 		"",
 		"event: content_block_delta",
-		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"zone\":"}}`,
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"zone\":\"UTC\"}"}}`,
 		"",
 		"event: content_block_stop",
 		`data: {"type":"content_block_stop","index":0}`,
@@ -550,8 +559,10 @@ func (r *pausingReader) Read(p []byte) (int, error) {
 }
 
 // TestAnthropicStopReasonToChatFinishReason pins the public Anthropic-to-Chat
-// mapping. Canonical reasons get the documented Chat spelling; a provider-only
-// reason keeps its source spelling rather than being collapsed into "stop".
+// mapping to the documented Chat wire enum. A provider-only reason is
+// approximated: refusal keeps its meaning as content_filter, every other
+// non-enum reason becomes stop, and the non-streaming response records the
+// loss. The canonical record keeps the source spelling.
 func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 	for reason, want := range map[string]string{
 		"end_turn":                      "stop",
@@ -559,13 +570,14 @@ func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 		"max_tokens":                    "length",
 		"model_context_window_exceeded": "length",
 		"tool_use":                      "tool_calls",
-		"pause_turn":                    "pause_turn",
-		"refusal":                       "refusal",
+		"pause_turn":                    "stop",
+		"refusal":                       "content_filter",
+		"provider_unknown":              "stop",
 	} {
 		body := `{"id":"msg_1","type":"message","role":"assistant","model":"m",` +
 			`"content":[{"type":"text","text":"ok"}],"stop_reason":"` + reason + `",` +
 			`"usage":{"input_tokens":1,"output_tokens":1}}`
-		out, err := TranslateResponse([]byte(body))
+		out, warnings, err := TranslateResponseBetween(ir.Chat, ir.Anthropic, []byte(body))
 		if err != nil {
 			t.Fatalf("TranslateResponse(%q): %v", reason, err)
 		}
@@ -582,6 +594,16 @@ func TestAnthropicStopReasonToChatFinishReason(t *testing.T) {
 		}
 		if got.Choices[0].FinishReason != want {
 			t.Errorf("stop_reason %q -> finish_reason %q, want %q", reason, got.Choices[0].FinishReason, want)
+		}
+		approximated := reason == "pause_turn" || reason == "refusal" || reason == "provider_unknown"
+		found := false
+		for _, warning := range warnings {
+			if warning.Field == "finish_reason" {
+				found = true
+			}
+		}
+		if found != approximated {
+			t.Errorf("stop_reason %q warning = %v, want %v (warnings %+v)", reason, found, approximated, warnings)
 		}
 	}
 }
@@ -625,14 +647,14 @@ func TestAnthropicErrorEventSurfaces(t *testing.T) {
 	if err := StreamToOpenAI(&sseOut, strings.NewReader(stream), nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(sseOut.String(), `"error":{"message":"Overloaded","type":"overloaded_error"}`) {
+	if !strings.Contains(sseOut.String(), `"error":{"code":null,"message":"Overloaded","param":null,"type":"overloaded_error"}`) {
 		t.Errorf("stream error event not re-rendered as the shared OpenAI envelope: %q", sseOut.String())
 	}
 }
 
 // TestTranslateRequestPromptCacheKey pins the sub-conversation injection: a
-// non-empty tracked value lands as Anthropic's native top-level
-// prompt_cache_key; an empty one adds nothing.
+// non-empty tracked value lands as a top-level prompt_cache_key tracking
+// extension (not an Anthropic cache field), and an empty one adds nothing.
 func TestTranslateRequestPromptCacheKey(t *testing.T) {
 	in := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
 	out, err := TranslateRequest([]byte(in), 4096, "task-7")
@@ -671,8 +693,9 @@ func allocDelta(fn func()) uint64 {
 }
 
 // TestTranslateRequestSystemFragmentsExactOutput pins the exact system join:
-// the existing "\n\n" separator between lifted fragments, including empty
-// fragments, must survive the strings.Builder rewrite byte-for-byte.
+// the "\n\n" separator between lifted non-empty fragments must survive the
+// strings.Builder rewrite byte-for-byte. An empty fragment is dropped before
+// the join because Anthropic text blocks require at least one character.
 func TestTranslateRequestSystemFragmentsExactOutput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -690,9 +713,9 @@ func TestTranslateRequestSystemFragmentsExactOutput(t *testing.T) {
 			want: `{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","stream":false,"system":"top\n\na"}`,
 		},
 		{
-			name: "empty fragment keeps separator",
-			body: `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"system","content":""},{"role":"system","content":"b"}]}`,
-			want: `{"max_tokens":64,"messages":null,"model":"m","stream":false,"system":"s\n\n\n\nb"}`,
+			name: "empty fragment skipped",
+			body: `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"system","content":""},{"role":"system","content":"b"},{"role":"user","content":"hi"}]}`,
+			want: `{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","stream":false,"system":"s\n\nb"}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -720,7 +743,7 @@ func TestTranslateRequestSystemAllocationLinear(t *testing.T) {
 			}
 			b.WriteString(`{"role":"system","content":"a"}`)
 		}
-		b.WriteString(`]}`)
+		b.WriteString(`,{"role":"user","content":"hi"}]}`)
 		return []byte(b.String())
 	}
 	wantFor := func(n int) string {
@@ -777,7 +800,7 @@ func TestTranslateResponseContentExactOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ab","role":"assistant"}}],"created":0,"id":"msg","model":"m","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":1,"prompt_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"total_tokens":3}}`
+	const want = `{"choices":[{"finish_reason":"stop","index":0,"logprobs":null,"message":{"content":"ab","role":"assistant"}}],"created":0,"id":"msg","model":"m","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":1,"prompt_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"total_tokens":3}}`
 	if string(normalized) != want {
 		t.Fatalf("translated response =\n%s\nwant\n%s", normalized, want)
 	}
@@ -860,7 +883,7 @@ func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
+			body := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
 			if tc.raw != "" {
 				body += `,"tool_choice":` + tc.raw
 			}
@@ -901,7 +924,7 @@ func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 // map[string]any decode paid for even though only function.name is retained.
 func hostileToolChoiceBody(shape string) []byte {
 	var body strings.Builder
-	body.WriteString(`{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}],"tool_choice":{"function":`)
+	body.WriteString(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}],"tool_choice":{"function":`)
 	switch shape {
 	case "function":
 		body.WriteString(`{"name":"f","x":[`)

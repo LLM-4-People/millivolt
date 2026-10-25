@@ -7,6 +7,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,26 +85,60 @@ func TestUnknownPathTranslatedUsesTargetPath(t *testing.T) {
 }
 
 // TestResponsesHostileMaxOutputTokensRejected proves the hostile bound covers
-// the Responses spelling and that mixing cap families fails closed before any
-// upstream send.
+// every cap spelling, names the client's own field, and that mixing cap
+// families fails closed before any upstream send.
 func TestResponsesHostileMaxOutputTokensRejected(t *testing.T) {
-	for name, body := range map[string]string{
-		"hostile max_output_tokens": `{"model":"m","input":"hi","max_output_tokens":1000001}`,
-		"conflicting spellings":     `{"model":"m","input":"hi","max_tokens":1,"max_output_tokens":1000001}`,
+	const chatMessages = `"messages":[{"role":"user","content":"hi"}]`
+	for _, tc := range []struct {
+		name string
+		path string
+		body string
+		want string
+	}{
+		{
+			name: "responses max_output_tokens",
+			path: "/v1/responses",
+			body: `{"model":"m","input":"hi","max_output_tokens":1000001}`,
+			want: "max_output_tokens must not exceed",
+		},
+		{
+			name: "responses max_tokens",
+			path: "/v1/responses",
+			body: `{"model":"m","input":"hi","max_tokens":1000001}`,
+			want: "max_tokens must not exceed",
+		},
+		{
+			name: "chat max_tokens",
+			path: "/v1/chat/completions",
+			body: `{"model":"m",` + chatMessages + `,"max_tokens":1000001}`,
+			want: "max_tokens must not exceed",
+		},
+		{
+			name: "chat max_completion_tokens",
+			path: "/v1/chat/completions",
+			body: `{"model":"m",` + chatMessages + `,"max_completion_tokens":1000001}`,
+			want: "max_completion_tokens must not exceed",
+		},
+		{
+			name: "conflicting spellings",
+			path: "/v1/responses",
+			body: `{"model":"m","input":"hi","max_tokens":1,"max_output_tokens":1000001}`,
+			want: "max_output_tokens cannot be combined",
+		},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			up := newFixtureUpstream(t, "application/json", 200, `{}`)
 			s := New(config.Default(), metrics.Noop{})
 			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
-			w := proxyRequest(t, s, "/v1/responses", "anthropic", body)
+			w := proxyRequest(t, s, tc.path, "anthropic", tc.body)
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
 			}
 			if up.calls.Load() != 0 {
 				t.Fatalf("upstream was called %d times before the cap rejection", up.calls.Load())
 			}
-			if !strings.Contains(w.Body.String(), "max_tokens") {
-				t.Fatalf("rejection does not name a cap field: %s", w.Body.String())
+			if !strings.Contains(w.Body.String(), tc.want) {
+				t.Fatalf("rejection does not say %q: %s", tc.want, w.Body.String())
 			}
 		})
 	}
@@ -283,5 +318,64 @@ func TestRoutingHeaderErrorEchoBounded(t *testing.T) {
 	s.ServeHTTP(rec, r)
 	if rec.Code != http.StatusBadRequest || rec.Body.Len() > 8<<10 {
 		t.Fatalf("hostile timeout response = %d/%d bytes, want 400 with a bounded body", rec.Code, rec.Body.Len())
+	}
+}
+
+// TestMixedTokenCapSpellingsRejectedInRange pins DUP-5: the conflict rule is
+// independent of the hostile range bound, on both client wire families.
+func TestMixedTokenCapSpellingsRejectedInRange(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "responses client",
+			path: "/v1/responses",
+			body: `{"model":"m","input":"hi","max_tokens":1,"max_output_tokens":2}`,
+		},
+		{
+			name: "chat client",
+			path: "/v1/chat/completions",
+			body: `{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":1,"max_output_tokens":2}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "application/json", 200, `{}`)
+			s := New(config.Default(), metrics.Noop{})
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+			w := proxyRequest(t, s, tc.path, "anthropic", tc.body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), "cannot be combined") {
+				t.Fatalf("rejection does not name the conflict: %s", w.Body.String())
+			}
+			if up.calls.Load() != 0 {
+				t.Fatalf("upstream was called %d times before the conflict rejection", up.calls.Load())
+			}
+		})
+	}
+}
+
+// TestHostileTokenCapFallbackNeutral pins the ambiguous-source branch: when
+// only the record carries the value and the body no longer names a field, the
+// rejection uses the neutral "output token cap" wording.
+func TestHostileTokenCapFallbackNeutral(t *testing.T) {
+	n := maxRequestOutputTokens + 1
+	rec := &metrics.Record{ReqMaxTokens: &n}
+	fallback := fmt.Sprintf("output token cap must not exceed %d", maxRequestOutputTokens)
+	if got := tokenCapViolation([]byte(`{}`), rec); got != fallback {
+		t.Fatalf("fallback reason = %q, want the neutral name", got)
+	}
+	if got := tokenCapViolation(nil, rec); got != fallback {
+		t.Fatalf("nil-body reason = %q, want the neutral name", got)
+	}
+	if got := tokenCapViolation([]byte(`{"max_output_tokens":2}`), rec); got != fallback {
+		t.Fatalf("non-hostile body reason = %q, want the record fallback", got)
+	}
+	if got := tokenCapViolation([]byte(`{"max_output_tokens":1000001}`), nil); !strings.HasPrefix(got, "max_output_tokens ") {
+		t.Fatalf("body reason = %q, want max_output_tokens", got)
 	}
 }

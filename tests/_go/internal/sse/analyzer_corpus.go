@@ -2389,10 +2389,10 @@ const analyzerCorpusGolden = `{
     "usage_raw": "",
     "usage_chunk": "{\"type\":\"response.failed\"}",
     "preview": "",
-    "error_type": "",
+    "error_type": "upstream_error",
     "error_code": "",
-    "error_msg": "",
-    "has_in_band_error": false,
+    "error_msg": "upstream response failed",
+    "has_in_band_error": true,
     "outcome": "",
     "record_usage": {
       "input_tokens": 0,
@@ -3049,8 +3049,10 @@ const analyzerCorpusGolden = `{
     "first_reasoning": 0,
     "chunks": 1,
     "tool_chunks": 1,
-    "tool_calls": 0,
-    "tool_names": null,
+    "tool_calls": 1,
+    "tool_names": [
+      "search"
+    ],
     "finish_reason": "",
     "terminated": false,
     "chatlike": true,
@@ -3079,8 +3081,10 @@ const analyzerCorpusGolden = `{
     "provider_model": "",
     "provider_id": "",
     "record_preview": "",
-    "record_calls": 0,
-    "record_names": null,
+    "record_calls": 1,
+    "record_names": [
+      "search"
+    ],
     "record_reasoning": 0,
     "record_chunks": 1
   },

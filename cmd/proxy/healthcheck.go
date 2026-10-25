@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -23,10 +25,13 @@ const healthcheckTimeout = 3 * time.Second
 // only the real liveness handler can green-light the instance; /healthz is
 // intentionally unauthenticated: this probe carries no operator credential.
 func runHealthcheck() int {
-	cfg, err := config.LoadFile(liveConfigPath)
+	cfg, _, err := config.LoadFileStrict(liveConfigPath)
 	if err != nil {
-		log.Printf("healthcheck: config: %v", err)
-		return 1
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("healthcheck: config: %v", err)
+			return 1
+		}
+		cfg = config.Default()
 	}
 	applyCLIOverrides(cfg)
 	host, port, err := net.SplitHostPort(cfg.Listen)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -167,8 +168,19 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// directory and removes it on every error.
 	uploadDir := os.TempDir()
 	decodeDir := ""
+	storeAvailable := false
 	if dir, err := dbStageDir(); err == nil {
-		uploadDir, decodeDir = dir, dir
+		uploadDir, decodeDir, storeAvailable = dir, dir, true
+	}
+	// A database member can only be decoded and validated when the live store
+	// owns a staging volume. A config-only apply or a store-less preview skips
+	// that member: its framing and outer hash are still checked, but it is not
+	// staged or semantically validated. A restore that actually requests the
+	// database still fails closed below when no volume exists.
+	decodeDatabase := storeAvailable && (wantDB || inspect)
+	if wantDB && !inspect && !storeAvailable {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
+		return
 	}
 	body := http.MaxBytesReader(w, r.Body, cap)
 	defer body.Close()
@@ -191,7 +203,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			log.Printf("restore: remove staged upload %s: %v", uploadPath, err)
 		}
 	}()
-	arch, err := backup.DecodeFile(decodeDir, uploadPath)
+	arch, err := backup.DecodeFileSelected(decodeDir, uploadPath, decodeDatabase)
 	if err != nil {
 		// Without a live store there is no volume for a decoded database
 		// member; keep the endpoint's existing storage-disabled answer while a
@@ -216,7 +228,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	// A file-backed database member is integrity-checked in place, so the
 	// legacy staging-directory argument is empty.
-	if err := backup.Validate("", arch); err != nil {
+	if err := backup.ValidateSelected("", arch, decodeDatabase); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -536,7 +548,7 @@ func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, 
 		if path == "" {
 			return backup.Archive{}, cleanup, fmt.Errorf("no config file; start with -config to back up settings")
 		}
-		cfg, err := config.LoadFile(path)
+		cfg, _, err := config.LoadFileStrict(path)
 		if err != nil {
 			return backup.Archive{}, cleanup, err
 		}
@@ -614,9 +626,9 @@ func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	cur, err := config.LoadFile(path)
+	cur, _, err := config.LoadFileStrict(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
 		cur = config.Default()
@@ -660,8 +672,9 @@ func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 }
 
 // readRestoreConfigFile captures the live config file for rollback. A missing
-// file is not an error: LoadFile treats it as defaults and a restore may create
-// it. Any other read failure aborts before the restore writes anything.
+// file is not an error for this capture: the caller's strict load substitutes
+// defaults on fs.ErrNotExist and the restore may create it. Any other read
+// failure aborts before the restore writes anything.
 func readRestoreConfigFile(path string) (raw []byte, mode os.FileMode, exists bool, err error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -670,7 +683,7 @@ func readRestoreConfigFile(path string) (raw []byte, mode os.FileMode, exists bo
 		}
 		return nil, 0, false, err
 	}
-	raw, err = os.ReadFile(path)
+	raw, err = config.ReadDocument(path)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -936,11 +949,11 @@ func restoreInspectLiveConfig(path string) (*config.Config, error) {
 	if path == "" {
 		return config.Default(), nil
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("live config unavailable: %w", err)
-	}
-	cur, _, err := config.LoadBytes(raw)
+	// Inspect compares against the same strict document the restore apply
+	// path will load. Repair semantics (LoadBytes) would omit unknown fields and
+	// extra documents that LoadFileStrict rejects, presenting a diff against a
+	// view the apply can never produce.
+	cur, _, err := config.LoadFileStrict(path)
 	if err != nil {
 		return nil, fmt.Errorf("live config unavailable: %w", err)
 	}
@@ -978,7 +991,15 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 	} else {
 		out["config"] = map[string]any{"present": false}
 	}
-	if arch.DatabasePath != "" {
+	if arch.DatabasePresent && arch.DatabasePath == "" {
+		// A store-less preview can report the member's presence and decoded
+		// size, but not its request span. The selection must stay off: there is
+		// no volume to apply it to.
+		out["database"] = map[string]any{
+			"present": true, "bytes": arch.DatabaseBytes, "inspectable": false,
+			"reason": "durable storage is disabled",
+		}
+	} else if arch.DatabasePath != "" {
 		size, err := arch.DatabaseMemberSize()
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())

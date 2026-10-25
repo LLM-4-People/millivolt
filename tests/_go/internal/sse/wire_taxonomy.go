@@ -126,3 +126,16 @@ func TestAnthropicToolOnlyStreamSetsFirstToken(t *testing.T) {
 		t.Fatalf("finish = %q, want tool_calls", rec.FinishReason)
 	}
 }
+
+// TestResponsesStandaloneNumericErrorCodeRecorded pins TC6-6: the Responses
+// error event allows a numeric code, and a typed string field would reject the
+// whole event.
+func TestResponsesStandaloneNumericErrorCodeRecorded(t *testing.T) {
+	_, rec := analyzeLines([]string{
+		`data: {"type":"error","code":500,"message":"boom"}`,
+	})
+	if rec.ErrorType != "provider_error" || rec.ErrorCode != "500" || rec.ErrorMsg != "boom" {
+		t.Fatalf("recorded error = %s/%s/%s, want provider_error/500/boom",
+			rec.ErrorType, rec.ErrorCode, rec.ErrorMsg)
+	}
+}

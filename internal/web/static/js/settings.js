@@ -484,7 +484,7 @@ function backupRestoreOptionsHTML(b) {
   const cfg = j.config || {};
   const db = j.database || {};
   const canCfg = !!b.config && !!cfg.present;
-  const canDb = !!b.database && !!db.present;
+  const canDb = !!b.database && !!db.present && db.inspectable !== false;
   const wantCfg = backupCheckOn('backup-include-config', canCfg);
   const wantDb = backupCheckOn('backup-include-database', canDb);
   const merge = backupMode === 'merge';
@@ -495,13 +495,18 @@ function backupRestoreOptionsHTML(b) {
   }
   if (db.present) {
     html += backupMemberCheck('backup-include-database', 'database', canDb);
-    if (!canDb) html += '<span class="st-hint">durable storage is disabled</span>';
+    if (!canDb) html += `<span class="st-hint">${escapeHtml(db.inspectable === false && db.reason ? db.reason : 'durable storage is disabled')}</span>`;
   }
   if (wantCfg || wantDb) {
     html += `<label class="st-check"><input type="radio" name="backup-mode" value="replace"${merge ? '' : ' checked'}> replace</label>` +
       `<label class="st-check"><input type="radio" name="backup-mode" value="merge"${merge ? ' checked' : ''}> merge</label>`;
     const hints = [];
-    if (wantCfg) hints.push(merge ? 'overlays keys that differ from default' : 'writes every key from the backup');
+    const cliKeys = cliOverrideKeys();
+    if (wantCfg) {
+      if (merge) hints.push('overlays keys that differ from default');
+      else if (cliKeys.length) hints.push('writes every key from the backup except CLI-overridden ' + cliKeys.join(' and '));
+      else hints.push('writes every key from the backup');
+    }
     if (wantDb) hints.push(merge ? 'inserts request ids that are not already stored' : 'replaces the live database on restart');
     html += `<span class="st-hint">${escapeHtml(hints.join('. '))}.</span>`;
   }
@@ -517,7 +522,7 @@ function backupWantConfig() {
 function backupWantDatabase() {
   const b = (settingsDoc && settingsDoc.backup) || {};
   const db = (backupInspect && backupInspect.data && backupInspect.data.database) || {};
-  return backupCheckOn('backup-include-database', !!(b.database && db.present));
+  return backupCheckOn('backup-include-database', !!(b.database && db.present && db.inspectable !== false));
 }
 
 function backupQuery(forRestore = false) {
@@ -547,13 +552,31 @@ function backupScalar(v) {
   return String(v);
 }
 
+// cliOverrideKeys names the settings the process-start CLI flags keep pinned
+// through a restore. prepareRestoreConfig applies the live listen/db_path after
+// either mode, so the preview must not claim a replace resets them.
+function cliOverrideKeys() {
+  // The settings payload already enumerates the process-start CLI overrides.
+  // Sort for a stable preview; never keep a second hardcoded key list here.
+  const overrides = (settingsDoc && settingsDoc.overrides) || {};
+  return Object.keys(overrides).sort();
+}
+
 function backupDiffRowsHTML(doc) {
   if (!backupInspect || !backupInspect.data) return '';
   const cfg = backupInspect.data.config || {};
   if (!cfg.present) return '';
   const modified = Array.isArray(cfg.modified) ? cfg.modified : [];
-  if (!modified.length) {
-    return `<div class="st-row st-backup" data-cat="backup" data-backup="diff" data-label="restore config default" id="backup-preview"><div class="st-name">Config</div><div class="st-ctl"><span class="st-hint">every key in this backup is still the built-in default</span></div></div>`;
+  const modifiedSet = new Set(modified);
+  const vsLive = new Set(Array.isArray(cfg.vs_live) ? cfg.vs_live : []);
+  // A replace restore writes every key, including a key that is default in
+  // the backup but customized live. Render the union so that reset is visible;
+  // merge only overlays non-default backup keys, so a live-only key is
+  // explicitly reported as unchanged instead.
+  const keys = modified.slice();
+  for (const key of vsLive) if (!modifiedSet.has(key)) keys.push(key);
+  if (!keys.length) {
+    return `<div class="st-row st-backup" data-cat="backup" data-backup="diff" data-label="restore config default" id="backup-preview"><div class="st-name">Config</div><div class="st-ctl"><span class="st-hint">every key in this backup is still the built-in default and matches the live config</span></div></div>`;
   }
   const fields = (doc && doc.fields) || (settingsDoc && settingsDoc.fields) || [];
   const byKey = {};
@@ -561,12 +584,18 @@ function backupDiffRowsHTML(doc) {
   const defaults = (doc && doc.defaults) || (settingsDoc && settingsDoc.defaults) || {};
   const live = (doc && doc.values) || (settingsDoc && settingsDoc.values) || {};
   const values = cfg.values || {};
-  const vsLive = new Set(Array.isArray(cfg.vs_live) ? cfg.vs_live : []);
-  return modified.map((key, i) => {
+  const merge = backupMode === 'merge';
+  const cliKeys = cliOverrideKeys();
+  return keys.map((key, i) => {
     const label = (byKey[key] && byKey[key].label) || key;
     const val = backupScalar(values[key]);
-    let hint = 'default ' + backupScalar(defaults[key]);
-    hint += vsLive.has(key) ? ' · live ' + backupScalar(live[key]) : ' · same as live';
+    const inBackup = modifiedSet.has(key);
+    const differsLive = vsLive.has(key);
+    let hint = inBackup ? 'default ' + backupScalar(defaults[key]) : 'backup default ' + backupScalar(defaults[key]);
+    if (differsLive) hint += ' · live ' + backupScalar(live[key]);
+    else if (inBackup) hint += ' · same as live';
+    if (cliKeys.includes(key)) hint += ' · preserved by the CLI override';
+    else if (!inBackup) hint += merge ? ' · merge leaves it unchanged' : ' · replace resets it';
     const id = i === 0 ? ' id="backup-preview"' : '';
     return `<div class="st-row" data-cat="backup" data-backup="diff" data-key="${escapeHtml(key)}" data-label="${escapeHtml(label)} restore"${id}>
       <div class="st-name">${escapeHtml(label)}</div>
@@ -773,9 +802,10 @@ function settingsFieldHTML(f, val, def, override) {
   const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
   let hint = '';
   if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
-  else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations' && String(val) === String(def)) {
+  else if (def != null && def !== '' && f.kind === 'model_rules' && JSON.stringify(val) === JSON.stringify(def)) hint = `<span class="st-hint">default</span>`;
+  else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'model_rules' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations' && String(val) === String(def)) {
     hint = `<span class="st-hint">default</span>`;
-  } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations') {
+  } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'model_rules' && f.kind !== 'strings' && f.kind !== 'request_overrides' && f.kind !== 'sub_conversations') {
     hint = `<span class="st-hint">default ${escapeHtml(String(def))}</span>`;
   }
   if (locked) hint += `<span class="st-hint">via flag · ${escapeHtml(String(override))}</span>`;
@@ -911,7 +941,7 @@ function providerCardHTML(label, p) {
     `<div class="prov-mmap">${Object.entries(modelsKeys).map(([f, path]) => modelRowHTML(f, path, mfields)).join('')}</div>` +
     (mfree.length ? `<div class="prov-add prov-add-m"><select class="sp-mfield-new" aria-label="canonical model field">${mfree.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')}</select><button type="button" class="btn prov-addbtn" data-prov-add-model aria-label="add model mapping">+ map</button></div>` : '') +
     `</div>` +
-    `<div class="prov-sec"><div class="prov-lb"><span>ensured tools</span><span class="prov-sub">tool names every chat request's tools array must carry - missing names are injected as inert stubs upstream</span></div>` +
+    `<div class="prov-sec"><div class="prov-lb"><span>ensured tools</span><span class="prov-sub">tool names relayed Chat Completions client bodies on a Chat outbound wire must carry - missing names are injected as inert stubs upstream</span></div>` +
     `<div class="prov-add"><input class="sp-etools" value="${escapeHtml(ensureTools.join(', '))}" placeholder="tool names, comma-separated - e.g. bash, read" aria-label="ensured tool names"></div>` +
     `</div>` +
     `<div class="prov-sec"><div class="prov-lb"><span>upstream headers</span><span class="prov-sub">extra headers sent upstream - {{uuid4}} / {{platform}} / {{opencode-msg-id}} / {{opencode-ses-id}} expand per request</span></div>` +
@@ -1416,9 +1446,9 @@ function mrRestoreDefaults(wrap) {
 
 // ---- request overrides editor ----
 // request_overrides: ordered rules rewriting the upstream request before
-// relay (headers set/replace/remove plus OpenAI-wire token ceilings),
-// scoped per client, provider and/or model. One visual grammar with the
-// other structured editors: each rule is a .prov-sec card inside an
+// relay (headers set/replace/remove plus Chat or Anthropic client-body token
+// ceilings), scoped per client, provider and/or model. One visual grammar with
+// the other structured editors: each rule is a .prov-sec card inside an
 // .mr-wrap shell (tools row, count, muted tokens), the headers mapping
 // reuses the providers editor's headerRowHTML family verbatim (its add
 // row, Enter key, remove buttons and change-time token lint all ride the
@@ -1737,7 +1767,7 @@ function roRuleCardHTML(r, i, expanded = false) {
     `<div class="prov-lb"><span>remove headers</span><span class="prov-sub">delete upstream headers by name - e.g. User-Agent</span></div>` +
     `<div class="prov-chips">${removes.map(n => roRemoveChipHTML(String(n == null ? '' : n))).join('')}</div>` +
     `<div class="prov-add"><input class="ro-rh-in" placeholder="header name to remove… ↵" aria-label="add header to remove"><button type="button" class="btn prov-addbtn" data-ro-rh-add aria-label="add header to remove">+</button></div>` +
-    `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on the OpenAI wire - empty leaves the request's own value</span></div>` +
+    `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on Chat Completions or Anthropic client bodies, before translation - empty leaves the request's own value</span></div>` +
     `<div class="st-ctl-line ro-body">` +
     `<label class="ro-field"><span>max_tokens</span><input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max_tokens ceiling')}></label>` +
     `<label class="ro-field"><span>max_completion_tokens</span><input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max_completion_tokens ceiling')}></label>` +
@@ -2099,7 +2129,7 @@ function scCardHTML(e, i) {
     `<div class="prov-lb"><span>params</span><span class="prov-sub">exact top-level request body fields, checked in order - the first present field decides</span></div>` +
     `<div class="sc-params">${params.map(p => scParamRowHTML(String(p == null ? '' : p))).join('')}</div>` +
     `<div class="prov-add"><input class="sc-param-in" placeholder="body field - e.g. promptCacheKey ↵" aria-label="add tracked body field"><button type="button" class="btn prov-addbtn" data-sc-param-add aria-label="add tracked body field">+</button></div>` +
-    `<label class="st-check"><input type="checkbox" class="st-switch sc-strip"${e.strip ? ' checked' : ''}><span>strip every configured field from the top level of the relayed upstream body - unchecked forwards it unchanged</span></label>` +
+    `<label class="st-check"><input type="checkbox" class="st-switch sc-strip"${e.strip ? ' checked' : ''}><span>strip every configured field from the top level of the client request body before relay or translation - unchecked forwards it unchanged</span></label>` +
     `<div class="mr-err sc-err" aria-live="polite"></div>` +
     `</div>`;
 }
@@ -2107,7 +2137,7 @@ function scCardHTML(e, i) {
 function subConversationsEditorHTML(val) {
   const entries = Array.isArray(val) ? val : [];
   return `<div class="prov-sec mr-wrap sc-wrap">` +
-    `<div class="mr-hint">each entry tracks one classified client's sub-conversation identity from top-level request body fields · the first present field decides: a present value that is not a JSON string counts as absent and the next field is checked, while a present string that cannot be decoded or fails the identity rules drops the identity for the request - no later field is consulted, never a client error · the value groups requests under a k: identity, after X-Proxy-Session and before client+key grouping · strip removes every configured field present at the top level of the relayed body</div>` +
+    `<div class="mr-hint">each entry tracks one classified client's sub-conversation identity from top-level request body fields · the first present field decides: a present value that is not a JSON string counts as absent and the next field is checked, while a present string that cannot be decoded or fails the identity rules drops the identity for the request - no later field is consulted, never a client error · the value groups requests under a k: identity, after X-Proxy-Session and before client+key grouping · strip removes every configured field present at the top level of the client request body before relay or translation</div>` +
     `<div class="mr-tools"><button type="button" class="btn" data-sc-add aria-label="add entry">+ add entry</button><span class="mr-count muted"></span></div>` +
     `<div class="sc-rows">${entries.map((e, i) => scCardHTML(e, i)).join('')}</div>` +
     scDatalistHTML() +

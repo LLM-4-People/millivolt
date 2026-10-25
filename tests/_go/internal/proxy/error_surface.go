@@ -213,8 +213,10 @@ func TestCommittedNonOKStatusIsInBand(t *testing.T) {
 	case <-time.After(8 * time.Second):
 		t.Fatal("first request never completed")
 	}
+	var secondBody string
 	select {
 	case body := <-second:
+		secondBody = body
 		if strings.Contains(body, `"choices"`) || strings.Contains(body, "[DONE]") {
 			t.Fatalf("committed non-200 status leaked a JSON/OpenAI body: %s", body)
 		}
@@ -223,6 +225,22 @@ func TestCommittedNonOKStatusIsInBand(t *testing.T) {
 		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("queued request never completed")
+	}
+	var queued *metrics.Record
+	for _, rec := range waitForRecord(t, buf, 2) {
+		if rec.ErrorType != "" {
+			queued = rec
+		}
+	}
+	if queued == nil {
+		t.Fatalf("no record for the queued in-band error: %s", secondBody)
+	}
+	if queued.StatusCode != http.StatusOK {
+		t.Fatalf("committed queued record status = %d, want the client's 200 rather than the unrelayable 201: %+v",
+			queued.StatusCode, queued)
+	}
+	if queued.ErrorMsg == "" || !queued.IsError() {
+		t.Fatalf("committed 201 record must carry the in-band outcome: %+v", queued)
 	}
 }
 
@@ -412,20 +430,25 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 	w := httptest.NewRecorder()
 	emitDegenerateResponses(w, &a, time.Now(), metrics.CodeTruncated, rec)
 	body := w.Body.String()
-	if !strings.HasPrefix(body, "event: response.failed\ndata: ") || !strings.HasSuffix(body, "\n\n") {
-		t.Fatalf("frame framing = %q", body)
-	}
-	if strings.Count(body, "event: response.failed") != 1 {
-		t.Fatalf("response.failed count = %d: %q", strings.Count(body, "event: response.failed"), body)
-	}
 	if strings.Contains(body, "[DONE]") || strings.Contains(body, `"choices"`) {
 		t.Fatalf("Responses client received a Chat frame: %q", body)
 	}
-	payload := strings.TrimSuffix(strings.TrimPrefix(body, "event: response.failed\ndata: "), "\n\n")
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
-		t.Fatalf("payload %q: %v", payload, err)
+	payloads := responsesFramePayloads(t, body)
+	if len(payloads) != 2 {
+		t.Fatalf("frames = %d, want error + failed: %q", len(payloads), body)
 	}
+	errorEvent := payloads[0]
+	if errorEvent["type"] != "error" || errorEvent["code"] != metrics.CodeTruncated {
+		t.Fatalf("error event = %v, want the specific truncated code", errorEvent)
+	}
+	// The synthetic pair owns its own 0,1 sequence because the relay does not
+	// track the provider's per-response counter. The stream is already
+	// terminating; the order within the pair is what matters.
+	if errorEvent["sequence_number"] != float64(0) || payloads[1]["sequence_number"] != float64(1) {
+		t.Fatalf("synthetic sequence numbers = %v/%v, want 0/1",
+			errorEvent["sequence_number"], payloads[1]["sequence_number"])
+	}
+	doc := payloads[1]
 	if doc["type"] != "response.failed" {
 		t.Fatalf("event type = %v", doc["type"])
 	}
@@ -434,11 +457,17 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 		t.Fatalf("response = %v", response)
 	}
 	failure, _ := response["error"].(map[string]any)
-	if failure["code"] != metrics.CodeTruncated || failure["message"] != metrics.DegenerateMessage(metrics.CodeTruncated) {
+	// response.error.code is the closed ResponseErrorCode enum; the specific
+	// internal code stays on the error event and the record.
+	if failure["code"] != "server_error" || failure["message"] != metrics.DegenerateMessage(metrics.CodeTruncated) {
 		t.Fatalf("error = %v", failure)
 	}
 	if output, ok := response["output"].([]any); !ok || len(output) != 0 {
 		t.Fatalf("output = %v, want an empty array", response["output"])
+	}
+	a.Fill(rec)
+	if rec.ErrorCode != metrics.CodeTruncated || !rec.IsError() {
+		t.Fatalf("record error = %q (error %v), want the specific truncated code", rec.ErrorCode, rec.IsError())
 	}
 	if rec.ResponseBytes != int64(len(body)) {
 		t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
@@ -451,12 +480,12 @@ func TestDegenerateResponsesFailureWireShape(t *testing.T) {
 	rec2 := &metrics.Record{ID: "req_2"}
 	w2 := httptest.NewRecorder()
 	emitDegenerateResponses(w2, &withID, time.Now(), metrics.CodeTruncated, rec2)
-	var doc2 map[string]any
-	payload2 := strings.TrimSuffix(strings.TrimPrefix(w2.Body.String(), "event: response.failed\ndata: "), "\n\n")
-	if err := json.Unmarshal([]byte(payload2), &doc2); err != nil {
-		t.Fatalf("payload %q: %v", payload2, err)
+	payloads2 := responsesFramePayloads(t, w2.Body.String())
+	if len(payloads2) != 2 {
+		t.Fatalf("frames = %d, want error + failed: %s", len(payloads2), w2.Body.String())
 	}
-	if got := doc2["response"].(map[string]any)["id"]; got != "resp_terminal" {
+	failed, _ := payloads2[1]["response"].(map[string]any)
+	if got := failed["id"]; got != "resp_terminal" {
 		t.Fatalf("synthetic failure id = %v, want the terminal response id", got)
 	}
 }
@@ -530,8 +559,8 @@ func TestArmedPacerPreCommitUsesInboundErrorShape(t *testing.T) {
 			if rec.StatusCode != http.StatusTooManyRequests || rec.ErrorType != "rate_limit_error" {
 				t.Fatalf("record = %+v", rec)
 			}
-			if rec.ResponseBytes != int64(len(body)) {
-				t.Fatalf("recorded bytes = %d, want %d", rec.ResponseBytes, len(body))
+			if rec.ResponseBytes != 0 {
+				t.Fatalf("recorded bytes = %d, want 0: a status-line envelope is not relayed body", rec.ResponseBytes)
 			}
 		})
 	}
@@ -582,4 +611,113 @@ func TestQualityExhaustedSinkUsesProtocolEnvelope(t *testing.T) {
 			}
 		})
 	}
+}
+
+// responsesFramePayloads decodes the typed payload of every SSE frame in one
+// synthetic Responses body.
+func responsesFramePayloads(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, frame := range strings.Split(strings.TrimSuffix(body, "\n\n"), "\n\n") {
+		var payload string
+		for _, line := range strings.Split(frame, "\n") {
+			if data, ok := strings.CutPrefix(line, "data: "); ok {
+				payload = data
+			}
+		}
+		if payload == "" {
+			t.Fatalf("frame %q has no data line", frame)
+		}
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+			t.Fatalf("payload %q: %v", payload, err)
+		}
+		out = append(out, doc)
+	}
+	return out
+}
+
+// assertResponsesEnvelopeRequired checks the required Response fields the
+// official schema lists, including keys whose value is null.
+func assertResponsesEnvelopeRequired(t *testing.T, response map[string]any) {
+	t.Helper()
+	for _, key := range []string{
+		"access_programs", "id", "object", "created_at", "error",
+		"incomplete_details", "instructions", "model", "tools", "output",
+		"parallel_tool_calls", "metadata", "tool_choice", "temperature", "top_p",
+	} {
+		if _, ok := response[key]; !ok {
+			t.Fatalf("response envelope is missing required %q: %v", key, response)
+		}
+	}
+}
+
+// TestSyntheticResponsesErrorFramesSchemaComplete pins TC5-4: every synthetic
+// Responses error or failure event carries sequence_number, and the failed
+// event carries the complete required response envelope.
+func TestSyntheticResponsesErrorFramesSchemaComplete(t *testing.T) {
+	t.Run("committed stream error pair", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		rec := &metrics.Record{}
+		if err := writeProtocolStreamError(w, rec, ir.Responses, "req_1", "model-a", "server_error", "", "boom"); err != nil {
+			t.Fatal(err)
+		}
+		payloads := responsesFramePayloads(t, w.Body.String())
+		if len(payloads) != 2 {
+			t.Fatalf("frames = %d, want error + failed: %s", len(payloads), w.Body.String())
+		}
+		errorEvent := payloads[0]
+		if errorEvent["type"] != "error" {
+			t.Fatalf("first frame type = %v", errorEvent["type"])
+		}
+		for _, key := range []string{"type", "code", "message", "param", "sequence_number"} {
+			if _, ok := errorEvent[key]; !ok {
+				t.Fatalf("error event is missing required %q: %v", key, errorEvent)
+			}
+		}
+		failed := payloads[1]
+		if failed["type"] != "response.failed" {
+			t.Fatalf("second frame type = %v", failed["type"])
+		}
+		if _, ok := failed["sequence_number"]; !ok {
+			t.Fatalf("failed event is missing sequence_number: %v", failed)
+		}
+		response, _ := failed["response"].(map[string]any)
+		if response == nil {
+			t.Fatalf("failed event has no response object: %v", failed)
+		}
+		assertResponsesEnvelopeRequired(t, response)
+		if response["status"] != "failed" {
+			t.Fatalf("failed status = %v", response["status"])
+		}
+		failure, _ := response["error"].(map[string]any)
+		if failure["message"] != "boom" {
+			t.Fatalf("failure error = %v", failure)
+		}
+	})
+
+	t.Run("degenerate substitution", func(t *testing.T) {
+		rec := &metrics.Record{ID: "req_2", Model: "model-a"}
+		var a sse.Analyzer
+		w := httptest.NewRecorder()
+		emitDegenerateResponses(w, &a, time.Now(), metrics.CodeTruncated, rec)
+		payloads := responsesFramePayloads(t, w.Body.String())
+		if len(payloads) != 2 || payloads[0]["type"] != "error" || payloads[1]["type"] != "response.failed" {
+			t.Fatalf("payloads = %v", payloads)
+		}
+		if payloads[0]["code"] != metrics.CodeTruncated {
+			t.Fatalf("degenerate error event = %v, want the specific code", payloads[0])
+		}
+		if _, ok := payloads[1]["sequence_number"]; !ok {
+			t.Fatalf("degenerate event is missing sequence_number: %v", payloads[1])
+		}
+		response, _ := payloads[1]["response"].(map[string]any)
+		if response == nil {
+			t.Fatalf("degenerate event has no response object: %v", payloads[1])
+		}
+		assertResponsesEnvelopeRequired(t, response)
+		if response["model"] != "model-a" {
+			t.Fatalf("degenerate model = %v", response["model"])
+		}
+	})
 }

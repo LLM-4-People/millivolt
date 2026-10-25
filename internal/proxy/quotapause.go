@@ -12,26 +12,25 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
-// isOpenAIWire is the single format predicate: it reports the neutral wire
-// fact whether a target format speaks the OpenAI-compatible wire - the
-// explicit "openai" spelling or the empty passthrough default. Every
-// openai-versus-other spelling decision composes it and nothing hand-spells
-// the pair: the quota pause keys on it (only these upstreams return the
-// insufficient_quota / insufficient_credits envelope family the pause is
-// defined on), overrideBodyWireFormat extends it with the
-// translated-anthropic target, and its negation gates the client-meta
-// format capture, the request-translate gate (which keeps the cursor
-// exclusion explicit - cursor's bidirectional translator owns its own
-// body) and both response-translation gates.
+// isOpenAIWire is the neutral format predicate: it reports whether a target
+// format speaks the OpenAI-compatible wire - the explicit "openai" spelling or
+// the empty passthrough default. It owns two gates: ensured tools (together
+// with a Chat inbound body) and the client-meta format capture (negated). The
+// quota pause uses isOpenAICompatibleWire below instead, because the Responses
+// wire returns the same insufficient_quota / insufficient_credits envelope
+// family. Request-body rewrite eligibility is a separate inbound-shape
+// decision (overrideBodyInbound in request.go), and translation itself uses
+// target.translate; nothing hand-spells the openai pair outside this owner.
 func isOpenAIWire(format string) bool {
 	return format == "" || format == "openai"
 }
 
 // isOpenAICompatibleWire extends the Chat-wire predicate with the Responses
-// wire for decisions that only depend on the OpenAI error/envelope family.
-// Body-shape decisions (ensured tools, request-override fields) keep using
-// isOpenAIWire: the Chat wire and the Responses wire are not interchangeable
-// request shapes.
+// wire for decisions that only depend on the OpenAI error/envelope family;
+// the quota pause is its only caller. Body-shape decisions keep their own
+// gates: ensured tools requires isOpenAIWire plus a Chat inbound body, and
+// request-override fields use overrideBodyInbound (Chat or Anthropic inbound)
+// because the Chat and Responses request shapes are not interchangeable.
 func isOpenAICompatibleWire(format string) bool {
 	return isOpenAIWire(format) || format == "openai-responses"
 }

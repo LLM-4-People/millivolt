@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -24,10 +26,10 @@ type responsesWireRequest struct {
 	Model             string              `json:"model"`
 	Input             json.RawMessage     `json:"input"`
 	Instructions      *string             `json:"instructions"`
-	MaxOutputTokens   *int                `json:"max_output_tokens"`
+	MaxOutputTokens   json.RawMessage     `json:"max_output_tokens"`
 	Temperature       *float64            `json:"temperature"`
 	TopP              *float64            `json:"top_p"`
-	TopLogprobs       *int                `json:"top_logprobs"`
+	TopLogprobs       json.RawMessage     `json:"top_logprobs"`
 	Tools             []responsesWireTool `json:"tools"`
 	ToolChoice        json.RawMessage     `json:"tool_choice"`
 	ParallelToolCalls *bool               `json:"parallel_tool_calls"`
@@ -42,45 +44,57 @@ type responsesWireRequest struct {
 		Format    json.RawMessage `json:"format"`
 		Verbosity string          `json:"verbosity"`
 	} `json:"text"`
-	Stream             bool              `json:"stream"`
-	Store              *bool             `json:"store"`
-	PreviousResponseID string            `json:"previous_response_id"`
-	Metadata           map[string]string `json:"metadata"`
-	ServiceTier        string            `json:"service_tier"`
-	User               string            `json:"user"`
-	Include            []string          `json:"include"`
-	Truncation         string            `json:"truncation"`
-	Background         bool              `json:"background"`
-	MaxToolCalls       *int              `json:"max_tool_calls"`
-	Conversation       json.RawMessage   `json:"conversation"`
-	Prompt             json.RawMessage   `json:"prompt"`
+	Stream               bool                   `json:"stream"`
+	Store                *bool                  `json:"store"`
+	PreviousResponseID   string                 `json:"previous_response_id"`
+	Metadata             boundedStringMap       `json:"metadata"`
+	ServiceTier          string                 `json:"service_tier"`
+	User                 string                 `json:"user"`
+	SafetyIdentifier     string                 `json:"safety_identifier"`
+	PromptCacheKey       string                 `json:"prompt_cache_key"`
+	Moderation           *ir.Moderation         `json:"moderation"`
+	PromptCacheOptions   *ir.PromptCacheOptions `json:"prompt_cache_options"`
+	PromptCacheRetention string                 `json:"prompt_cache_retention"`
+	Include              []string               `json:"include"`
+	Truncation           string                 `json:"truncation"`
+	Background           bool                   `json:"background"`
+	MaxToolCalls         json.RawMessage        `json:"max_tool_calls"`
+	Conversation         json.RawMessage        `json:"conversation"`
+	Prompt               json.RawMessage        `json:"prompt"`
+	ContextManagement    json.RawMessage        `json:"context_management"`
+	AccessPrograms       json.RawMessage        `json:"access_programs"`
+	StreamOptions        json.RawMessage        `json:"stream_options"`
 }
 
 type responsesWireTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"`
-	Strict      *bool           `json:"strict"`
+	Type           string          `json:"type"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description"`
+	Parameters     json.RawMessage `json:"parameters"`
+	Strict         *bool           `json:"strict"`
+	AllowedCallers json.RawMessage `json:"allowed_callers"`
+	Async          *bool           `json:"async"`
+	DeferLoading   *bool           `json:"defer_loading"`
+	OutputSchema   json.RawMessage `json:"output_schema"`
 }
 
 // responsesWireAnnotation is one output_text annotation. The flat url shape
 // is also the source field set for a Chat url_citation, so both decoders
 // share the same IR mapping.
 type responsesWireAnnotation struct {
-	Type       string `json:"type"`
-	URL        string `json:"url"`
-	Title      string `json:"title"`
-	StartIndex int    `json:"start_index"`
-	EndIndex   int    `json:"end_index"`
-	FileID     string `json:"file_id"`
-	Filename   string `json:"filename"`
-	Index      int    `json:"index"`
+	Type       string        `json:"type"`
+	URL        string        `json:"url"`
+	Title      string        `json:"title"`
+	StartIndex jsonnum.Int64 `json:"start_index"`
+	EndIndex   jsonnum.Int64 `json:"end_index"`
+	FileID     string        `json:"file_id"`
+	Filename   string        `json:"filename"`
 }
 
 type responsesWireItem struct {
 	Type    string          `json:"type"`
 	Role    string          `json:"role"`
+	Phase   string          `json:"phase"`
 	Content json.RawMessage `json:"content"`
 
 	CallID    string          `json:"call_id"`
@@ -105,8 +119,9 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	// Bound the collections the typed decode materializes. Input has its own
 	// check in decodeResponsesInput, before that function's item decode.
 	var bounds struct {
-		Tools   json.RawMessage `json:"tools"`
-		Include json.RawMessage `json:"include"`
+		Tools         json.RawMessage `json:"tools"`
+		Include       json.RawMessage `json:"include"`
+		StreamOptions json.RawMessage `json:"stream_options"`
 	}
 	if err := json.Unmarshal(body, &bounds); err != nil {
 		return nil, fmt.Errorf("parse responses request: %w", err)
@@ -115,6 +130,13 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		return nil, err
 	}
 	if err := checkWireArray(bounds.Include, "include", WireCollectionMax); err != nil {
+		return nil, err
+	}
+	// The member map is decoded below and one warning is added per present
+	// member. Bound it before that materializes: a request-sized object of
+	// tiny members otherwise expands into a body-sized map plus a body-sized
+	// warning join before the header sink cuts it.
+	if err := checkWireObject(bounds.StreamOptions, "stream_options", WireCollectionMax); err != nil {
 		return nil, err
 	}
 	var in responsesWireRequest
@@ -127,26 +149,45 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	if in.Background {
 		return nil, errors.New("responses request: background execution is not supported")
 	}
+	if len(in.ContextManagement) > 0 && !bytes.Equal(bytes.TrimSpace(in.ContextManagement), []byte("null")) {
+		// Compaction is server-side conversation state. The proxy is
+		// stateless, so honoring it is impossible and silently dropping it
+		// would change the model's context. Reject before any upstream call.
+		return nil, errors.New("responses request: context_management is not supported")
+	}
 	if len(in.Conversation) > 0 && !bytes.Equal(bytes.TrimSpace(in.Conversation), []byte("null")) {
 		return nil, errors.New("responses request: conversation is not supported")
 	}
 	if len(in.Prompt) > 0 && !bytes.Equal(bytes.TrimSpace(in.Prompt), []byte("null")) {
 		return nil, errors.New("responses request: prompt templates are not supported")
 	}
+	maxOutputTokens, err := jsonnum.OptionalInt(in.MaxOutputTokens, "max_output_tokens")
+	if err != nil {
+		return nil, fmt.Errorf("responses request: %w", err)
+	}
+	topLogprobs, err := jsonnum.OptionalInt(in.TopLogprobs, "top_logprobs")
+	if err != nil {
+		return nil, fmt.Errorf("responses request: %w", err)
+	}
 	req := &ir.Request{
-		Model:              in.Model,
-		Instructions:       in.Instructions,
-		MaxOutputTokens:    in.MaxOutputTokens,
-		Temperature:        in.Temperature,
-		TopP:               in.TopP,
-		TopLogprobs:        in.TopLogprobs,
-		ParallelToolCalls:  in.ParallelToolCalls,
-		Stream:             in.Stream,
-		Store:              in.Store,
-		PreviousResponseID: in.PreviousResponseID,
-		Metadata:           in.Metadata,
-		ServiceTier:        in.ServiceTier,
-		User:               in.User,
+		Model:                in.Model,
+		Instructions:         in.Instructions,
+		MaxOutputTokens:      maxOutputTokens,
+		Temperature:          in.Temperature,
+		TopP:                 in.TopP,
+		TopLogprobs:          topLogprobs,
+		ParallelToolCalls:    in.ParallelToolCalls,
+		Stream:               in.Stream,
+		Store:                in.Store,
+		PreviousResponseID:   in.PreviousResponseID,
+		Metadata:             in.Metadata.values,
+		ServiceTier:          in.ServiceTier,
+		User:                 in.User,
+		SafetyIdentifier:     in.SafetyIdentifier,
+		PromptCacheKey:       in.PromptCacheKey,
+		Moderation:           in.Moderation,
+		PromptCacheOptions:   in.PromptCacheOptions,
+		PromptCacheRetention: in.PromptCacheRetention,
 	}
 	if len(in.Include) > 0 {
 		otherInclude := false
@@ -183,15 +224,57 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		if warn != "" {
 			req.Warnings.Add(ir.WarningDropped, "text.format", warn)
 		}
-		if in.Text.Verbosity != "" {
-			req.Warnings.Add(ir.WarningDropped, "text.verbosity", "no cross-protocol equivalent")
-		}
+		req.Verbosity = in.Text.Verbosity
 	}
 	if in.Truncation != "" && in.Truncation != "disabled" {
 		req.Warnings.Add(ir.WarningDropped, "truncation", "server-side truncation is not translated")
 	}
-	if in.MaxToolCalls != nil {
+	maxToolCalls, err := jsonnum.OptionalInt(in.MaxToolCalls, "max_tool_calls")
+	if err != nil {
+		return nil, fmt.Errorf("responses request: %w", err)
+	}
+	if maxToolCalls != nil {
 		req.Warnings.Add(ir.WarningDropped, "max_tool_calls", "no cross-protocol equivalent")
+	}
+	if wireValuePresent(in.AccessPrograms) {
+		req.Warnings.Add(ir.WarningDropped, "access_programs", "provider access programs have no cross-protocol equivalent")
+	}
+	if wireValuePresent(in.StreamOptions) {
+		// stream_options is an object. A non-object or a wrong-typed
+		// include_obfuscation is malformed input, not a translatable option:
+		// fail closed at the trust boundary. Every other present member is a
+		// loss the target cannot carry, so record it (reject mode turns the
+		// warning into a 400). Names are visited in sorted order so warning
+		// order is deterministic.
+		var options map[string]json.RawMessage
+		if err := json.Unmarshal(in.StreamOptions, &options); err != nil {
+			return nil, errors.New("responses request: stream_options must be a JSON object")
+		}
+		names := make([]string, 0, len(options))
+		for name := range options {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			raw := options[name]
+			if !wireValuePresent(raw) {
+				continue
+			}
+			if name == "include_obfuscation" {
+				var include bool
+				if err := json.Unmarshal(raw, &include); err != nil {
+					return nil, errors.New("responses request: stream_options.include_obfuscation must be a boolean")
+				}
+				// Obfuscation is on by default; false disables it and needs no
+				// equivalent on the target. Only true is a loss.
+				if include {
+					req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation",
+						"provider-generated stream obfuscation cannot be translated")
+				}
+				continue
+			}
+			req.Warnings.Add(ir.WarningDropped, "stream_options."+name, "stream option has no cross-protocol equivalent")
+		}
 	}
 	if len(in.Tools) > 0 {
 		tools, warns, err := decodeResponsesTools(in.Tools)
@@ -219,8 +302,16 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 }
 
 func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error) {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, nil, errors.New("responses request: input is required")
+	if len(raw) == 0 {
+		// The Responses reference marks input optional. An absent field means
+		// no messages; the target encoders then decide from instructions (a
+		// Chat system message) or fail closed on an empty conversation.
+		return nil, nil, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		// Explicit null is not a valid input value even though the field is
+		// optional.
+		return nil, nil, errors.New("responses request: input must not be null")
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
@@ -235,19 +326,29 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 	// Reasoning items carry a summary array that the typed item decode would
 	// materialize unbounded. The enclosing item array is bounded above; the
 	// summaries also share one aggregate budget so thousands of items at the
-	// per-item cap cannot multiply.
+	// per-item cap cannot multiply. Every item's content and function-call
+	// output share one part and annotation budget for the same reason.
 	var itemBounds []struct {
 		Summary json.RawMessage `json:"summary"`
+		Content json.RawMessage `json:"content"`
+		Output  json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(raw, &itemBounds); err != nil {
 		return nil, nil, fmt.Errorf("responses input: %w", err)
 	}
 	summaryTotal := 0
-	for _, item := range itemBounds {
+	var nested responsesNestedBudget
+	for i, item := range itemBounds {
 		if err := checkWireArray(item.Summary, "input.summary", metrics.ContentPartMax); err != nil {
 			return nil, nil, err
 		}
 		if err := addWireArray(&summaryTotal, item.Summary, "input.summary", WireNestedCollectionMax); err != nil {
+			return nil, nil, err
+		}
+		if err := checkResponsesContent(&nested, item.Content, fmt.Sprintf("input[%d].content", i)); err != nil {
+			return nil, nil, err
+		}
+		if err := checkResponsesContent(&nested, item.Output, fmt.Sprintf("input[%d].output", i)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -273,7 +374,24 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 		}
 		out = append(out, ir.Message{Role: ir.RoleUser, Content: []ir.Block{block}})
 	}
+	phaseSeen := false
+	ids := newRequestToolIDs()
 	for i, item := range items {
+		if item.Type != "function_call" {
+			continue
+		}
+		id := responsesFunctionCallItemID(item)
+		if id == "" {
+			continue
+		}
+		if err := ids.preReserve(id); err != nil {
+			return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
+		}
+	}
+	for i, item := range items {
+		if item.Phase != "" {
+			phaseSeen = true
+		}
 		typ := item.Type
 		if typ == "" && item.Role != "" {
 			typ = "message"
@@ -297,7 +415,7 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 				out = append(out, ir.Message{Role: role, Content: blocks})
 			}
 		case "function_call":
-			call, w, err := decodeResponsesFunctionCall(item)
+			call, w, err := decodeResponsesFunctionCall(item, false, ids)
 			if err != nil {
 				return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
 			}
@@ -357,6 +475,11 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 			warns.Add(ir.WarningDropped, "input."+typ, "unsupported input item")
 		}
 	}
+	if phaseSeen {
+		// One warning per request: the phase is a per-item hint, and
+		// repeating it for every item would amplify the header.
+		warns.Add(ir.WarningDropped, "input.phase", "input item phase has no cross-protocol equivalent")
+	}
 	return out, warns, nil
 }
 
@@ -388,7 +511,8 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 			Data   string `json:"data"`
 			Format string `json:"format"`
 		} `json:"input_audio"`
-		Annotations []responsesWireAnnotation `json:"annotations"`
+		Annotations           []responsesWireAnnotation `json:"annotations"`
+		PromptCacheBreakpoint json.RawMessage           `json:"prompt_cache_breakpoint"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, nil, err
@@ -396,15 +520,27 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 	var (
 		out   []ir.Block
 		warns ir.Warnings
+		// textOffset is the running rune length of the text parts before the
+		// current one. A Responses url_citation span is message-relative while
+		// the IR citation is block-relative.
+		textOffset int
 	)
 	for _, p := range parts {
+		if rawPresent(p.PromptCacheBreakpoint) {
+			warns.Add(ir.WarningDropped, "prompt_cache_breakpoint", "per-part prompt_cache_breakpoint is not mapped")
+		}
 		switch p.Type {
 		case "input_text", "output_text", "text", "reasoning_text":
 			block := ir.TextBlock(p.Text)
-			citations, w := decodeResponsesAnnotations(p.Annotations)
+			partRunes := utf8.RuneCountInString(p.Text)
+			citations, w, err := decodeResponsesAnnotations(p.Annotations, textOffset, partRunes)
+			if err != nil {
+				return nil, nil, err
+			}
 			block.Citations = citations
 			warns = append(warns, w...)
 			out = append(out, block)
+			textOffset += partRunes
 		case "refusal":
 			out = append(out, ir.Block{Type: ir.BlockRefusal, Refusal: p.Refusal})
 		case "input_image":
@@ -417,6 +553,19 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 				Filename: p.Filename, Detail: p.Detail,
 			}
 			normalizeFileData(file)
+			if file.FileData != "" && file.MediaType == "" {
+				file.MediaType = inferFileMediaType(file)
+			}
+			if file.FileData != "" && file.MediaType == "" {
+				// The bytes cannot be typed for a target that needs a media
+				// type. Keep a file id or URL on the same part; without one
+				// the block has no payload left and is dropped.
+				warns.Add(ir.WarningDropped, "content.file_data", "inline file data has no recognizable media type")
+				file.FileData = ""
+				if file.FileID == "" && file.FileURL == "" {
+					continue
+				}
+			}
 			out = append(out, ir.Block{Type: ir.BlockFile, File: file})
 		case "input_audio":
 			if p.InputAudio == nil {
@@ -434,8 +583,11 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 
 // decodeResponsesAnnotations maps the annotation shapes the IR can represent.
 // A url_citation becomes a citation on its text block; a type whose source
-// identity cannot be carried is reported rather than silently discarded.
-func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir.Warnings) {
+// identity cannot be carried is reported rather than silently discarded. The
+// source span is message-relative, so offset (the rune length of preceding text
+// parts) is subtracted and a span outside this part is dropped instead of
+// emitting a negative or out-of-range block span.
+func decodeResponsesAnnotations(in []responsesWireAnnotation, offset, partRunes int) ([]ir.Citation, ir.Warnings, error) {
 	var (
 		out   []ir.Citation
 		warns ir.Warnings
@@ -447,9 +599,23 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 				warns.Add(ir.WarningDropped, "annotations.url_citation", "url_citation has no url")
 				continue
 			}
+			start, err := intFromJSONIndex("url_citation.start_index", a.StartIndex)
+			if err != nil {
+				return nil, nil, err
+			}
+			end, err := intFromJSONIndex("url_citation.end_index", a.EndIndex)
+			if err != nil {
+				return nil, nil, err
+			}
+			start -= offset
+			end -= offset
+			if start < 0 || end < start || end > partRunes {
+				warns.Add(ir.WarningDropped, "annotations.span", "url_citation span falls outside its text part")
+				continue
+			}
 			out = append(out, ir.Citation{
 				Type: "url_citation", URL: a.URL, Title: a.Title,
-				StartIndex: a.StartIndex, EndIndex: a.EndIndex,
+				StartIndex: start, EndIndex: end,
 			})
 		case "":
 			warns.Add(ir.WarningDropped, "annotations", "annotation has no type")
@@ -457,29 +623,48 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation) ([]ir.Citation, ir
 			warns.Add(ir.WarningDropped, "annotations."+a.Type, "annotation has no cross-protocol equivalent")
 		}
 	}
-	return out, warns
+	return out, warns, nil
 }
 
-func decodeResponsesFunctionCall(item responsesWireItem) (*ir.ToolCall, ir.Warnings, error) {
+// responsesFunctionCallItemID returns the id a function-call item references:
+// call_id when present, otherwise the item id.
+func responsesFunctionCallItemID(item responsesWireItem) string {
+	if item.CallID != "" {
+		return item.CallID
+	}
+	return item.ID
+}
+
+// decodeResponsesFunctionCall decodes one function-call item. requireEvidence
+// rejects a missing, null or whitespace argument value; the response decoder
+// sets it for a non-clean terminal, while request history keeps the empty
+// object.
+func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, ids *requestToolIDs) (*ir.ToolCall, ir.Warnings, error) {
 	var warns ir.Warnings
 	if item.Name == "" {
 		return nil, nil, errors.New("function_call has no name")
 	}
-	args, err := parseToolArguments(item.Arguments)
-	if err != nil {
+	if err := checkNativeIdentity("tool name", item.Name); err != nil {
 		return nil, nil, err
 	}
-	id := item.CallID
-	if id == "" {
-		id = item.ID
-	}
+	id := responsesFunctionCallItemID(item)
 	if id == "" {
 		return nil, nil, errors.New("function_call has no call_id")
 	}
 	if err := checkNativeIdentity("tool id", id); err != nil {
 		return nil, nil, err
 	}
-	if err := checkNativeIdentity("tool name", item.Name); err != nil {
+	if err := ids.reserve(id); err != nil {
+		return nil, nil, err
+	}
+	// Structural identity failures stay fatal even when the source also
+	// omitted the argument value; only a well-formed call can be dropped for
+	// unusable arguments.
+	if requireEvidence && toolArgumentsMissing(item.Arguments) {
+		return nil, nil, errToolArgumentsMissing
+	}
+	args, err := parseToolArguments(item.Arguments)
+	if err != nil {
 		return nil, nil, err
 	}
 	return &ir.ToolCall{ID: id, Name: item.Name, Arguments: args}, warns, nil
@@ -493,6 +678,22 @@ func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error
 	for i, t := range in {
 		if t.Type != "" && t.Type != "function" {
 			return nil, nil, fmt.Errorf("responses tool %d: provider-defined type %q has no cross-protocol equivalent", i, t.Type)
+		}
+		present, err := toolAllowedCallers(t.AllowedCallers)
+		if err != nil {
+			return nil, nil, fmt.Errorf("responses tool %d: %w", i, err)
+		}
+		if present {
+			warns.Add(ir.WarningDropped, "tool.allowed_callers", "only direct invocation is representable")
+		}
+		if t.Async != nil && *t.Async {
+			warns.Add(ir.WarningDropped, "tool.async", "asynchronous execution has no cross-protocol equivalent")
+		}
+		if t.DeferLoading != nil && *t.DeferLoading {
+			warns.Add(ir.WarningDropped, "tool.defer_loading", "deferred tool loading has no cross-protocol equivalent")
+		}
+		if wireValuePresent(t.OutputSchema) {
+			warns.Add(ir.WarningDropped, "tool.output_schema", "tool output schemas have no cross-protocol equivalent")
 		}
 		if strings.TrimSpace(t.Name) == "" {
 			return nil, nil, fmt.Errorf("responses tool %d: name is required", i)
@@ -575,6 +776,12 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
 	}
+	if err := validateResponsesToolVocabulary(req); err != nil {
+		return nil, err
+	}
+	if err := validateResponseFormatName("responses", req.ResponseFormat); err != nil {
+		return nil, err
+	}
 	if len(req.Stop) > 0 {
 		req.Warnings.Add(ir.WarningDropped, "stop", "Responses has no stop sequences")
 	}
@@ -601,10 +808,17 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 			if req.Reasoning.Effort != "" {
 				req.Warnings.Add(ir.WarningApproximated, "reasoning.effort", "disabled thinking supersedes the requested effort")
 			}
+			if req.Reasoning.BudgetTokens != nil {
+				req.Warnings.Add(ir.WarningDropped, "reasoning.budget_tokens", "disabled thinking supersedes the requested budget")
+			}
 			req.Reasoning.Effort = "none"
-		} else if req.Reasoning.BudgetTokens != nil && req.Reasoning.Effort == "" {
-			req.Reasoning.Effort = effortFromBudget(*req.Reasoning.BudgetTokens)
-			req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "mapped to reasoning.effort")
+		} else if req.Reasoning.BudgetTokens != nil {
+			if req.Reasoning.Effort == "" {
+				req.Reasoning.Effort = effortFromBudget(*req.Reasoning.BudgetTokens)
+				req.Warnings.Add(ir.WarningApproximated, "reasoning.budget_tokens", "mapped to reasoning.effort")
+			} else {
+				req.Warnings.Add(ir.WarningDropped, "reasoning.budget_tokens", "reasoning.effort takes precedence over the budget")
+			}
 		}
 		if req.Reasoning.Display != "" {
 			req.Warnings.Add(ir.WarningDropped, "reasoning.display", "Responses has no display mode")
@@ -624,7 +838,16 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 		out["instructions"] = *instructions
 	}
 	if req.MaxOutputTokens != nil {
-		out["max_output_tokens"] = *req.MaxOutputTokens
+		// CreateResponse.max_output_tokens has a documented minimum of 16
+		// while Chat max_tokens and Anthropic max_tokens allow smaller values
+		// (including 0). Clamp up and report the approximation; reject-mode
+		// translation turns the warning into a 400.
+		limit := *req.MaxOutputTokens
+		if limit < 16 {
+			limit = 16
+			req.Warnings.Add(ir.WarningApproximated, "max_output_tokens", "Responses requires at least 16")
+		}
+		out["max_output_tokens"] = limit
 	}
 	if req.Temperature != nil {
 		out["temperature"] = *req.Temperature
@@ -662,8 +885,15 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 			out["reasoning"] = r
 		}
 	}
-	if req.ResponseFormat != nil {
-		out["text"] = map[string]any{"format": encodeResponsesFormat(req.ResponseFormat)}
+	if req.ResponseFormat != nil || req.Verbosity != "" {
+		text := map[string]any{}
+		if req.ResponseFormat != nil {
+			text["format"] = encodeResponsesFormat(req.ResponseFormat)
+		}
+		if req.Verbosity != "" {
+			text["verbosity"] = req.Verbosity
+		}
+		out["text"] = text
 	}
 	if req.Stream {
 		out["stream"] = true
@@ -684,6 +914,21 @@ func EncodeResponsesRequest(req *ir.Request) ([]byte, error) {
 	}
 	if req.User != "" {
 		out["user"] = req.User
+	}
+	if req.SafetyIdentifier != "" {
+		out["safety_identifier"] = req.SafetyIdentifier
+	}
+	if req.PromptCacheKey != "" {
+		out["prompt_cache_key"] = req.PromptCacheKey
+	}
+	if req.Moderation != nil {
+		out["moderation"] = req.Moderation
+	}
+	if req.PromptCacheOptions != nil {
+		out["prompt_cache_options"] = req.PromptCacheOptions
+	}
+	if req.PromptCacheRetention != "" {
+		out["prompt_cache_retention"] = req.PromptCacheRetention
 	}
 	if req.Logprobs != nil && *req.Logprobs {
 		out["include"] = []string{"message.output_text.logprobs"}
@@ -768,9 +1013,16 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 					if b.CacheControl != nil {
 						req.Warnings.Add(ir.WarningDropped, "cache_control", "Responses has no cache breakpoints")
 					}
-					out = append(out, encodeResponsesFunctionCall(b.ToolCall))
+					out = append(out, encodeResponsesFunctionCall(b.ToolCall, ""))
 				case ir.BlockText, ir.BlockRefusal:
 					textBlocks = append(textBlocks, b)
+				default:
+					// OutputMessageContent is text/refusal only, so an
+					// assistant media block cannot ride the same message
+					// without producing an invalid part. Report the drop
+					// instead of losing it silently.
+					req.Warnings.Add(ir.WarningDropped, "assistant."+string(b.Type),
+						"the Responses assistant input message accepts text, refusal, reasoning and tool calls only")
 				}
 			}
 			if len(textBlocks) > 0 {
@@ -825,20 +1077,32 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 	out := make([]map[string]any, 0, len(blocks))
 	for _, b := range blocks {
 		if b.CacheControl != nil && warns != nil {
-			warns.Add(ir.WarningDropped, "cache_control", "Responses input has no cache breakpoints")
+			warns.Add(ir.WarningDropped, "cache_control", "per-part prompt_cache_breakpoint is not mapped")
 		}
 		if len(b.Citations) > 0 && warns != nil {
 			warns.Add(ir.WarningDropped, "citations", "Responses input has no citations")
 		}
 		switch b.Type {
 		case ir.BlockText:
-			textType := "input_text"
-			if role == ir.RoleAssistant {
-				textType = "output_text"
-			}
-			out = append(out, map[string]any{"type": textType, "text": b.Text})
+			// This encoder serves the request input only. EasyInputMessage's
+			// content union accepts input_text for every role; output_text is
+			// an OutputMessage part and would make an assistant input item
+			// match none of the valid input variants.
+			out = append(out, map[string]any{"type": "input_text", "text": b.Text})
 		case ir.BlockRefusal:
-			out = append(out, map[string]any{"type": "refusal", "refusal": b.Refusal})
+			// The request input union is input_text, input_image and
+			// input_file; refusal is an OutputMessage part, and this encoder
+			// emits a minimal EasyInputMessage with no id or status. Send the
+			// refusal text as input text and report that the distinction is
+			// lost instead of emitting an input part no schema accepts.
+			if b.Refusal == "" {
+				continue
+			}
+			out = append(out, map[string]any{"type": "input_text", "text": b.Refusal})
+			if warns != nil {
+				warns.AddOnce(ir.WarningDropped, "content.refusal",
+					"Responses input has no refusal part; the refusal text is sent as input text")
+			}
 		case ir.BlockImage:
 			part := map[string]any{"type": "input_image"}
 			if b.Image.FileID != "" {
@@ -871,13 +1135,39 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 			}
 			out = append(out, part)
 		case ir.BlockAudio:
-			out = append(out, map[string]any{
-				"type":        "input_audio",
-				"input_audio": map[string]any{"data": b.Audio.Data, "format": b.Audio.Format},
-			})
+			// The current Responses InputContent union is text, image and
+			// file only; an input_audio part would be rejected upstream.
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "content.input_audio", "Responses input has no audio part")
+			}
+		default:
+			// The content-part union has no representation for a tool call,
+			// reasoning or another structured block. Report the loss instead
+			// of emitting a silently shortened message; the assistant branch
+			// already carries its own representable blocks explicitly.
+			if warns != nil {
+				field := string(b.Type)
+				if b.Type == ir.BlockRedactedReasoning {
+					field = "reasoning"
+				}
+				warns.Add(ir.WarningDropped, "content."+field, responsesContentRoleDetail(role))
+			}
 		}
 	}
 	return out
+}
+
+// responsesContentRoleDetail describes what a Responses content part can carry
+// for one role, so a dropped block's warning names the role-specific reason.
+func responsesContentRoleDetail(role ir.Role) string {
+	switch role {
+	case ir.RoleAssistant:
+		return "assistant content accepts text only"
+	case ir.RoleSystem, ir.RoleDeveloper:
+		return "system and developer content accepts text only"
+	default:
+		return "user content accepts text, images, files and audio only"
+	}
 }
 
 func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]any {
@@ -897,10 +1187,11 @@ func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]an
 	if r.Text != "" && len(summary) == 0 {
 		summary = append(summary, map[string]any{"type": "summary_text", "text": r.Text})
 	}
-	item := map[string]any{"type": "reasoning", "summary": summary}
-	if r.ID != "" {
-		item["id"] = r.ID
+	id := r.ID
+	if id == "" {
+		id = newResponsesItemID(ir.BlockReasoning)
 	}
+	item := map[string]any{"type": "reasoning", "summary": summary, "id": id}
 	if r.Encrypted != "" {
 		if r.Provider == "" || r.Provider == ir.Responses {
 			item["encrypted_content"] = r.Encrypted
@@ -913,14 +1204,20 @@ func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]an
 	return item
 }
 
-func encodeResponsesFunctionCall(c *ir.ToolCall) map[string]any {
+// encodeResponsesFunctionCall renders one function-call item. A response
+// output item carries its lifecycle status; a request-history item omits it.
+func encodeResponsesFunctionCall(c *ir.ToolCall, status string) map[string]any {
 	args := c.Arguments
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	return map[string]any{
+	item := map[string]any{
 		"type": "function_call", "call_id": c.ID, "name": c.Name, "arguments": string(args),
 	}
+	if status != "" {
+		item["status"] = status
+	}
+	return item
 }
 
 func encodeResponsesTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
@@ -978,17 +1275,21 @@ func encodeResponsesFormat(rf *ir.ResponseFormat) map[string]any {
 }
 
 type responsesWireResponse struct {
-	ID                string              `json:"id"`
-	Object            string              `json:"object"`
-	CreatedAt         int64               `json:"created_at"`
-	Status            string              `json:"status"`
-	Error             *responsesWireError `json:"error"`
+	ID        string              `json:"id"`
+	Object    string              `json:"object"`
+	CreatedAt jsonnum.UnixSeconds `json:"created_at"`
+	Status    string              `json:"status"`
+	// Error is raw because the shared envelope parser deliberately accepts a
+	// string value and a numeric code; a typed object would reject those
+	// shapes before the proxy can record the provider's failure.
+	Error             json.RawMessage `json:"error"`
 	IncompleteDetails *struct {
 		Reason string `json:"reason"`
 	} `json:"incomplete_details"`
 	Instructions       json.RawMessage     `json:"instructions"`
-	MaxOutputTokens    *int                `json:"max_output_tokens"`
 	Model              string              `json:"model"`
+	Metadata           boundedStringMap    `json:"metadata"`
+	ServiceTier        string              `json:"service_tier"`
 	Output             []responsesWireItem `json:"output"`
 	ParallelToolCalls  *bool               `json:"parallel_tool_calls"`
 	PreviousResponseID *string             `json:"previous_response_id"`
@@ -1002,41 +1303,33 @@ type responsesWireResponse struct {
 	Usage              *responsesWireUsage `json:"usage"`
 }
 
-type responsesWireError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Param   string `json:"param"`
-	Type    string `json:"type"`
-}
-
 type responsesWireUsage struct {
-	InputTokens        int64 `json:"input_tokens"`
-	OutputTokens       int64 `json:"output_tokens"`
-	TotalTokens        int64 `json:"total_tokens"`
+	InputTokens        jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens       jsonnum.Int64 `json:"output_tokens"`
+	TotalTokens        jsonnum.Int64 `json:"total_tokens"`
 	InputTokensDetails *struct {
-		CachedTokens     int64 `json:"cached_tokens"`
-		CacheWriteTokens int64 `json:"cache_write_tokens"`
+		CachedTokens     jsonnum.Int64 `json:"cached_tokens"`
+		CacheWriteTokens jsonnum.Int64 `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	OutputTokensDetails *struct {
-		ReasoningTokens int64 `json:"reasoning_tokens"`
+		ReasoningTokens jsonnum.Int64 `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
 }
 
-// DecodeResponsesResponse converts one non-streaming Responses body into the
-// canonical response.
-func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
-	if !utf8.Valid(body) {
-		return nil, errors.New("responses response body is not valid UTF-8")
-	}
-	// Bound the output array before the typed decode materializes it.
+// checkResponsesResponseBounds preflights the array shapes a Responses
+// response materializes before the typed decode. It is shared by the
+// non-streaming decoder and the streaming created/terminal branches so one
+// large document cannot amplify into a large typed allocation in either path.
+// The probe only retains raw members; it stops at the first over-bound array.
+func checkResponsesResponseBounds(body []byte) error {
 	var probe struct {
 		Output json.RawMessage `json:"output"`
 	}
 	if err := json.Unmarshal(body, &probe); err != nil {
-		return nil, fmt.Errorf("parse responses response: %w", err)
+		return fmt.Errorf("parse responses response: %w", err)
 	}
 	if !metrics.ContentPartsWithinLimit(probe.Output) {
-		return nil, fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
+		return fmt.Errorf("responses output exceeds %d items", metrics.ContentPartMax)
 	}
 	// A reasoning output item's summary array is materialized by the typed
 	// item decode; the bounded output array keeps this probe slice small. An
@@ -1045,19 +1338,36 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	if len(probe.Output) > 0 && !bytes.Equal(bytes.TrimSpace(probe.Output), []byte("null")) {
 		var itemBounds []struct {
 			Summary json.RawMessage `json:"summary"`
+			Content json.RawMessage `json:"content"`
 		}
 		if err := json.Unmarshal(probe.Output, &itemBounds); err != nil {
-			return nil, fmt.Errorf("parse responses response: %w", err)
+			return fmt.Errorf("parse responses response: %w", err)
 		}
 		summaryTotal := 0
-		for _, item := range itemBounds {
+		var nested responsesNestedBudget
+		for i, item := range itemBounds {
 			if err := checkWireArray(item.Summary, "output.summary", metrics.ContentPartMax); err != nil {
-				return nil, err
+				return err
 			}
 			if err := addWireArray(&summaryTotal, item.Summary, "output.summary", WireNestedCollectionMax); err != nil {
-				return nil, err
+				return err
+			}
+			if err := checkResponsesContent(&nested, item.Content, fmt.Sprintf("output[%d].content", i)); err != nil {
+				return err
 			}
 		}
+	}
+	return nil
+}
+
+// DecodeResponsesResponse converts one non-streaming Responses body into the
+// canonical response.
+func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
+	if !utf8.Valid(body) {
+		return nil, errors.New("responses response body is not valid UTF-8")
+	}
+	if err := checkResponsesResponseBounds(body); err != nil {
+		return nil, err
 	}
 	var in responsesWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {
@@ -1082,10 +1392,12 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		return nil, fmt.Errorf("responses response is not terminal (status %q)", in.Status)
 	}
 	resp := &ir.Response{
-		ID:      in.ID,
-		Model:   in.Model,
-		Created: in.CreatedAt,
-		Status:  in.Status,
+		ID:          in.ID,
+		Model:       in.Model,
+		Created:     int64(in.CreatedAt),
+		Status:      in.Status,
+		Metadata:    in.Metadata.values,
+		ServiceTier: in.ServiceTier,
 	}
 	if in.Usage != nil {
 		resp.Usage = responsesUsageToIR(in.Usage)
@@ -1095,11 +1407,11 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	}
 	if in.Status == "failed" {
 		e := &ir.Error{Message: "upstream response failed"}
-		if in.Error != nil {
-			e.Code = in.Error.Code
-			e.Type = in.Error.Type
-			if in.Error.Message != "" {
-				e.Message = in.Error.Message
+		if typ, code, msg := metrics.ParseErrorComponents(in.Error); typ != "" || code != "" || msg != "" {
+			bounded := boundedProviderError(typ, code, msg)
+			e.Type, e.Code = bounded.Type, bounded.Code
+			if msg != "" {
+				e.Message = bounded.Message
 			}
 		}
 		resp.Error = e
@@ -1110,31 +1422,44 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 	// through the shared decoy-aware parser: an empty error object is not a
 	// failure, while a string or numeric-code envelope still classifies.
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
-		resp.Error = &ir.Error{Type: typ, Code: code, Message: msg}
+		resp.Error = boundedProviderError(typ, code, msg)
 		resp.Finish = ir.FinishError
 		return resp, nil
 	}
+	// A completed response with no incomplete reason owns a finished turn. Any
+	// other terminal can carry the prefix of a function-call argument value the
+	// source never completed; drop only that call and keep the source terminal.
+	cleanTerminal := in.Status == "completed" && (in.IncompleteDetails == nil || in.IncompleteDetails.Reason == "")
+	outputPhaseSeen := false
 	for i, item := range in.Output {
+		if item.Phase != "" {
+			outputPhaseSeen = true
+		}
 		typ := item.Type
 		if typ == "" && item.Role != "" {
 			typ = "message"
 		}
-		switch typ {
-		case "message":
+		switch {
+		case typ == "message":
 			blocks, warns, err := decodeResponsesContent(item.Content, ir.RoleAssistant)
 			if err != nil {
 				return nil, fmt.Errorf("responses output item %d: %w", i, err)
 			}
 			resp.Blocks = append(resp.Blocks, blocks...)
 			resp.Warnings = append(resp.Warnings, warns...)
-		case "function_call":
-			call, warns, err := decodeResponsesFunctionCall(item)
+		case typ == "function_call":
+			call, warns, err := decodeResponsesFunctionCall(item, !cleanTerminal, nil)
 			if err != nil {
+				if !cleanTerminal && isToolArgumentsError(err) {
+					resp.Warnings.AddOnce(ir.WarningDropped, "function_call.arguments",
+						"the source stopped before the function call arguments were complete")
+					continue
+				}
 				return nil, fmt.Errorf("responses output item %d: %w", i, err)
 			}
 			resp.Blocks = append(resp.Blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 			resp.Warnings = append(resp.Warnings, warns...)
-		case "reasoning":
+		case typ == "reasoning":
 			if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
 				return nil, err
 			}
@@ -1161,9 +1486,22 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 				ID: item.ID, Text: reasoningText.String(), Summary: summary,
 				Encrypted: item.EncryptedContent, Provider: ir.Responses,
 			}})
+		case sse.ResponsesToolCallItem(typ):
+			// A provider-executed tool item (custom, local shell, MCP,
+			// computer, ...) has no cross-protocol block. It is still tool
+			// activity: count it so the finish is tool_calls and the record
+			// does not bill its argument output as answer generation. The
+			// translated wire keeps the existing dropped-item warning.
+			resp.ProviderToolCalls++
+			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
 		default:
 			resp.Warnings.Add(ir.WarningDropped, "output."+typ, "provider-specific item has no cross-protocol equivalent")
 		}
+	}
+	if outputPhaseSeen {
+		// One warning per response: phase is a per-item hint, and repeating
+		// it for every item would amplify the warning header.
+		resp.Warnings.Add(ir.WarningDropped, "output.phase", "output item phase has no cross-protocol equivalent")
 	}
 	if in.IncompleteDetails != nil && in.IncompleteDetails.Reason != "" {
 		resp.IncompleteReason = in.IncompleteDetails.Reason
@@ -1181,7 +1519,7 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		resp.Finish = ir.FinishOther
 	} else if in.Status == "cancelled" {
 		resp.Finish = ir.FinishCancelled
-	} else if hasToolCall(resp.Blocks) {
+	} else if hasToolCall(resp.Blocks) || resp.ProviderToolCalls > 0 {
 		resp.Finish = ir.FinishToolCalls
 	} else {
 		resp.Finish = ir.FinishStop
@@ -1200,18 +1538,185 @@ func hasToolCall(blocks []ir.Block) bool {
 
 func responsesUsageToIR(in *responsesWireUsage) ir.Usage {
 	u := ir.Usage{
-		InputTokens:  in.InputTokens,
-		OutputTokens: in.OutputTokens,
-		TotalTokens:  in.TotalTokens,
+		InputTokens:  int64(in.InputTokens),
+		OutputTokens: int64(in.OutputTokens),
+		TotalTokens:  int64(in.TotalTokens),
 	}
 	if in.InputTokensDetails != nil {
-		u.CacheReadTokens = in.InputTokensDetails.CachedTokens
-		u.CacheWriteTokens = in.InputTokensDetails.CacheWriteTokens
+		u.CacheReadTokens = int64(in.InputTokensDetails.CachedTokens)
+		u.CacheWriteTokens = int64(in.InputTokensDetails.CacheWriteTokens)
 	}
 	if in.OutputTokensDetails != nil {
-		u.ReasoningTokens = in.OutputTokensDetails.ReasoningTokens
+		u.ReasoningTokens = int64(in.OutputTokensDetails.ReasoningTokens)
 	}
 	return u
+}
+
+// ResponsesEnvelope describes one full Responses response object. The stream
+// encoder, the non-stream encoder and the proxy's synthetic error frames all
+// build their response from this owner, so a required envelope field cannot
+// drift between them.
+type ResponsesEnvelope struct {
+	ID               string
+	Model            string
+	Created          int64
+	Status           string
+	IncompleteReason string
+	Output           []any
+	Error            *ir.Error
+	Usage            ir.Usage
+	Metadata         map[string]string
+	ServiceTier      string
+}
+
+// NewResponsesEnvelope builds the complete response object required by the
+// Responses schema. access_programs, metadata, error, incomplete_details,
+// instructions, temperature and top_p are required keys even when null.
+func NewResponsesEnvelope(env ResponsesEnvelope) (map[string]any, error) {
+	created := env.Created
+	if created == 0 {
+		created = time.Now().Unix()
+	}
+	status := env.Status
+	if status == "" {
+		status = "completed"
+	}
+	output := env.Output
+	if output == nil {
+		output = []any{}
+	}
+	metadata := env.Metadata
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
+	out := map[string]any{
+		"id":                   env.ID,
+		"object":               "response",
+		"access_programs":      nil,
+		"created_at":           created,
+		"status":               status,
+		"error":                nil,
+		"incomplete_details":   nil,
+		"instructions":         nil,
+		"max_output_tokens":    nil,
+		"metadata":             metadata,
+		"model":                env.Model,
+		"output":               output,
+		"parallel_tool_calls":  true,
+		"previous_response_id": nil,
+		"reasoning":            nil,
+		"store":                false,
+		"temperature":          nil,
+		"text":                 map[string]any{"format": map[string]any{"type": "text"}},
+		"tool_choice":          "auto",
+		"tools":                []any{},
+		"top_p":                nil,
+		"truncation":           "disabled",
+	}
+	if status == "incomplete" && env.IncompleteReason != "" {
+		out["incomplete_details"] = map[string]any{"reason": env.IncompleteReason}
+	}
+	if env.Error != nil {
+		failure := map[string]any{"code": responsesErrorCode(env.Error.Code), "message": env.Error.Message}
+		// ResponseError.type is the source error spelling when the provider
+		// recorded one; an absent type stays absent rather than inventing a
+		// vocabulary value.
+		if env.Error.Type != "" {
+			failure["type"] = env.Error.Type
+		}
+		out["error"] = failure
+	}
+	if env.ServiceTier != "" {
+		// Every envelope caller goes through the Responses vocabulary; a
+		// source tier from another wire cannot leak a foreign spelling.
+		if tier, _ := mapServiceTier(ir.Responses, env.ServiceTier); tier != "" {
+			out["service_tier"] = tier
+		}
+	}
+	if env.Usage != (ir.Usage{}) {
+		usage, err := encodeResponsesUsage(env.Usage)
+		if err != nil {
+			return nil, err
+		}
+		out["usage"] = usage
+	}
+	return out, nil
+}
+
+// responsesAnyItems converts typed output items for the shared envelope.
+func responsesAnyItems(items []map[string]any) []any {
+	out := make([]any, len(items))
+	for i, item := range items {
+		out[i] = item
+	}
+	return out
+}
+
+// responsesErrorCode maps an internal or provider error code onto the closed
+// ResponseErrorCode enum. The failed envelope may carry only one of those 21
+// values; the free-form error event and the record keep the specific internal
+// code. A documented synonym is translated exactly, and anything else falls
+// back to server_error rather than emitting an invalid enum member.
+func responsesErrorCode(code string) string {
+	if code == "rate_limit_error" {
+		return "rate_limit_exceeded"
+	}
+	switch code {
+	case "server_error", "rate_limit_exceeded", "invalid_prompt", "data_residency_mismatch",
+		"bio_policy", "misalignment_policy_violation", "vector_store_timeout", "invalid_image",
+		"invalid_image_format", "invalid_base64_image", "invalid_image_url", "image_too_large",
+		"image_too_small", "image_parse_error", "image_content_policy_violation", "invalid_image_mode",
+		"image_file_too_large", "unsupported_image_media_type", "empty_image_file",
+		"failed_to_download_image", "image_file_not_found":
+		return code
+	}
+	return "server_error"
+}
+
+// ResponsesSyntheticEvent builds one complete synthetic Responses SSE event
+// for the proxy's committed-socket error sinks: the error event carries the
+// required sequence_number and the failed event carries both sequence_number
+// and the full required response envelope. payload and frame are returned so
+// an analyzer can observe the same document the client receives.
+func ResponsesSyntheticEvent(eventType string, sequence int64, id, model, code, message string) (payload, frame []byte, err error) {
+	event := map[string]any{"type": eventType, "sequence_number": sequence}
+	switch eventType {
+	case "error":
+		event["code"] = code
+		event["message"] = message
+		event["param"] = nil
+	case "response.failed":
+		env, envErr := NewResponsesEnvelope(ResponsesEnvelope{
+			ID: responsesWireID(id), Model: model, Status: "failed",
+			Error: &ir.Error{Code: code, Message: message},
+		})
+		if envErr != nil {
+			return nil, nil, envErr
+		}
+		event["response"] = env
+	default:
+		return nil, nil, fmt.Errorf("unsupported synthetic Responses event %q", eventType)
+	}
+	payload, err = sse.MarshalWireJSON(event)
+	if err != nil {
+		return nil, nil, err
+	}
+	frame = append([]byte("event: "+eventType+"\ndata: "), payload...)
+	frame = append(frame, '\n', '\n')
+	return payload, frame, nil
+}
+
+// responsesWireID shapes a synthetic Responses identity. Encoder-created
+// responses use the resp_ prefix; a proxy request id must not leak into the
+// Responses envelope as a non-conforming id.
+func responsesWireID(id string) string {
+	if strings.HasPrefix(id, "resp_") {
+		return id
+	}
+	if id == "" {
+		return "resp_proxy"
+	}
+	return "resp_" + id
 }
 
 // EncodeResponsesResponse renders the canonical response as a Responses body.
@@ -1226,69 +1731,32 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	if created == 0 {
 		created = time.Now().Unix()
 	}
-	status := resp.Status
-	if status == "" {
-		status = "completed"
-	}
-	switch {
-	case resp.Error != nil:
-		status = "failed"
-	case resp.Finish == ir.FinishCancelled:
-		status = "cancelled"
-	case resp.Finish == ir.FinishLength || resp.Finish == ir.FinishContentFilter || resp.Finish == ir.FinishOther:
-		status = "incomplete"
-	}
-	out := map[string]any{
-		"id":                   resp.ID,
-		"object":               "response",
-		"created_at":           created,
-		"status":               status,
-		"error":                nil,
-		"incomplete_details":   nil,
-		"instructions":         nil,
-		"max_output_tokens":    nil,
-		"model":                resp.Model,
-		"output":               encodeResponsesOutput(resp.Blocks, &resp.Warnings),
-		"parallel_tool_calls":  true,
-		"previous_response_id": nil,
-		"reasoning":            nil,
-		"store":                false,
-		"temperature":          nil,
-		"text":                 map[string]any{"format": map[string]any{"type": "text"}},
-		"tool_choice":          "auto",
-		"tools":                []any{},
-		"top_p":                nil,
-		"truncation":           "disabled",
+	status, incompleteReason, approximated := responsesTerminalStatus(resp.Finish, resp.IncompleteReason)
+	if resp.Status != "" {
+		// A Responses source's own lifecycle status is authoritative.
+		status = resp.Status
 	}
 	if resp.Error != nil {
-		code := resp.Error.Code
-		if code == "" {
-			code = "server_error"
-		}
-		out["error"] = map[string]any{
-			"code":    code,
-			"message": resp.Error.Message,
-		}
+		status = "failed"
 	}
-	if status == "incomplete" {
-		reason := resp.IncompleteReason
-		switch {
-		case reason != "":
-		case resp.Finish == ir.FinishContentFilter:
-			reason = "content_filter"
-		case resp.Finish == ir.FinishLength:
-			reason = "max_output_tokens"
-		}
-		if reason != "" {
-			out["incomplete_details"] = map[string]any{"reason": reason}
-		}
+	if status != "incomplete" {
+		incompleteReason = ""
 	}
-	if resp.Usage != (ir.Usage{}) {
-		usage, err := encodeResponsesUsage(resp.Usage)
-		if err != nil {
-			return nil, err
-		}
-		out["usage"] = usage
+	if approximated && resp.Status == "" {
+		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
+			fmt.Sprintf("finish reason %q is represented as Responses status %q", string(resp.Finish), status))
+	}
+	tier, tierWarns := mapServiceTier(ir.Responses, resp.ServiceTier)
+	resp.Warnings = append(resp.Warnings, tierWarns...)
+	out, err := NewResponsesEnvelope(ResponsesEnvelope{
+		ID: resp.ID, Model: resp.Model, Created: created, Status: status,
+		IncompleteReason: incompleteReason,
+		Output:           responsesAnyItems(encodeResponsesOutput(resp.Blocks, status, &resp.Warnings)),
+		Error:            resp.Error, Usage: resp.Usage,
+		Metadata: resp.Metadata, ServiceTier: tier,
+	})
+	if err != nil {
+		return nil, err
 	}
 	if resp.StopSequence != "" {
 		resp.Warnings.Add(ir.WarningDropped, "stop_sequence", "Responses has no matched stop sequence")
@@ -1296,16 +1764,53 @@ func EncodeResponsesResponse(resp *ir.Response) ([]byte, error) {
 	return sse.MarshalWireJSON(out)
 }
 
-func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
+// responsesTerminalStatus maps one canonical finish reason onto the Responses
+// lifecycle status and incomplete reason. A raw provider reason with no exact
+// Responses equivalent (pause_turn, refusal, an unknown value) is an
+// incomplete response and reports an approximation. refusal maps to
+// content_filter because Responses has no refusal terminal reason. A source
+// Responses reason is already authoritative and is preserved.
+func responsesTerminalStatus(finish ir.FinishReason, incompleteReason string) (status, reason string, approximated bool) {
+	switch finish {
+	case ir.FinishStop, ir.FinishToolCalls:
+		return "completed", "", false
+	case ir.FinishLength:
+		return "incomplete", "max_output_tokens", false
+	case ir.FinishContentFilter:
+		return "incomplete", "content_filter", false
+	case ir.FinishCancelled:
+		return "cancelled", "", false
+	case ir.FinishError:
+		return "failed", "", false
+	case ir.FinishOther:
+		if incompleteReason != "" {
+			return "incomplete", incompleteReason, false
+		}
+		return "incomplete", "", false
+	case "refusal":
+		return "incomplete", "content_filter", true
+	default:
+		if incompleteReason != "" {
+			return "incomplete", incompleteReason, false
+		}
+		return "incomplete", "", true
+	}
+}
+
+func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings) []map[string]any {
 	var out []map[string]any
 	var textBlocks []ir.Block
+	messageStatus := "completed"
+	if status != "completed" {
+		messageStatus = "incomplete"
+	}
 	flushText := func() {
 		if len(textBlocks) == 0 {
 			return
 		}
 		out = append(out, map[string]any{
-			"type": "message", "role": "assistant", "status": "completed",
-			"content": encodeResponsesOutputContent(textBlocks, warns),
+			"id": newResponsesItemID(ir.BlockText), "type": "message", "role": "assistant",
+			"status": messageStatus, "content": encodeResponsesOutputContent(textBlocks, warns),
 		})
 		textBlocks = nil
 	}
@@ -1318,13 +1823,18 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 			textBlocks = append(textBlocks, b)
 		case ir.BlockToolCall:
 			flushText()
-			out = append(out, encodeResponsesFunctionCall(b.ToolCall))
+			out = append(out, encodeResponsesFunctionCall(b.ToolCall, "completed"))
 		case ir.BlockReasoning:
 			flushText()
 			out = append(out, encodeResponsesReasoning(b.Reasoning, warns))
 		case ir.BlockRedactedReasoning:
 			flushText()
 			out = append(out, encodeResponsesReasoning(b.Reasoning, warns))
+		default:
+			if warns != nil {
+				warns.AddOnce(ir.WarningDropped, "output."+string(b.Type),
+					"Responses output has no equivalent content part")
+			}
 		}
 	}
 	flushText()
@@ -1335,11 +1845,27 @@ func encodeResponsesOutput(blocks []ir.Block, warns *ir.Warnings) []map[string]a
 }
 
 // responsesAnnotations maps the citations an output_text part can carry. The
-// Responses url_citation spelling is flat, unlike Chat's wrapper. A citation
-// with no URL (for example an Anthropic character location) cannot be
-// represented and is reported.
-func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[string]any {
+// Responses url_citation spelling is flat, unlike Chat's wrapper; its span is
+// relative to the message, so offset (the rune length of preceding output text)
+// is added to every block-relative IR span. A citation with no URL (for
+// example an Anthropic character location) cannot be represented and is
+// reported.
+func responsesAnnotations(citations []ir.Citation, offset int, warns *ir.Warnings) []map[string]any {
 	var out []map[string]any
+	// Anthropic's web_search_result_location carries url/title but no
+	// character span, while Responses requires both span fields. The part-start
+	// offset is therefore fabricated; report it once for this text part.
+	spanApproximated := false
+	for _, c := range citations {
+		if c.URL != "" && c.Type != "url_citation" && c.StartIndex == 0 && c.EndIndex == 0 {
+			spanApproximated = true
+			break
+		}
+	}
+	if spanApproximated && warns != nil {
+		warns.Add(ir.WarningApproximated, "citations",
+			fmt.Sprintf("source citation has no character span; target span is %d..%d", offset, offset))
+	}
 	for _, c := range citations {
 		if c.URL == "" {
 			if warns != nil {
@@ -1349,7 +1875,7 @@ func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[str
 		}
 		out = append(out, map[string]any{
 			"type": "url_citation", "url": c.URL, "title": c.Title,
-			"start_index": c.StartIndex, "end_index": c.EndIndex,
+			"start_index": offset + c.StartIndex, "end_index": offset + c.EndIndex,
 		})
 	}
 	return out
@@ -1357,16 +1883,21 @@ func responsesAnnotations(citations []ir.Citation, warns *ir.Warnings) []map[str
 
 func encodeResponsesOutputContent(blocks []ir.Block, warns *ir.Warnings) []map[string]any {
 	out := make([]map[string]any, 0, len(blocks))
+	// textOffset is the running rune length of preceding output text. A
+	// Responses url_citation span is message-relative, while an IR citation is
+	// block-relative.
+	textOffset := 0
 	for _, b := range blocks {
 		switch b.Type {
 		case ir.BlockText:
 			part := map[string]any{
 				"type": "output_text", "text": b.Text, "annotations": []any{}, "logprobs": []any{},
 			}
-			if annotations := responsesAnnotations(b.Citations, warns); len(annotations) > 0 {
+			if annotations := responsesAnnotations(b.Citations, textOffset, warns); len(annotations) > 0 {
 				part["annotations"] = annotations
 			}
 			out = append(out, part)
+			textOffset += utf8.RuneCountInString(b.Text)
 		case ir.BlockRefusal:
 			if len(b.Citations) > 0 && warns != nil {
 				warns.Add(ir.WarningDropped, "citations", "refusal parts have no citation mapping")
@@ -1405,7 +1936,7 @@ func encodeResponsesUsage(u ir.Usage) (map[string]any, error) {
 // never rejected by a narrower local shape.
 func DecodeResponsesError(body []byte) (*ir.Error, error) {
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
-		return &ir.Error{Type: typ, Code: code, Message: msg}, nil
+		return boundedProviderError(typ, code, msg), nil
 	}
 	return nil, errors.New("not an OpenAI error envelope")
 }

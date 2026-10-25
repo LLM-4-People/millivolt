@@ -1543,9 +1543,10 @@ func TestQueueWaitExceededAfterKeepaliveEmitsSSEError(t *testing.T) {
 	<-firstDone
 }
 
-// TestStreamKeepaliveThenUpstreamErrorIsInBand: after the pacer has
-// committed 200, an exhausted 429 must not be relayed as raw JSON.
-func TestStreamKeepaliveThenUpstreamErrorIsInBand(t *testing.T) {
+// TestSlowUpstreamJSONErrorKeepsStatus: the pacer does not commit SSE before
+// upstream headers because the body may be JSON. A slow 429 therefore keeps
+// its real status and content type instead of becoming an in-band error.
+func TestSlowUpstreamJSONErrorKeepsStatus(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(40 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
@@ -1569,19 +1570,22 @@ func TestStreamKeepaliveThenUpstreamErrorIsInBand(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, want 200 (pacer committed during TTFB)", resp.StatusCode)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("content-type = %q, want application/json", ct)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(body)
-	if !strings.Contains(got, "data: ") || !strings.Contains(got, "rate_limit_error") {
-		t.Fatalf("body %q, want in-band SSE error, not raw JSON", got)
+	if strings.Contains(got, ": keepalive") {
+		t.Fatalf("JSON error body carried SSE keepalives: %q", got)
 	}
-	if !strings.Contains(got, "data: [DONE]") {
-		t.Fatalf("body %q, want [DONE]", got)
+	if !strings.Contains(got, "rate_limit_error") {
+		t.Fatalf("body %q, want the provider error JSON", got)
 	}
 }
 

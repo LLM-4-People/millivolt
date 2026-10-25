@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -26,11 +27,11 @@ type anthropicWireRequest struct {
 	Model         string              `json:"model"`
 	Messages      []anthropicWireMsg  `json:"messages"`
 	System        json.RawMessage     `json:"system"`
-	MaxTokens     *int                `json:"max_tokens"`
+	MaxTokens     json.RawMessage     `json:"max_tokens"`
 	Stream        bool                `json:"stream"`
 	Temperature   *float64            `json:"temperature"`
 	TopP          *float64            `json:"top_p"`
-	TopK          *int                `json:"top_k"`
+	TopK          json.RawMessage     `json:"top_k"`
 	StopSequences []string            `json:"stop_sequences"`
 	Tools         []anthropicWireTool `json:"tools"`
 	ToolChoice    json.RawMessage     `json:"tool_choice"`
@@ -40,7 +41,14 @@ type anthropicWireRequest struct {
 		UserID string `json:"user_id"`
 	} `json:"metadata"`
 	ServiceTier  string          `json:"service_tier"`
+	Speed        string          `json:"speed"`
 	OutputConfig json.RawMessage `json:"output_config"`
+	// Stateful and data-residency controls the canonical request cannot carry.
+	// Present values are reported rather than silently dropped; diagnostics
+	// also covers its nested previous_message_id.
+	Container    json.RawMessage `json:"container"`
+	Diagnostics  json.RawMessage `json:"diagnostics"`
+	InferenceGeo string          `json:"inference_geo"`
 }
 
 type anthropicWireMsg struct {
@@ -55,13 +63,23 @@ type anthropicWireTool struct {
 	InputSchema  json.RawMessage  `json:"input_schema"`
 	Strict       *bool            `json:"strict"`
 	CacheControl *ir.CacheControl `json:"cache_control"`
+
+	// Provider-only tool knobs. They have no cross-protocol equivalent and
+	// are reported rather than silently dropped.
+	AllowedCallers      json.RawMessage `json:"allowed_callers"`
+	DeferLoading        *bool           `json:"defer_loading"`
+	InputExamples       json.RawMessage `json:"input_examples"`
+	EagerInputStreaming *bool           `json:"eager_input_streaming"`
 }
 
 type anthropicWireBlock struct {
 	Type string `json:"type"`
 
-	Text         string           `json:"text"`
-	Citations    []ir.Citation    `json:"citations"`
+	Text string `json:"text"`
+	// Citations is raw because the member is block-type-aware: text, system
+	// and tool-result text blocks carry a citation array, while a document
+	// block carries the CitationsConfigParam object ({"enabled":true}).
+	Citations    json.RawMessage  `json:"citations"`
 	CacheControl *ir.CacheControl `json:"cache_control"`
 
 	Source *struct {
@@ -73,14 +91,26 @@ type anthropicWireBlock struct {
 		Content   json.RawMessage `json:"content"`
 	} `json:"source"`
 	Title string `json:"title"`
+	// Context is a document-only hint with no cross-protocol equivalent.
+	Context json.RawMessage `json:"context"`
 
 	ID    string          `json:"id"`
 	Name  string          `json:"name"`
 	Input json.RawMessage `json:"input"`
+	// Caller and ToolsetName describe a server-side tool call. They are
+	// retained on the wire model so their presence is reported instead of
+	// being silently discarded by encoding/json.
+	Caller      json.RawMessage `json:"caller"`
+	ToolsetName string          `json:"toolset_name"`
 
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
 	IsError   bool            `json:"is_error"`
+
+	// Transformations is an image-only knob (oversized_image: downsize or
+	// error) and changes request semantics; the canonical model has no
+	// equivalent, so its presence is reported.
+	Transformations json.RawMessage `json:"transformations"`
 
 	Thinking  string `json:"thinking"`
 	Signature string `json:"signature"`
@@ -119,6 +149,15 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 			return nil, err
 		}
 	}
+	if err := checkStringArray(bounds.StopSequences, "stop_sequences"); err != nil {
+		return nil, err
+	}
+	// System citations and every nested tool_result/document content array
+	// share one aggregate: bounded parent arrays alone multiply through
+	// nesting. This runs before the typed request decode.
+	if err := checkAnthropicRequestCollections(bounds.System, bounds.Messages); err != nil {
+		return nil, err
+	}
 	var in anthropicWireRequest
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse anthropic request: %w", err)
@@ -126,15 +165,23 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 	if strings.TrimSpace(in.Model) == "" {
 		return nil, errors.New("anthropic request: model is required")
 	}
-	if in.MaxTokens == nil {
+	maxTokens, err := jsonnum.OptionalInt(in.MaxTokens, "max_tokens")
+	if err != nil {
+		return nil, fmt.Errorf("anthropic request: %w", err)
+	}
+	if maxTokens == nil {
 		return nil, errors.New("anthropic request: max_tokens is required")
+	}
+	topK, err := jsonnum.OptionalInt(in.TopK, "top_k")
+	if err != nil {
+		return nil, fmt.Errorf("anthropic request: %w", err)
 	}
 	req := &ir.Request{
 		Model:           in.Model,
-		MaxOutputTokens: in.MaxTokens,
+		MaxOutputTokens: maxTokens,
 		Temperature:     in.Temperature,
 		TopP:            in.TopP,
-		TopK:            in.TopK,
+		TopK:            topK,
 		Stop:            in.StopSequences,
 		Stream:          in.Stream,
 		ServiceTier:     in.ServiceTier,
@@ -151,13 +198,20 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 		req.Messages = append(req.Messages, ir.Message{Role: ir.RoleSystem, Content: blocks})
 		req.Warnings = append(req.Warnings, warns...)
 	}
+	ids := newRequestToolIDs()
 	for i, m := range in.Messages {
-		msg, warns, err := decodeAnthropicMessage(m)
+		if err := preReserveAnthropicToolIDs(ids, m.Content); err != nil {
+			return nil, fmt.Errorf("anthropic message %d: %w", i, err)
+		}
+	}
+	for i, m := range in.Messages {
+		// One accumulator spans every message so AddOnce sees the whole
+		// request instead of restarting at each message.
+		msg, err := decodeAnthropicMessage(m, &req.Warnings, ids)
 		if err != nil {
 			return nil, fmt.Errorf("anthropic message %d: %w", i, err)
 		}
 		req.Messages = append(req.Messages, msg)
-		req.Warnings = append(req.Warnings, warns...)
 	}
 	if len(in.Tools) > 0 {
 		tools, warns, err := decodeAnthropicTools(in.Tools)
@@ -173,7 +227,7 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 		req.ToolChoice = tc
 		req.ParallelToolCalls = parallel
 	}
-	if r, warns, err := decodeAnthropicThinking(in.Thinking); err != nil {
+	if r, warns, err := decodeAnthropicThinking(in.Thinking, maxTokens); err != nil {
 		return nil, err
 	} else if r != nil {
 		req.Reasoning = r
@@ -190,6 +244,35 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 			req.Reasoning.Effort = effort
 		}
 		req.Warnings = append(req.Warnings, warns...)
+	}
+	for _, field := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"container", in.Container},
+		{"diagnostics", in.Diagnostics},
+	} {
+		if rawPresent(field.raw) {
+			req.Warnings.Add(ir.WarningDropped, field.name, "the canonical request has no Anthropic "+field.name+" state")
+		}
+	}
+	if in.InferenceGeo != "" {
+		req.Warnings.Add(ir.WarningDropped, "inference_geo", "the canonical request has no data-residency control")
+	}
+	if in.Speed != "" {
+		switch in.Speed {
+		case "standard":
+			// Standard processing is the default; no tier is needed.
+		case "fast":
+			if req.ServiceTier == "" || req.ServiceTier == "auto" {
+				req.ServiceTier = "fast"
+				req.Warnings.Add(ir.WarningApproximated, "speed", "mapped Anthropic fast speed to service_tier fast")
+			} else {
+				req.Warnings.Add(ir.WarningDropped, "speed", "service_tier already selects the target tier")
+			}
+		default:
+			req.Warnings.Add(ir.WarningDropped, "speed", "unsupported speed value")
+		}
 	}
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
@@ -218,72 +301,170 @@ func decodeAnthropicSystem(raw json.RawMessage) ([]ir.Block, ir.Warnings, error)
 			warns.Add(ir.WarningDropped, "system."+p.Type, "unsupported system block")
 			continue
 		}
-		blocks = append(blocks, ir.Block{Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl})
+		citations, w := decodeAnthropicCitations(p.Citations, "text")
+		warns = append(warns, w...)
+		blocks = append(blocks, ir.Block{
+			Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: citations,
+		})
 	}
 	return blocks, warns, nil
 }
 
-func decodeAnthropicMessage(m anthropicWireMsg) (ir.Message, ir.Warnings, error) {
+// preReserveAnthropicToolIDs claims every explicit tool_use id in one message
+// before any block is decoded. A later id-less tool_use then synthesizes
+// against the whole request instead of colliding with an explicit id that
+// appears after it.
+func preReserveAnthropicToolIDs(ids *requestToolIDs, content json.RawMessage) error {
+	return preReserveAnthropicContent(ids, content, "")
+}
+
+// preReserveAnthropicContent walks nested tool_result and document source
+// content so an explicit id anywhere in the request participates in the
+// namespace. A parse failure is left to the typed decoder, which owns the
+// error; the pre-scan only needs the arrays it can read.
+func preReserveAnthropicContent(ids *requestToolIDs, raw json.RawMessage, prefix string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil
+	}
+	var parts []anthropicWireBlock
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
+		return nil
+	}
+	for i, p := range parts {
+		where := fmt.Sprintf("block %d", i)
+		if prefix != "" {
+			where = prefix + " " + where
+		}
+		switch p.Type {
+		case "tool_use":
+			if p.ID == "" {
+				continue
+			}
+			if err := ids.preReserve(p.ID); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+		case "tool_result":
+			if err := preReserveAnthropicContent(ids, p.Content, where+" content"); err != nil {
+				return err
+			}
+		case "document":
+			// Only a content-source document contributes nested blocks; the
+			// other source types carry no content array the decoder reads.
+			if p.Source != nil && p.Source.Type == "content" {
+				if err := preReserveAnthropicContent(ids, p.Source.Content, where+" source content"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func decodeAnthropicMessage(m anthropicWireMsg, warns *ir.Warnings, ids *requestToolIDs) (ir.Message, error) {
 	role := ir.Role(m.Role)
 	switch role {
 	case ir.RoleUser, ir.RoleAssistant, ir.RoleSystem:
 	default:
-		return ir.Message{}, nil, fmt.Errorf("unsupported role %q", m.Role)
+		return ir.Message{}, fmt.Errorf("unsupported role %q", m.Role)
 	}
-	blocks, warns, err := decodeAnthropicContent(m.Content)
+	blocks, err := decodeAnthropicContent(m.Content, warns, ids)
 	if err != nil {
-		return ir.Message{}, nil, err
+		return ir.Message{}, err
 	}
-	return ir.Message{Role: role, Content: blocks}, warns, nil
+	return ir.Message{Role: role, Content: blocks}, nil
 }
 
-func decodeAnthropicContent(raw json.RawMessage) ([]ir.Block, ir.Warnings, error) {
+func decodeAnthropicContent(raw json.RawMessage, warns *ir.Warnings, ids *requestToolIDs) ([]ir.Block, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, nil, nil
+		return nil, nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		if s == "" {
-			return nil, nil, nil
+			return nil, nil
 		}
-		return []ir.Block{ir.TextBlock(s)}, nil, nil
+		return []ir.Block{ir.TextBlock(s)}, nil
 	}
 	if !metrics.ContentPartsWithinLimit(raw) {
-		return nil, nil, fmt.Errorf("anthropic content block array exceeds %d blocks", metrics.ContentPartMax)
+		return nil, fmt.Errorf("anthropic content block array exceeds %d blocks", metrics.ContentPartMax)
 	}
 	if err := checkAnthropicCitations(raw, "content"); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var parts []anthropicWireBlock
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return decodeAnthropicBlocks(parts)
+	return decodeAnthropicBlocks(parts, warns, ids)
 }
 
-func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings, error) {
-	var (
-		blocks []ir.Block
-		warns  ir.Warnings
-	)
-	for _, p := range parts {
+// syntheticToolID is a bounded, schema-conforming id for an Anthropic tool
+// call that omitted its required id. The block index keeps it unique within
+// one response.
+func syntheticToolID(index int) string {
+	return fmt.Sprintf("toolu_proxy_%d", index)
+}
+
+// decodeAnthropicCitations decodes one block's citations member by block
+// type. Text blocks (including system and tool-result text) carry a citation
+// array. A document block carries the CitationsConfigParam object instead; the
+// canonical model has no document-citation configuration, so it is reported
+// and never turned into text citations.
+func decodeAnthropicCitations(raw json.RawMessage, blockType string) ([]ir.Citation, ir.Warnings) {
+	trimmed := bytes.TrimSpace(raw)
+	var warns ir.Warnings
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, warns
+	}
+	switch trimmed[0] {
+	case '[':
+		var citations []ir.Citation
+		if err := json.Unmarshal(trimmed, &citations); err != nil {
+			warns.Add(ir.WarningDropped, "citations", "citation array could not be decoded")
+			return nil, warns
+		}
+		return citations, warns
+	case '{':
+		if blockType == "document" {
+			warns.Add(ir.WarningDropped, "document.citations", "Anthropic document citation configuration is not represented")
+		} else {
+			warns.Add(ir.WarningDropped, "citations", "citation configuration has no text-block equivalent")
+		}
+		return nil, warns
+	default:
+		warns.Add(ir.WarningDropped, "citations", "citations member has an unsupported shape")
+		return nil, warns
+	}
+}
+
+func decodeAnthropicBlocks(parts []anthropicWireBlock, warns *ir.Warnings, ids *requestToolIDs) ([]ir.Block, error) {
+	var blocks []ir.Block
+	for i, p := range parts {
 		switch p.Type {
 		case "text":
+			citations, w := decodeAnthropicCitations(p.Citations, "text")
+			*warns = append(*warns, w...)
 			blocks = append(blocks, ir.Block{
-				Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: p.Citations,
+				Type: ir.BlockText, Text: p.Text, CacheControl: p.CacheControl, Citations: citations,
 			})
 		case "image":
+			if wireValuePresent(p.Transformations) {
+				warns.AddOnce(ir.WarningDropped, "image.transformations", "Anthropic image transformations have no cross-protocol equivalent")
+			}
 			img, err := decodeAnthropicImage(p.Source)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			blocks = append(blocks, ir.Block{Type: ir.BlockImage, Image: img, CacheControl: p.CacheControl})
 		case "document":
-			docBlocks, w, err := decodeAnthropicDocument(p)
-			if err != nil {
-				return nil, nil, err
+			if _, w := decodeAnthropicCitations(p.Citations, "document"); len(w) > 0 {
+				*warns = append(*warns, w...)
 			}
-			warns = append(warns, w...)
+			docBlocks, err := decodeAnthropicDocument(p, warns, ids)
+			if err != nil {
+				return nil, err
+			}
 			// The document's cache breakpoint covers everything through its
 			// final decoded block.
 			if p.CacheControl != nil && len(docBlocks) > 0 {
@@ -294,27 +475,46 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			}
 			blocks = append(blocks, docBlocks...)
 		case "tool_use":
+			if wireValuePresent(p.Caller) {
+				warns.AddOnce(ir.WarningDropped, "tool_use.caller", "server-side tool caller has no cross-protocol equivalent")
+			}
+			if p.ToolsetName != "" {
+				warns.AddOnce(ir.WarningDropped, "tool_use.toolset_name", "server-side toolset name has no cross-protocol equivalent")
+			}
 			if p.Input != nil && !json.Valid(p.Input) {
-				return nil, nil, errors.New("anthropic tool_use input is not valid JSON")
+				return nil, errors.New("anthropic tool_use input is not valid JSON")
 			}
 			args := bytes.TrimSpace(p.Input)
 			if len(args) == 0 || bytes.Equal(args, []byte("null")) {
 				args = json.RawMessage(`{}`)
 			}
 			if args[0] != '{' {
-				return nil, nil, errors.New("anthropic tool_use input must be a JSON object")
+				return nil, errors.New("anthropic tool_use input must be a JSON object")
+			}
+			id := p.ID
+			if id == "" {
+				// Anthropic requires a non-empty tool_use id. Synthesize a
+				// conforming one and report the approximation rather than
+				// emitting an empty id on the target wire. The request-scoped
+				// namespace keeps it unique across every message.
+				id = ids.synthesize(syntheticToolID(i))
+				warns.Add(ir.WarningApproximated, "tool_use.id", "generated a missing tool id")
+			} else if err := ids.reserve(id); err != nil {
+				return nil, err
 			}
 			blocks = append(blocks, ir.Block{
 				Type: ir.BlockToolCall, CacheControl: p.CacheControl, ToolCall: &ir.ToolCall{
-					ID: p.ID, Name: p.Name, Arguments: args,
+					ID: id, Name: p.Name, Arguments: args,
 				},
 			})
 		case "tool_result":
-			content, w, err := decodeAnthropicContent(p.Content)
-			if err != nil {
-				return nil, nil, err
+			if p.ToolsetName != "" {
+				warns.AddOnce(ir.WarningDropped, "tool_result.toolset_name", "server-side toolset name has no cross-protocol equivalent")
 			}
-			warns = append(warns, w...)
+			content, err := decodeAnthropicContent(p.Content, warns, ids)
+			if err != nil {
+				return nil, err
+			}
 			blocks = append(blocks, ir.Block{
 				Type: ir.BlockToolResult, CacheControl: p.CacheControl, ToolResult: &ir.ToolResult{
 					CallID: p.ToolUseID, Content: content, IsError: p.IsError,
@@ -337,7 +537,7 @@ func decodeAnthropicBlocks(parts []anthropicWireBlock) ([]ir.Block, ir.Warnings,
 			warns.Add(ir.WarningDropped, "content."+p.Type, "unsupported content block")
 		}
 	}
-	return blocks, warns, nil
+	return blocks, nil
 }
 
 func decodeAnthropicImage(src *struct {
@@ -370,39 +570,41 @@ func decodeAnthropicImage(src *struct {
 // keeping them as blocks preserves the images and avoids manufacturing an
 // empty file block. The document boundary (title/context/citations) has no
 // cross-protocol equivalent and is reported.
-func decodeAnthropicDocument(p anthropicWireBlock) ([]ir.Block, ir.Warnings, error) {
+func decodeAnthropicDocument(p anthropicWireBlock, warns *ir.Warnings, ids *requestToolIDs) ([]ir.Block, error) {
 	if p.Source == nil {
-		return nil, nil, errors.New("anthropic document block has no source")
+		return nil, errors.New("anthropic document block has no source")
+	}
+	if len(bytes.TrimSpace(p.Context)) > 0 && !bytes.Equal(bytes.TrimSpace(p.Context), []byte("null")) {
+		warns.Add(ir.WarningDropped, "document.context", "document context has no cross-protocol equivalent")
 	}
 	switch p.Source.Type {
 	case "base64":
 		file := &ir.File{FileData: p.Source.Data, MediaType: p.Source.MediaType, Filename: p.Title}
-		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil
 	case "text":
 		// A plain-text document's data is the text itself, not base64. The
 		// title has no text-block field on any target, so a non-empty one is a
 		// recorded loss instead of a silent drop.
-		var warns ir.Warnings
 		if p.Title != "" {
 			warns.Add(ir.WarningDropped, "document.title", "plain-text document title has no cross-protocol equivalent")
 		}
-		return []ir.Block{ir.TextBlock(string(p.Source.Data))}, warns, nil
+		return []ir.Block{ir.TextBlock(string(p.Source.Data))}, nil
 	case "url":
 		file := &ir.File{FileURL: p.Source.URL, Filename: p.Title}
-		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil
 	case "file":
 		file := &ir.File{FileID: p.Source.FileID, Filename: p.Title}
-		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil, nil
+		return []ir.Block{{Type: ir.BlockFile, File: file}}, nil
 	case "content":
-		blocks, warns, err := decodeAnthropicContent(p.Source.Content)
+		blocks, err := decodeAnthropicContent(p.Source.Content, warns, ids)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		warns.Add(ir.WarningApproximated, "document.content",
 			"nested document content was inlined and its title, context and citations are not preserved")
-		return blocks, warns, nil
+		return blocks, nil
 	default:
-		return nil, nil, fmt.Errorf("unsupported anthropic document source %q", p.Source.Type)
+		return nil, fmt.Errorf("unsupported anthropic document source %q", p.Source.Type)
 	}
 }
 
@@ -411,9 +613,28 @@ func decodeAnthropicTools(in []anthropicWireTool) ([]ir.Tool, ir.Warnings, error
 		out   []ir.Tool
 		warns ir.Warnings
 	)
+	dropped := map[string]bool{}
 	for i, t := range in {
 		if t.Type != "" && t.Type != "custom" {
 			return nil, nil, fmt.Errorf("anthropic tool %d: provider-defined type %q has no cross-protocol equivalent", i, t.Type)
+		}
+		allowedCallers, err := toolAllowedCallers(t.AllowedCallers)
+		if err != nil {
+			return nil, nil, fmt.Errorf("anthropic tool %d: %w", i, err)
+		}
+		for _, field := range []struct {
+			name    string
+			present bool
+		}{
+			{"tool.allowed_callers", allowedCallers},
+			{"tool.defer_loading", t.DeferLoading != nil},
+			{"tool.input_examples", len(bytes.TrimSpace(t.InputExamples)) > 0 && !bytes.Equal(bytes.TrimSpace(t.InputExamples), []byte("null"))},
+			{"tool.eager_input_streaming", t.EagerInputStreaming != nil},
+		} {
+			if field.present && !dropped[field.name] {
+				dropped[field.name] = true
+				warns.Add(ir.WarningDropped, field.name, "provider-only tool knob has no cross-protocol equivalent")
+			}
 		}
 		if strings.TrimSpace(t.Name) == "" {
 			return nil, nil, fmt.Errorf("anthropic tool %d: name is required", i)
@@ -461,14 +682,14 @@ func decodeAnthropicToolChoice(raw json.RawMessage) (*ir.ToolChoice, *bool, erro
 	}
 }
 
-func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warnings, error) {
+func decodeAnthropicThinking(raw json.RawMessage, maxTokens *int) (*ir.ReasoningConfig, ir.Warnings, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil, nil
 	}
 	var obj struct {
-		Type         string `json:"type"`
-		BudgetTokens *int   `json:"budget_tokens"`
-		Display      string `json:"display"`
+		Type         string          `json:"type"`
+		BudgetTokens json.RawMessage `json:"budget_tokens"`
+		Display      string          `json:"display"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, nil, fmt.Errorf("anthropic thinking: %w", err)
@@ -477,7 +698,24 @@ func decodeAnthropicThinking(raw json.RawMessage) (*ir.ReasoningConfig, ir.Warni
 	switch obj.Type {
 	case "enabled":
 		enabled := true
-		return &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: obj.BudgetTokens, Display: obj.Display}, nil, nil
+		budget, err := jsonnum.OptionalInt(obj.BudgetTokens, "thinking.budget_tokens")
+		if err != nil {
+			return nil, nil, fmt.Errorf("anthropic thinking: %w", err)
+		}
+		// Anthropic requires a budget for enabled thinking and documents a
+		// 1024 floor plus a strict upper bound below max_tokens. Zero, a
+		// negative or an absent budget would otherwise be mapped to a
+		// reasoning effort the target cannot honor.
+		if budget == nil {
+			return nil, nil, errors.New("anthropic thinking: budget_tokens is required when type is enabled")
+		}
+		if *budget < 1024 {
+			return nil, nil, fmt.Errorf("anthropic thinking: budget_tokens must be at least 1024")
+		}
+		if maxTokens != nil && *budget >= *maxTokens {
+			return nil, nil, fmt.Errorf("anthropic thinking: budget_tokens must be less than max_tokens")
+		}
+		return &ir.ReasoningConfig{Enabled: &enabled, BudgetTokens: budget, Display: obj.Display}, nil, nil
 	case "adaptive":
 		enabled := true
 		warns.Add(ir.WarningApproximated, "thinking.type", "adaptive thinking has no cross-protocol equivalent")
@@ -530,6 +768,9 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if err := ir.ValidateRequest(req); err != nil {
 		return nil, err
 	}
+	if err := validateAnthropicToolVocabulary(req); err != nil {
+		return nil, err
+	}
 	if req.PreviousResponseID != "" {
 		return nil, errors.New("anthropic target cannot resolve previous_response_id")
 	}
@@ -557,12 +798,37 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if req.TopLogprobs != nil {
 		req.Warnings.Add(ir.WarningDropped, "top_logprobs", "Anthropic Messages has no top_logprobs")
 	}
+	if req.Verbosity != "" {
+		req.Warnings.Add(ir.WarningDropped, "verbosity", "Anthropic Messages has no verbosity")
+	}
+	if req.SafetyIdentifier != "" {
+		req.Warnings.Add(ir.WarningDropped, "safety_identifier", "Anthropic Messages has no safety identifier")
+	}
+	if req.PromptCacheKey != "" {
+		req.Warnings.Add(ir.WarningDropped, "prompt_cache_key", "Anthropic Messages has no prompt_cache_key")
+	}
+	if req.Moderation != nil {
+		req.Warnings.Add(ir.WarningDropped, "moderation", "Anthropic Messages has no moderation configuration")
+	}
+	if req.PromptCacheOptions != nil {
+		req.Warnings.Add(ir.WarningDropped, "prompt_cache_options", "Anthropic Messages uses cache_control, not prompt_cache_options")
+	}
+	if req.PromptCacheRetention != "" {
+		req.Warnings.Add(ir.WarningDropped, "prompt_cache_retention", "Anthropic Messages uses cache_control, not prompt_cache_retention")
+	}
 	if req.ResponseFormat != nil && req.ResponseFormat.Type == "json_object" {
 		req.Warnings.Add(ir.WarningApproximated, "response_format.json_object", "Anthropic only supports json_schema")
 	}
+	system, messages := encodeAnthropicTurns(req.Messages, req.Instructions, &req.Warnings)
+	if len(messages) == 0 {
+		// Anthropic requires a non-empty messages array. Every input part can
+		// be empty after translation, so fail closed before any upstream call
+		// instead of emitting JSON null.
+		return nil, errors.New("anthropic target requires at least one non-empty message")
+	}
 	out := map[string]any{
 		"model":    req.Model,
-		"messages": encodeAnthropicMessages(req.Messages, &req.Warnings),
+		"messages": messages,
 	}
 	if req.MaxOutputTokens != nil {
 		out["max_tokens"] = *req.MaxOutputTokens
@@ -590,7 +856,7 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if len(req.Stop) > 0 {
 		out["stop_sequences"] = req.Stop
 	}
-	if system := encodeAnthropicSystem(req.Messages, req.Instructions, &req.Warnings); system != nil {
+	if system != nil {
 		out["system"] = system
 	}
 	if len(req.Tools) > 0 {
@@ -606,12 +872,31 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 		out["output_config"] = oc
 	}
 	if req.User != "" {
+		// Anthropic metadata.user_id is maxLength 512 in characters. An
+		// overlong identifier is rejected rather than truncated, because a
+		// truncated identifier can collide with a different caller.
+		if utf8.RuneCountInString(req.User) > anthropicUserIDMax {
+			return nil, fmt.Errorf("anthropic metadata.user_id exceeds %d characters", anthropicUserIDMax)
+		}
 		out["metadata"] = map[string]any{"user_id": req.User}
 	}
-	tier, tierWarns := mapServiceTier(ir.Anthropic, req.ServiceTier)
-	req.Warnings = append(req.Warnings, tierWarns...)
-	if tier != "" {
-		out["service_tier"] = tier
+	switch req.ServiceTier {
+	case "fast":
+		// Anthropic expresses fast processing with speed, not the service
+		// tier vocabulary.
+		out["speed"] = "fast"
+	case "priority":
+		// OpenAI's priority spelling is the other request opt-in for Fast
+		// mode; Anthropic has one fast speed value, so the intent survives
+		// with an approximation warning.
+		out["speed"] = "fast"
+		req.Warnings.Add(ir.WarningApproximated, "service_tier", "priority is a fast-mode request; Anthropic has one speed value")
+	default:
+		tier, tierWarns := mapServiceTier(ir.Anthropic, req.ServiceTier)
+		req.Warnings = append(req.Warnings, tierWarns...)
+		if tier != "" {
+			out["service_tier"] = tier
+		}
 	}
 	if req.CacheControl != nil {
 		out["cache_control"] = req.CacheControl
@@ -622,55 +907,52 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	return sse.MarshalWireJSON(out)
 }
 
-// encodeAnthropicSystem lifts the Responses instructions and leading
-// system/developer messages into the top-level system field. Mid-conversation
-// system messages stay in messages.
-func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *ir.Warnings) any {
+type anthropicOutMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"`
+}
+
+// anthropicSystemTextBlocks renders the text-only part of a system or
+// developer turn. Anthropic system content cannot carry non-text blocks, and
+// TextBlockParam.text has minLength 1, so both are dropped with a warning.
+func anthropicSystemTextBlocks(content []ir.Block, warns *ir.Warnings) []map[string]any {
 	var blocks []map[string]any
-	if instructions != nil && *instructions != "" {
-		blocks = append(blocks, map[string]any{"type": "text", "text": *instructions})
-	}
-	seenNonSystem := false
-	moved := false
-	for _, m := range messages {
-		if m.Role != ir.RoleSystem && m.Role != ir.RoleDeveloper {
-			seenNonSystem = true
+	for _, b := range content {
+		if b.Type != ir.BlockText {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "system."+string(b.Type), "Anthropic system prompts are text-only")
+			}
 			continue
 		}
-		// Anthropic Messages has one top-level system prompt and no system
-		// turn inside the conversation. Lift a late system/developer message
-		// to that prompt rather than emitting an invalid role; the positional
-		// change is reported.
-		if seenNonSystem && !moved {
-			moved = true
-			if warns != nil {
-				warns.Add(ir.WarningApproximated, "system", "Anthropic Messages only supports a top-level system prompt; a later system message was moved before the conversation")
+		if b.Text == "" {
+			continue
+		}
+		block := map[string]any{"type": "text", "text": b.Text}
+		if b.CacheControl != nil {
+			block["cache_control"] = b.CacheControl
+		}
+		if len(b.Citations) > 0 {
+			if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
+				block["citations"] = citations
 			}
 		}
-		for _, b := range m.Content {
-			if b.Type != ir.BlockText {
-				if warns != nil {
-					warns.Add(ir.WarningDropped, "system."+string(b.Type), "Anthropic system prompts are text-only")
-				}
-				continue
-			}
-			if len(b.Citations) > 0 && warns != nil {
-				warns.Add(ir.WarningDropped, "system.citations", "Anthropic system blocks have no citations")
-			}
-			block := map[string]any{"type": "text", "text": b.Text}
-			if b.CacheControl != nil {
-				block["cache_control"] = b.CacheControl
-			}
-			blocks = append(blocks, block)
-		}
+		blocks = append(blocks, block)
 	}
+	return blocks
+}
+
+// anthropicTextContent keeps the historical string join for plain text while a
+// cache breakpoint or citation requires the block-array form. Both the
+// top-level and in-conversation system encoders share it.
+func anthropicTextContent(blocks []map[string]any) any {
 	if len(blocks) == 0 {
 		return nil
 	}
-	// Preserve the historical string join when no block carries a cache
-	// breakpoint; a breakpoint requires the block-array form.
 	for _, block := range blocks {
 		if _, ok := block["cache_control"]; ok {
+			return blocks
+		}
+		if _, ok := block["citations"]; ok {
 			return blocks
 		}
 	}
@@ -683,42 +965,245 @@ func encodeAnthropicSystem(messages []ir.Message, instructions *string, warns *i
 	return strings.Join(parts, "\n\n")
 }
 
-type anthropicOutMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
-}
-
-func encodeAnthropicMessages(in []ir.Message, warns *ir.Warnings) []anthropicOutMessage {
+// encodeAnthropicTurns renders the message history and the top-level system
+// field in one pass. The top-level field owns the Responses instructions and
+// every system or developer turn that arrives before the first emitted
+// conversation turn. "First emitted turn" is out's emptiness, not the presence
+// of a non-system input: a leading assistant turn can be dropped and an empty
+// leading user turn can encode to nothing, so neither may push a later system
+// turn into messages where Anthropic rejects it. A mid-conversation system run
+// stays in messages only after an emitted user turn and before an assistant
+// turn or the end; any other position is lifted to the top-level prompt with
+// one approximation warning. A later developer turn has no Anthropic role and
+// is lifted with one approximation warning.
+func encodeAnthropicTurns(messages []ir.Message, instructions *string, warns *ir.Warnings) (any, []anthropicOutMessage) {
+	var systemBlocks []map[string]any
+	if instructions != nil && *instructions != "" {
+		systemBlocks = append(systemBlocks, map[string]any{"type": "text", "text": *instructions})
+	}
 	var out []anthropicOutMessage
-	for _, m := range in {
+	leadingAssistantDropped := false
+	droppedToolCalls := map[string]struct{}{}
+	orphanResultDropped := false
+	developerLifted := false
+	for i := 0; i < len(messages); i++ {
+		m := messages[i]
 		if m.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
 		}
-		// Every system/developer message is rendered at the top level; none
-		// may appear as a role inside the conversation.
-		if m.Role == ir.RoleSystem || m.Role == ir.RoleDeveloper {
-			continue
+		switch m.Role {
+		case ir.RoleSystem:
+			// A mid-conversation system run is valid only after a user turn and
+			// before an assistant turn (or at the end). Anthropic rejects it
+			// between user turns and between a tool_use and its tool_result.
+			// Judge the whole contiguous run, then lift it to the top-level
+			// prompt with one approximation warning when its position is not
+			// valid. A leading run always belongs at the top level.
+			end := i + 1
+			for end < len(messages) && messages[end].Role == ir.RoleSystem {
+				end++
+			}
+			blocks := anthropicSystemTextBlocks(m.Content, warns)
+			for j := i + 1; j < end; j++ {
+				if messages[j].Name != "" && warns != nil {
+					warns.Add(ir.WarningDropped, "messages.name", "Anthropic Messages has no participant name")
+				}
+				blocks = append(blocks, anthropicSystemTextBlocks(messages[j].Content, warns)...)
+			}
+			next := ir.Role("")
+			for j := end; j < len(messages); j++ {
+				if messages[j].Role != ir.RoleSystem {
+					next = messages[j].Role
+					break
+				}
+			}
+			previous := ir.Role("")
+			if len(out) > 0 {
+				previous = ir.Role(out[len(out)-1].Role)
+			}
+			if len(out) == 0 || (previous == ir.RoleUser && (next == "" || next == ir.RoleAssistant)) {
+				if len(out) == 0 {
+					systemBlocks = append(systemBlocks, blocks...)
+				} else {
+					out = appendAnthropicTurn(out, string(m.Role), anthropicTextContent(blocks), warns)
+				}
+			} else {
+				systemBlocks = append(systemBlocks, blocks...)
+				if len(blocks) > 0 && warns != nil {
+					warns.AddOnce(ir.WarningApproximated, "system", "a system message was moved before the conversation because Anthropic only accepts one after a user turn and before an assistant turn")
+				}
+			}
+			i = end - 1
+		case ir.RoleDeveloper:
+			if len(out) != 0 && !developerLifted {
+				developerLifted = true
+				if warns != nil {
+					warns.Add(ir.WarningApproximated, "system", "Anthropic Messages has no developer role; a later developer message was moved before the conversation")
+				}
+			}
+			systemBlocks = append(systemBlocks, anthropicSystemTextBlocks(m.Content, warns)...)
+		case ir.RoleAssistant:
+			// Anthropic requires the first emitted turn to use the user role.
+			// A source history may begin with an assistant turn (or a leading
+			// user turn may have encoded to nothing), so drop the leading
+			// assistant turns rather than prepending a fabricated user turn.
+			// One warning covers every dropped turn, and the tool-call ids are
+			// retained so their results can be dropped as orphans.
+			if len(out) == 0 {
+				for _, b := range m.Content {
+					if b.Type == ir.BlockToolCall && b.ToolCall != nil && b.ToolCall.ID != "" {
+						droppedToolCalls[b.ToolCall.ID] = struct{}{}
+					}
+				}
+				if !leadingAssistantDropped {
+					leadingAssistantDropped = true
+					if warns != nil {
+						warns.Add(ir.WarningDropped, "messages.leading_assistant", "Anthropic Messages requires the first turn to use the user role")
+					}
+				}
+				continue
+			}
+			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(m.Content, m.Role, warns), warns)
+		default:
+			contentBlocks := m.Content
+			if m.Role == ir.RoleUser && len(droppedToolCalls) > 0 {
+				// A result whose tool_use was in a dropped leading assistant
+				// turn would be an orphan: Anthropic requires every tool_result
+				// to answer a preceding assistant tool_use. Keep the user
+				// turn's other blocks and report the loss once.
+				filtered := make([]ir.Block, 0, len(m.Content))
+				for _, b := range m.Content {
+					if b.Type == ir.BlockToolResult && b.ToolResult != nil {
+						if _, orphan := droppedToolCalls[b.ToolResult.CallID]; orphan {
+							if !orphanResultDropped {
+								orphanResultDropped = true
+								if warns != nil {
+									warns.Add(ir.WarningDropped, "messages.orphan_tool_result", "tool results for dropped leading assistant tool calls were dropped")
+								}
+							}
+							continue
+						}
+					}
+					filtered = append(filtered, b)
+				}
+				contentBlocks = filtered
+			}
+			out = appendAnthropicTurn(out, string(m.Role), encodeAnthropicContent(contentBlocks, m.Role, warns), warns)
 		}
-		role := string(m.Role)
-		content := encodeAnthropicContent(m.Content, warns)
-		if content == nil {
-			continue
-		}
-		// Anthropic merges consecutive same-role turns; doing it here keeps
-		// tool_result blocks immediately after their tool_use turn.
-		if n := len(out); n > 0 && out[n-1].Role == role {
-			out[n-1].Content = mergeAnthropicContent(out[n-1].Content, content)
-			continue
-		}
-		out = append(out, anthropicOutMessage{Role: role, Content: content})
 	}
-	return out
+	out = liftMisplacedAnthropicSystemRuns(out, &systemBlocks, warns)
+	return anthropicTextContent(systemBlocks), out
+}
+
+// liftMisplacedAnthropicSystemRuns applies the emitted-role placement rule as
+// a post-pass. Placement is decided from the source roles during the loop, but
+// an empty assistant turn or an unrepresentable user turn can encode to
+// nothing, leaving the system run between two emitted user turns - a shape
+// Anthropic rejects. A system run is valid only before an emitted assistant
+// turn or at the end; every other kept run moves to the top-level prompt with
+// one approximation warning. The pass may leave adjacent user turns; Anthropic
+// merges them server-side, and the tool_result adjacency the encoder owns is
+// not disturbed.
+func liftMisplacedAnthropicSystemRuns(out []anthropicOutMessage, systemBlocks *[]map[string]any, warns *ir.Warnings) []anthropicOutMessage {
+	if len(out) == 0 {
+		return out
+	}
+	kept := out[:0]
+	for i, turn := range out {
+		if turn.Role == "system" && i+1 < len(out) && out[i+1].Role != "assistant" {
+			blocks := anthropicOutSystemBlocks(turn.Content)
+			*systemBlocks = append(*systemBlocks, blocks...)
+			if len(blocks) > 0 && warns != nil {
+				warns.AddOnce(ir.WarningApproximated, "system", "a system message was moved before the conversation because Anthropic only accepts one after a user turn and before an assistant turn")
+			}
+			continue
+		}
+		kept = append(kept, turn)
+	}
+	return kept
+}
+
+// anthropicOutSystemBlocks converts one already-rendered in-conversation
+// system turn back to the block form the top-level system field uses.
+func anthropicOutSystemBlocks(content any) []map[string]any {
+	switch rendered := content.(type) {
+	case string:
+		if rendered == "" {
+			return nil
+		}
+		return []map[string]any{{"type": "text", "text": rendered}}
+	case []map[string]any:
+		return rendered
+	}
+	return nil
+}
+
+// appendAnthropicTurn appends one rendered turn and merges it into a
+// consecutive same-role predecessor. Anthropic merges consecutive same-role
+// turns, and doing it here keeps tool_result blocks immediately after their
+// tool_use turn. A merge appends the later turn after the earlier one, so the
+// assembled user turn can put text before a tool_result; re-apply the
+// results-first rule the per-turn encoder already owns and report the move.
+func appendAnthropicTurn(out []anthropicOutMessage, role string, content any, warns *ir.Warnings) []anthropicOutMessage {
+	if content == nil {
+		return out
+	}
+	if n := len(out); n > 0 && out[n-1].Role == role {
+		merged := mergeAnthropicContent(out[n-1].Content, content)
+		if blocks, ok := merged.([]map[string]any); ok {
+			if ordered, moved := orderAnthropicRenderedResultsFirst(blocks); moved {
+				merged = ordered
+				if warns != nil {
+					warns.AddOnce(ir.WarningApproximated, "messages.tool_result",
+						"tool results were moved before other content in a merged user turn")
+				}
+			}
+		}
+		out[n-1].Content = merged
+		return out
+	}
+	return append(out, anthropicOutMessage{Role: role, Content: content})
+}
+
+// orderAnthropicRenderedResultsFirst moves every rendered tool_result block to
+// the front of one user turn, preserving the relative order within each group.
+// It reports whether a move occurred. The canonical-block twin is the ordering
+// step in encodeAnthropicBlocks; this owner covers a turn assembled from
+// already-rendered pieces.
+func orderAnthropicRenderedResultsFirst(blocks []map[string]any) ([]map[string]any, bool) {
+	seenOther := false
+	moved := false
+	for _, block := range blocks {
+		if block["type"] == "tool_result" {
+			if seenOther {
+				moved = true
+				break
+			}
+			continue
+		}
+		seenOther = true
+	}
+	if !moved {
+		return blocks, false
+	}
+	ordered := make([]map[string]any, 0, len(blocks))
+	for _, block := range blocks {
+		if block["type"] == "tool_result" {
+			ordered = append(ordered, block)
+		}
+	}
+	for _, block := range blocks {
+		if block["type"] != "tool_result" {
+			ordered = append(ordered, block)
+		}
+	}
+	return ordered, true
 }
 
 // encodeAnthropicContent renders a simple all-text turn as a string (the
 // shape the Chat translator historically emitted) and every structured turn as
 // a block array.
-func encodeAnthropicContent(blocks []ir.Block, warns *ir.Warnings) any {
+func encodeAnthropicContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) any {
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -732,9 +1217,15 @@ func encodeAnthropicContent(blocks []ir.Block, warns *ir.Warnings) any {
 		text.WriteString(b.Text)
 	}
 	if allText {
+		// Anthropic's TextBlockParam.text has minLength 1. An all-empty
+		// text-only turn contributes no content at all, matching the
+		// zero-block skip below.
+		if text.Len() == 0 {
+			return nil
+		}
 		return text.String()
 	}
-	return encodeAnthropicBlocks(blocks, ir.RoleUser, warns)
+	return encodeAnthropicBlocks(blocks, role, warns)
 }
 
 func mergeAnthropicContent(prev, next any) any {
@@ -796,6 +1287,12 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 	for _, b := range ordered {
 		switch b.Type {
 		case ir.BlockText:
+			// Anthropic rejects an empty text block (minLength 1). Drop it
+			// with its cache control and citations rather than emitting an
+			// invalid block; a structured turn keeps its other blocks.
+			if b.Text == "" {
+				continue
+			}
 			block := map[string]any{"type": "text", "text": b.Text}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
@@ -811,6 +1308,14 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			if source == nil {
 				continue
 			}
+			if role == ir.RoleAssistant && warns != nil {
+				// AssistantMessageParam.content uses the shared
+				// MessageContentParam type, so the block is schema-valid, but
+				// assistant media is unusual and provider acceptance is not
+				// verified. Keep the representable block and report the
+				// approximation.
+				warns.Add(ir.WarningApproximated, "assistant.image", "assistant media is schema-valid on Anthropic but runtime acceptance is not verified")
+			}
 			block := map[string]any{"type": "image", "source": source}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
@@ -821,9 +1326,17 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			if source == nil {
 				continue
 			}
+			if role == ir.RoleAssistant && warns != nil {
+				warns.Add(ir.WarningApproximated, "assistant.document", "assistant media is schema-valid on Anthropic but runtime acceptance is not verified")
+			}
 			block := map[string]any{"type": "document", "source": source}
 			if b.File != nil && b.File.Filename != "" {
-				block["title"] = b.File.Filename
+				if utf8.RuneCountInString(b.File.Filename) <= anthropicDocumentTitleMax {
+					block["title"] = b.File.Filename
+				} else if warns != nil {
+					warns.Add(ir.WarningDropped, "document.title",
+						"Anthropic document titles are limited to 500 characters")
+				}
 			}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
@@ -861,17 +1374,45 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			if b.CacheControl != nil && warns != nil {
 				warns.Add(ir.WarningDropped, "reasoning.cache_control", "Anthropic thinking blocks have no cache breakpoint")
 			}
-			if b.Reasoning.Signature != "" || b.Reasoning.Provider == ir.Anthropic {
+			native := b.Reasoning.Signature != "" || b.Reasoning.Provider == ir.Anthropic
+			if native {
 				out = append(out, map[string]any{
 					"type": "thinking", "thinking": b.Reasoning.Text, "signature": b.Reasoning.Signature,
 				})
+				// Anthropic thinking has one text payload; a summary that is
+				// not the same visible text has no separate slot.
+				if len(b.Reasoning.Summary) > 0 && warns != nil {
+					warns.Add(ir.WarningDropped, "reasoning.summary", "Anthropic thinking has no separate reasoning summary")
+				}
 			} else if b.Reasoning.Text != "" {
 				// A reasoning block minted by another family has no Anthropic
 				// signature; emitting it as text preserves the visible content.
+				// An encrypted artifact is still unreplayable, so that loss is
+				// reported alongside the approximation, matching the
+				// summary-only branch.
 				if warns != nil {
 					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning was emitted as visible text")
+					if b.Reasoning.Encrypted != "" {
+						warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
+					}
+					if len(b.Reasoning.Summary) > 0 {
+						warns.Add(ir.WarningDropped, "reasoning.summary", "Anthropic text has no separate reasoning summary")
+					}
 				}
 				out = append(out, map[string]any{"type": "text", "text": b.Reasoning.Text})
+			} else if len(b.Reasoning.Summary) > 0 {
+				// No raw text is available; the summaries are the only visible
+				// reasoning, so fold them into text with the same approximation
+				// the Chat encoder applies instead of dropping the block. An
+				// encrypted artifact is still unreplayable, so that loss stays
+				// reported alongside the approximation.
+				if warns != nil {
+					warns.Add(ir.WarningApproximated, "reasoning", "cross-protocol reasoning summary was emitted as visible text")
+					if b.Reasoning.Encrypted != "" {
+						warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
+					}
+				}
+				out = append(out, map[string]any{"type": "text", "text": strings.Join(b.Reasoning.Summary, "")})
 			} else if b.Reasoning.Encrypted != "" {
 				if warns != nil {
 					warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Anthropic Messages")
@@ -886,11 +1427,38 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 				warns.Add(ir.WarningOpaque, "reasoning", "redacted reasoning cannot be replayed on Anthropic Messages")
 			}
 		case ir.BlockRefusal:
-			out = append(out, map[string]any{"type": "text", "text": b.Refusal})
+			// A refusal becomes a text block, which Anthropic also rejects
+			// when empty (minLength 1). Drop it explicitly instead of
+			// emitting an invalid block; a non-empty refusal keeps its cache
+			// breakpoint like any other text block.
+			if b.Refusal == "" {
+				if warns != nil {
+					warns.Add(ir.WarningDropped, "content.refusal", "empty refusal has no representable content")
+				}
+				continue
+			}
+			block := map[string]any{"type": "text", "text": b.Refusal}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			out = append(out, block)
 		}
 	}
-	_ = role
 	return out
+}
+
+// anthropicUserIDMax is the official metadata.user_id maxLength. It counts
+// Unicode characters, matching the JSON Schema maxLength semantics.
+const anthropicUserIDMax = 512
+
+// anthropicDocumentTitleMax is the official DocumentBlockParam title maxLength,
+// counted in Unicode characters.
+const anthropicDocumentTitleMax = 500
+
+// anthropicImageMediaTypes is the Base64ImageSource media-type allowlist from
+// the Anthropic Messages schema.
+var anthropicImageMediaTypes = map[string]bool{
+	"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
 }
 
 func encodeAnthropicImage(img *ir.Image, warns *ir.Warnings) map[string]any {
@@ -902,6 +1470,13 @@ func encodeAnthropicImage(img *ir.Image, warns *ir.Warnings) map[string]any {
 	case img.FileID != "":
 		source = map[string]any{"type": "file", "file_id": img.FileID}
 	case img.Data != "":
+		if !anthropicImageMediaTypes[img.MediaType] {
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "image.media_type",
+					"Anthropic base64 images must be jpeg, png, gif or webp")
+			}
+			return nil
+		}
 		source = map[string]any{"type": "base64", "media_type": img.MediaType, "data": img.Data}
 	case img.URL != "":
 		source = map[string]any{"type": "url", "url": img.URL}
@@ -973,10 +1548,12 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 	if len(blocks) == 0 {
 		return ""
 	}
+	// The plain string form cannot carry a cache breakpoint or citations.
+	// Use the array form whenever a text block has either so it survives.
 	allText := true
 	var text strings.Builder
 	for _, b := range blocks {
-		if b.Type != ir.BlockText {
+		if b.Type != ir.BlockText || b.CacheControl != nil || len(b.Citations) > 0 {
 			allText = false
 			break
 		}
@@ -989,10 +1566,22 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 	for _, b := range blocks {
 		switch b.Type {
 		case ir.BlockText:
-			if len(b.Citations) > 0 && warns != nil {
-				warns.Add(ir.WarningDropped, "tool_result.citations", "Anthropic tool-result text blocks have no citations")
+			// TextBlockParam requires non-empty text. A mixed tool result
+			// keeps its image/file parts and drops the empty text block with
+			// its cache breakpoint or citations.
+			if b.Text == "" {
+				continue
 			}
-			out = append(out, map[string]any{"type": "text", "text": b.Text})
+			block := map[string]any{"type": "text", "text": b.Text}
+			if b.CacheControl != nil {
+				block["cache_control"] = b.CacheControl
+			}
+			if len(b.Citations) > 0 {
+				if citations := anthropicCitations(b.Citations, warns); len(citations) > 0 {
+					block["citations"] = citations
+				}
+			}
+			out = append(out, block)
 		case ir.BlockImage:
 			if source := encodeAnthropicImage(b.Image, warns); source != nil {
 				out = append(out, map[string]any{"type": "image", "source": source})
@@ -1010,6 +1599,11 @@ func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any
 				warns.Add(ir.WarningDropped, "tool_result."+string(b.Type), "block has no Anthropic tool-result equivalent")
 			}
 		}
+	}
+	if len(out) == 0 {
+		// Every block was dropped, so no text block remains to carry a
+		// breakpoint. The empty string is the valid empty tool_result.
+		return ""
 	}
 	return out
 }
@@ -1057,7 +1651,9 @@ func encodeAnthropicToolChoice(tc *ir.ToolChoice, parallel *bool) map[string]any
 	default:
 		out["type"] = "auto"
 	}
-	if parallel != nil {
+	// ToolChoiceNone carries only its type in the Anthropic schema; the
+	// parallel-use modifier is declared on auto/any/tool only.
+	if parallel != nil && mode != ir.ToolChoiceNone {
 		out["disable_parallel_tool_use"] = !*parallel
 	}
 	return out
@@ -1141,6 +1737,14 @@ func encodeAnthropicOutputConfig(rf *ir.ResponseFormat, reasoning *ir.ReasoningC
 		if rf.Name != "" && warns != nil {
 			warns.Add(ir.WarningDropped, "response_format.name", "Anthropic output_config.format has no name")
 		}
+		if rf.Description != "" && warns != nil {
+			warns.Add(ir.WarningDropped, "response_format.description", "Anthropic output_config.format has no description")
+		}
+		// Anthropic's JSONOutputFormat has no strict mode. Strict false is
+		// the target's default and therefore not a loss; strict true is.
+		if rf.Strict != nil && *rf.Strict && warns != nil {
+			warns.Add(ir.WarningDropped, "response_format.strict", "Anthropic output_config.format has no strict mode")
+		}
 	}
 	if len(out) == 0 {
 		return nil
@@ -1158,16 +1762,35 @@ type anthropicWireResponse struct {
 	StopReason   string               `json:"stop_reason"`
 	StopSequence string               `json:"stop_sequence"`
 	StopDetails  json.RawMessage      `json:"stop_details"`
-	Usage        anthropicWireUsage   `json:"usage"`
+	// Container and Diagnostics are required nullable response members with
+	// no cross-protocol equivalent. Keep them raw so a non-null source value
+	// can be reported instead of silently dropped.
+	Container   json.RawMessage    `json:"container"`
+	Diagnostics json.RawMessage    `json:"diagnostics"`
+	Usage       anthropicWireUsage `json:"usage"`
 }
 
 type anthropicWireUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-	OutputTokensDetails      *struct {
-		ThinkingTokens int64 `json:"thinking_tokens"`
+	InputTokens  jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens jsonnum.Int64 `json:"output_tokens"`
+	// The Anthropic schema declares both cache counters number or null, so an
+	// explicit null must decode as zero rather than fail the whole response.
+	// The streaming owner uses the same pointer shape.
+	CacheCreationInputTokens *jsonnum.Int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *jsonnum.Int64 `json:"cache_read_input_tokens"`
+	// ServiceTier and Speed describe the serving tier of this usage. They
+	// exist only on the response side; the request spells the tier through
+	// service_tier/speed as well.
+	ServiceTier string `json:"service_tier"`
+	Speed       string `json:"speed"`
+	// CacheCreation, InferenceGeo and ServerToolUse are required nullable
+	// members with no canonical usage equivalent. They stay raw so a non-null
+	// provider value can be reported as dropped.
+	CacheCreation       json.RawMessage `json:"cache_creation"`
+	InferenceGeo        json.RawMessage `json:"inference_geo"`
+	ServerToolUse       json.RawMessage `json:"server_tool_use"`
+	OutputTokensDetails *struct {
+		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -1216,18 +1839,40 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 			return nil, err
 		}
 	}
-	blocks, warns, err := decodeAnthropicBlocks(in.Content)
-	if err != nil {
-		return nil, err
-	}
 	resp := &ir.Response{
 		ID:           in.ID,
 		Model:        in.Model,
 		Created:      time.Now().Unix(),
-		Blocks:       blocks,
 		Finish:       anthropicFinishReason(in.StopReason),
 		StopSequence: in.StopSequence,
-		Warnings:     warns,
+	}
+	// The response accumulator spans every content block so AddOnce dedupes
+	// a repeated block-level loss.
+	blocks, err := decodeAnthropicBlocks(in.Content, &resp.Warnings, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp.Blocks = blocks
+	// A provider stop reason of "error" is a failure statement even though the
+	// current Anthropic response type does not list it and the body carries no
+	// error object. Keep the source finish and synthesize the canonical
+	// failure so the record and a translated terminal are not empty.
+	if resp.Finish == ir.FinishError && resp.Error == nil {
+		resp.Error = syntheticAnthropicFailure()
+	}
+	if tier, tierWarns := anthropicUsageServiceTier(in.Usage.ServiceTier, in.Usage.Speed); tier != "" || len(tierWarns) > 0 {
+		resp.ServiceTier = tier
+		resp.Warnings = append(resp.Warnings, tierWarns...)
+	}
+	if in.StopReason == "model_context_window_exceeded" {
+		resp.Warnings.Add(ir.WarningApproximated, "stop_reason",
+			"model context window exhaustion is represented as a length finish")
+	}
+	if in.StopReason == "" {
+		// Chat has the same warning on a missing finish_reason; Anthropic
+		// omitted a completion marker, so a Responses target becomes
+		// incomplete and the loss is explicit on every wire.
+		resp.Warnings.Add(ir.WarningApproximated, "stop_reason", "provider omitted the completion marker")
 	}
 	usage, err := anthropicUsageToIR(in.Usage)
 	if err != nil {
@@ -1241,27 +1886,49 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		resp.Warnings.Add(ir.WarningDropped, "stop_details",
 			"the cross-protocol terminal has no stop-details equivalent")
 	}
+	warnAnthropicResponseOnly(in.Container, "container", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Diagnostics, "diagnostics", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Usage.CacheCreation, "usage.cache_creation", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Usage.InferenceGeo, "usage.inference_geo", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Usage.ServerToolUse, "usage.server_tool_use", &resp.Warnings)
 	return resp, nil
 }
 
-func anthropicUsageToIR(u anthropicWireUsage) (ir.Usage, error) {
-	out := ir.Usage{
-		OutputTokens:     u.OutputTokens,
-		CacheReadTokens:  u.CacheReadInputTokens,
-		CacheWriteTokens: u.CacheCreationInputTokens,
+// warnAnthropicResponseOnly reports one non-null Anthropic response member
+// that has no Chat or Responses representation. Absent and explicit null are
+// the schema's normal empty spellings, not a loss.
+func warnAnthropicResponseOnly(raw json.RawMessage, field string, warns *ir.Warnings) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return
 	}
-	input, err := metrics.SumCounts(u.InputTokens, u.CacheReadInputTokens, u.CacheCreationInputTokens)
+	warns.Add(ir.WarningDropped, field, "Anthropic response member has no cross-protocol equivalent")
+}
+
+func anthropicUsageToIR(u anthropicWireUsage) (ir.Usage, error) {
+	var cacheRead, cacheWrite int64
+	if u.CacheReadInputTokens != nil {
+		cacheRead = int64(*u.CacheReadInputTokens)
+	}
+	if u.CacheCreationInputTokens != nil {
+		cacheWrite = int64(*u.CacheCreationInputTokens)
+	}
+	out := ir.Usage{
+		OutputTokens:     int64(u.OutputTokens),
+		CacheReadTokens:  cacheRead,
+		CacheWriteTokens: cacheWrite,
+	}
+	input, err := metrics.SumCounts(int64(u.InputTokens), cacheRead, cacheWrite)
 	if err != nil {
 		return ir.Usage{}, fmt.Errorf("usage: %w", err)
 	}
-	total, err := metrics.SumCounts(input, u.OutputTokens)
+	total, err := metrics.SumCounts(input, int64(u.OutputTokens))
 	if err != nil {
 		return ir.Usage{}, fmt.Errorf("usage: %w", err)
 	}
 	out.InputTokens = input
 	out.TotalTokens = total
 	if u.OutputTokensDetails != nil {
-		out.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
+		out.ReasoningTokens = int64(u.OutputTokensDetails.ThinkingTokens)
 	}
 	return out, nil
 }
@@ -1285,24 +1952,35 @@ func anthropicFinishReason(reason string) ir.FinishReason {
 	}
 }
 
+// syntheticAnthropicFailure is the canonical failure for a provider stop
+// reason that says the turn failed without an error object. The spelling
+// "error" is not in the current Anthropic StopReason type, but compatible
+// upstreams emit it; dropping the failure or mapping it to a clean finish
+// would hide a provider statement.
+func syntheticAnthropicFailure() *ir.Error {
+	return &ir.Error{Type: sse.TypeUpstreamError, Message: "upstream response failed"}
+}
+
 // EncodeAnthropicResponse renders the canonical response as a non-streaming
 // Anthropic message.
 func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	if err := ir.ValidateResponse(resp); err != nil {
 		return nil, err
 	}
+	if err := validateAnthropicResponseToolVocabulary(resp); err != nil {
+		return nil, err
+	}
 	if err := validateUsage(resp.Usage); err != nil {
 		return nil, err
 	}
-	blocks := encodeAnthropicBlocks(resp.Blocks, ir.RoleAssistant, &resp.Warnings)
-	usage := map[string]any{
-		"input_tokens":                nonNegative(resp.Usage.InputTokens - resp.Usage.CacheReadTokens - resp.Usage.CacheWriteTokens),
-		"output_tokens":               resp.Usage.OutputTokens,
-		"cache_creation_input_tokens": resp.Usage.CacheWriteTokens,
-		"cache_read_input_tokens":     resp.Usage.CacheReadTokens,
-	}
-	if resp.Usage.ReasoningTokens != 0 {
-		usage["output_tokens_details"] = map[string]any{"thinking_tokens": resp.Usage.ReasoningTokens}
+	blocks := encodeAnthropicBlocks(encodeAnthropicResponseBlocks(resp.Blocks, &resp.Warnings), ir.RoleAssistant, &resp.Warnings)
+	serviceTier, speed, tierWarns := anthropicResponseUsageTier(resp.ServiceTier)
+	resp.Warnings = append(resp.Warnings, tierWarns...)
+	stopReason, terminalApproximated := anthropicContentTerminal(
+		resp.Finish, hasRefusalBlock(resp.Blocks), hasToolCallBlock(resp.Blocks))
+	if terminalApproximated {
+		resp.Warnings.Add(ir.WarningApproximated, "stop_reason",
+			fmt.Sprintf("finish reason %q is represented as Anthropic stop reason %q", string(resp.Finish), stopReason))
 	}
 	out := map[string]any{
 		"id":            resp.ID,
@@ -1310,18 +1988,145 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 		"role":          "assistant",
 		"model":         resp.Model,
 		"content":       blocks,
-		"stop_reason":   anthropicStopReason(resp.Finish),
+		"stop_reason":   stopReason,
 		"stop_sequence": nil,
-		"usage":         usage,
+		"stop_details":  nil,
+		"container":     nil,
+		"diagnostics":   nil,
+		"usage":         anthropicMessageUsage(resp.Usage, serviceTier, speed),
 	}
 	if resp.StopSequence != "" {
 		out["stop_sequence"] = resp.StopSequence
+	}
+	if len(resp.Metadata) > 0 {
+		// The Anthropic Message response object has no metadata property.
+		// The field is unrepresentable, so report the loss instead of adding
+		// a non-schema field.
+		resp.Warnings.Add(ir.WarningDropped, "metadata", "Anthropic Messages responses have no metadata field")
 	}
 	if resp.Finish == ir.FinishOther || resp.Finish == ir.FinishCancelled {
 		resp.Warnings.Add(ir.WarningApproximated, "finish_reason",
 			"Anthropic Messages has no equivalent terminal reason")
 	}
 	return sse.MarshalWireJSON(out)
+}
+
+// anthropicMessageUsage renders the full Message.usage shape. The current
+// Anthropic interface marks cache_creation, inference_geo, output_tokens_details,
+// server_tool_use, service_tier and speed as required nullable members, so every
+// one is present; the members with no canonical source stay null rather than
+// disappearing. Reasoning maps to output_tokens_details.
+func anthropicMessageUsage(u ir.Usage, serviceTier, speed string) map[string]any {
+	out := map[string]any{
+		"input_tokens":                nonNegative(u.InputTokens - u.CacheReadTokens - u.CacheWriteTokens),
+		"output_tokens":               u.OutputTokens,
+		"cache_creation_input_tokens": u.CacheWriteTokens,
+		"cache_read_input_tokens":     u.CacheReadTokens,
+		"cache_creation":              nil,
+		"inference_geo":               nil,
+		"output_tokens_details":       nil,
+		"server_tool_use":             nil,
+		"service_tier":                nil,
+		"speed":                       nil,
+	}
+	if u.ReasoningTokens != 0 {
+		out["output_tokens_details"] = map[string]any{"thinking_tokens": u.ReasoningTokens}
+	}
+	if serviceTier != "" {
+		out["service_tier"] = serviceTier
+	}
+	if speed != "" {
+		out["speed"] = speed
+	}
+	return out
+}
+
+// anthropicDeltaUsage renders MessageDeltaUsage. Its type carries only the
+// cumulative counters and the two detail objects; tier, speed and
+// cache_creation are not members, so a message_delta must not gain them.
+func anthropicDeltaUsage(u ir.Usage) map[string]any {
+	out := map[string]any{
+		"input_tokens":                nonNegative(u.InputTokens - u.CacheReadTokens - u.CacheWriteTokens),
+		"output_tokens":               u.OutputTokens,
+		"cache_creation_input_tokens": u.CacheWriteTokens,
+		"cache_read_input_tokens":     u.CacheReadTokens,
+		"output_tokens_details":       nil,
+		"server_tool_use":             nil,
+	}
+	if u.ReasoningTokens != 0 {
+		out["output_tokens_details"] = map[string]any{"thinking_tokens": u.ReasoningTokens}
+	}
+	return out
+}
+
+// encodeAnthropicResponseBlocks filters assistant blocks that are valid only
+// in a request MessageParam.Content list. Anthropic's response Message.content
+// is a ContentBlock list, whose union has no image or document block, so the
+// shared request encoder's block plus approximation warning would emit a wire
+// the target rejects. Request encoding keeps its current block-and-warn
+// behavior.
+func encodeAnthropicResponseBlocks(blocks []ir.Block, warns *ir.Warnings) []ir.Block {
+	filtered := make([]ir.Block, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case ir.BlockImage:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "response.assistant.image", "Anthropic Message.content has no image block")
+			}
+			continue
+		case ir.BlockFile:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "response.assistant.document", "Anthropic Message.content has no document block")
+			}
+			continue
+		}
+		filtered = append(filtered, b)
+	}
+	return filtered
+}
+
+// hasRefusalBlock reports whether the response content carries a refusal the
+// Anthropic encoder represents. An empty refusal is dropped as invalid
+// content, so it does not imply a refusal terminal.
+func hasRefusalBlock(blocks []ir.Block) bool {
+	for _, b := range blocks {
+		if b.Type == ir.BlockRefusal && b.Refusal != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasToolCallBlock reports whether the response content carries a representable
+// tool call.
+func hasToolCallBlock(blocks []ir.Block) bool {
+	for _, b := range blocks {
+		if b.Type == ir.BlockToolCall && b.ToolCall != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicContentTerminal derives the Anthropic stop reason from the response
+// content when the mapped reason is end_turn. Anthropic defines refusal and
+// tool_use as distinct terminals and clients branch on the field: a tool call
+// under end_turn is never executed, and a refusal under end_turn reads as a
+// normal answer. A refusal wins when both appear. The bool reports that the
+// stored reason was approximated, for the non-stream warning channel; a
+// streaming response has no header to report it in.
+func anthropicContentTerminal(finish ir.FinishReason, refusal, toolCall bool) (string, bool) {
+	reason := anthropicStopReason(finish)
+	if reason != "end_turn" {
+		return reason, false
+	}
+	if refusal {
+		return "refusal", true
+	}
+	if toolCall {
+		return "tool_use", true
+	}
+	return reason, false
 }
 
 func anthropicStopReason(r ir.FinishReason) string {
@@ -1356,19 +2161,20 @@ func nonNegative(v int64) int64 {
 // non-2xx body or an SSE error event.
 func DecodeAnthropicError(body []byte) (*ir.Error, error) {
 	var in struct {
-		Type  string `json:"type"`
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Type  string          `json:"type"`
+		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, err
 	}
-	if in.Error.Message == "" && in.Error.Type == "" {
-		return nil, errors.New("not an anthropic error envelope")
+	typ, code, msg := metrics.ParseErrorComponents(in.Error)
+	if typ == "" && code == "" && msg == "" {
+		if !errorValuePresent(in.Error) {
+			return nil, errors.New("not an anthropic error envelope")
+		}
+		typ, msg = "api_error", genericProviderErrorMessage
 	}
-	return &ir.Error{Type: in.Error.Type, Message: in.Error.Message}, nil
+	return boundedProviderError(typ, code, msg), nil
 }
 
 // EncodeAnthropicError renders the canonical error as an Anthropic error

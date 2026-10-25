@@ -12,8 +12,13 @@ millivolt accepts three client wire families and translates between any of
 them and the supported upstream families. The client protocol is selected by
 the request path, or explicitly by `X-Proxy-In-Format`; the upstream protocol
 is selected by `X-Proxy-Format`. Translation runs only when both are known and
-differ. An absent `X-Proxy-Format` is always a byte-transparent passthrough,
-and an explicit format equal to the client protocol is also passthrough.
+differ. An absent `X-Proxy-Format` never enters the IR, and an explicit format
+equal to the client protocol also stays passthrough. Passthrough is not an
+unconditional byte-identity promise: configured `request_overrides`, a
+`sub_conversations` strip, or ensured tools can still rewrite the upstream
+body before it is sent (see
+[request overrides](operations.md#request-overrides)). Without any of those
+configured, the body bytes are relayed unchanged.
 
 | Client path | Client protocol | `X-Proxy-Format` | Upstream protocol |
 | --- | --- | --- | --- |
@@ -49,7 +54,9 @@ Cross-protocol translation goes through one canonical request, response and
 stream model in [format/ir](../internal/format/ir/ir.go). Each wire family has
 one decoder and one encoder; the IR is the single source of truth for roles,
 content blocks, tool calls and results, reasoning artifacts, stop reasons and
-usage. Same-protocol requests never enter the IR: they relay byte-for-byte.
+usage. Same-protocol requests never enter the IR: they relay unchanged unless
+a configured request override, sub-conversation strip or ensured-tools rule
+rewrites the upstream body first.
 
 Carried wherever the target protocol represents them: text, images (URL,
 base64 or file id), documents, audio where the target accepts it,
@@ -58,18 +65,209 @@ tool use, tool calls and results, structured outputs, reasoning effort and
 summary, stop sequences, sampling parameters, metadata, usage and cache-token
 accounting.
 
+A malformed Chat `stop` value is rejected before the upstream send on a
+translated request. Absent, null, a string and an array of strings are the
+accepted shapes; any other type returns 400 instead of silently dropping the
+stop filter. An array element that is null or not a string is also rejected:
+Go would otherwise decode it as an empty stop sequence. The same element rule
+applies to Anthropic `stop_sequences`. Native Chat passthrough is not decoded:
+the body is relayed unchanged, so `stop: 5` reaches the upstream and its
+response is returned. An empty string and an empty array still mean no stops.
+
 Protocol-only artifacts are preserved for the same family and reported when a
 target cannot consume them:
 
 - Anthropic thinking and redacted-thinking blocks keep their opaque signatures.
+  A Responses reasoning item has no Anthropic signature: a translated request
+  or non-streaming response emits its visible text with an approximation
+  warning instead of a `thinking` block, while a translated stream opens a
+  `thinking` block with an empty `signature`. The proxy keeps the reasoning
+  text and does not invent a signature; resending an empty-signature block is a
+  client choice and the target may reject it.
 - OpenAI Responses reasoning items keep `encrypted_content` and item ids.
   A cross-family encrypted reasoning artifact is never replayed into another
-  provider's field; it is dropped with a warning.
+  provider's field. A non-streaming surface drops it with a warning; a stream
+  has no warning sink and drops it silently.
+- A Responses reasoning item exposes two independent text channels: the
+  summary parts and the content reasoning text. A translated stream emits both
+  as they arrive, so text the source places in both channels appears in two
+  target reasoning blocks. The proxy does not deduplicate across channels: a
+  native client accumulating the source observes the same two channels, and
+  merging them would corrupt genuinely distinct summary and content text.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
-- `previous_response_id`, `item_reference`, `background`, `conversation`,
-  `store: true` and prompt templates require provider-side state and are
-  rejected when the target cannot honor them.
+- A Responses item `phase` is a wire hint with no target equivalent. A
+  non-streaming request or response records one `input.phase` or `output.phase`
+  warning. A translated stream keeps one `output.phase` warning only in the
+  decoder's diagnostic state; no client header or stored record carries it.
+  The phase text never reaches the client wire.
+- A `response.output_text.delta` for a part the source never announced is
+  dropped, but the matching done event or the terminal document recovers the
+  full text, so only the incremental gap is lost. A Chat `[DONE]` without a
+  finish reason maps to `response.incomplete` for Responses and to a clean
+  `message_delta` with `end_turn` for Anthropic; both are accepted limits with
+  no reproduced client failure.
+- An Anthropic target derives its terminal from content when the canonical
+  reason maps to `end_turn`: a non-empty refusal becomes `refusal`, a tool call
+  becomes `tool_use`, and a refusal wins when both appear. The non-streaming
+  response reports the approximation in `X-Proxy-Warnings`; a stream has no
+  warning channel.
+- A canonical output block with no Responses content part, such as a file or
+  audio block carried from Anthropic, is dropped from the output with one
+  `output.<type>` warning. Text around the dropped block is preserved.
+- Responses provider-executed tool calls in the shared tool-item vocabulary
+  (`custom_tool_call`, `local_shell_call`, `mcp_call`, `computer_call`,
+  `tool_search_call` and their peers) are tool activity: they count toward a
+  `tool_calls` finish even though no cross-protocol content block exists for
+  them, and a translated record still counts them (retaining streamed names)
+  when the target wire drops the item. Provider-executed generation artifacts
+  (`program`, `program_output`, `image_generation_call`,
+  `code_interpreter_call`) are output presence
+  instead: a completed turn that carries only one of them is not an empty
+  completion, while its finish stays the source's stop rather than
+  `tool_calls`, because the item is generated source or media rather than a
+  model tool invocation. Extending the tool vocabulary waits for a
+  demonstrated client need.
+- `previous_response_id`, `item_reference`, `background`, `conversation` and
+  prompt templates require provider-side state and are rejected when the
+  target cannot honor them. `store: true` is honored by Chat Completions and
+  Responses targets and rejected by Anthropic. A Chat or Anthropic request
+  translated to a Responses target sets `store: false` when the source never
+  chose storage, because the Responses default retains data for at least 30
+  days while the source protocol has no such opt-in and the proxy has no
+  retrieval path. Explicit source values are preserved. A Responses source's
+  implicit storage cannot be honored on Chat or Anthropic, and no response id
+  is returned for later retrieval.
+- Every system or developer message before the first emitted conversation
+  turn, together with the Responses instructions, becomes the top-level
+  Anthropic `system` prompt. A mid-conversation system run stays in `messages`
+  only after an emitted user turn and before an assistant turn or the end; any
+  other position is lifted to the prompt with one approximation warning. A
+  later developer turn has no Anthropic role and is lifted to the prompt with
+  an approximation warning, which reports the positional change.
+- An Anthropic target drops leading assistant turns because the first message
+  must use the user role, reporting one `messages.leading_assistant` warning.
+  A tool result that answered a dropped leading call is dropped with one
+  `messages.orphan_tool_result` warning, so that result never reaches the
+  wire. A source-supplied result that matches no call in the source history is
+  content, not an artifact of the drop: it passes through unchanged as a
+  `tool_result` even though no preceding `tool_use` exists, with no warning.
+  Pairing happens before the drop: a result that names a dropped call stays
+  paired to it and is dropped with that call rather than retargeted to a later
+  same-name call, because the name may answer the dropped call and retargeting
+  could answer the wrong tool. A system or developer turn before
+  the first emitted turn is still lifted to the top-level prompt even when a
+  dropped assistant or an empty user turn preceded it.
+- Consecutive same-role turns are merged. A merged user turn keeps Anthropic's
+  results-first rule: when the later turn would otherwise put text before a
+  `tool_result`, the results move to the front with their relative order
+  preserved and one `approximated:messages.tool_result` warning reports the
+  reorder. An already-ordered or text-only merge keeps source order and warns
+  nothing.
+- A non-clean non-streaming terminal can carry a missing, null, whitespace or
+  partial tool-call argument value the source never finished: a Chat finish
+  other than `stop`, `tool_calls` or `function_call`, or a Responses
+  `incomplete` or `cancelled` terminal, including a `completed` response that
+  still carries an incomplete reason. The proxy drops only the unusable call
+  with one `tool_calls.arguments` or `function_call.arguments` warning and
+  keeps the text, refusal and source finish. A Responses `failed` terminal is not covered
+  by that rule: it returns the provider error envelope and discards the output,
+  so no block or warning is produced. A clean terminal still maps an omitted,
+  null or whitespace value to the empty object, but fails closed on a partial
+  or otherwise invalid value. Structural failures such as a missing name or id
+  remain fatal on every terminal, even when the arguments are also unusable.
+- A streamed Responses `function_call` that omits `call_id` uses its item id as
+  the target tool id. When both identities are absent, the block starts with a
+  stable `call_proxy_<output index>` id instead of an empty id, so Chat does not
+  write an empty tool call and Anthropic does not reject the block. An
+  announcement that carries both identities accepts either spelling on the
+  terminal item. A terminal item that uses the other identity kind, an item id
+  after a call-id announcement or the reverse, matches a unique open announced
+  call with the same name. A terminal entry that repeats an announced call
+  whose block already closed is skipped before open matching when its identity
+  and name agree; an id-less entry also requires its effective argument value
+  to agree. An id-less repeat is skipped before its array position is resolved,
+  so a closed call announced at a foreign position cannot claim a different
+  open call. Formatting differences and object key order do not affect that
+  agreement, but numeric literals are compared as written, so `1` and `1.0`
+  do not agree. A value above the canonicalization size, nesting or
+  member-separator bounds keeps the byte-exact rule, as does a partial or
+  otherwise invalid value, so formatting and key-order differences in such a
+  value do not agree. A named terminal item matches only an open announced call
+  with the same name; several same-name candidates are disambiguated only by
+  the announcement at the terminal position, and no same-name candidate starts
+  a new call instead of taking a differently named open call. An id-less
+  terminal item then matches a unique open announced call with the same name,
+  then the announcement at its own position among same-name candidates, then a
+  lone or first still-open id-less announced call in output order, so a
+  reordered terminal array completes the announced block rather than
+  synthesizing a second call. If no open call matches, an id-less entry whose
+  name and effective argument value agree with a closed id-less call is
+  skipped as that call's repeat. An unannounced id-less call at a colliding
+  announced position cannot be distinguished from a repeat and is dropped
+  rather than assigned to a different call. An identified terminal call also
+  matches only a same-name candidate whose identity kind is compatible: a
+  candidate keyed by the same identity kind must carry that identity, while a
+  cross-kind candidate stays eligible under the mixed-spelling rule. Position
+  alone never moves arguments to a conflicting identity. The non-streaming
+  decoder still rejects a call with both identities absent.
+- A legacy Chat `message.function_call` is treated as answer-shaped for retry
+  safety because the deprecated shape can represent either a tool invocation or
+  a final answer, and it is not counted as a tool call. A Chat source that uses
+  only that shape therefore records no tool-call count even though the call
+  translates.
+- Anthropic `metadata.user_id` is limited to 512 characters. A longer Chat or
+  Responses `user` value is rejected before any upstream send rather than
+  truncated, because truncation can collide two distinct identifiers.
+  Chat/Responses `service_tier: priority` maps to Anthropic `speed: fast` with
+  an approximation warning; `fast` maps without one. A translated stream takes
+  its tier and metadata from the source start event. A value that appears only
+  in the terminal document is not applied retroactively, because the target
+  `message_start` and earlier chunks are already on the wire.
+- An Anthropic document `title` is limited to 500 characters. A longer source
+  filename is dropped with a `document.title` warning while the document bytes
+  still translate; strict mode rejects the loss before any upstream send.
+- A response metadata map has no field on the Anthropic Message object, so a
+  non-streaming translated response drops it with a warning. A translated
+  Anthropic stream cannot report response-side warnings after its status line
+  is committed.
+- An image or document inside an Anthropic assistant request turn is
+  schema-valid because assistant request content shares the message content
+  type. The request encoder keeps it and reports an `assistant.image` or
+  `assistant.document` approximation warning; runtime acceptance of assistant
+  media is not verified. Anthropic's response `Message.content` union has no
+  image or document block, so the response encoder drops it with a
+  `response.assistant.image` or `response.assistant.document` dropped warning.
+  User media is carried without that warning.
+- A Responses `input_file` with inline `file_data` but no media-type
+  declaration has one inferred from a data-URL prefix, a `.pdf` or common
+  plain-text filename extension, or a base64 `%PDF-` signature. Unrecognized
+  bytes are dropped with one warning while a file id or URL on the same part
+  survives; a part with no remaining payload is dropped. Chat file parts keep
+  their existing PDF-only default.
+- A Chat response carries one refusal field, so multiple IR refusal parts are
+  concatenated in block order. An empty part contributes nothing and never
+  clears earlier text.
+- A translated response has no audio representation: the IR has no audio output
+  block, so a Chat `message.audio` or streamed `delta.audio` and a Responses
+  `output_audio` content part never reach a target wire. The non-streaming
+  Responses decoder reports one `content.output_audio` warning; the Chat
+  decoder carries no audio block and reports no warning. Native same-protocol
+  relay keeps the audio unchanged. Mapping a transcript to assistant text
+  would be a fidelity feature, not a lossless translation.
+- A translated non-streaming response assumes a schema-valid source identity.
+  A source that omits `id` or `model` yields an empty string on the target
+  rather than an invented identity. The Responses envelope carries protocol
+  defaults for request-echo fields (`parallel_tool_calls: true`, `tools: []`,
+  `tool_choice: "auto"`, null `instructions`/`temperature`/`top_p`,
+  `store: false`); a translated response cannot echo the source request's
+  parameters without threading the request IR into the encoder.
+- A Responses output tool-call `call_id` has no schema length bound, so a
+  provider id longer than 64 characters is relayed unchanged. If the client
+  replays that call as request history, the Responses request boundary enforces
+  its 1..64 character reference rule and rejects the request with 400. The
+  proxy never shortens or drops the output id, because that would break the
+  correlation the client already received.
 - Responses `include` options other than `message.output_text.logprobs` and a
   non-string Chat metadata value have no target equivalent and are dropped
   with a warning. The logprobs include maps to the target's request field, but
@@ -79,20 +277,41 @@ target cannot consume them:
   pairs with its `role: function` reply by function name. Chat `prediction`,
   audio output, non-text `modalities`, and `web_search_options` have no target
   equivalent and are dropped with a warning.
-- A `json_schema` response format must carry its `schema` object to translate;
-  a schema-less `json_schema` is rejected with 400 because a cross-protocol
-  target has no meaningful mapping for one. A native same-protocol Chat
-  request is relayed unchanged, so the passthrough path still forwards it.
+- A request-history tool call without an id gets a generated id and reports the
+  recorded approximation. Tool ids are pre-reserved once per request across
+  every message and item before any message is decoded: a generated id can
+  never collide with an explicit id anywhere in the request, including one that
+  appears later, and a repeated explicit id fails closed with HTTP 400. The
+  deprecated per-assistant Chat `function_call` keeps its function name as the
+  id because that shape carries no id; a repeated same-name legacy call is
+  inherently ambiguous and remains the documented exception. Pairing keeps the
+  kind of reference. A non-empty
+  `tool_call_id` answers the unanswered call with that exact id, so an explicit
+  id is never shadowed by another call's function name; when no id matches, a
+  generated call may still be addressed by the function name its client supplied
+  in place of the missing id. A message `name` (with no `tool_call_id`) addresses
+  a unique generated call. A reply with neither resolves only while exactly one
+  generated call is unresolved and no other call is unresolved. Any reference
+  matching more than one unresolved call fails closed, and an explicit call is
+  never answered by its name alone.
+- A `json_schema` response format must carry a valid JSON object `schema` to
+  translate; a schema-less, null, non-object or invalid `json_schema` schema is
+  rejected with 400 because a cross-protocol target has no meaningful mapping
+  for one. A native same-protocol Chat request is relayed unchanged, so the
+  passthrough path still forwards it.
 - A non-function tool type and malformed tool arguments are rejected before any
   upstream send.
 
-`translation_loss` selects the policy. `warn` (default) drops optional fields
-the target cannot represent and reports each one in `X-Proxy-Warnings`.
-`reject` fails the request with 400 naming the fields before any upstream send,
+`translation_loss` selects the policy. `warn` (default) drops the optional
+fields this proxy models but the target cannot represent, and reports each one
+in `X-Proxy-Warnings`. Provider-specific extension fields outside that modeled
+vocabulary are not inspected or reported; the passthrough path relays them
+unchanged. `reject` fails the request with 400 naming the fields before any
+upstream send,
 and it refuses every recorded loss, including a documented approximation such
-as a clamped temperature, a moved system message, a generated tool-call id or
-a `json_object` response format, not only a field the target cannot represent
-at all. The header is proxy-owned: a provider response header of the same name
+as a clamped temperature, a moved developer message, a generated tool-call id
+or a `json_object` response format, not only a field the target cannot
+represent at all. The header is proxy-owned: a provider response header of the same name
 is never forwarded. Its whole value is bounded at 1024 bytes; an over-cap list
 is cut at the byte budget, possibly inside the final field, and ends with
 `; truncated`. Response-side warnings
@@ -106,16 +325,106 @@ the client status becomes 502: a translated client would read 200 as a
 successful completion. A non-200 translated error body is buffered before the
 client sees it, at most 64 KiB, under `whole_document_read_timeout` (default 2
 minutes), so a provider that holds an error stream open can delay the client
-until that bound expires. Pre-commit failures (routing, request validation,
-translation, or an oversized translated body) answer in the client protocol's
-own error envelope.
+until that bound expires. A non-200 status that forbids a response body (1xx,
+204 or 304) cannot carry the translated envelope, so it fails closed as 502
+`upstream_error` naming the upstream status instead of committing a status
+whose error body the client cannot receive. Pre-commit failures (routing,
+request validation, translation, or an oversized translated body) answer in the
+client protocol's own error envelope. Non-streaming translation reads the complete upstream 200
+body and the translated document under a fixed 32 MiB cap each; exceeding
+either fails closed with 502 `response_too_large` before any client bytes. The
+cap is an internal safety constant, not a configurable limit.
 
 Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and
 closes it before `message_delta`; Responses emits `response.created`, per-item
 lifecycle events and one terminal event; Chat emits the role chunk, deltas, one
-`finish_reason` chunk and one `[DONE]`. A truncated upstream is closed with the
-client protocol's own error event, never a fabricated clean finish.
+`finish_reason` chunk and one `[DONE]`. The official Anthropic event flow closes
+every content block before `message_delta`. A nonconforming source that sends a
+content delta after `message_delta` is not given a runtime special case, because
+the terminal contract and the target encoder ordering still own the turn. A truncated upstream is closed with the
+client protocol's own error event, never a fabricated clean finish. The
+Responses encoder can emit `response.cancelled` for a canonical cancelled
+finish. The current `ResponseStreamEvent` union lists completed, failed and
+incomplete terminals, while the `Response` status enum includes cancelled; the
+event is kept as a forward-compatible extension and a strict client may treat
+it as unknown. Synthetic Responses error and terminal frames emitted on a
+committed socket after an accepted non-completion status restart
+`sequence_number` at 0 and 1; relayed events before that keep their original
+sequence. The degenerate terminal-region substitution emits the same error plus
+`response.failed` pair at 0 and 1 even when earlier streamed events carried
+higher numbers, because the relay does not retain the provider's counter. Both
+reset cases are documented contract gaps, not reproduced client failures; the
+terminal event is final for the turn.
+
+- A Chat stream chunk is decoded from its first choice only. A translated
+  request never emits `n` above 1 because only one choice can be translated,
+  so the limit is unreachable for compliant traffic; a noncompliant upstream
+  that interleaves several choices in one stream would mix them in the
+  translated stream.
+- A Chat stream must carry `chat.completion.chunk` documents. A full
+  completion document, or a choice carrying `message` instead of `delta`, is
+  rejected instead of becoming a successful empty answer; a chunk without
+  `object` stays accepted when it carries a delta.
+- A source in-band error followed by the protocol terminal is deliberate: Chat
+  and Responses clients receive the provider error and then `[DONE]` or the
+  terminal event, matching the source order. The relay does not suppress the
+  terminal after an error.
+- A streamed tool `arguments` value that is exactly `null` is emitted literally
+  and fails the block-close validation, while the non-streaming decoder
+  normalizes it to `{}`. The stream cannot rewrite bytes it already delivered,
+  and no official provider shape emits this value, so the inconsistency is an
+  accepted limit rather than a normalization path.
+- Anthropic `content_block_start` text is not counted as answer content,
+  first-answer time or a preview. The Anthropic wire is exempt from the OpenAI
+  degenerate substitution, so a completed start-text-only stream stays healthy
+  and records no answer content. Official start text is normally empty; this is
+  an accepted accounting limit.
+
+Streaming citations are not translated. A Responses
+`response.output_text.annotation.added` event is not decoded, and a streamed
+target does not emit citations or annotations; non-streaming responses do carry
+url citations. A citation stream event is a separate feature, not a silent
+claim of streaming parity.
+
+A non-streaming translated Responses message item carries
+`status: "incomplete"` when the response-level status is not `completed`, and
+`status: "completed"` otherwise. Function-call items always carry
+`status: "completed"` because every emitted call has validated arguments. The
+response-level `status` still owns the turn lifecycle. In a translated stream,
+`response.output_item.added` carries `status: "in_progress"` and each
+`response.output_item.done` carries the status at which that item closed:
+`"completed"` for a normal close and `"incomplete"` for an aborted item. The
+terminal response output preserves those per-item statuses; only an item still
+open at an incomplete or failed terminal is rendered `incomplete`, and a failed
+terminal omits an open call whose arguments were never validated.
+
+Parallel tool calls translated to Anthropic open their indexed content blocks
+concurrently (for example start 0, start 1, delta 0, delta 1, stop 0, stop 1).
+The blocks carry the index the streaming contract requires, and SDKs accumulate
+by index; a strict assumption of sequential block lifecycles would need a
+separate encoder design, not a per-request special case. A streamed Responses
+tool call is validated by its terminal class. A completed terminal fails closed
+on a partial function-call value. Incomplete and cancelled terminals do the
+same, because both are normal turn boundaries and an executable empty object
+must never close a call the model did not finish. On those two terminals a call
+with missing, null or whitespace arguments is also rejected unless the source
+explicitly sent `{}`. When validation fails, the target abort closes non-tool blocks but
+leaves an open tool block unclosed: Anthropic emits no `content_block_stop` over
+empty input, and Responses emits no done function-call item with empty
+arguments. The proxy error frame terminates the stream, so a client that keeps
+reading cannot execute an empty call. A failed, errored or truncated terminal
+instead drops only the unparseable call and keeps the provider error or
+truncation. On Anthropic and Responses, an already-announced open call is left
+unclosed on those three terminals: Anthropic emits no `content_block_stop`,
+Responses emits no done function-call item, and the proxy error frame ends the
+stream. The Chat target already streamed the announcement with empty arguments,
+and Chat reports a cancelled finish as `stop`, so that accepted limit is not
+distinguishable there. A Chat `[DONE]`
+without a preceding non-null finish reason is a clean transport terminator but
+an empty finish: a Responses target receives `response.incomplete` with
+`incomplete_details: null`, and the record reports `finish=other`. That
+degenerate classification is deliberate rather than a fabricated completion.
 
 ## Bundled compatibility profiles
 
@@ -161,10 +470,16 @@ free tier gated on that wire signature rather than on TLS, header order or
 credentials: with the id headers in shape and a chat `tools` array containing
 the `bash` and `read` tool names, the gated free models served even under
 the anonymous `public` bearer. `ensure_tools` injects missing names as inert
-stubs and adds `tool_choice: none` when the client sent no tools of its own,
-so the stubs can never be invoked; a body that already satisfies the
-signature relays byte-identical. The stubs are Chat-shaped, so they are
-injected only into an OpenAI Chat client body on a Chat outbound wire; an
+stubs. When the client sent no tools of its own, an absent, null, or `auto`
+`tool_choice` is forced to `none`, while an explicit `none` stays; a
+`required`, named, or malformed choice skips injection entirely, because
+forcing `none` would contradict the client and injecting would let the model
+call an undeclared stub. When the client already declares at least one tool,
+the configured names are added to that list and an explicit `required` or
+named `tool_choice` stays in force. A body that already satisfies the
+signature is relayed unchanged, apart from any configured request override or
+sub-conversation strip that runs before it. The stubs are Chat-shaped, so they
+are injected only into an OpenAI Chat client body on a Chat outbound wire; an
 Anthropic, Responses, Cursor, or arbitrary body is never rewritten.
 The same check found the signature also requires a streaming request
 (`"stream": true`): non-streaming requests to the gated free models get the
@@ -197,13 +512,23 @@ images, tools and results, thinking blocks, cache control, selected parameters,
 usage and streaming events. Fields with no target representation follow the
 [translation loss policy](#cross-protocol-translation). A configured
 [sub-conversation tracking](operations.md#sub-conversation-tracking) value is
-injected as the native top-level `prompt_cache_key`; the client's own spelling
-of the tracked field is otherwise dropped by the allowlist. The caller
+injected as a top-level `prompt_cache_key`. That field is a proxy tracking
+extension, not an Anthropic cache control: Anthropic caching uses
+`cache_control`, and the injection is only safe for upstreams that tolerate
+unknown top-level fields. The client's own spelling of the tracked field is
+otherwise dropped by the allowlist. The caller
 must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
 
 Stored parameter and conversation-composition metadata describe the translated
-upstream body, not an exact copy of the original request. If the caller omits
+upstream body, not an exact copy of the original request. For a native or
+translated Anthropic body, the recorded stop count, tool choice, parallel-tool
+flag, reasoning effort, response format and service tier come from the
+Anthropic spellings (`stop_sequences`, the `tool_choice` type/name and
+`disable_parallel_tool_use`, `output_config`, and `speed`) when the Chat
+spelling is absent. A body that combines the Responses `max_output_tokens` spelling with a Chat
+`max_tokens` or `max_completion_tokens` spelling is rejected with HTTP 400
+before translation or any upstream send. If the caller omits
 all three output-limit spellings (`max_tokens`, `max_completion_tokens` and
 `max_output_tokens`), translation supplies `anthropic_default_max_tokens`,
 which can therefore appear in request details as a captured value. When a
@@ -219,6 +544,13 @@ native Chat client may send either spelling, and the decoder prefers
 `max_completion_tokens`, but a translated Chat request still carries
 `max_tokens` and can therefore be refused by a target that accepts only the
 newer spelling.
+
+An Anthropic target request forwards `temperature` (clamped to 0..1), `top_p`
+and `top_k` for older and compatible upstreams. The current Anthropic
+`MessageCreateParamsBase` request type no longer lists those sampling fields,
+so a strict current endpoint may reject them. The forwarding is kept as a
+compatibility choice rather than silently dropping client values; revisit it
+if a live current endpoint is verified to reject them.
 
 Non-streaming translation buffers the full response before committing status;
 a translation failure can therefore return a real error status. A translated
@@ -287,9 +619,12 @@ without the HTTP relay's shared-segment deduplication. Query overrides and the
 incoming query are not used.
 
 A lost park cold-starts from provided history. The quality-retry path may re-ask
-an empty continuation; exhausted/invalid continuations surface errors rather
-than silently completing. Cursor's wire reports one combined output total with
-no answer/reasoning split, so the generic mid-thinking rescue
+an empty continuation; a fresh Run is accepted only on HTTP 200, so any other
+response to the re-ask is a failed re-ask and the void surfaces instead of an
+acknowledgement being driven as a stream. Exhausted/invalid continuations
+surface errors rather than silently completing. Cursor's wire reports one
+combined output total with no answer/reasoning split, so the generic
+mid-thinking rescue
 (`thinking_retries`) does not apply here: a Cursor turn that produced nothing
 is the existing empty-turn re-ask's business. This is not exactly-once
 execution, checkpoint persistence, or a guarantee that an upstream keeps a

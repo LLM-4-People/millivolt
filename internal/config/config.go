@@ -407,9 +407,9 @@ type Config struct {
 
 	// SSEKeepaliveInterval is how often a quiet streaming socket gets an SSE
 	// comment (`: keepalive`) so proxies and the client do not drop the
-	// connection during queue wait, operator hold, upstream TTFB, or mid-stream
-	// gaps. Chat Completions clients ignore SSE comments. Hot-reloads (new
-	// streams; in-flight pacers keep the interval they started with).
+	// connection during queue wait, operator hold, or mid-stream gaps. Chat
+	// Completions clients ignore SSE comments. Hot-reloads (new streams;
+	// in-flight pacers keep the interval they started with).
 	SSEKeepaliveInterval time.Duration `yaml:"sse_keepalive_interval" json:"sse_keepalive_interval"`
 	// SSEWriteProgressTimeout bounds one client-facing SSE write. A stalled
 	// reader fails that write instead of pinning shutdown. New streams use the
@@ -467,7 +467,8 @@ type Config struct {
 
 	// RequestOverrides is the opt-in list of scoped rewrites applied to the
 	// UPSTREAM request before relay: set/replace/remove HTTP headers and set
-	// OpenAI-wire body token ceilings (max_tokens / max_completion_tokens),
+	// Chat Completions or Anthropic client body token ceilings
+	// (max_tokens / max_completion_tokens),
 	// scoped per client, provider and/or model. Default nil: the feature is
 	// fully off and the request path is untouched. Matching is exact-leaf
 	// (an empty scope field is a wildcard); all matching rules apply in list
@@ -487,7 +488,8 @@ type Config struct {
 	// request under a k: conversation identity (after the X-Proxy-Session
 	// header, before automatic client+key grouping); an absent or dropped
 	// identity is never rejected, and strip removes every configured field
-	// present at the top level of the relayed upstream body.
+	// present at the top level of the client request body before relay or
+	// translation, including a Responses client body.
 	// validateSubConversations owns the normalization and validation.
 	SubConversations []SubConversation `yaml:"sub_conversations" json:"sub_conversations"`
 }
@@ -622,18 +624,24 @@ type ProviderOverride struct {
 	// EnsureTools names function tools that must be present in the tools
 	// array of relayed OpenAI-wire chat bodies for this provider. A
 	// first-party client may gate its free tier on its own tool signature;
-	// names the request lacks are injected as inert function stubs, and a
-	// body that carried no tools and no tool_choice also receives
-	// tool_choice "none" so the injected stubs can never be invoked. Only
-	// chat-shaped bodies (a top-level messages array) are rewritten; a body
-	// that already carries every configured name relays byte-identical.
+	// names the request lacks are injected as inert function stubs. When the
+	// client supplied no tools, an absent, null, or auto tool_choice is
+	// forced to none, an explicit none stays, and a required, named, or
+	// malformed choice skips injection entirely. Only chat-shaped bodies (a
+	// top-level messages array) are rewritten; a body that already carries
+	// every configured name needs no tool edit and is byte-identical only
+	// when no configured request override or strip also rewrites the body.
 	// Names must be non-empty and unique, validated on load.
 	EnsureTools []string `yaml:"ensure_tools" json:"ensure_tools"`
 	// Headers are extra upstream headers sent on every request to this
 	// provider (LLM calls and models discovery), e.g. mimicking a first-party
 	// client's wire fingerprint. Values override client-forwarded headers;
-	// the client's explicit X-Proxy-Headers injection map still wins. Four
-	// per-request template placeholders expand at send time: "{{uuid4}}" (a
+	// the client's explicit X-Proxy-Headers injection map still wins.
+	// accept-encoding and range are proxy-owned: the X-Proxy-Headers map
+	// rejects them with 400, and a configured or override value is stripped
+	// from the final request so the transport keeps its own gzip negotiation
+	// and never sends a partial range. Four per-request template placeholders
+	// expand at send time: "{{uuid4}}" (a
 	// fresh UUID v4 per request), "{{platform}}" (rust-style "os; arch",
 	// e.g. "linux; x86_64"), "{{opencode-msg-id}}" and
 	// "{{opencode-ses-id}}" (fresh identifiers in the opencode CLI's wire
@@ -694,7 +702,7 @@ const storageWriteChanCapMax = 1_000_000
 // identity: the client whose requests are tracked, the ordered top-level
 // request body field names whose value supplies the identity (the first
 // present one decides), and whether the configured fields are stripped from
-// the relayed upstream body.
+// the top level of the client request body before relay or translation.
 type SubConversation struct {
 	// Client matches the request's classified client name exactly: no
 	// wildcard, no case folding. validateSubConversations trims it.
@@ -708,9 +716,10 @@ type SubConversation struct {
 	// checkSubConversationParam); validateSubConversations trims every name.
 	Params []string `yaml:"params" json:"params"`
 	// Strip removes every configured field present at the top level of the
-	// relayed upstream body for this client, not only the one that supplied
-	// the tracked value. Default false: the configured fields are forwarded
-	// unchanged.
+	// client request body before relay or translation for this client, not
+	// only the one that supplied the tracked value. It applies to any JSON
+	// body, including a Responses client body. Default false: the configured
+	// fields are forwarded unchanged.
 	Strip bool `yaml:"strip" json:"strip"`
 }
 
@@ -1187,8 +1196,9 @@ func Example() *Config {
 			// identifier format (shape-validated upstream; the two template
 			// placeholders mint fresh ones per request) and a tools array
 			// containing the bash and read tool names (ensure_tools injects
-			// inert stubs when a client's request lacks them, with
-			// tool_choice none so stubs can never be invoked). A check on
+			// inert stubs when a client's request lacks them; an absent,
+			// null, or auto choice becomes none, while a required or named
+			// choice skips injection). A check on
 			// 2026-09-24 found the free models then served under the
 			// anonymous public bearer with this signature; that is an
 			// observation about that day, not an entitlement. The profile is
@@ -1240,6 +1250,21 @@ func (c *Config) mergeOverlay(src *Config, present map[string]any) {
 	}
 }
 
+// ValidURLPort accepts an absent port or a decimal TCP port 1-65535. The
+// allowed-base-url loader and the request routing boundary share it so a
+// loaded allowlist entry can always match a request base URL that the boundary
+// accepts.
+func ValidURLPort(port string) bool {
+	if port == "" {
+		return true
+	}
+	if len(port) > 5 {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
+}
+
 // Validate checks the merged config for type and range sanity, failing closed
 // at the load boundary. Ranges are deliberately permissive guardrails (catch
 // nonsense like a negative count, a negative duration, or a zero idle-per-host
@@ -1269,6 +1294,22 @@ func (c *Config) Validate() error {
 		u, err := url.Parse(entry)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("allowed_base_urls: %q must be an absolute http:// or https:// URL", entry)
+		}
+		// The runtime prefix match is byte-sensitive, so an entry that only
+		// parses after url.Parse folds the scheme to lowercase could match
+		// only a client base URL spelled with the same uppercase scheme.
+		if !strings.HasPrefix(entry, "http://") && !strings.HasPrefix(entry, "https://") {
+			return fmt.Errorf("allowed_base_urls: %q must start with lowercase http:// or https://: the runtime prefix match is byte-sensitive", entry)
+		}
+		if !ValidURLPort(u.Port()) {
+			return fmt.Errorf("allowed_base_urls: %q must use a port between 1 and 65535", entry)
+		}
+		// "http://:8080" parses with a port but no hostname. No request base
+		// URL can be hostless (the request boundary rejects it), so the entry
+		// could never match; fail closed at load instead of accepting a dead
+		// allowlist rule.
+		if u.Hostname() == "" {
+			return fmt.Errorf("allowed_base_urls: %q must name a host: a port without a hostname can never match a request base URL", entry)
 		}
 		if u.User != nil {
 			return fmt.Errorf("allowed_base_urls: %q must not carry userinfo: a request base URL never does, and the entry persists credentials in the config", entry)
@@ -1731,12 +1772,16 @@ func failClosedYAMLKey(key string) bool {
 	}
 }
 
-// LoadFile reads the YAML config at path (may be empty) and merges recognized,
-// valid keys over the built-in defaults. A missing file yields the defaults.
-// Unknown keys, invalid types/ranges, and extra YAML documents are omitted so
-// a typo cannot block boot; a duplicate top-level key is ambiguous and returns
-// a parse error naming the key and line. Settings POST still rejects those
-// inputs. This read path does not rewrite the file.
+// LoadFile is the lenient library/test read. It reads the YAML config at path
+// (may be empty) and merges recognized, valid keys over the built-in defaults;
+// a missing file yields the defaults. Unknown keys, extra YAML documents and an
+// invalid type or range for an ordinary key are omitted. `allowed_base_urls`
+// and `listen` are the exceptions: their invalid values describe a security or
+// bind boundary, so they fail the read instead of being dropped. Production
+// does not call it: boot uses LoadFileRepair, reload uses LoadFileStrict, and
+// Settings, backup and the healthcheck use their strict reads. A duplicate
+// top-level key is ambiguous and returns a parse error naming the key and line.
+// This path does not rewrite the file.
 func LoadFile(path string) (*Config, error) {
 	cfg, _, err := loadYAMLFile(path)
 	return cfg, err
@@ -1752,7 +1797,7 @@ func LoadFileStrict(path string) (*Config, []string, error) {
 	if path == "" {
 		return Default(), nil, nil
 	}
-	b, err := readConfigFile(path)
+	b, err := ReadDocument(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read config: %w", err)
 	}
@@ -1779,7 +1824,7 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 		cfg := Default()
 		return cfg, nil, cfg.Validate()
 	}
-	b, err := readConfigFile(path)
+	b, err := ReadDocument(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Default(), nil, nil
@@ -1821,13 +1866,27 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 	return cfg, skipped, nil
 }
 
-// readConfigFile is LoadFile's one input reader. The configuration document
-// is intentionally allowed the same envelope as the rendered document Validate
-// enforces, so the size check happens before parsing or proportional
-// allocation. Stat catches an oversized regular file immediately; the bounded
-// read keeps the guarantee if the file grows between stat and read (or if the
-// path is a special file).
-func readConfigFile(path string) ([]byte, error) {
+// ReadDocument is the one bounded read owner for a configuration document.
+// Boot, reload, inspect and the restore rollback capture all use it. It
+// enforces the ConfigDocumentMaxBytes bound on the input bytes before parsing,
+// matching the rendered-document bound that Config.validateDocumentSize
+// enforces through Validate after parsing.
+//
+// The pre-open stat rejects a FIFO, device or directory before os.Open, which
+// would block indefinitely on a FIFO with no writer. The post-open stat repeats
+// the regular-file and size checks for the stat-to-open race, and the bounded
+// LimitReader keeps the size guarantee even if the file grows after the check.
+func ReadDocument(path string) ([]byte, error) {
+	pre, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
+	}
+	if pre.Size() > int64(ConfigDocumentMaxBytes) {
+		return nil, configFileTooLarge(path, pre.Size())
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1836,6 +1895,9 @@ func readConfigFile(path string) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: not a regular file", path)
 	}
 	if info.Size() > int64(ConfigDocumentMaxBytes) {
 		return nil, configFileTooLarge(path, info.Size())
@@ -1860,7 +1922,7 @@ func loadYAMLFile(path string) (*Config, []string, error) {
 	if path == "" {
 		return def, nil, def.Validate()
 	}
-	b, err := readConfigFile(path)
+	b, err := ReadDocument(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return def, nil, nil

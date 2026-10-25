@@ -12,7 +12,7 @@ import (
 
 func TestHealthcheckDoesNotRewriteConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := []byte("max_retriez: 3\nmax_retries: 1\n---\nextra: true\n")
+	raw := []byte("max_retriez: 3\nmax_retries: 1\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -33,5 +33,40 @@ func TestHealthcheckDoesNotRewriteConfig(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(got, raw) {
 		t.Fatalf("healthcheck rewrote config: %v\n%s", err, got)
+	}
+}
+
+// TestHealthcheckRejectsInvalidBaseConfig pins TC7-1: an invalid recognized
+// value makes healthcheck exit 1 without rewriting the file.
+func TestHealthcheckRejectsInvalidBaseConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte("max_retries: not-an-int\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := liveConfigPath
+	t.Cleanup(func() { liveConfigPath = oldPath })
+	liveConfigPath = path
+	if code := runHealthcheck(); code != 1 {
+		t.Fatalf("healthcheck exit = %d, want 1", code)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("healthcheck rewrote the invalid base file: %v\n%s", err, got)
+	}
+}
+
+// TestHealthcheckMissingConfigUsesDefaults pins the documented missing-file
+// exception: healthcheck probes with the built-in defaults instead of failing
+// the config load. An invalid document is covered above and still exits 1.
+func TestHealthcheckMissingConfigUsesDefaults(t *testing.T) {
+	oldPath, oldListen := liveConfigPath, liveListenOverride
+	t.Cleanup(func() { liveConfigPath, liveListenOverride = oldPath, oldListen })
+	probe := httptest.NewServer(http.HandlerFunc(handleHealthz))
+	defer probe.Close()
+	liveConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	liveListenOverride = strings.TrimPrefix(probe.URL, "http://")
+	if code := runHealthcheck(); code != 0 {
+		t.Fatalf("healthcheck with a missing config = %d, want 0 via defaults", code)
 	}
 }

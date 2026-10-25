@@ -112,6 +112,20 @@ func (w *Warnings) Add(kind WarningKind, field, detail string) {
 	*w = append(*w, Warning{Kind: kind, Field: field, Detail: detail})
 }
 
+// AddOnce appends a warning unless the same kind and field are already
+// present. A loss repeated across a bounded but large collection is reported
+// once, so one request cannot amplify the warning header with one entry per
+// block. The linear scan is bounded by the number of distinct warnings, which
+// stays small.
+func (w *Warnings) AddOnce(kind WarningKind, field, detail string) {
+	for _, item := range *w {
+		if item.Kind == kind && item.Field == field {
+			return
+		}
+	}
+	w.Add(kind, field, detail)
+}
+
 // Header renders the warnings as a single header-safe value. It is bounded by
 // the caller's header budget; the proxy truncates at the boundary.
 func (w Warnings) Header() string {
@@ -326,6 +340,25 @@ type Request struct {
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	ServiceTier        string            `json:"service_tier,omitempty"`
 	User               string            `json:"user,omitempty"`
+	// Verbosity is the Chat top-level / Responses text.verbosity level
+	// (low, medium, high). Anthropic has no equivalent.
+	Verbosity string `json:"verbosity,omitempty"`
+	// SafetyIdentifier and PromptCacheKey are shared OpenAI request identity
+	// fields. They cross Chat and Responses unchanged; Anthropic has no
+	// equivalent.
+	SafetyIdentifier string `json:"safety_identifier,omitempty"`
+	PromptCacheKey   string `json:"prompt_cache_key,omitempty"`
+
+	// Moderation, when set, asks the target to moderate the input and output.
+	// Chat and Responses share the ModerationParam shape; Anthropic has no
+	// equivalent and drops it with a warning.
+	Moderation *Moderation `json:"moderation,omitempty"`
+
+	// PromptCacheOptions and PromptCacheRetention are the shared Chat/Responses
+	// prompt caching fields. Anthropic uses cache_control instead and reports
+	// both as dropped; the breakpoint mapping is a separate feature.
+	PromptCacheOptions   *PromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	PromptCacheRetention string              `json:"prompt_cache_retention,omitempty"`
 
 	// Instructions is the Responses top-level instructions string. Leading
 	// system/developer messages are folded into it by the Responses encoder.
@@ -338,6 +371,24 @@ type Request struct {
 	PreviousResponseID string `json:"previous_response_id,omitempty"`
 
 	Warnings Warnings `json:"warnings,omitempty"`
+}
+
+// Moderation is the shared Chat/Responses moderation configuration. Policy is
+// retained as its wire subdocument because both request schemas spell the
+// same ModerationParam object.
+type Moderation struct {
+	Model  string          `json:"model"`
+	Policy json.RawMessage `json:"policy,omitempty"`
+}
+
+// PromptCacheOptions is the shared prompt caching configuration. ChatGPT and
+// Responses share ttl and mode; Prewarm and ComparisonResponseID are
+// Responses-only and are reported when a Chat target drops them.
+type PromptCacheOptions struct {
+	TTL                  string `json:"ttl,omitempty"`
+	Mode                 string `json:"mode,omitempty"`
+	Prewarm              *bool  `json:"prewarm,omitempty"`
+	ComparisonResponseID string `json:"comparison_response_id,omitempty"`
 }
 
 // FinishReason is the normalized completion cause.
@@ -378,6 +429,12 @@ type Response struct {
 
 	Usage Usage `json:"usage"`
 
+	// Metadata and ServiceTier are response-envelope fields the providers echo
+	// back: a string map (bounded by the schema's 16 pairs) and the processing
+	// tier actually used to serve the request.
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	ServiceTier string            `json:"service_tier,omitempty"`
+
 	// Status is the Responses lifecycle status when the source carried one.
 	Status           string `json:"status,omitempty"`
 	IncompleteReason string `json:"incomplete_reason,omitempty"`
@@ -386,6 +443,13 @@ type Response struct {
 	// successful HTTP response (Responses status:"failed"). The proxy renders
 	// it as a protocol-native error instead of a completion.
 	Error *Error `json:"error,omitempty"`
+
+	// ProviderToolCalls counts Responses provider-executed tool items
+	// (custom_tool_call, local_shell_call, mcp_call, computer_call, ...) that
+	// have no cross-protocol Block representation. function_call items are
+	// already ir.BlockToolCall entries. The record and finish classification
+	// count both forms as tool activity.
+	ProviderToolCalls int `json:"provider_tool_calls,omitempty"`
 
 	Warnings Warnings `json:"warnings,omitempty"`
 }
@@ -463,6 +527,9 @@ func ValidateRequest(r *Request) error {
 	if r.TopK != nil && *r.TopK < 0 {
 		return fmt.Errorf("ir: top_k must not be negative")
 	}
+	if r.Moderation != nil && strings.TrimSpace(r.Moderation.Model) == "" {
+		return fmt.Errorf("ir: moderation.model is required")
+	}
 	if r.TopLogprobs != nil && (*r.TopLogprobs < 0 || *r.TopLogprobs > 20) {
 		return fmt.Errorf("ir: top_logprobs must be between 0 and 20")
 	}
@@ -486,11 +553,11 @@ func ValidateRequest(r *Request) error {
 		if t.Type != "" && t.Type != "function" {
 			return fmt.Errorf("ir: tool %d has unsupported type %q", i, t.Type)
 		}
-		if params := bytes.TrimSpace(t.Parameters); len(params) > 0 {
-			if !json.Valid(params) || params[0] != '{' {
-				return fmt.Errorf("ir: tool %d parameters must be a JSON object", i)
-			}
+		params, err := CanonicalToolParameters(t.Parameters)
+		if err != nil {
+			return fmt.Errorf("ir: tool %d: %w", i, err)
 		}
+		r.Tools[i].Parameters = params
 	}
 	if r.ToolChoice != nil {
 		switch r.ToolChoice.Mode {
@@ -509,8 +576,15 @@ func ValidateRequest(r *Request) error {
 		switch r.ResponseFormat.Type {
 		case "", "text", "json_object":
 		case "json_schema":
-			if len(r.ResponseFormat.Schema) == 0 {
+			// Both official schemas require the schema member itself to be a
+			// JSON object. Length alone would pass null, an array or a
+			// boolean and emit a target wire the provider rejects.
+			schema := bytes.TrimSpace(r.ResponseFormat.Schema)
+			if len(schema) == 0 {
 				return fmt.Errorf("ir: json_schema response format requires a schema")
+			}
+			if schema[0] != '{' || !json.Valid(schema) {
+				return fmt.Errorf("ir: json_schema response format requires a JSON object schema")
 			}
 		default:
 			return fmt.Errorf("ir: unsupported response format %q", r.ResponseFormat.Type)
@@ -586,4 +660,41 @@ func ValidateResponse(r *Response) error {
 		}
 	}
 	return nil
+}
+
+// CanonicalToolParameters renders one tool parameter schema as the root-object
+// JSON Schema every supported target requires. A tool's arguments are a JSON
+// object, so an omitted, null or empty source schema becomes the canonical
+// empty object schema. A schema without a root type gains type "object" while
+// keeping its other members, including properties, required and root
+// combinators. An explicit non-object or non-string root type is rejected
+// because no target accepts it.
+func CanonicalToolParameters(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return json.RawMessage(`{"type":"object","properties":{}}`), nil
+	}
+	if trimmed[0] != '{' || !json.Valid(trimmed) {
+		return nil, fmt.Errorf("parameters must be a JSON object")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, fmt.Errorf("parameters: %w", err)
+	}
+	if len(obj) == 0 {
+		return json.RawMessage(`{"type":"object","properties":{}}`), nil
+	}
+	if typ, ok := obj["type"]; ok {
+		var name string
+		if err := json.Unmarshal(typ, &name); err != nil || name != "object" {
+			return nil, fmt.Errorf("parameters root type must be %q", "object")
+		}
+		return append(json.RawMessage(nil), trimmed...), nil
+	}
+	obj["type"] = json.RawMessage(`"object"`)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("parameters: %w", err)
+	}
+	return out, nil
 }

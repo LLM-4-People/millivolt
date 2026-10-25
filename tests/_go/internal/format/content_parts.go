@@ -117,25 +117,58 @@ func TestChatSystemAndAssistantPartsAreTextOnly(t *testing.T) {
 	}
 }
 
-func TestAnthropicSystemDropsWarn(t *testing.T) {
-	req := &ir.Request{Model: "m", Messages: []ir.Message{{
-		Role: ir.RoleSystem,
-		Content: []ir.Block{
-			{Type: ir.BlockText, Text: "rules", Citations: []ir.Citation{{Type: "char_location", CitedText: "x"}}},
-			{Type: ir.BlockImage, Image: &ir.Image{URL: "https://example.com/a.png"}},
+func TestAnthropicSystemCitationsPreserved(t *testing.T) {
+	req := &ir.Request{Model: "m", Messages: []ir.Message{
+		{
+			Role: ir.RoleSystem,
+			Content: []ir.Block{
+				{Type: ir.BlockText, Text: "rules", Citations: []ir.Citation{{Type: "char_location", CitedText: "x"}}},
+				{Type: ir.BlockImage, Image: &ir.Image{URL: "https://example.com/a.png"}},
+			},
 		},
-	}}}
+		{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}},
+	}}
 	body, err := EncodeAnthropicRequest(req, 8, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := decodeJSONMap(t, body)["system"]; got != "rules" {
-		t.Fatalf("system = %v, want the text only", got)
+	system, ok := decodeJSONMap(t, body)["system"].([]any)
+	if !ok || len(system) != 1 {
+		t.Fatalf("system = %v, want the block-array form with one text block", decodeJSONMap(t, body)["system"])
 	}
-	for _, field := range []string{"system.citations", "system.image"} {
-		if !warningField(req.Warnings, field) {
-			t.Fatalf("missing %s drop warning: %+v", field, req.Warnings)
-		}
+	block := system[0].(map[string]any)
+	if block["text"] != "rules" {
+		t.Fatalf("system text = %v", block["text"])
+	}
+	citations, _ := block["citations"].([]any)
+	if len(citations) != 1 {
+		t.Fatalf("system citations = %v, want the preserved citation", block["citations"])
+	}
+	if warningField(req.Warnings, "system.citations") {
+		t.Fatalf("system citations were reported as dropped: %+v", req.Warnings)
+	}
+	if !warningField(req.Warnings, "system.image") {
+		t.Fatalf("missing system.image drop warning: %+v", req.Warnings)
+	}
+}
+
+func TestAnthropicToolResultCitationsPreserved(t *testing.T) {
+	blocks := []ir.Block{{
+		Type: ir.BlockText, Text: "result",
+		Citations: []ir.Citation{{Type: "char_location", CitedText: "x"}},
+	}}
+	var warns ir.Warnings
+	content := encodeAnthropicToolResultContent(blocks, &warns)
+	array, ok := content.([]map[string]any)
+	if !ok || len(array) != 1 {
+		t.Fatalf("tool result content = %#v, want the array form", content)
+	}
+	citations, _ := array[0]["citations"].([]ir.Citation)
+	if len(citations) != 1 {
+		t.Fatalf("tool-result citations = %v, want the preserved citation", array[0]["citations"])
+	}
+	if warningField(warns, "tool_result.citations") {
+		t.Fatalf("tool-result citations were reported as dropped: %+v", warns)
 	}
 }
 

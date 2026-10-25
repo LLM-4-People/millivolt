@@ -84,7 +84,7 @@ func benchmarkLegacyNonStream(body []byte, preview bool) (string, Usage, float64
 	outcome := ""
 	if len(classify.Choices) > 0 {
 		ch := classify.Choices[0]
-		outcome = ClassifyOutcome(ch.FinishReason, true, contentPresent(ch.Message.Content), false, len(ch.Message.ToolCalls), true)
+		outcome = ClassifyOutcome(ch.FinishReason, true, contentPresent(ch.Message.Content), false, false, len(ch.Message.ToolCalls), true)
 	}
 	return outcome, usage, cost, previewText
 }

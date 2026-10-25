@@ -336,10 +336,23 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// (redacted audit headers, request-id aliases, server, processing time,
 	// echoed model, rate-limit state).
 	captureUpstreamHeaders(resp, rec, t.authHeader)
-	if resp.StatusCode >= 400 {
-		// Connect streaming is HTTP 200 + envelopes. A 4xx/5xx means the
-		// Run never started - do not drive it as a live bidi body.
-		captureErrorFromResponse(resp, rec)
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		// Connect streaming is HTTP 200 + envelopes.
+	case isNonCompletionStatus(resp.StatusCode):
+		// 202/204/205 acknowledges the request without a bidi Run body. Relay
+		// the status and its body through the same owner as the generic relay;
+		// synthesizing SSE under it would invent a completion the provider
+		// never sent.
+		s.relayNonCompletionStatus(ctx, w, resp, rec, ir.Chat)
+		upstreamCancel()
+		pw.Close()
+		resp.Body.Close()
+		return
+	case resp.StatusCode >= 400:
+		// A 4xx/5xx means the Run never started - do not drive it as a live
+		// bidi body.
+		s.captureErrorFromResponse(r.Context(), resp, rec)
 		upstreamCancel() // tears down the h2 stream - the transport closes the REAL body (the cursor path never reaches ServeHTTP's body defer)
 		pw.Close()
 		// resp.Body here is captureErrorFromResponse's NopCloser re-wrap, so
@@ -348,6 +361,16 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		resp.Body.Close()
 		typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 		writeClientError(w, rec, ir.Chat, typ, msg, resp.StatusCode)
+		return
+	default:
+		// 304 and every other non-200 status cannot carry a Run. Fail closed
+		// through the transport sink instead of delivering an empty success
+		// whose body net/http would discard.
+		upstreamCancel()
+		pw.Close()
+		resp.Body.Close()
+		rec.StatusCode = http.StatusBadGateway
+		s.writeTransportFailure(w, rec, ir.Chat, fmt.Errorf("cursor run returned HTTP %d", resp.StatusCode))
 		return
 	}
 	// Build and start the resumable run over the live stream
@@ -525,13 +548,14 @@ func cursorSendFailed(resp *http.Response) bool {
 }
 
 // openCursorRun opens a fresh agent.v1 Run stream for the given request body.
-// forceUser selects the re-ask translation (fresh user turn). Errors are
-// returned to the caller (never written to the client); the caller classifies
-// them - a failed re-ask falls back to surfacing the void. When the response
-// is adopted (a live Run will be driven on it), captureUpstreamHeaders
-// re-captures the record's upstream header metadata from it - the cursor twin
-// of the generic quality loops, which re-capture at every adoption so the
-// record describes the attempt whose body the client actually received.
+// forceUser selects the re-ask translation (fresh user turn). Only HTTP 200 is
+// a Run; every other status is a failed re-ask, and an error is returned to the
+// caller (never written to the client) so it falls back to surfacing the void.
+// When the response is adopted (a live Run will be driven on it),
+// captureUpstreamHeaders re-captures the record's upstream header metadata from
+// it - the cursor twin of the generic quality loops, which re-capture at every
+// adoption so the record describes the attempt whose body the client actually
+// received.
 func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, key string, body []byte, forceUser bool, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) (*providerformat.CursorRun, error) {
 	var (
 		clientMessage []byte
@@ -552,7 +576,11 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
+	// A Connect Run is exactly HTTP 200 plus envelopes. A 202/204/205/304 (or
+	// any other adopted status) carries no Run body: driving its acknowledgement
+	// as a live stream would surface a read error as the re-ask's answer.
+	// Return an error so the caller restores the voided attempt instead.
+	if resp.StatusCode != http.StatusOK {
 		detail := fmt.Sprintf("cursor run: HTTP %d", resp.StatusCode)
 		upstreamCancel()
 		pw.Close()
@@ -586,6 +614,7 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 func (s *Server) setCursorIdentity(req *http.Request, t *target, key string) {
 	s.applyProviderHeaders(req.Header, t.provider)
 	applyOverrideHeaders(req.Header, t.override, t.authHeader)
+	stripTransportModeHeaders(req.Header)
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Te", "trailers")
 	setResolvedAuth(req.Header, t, key)
@@ -608,20 +637,25 @@ func (s *Server) setCursorHeaders(req *http.Request, t *target, key string) {
 // surface writes. Wrapping w at the two drive entries covers both the
 // streamed emitters (deltas, finish, usage, [DONE], in-band errors) and the
 // single-JSON completion; header/status writes are not body bytes and are
-// not counted. Flush and Unwrap keep the pacer reachable through the wrap
-// (pacerOf and the flusher assertions walk them).
+// not counted. A helper that already books accepted bytes (writeCounted, used
+// by the finishRunTurn in-band error sink) reaches the wrapped writer through
+// UncountedWriter, so the frame keeps exactly one counter. Flush and Unwrap
+// keep the pacer reachable through the wrap (pacerOf and the flusher
+// assertions walk them).
 type cursorCountWriter struct {
 	http.ResponseWriter
 	rec *metrics.Record
 }
 
 func (c cursorCountWriter) Write(p []byte) (int, error) {
-	n, err := c.ResponseWriter.Write(p)
-	if err == nil {
-		c.rec.ResponseBytes += int64(n)
-	}
-	return n, err
+	return writeCounted(c.ResponseWriter, c.rec, p)
 }
+
+// UncountedWriter hands a counting helper the wrapped writer instead of this
+// counter. writeCounted is the single owner of accepted-byte accounting for a
+// frame it emits; without the unwrap, a composed call (finishRunTurn's
+// TurnErrored branch) would book the same bytes here and in the helper.
+func (c cursorCountWriter) UncountedWriter() io.Writer { return c.ResponseWriter }
 
 func (c cursorCountWriter) Flush() {
 	if f, ok := c.ResponseWriter.(http.Flusher); ok {

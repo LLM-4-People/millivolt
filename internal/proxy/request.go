@@ -28,6 +28,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 
 	"golang.org/x/net/publicsuffix"
@@ -41,10 +42,10 @@ const requestReadHintMax = 1 << 20
 // setResolvedAuth stamps the extracted upstream key into the target's
 // configured auth header (name + prefix); an empty key stamps nothing. The
 // one owner shared by the generic upstream request builder, the metadata
-// fetchers, and the cursor identity headers. The anthropic x-api-key
-// fallback (a target with no configured auth header) keeps its own branch,
-// and buildUpstreamRequest additionally strips the client's forwarded
-// credential before stamping.
+// fetchers, and the cursor identity headers. t.authHeader always carries the
+// resolved header (Authorization unless the client names one), so there is no
+// protocol-specific fallback, and buildUpstreamRequest additionally strips the
+// client's forwarded credential before stamping.
 func setResolvedAuth(h http.Header, t *target, key string) {
 	if key != "" {
 		h.Set(t.authHeader, t.authPrefix+key)
@@ -54,33 +55,38 @@ func setResolvedAuth(h http.Header, t *target, key string) {
 func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *target, key string, body []byte) (*http.Request, error) {
 	path := t.path
 	if path == "" {
-		path = r.URL.Path
+		// EscapedPath preserves the client's percent-encoding: Path alone
+		// would turn %2F, %3F and %23 into path separators or query/fragment
+		// delimiters before the upstream sees them.
+		path = r.URL.EscapedPath()
+		if path == "" {
+			path = "/"
+		}
 	}
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	targetURL := joinUpstreamURL(t.baseURL, path)
-	u, err := url.Parse(targetURL)
+	u, err := upstreamURL(t.baseURL, path, t.query, r.URL.RawQuery)
 	if err != nil {
-		return nil, fmt.Errorf("invalid base URL %q: %w", clientEcho(t.baseURL), err)
-	}
-	// Query override takes precedence; otherwise pass the client's query along.
-	if t.query != "" {
-		u.RawQuery = t.query
-	} else {
-		u.RawQuery = r.URL.RawQuery
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
+	// NewRequest re-parses its URL string, where a literal "#" in RawQuery
+	// becomes a fragment and truncates the query. Keep the structurally built
+	// URL the transport will serialize instead.
+	req.URL = u
 
 	// Forward client headers, dropping proxy control, hop-by-hop, and the
-	// upstream auth header (re-added below from the extracted key). Drop
-	// Accept-Encoding so the transport adds its own gzip preference and
-	// auto-decompresses upstream responses (letting us analyze the plaintext
-	// and relay readable bytes downstream).
+	// upstream auth header (re-added below from the extracted key). Transport
+	// mode headers (Accept-Encoding, Range) never pass through: the shared
+	// transport must own gzip negotiation and auto-decompression, and the relay
+	// always forwards a complete body, so a caller-supplied value would
+	// desynchronize the framing. The final assembly strips them again after
+	// every configured source.
 	//
 	// RFC 7230 §6.1: a header nominated by the Connection header is itself
 	// hop-by-hop and must not be forwarded. The static isHopByHop list alone
@@ -90,7 +96,7 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	for k, vs := range r.Header {
 		// Inbound names are already canonical, so the direct predicates avoid
 		// three lowercasing allocations per forwarded header.
-		if isProxyControlHeaderCanonical(k) || isHopByHopCanonical(k) || nominated[k] || strings.EqualFold(k, "Accept-Encoding") {
+		if isProxyControlHeaderCanonical(k) || isHopByHopCanonical(k) || nominated[k] || isTransportModeHeader(k) {
 			continue
 		}
 		req.Header[k] = append([]string(nil), vs...)
@@ -113,7 +119,7 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 
 	// Extra headers the app asked us to add (or override), filtered.
 	for k, vs := range t.extraHeader {
-		if isHopByHop(k) || isProxyControlHeader(k) {
+		if isHopByHop(k) || isProxyControlHeader(k) || isTransportModeHeader(k) {
 			continue
 		}
 		req.Header.Del(k)
@@ -126,6 +132,11 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	// the chain (its set/replace entries, then its removals), with the
 	// credential safety belt inside applyOverrideHeaders.
 	applyOverrideHeaders(req.Header, t.override, t.authHeader)
+	// Transport-mode headers are invariant regardless of which source tried to
+	// set them: the shared transport's own Accept-Encoding enables
+	// auto-decompression, and Range would request a partial body the relay
+	// cannot forward as a completion.
+	stripTransportModeHeaders(req.Header)
 
 	return req, nil
 }
@@ -369,10 +380,11 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 // would exceed the request byte budget.
 func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64, inbound ir.Protocol) (out []byte, changed bool, why string) {
 	// Narrow fast path: when ensured tools are the only configured action and
-	// the body already carries every name, one struct decode proves the
-	// document needs no rewrite. The general path would materialize every
-	// top-level value as json.RawMessage (a body-sized copy) and decode every
-	// tool entry again only to return the original bytes.
+	// the body already carries every name, one bounded lexical scan of the
+	// top-level keys plus the tools decode proves the document needs no
+	// rewrite. The general path would materialize every top-level value as
+	// json.RawMessage (a body-sized copy) and decode every tool entry again
+	// only to return the original bytes.
 	if ob == nil && len(strip) == 0 && len(ensureTools) > 0 && ensureToolsSatisfied(body, ensureTools) {
 		return body, false, ""
 	}
@@ -435,19 +447,6 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, e
 	return out, true, ""
 }
 
-// chatMessagesPresence records whether the top-level messages member is a JSON
-// array without copying it. The enclosing document decode validates syntax, so
-// the one shared predicate can inspect the first token: null, an object, a
-// string or a scalar is not the documented chat-completions messages array.
-type chatMessagesPresence struct {
-	array bool
-}
-
-func (m *chatMessagesPresence) UnmarshalJSON(raw []byte) error {
-	m.array = chatMessagesArray(raw)
-	return nil
-}
-
 // chatMessagesArray is the single chat-body predicate shared by the no-copy
 // fast path and the general rewrite path. Only a top-level JSON array is the
 // documented messages member; every other shape leaves the body unrewritten,
@@ -458,39 +457,103 @@ func chatMessagesArray(raw json.RawMessage) bool {
 }
 
 // ensureToolsSatisfied reports whether the ensured-tools actor would leave the
-// body unchanged: no top-level messages array (the actor skips non-chat
-// bodies) or every configured name already present in the tools array. One
-// struct decode replaces the general path's raw-value map plus per-entry
-// decode; any shape it cannot prove satisfied falls back to that path, so the
-// skip semantics stay exactly ensureToolsInBody's.
+// body unchanged: no exact top-level messages array (the actor skips non-chat
+// bodies), a tools value that is not an array (the actor skips it), or every
+// configured name already present. One lexical scan finds the exact top-level
+// keys with last-occurrence-wins semantics, the same keys the general path's
+// map decode sees; a case variant is a different key to both paths. Any shape
+// the scan cannot prove unchanged falls back to the general path, which owns
+// the rewrite and its fail-closed errors.
 func ensureToolsSatisfied(body []byte, ensureTools []string) bool {
-	var doc struct {
-		Messages chatMessagesPresence `json:"messages"`
-		Tools    []struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
-	}
-	if json.Unmarshal(body, &doc) != nil {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
 		return false
 	}
-	if !doc.Messages.array {
+	var messages, tools json.RawMessage
+	i := metrics.SkipSpace(trimmed, 1)
+	for i < len(trimmed) && trimmed[i] != '}' {
+		keyStart := i
+		keyEnd := skipJSONString(trimmed, i)
+		if keyEnd < 0 {
+			return false
+		}
+		var key string
+		if json.Unmarshal(trimmed[keyStart:keyEnd], &key) != nil {
+			return false
+		}
+		i = metrics.SkipSpace(trimmed, keyEnd)
+		if i >= len(trimmed) || trimmed[i] != ':' {
+			return false
+		}
+		i = metrics.SkipSpace(trimmed, i+1)
+		valueStart := i
+		valueEnd := skipJSONValue(trimmed, i)
+		if valueEnd < 0 {
+			return false
+		}
+		switch key {
+		case "messages":
+			messages = trimmed[valueStart:valueEnd]
+		case "tools":
+			tools = trimmed[valueStart:valueEnd]
+		}
+		i = metrics.SkipSpace(trimmed, valueEnd)
+		if i >= len(trimmed) {
+			return false
+		}
+		if trimmed[i] == ',' {
+			i = metrics.SkipSpace(trimmed, i+1)
+			if i >= len(trimmed) || trimmed[i] == '}' {
+				return false
+			}
+			continue
+		}
+		if trimmed[i] != '}' {
+			return false
+		}
+	}
+	if i >= len(trimmed) || trimmed[i] != '}' || metrics.SkipSpace(trimmed, i+1) != len(trimmed) {
+		return false
+	}
+	if !chatMessagesArray(messages) {
+		return true
+	}
+	if len(tools) == 0 {
+		return false
+	}
+	have, _, array := toolsArrayNames(tools)
+	if !array {
 		return true
 	}
 	for _, want := range ensureTools {
-		found := false
-		for i := range doc.Tools {
-			if doc.Tools[i].Function.Name == want {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !have[want] {
 			return false
 		}
 	}
 	return true
+}
+
+// toolsArrayNames decodes the function names one top-level tools value
+// declares. array is false when the value is not a JSON array, which the actor
+// treats as a body it must not touch. Malformed entries are ignored exactly
+// like the rewrite path ignores them.
+func toolsArrayNames(raw json.RawMessage) (names map[string]bool, entries int, array bool) {
+	names = make(map[string]bool)
+	var decoded []json.RawMessage
+	if json.Unmarshal(raw, &decoded) != nil {
+		return names, 0, false
+	}
+	for _, entry := range decoded {
+		var fn struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(entry, &fn) == nil && fn.Function.Name != "" {
+			names[fn.Function.Name] = true
+		}
+	}
+	return names, len(decoded), true
 }
 
 // ensureToolStub is the inert function stub injected for a configured name a
@@ -512,10 +575,12 @@ type ensureToolStub struct {
 // chat-shaped bodies qualify (a top-level messages array), so discovery,
 // responses-style and embeddings bodies stay untouched; a tools value that
 // does not decode as an array skips the actor rather than corrupting the
-// body. A body whose own tools array is absent or empty and that carries no
-// tool_choice also receives tool_choice "none": the injected stubs then
-// cannot be invoked, matching what a client that sent no tools expects
-// back. A body that already carries every name is returned unchanged - the
+// body. When the client supplied no tools of its own, the injected stubs are
+// inert only if the model cannot choose them: an absent, null, or auto
+// tool_choice becomes none. An explicit none keeps its spelling. A required,
+// named, or malformed choice skips injection entirely - forcing none would
+// contradict the client, and injecting would let it call an undeclared stub.
+// A body that already carries every name is returned unchanged - the
 // passthrough invariant survives satisfied signatures.
 func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (changed bool, why string) {
 	rawMessages, ok := doc["messages"]
@@ -525,21 +590,11 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 	have := make(map[string]bool, len(ensureTools))
 	clientTools := 0
 	if raw, ok := doc["tools"]; ok {
-		var entries []json.RawMessage
-		if err := json.Unmarshal(raw, &entries); err != nil {
+		var array bool
+		have, clientTools, array = toolsArrayNames(raw)
+		if !array {
 			// Not an array: not a chat tools field the stubs belong in.
 			return false, ""
-		}
-		clientTools = len(entries)
-		for _, entry := range entries {
-			var fn struct {
-				Function struct {
-					Name string `json:"name"`
-				} `json:"function"`
-			}
-			if json.Unmarshal(entry, &fn) == nil && fn.Function.Name != "" {
-				have[fn.Function.Name] = true
-			}
 		}
 	}
 	var additions []json.RawMessage
@@ -566,8 +621,36 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 			tools = append(tools, additions...)
 		}
 	} else {
+		// The injected stubs are the body's only tools. Decide the choice
+		// once: force none for an implicit choice, keep an explicit none, and
+		// skip injection for anything that would contradict the client or let
+		// it select an undeclared stub.
+		forceNone := false
+		if raw, ok := doc["tool_choice"]; ok {
+			var choice any
+			if err := json.Unmarshal(raw, &choice); err != nil {
+				return false, ""
+			}
+			switch value := choice.(type) {
+			case nil:
+				forceNone = true
+			case string:
+				switch value {
+				case "auto":
+					forceNone = true
+				case "none":
+					// Already inert; keep the client's spelling.
+				default:
+					return false, ""
+				}
+			default:
+				return false, ""
+			}
+		} else {
+			forceNone = true
+		}
 		tools = additions
-		if _, ok := doc["tool_choice"]; !ok {
+		if forceNone {
 			doc["tool_choice"] = json.RawMessage(`"none"`)
 		}
 	}
@@ -579,16 +662,9 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 	return true, ""
 }
 
-// applyTokenCaps decodes the request's token-ceiling spellings from body with
-// one minimal unmarshal and stamps the effective ceiling onto the record
-// through MergeTokenCaps' precedence (max_completion_tokens over max_tokens
-// over max_output_tokens; none present stamps nil). A body whose cap fields
-// do not decode leaves the record untouched. Both cap re-reads share it: restampReqMaxTokens re-reads
-// a rewritten body, and parseLLMRequest's split-decode recovery re-reads a
-// body whose parameter block failed its strict decode.
 // resolveRequestTokenCap owns the three wire spellings the metadata decoder
 // accepts: the Chat pair (max_completion_tokens over max_tokens) first, then the
-// Responses max_output_tokens spelling. Both metadata decode paths call it, so
+// Responses max_output_tokens spelling. Every metadata decode path calls it, so
 // the hostile-cap trust boundary cannot see a different ceiling per path.
 func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 	if v := providerformat.MergeTokenCaps(maxCompletion, maxTokens); v != nil {
@@ -597,16 +673,35 @@ func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 	return maxOutput
 }
 
+// applyTokenCaps stamps the effective token ceiling onto the record through
+// MergeTokenCaps' precedence (max_completion_tokens over max_tokens over
+// max_output_tokens; none present stamps nil). The occurrence scan rejects a
+// duplicate cap spelling, and a malformed spelling leaves the ceiling unset
+// here; ServeHTTP's tokenCapViolation rejects either before the request can
+// proceed. Both cap re-reads share it: restampReqMaxTokens re-reads a rewritten
+// body, and parseLLMRequest re-reads a body whose parameter block failed its
+// strict decode.
 func applyTokenCaps(body []byte, rec *metrics.Record) {
-	var caps struct {
-		MaxTokens       *int `json:"max_tokens"`
-		MaxCompTokens   *int `json:"max_completion_tokens"`
-		MaxOutputTokens *int `json:"max_output_tokens"`
-	}
-	if json.Unmarshal(body, &caps) != nil {
+	caps, err := scanTokenCaps(body)
+	if err != nil {
 		return
 	}
-	rec.ReqMaxTokens = resolveRequestTokenCap(caps.MaxCompTokens, caps.MaxTokens, caps.MaxOutputTokens)
+	rec.ReqMaxTokens = resolveRequestTokenCap(
+		tokenCapOptional(caps.MaxCompTokens, "max_completion_tokens"),
+		tokenCapOptional(caps.MaxTokens, "max_tokens"),
+		tokenCapOptional(caps.MaxOutputTokens, "max_output_tokens"),
+	)
+}
+
+// tokenCapOptional decodes one cap member for the request record. A missing or
+// malformed spelling contributes nothing here; ServeHTTP's tokenCapViolation is
+// the trust boundary that rejects a malformed cap before the request proceeds.
+func tokenCapOptional(raw json.RawMessage, field string) *int {
+	v, err := tokenCapValue(raw, field)
+	if err != nil {
+		return nil
+	}
+	return v
 }
 
 // restampReqMaxTokens re-reads the effective token ceiling from a rewritten
@@ -644,23 +739,89 @@ func joinUpstreamURL(baseURL, path string) string {
 	return base + path
 }
 
+// upstreamURL builds the request target structurally. The path is already an
+// escaped path (client request or validated X-Proxy-Path) and is never
+// re-parsed as part of a concatenated URL, so an encoded ? or # cannot become
+// a query or fragment delimiter.
+func upstreamURL(baseURL, escapedPath, queryOverride, clientQuery string) (*url.URL, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid base URL %q: %w", clientEcho(baseURL), err)
+	}
+	joined := joinUpstreamEscapedPath(base.EscapedPath(), escapedPath)
+	decoded, err := url.PathUnescape(joined)
+	if err != nil {
+		return nil, fmt.Errorf("invalid request path: %w", err)
+	}
+	u := *base
+	u.Path = decoded
+	u.RawPath = joined
+	// Query override takes precedence; otherwise pass the client's query along.
+	if queryOverride != "" {
+		u.RawQuery = queryOverride
+	} else {
+		u.RawQuery = clientQuery
+	}
+	return &u, nil
+}
+
+// joinUpstreamEscapedPath joins two escaped paths and drops the request path's
+// first segment when it duplicates the base's last non-empty segment. Segment
+// comparison uses the decoded spelling so an encoded character still matches;
+// joining uses the escaped spelling so %2F never becomes a separator. Exactly
+// one leading separator is consumed: every remaining empty segment (a doubled
+// slash at the start, inside or at the end) is part of the client's path shape
+// and is preserved.
+func joinUpstreamEscapedPath(basePath, escapedPath string) string {
+	base := strings.TrimRight(basePath, "/")
+	if !strings.HasPrefix(escapedPath, "/") {
+		escapedPath = "/" + escapedPath
+	}
+	var baseSegs []string
+	if base != "" {
+		baseSegs = strings.Split(strings.Trim(base, "/"), "/")
+	}
+	pathSegs := strings.Split(escapedPath[1:], "/")
+	if len(baseSegs) > 0 && len(pathSegs) > 0 && pathSegs[0] != "" &&
+		decodedPathSegment(baseSegs[len(baseSegs)-1]) == decodedPathSegment(pathSegs[0]) {
+		pathSegs = pathSegs[1:]
+	}
+	return "/" + strings.Join(append(baseSegs, pathSegs...), "/")
+}
+
+func decodedPathSegment(segment string) string {
+	decoded, err := url.PathUnescape(segment)
+	if err != nil {
+		return segment
+	}
+	return decoded
+}
+
 // maxBaseURLHostBytes is the DNS presentation limit for one hostname (RFC
 // 1035, without a trailing dot). It bounds the authority a client can claim
 // through X-Proxy-Base-URL before providerFromURL derives a retained label.
 const maxBaseURLHostBytes = 253
 
-// validBaseURLPort accepts an absent port or a decimal TCP port 1-65535 with
-// at most five digits. net/url validates the syntax but not the range or
-// length; a header-sized or out-of-range port is hostile input, not a target.
-func validBaseURLPort(port string) bool {
-	if port == "" {
-		return true
-	}
-	if len(port) > 5 {
+// validProxyPathHeader accepts one escaped path override. Literal ? and #
+// would be reinterpreted as query/fragment delimiters, and controls or spaces
+// cannot travel in a request target; percent escapes must be well formed.
+func validProxyPathHeader(p string) bool {
+	if strings.IndexFunc(p, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f || r == '?' || r == '#'
+	}) >= 0 {
 		return false
 	}
-	n, err := strconv.Atoi(port)
-	return err == nil && n >= 1 && n <= 65535
+	_, err := url.PathUnescape(p)
+	return err == nil
+}
+
+// validProxyQueryHeader accepts one raw query override. # would start a
+// fragment and controls or spaces are invalid in a request target; a literal ?
+// and well-formed percent escapes are query data.
+func validProxyQueryHeader(q string) bool {
+	return strings.IndexFunc(q, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f || r == '#'
+	}) < 0
 }
 
 // clientEchoMax bounds a client-supplied value echoed inside a rejection
@@ -687,13 +848,22 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
+	// "http://:8080" parses with a non-empty Host but no hostname, and Go's
+	// transport dials the local host for that authority. A base URL without a
+	// host is malformed input, never a local-target shorthand; reject it here
+	// rather than allowing a request to reach a loopback service.
+	if parsed.Hostname() == "" {
+		return nil, fmt.Errorf("invalid %s %q: a hostname is required", hdrBaseURL, clientEcho(baseURL))
+	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("unsupported %s scheme %q", hdrBaseURL, clientEcho(parsed.Scheme))
 	}
 	// The base must be exactly scheme://host[:port][/path] - no userinfo
 	// (credentials would ride to the upstream and leak into error echoes), no
-	// query or fragment (they collide with the path/query join). Deny by default.
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+	// query or fragment (they collide with the path/query join). A bare
+	// trailing "#" parses to an empty Fragment but is still a fragment marker;
+	// a percent-encoded %23 remains path data. Deny by default.
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(baseURL, "#") {
 		return nil, fmt.Errorf("invalid %s %q: userinfo, query, and fragment are not allowed in a base URL", hdrBaseURL, clientEcho(baseURL))
 	}
 	// A client controls this authority, and providerFromURL falls back to the
@@ -702,7 +872,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	// neither the retained provider label nor an upstream dial ever carries
 	// header-sized data. Normal domains, IPs, ports and operator aliases pass
 	// unchanged.
-	if len(parsed.Hostname()) > maxBaseURLHostBytes || !validBaseURLPort(parsed.Port()) {
+	if len(parsed.Hostname()) > maxBaseURLHostBytes || !config.ValidURLPort(parsed.Port()) {
 		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
 
@@ -716,7 +886,13 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		provider: providerFromURL(parsed),
 	}
 	if h := strings.TrimSpace(r.Header.Get(hdrAuthHeader)); h != "" {
-		if !isValidAuthHeader(h) {
+		// The documented default is also a legal explicit selector. The
+		// defensive strip set keeps its lowercase spelling because the raw
+		// client header must never pass through; normalize the selector back
+		// to the wire spelling the default uses.
+		if strings.EqualFold(h, "Authorization") {
+			h = "Authorization"
+		} else if !isValidAuthHeader(h) {
 			return nil, fmt.Errorf("invalid %s header %q", hdrAuthHeader, clientEcho(h))
 		}
 		t.authHeader = h
@@ -732,9 +908,15 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		t.authPrefix = p
 	}
 	if p := strings.TrimSpace(r.Header.Get(hdrPath)); p != "" {
+		if !validProxyPathHeader(p) {
+			return nil, fmt.Errorf("invalid %s header", hdrPath)
+		}
 		t.path = p
 	}
 	if q := strings.TrimSpace(r.Header.Get(hdrQuery)); q != "" {
+		if !validProxyQueryHeader(q) {
+			return nil, fmt.Errorf("invalid %s header", hdrQuery)
+		}
 		t.query = q
 	}
 	if f := strings.TrimSpace(r.Header.Get(hdrFormat)); f != "" {
@@ -762,7 +944,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		}
 		t.translate = false
 	}
-	if t.inbound != "" && t.outbound != "" && t.path == "" && (t.translate || pathProtocol(r.URL.Path) != "") {
+	if t.inbound != "" && t.outbound != "" && t.path == "" && (t.translate || pathProtocol(routePath(r)) != "") {
 		// A translated request reaches the target protocol's own endpoint: the
 		// client's path names the inbound protocol, so forwarding it verbatim
 		// would address the wrong wire. A same-protocol request on one of the
@@ -865,10 +1047,29 @@ func isValidAuthHeader(h string) bool {
 	if !config.ValidHeaderName(h) {
 		return false
 	}
-	if isHopByHop(h) || isProxyControlHeader(h) || strings.EqualFold(h, "host") {
+	if isHopByHop(h) || isProxyControlHeader(h) || isTransportModeHeader(h) ||
+		strings.EqualFold(h, "host") || strings.EqualFold(h, "content-length") {
 		return false
 	}
 	return true
+}
+
+// isTransportModeHeader reports whether a header selects a transport-level
+// response mode the proxy must own. Accept-Encoding controls gzip negotiation
+// and net/http's automatic decompression; Range asks for a partial body. A
+// supplied value from any source would make the relay forward bytes whose
+// framing no longer matches the status and headers it emits.
+func isTransportModeHeader(h string) bool {
+	return strings.EqualFold(h, "Accept-Encoding") || strings.EqualFold(h, "Range")
+}
+
+// stripTransportModeHeaders removes the transport-mode headers after every
+// header source has run. The shared transport then adds its own
+// Accept-Encoding, auto-decompresses gzip upstream bodies, and never sends a
+// partial-range request.
+func stripTransportModeHeaders(h http.Header) {
+	h.Del("Accept-Encoding")
+	h.Del("Range")
 }
 
 // remoteIP returns the client's IP (host part of RemoteAddr), honoring
@@ -1208,10 +1409,8 @@ type disconnectWriter struct {
 }
 
 func (d disconnectWriter) Write(p []byte) (int, error) {
-	n, err := d.w.Write(p)
-	if err == nil {
-		d.rec.ResponseBytes += int64(n)
-	} else {
+	n, err := writeCounted(d.w, d.rec, p)
+	if err != nil {
 		markClientGone(d.rec)
 	}
 	return n, err
@@ -1560,49 +1759,165 @@ func hostileTokenCap(v *int) bool {
 	return v != nil && *v > maxRequestOutputTokens
 }
 
+// tokenCapMembers holds the first raw occurrence of each accepted token-ceiling
+// spelling. It is the occurrence scan's container, not an independently decoded
+// record: encoding/json folds member names case-insensitively and keeps the
+// last duplicate, while the relay sends the body byte-for-byte, so a second
+// occurrence could describe a different value to the record and the wire.
+type tokenCapMembers struct {
+	MaxTokens       json.RawMessage `json:"max_tokens"`
+	MaxCompTokens   json.RawMessage `json:"max_completion_tokens"`
+	MaxOutputTokens json.RawMessage `json:"max_output_tokens"`
+}
+
+// tokenCapPresent reports whether a raw cap member was supplied. JSON null is
+// the schema's explicit absent value.
+func tokenCapPresent(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+}
+
+// scanTokenCaps walks the top-level object once and collects the first raw
+// value of each accepted token-ceiling spelling. A second occurrence of any
+// member that folds to a cap name fails instead of letting the record and
+// reservation validate one value while the relay sends every occurrence
+// upstream. Invalid JSON returns an empty scan so the existing passthrough
+// path is preserved.
+func scanTokenCaps(body []byte) (tokenCapMembers, error) {
+	var caps tokenCapMembers
+	var seen [3]bool
+	i := metrics.SkipSpace(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return caps, nil
+	}
+	i = metrics.SkipSpace(body, i+1)
+	for i < len(body) && body[i] != '}' {
+		keyStart := i
+		end := skipJSONString(body, i)
+		if end < 0 {
+			return tokenCapMembers{}, nil
+		}
+		key, ok := decodeRequestKey(body[keyStart:end])
+		if !ok {
+			return tokenCapMembers{}, nil
+		}
+		i = metrics.SkipSpace(body, end)
+		if i >= len(body) || body[i] != ':' {
+			return tokenCapMembers{}, nil
+		}
+		i = metrics.SkipSpace(body, i+1)
+		if i >= len(body) {
+			return tokenCapMembers{}, nil
+		}
+		valueStart := i
+		next := skipJSONValue(body, i)
+		if next < 0 {
+			return tokenCapMembers{}, nil
+		}
+		switch {
+		case key.equal("max_tokens"):
+			if seen[0] {
+				return tokenCapMembers{}, errors.New("max_tokens appears more than once")
+			}
+			seen[0] = true
+			caps.MaxTokens = json.RawMessage(body[valueStart:next])
+		case key.equal("max_completion_tokens"):
+			if seen[1] {
+				return tokenCapMembers{}, errors.New("max_completion_tokens appears more than once")
+			}
+			seen[1] = true
+			caps.MaxCompTokens = json.RawMessage(body[valueStart:next])
+		case key.equal("max_output_tokens"):
+			if seen[2] {
+				return tokenCapMembers{}, errors.New("max_output_tokens appears more than once")
+			}
+			seen[2] = true
+			caps.MaxOutputTokens = json.RawMessage(body[valueStart:next])
+		}
+		i = metrics.SkipSpace(body, next)
+		if i < len(body) && body[i] == ',' {
+			i = metrics.SkipSpace(body, i+1)
+			continue
+		}
+		if i < len(body) && body[i] == '}' {
+			break
+		}
+		return tokenCapMembers{}, nil
+	}
+	return caps, nil
+}
+
+// tokenCapValue validates one raw token-ceiling member. An absent or JSON null
+// member returns nil with no error. A supplied member must be a JSON number
+// whose value is integral and no greater than maxRequestOutputTokens; the
+// returned int is that exact value. The wire schema requires an integer, so a
+// fractional, overflowing, out-of-range or non-number value fails closed
+// instead of slipping past a typed decode that rejected the whole object.
+func tokenCapValue(raw json.RawMessage, field string) (*int, error) {
+	if !tokenCapPresent(raw) {
+		return nil, nil
+	}
+	n, err := jsonnum.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s", field, err)
+	}
+	if n > maxRequestOutputTokens {
+		return nil, fmt.Errorf("%s must not exceed %d", field, maxRequestOutputTokens)
+	}
+	return &n, nil
+}
+
 // conflictingTokenCapSpellings reports a body that mixes the Responses
 // max_output_tokens spelling with a Chat max_tokens/max_completion_tokens
-// spelling. The wire families are distinct, so accepting both would make the
-// recorded ceiling depend on decode precedence rather than the client's wire.
+// spelling. Presence is decided on the occurrence scan, so an unrepresentable
+// spelling cannot hide the mix. The wire families are distinct, so accepting
+// both would make the recorded ceiling depend on decode precedence rather than
+// the client's wire.
 func conflictingTokenCapSpellings(body []byte) bool {
-	var caps struct {
-		MaxTokens       *int `json:"max_tokens"`
-		MaxCompTokens   *int `json:"max_completion_tokens"`
-		MaxOutputTokens *int `json:"max_output_tokens"`
-	}
-	if json.Unmarshal(body, &caps) != nil {
+	caps, err := scanTokenCaps(body)
+	if err != nil {
 		return false
 	}
-	return caps.MaxOutputTokens != nil && (caps.MaxTokens != nil || caps.MaxCompTokens != nil)
+	return tokenCapPresent(caps.MaxOutputTokens) &&
+		(tokenCapPresent(caps.MaxTokens) || tokenCapPresent(caps.MaxCompTokens))
 }
 
-// hostileTokenCapInBody applies the hostile-cap bound to EVERY token-ceiling
-// spelling a body carries, not only the one that wins the record precedence.
-// A Responses body can carry both max_tokens and max_output_tokens; checking
-// only the winner let the other spelling reach the upstream unbounded.
-func hostileTokenCapInBody(body []byte) bool {
-	var caps struct {
-		MaxTokens       *int `json:"max_tokens"`
-		MaxCompTokens   *int `json:"max_completion_tokens"`
-		MaxOutputTokens *int `json:"max_output_tokens"`
+// tokenCapViolation returns the client-facing 400 reason for the first token
+// ceiling spelling that is hostile, malformed or duplicated, or the empty
+// string when every occurrence is valid. It checks every occurrence the body
+// carries, not only the one that wins the record precedence: a Responses body
+// can carry both max_tokens and max_output_tokens, and checking only the winner
+// let the other spelling reach the upstream unbounded. The body is authoritative
+// because it carries the client's actual field names; the record's effective
+// ceiling is a fallback for a body whose cap fields did not decode.
+func tokenCapViolation(body []byte, rec *metrics.Record) string {
+	caps, err := scanTokenCaps(body)
+	if err != nil {
+		return err.Error()
 	}
-	if json.Unmarshal(body, &caps) != nil {
-		return false
-	}
-	for _, v := range []*int{caps.MaxTokens, caps.MaxCompTokens, caps.MaxOutputTokens} {
-		if hostileTokenCap(v) {
-			return true
+	for _, cap := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"max_completion_tokens", caps.MaxCompTokens},
+		{"max_tokens", caps.MaxTokens},
+		{"max_output_tokens", caps.MaxOutputTokens},
+	} {
+		if _, err := tokenCapValue(cap.raw, cap.name); err != nil {
+			return err.Error()
 		}
 	}
-	return false
+	if rec != nil && hostileTokenCap(rec.ReqMaxTokens) {
+		return fmt.Sprintf("output token cap must not exceed %d", maxRequestOutputTokens)
+	}
+	return ""
 }
 
-// writeHostileTokenCap rejects a hostile token cap with the shared 400
-// envelope. Both ServeHTTP enforcement sites use it, so the two trust
-// boundaries can never drift in status, type or wording.
-func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol) {
-	writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError,
-		fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens))
+// writeHostileTokenCap rejects a hostile or malformed token cap with the shared
+// 400 envelope. Both ServeHTTP enforcement sites use it, so the two trust
+// boundaries can never drift in status or type.
+func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol, reason string) {
+	writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError, reason)
 }
 
 type requestRouting struct {
@@ -1616,50 +1931,72 @@ type requestMessage[C any] struct {
 }
 
 type requestParameters struct {
-	MaxTokens       *int              `json:"max_tokens"`
-	MaxCompTokens   *int              `json:"max_completion_tokens"`
-	MaxOutputTokens *int              `json:"max_output_tokens"`
-	Temperature     *float64          `json:"temperature"`
-	TopP            *float64          `json:"top_p"`
-	Tools           []discardedJSON   `json:"tools"`
-	ToolChoice      requestToolChoice `json:"tool_choice"`
-	StreamOptions   *struct{}         `json:"stream_options"`
-	N               *int              `json:"n"`
-	Stop            json.RawMessage   `json:"stop"`
-	Logprobs        bool              `json:"logprobs"`
-	PresencePen     *float64          `json:"presence_penalty"`
-	FrequencyPen    *float64          `json:"frequency_penalty"`
-	ResponseFormat  *struct {
+	Temperature    *float64          `json:"temperature"`
+	TopP           *float64          `json:"top_p"`
+	Tools          []discardedJSON   `json:"tools"`
+	ToolChoice     requestToolChoice `json:"tool_choice"`
+	StreamOptions  *struct{}         `json:"stream_options"`
+	N              json.RawMessage   `json:"n"`
+	Stop           json.RawMessage   `json:"stop"`
+	StopSequences  json.RawMessage   `json:"stop_sequences"`
+	Logprobs       bool              `json:"logprobs"`
+	PresencePen    *float64          `json:"presence_penalty"`
+	FrequencyPen   *float64          `json:"frequency_penalty"`
+	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
-	Seed            *int64                   `json:"seed"`
+	// Text and Include are the native Responses spellings for the response
+	// format/verbosity pair and the logprob opt-in. They are raw so a valid
+	// but unusual shape cannot trigger a typed-decode failure that erases the
+	// rest of the record.
+	Text    json.RawMessage `json:"text"`
+	Include json.RawMessage `json:"include"`
+	// Functions and FunctionCall are the deprecated Chat spellings the codec
+	// still converts. Keep them raw so a schema-invalid member records a
+	// lexical count instead of failing the whole parameters decode.
+	Functions       json.RawMessage          `json:"functions"`
+	FunctionCall    json.RawMessage          `json:"function_call"`
+	Seed            json.RawMessage          `json:"seed"`
 	ParallelTools   *bool                    `json:"parallel_tool_calls"`
 	LogitBias       map[string]discardedJSON `json:"logit_bias"`
-	TopLogprobs     *int                     `json:"top_logprobs"`
+	TopLogprobs     json.RawMessage          `json:"top_logprobs"`
 	ServiceTier     string                   `json:"service_tier"`
 	Thinking        json.RawMessage          `json:"thinking"`
 	Metadata        requestMetadataKeys      `json:"metadata"`
 	ReasoningEffort string                   `json:"reasoning_effort"`
 	Verbosity       string                   `json:"verbosity"`
 	Reasoning       json.RawMessage          `json:"reasoning"`
+	OutputConfig    *struct {
+		Effort string `json:"effort"`
+		Format *struct {
+			Type string `json:"type"`
+		} `json:"format"`
+	} `json:"output_config"`
+	Speed string `json:"speed"`
 	// System carries the system prompt for Anthropic-shaped bodies (OpenAI
 	// puts it in a role:"system"/"developer" message instead). Content only.
 	System   requestContent                   `json:"system"`
 	Messages []requestMessage[requestContent] `json:"messages"`
 }
 
-// requestToolChoice captures only the recorded shape of a tool_choice value
-// during the single document decode. The string shorthand is kept verbatim; an
-// object contributes only function.name with the "tool:" prefix; every other
-// or malformed shape records nothing. A typed decode visits only the function
-// member and skips unknown or deeply nested members instead of materializing
-// the whole value as a map[string]any per node. Each top-level occurrence
-// resets the field, so a duplicate tool_choice key keeps JSON's last-wins
-// semantics.
-type requestToolChoice string
+// requestToolChoice captures the recorded shape of a tool_choice value during
+// the single document decode. The string shorthand is kept verbatim. A Chat
+// object contributes function.name with the "tool:" prefix; an Anthropic object
+// contributes its type (any becomes the Chat required spelling, tool becomes
+// tool:name, auto and none stay themselves) and its disable_parallel_tool_use
+// flag. Every other or malformed shape records nothing. A typed decode visits
+// only the known members and skips unknown or deeply nested ones instead of
+// materializing the whole value as a map[string]any per node. Each top-level
+// occurrence resets the field, so a duplicate tool_choice key keeps JSON's
+// last-wins semantics.
+type requestToolChoice struct {
+	Value           string
+	DisableParallel bool
+	DisableSet      bool
+}
 
 func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
-	*t = ""
+	*t = requestToolChoice{}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return nil
@@ -1667,24 +2004,162 @@ func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
 	if trimmed[0] == '"' {
 		var s string
 		if json.Unmarshal(trimmed, &s) == nil {
-			*t = requestToolChoice(s)
+			t.Value = s
 		}
 		return nil
 	}
 	var choice struct {
-		Function json.RawMessage `json:"function"`
+		// Raw members keep JSON's last-wins semantics for duplicate keys and
+		// let one malformed member reset the whole record instead of failing
+		// the request.
+		Function        json.RawMessage `json:"function"`
+		Type            string          `json:"type"`
+		Name            string          `json:"name"`
+		DisableParallel json.RawMessage `json:"disable_parallel_tool_use"`
 	}
-	if json.Unmarshal(trimmed, &choice) != nil || len(choice.Function) == 0 {
+	if json.Unmarshal(trimmed, &choice) != nil {
 		return nil
 	}
-	var function struct {
-		Name *string `json:"name"`
+	if raw := bytes.TrimSpace(choice.DisableParallel); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+		var disable bool
+		if json.Unmarshal(raw, &disable) != nil {
+			return nil
+		}
+		t.DisableSet = true
+		t.DisableParallel = disable
 	}
-	if json.Unmarshal(choice.Function, &function) != nil || function.Name == nil {
+	if raw := bytes.TrimSpace(choice.Function); len(raw) > 0 {
+		if bytes.Equal(raw, []byte("null")) {
+			return nil
+		}
+		var function struct {
+			Name *string `json:"name"`
+		}
+		if json.Unmarshal(raw, &function) == nil && function.Name != nil {
+			t.Value = "tool:" + *function.Name
+		}
 		return nil
 	}
-	*t = requestToolChoice("tool:" + *function.Name)
+	switch choice.Type {
+	case "any":
+		t.Value = "required"
+	case "tool", "function":
+		// Chat/Anthropic spell the forced tool as type "tool" with name, and
+		// native Responses spells it as type "function" with name.
+		if choice.Name != "" {
+			t.Value = "tool:" + choice.Name
+		}
+	case "auto", "none":
+		t.Value = choice.Type
+	}
 	return nil
+}
+
+// requestStopCount records how many stop sequences a raw stop field carries.
+// A string is one sequence and an array contributes its length; null, an
+// object and every other shape record zero. The scan is lexical: counting an
+// accepted array never materializes a []string, and an over-bound array stops
+// at requestMetadataMaxElements+1.
+func requestStopCount(raw json.RawMessage) int {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) {
+		return 0
+	}
+	switch raw[i] {
+	case '"':
+		if metrics.SkipJSONString(raw, i) == i+2 {
+			return 0
+		}
+		return 1
+	case '[':
+		return requestArrayCount(raw)
+	}
+	return 0
+}
+
+// requestIncludeLogprobs reports whether a raw Responses include array names
+// the output-text logprob option. The scan is lexical: it never materializes
+// the array, and a malformed or non-array value records nothing.
+func requestIncludeLogprobs(raw json.RawMessage) bool {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '[' {
+		return false
+	}
+	const field = "message.output_text.logprobs"
+	i = metrics.SkipSpace(raw, i+1)
+	for i < len(raw) && raw[i] != ']' {
+		if raw[i] == '"' {
+			end := skipJSONString(raw, i)
+			if end < 0 {
+				return false
+			}
+			// Decode the token so an escaped spelling such as
+			// "message.output_text\u002elogprobs" matches the option the
+			// codec sees after its own JSON decode.
+			var member string
+			if json.Unmarshal(raw[i:end], &member) == nil && member == field {
+				return true
+			}
+			i = metrics.SkipSpace(raw, end)
+		} else {
+			next := skipJSONValue(raw, i)
+			if next < 0 {
+				return false
+			}
+			i = metrics.SkipSpace(raw, next)
+		}
+		if i < len(raw) && raw[i] == ',' {
+			i = metrics.SkipSpace(raw, i+1)
+		}
+	}
+	return false
+}
+
+// requestArrayCount counts a raw JSON array's members lexically, so a
+// schema-invalid member still records how many entries the client offered. A
+// non-array or malformed value records zero; the count saturates at the shared
+// collection ceiling.
+func requestArrayCount(raw json.RawMessage) int {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '[' {
+		return 0
+	}
+	n, _, ok := metrics.CountJSONArrayBytes(raw, i, requestMetadataMaxElements)
+	if !ok {
+		return 0
+	}
+	return n
+}
+
+// requestFunctionCallChoice maps the deprecated Chat function_call selector to
+// the same recorded spelling as tool_choice. The codec gives tool_choice
+// precedence, so callers apply this only when tool_choice recorded nothing.
+func requestFunctionCallChoice(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	switch trimmed[0] {
+	case '"':
+		var shorthand string
+		if json.Unmarshal(trimmed, &shorthand) != nil {
+			return ""
+		}
+		switch shorthand {
+		case "auto", "none", "required":
+			return shorthand
+		}
+	case '{':
+		var obj struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(trimmed, &obj) == nil {
+			if name := strings.TrimSpace(obj.Name); name != "" {
+				return "tool:" + name
+			}
+		}
+	}
+	return ""
 }
 
 // requestMetadataKeysMax bounds the distinct top-level metadata keys counted
@@ -1776,18 +2251,35 @@ func (m *requestMetadataKeys) count() int { return len(m.keys) }
 // can otherwise expand into hundreds of MiB of empty objects or raw values;
 // this is an internal DoS guardrail, not a wire-format limit, and 10k
 // messages/tools/logit_bias/stop entries or top-level keys is far above a
-// normal request. The wire codecs use the same ceiling for their own decode
-// preflight, so the proxy can never reject a document the translator would
-// accept (or the reverse).
+// normal request. The wire codecs share this top-level collection ceiling for
+// their own decode preflight. Nested content and duplicate-occurrence bounds
+// can still be stricter on either side: the preflight accumulates every
+// duplicate top-level system member while the Anthropic codec decodes only the
+// last, and the codec's per-array content cap is smaller than the shared
+// aggregate.
 const requestMetadataMaxElements = providerformat.WireCollectionMax
 
 // requestContentPartsMax bounds the aggregate content-part arrays over every
-// message plus the top-level system content. The per-array
-// metrics.ContentPartMax keeps one message from expanding a typed slice, but
-// thousands of messages at that per-array cap still compose a request-sized
-// slice of empty parts. Internal DoS guardrail, not a wire-format or
-// user-tunable limit; text length never counts against it.
-const requestContentPartsMax = 16_384
+// message, the top-level system content and every nested Responses input
+// content/output array. The per-array metrics.ContentPartMax keeps one message
+// from expanding a typed slice, but thousands of messages at that per-array cap
+// still compose a request-sized slice of empty parts. It reuses the format
+// owner so the preflight and the translated codec accept the same aggregate.
+// Internal DoS guardrail, not a wire-format or user-tunable limit; text length
+// never counts against it.
+const requestContentPartsMax = providerformat.WireContentPartsMax
+
+// requestAnnotationsMax bounds the aggregate annotation members over every
+// Responses content part. Each annotation becomes a typed citation and a
+// possible warning, so per-array ContentPartMax alone lets thousands of parts
+// multiply. It reuses the format owner's aggregate so the proxy preflight and
+// the codec reject the same document class.
+const requestAnnotationsMax = providerformat.WireNestedCollectionMax
+
+// requestAnnotationArrayMax bounds one Responses annotation array. It matches
+// the codec's per-array check in checkResponsesContent, so a single oversized
+// array fails in the preflight instead of after translation begins.
+const requestAnnotationArrayMax = metrics.ContentPartMax
 
 // requestToolCallsMax bounds the aggregate tool_calls array members over every
 // message. Each member expands into a typed tool-call value and, on the
@@ -1821,17 +2313,37 @@ func boundRequestMetadata(body []byte) error {
 	// occurrence still reaches its decoder, so each is counted below.
 	var logitSeen map[string]struct{}
 	logitOver := false
+	// metadata is also a map field. Duplicate metadata objects merge in
+	// encoding/json, so distinct keys accumulate across every occurrence. A
+	// single occurrence needs only a raw member count: distinct keys cannot
+	// exceed raw members, and the typed decode caps its retained keys at the
+	// same ceiling. The distinct-key set is built only once a second object
+	// makes merge semantics relevant, so a hostile single object never
+	// retains a decoded key map.
+	var metadataSeen map[string]struct{}
+	metadataObjects := 0
+	metadataFirstStart := 0
+	metadataFirstOver := false
+	metadataOver := false
 	// memberSeen counts distinct top-level keys because the rewrite engine and
 	// metadata decode both keep one entry per distinct key; duplicate members
 	// must stay cheap and accepted. Encoding/json retains the last duplicate
 	// value, so raw member count is not the decoded map size.
 	var memberSeen map[string]struct{}
-	// contentParts accumulates message content-part array lengths plus the
-	// top-level system content. toolCalls accumulates every message tool_calls
-	// member. Both stop growing at the first over-budget array, so the
-	// rejection costs one bounded prefix scan.
+	// contentParts accumulates message content-part array lengths, the
+	// top-level system content and every nested Responses input content/output
+	// part. annotations accumulates the annotation members inside each of
+	// those parts. toolCalls accumulates every message tool_calls member. All
+	// stop growing at the first over-budget array, so the rejection costs one
+	// bounded prefix scan.
 	contentParts := 0
+	annotationParts := 0
 	toolCalls := 0
+	// stream_options is a RawMessage field: duplicate top-level occurrences
+	// overwrite, so only the last object reaches the typed decode. Retain its
+	// span and bound that occurrence after the scan, matching the codec.
+	streamOptionsStart, streamOptionsEnd := -1, -1
+	streamOptionsSeen := false
 	for i < len(body) {
 		keyStart := i
 		end := skipJSONString(body, i)
@@ -1886,7 +2398,7 @@ func boundRequestMetadata(body []byte) error {
 				toolCalls += calls
 			}
 			i = next
-		case "tools", "functions", "input":
+		case "tools", "functions", "modalities":
 			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
 			if !ok {
 				return nil
@@ -1895,17 +2407,91 @@ func boundRequestMetadata(body []byte) error {
 				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", collection, requestMetadataMaxElements))
 			}
 			i = next
-		case "metadata":
-			// The metadata map is decoded into a typed map; a hostile member
-			// count would expand there even though the top-level preflight saw
-			// only one value.
-			if !metrics.ObjectWithinLimit(body[i:], requestMetadataMaxElements) {
-				return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
+		case "input":
+			// Responses input is an item array whose nested content/output
+			// arrays are decoded by every translated request. Count both the
+			// items and their parts/annotations here so the preflight rejects
+			// an amplification body before the codec materializes it.
+			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
+			if !ok {
+				return nil
 			}
+			if n > requestMetadataMaxElements {
+				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", collection, requestMetadataMaxElements))
+			}
+			if n > 0 {
+				parts, annotations, nestedNext, annotationArrayOver, nestedOK := countResponsesInputNested(
+					body, i, requestContentPartsMax-contentParts, requestAnnotationsMax-annotationParts)
+				if !nestedOK {
+					return nil
+				}
+				if annotationArrayOver {
+					return requestMetadataOverflow(body, fmt.Errorf("request annotation array exceeds %d", requestAnnotationArrayMax))
+				}
+				if parts > requestContentPartsMax-contentParts {
+					return requestMetadataOverflow(body, fmt.Errorf("request content parts exceed %d", requestContentPartsMax))
+				}
+				if annotations > requestAnnotationsMax-annotationParts {
+					return requestMetadataOverflow(body, fmt.Errorf("request annotations exceed %d", requestAnnotationsMax))
+				}
+				contentParts += parts
+				annotationParts += annotations
+				next = nestedNext
+			}
+			i = next
+		case "metadata":
 			next := skipJSONValue(body, i)
 			if next < 0 {
 				return nil
 			}
+			trimmed := metrics.SkipSpace(body, i)
+			switch {
+			case trimmed < next && body[trimmed] == 'n':
+				// encoding/json sets the map field to nil for null, so every
+				// key merged before this member is discarded.
+				clear(metadataSeen)
+				metadataSeen = nil
+				metadataObjects = 0
+				metadataFirstStart = 0
+				metadataFirstOver, metadataOver = false, false
+			case trimmed < next && body[trimmed] == '{':
+				metadataObjects++
+				rawOK := metrics.ObjectWithinLimit(body[i:next], requestMetadataMaxElements)
+				if metadataObjects == 1 {
+					metadataFirstStart = i
+					metadataFirstOver = !rawOK
+				} else if !metadataOver {
+					if metadataSeen == nil {
+						// Merge semantics now need the first object's
+						// distinct keys; it was counted but not decoded.
+						metadataSeen = make(map[string]struct{}, 8)
+						n, _, ok := countJSONObjectKeys(body, metadataFirstStart, requestMetadataMaxElements, metadataSeen)
+						if !ok {
+							return nil
+						}
+						if n > requestMetadataMaxElements {
+							metadataOver = true
+						}
+					}
+					if !metadataOver {
+						n, _, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements, metadataSeen)
+						if !ok {
+							return nil
+						}
+						if n > requestMetadataMaxElements {
+							metadataOver = true
+						}
+					}
+				}
+			}
+			i = next
+		case "stream_options":
+			next := skipJSONValue(body, i)
+			if next < 0 {
+				return nil
+			}
+			streamOptionsStart, streamOptionsEnd = i, next
+			streamOptionsSeen = true
 			i = next
 		case "stop":
 			// stop is decoded into []string only to count it. A string is one
@@ -1931,7 +2517,7 @@ func boundRequestMetadata(body []byte) error {
 			if logitSeen == nil {
 				logitSeen = make(map[string]struct{})
 			}
-			n, next, ok := countJSONLogitBias(body, i, requestMetadataMaxElements, logitSeen)
+			n, next, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements, logitSeen)
 			if !ok {
 				return nil
 			}
@@ -1976,6 +2562,13 @@ func boundRequestMetadata(body []byte) error {
 	}
 	if logitOver {
 		return requestMetadataOverflow(body, fmt.Errorf("request logit_bias exceeds %d entries", requestMetadataMaxElements))
+	}
+	if metadataOver || (metadataObjects == 1 && metadataFirstOver) {
+		return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
+	}
+	if streamOptionsSeen &&
+		!metrics.ObjectWithinLimit(body[streamOptionsStart:streamOptionsEnd], requestMetadataMaxElements) {
+		return requestMetadataOverflow(body, fmt.Errorf("request stream_options exceeds %d members", requestMetadataMaxElements))
 	}
 	return nil
 }
@@ -2047,10 +2640,14 @@ func (k requestKey) collection() string {
 		return "input"
 	case k.equal("metadata"):
 		return "metadata"
+	case k.equal("stream_options"):
+		return "stream_options"
 	case k.equal("logit_bias"):
 		return "logit_bias"
-	case k.equal("stop"):
+	case k.equal("stop"), k.equal("stop_sequences"):
 		return "stop"
+	case k.equal("modalities"):
+		return "modalities"
 	}
 	return ""
 }
@@ -2197,6 +2794,239 @@ func countRequestMessageContentParts(data []byte, start, budget int) (int, int, 
 	return parts, i + 1, true
 }
 
+// countResponsesInputNested counts the aggregate content-part and annotation
+// members of one Responses input array without materializing it. Every item
+// object's content and output arrays contribute parts; every part object's
+// annotations array contributes annotation members. budget is the remaining
+// aggregate allowance; a count above it means the bound is exceeded. Duplicate
+// members are each charged because every occurrence reaches the decoder.
+// Non-object items and non-array values contribute zero, matching the typed
+// decoder's shape tolerance. annotationArrayOver means one annotation array
+// exceeded requestAnnotationArrayMax. ok is false on malformed input so the
+// document keeps its passthrough behavior.
+func countResponsesInputNested(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, annotationArrayOver bool, ok bool) {
+	i := metrics.SkipSpace(data, start)
+	if i >= len(data) {
+		return 0, 0, 0, false, false
+	}
+	if data[i] != '[' {
+		next := skipJSONValue(data, i)
+		return 0, 0, next, false, next >= 0
+	}
+	i = metrics.SkipSpace(data, i+1)
+	for i < len(data) && data[i] != ']' {
+		if data[i] == '{' {
+			itemParts, itemAnnotations, itemNext, itemArrayOver, itemOK := countResponsesInputItemNested(data, i, partBudget-parts, annotationBudget-annotations)
+			if !itemOK {
+				return 0, 0, 0, false, false
+			}
+			parts += itemParts
+			annotations += itemAnnotations
+			if itemArrayOver {
+				return parts, annotations, 0, true, true
+			}
+			if parts > partBudget || annotations > annotationBudget {
+				return parts, annotations, 0, false, true
+			}
+			i = metrics.SkipSpace(data, itemNext)
+		} else {
+			itemNext := skipJSONValue(data, i)
+			if itemNext < 0 {
+				return 0, 0, 0, false, false
+			}
+			i = metrics.SkipSpace(data, itemNext)
+		}
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			if i >= len(data) || data[i] == ']' {
+				return 0, 0, 0, false, false
+			}
+			continue
+		}
+		if i < len(data) && data[i] == ']' {
+			break
+		}
+		return 0, 0, 0, false, false
+	}
+	if i >= len(data) || data[i] != ']' {
+		return 0, 0, 0, false, false
+	}
+	return parts, annotations, i + 1, false, true
+}
+
+// countResponsesInputItemNested counts one item object's content and output
+// arrays. A string output or content value contributes no parts.
+func countResponsesInputItemNested(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, annotationArrayOver bool, ok bool) {
+	i := metrics.SkipSpace(data, start)
+	if i >= len(data) || data[i] != '{' {
+		return 0, 0, 0, false, false
+	}
+	i = metrics.SkipSpace(data, i+1)
+	for i < len(data) && data[i] != '}' {
+		end := skipJSONString(data, i)
+		if end < 0 {
+			return 0, 0, 0, false, false
+		}
+		key := data[i:end]
+		i = metrics.SkipSpace(data, end)
+		if i >= len(data) || data[i] != ':' {
+			return 0, 0, 0, false, false
+		}
+		i = metrics.SkipSpace(data, i+1)
+		if i >= len(data) {
+			return 0, 0, 0, false, false
+		}
+		if requestKeyEqual(key, "content") || requestKeyEqual(key, "output") {
+			partCount, annotationCount, partNext, partArrayOver, partOK := countResponsesPartArray(data, i, partBudget-parts, annotationBudget-annotations)
+			if !partOK {
+				return 0, 0, 0, false, false
+			}
+			parts += partCount
+			annotations += annotationCount
+			if partArrayOver {
+				return parts, annotations, 0, true, true
+			}
+			if parts > partBudget || annotations > annotationBudget {
+				return parts, annotations, 0, false, true
+			}
+			i = metrics.SkipSpace(data, partNext)
+		} else {
+			valueNext := skipJSONValue(data, i)
+			if valueNext < 0 {
+				return 0, 0, 0, false, false
+			}
+			i = metrics.SkipSpace(data, valueNext)
+		}
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			continue
+		}
+		if i < len(data) && data[i] == '}' {
+			break
+		}
+		return 0, 0, 0, false, false
+	}
+	if i >= len(data) || data[i] != '}' {
+		return 0, 0, 0, false, false
+	}
+	return parts, annotations, i + 1, false, true
+}
+
+// countResponsesPartArray counts one content-part array's members and the
+// annotation members inside each part object. A string value contributes no
+// parts, matching function_call_output's string-or-array contract.
+func countResponsesPartArray(data []byte, start, partBudget, annotationBudget int) (parts, annotations, next int, annotationArrayOver bool, ok bool) {
+	i := metrics.SkipSpace(data, start)
+	if i >= len(data) {
+		return 0, 0, 0, false, false
+	}
+	if data[i] != '[' {
+		next := skipJSONValue(data, i)
+		return 0, 0, next, false, next >= 0
+	}
+	i = metrics.SkipSpace(data, i+1)
+	for i < len(data) && data[i] != ']' {
+		parts++
+		if parts > partBudget {
+			return parts, annotations, 0, false, true
+		}
+		if data[i] == '{' {
+			annotationCount, partNext, partArrayOver, partOK := countResponsesPartAnnotations(data, i, annotationBudget-annotations)
+			if !partOK {
+				return 0, 0, 0, false, false
+			}
+			annotations += annotationCount
+			if partArrayOver {
+				return parts, annotations, 0, true, true
+			}
+			if annotations > annotationBudget {
+				return parts, annotations, 0, false, true
+			}
+			i = metrics.SkipSpace(data, partNext)
+		} else {
+			partNext := skipJSONValue(data, i)
+			if partNext < 0 {
+				return 0, 0, 0, false, false
+			}
+			i = metrics.SkipSpace(data, partNext)
+		}
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			if i >= len(data) || data[i] == ']' {
+				return 0, 0, 0, false, false
+			}
+			continue
+		}
+		if i < len(data) && data[i] == ']' {
+			break
+		}
+		return 0, 0, 0, false, false
+	}
+	if i >= len(data) || data[i] != ']' {
+		return 0, 0, 0, false, false
+	}
+	return parts, annotations, i + 1, false, true
+}
+
+// countResponsesPartAnnotations counts one part object's annotations array.
+// Duplicate annotations members are each charged for the same reason as
+// duplicate content members. One array above requestAnnotationArrayMax sets
+// annotationArrayOver before the aggregate check.
+func countResponsesPartAnnotations(data []byte, start, budget int) (total, next int, annotationArrayOver bool, ok bool) {
+	i := metrics.SkipSpace(data, start)
+	if i >= len(data) || data[i] != '{' {
+		return 0, 0, false, false
+	}
+	i = metrics.SkipSpace(data, i+1)
+	for i < len(data) && data[i] != '}' {
+		end := skipJSONString(data, i)
+		if end < 0 {
+			return 0, 0, false, false
+		}
+		key := data[i:end]
+		i = metrics.SkipSpace(data, end)
+		if i >= len(data) || data[i] != ':' {
+			return 0, 0, false, false
+		}
+		i = metrics.SkipSpace(data, i+1)
+		if i >= len(data) {
+			return 0, 0, false, false
+		}
+		if requestKeyEqual(key, "annotations") {
+			n, valueNext, countOK := metrics.CountJSONArrayBytes(data, i, requestAnnotationArrayMax)
+			if !countOK {
+				return 0, 0, false, false
+			}
+			if n > requestAnnotationArrayMax {
+				return total + n, 0, true, true
+			}
+			total += n
+			if total > budget {
+				return total, 0, false, true
+			}
+			i = metrics.SkipSpace(data, valueNext)
+		} else {
+			valueNext := skipJSONValue(data, i)
+			if valueNext < 0 {
+				return 0, 0, false, false
+			}
+			i = metrics.SkipSpace(data, valueNext)
+		}
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			continue
+		}
+		if i < len(data) && data[i] == '}' {
+			break
+		}
+		return 0, 0, false, false
+	}
+	if i >= len(data) || data[i] != '}' {
+		return 0, 0, false, false
+	}
+	return total, i + 1, false, true
+}
+
 // countRequestMessagesToolCalls counts the aggregate tool_calls array members
 // over the message objects of the messages array at start. budget is the
 // remaining aggregate allowance; a count above it means the aggregate bound is
@@ -2321,14 +3151,16 @@ func asciiKeyEqual(raw []byte, name string) bool {
 	return true
 }
 
-// countJSONLogitBias accumulates the distinct keys of one logit_bias object
+// countJSONObjectKeys accumulates the distinct keys of one JSON map value
 // into seen. encoding/json reuses the non-nil map field across duplicate
-// top-level logit_bias objects, so distinct keys, not raw members, are the
-// decoded size. Duplicate members of one object therefore do not consume the
-// bound. Once seen exceeds max, the map is cleared and the rest of the object
-// is skipped without decoding keys; the caller preserves the overflow state
-// and skips later logit_bias occurrences entirely.
-func countJSONLogitBias(data []byte, i, max int, seen map[string]struct{}) (int, int, bool) {
+// top-level map members (metadata, logit_bias), so distinct keys, not raw
+// members, are the decoded size. Duplicate members of one object therefore do
+// not consume the bound. Plain ASCII keys decode from their source slice and
+// allocate only the map key; escaped or non-ASCII keys decode once through the
+// shared requestKey owner. Once seen exceeds max, the map is cleared and the
+// rest of the object is skipped without decoding keys; the caller preserves
+// the overflow state and skips later occurrences entirely.
+func countJSONObjectKeys(data []byte, i, max int, seen map[string]struct{}) (int, int, bool) {
 	i = metrics.SkipSpace(data, i)
 	if i >= len(data) {
 		return 0, 0, false
@@ -2354,17 +3186,13 @@ func countJSONLogitBias(data []byte, i, max int, seen map[string]struct{}) (int,
 			return 0, 0, false
 		}
 		if !over {
-			var key string
-			if json.Unmarshal(data[keyStart:end], &key) != nil {
+			key, ok := decodeRequestKey(data[keyStart:end])
+			if !ok {
 				return 0, 0, false
 			}
-			if _, exists := seen[key]; !exists {
-				if len(seen) >= max {
-					over = true
-					clear(seen)
-				} else {
-					seen[key] = struct{}{}
-				}
+			if countDistinctJSONKey(seen, key, max) > max {
+				over = true
+				clear(seen)
 			}
 		}
 		i = metrics.SkipSpace(data, end)
@@ -2523,17 +3351,39 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
 	if !preview && parseLLMRequestFast(body, rec) {
 		return nil
 	}
-	return parseLLMRequestSlow(body, rec, preview)
+	return parseLLMRequestSlow(body, rec, preview, true)
 }
 
-func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview bool) error {
+// parseGeneratedLLMRequest decodes the proxy's own translated request body.
+// It passes bound=false, so parseLLMRequestSlow skips ALL of
+// boundRequestMetadata: the messages/tools/stop array limits, the logit_bias,
+// metadata and distinct top-level-member counts, the aggregate content-part
+// and annotation counts, and the 1,024 aggregate tool-call bound. That is
+// deliberate: translation legitimately changes composition (one tool result
+// becomes a content block, media parts split, lifted system fragments add
+// members), and re-applying the client-facing aggregate would reject a body
+// the codec just built. The broad skip is safe because the source body was
+// already bounded by parseLLMRequest, the codec validates the IR and its own
+// wire collections, and the translated document is capped by
+// max_request_bytes before this decode runs. UTF-8 expansion, the typed
+// metadata decode and the token-cap recheck remain active.
+func parseGeneratedLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+	if !preview && parseLLMRequestFast(body, rec) {
+		return nil
+	}
+	return parseLLMRequestSlow(body, rec, preview, false)
+}
+
+func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) error {
 	// Reject replacement expansion before the first typed decode so raw
 	// invalid UTF-8 cannot multiply the request in memory.
 	if requestStringExpansionExceeded(body) {
 		return fmt.Errorf("request body contains invalid UTF-8 that expands beyond the request size")
 	}
-	if err := boundRequestMetadata(body); err != nil {
-		return err
+	if bound {
+		if err := boundRequestMetadata(body); err != nil {
+			return err
+		}
 	}
 	var req struct {
 		requestRouting
@@ -2564,60 +3414,122 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview bool) error {
 		}
 	}
 	rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
-	// Prefer max_completion_tokens, matching the Anthropic translator's
-	// pick: the translated body re-decodes through this same
-	// MergeTokenCaps precedence, so the trust-boundary check in ServeHTTP
-	// must see the one field a translated body can actually carry upstream.
-	rec.ReqMaxTokens = resolveRequestTokenCap(req.MaxCompTokens, req.MaxTokens, req.MaxOutputTokens)
+	// The occurrence scan owns the cap value, so the record describes the same
+	// occurrence the trust boundary validated. Prefer max_completion_tokens,
+	// matching the Anthropic translator's pick.
+	applyTokenCaps(body, rec)
+	// Integral spellings (1.0, 1e1) are accepted by every codec and relayed
+	// verbatim, but a typed int decode fails them and erased the rest of the
+	// record with it. Carry these three members as raw JSON and decode them
+	// with the shared exact parser after the merged decode; a malformed
+	// spelling records nothing here (the wire codec owns its own validation)
+	// without discarding the other fields.
+	n, errN := jsonnum.OptionalInt(req.N, "n")
+	seed, errSeed := jsonnum.OptionalInt64(req.Seed, "seed")
+	topLogprobs, errTop := jsonnum.OptionalInt(req.TopLogprobs, "top_logprobs")
+	if errN == nil {
+		rec.ReqN = n
+	}
+	if errSeed == nil {
+		rec.ReqSeed = seed
+	}
+	if errTop == nil {
+		rec.ReqTopLogprobs = topLogprobs
+	}
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
-	rec.ReqToolsCount = len(req.Tools)
-	rec.ReqN = req.N
+	rec.ReqToolsCount = len(req.Tools) + requestArrayCount(req.Functions)
 	rec.ReqPresencePen = req.PresencePen
 	rec.ReqFrequencyPen = req.FrequencyPen
-	rec.ReqLogprobs = req.Logprobs
+	rec.ReqLogprobs = req.Logprobs || requestIncludeLogprobs(req.Include)
 	if req.StreamOptions != nil {
 		rec.ReqStreamOpts = true
 	}
-	if len(req.ToolChoice) > 0 {
-		rec.ReqToolChoice = string(req.ToolChoice)
+	rec.ReqToolChoice = req.ToolChoice.Value
+	if rec.ReqToolChoice == "" {
+		rec.ReqToolChoice = requestFunctionCallChoice(req.FunctionCall)
 	}
 	if len(req.Stop) > 0 {
-		var s string
-		var arr []string
-		if json.Unmarshal(req.Stop, &s) == nil {
-			rec.ReqStop = 1
-		} else if json.Unmarshal(req.Stop, &arr) == nil {
-			rec.ReqStop = len(arr)
-		}
+		rec.ReqStop = requestStopCount(req.Stop)
+	} else if len(req.StopSequences) > 0 {
+		rec.ReqStop = requestStopCount(req.StopSequences)
 	}
 	// Additional non-content params: capture shape only, never values that
 	// could carry content (logit_bias keys are token ids, metadata is counted
 	// not copied).
+	// Native Responses text governs both the response format and verbosity.
+	// Decode it after the merged pass and ignore a malformed shape for
+	// metadata only; a scalar must not erase the rest of the record.
+	var textFormat, textVerbosity string
+	if len(req.Text) > 0 {
+		var text struct {
+			Format *struct {
+				Type string `json:"type"`
+			} `json:"format"`
+			Verbosity string `json:"verbosity"`
+		}
+		if json.Unmarshal(req.Text, &text) == nil {
+			if text.Format != nil {
+				textFormat = text.Format.Type
+			}
+			textVerbosity = text.Verbosity
+		}
+	}
 	if req.ResponseFormat != nil {
 		rec.ReqResponseFormat = req.ResponseFormat.Type
+	} else if req.OutputConfig != nil && req.OutputConfig.Format != nil {
+		rec.ReqResponseFormat = req.OutputConfig.Format.Type
+	} else {
+		rec.ReqResponseFormat = textFormat
 	}
-	rec.ReqSeed = req.Seed
-	rec.ReqParallelTools = req.ParallelTools
-	rec.ReqTopLogprobs = req.TopLogprobs
-	rec.ReqServiceTier = req.ServiceTier
+	if req.ParallelTools != nil {
+		rec.ReqParallelTools = req.ParallelTools
+	} else if req.ToolChoice.DisableSet {
+		parallel := !req.ToolChoice.DisableParallel
+		rec.ReqParallelTools = &parallel
+	}
+	if req.ServiceTier != "" {
+		rec.ReqServiceTier = req.ServiceTier
+	} else {
+		rec.ReqServiceTier = req.Speed
+	}
 	rec.ReqLogitBias = len(req.LogitBias)
 	rec.ReqMetadataKeys = req.Metadata.count()
 	if len(req.Thinking) > 0 {
-		// Any non-null "thinking" object means extended thinking was requested.
-		rec.ReqThinking = string(req.Thinking) != "null"
+		// Record extended thinking only when the object asks for it. The
+		// codec decodes type "disabled" as Enabled=false, so the presence of
+		// a thinking object alone is not a request.
+		var thinking struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(req.Thinking, &thinking) == nil {
+			switch thinking.Type {
+			case "enabled", "adaptive", "between_tools":
+				rec.ReqThinking = true
+			}
+		}
 	}
 	if tok := configToken(req.ReasoningEffort); tok != "" {
 		rec.ReqReasoningEffort = tok
-	} else if len(req.Reasoning) > 0 {
-		var obj struct {
-			Effort string `json:"effort"`
+	} else {
+		var effort string
+		if req.OutputConfig != nil {
+			effort = configToken(req.OutputConfig.Effort)
 		}
-		if json.Unmarshal(req.Reasoning, &obj) == nil {
-			rec.ReqReasoningEffort = configToken(obj.Effort)
+		if effort == "" && len(req.Reasoning) > 0 {
+			var obj struct {
+				Effort string `json:"effort"`
+			}
+			if json.Unmarshal(req.Reasoning, &obj) == nil {
+				effort = configToken(obj.Effort)
+			}
 		}
+		rec.ReqReasoningEffort = effort
 	}
 	rec.ReqVerbosity = configToken(req.Verbosity)
+	if rec.ReqVerbosity == "" {
+		rec.ReqVerbosity = configToken(textVerbosity)
+	}
 	// Prompt composition: per-role character sizes, multimodal counts, and the
 	// role of the last turn (what the model is actually responding to). Sizes
 	// count text characters only - never the text itself, and never inline

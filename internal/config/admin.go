@@ -3,10 +3,11 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
-	"os"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -37,8 +38,9 @@ type Handler struct {
 	// back into the file (dev instance -listen / -db-path).
 	Overrides map[string]string
 	// Persist is called AFTER a successful WriteFile to hot-apply. Production
-	// uses LoadFileRepair + CLI overrides + Server.Reload (a clean WriteFile
-	// is a no-op repair). Nil is write-only (tests).
+	// persists through reloadConfigLocked (LoadFileStrict + CLI overrides +
+	// Server.Reload); a clean WriteFile is still applied and reported. Nil is
+	// write-only (tests).
 	Persist func() (restartRequired []string, err error)
 	// Serialize brackets the POST file read/validate/write/reload transaction
 	// with the process-wide config-application serializer. Production wires it
@@ -224,9 +226,12 @@ func (h *Handler) fileConfig() (*Config, error) {
 	if h.Path == "" {
 		return Default(), nil
 	}
-	c, err := LoadFile(h.Path)
+	// Settings is an operational consumer, not boot repair: an invalid
+	// recognized value must fail the read so a stale revision is never
+	// written back with a silent default.
+	c, _, err := LoadFileStrict(h.Path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Default(), nil
 		}
 		return nil, fmt.Errorf("load config: %w", err)

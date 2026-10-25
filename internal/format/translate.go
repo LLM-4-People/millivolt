@@ -1,10 +1,12 @@
 package format
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -93,6 +95,35 @@ func fileMediaType(file *ir.File) string {
 	return ""
 }
 
+// inferFileMediaType resolves an inline file's media type at the file-data
+// owner: the declared field or data-URL prefix first, then a filename
+// extension, then a PDF signature in the base64 payload. The empty string means
+// the bytes cannot be typed; a caller with a media-type allowlist decides
+// whether to drop them.
+func inferFileMediaType(file *ir.File) string {
+	if file == nil {
+		return ""
+	}
+	if media := fileMediaType(file); media != "" {
+		return media
+	}
+	switch strings.ToLower(path.Ext(file.Filename)) {
+	case ".pdf":
+		return "application/pdf"
+	case ".txt", ".md", ".markdown", ".csv", ".json", ".yaml", ".yml", ".log", ".xml":
+		return "text/plain"
+	}
+	// "%PDF-" base64-encodes to JVBERi0. Decoding the first eight characters
+	// covers the five-byte signature and any continuation bits.
+	if len(file.FileData) >= 8 {
+		if head, err := base64.StdEncoding.DecodeString(file.FileData[:8]); err == nil &&
+			strings.HasPrefix(string(head), "%PDF-") {
+			return "application/pdf"
+		}
+	}
+	return ""
+}
+
 // fileDataURL renders canonical inline file bytes in the data-URL spelling
 // Chat and Responses accept. A value that already carries the prefix passes
 // through unchanged, as does raw base64 with no declared media type.
@@ -157,6 +188,22 @@ func TranslateRequestBetweenIR(inbound, outbound ir.Protocol, body []byte, defau
 	req, err := DecodeRequest(inbound, body)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	// A translated stream targeting Chat must ask for the usage chunk. The
+	// decoder-owned flag describes only a direct Chat client's request, and a
+	// compliant Chat upstream sends no usage unless stream_options asks for
+	// it. This is the single translation owner, so every inbound protocol
+	// inherits the rule.
+	if outbound == ir.Chat && inbound != ir.Chat && req.Stream {
+		req.StreamIncludeUsage = true
+	}
+	// A translated request to Responses must opt out of provider-side storage.
+	// OpenAI's Responses default is store=true with retention of at least 30
+	// days, while the source protocol never asked for retention and the proxy
+	// has no retrieval path. An explicit source value is preserved.
+	if outbound == ir.Responses && inbound != ir.Responses && req.Store == nil {
+		store := false
+		req.Store = &store
 	}
 	out, err := EncodeRequest(outbound, req, defaultMaxTokens, promptCacheKey)
 	if err != nil {
@@ -260,10 +307,26 @@ func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sour
 	return out, resp, resp.Warnings, err
 }
 
+// StreamOptions carries the client's stream preferences that the target
+// encoder must honor. The zero value requests the protocol's default frames.
+type StreamOptions struct {
+	// IncludeUsage is the Chat client's stream_options.include_usage. The
+	// Chat target emits its extra usage chunk only when the client asked and
+	// the source actually reported usage.
+	IncludeUsage bool
+	// FallbackModel supplies the model identity for a translated Chat,
+	// Responses or Anthropic stream whose source omitted its start event. The
+	// proxy passes its recorded request model so the lazily opened stream still
+	// names a real model.
+	FallbackModel string
+}
+
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
 // protocol's SSE stream. observe, when non-nil, receives every raw upstream
-// data payload (used for source-only cost accounting).
-func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io.Reader, flusher http.Flusher, observe func([]byte)) error {
+// event name and data payload (used for source-only cost accounting). The
+// name is needed for a type-less terminal document whose SSE event name is
+// its only classifier.
+func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io.Reader, flusher http.Flusher, observe func(string, []byte), opts StreamOptions) error {
 	var dec StreamDecoder
 	switch outbound {
 	case ir.Chat:
@@ -282,11 +345,17 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	var enc StreamEncoder
 	switch inbound {
 	case ir.Chat:
-		enc = NewChatStreamEncoder(dst, flusher)
+		chat := NewChatStreamEncoder(dst, flusher, opts.IncludeUsage)
+		chat.fallbackModel = opts.FallbackModel
+		enc = chat
 	case ir.Responses:
-		enc = NewResponsesStreamEncoder(dst, flusher)
+		responses := NewResponsesStreamEncoder(dst, flusher)
+		responses.fallbackModel = opts.FallbackModel
+		enc = responses
 	case ir.Anthropic:
-		enc = NewAnthropicStreamEncoder(dst, flusher)
+		anthropic := NewAnthropicStreamEncoder(dst, flusher)
+		anthropic.fallbackModel = opts.FallbackModel
+		enc = anthropic
 	default:
 		return fmt.Errorf("unsupported inbound protocol %q", inbound)
 	}
@@ -307,8 +376,12 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 			// terminal event: a target client must never receive an error or
 			// terminal frame for a block that is still open.
 			if errors.Is(err, ErrTruncatedStream) {
-				for _, pending := range dec.FlushBlocks() {
-					if writeErr := enc.Write(pending); writeErr != nil {
+				pending, flushErr := dec.FlushBlocks()
+				if flushErr != nil {
+					return abort(flushErr)
+				}
+				for _, event := range pending {
+					if writeErr := enc.Write(event); writeErr != nil {
 						return abort(writeErr)
 					}
 				}

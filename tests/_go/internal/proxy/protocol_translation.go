@@ -6,11 +6,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
@@ -20,6 +22,8 @@ import (
 type fixtureUpstream struct {
 	server      *httptest.Server
 	path        atomic.Value
+	escapedPath atomic.Value
+	rawQuery    atomic.Value
 	body        atomic.Value
 	contentType string
 	status      int
@@ -34,6 +38,8 @@ func newFixtureUpstream(t *testing.T, contentType string, status int, response s
 		f.calls.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		f.path.Store(r.URL.Path)
+		f.escapedPath.Store(r.URL.EscapedPath())
+		f.rawQuery.Store(r.URL.RawQuery)
 		f.body.Store(body)
 		w.Header().Set("Content-Type", f.contentType)
 		w.WriteHeader(f.status)
@@ -43,8 +49,10 @@ func newFixtureUpstream(t *testing.T, contentType string, status int, response s
 	return f
 }
 
-func (f *fixtureUpstream) lastPath() string { return f.path.Load().(string) }
-func (f *fixtureUpstream) lastBody() []byte { return f.body.Load().([]byte) }
+func (f *fixtureUpstream) lastPath() string        { return f.path.Load().(string) }
+func (f *fixtureUpstream) lastEscapedPath() string { return f.escapedPath.Load().(string) }
+func (f *fixtureUpstream) lastRawQuery() string    { return f.rawQuery.Load().(string) }
+func (f *fixtureUpstream) lastBody() []byte        { return f.body.Load().([]byte) }
 
 func proxyRequest(t *testing.T, s *Server, path, format, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -962,11 +970,14 @@ type rewriteTransport struct{ target string }
 
 func (t rewriteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	clone := r.Clone(r.Context())
-	u, err := http.NewRequest(r.Method, t.target+r.URL.Path, r.Body)
+	u, err := url.Parse(t.target)
 	if err != nil {
 		return nil, err
 	}
-	clone.URL = u.URL
+	u.Path = r.URL.Path
+	u.RawPath = r.URL.RawPath
+	u.RawQuery = r.URL.RawQuery
+	clone.URL = u
 	clone.Host = u.Host
 	return http.DefaultTransport.RoundTrip(clone)
 }
@@ -1181,4 +1192,170 @@ func TestTranslatedInBandErrorIsAFailure(t *testing.T) {
 			t.Fatalf("error envelope = %+v (body %s)", doc, w.Body.String())
 		}
 	})
+}
+
+// TestEncodedKnownRouteWithInFormatTranslation pins G1/H4: the encoded
+// spelling is preserved on a same-protocol passthrough, but an inbound
+// override that differs from the target format makes it a translated request,
+// which addresses the outbound canonical endpoint.
+func TestEncodedKnownRouteWithInFormatTranslation(t *testing.T) {
+	t.Run("translation retargets", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200,
+			`{"id":"msg_1","type":"message","role":"assistant","model":"m",`+
+				`"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",`+
+				`"usage":{"input_tokens":3,"output_tokens":2}}`)
+		s := New(config.Default(), metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+		r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1%2Fchat%2Fcompletions",
+			strings.NewReader(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+		r.Header.Set("X-Proxy-In-Format", "openai")
+		r.Header.Set("X-Proxy-Format", "anthropic")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+		if got := up.lastPath(); got != "/v1/messages" {
+			t.Fatalf("translated upstream path = %q, want /v1/messages", got)
+		}
+	})
+
+	t.Run("same-protocol passthrough preserves", func(t *testing.T) {
+		up, s := targetServer(t)
+		w := proxyRequest(t, s, "/v1%2Fchat%2Fcompletions", "openai",
+			`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+		if got := up.lastEscapedPath(); got != "/v1%2Fchat%2Fcompletions" {
+			t.Fatalf("passthrough upstream escaped path = %q, want the client spelling", got)
+		}
+	})
+}
+
+// TestTranslatedFrameBufCoversEncoderCaps pins TC8-9: the relay's derived
+// scanner bound must cover every frame the format encoders can legally emit.
+func TestTranslatedFrameBufCoversEncoderCaps(t *testing.T) {
+	for name, cap := range map[string]int{
+		"native stream":          providerformat.NativeStreamFrameMaxBytes,
+		"responses stream":       providerformat.ResponsesStreamFrameMaxBytes,
+		"responses stream + pad": providerformat.ResponsesStreamFrameMaxBytes + 2*1024,
+	} {
+		if translatedFrameBufMax < cap {
+			t.Fatalf("translatedFrameBufMax = %d, want at least %s (%d)", translatedFrameBufMax, name, cap)
+		}
+	}
+}
+
+// TestUnknownPathInFormatTranslationEndToEnd pins TC4-4: an unknown path with
+// X-Proxy-In-Format selects the inbound decoder, translates the request to the
+// target protocol and translates the response back.
+func TestUnknownPathInFormatTranslationEndToEnd(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", 200,
+		`{"id":"msg_1","type":"message","role":"assistant","model":"m",`+
+			`"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",`+
+			`"usage":{"input_tokens":3,"output_tokens":2}}`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/openai/deployments/foo/chat/completions",
+		strings.NewReader(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	r.Header.Set("Authorization", "Bearer sk-test")
+	r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+	r.Header.Set("X-Proxy-In-Format", "openai")
+	r.Header.Set("X-Proxy-Format", "anthropic")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if got := up.lastPath(); got != "/v1/messages" {
+		t.Fatalf("upstream path = %q, want /v1/messages", got)
+	}
+	if body := string(up.lastBody()); !strings.Contains(body, `"messages"`) || !strings.Contains(body, `"max_tokens":16`) {
+		t.Fatalf("upstream body is not the translated Anthropic request: %s", body)
+	}
+	var doc struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("response is not a Chat completion: %v (%s)", err, w.Body.String())
+	}
+	if len(doc.Choices) != 1 || doc.Choices[0].Message.Content != "hello" {
+		t.Fatalf("translated response = %s, want a Chat completion with hello", w.Body.String())
+	}
+}
+
+// TestChatClientUsageChunkFollowsRequest pins TC3-6 end-to-end: a Chat client
+// receives the extra usage chunk only when it asked for stream_options
+// include_usage, even though the upstream Responses body reports usage.
+func TestChatClientUsageChunkFollowsRequest(t *testing.T) {
+	up := newFixtureUpstream(t, "text/event-stream", 200,
+		`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Hi"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+
+`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "not requested",
+			body: `{"model":"m","stream":true,"input":"hi"}`,
+			want: false,
+		},
+		{
+			name: "requested",
+			body: `{"model":"m","stream":true,"input":"hi","stream_options":{"include_usage":true}}`,
+			want: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := proxyRequest(t, s, "/v1/chat/completions", "openai-responses", tc.body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+			}
+			out := w.Body.String()
+			if got := strings.Contains(out, `"usage":{`); got != tc.want {
+				t.Fatalf("usage chunk present = %v, want %v:\n%s", got, tc.want, out)
+			}
+			if !strings.Contains(out, `"content":"Hi"`) || !strings.Contains(out, "data: [DONE]") {
+				t.Fatalf("translated stream is incomplete:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestAnthropicAllEmptyRequestRejectedBeforeUpstream pins NEW-4 at the proxy
+// boundary: when every Chat input part is empty, translation produces no
+// Anthropic message, so the request fails with 400 before any upstream send.
+func TestAnthropicAllEmptyRequestRejectedBeforeUpstream(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", 200,
+		`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	s := New(config.Default(), metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	w := proxyRequest(t, s, "/v1/chat/completions", "anthropic",
+		`{"model":"m","messages":[{"role":"user","content":""}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "at least one non-empty message") {
+		t.Fatalf("rejection does not name the empty-message rule: %s", w.Body.String())
+	}
+	if up.calls.Load() != 0 {
+		t.Fatalf("upstream was called %d times for an all-empty request", up.calls.Load())
+	}
 }

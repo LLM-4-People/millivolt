@@ -244,7 +244,7 @@ data: {"type":"message_stop"}
 
 `
 	var buf bytes.Buffer
-	collectStream(t, NewAnthropicStreamDecoder(strings.NewReader(in), nil), NewChatStreamEncoder(&buf, nil))
+	collectStream(t, NewAnthropicStreamDecoder(strings.NewReader(in), nil), NewChatStreamEncoder(&buf, nil, false))
 	frames := parseWireFrames(t, buf.String())
 	if len(frames) == 0 {
 		t.Fatal("no frames")

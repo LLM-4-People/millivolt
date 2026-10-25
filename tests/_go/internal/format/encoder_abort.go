@@ -24,7 +24,7 @@ func TestResponsesEncoderRetentionFailureAbortsTarget(t *testing.T) {
 	src.WriteString("data: [DONE]\n\n")
 
 	var buf bytes.Buffer
-	err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader(src.String()), nil, nil)
+	err := TranslateStreamBetween(ir.Responses, ir.Chat, &buf, strings.NewReader(src.String()), nil, nil, StreamOptions{})
 	if err == nil || !strings.Contains(err.Error(), "retained bytes") {
 		t.Fatalf("error = %v, want the Responses retention bound", err)
 	}
@@ -87,12 +87,39 @@ func TestResponsesEncoderFrameCapAbortsOpenPart(t *testing.T) {
 	if partDone < 0 || itemDone < 0 || partDone > itemDone {
 		t.Fatalf("content part was not closed before the item: %s", out)
 	}
-	if !strings.Contains(out, `"text":""`) || !strings.Contains(out, `"status":"incomplete"`) {
-		t.Fatalf("abort flushed retained payload or missed the incomplete status: %s", out)
+	payloads := mustResponsePayloads(t, out)
+	sawIncomplete := false
+	for _, payload := range payloads {
+		switch payload["type"] {
+		case "response.content_part.done":
+			part, _ := payload["part"].(map[string]any)
+			if text, _ := part["text"].(string); text != "" {
+				t.Fatalf("aborted done payload retained text %q: %s", text, out)
+			}
+		case "response.output_item.done":
+			item, _ := payload["item"].(map[string]any)
+			if item["status"] == "incomplete" {
+				sawIncomplete = true
+			}
+			content, _ := item["content"].([]any)
+			for _, raw := range content {
+				part, _ := raw.(map[string]any)
+				if text, _ := part["text"].(string); text != "" {
+					t.Fatalf("aborted item retained text %q: %s", text, out)
+				}
+			}
+		}
+	}
+	if !sawIncomplete {
+		t.Fatalf("abort missed the incomplete status: %s", out)
 	}
 }
 
-func TestAnthropicAbortClosesOnlyOpenedBlocks(t *testing.T) {
+// TestAnthropicAbortClosesOnlyOpenedNonToolBlocks pins the round 8 NEW-1
+// contract: an open tool block has no validated argument value, so Abort must
+// not emit the content_block_stop that would finalize its empty input object.
+// The proxy error frame terminates the stream instead.
+func TestAnthropicAbortClosesOnlyOpenedNonToolBlocks(t *testing.T) {
 	var buf bytes.Buffer
 	enc := NewAnthropicStreamEncoder(&buf, nil)
 	for _, ev := range []*ir.Event{
@@ -122,14 +149,14 @@ func TestAnthropicAbortClosesOnlyOpenedBlocks(t *testing.T) {
 			t.Fatalf("abort emitted a terminal frame: %v", frame.data)
 		}
 	}
-	if len(stops) != 2 || stops[0] != 0 || stops[1] != 2 {
-		t.Fatalf("closed block indices = %v, want only the opened blocks [0 2]", stops)
+	if len(stops) != 1 || stops[0] != 0 {
+		t.Fatalf("closed block indices = %v, want only the non-tool block [0]", stops)
 	}
 }
 
 func TestChatEncoderAbortKeepsValidChunks(t *testing.T) {
 	var buf bytes.Buffer
-	enc := NewChatStreamEncoder(&buf, nil)
+	enc := NewChatStreamEncoder(&buf, nil, false)
 	for _, ev := range []*ir.Event{
 		{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
 		{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText}},
@@ -158,5 +185,32 @@ func TestChatEncoderAbortKeepsValidChunks(t *testing.T) {
 	}
 	if !strings.Contains(out, `"content":"hello"`) {
 		t.Fatalf("content written before the abort was lost: %s", out)
+	}
+}
+
+// TestResponsesEncoderAbortLeavesToolItemOpen pins the abort contract: an open
+// function call receives no output_item.done or arguments {} frame, because
+// either would finalize an executable empty call. The proxy error frame
+// terminates the stream instead.
+func TestResponsesEncoderAbortLeavesToolItemOpen(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewResponsesStreamEncoder(&buf, nil)
+	for _, ev := range []*ir.Event{
+		{Type: ir.EventStart, Response: &ir.Response{ID: "resp_1", Model: "m", Created: 1}},
+		{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
+			ID: "call_1", Name: "lookup", Arguments: json.RawMessage(`{}`),
+		}}},
+		{Type: ir.EventBlockDelta, Index: 0, Delta: &ir.Delta{Arguments: `{"q":`}},
+	} {
+		if err := enc.Write(ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := enc.Abort(); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "response.output_item.done") || strings.Contains(out, `"arguments":"{}"`) {
+		t.Fatalf("aborted tool item was closed: %s", out)
 	}
 }

@@ -1,14 +1,17 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -22,19 +25,20 @@ type anthropicStreamEvent struct {
 	ContentBlock anthropicWireBlock    `json:"content_block"`
 	Delta        json.RawMessage       `json:"delta"`
 	Usage        *anthropicStreamUsage `json:"usage"`
-	Error        *struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error        json.RawMessage       `json:"error"`
 }
 
 type anthropicStreamUsage struct {
-	InputTokens              *int64 `json:"input_tokens"`
-	OutputTokens             *int64 `json:"output_tokens"`
-	CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
-	OutputTokensDetails      *struct {
-		ThinkingTokens int64 `json:"thinking_tokens"`
+	InputTokens              *jsonnum.Int64 `json:"input_tokens"`
+	OutputTokens             *jsonnum.Int64 `json:"output_tokens"`
+	CacheCreationInputTokens *jsonnum.Int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *jsonnum.Int64 `json:"cache_read_input_tokens"`
+	// ServiceTier and Speed exist only on the message_start usage; a
+	// message_delta repeats the token fields without them.
+	ServiceTier         string `json:"service_tier"`
+	Speed               string `json:"speed"`
+	OutputTokensDetails *struct {
+		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
 }
 
@@ -54,28 +58,71 @@ type AnthropicStreamDecoder struct {
 	id      string
 	model   string
 	created int64
+	// started records that the first message_start already committed this
+	// stream's identity. A later message_start may merge usage but must never
+	// rewrite the id/model/created the client already saw.
+	started bool
 
 	usage          ir.Usage
 	usageBaseInput int64
-	skipped        map[int]bool
-	observe        func([]byte)
-	sawStopReason  bool
+	// usageReported distinguishes a source that reported usage (even all
+	// zeros) from one that never did. Only a reported usage is forwarded.
+	usageReported bool
+	skipped       map[int]bool
+	observe       func(string, []byte)
+	sawStopReason bool
+	// pendingStopReason and pendingStopSequence hold the last non-empty
+	// message_delta terminal values. Anthropic permits multiple message_delta
+	// events (usage is cumulative), so the decoder emits one canonical
+	// MessageDelta after the final wire event and never lets an interim empty
+	// delta send a premature finish to the target.
+	pendingStopReason   string
+	pendingStopSequence *string
+	messageDeltaSent    bool
 
 	openToolBlocks   int
 	toolInitialBytes int
 	toolInitial      map[int]int
-	openBlocks       map[int]bool
+	// toolStartNonEmpty records tool blocks whose content_block_start carried
+	// a complete input beyond the official empty object. A later
+	// input_json_delta cannot be combined with it: the start is a complete
+	// JSON object, not a prefix fragment, so raw concatenation is invalid.
+	toolStartNonEmpty map[int]bool
+	// toolInput accumulates input_json_delta fragments per open tool block so
+	// the completed value can be validated as a JSON object before the target
+	// receives a clean block end. The bytes are forwarded as they arrive;
+	// this buffer exists only for validation.
+	toolInput      map[int]*strings.Builder
+	toolInputBytes int
+	openBlocks     map[int]bool
+	// errorSeen records an explicit error event. A terminal stop reason of
+	// "error" without one still needs a failure event; with one, the explicit
+	// provider error already owns the terminal.
+	errorSeen bool
+	// seenBlocks is a lifetime set of content-block indexes. Anthropic's
+	// stream contract assigns each block index to one position in the final
+	// content array; reusing a closed index would make the target terminal
+	// repeat the same position and could amplify a bounded event into a huge
+	// terminal.
+	seenBlocks map[int]struct{}
+	// toolIDs is a lifetime set of committed tool_use ids. Two target blocks
+	// with one id make the client's tool-result correlation ambiguous.
+	toolIDs map[string]struct{}
 }
 
 // NewAnthropicStreamDecoder builds a decoder over one upstream body. observe,
 // when non-nil, receives every raw data payload synchronously.
-func NewAnthropicStreamDecoder(r io.Reader, observe func([]byte)) *AnthropicStreamDecoder {
+func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *AnthropicStreamDecoder {
 	return &AnthropicStreamDecoder{
-		r:           newSSEReader(r),
-		skipped:     map[int]bool{},
-		observe:     observe,
-		toolInitial: map[int]int{},
-		openBlocks:  map[int]bool{},
+		r:                 newSSEReader(r),
+		skipped:           map[int]bool{},
+		observe:           observe,
+		toolInitial:       map[int]int{},
+		toolStartNonEmpty: map[int]bool{},
+		toolInput:         map[int]*strings.Builder{},
+		openBlocks:        map[int]bool{},
+		seenBlocks:        map[int]struct{}{},
+		toolIDs:           map[string]struct{}{},
 	}
 }
 
@@ -94,8 +141,12 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				// A stop_reason delivered without message_stop is the server
 				// closing the turn; only a stream with neither is truncated.
 				if d.sawStopReason {
+					if err := d.closeOpenBlocks(true); err != nil {
+						return nil, err
+					}
 					d.terminal = true
-					d.q.push(&ir.Event{Type: ir.EventDone})
+					d.flushMessageDelta()
+					d.pushTerminal()
 					continue
 				}
 				return nil, ErrTruncatedStream
@@ -109,7 +160,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 		if d.observe != nil {
-			d.observe(raw.Data)
+			d.observe(raw.Name, raw.Data)
 		}
 		var ev anthropicStreamEvent
 		if err := json.Unmarshal(raw.Data, &ev); err != nil {
@@ -131,31 +182,62 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			if err := checkNativeIdentity("model", msg.Model); err != nil {
 				return nil, err
 			}
-			d.id, d.model = msg.ID, msg.Model
-			d.created = time.Now().Unix()
+			tier := ""
 			if msg.Usage != nil {
 				if err := d.mergeUsage(msg.Usage); err != nil {
 					return nil, err
 				}
+				d.usageReported = true
+				tier, _ = anthropicUsageServiceTier(msg.Usage.ServiceTier, msg.Usage.Speed)
 			}
+			if d.started {
+				// Identity already reached the wire: keep the first start's
+				// id/model/created and its start event. Only the cumulative
+				// usage above may still move.
+				continue
+			}
+			d.started = true
+			d.id, d.model = msg.ID, msg.Model
+			d.created = time.Now().Unix()
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
-				ID: d.id, Model: d.model, Created: d.created, Usage: u,
+				ID: d.id, Model: d.model, Created: d.created, Usage: u, ServiceTier: tier,
 			}})
 		case "content_block_start":
 			if d.openBlocks[ev.Index] {
 				return nil, fmt.Errorf("duplicate native tool index %d", ev.Index)
 			}
+			if _, seen := d.seenBlocks[ev.Index]; seen {
+				return nil, fmt.Errorf("reused native content block index %d", ev.Index)
+			}
+			if len(d.seenBlocks) >= WireCollectionMax {
+				return nil, fmt.Errorf("anthropic stream exceeds %d content block indexes", WireCollectionMax)
+			}
+			d.seenBlocks[ev.Index] = struct{}{}
 			d.openBlocks[ev.Index] = true
 			if len(ev.ContentBlock.Input) > toolInitialBytesMax-d.toolInitialBytes {
 				return nil, errNativeToolInitialBytes
 			}
 			block := ev.ContentBlock
 			if block.Type == "tool_use" {
+				if block.ID == "" {
+					// A streamed tool call without its required id still
+					// needs one on the target wire; the index keeps it
+					// unique within the response. Streaming cannot report
+					// the approximation in a header, so it is synthesized
+					// silently.
+					block.ID = syntheticToolID(ev.Index)
+				}
 				if err := checkNativeIdentity("tool id", block.ID); err != nil {
 					return nil, err
 				}
 				if err := checkNativeIdentity("tool name", block.Name); err != nil {
+					return nil, err
+				}
+				if err := checkToolCallName(block.Name); err != nil {
+					return nil, err
+				}
+				if err := reserveToolID(d.toolIDs, block.ID); err != nil {
 					return nil, err
 				}
 				d.openToolBlocks++
@@ -166,6 +248,12 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				d.toolInitialBytes += len(block.Input)
 				if d.toolInitialBytes > toolInitialBytesMax {
 					return nil, errNativeToolInitialBytes
+				}
+				if err := validateStreamedToolArguments(string(block.Input)); err != nil {
+					return nil, fmt.Errorf("anthropic stream tool %q: %w", boundedEcho(block.Name), err)
+				}
+				if !emptyToolInputObject(block.Input) {
+					d.toolStartNonEmpty[ev.Index] = true
 				}
 			}
 			irBlock, ok := anthropicStreamBlock(block)
@@ -197,7 +285,26 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			case "text_delta":
 				out.Text = delta.Text
 			case "input_json_delta":
+				if delta.PartialJSON != "" && d.toolStartNonEmpty[ev.Index] {
+					// The official start input is {}. A complete object at
+					// start plus a delta is not a prefix continuation, and
+					// concatenating them yields invalid arguments no target
+					// can represent. Fail closed before forwarding the delta.
+					return nil, fmt.Errorf("anthropic stream tool index %d carries a non-empty start input and input_json_delta", ev.Index)
+				}
 				out.Arguments = delta.PartialJSON
+				if _, open := d.toolInitial[ev.Index]; open && delta.PartialJSON != "" {
+					if len(delta.PartialJSON) > streamToolArgumentsMax-d.toolInputBytes {
+						return nil, fmt.Errorf("anthropic stream exceeds %d accumulated tool-argument bytes", streamToolArgumentsMax)
+					}
+					builder := d.toolInput[ev.Index]
+					if builder == nil {
+						builder = &strings.Builder{}
+						d.toolInput[ev.Index] = builder
+					}
+					d.toolInputBytes += len(delta.PartialJSON)
+					builder.WriteString(delta.PartialJSON)
+				}
 			case "thinking_delta":
 				out.Reasoning = delta.Thinking
 			case "signature_delta":
@@ -215,6 +322,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				d.openToolBlocks--
 				d.toolInitialBytes -= n
 				delete(d.toolInitial, ev.Index)
+				delete(d.toolStartNonEmpty, ev.Index)
 			}
 			if d.skipped[ev.Index] {
 				delete(d.skipped, ev.Index)
@@ -224,6 +332,13 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				// A terminal event already closed this block; a late stop must
 				// not emit a second BlockEnd for an index the client saw closed.
 				continue
+			}
+			if builder, ok := d.toolInput[ev.Index]; ok {
+				if err := validateStreamedToolArguments(builder.String()); err != nil {
+					return nil, fmt.Errorf("anthropic stream tool input: %w", err)
+				}
+				d.toolInputBytes -= builder.Len()
+				delete(d.toolInput, ev.Index)
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: ev.Index})
 		case "message_delta":
@@ -240,69 +355,153 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 				if err := d.mergeUsage(ev.Usage); err != nil {
 					return nil, err
 				}
+				d.usageReported = true
 			}
 			if delta.StopReason != "" {
 				d.sawStopReason = true
+				d.pendingStopReason = delta.StopReason
 			}
-			d.closeOpenBlocks()
-			finish := &ir.Finish{Reason: anthropicFinishReason(delta.StopReason)}
 			if delta.StopSequence != nil {
-				finish.StopSequence = *delta.StopSequence
+				d.pendingStopSequence = delta.StopSequence
 			}
-			u := d.usage
-			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: finish, Usage: &u})
+			if err := d.closeOpenBlocks(true); err != nil {
+				return nil, err
+			}
+			// The canonical MessageDelta is emitted once at message_stop so an
+			// interim usage-only delta cannot send a premature empty finish.
 		case "message_stop":
+			if err := d.closeOpenBlocks(true); err != nil {
+				return nil, err
+			}
 			d.terminal = true
-			d.closeOpenBlocks()
-			d.q.push(&ir.Event{Type: ir.EventDone})
+			d.flushMessageDelta()
+			d.pushTerminal()
 		case "ping":
 			continue
 		case "error":
 			d.terminal = true
-			d.closeOpenBlocks()
-			if ev.Error == nil || (ev.Error.Type == "" && ev.Error.Message == "") {
-				// An empty error object is not a provider statement; treat it
-				// exactly like a missing completion marker.
-				d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-					Type: sse.TypeUpstreamError, Code: metrics.CodeTruncated,
-					Message: metrics.DegenerateMessage(metrics.CodeTruncated),
-				}})
-				continue
+			d.errorSeen = true
+			// The provider already failed the turn; its error is the terminal
+			// statement, so an incomplete argument value is not reclassified.
+			_ = d.closeOpenBlocks(false)
+			typ, code, msg := metrics.ParseErrorComponents(ev.Error)
+			if typ == "" && code == "" && msg == "" {
+				if !errorValuePresent(ev.Error) {
+					// An empty error object is not a provider statement; treat
+					// it exactly like a missing completion marker.
+					d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
+						Type: sse.TypeUpstreamError, Code: metrics.CodeTruncated,
+						Message: metrics.DegenerateMessage(metrics.CodeTruncated),
+					}})
+					continue
+				}
+				typ, msg = "api_error", genericProviderErrorMessage
 			}
-			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-				Type: ev.Error.Type, Message: ev.Error.Message,
-			}})
+			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(typ, code, msg)})
 		default:
 			continue
 		}
 	}
 }
 
+// flushMessageDelta emits the single canonical terminal delta. The finish
+// reason is the last non-empty stop_reason the source reported; a source that
+// never reported one keeps the non-clean FinishOther. Usage is the merged
+// cumulative value at the terminal event.
+func (d *AnthropicStreamDecoder) flushMessageDelta() {
+	if d.messageDeltaSent {
+		return
+	}
+	d.messageDeltaSent = true
+	// The non-streaming decoder records a stop_reason approximation warning
+	// for model_context_window_exceeded. This path committed the target status
+	// line before message_delta arrived, and TranslateStreamBetween has no
+	// warning channel, so the same length finish is applied silently.
+	finish := &ir.Finish{Reason: anthropicFinishReason(d.pendingStopReason)}
+	if d.pendingStopSequence != nil {
+		finish.StopSequence = *d.pendingStopSequence
+	}
+	ev := &ir.Event{Type: ir.EventMessageDelta, Finish: finish}
+	if d.usageReported {
+		u := d.usage
+		ev.Usage = &u
+	}
+	d.q.push(ev)
+}
+
+// pushTerminal closes the canonical event stream after the message delta. A
+// terminal stop reason of "error" without an explicit error event synthesizes
+// one, so a translated terminal carries a non-null failure instead of a clean
+// end. An explicit provider error already terminated the stream and keeps its
+// own type.
+func (d *AnthropicStreamDecoder) pushTerminal() {
+	if !d.errorSeen && anthropicFinishReason(d.pendingStopReason) == ir.FinishError {
+		d.q.push(&ir.Event{Type: ir.EventError, Error: syntheticAnthropicFailure()})
+		return
+	}
+	d.q.push(&ir.Event{Type: ir.EventDone})
+}
+
 // closeOpenBlocks emits one BlockEnd for every block still open when a
 // terminal event arrives, in index order. Anthropic normally sends an explicit
 // content_block_stop, but a provider may omit it before message_delta or
 // message_stop; every target encoder requires the block lifecycle to close.
-func (d *AnthropicStreamDecoder) closeOpenBlocks() {
+// validateToolArguments is true on every clean close and false on a provider
+// error or the truncation flush, where an incomplete value is expected and the
+// stream already terminates with an error.
+func (d *AnthropicStreamDecoder) closeOpenBlocks(validateToolArguments bool) error {
 	indices := make([]int, 0, len(d.openBlocks))
 	for idx := range d.openBlocks {
 		indices = append(indices, idx)
 	}
 	sort.Ints(indices)
+	if validateToolArguments {
+		for _, idx := range indices {
+			if d.skipped[idx] {
+				continue
+			}
+			if builder, ok := d.toolInput[idx]; ok {
+				if err := validateStreamedToolArguments(builder.String()); err != nil {
+					return fmt.Errorf("anthropic stream tool input: %w", err)
+				}
+			}
+		}
+	}
 	for _, idx := range indices {
+		// A skipped provider block never announced a target block, so it must
+		// not receive a stop when the terminal event closes open blocks.
+		if d.skipped[idx] {
+			continue
+		}
+		// A failure close leaves a tool block open: content_block_stop would
+		// finalize the partial input the source never completed.
+		if !validateToolArguments {
+			if _, isTool := d.toolInitial[idx]; isTool {
+				continue
+			}
+		}
 		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	clear(d.openBlocks)
+	clear(d.skipped)
 	clear(d.toolInitial)
+	clear(d.toolStartNonEmpty)
+	clear(d.toolInput)
 	d.openToolBlocks = 0
 	d.toolInitialBytes = 0
+	d.toolInputBytes = 0
+	return nil
 }
 
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
-func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
-	d.closeOpenBlocks()
-	return drainQueue(&d.q)
+func (d *AnthropicStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
+	// FlushBlocks runs only for ErrTruncatedStream; the canonical truncation
+	// error already refuses a clean terminal, so do not validate an
+	// incomplete argument value here.
+	_ = d.closeOpenBlocks(false)
+	return drainQueue(&d.q), nil
 }
 
 // mergeUsage folds one Anthropic usage object into the stream total. The wire
@@ -314,20 +513,20 @@ func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
 // validation aborts the translation.
 func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	if u.InputTokens != nil {
-		d.usageBaseInput = *u.InputTokens
+		d.usageBaseInput = int64(*u.InputTokens)
 	}
 	usage := d.usage
 	if u.OutputTokens != nil {
-		usage.OutputTokens = *u.OutputTokens
+		usage.OutputTokens = int64(*u.OutputTokens)
 	}
 	if u.CacheReadInputTokens != nil {
-		usage.CacheReadTokens = *u.CacheReadInputTokens
+		usage.CacheReadTokens = int64(*u.CacheReadInputTokens)
 	}
 	if u.CacheCreationInputTokens != nil {
-		usage.CacheWriteTokens = *u.CacheCreationInputTokens
+		usage.CacheWriteTokens = int64(*u.CacheCreationInputTokens)
 	}
 	if u.OutputTokensDetails != nil {
-		usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
+		usage.ReasoningTokens = int64(u.OutputTokensDetails.ThinkingTokens)
 	}
 	input, err := metrics.SumCounts(d.usageBaseInput, usage.CacheReadTokens, usage.CacheWriteTokens)
 	if err != nil {
@@ -346,13 +545,31 @@ func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	return nil
 }
 
+// emptyToolInputObject reports whether an already-validated tool input is
+// absent, null or an object with no members. JSON whitespace is insignificant,
+// so "{ }" is the same empty object as "{}". It classifies bytes directly so a
+// large non-empty start does not copy its payload into a string.
+func emptyToolInputObject(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return true
+	}
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+		return false
+	}
+	return len(bytes.TrimSpace(trimmed[1:len(trimmed)-1])) == 0
+}
+
 func anthropicStreamBlock(b anthropicWireBlock) (ir.Block, bool) {
 	switch b.Type {
 	case "text":
 		return ir.Block{Type: ir.BlockText, Text: b.Text}, true
 	case "tool_use":
 		args := b.Input
-		if len(args) == 0 || string(args) == "null" {
+		// Every empty spelling is the same value. One canonical "{}" keeps the
+		// target from prefixing a later delta with "{ }" or announcing an
+		// empty object the client must parse differently.
+		if emptyToolInputObject(args) {
 			args = json.RawMessage(`{}`)
 		}
 		return ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
@@ -376,47 +593,47 @@ type AnthropicStreamEncoder struct {
 	w       io.Writer
 	flusher http.Flusher
 
-	id      string
-	model   string
-	created int64
+	id    string
+	model string
+	// fallbackModel is the request model from StreamOptions. A source stream
+	// whose first chunk omits model still needs the required Message.model in
+	// message_start; the request identity is the only sound fallback.
+	fallbackModel string
+	created       int64
 
 	started    bool
 	open       map[int]bool
 	skipped    map[int]bool
 	unopened   map[int]bool
+	blockTypes map[int]ir.BlockType
 	blockArgs  map[int]json.RawMessage
 	argSent    map[int]bool
 	finishSent bool
 	usage      ir.Usage
 	doneSent   bool
+	// serviceTier and speed come from the start event's response tier. The
+	// Anthropic message_start is emitted once and never rewritten, so a tier
+	// that arrives later cannot retroactively change it.
+	serviceTier string
+	speed       string
+	// refusalSeen and toolSeen record the content that owns the Anthropic
+	// terminal when the canonical finish reason maps to end_turn. A refusal
+	// wins when both appear.
+	refusalSeen bool
+	toolSeen    bool
 }
 
 // NewAnthropicStreamEncoder builds an encoder over one client response writer.
 func NewAnthropicStreamEncoder(w io.Writer, flusher http.Flusher) *AnthropicStreamEncoder {
 	return &AnthropicStreamEncoder{
 		w: w, flusher: flusher,
-		open:      map[int]bool{},
-		skipped:   map[int]bool{},
-		unopened:  map[int]bool{},
-		blockArgs: map[int]json.RawMessage{},
-		argSent:   map[int]bool{},
+		open:       map[int]bool{},
+		skipped:    map[int]bool{},
+		unopened:   map[int]bool{},
+		blockTypes: map[int]ir.BlockType{},
+		blockArgs:  map[int]json.RawMessage{},
+		argSent:    map[int]bool{},
 	}
-}
-
-// anthropicStreamUsage renders the full cumulative usage a translated stream
-// can carry. Anthropic reports non-cached input separately, so the cache
-// counts travel beside it, and reasoning rides in output_tokens_details.
-func anthropicUsageJSON(u ir.Usage) map[string]any {
-	out := map[string]any{
-		"input_tokens":                nonNegative(u.InputTokens - u.CacheReadTokens - u.CacheWriteTokens),
-		"output_tokens":               u.OutputTokens,
-		"cache_creation_input_tokens": u.CacheWriteTokens,
-		"cache_read_input_tokens":     u.CacheReadTokens,
-	}
-	if u.ReasoningTokens != 0 {
-		out["output_tokens_details"] = map[string]any{"thinking_tokens": u.ReasoningTokens}
-	}
-	return out
 }
 
 // startStream emits the mandatory message_start once, synthesizing identity for
@@ -432,12 +649,17 @@ func (e *AnthropicStreamEncoder) startStream() error {
 	if e.created == 0 {
 		e.created = time.Now().Unix()
 	}
+	model := e.model
+	if model == "" {
+		model = e.fallbackModel
+	}
 	return e.emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"id": e.id, "type": "message", "role": "assistant", "content": []any{},
-			"model": e.model, "stop_reason": nil, "stop_sequence": nil,
-			"usage": anthropicUsageJSON(e.usage),
+			"model": model, "stop_reason": nil, "stop_sequence": nil,
+			"stop_details": nil, "container": nil, "diagnostics": nil,
+			"usage": anthropicMessageUsage(e.usage, e.serviceTier, e.speed),
 		},
 	})
 }
@@ -451,11 +673,21 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 	}
 	switch ev.Type {
 	case ir.EventStart:
+		// message_start is already committed after the first non-start event;
+		// a late start must not rewrite the identity the client received. Its
+		// usage is still real data the target's terminal frame can carry, and
+		// an invalid value must fail like every other usage owner.
 		if ev.Response != nil {
 			if err := validateUsage(ev.Response.Usage); err != nil {
 				return err
 			}
-			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			if !e.started {
+				e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+				// Map the tier before message_start commits it. A stream has no
+				// warning channel; the non-stream encoder owns the unknown-tier
+				// warning.
+				e.serviceTier, e.speed, _ = anthropicResponseUsageTier(ev.Response.ServiceTier)
+			}
 			e.usage = ev.Response.Usage
 		}
 		return e.startStream()
@@ -463,6 +695,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		if ev.Block == nil {
 			return nil
 		}
+		e.blockTypes[ev.Index] = ev.Block.Type
 		switch ev.Block.Type {
 		case ir.BlockText, ir.BlockRefusal:
 			e.open[ev.Index] = true
@@ -475,6 +708,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			initial := ev.Block.Text
 			if ev.Block.Type == ir.BlockRefusal {
 				initial = ev.Block.Refusal
+				if initial != "" {
+					e.refusalSeen = true
+				}
 			}
 			if initial != "" {
 				return e.emitTextDelta(ev.Index, initial)
@@ -486,6 +722,13 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				e.unopened[ev.Index] = true
 				return nil
 			}
+			// Validate before any state changes or bytes reach the client.
+			// The streaming target cannot repair an invalid id or name, so it
+			// aborts instead of emitting a tool_use block Anthropic rejects.
+			if err := validateAnthropicToolCall(tc); err != nil {
+				return err
+			}
+			e.toolSeen = true
 			e.open[ev.Index] = true
 			if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
 				e.blockArgs[ev.Index] = tc.Arguments
@@ -539,6 +782,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		}
 		switch {
 		case ev.Delta.Text != "":
+			if e.blockTypes[ev.Index] == ir.BlockRefusal {
+				e.refusalSeen = true
+			}
 			return e.emitTextDelta(ev.Index, ev.Delta.Text)
 		case ev.Delta.Reasoning != "":
 			return e.emitReasoningDelta(ev.Index, ev.Delta.Reasoning)
@@ -564,6 +810,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				return err
 			}
 		}
+		delete(e.blockTypes, ev.Index)
 		delete(e.blockArgs, ev.Index)
 		delete(e.argSent, ev.Index)
 		delete(e.skipped, ev.Index)
@@ -578,27 +825,31 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			}
 			e.usage = *ev.Usage
 		}
-		stopReason := "end_turn"
+		reason := ir.FinishStop
 		var stopSequence any
 		if ev.Finish != nil {
-			stopReason = anthropicStopReason(ev.Finish.Reason)
+			reason = ev.Finish.Reason
 			if ev.Finish.StopSequence != "" {
 				stopSequence = ev.Finish.StopSequence
 			}
 		}
+		// A stream has no warning channel, so the content-derived terminal is
+		// reported only through stop_reason itself.
+		stopReason, _ := anthropicContentTerminal(reason, e.refusalSeen, e.toolSeen)
 		e.finishSent = true
 		return e.emit("message_delta", map[string]any{
 			"type":  "message_delta",
 			"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": stopSequence},
-			"usage": anthropicUsageJSON(e.usage),
+			"usage": anthropicDeltaUsage(e.usage),
 		})
 	case ir.EventDone:
 		if !e.finishSent {
 			e.finishSent = true
+			stopReason, _ := anthropicContentTerminal(ir.FinishStop, e.refusalSeen, e.toolSeen)
 			if err := e.emit("message_delta", map[string]any{
 				"type":  "message_delta",
-				"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-				"usage": anthropicUsageJSON(e.usage),
+				"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
+				"usage": anthropicDeltaUsage(e.usage),
 			}); err != nil {
 				return err
 			}
@@ -606,10 +857,11 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		return e.finish()
 	case ir.EventError:
 		if ev.Error != nil {
-			typ := ev.Error.Type
-			if typ == "" {
-				typ = "api_error"
-			}
+			// The target vocabulary is Anthropic's documented set, not the
+			// shared OpenAI class: the non-stream owner applies the same
+			// mapping, so a truncated internal class or a foreign server_error
+			// becomes api_error and provider classes pass through.
+			typ := anthropicErrorType(ev.Error.Type)
 			if err := e.emit("error", map[string]any{
 				"type":  "error",
 				"error": map[string]any{"type": typ, "message": ev.Error.Message},
@@ -617,6 +869,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				return err
 			}
 		}
+		// Anthropic's error event is the stream's terminal statement. Mark
+		// the stream done so finish()/Close() cannot append message_stop.
+		e.doneSent = true
 		return e.finish()
 	}
 	return nil
@@ -685,11 +940,18 @@ func (e *AnthropicStreamEncoder) finish() error {
 // Close finishes the stream if the caller did not deliver EventDone.
 func (e *AnthropicStreamEncoder) Close() error { return e.finish() }
 
-// Abort closes every content block this encoder opened without flushing any
-// retained tool input. The proxy terminates the committed stream with its
+// Abort closes every non-tool content block this encoder opened without
+// flushing any retained tool input. An open tool block has no validated
+// argument value: content_block_stop would finalize the empty input object its
+// start announced, so it is left open and the proxy's error frame terminates
+// the stream. The proxy terminates the committed stream with its
 // protocol-native error frame immediately afterwards.
 func (e *AnthropicStreamEncoder) Abort() error {
 	for _, idx := range sortedKeys(e.open) {
+		if e.blockTypes[idx] == ir.BlockToolCall {
+			delete(e.open, idx)
+			continue
+		}
 		if err := e.emit("content_block_stop", map[string]any{
 			"type": "content_block_stop", "index": idx,
 		}); err != nil {
@@ -697,6 +959,7 @@ func (e *AnthropicStreamEncoder) Abort() error {
 		}
 		delete(e.open, idx)
 	}
+	clear(e.blockTypes)
 	clear(e.blockArgs)
 	clear(e.argSent)
 	clear(e.skipped)

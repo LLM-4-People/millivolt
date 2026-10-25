@@ -158,6 +158,13 @@ func markStreamErr(ctx context.Context, rec *metrics.Record, err error) {
 		markClientGone(rec)
 		return
 	}
+	if rec.ClientDisconnected {
+		// The write that failed already classified this as the local client
+		// leaving (a 499/plain disconnect). The same error must not be
+		// re-stamped as an upstream read failure just because a write-progress
+		// deadline, rather than the request context, surfaced it.
+		return
+	}
 	rec.ErrorType = errStreamRead
 	rec.ErrorMsg = err.Error()
 }
@@ -199,14 +206,13 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 	for {
 		n, err := body.Read(chunk)
 		if n > 0 {
-			if _, werr := w.Write(chunk[:n]); werr != nil {
+			if _, werr := writeCounted(w, rec, chunk[:n]); werr != nil {
 				markClientGone(rec)
 				// Break to the analysis of the captured prefix: the
 				// upstream delivered those bytes, and the disconnect is
 				// recorded without losing their payload.
 				break
 			}
-			rec.ResponseBytes += int64(n)
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
 			if len(buf)+n <= nonStreamCaptureMax {
@@ -233,11 +239,64 @@ func isNonCompletionStatus(status int) bool {
 	return status == http.StatusAccepted || status == http.StatusNoContent || status == http.StatusResetContent
 }
 
+// statusAllowsBody reports whether an HTTP status permits a response body.
+// net/http refuses one for every 1xx, 204 and 304, so a translated non-200
+// with one of those statuses cannot carry the protocol error envelope it
+// promises; the caller fails closed with 502 instead.
+func statusAllowsBody(status int) bool {
+	if status >= 100 && status < 200 {
+		return false
+	}
+	return status != http.StatusNoContent && status != http.StatusNotModified
+}
+
+// stampCommittedErrorStatus records the outcome of an in-band error written
+// after a keepalive committed the success status line: the client saw 200, so
+// the record reports 200. A 429 is also retained in the attempt history as one
+// in-band entry, because HasRateLimit and its durable SQL mirror are defined by
+// the upstream HTTP status and the committed 200 must not erase the distinct
+// rate-limit count. It is health evidence, not a retry: Retries stays
+// unchanged, retry disclosures exclude it, and the final error entry already
+// owns the failure classification for every other status.
+func stampCommittedErrorStatus(rec *metrics.Record, upstreamStatus int) {
+	rec.StatusCode = http.StatusOK
+	if upstreamStatus != http.StatusTooManyRequests {
+		return
+	}
+	rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
+		StatusCode: upstreamStatus,
+		InBand:     true,
+		At:         time.Now(),
+	})
+}
+
 // relayNonCompletionStatus relays a non-completion status verbatim with the
 // upstream headers. It is the one writer for 202/204/205 on the native and
 // non-streaming translated paths, so neither translation nor completion
-// classification can replace the upstream status.
-func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record) {
+// classification can replace the upstream status. When a streaming pacer has
+// not committed yet, applyStatus owns the commit so the body mode comes from
+// Content-Type: a JSON acknowledgement stays quiet while an event-stream body
+// may receive keepalives. A 202 arriving after the pacer already committed a
+// keepalive 200 cannot be represented as the status, so it fails closed in
+// band instead of corrupting the committed stream.
+func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record, inbound ir.Protocol) {
+	if p := pacerOf(w); p != nil {
+		if p.applyStatus(resp.Header, resp.StatusCode) {
+			s.relayNonCompletionBody(ctx, w, resp, rec)
+			return
+		}
+		if p.statusCommitted() {
+			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+			// The pacer's kept-alive status line is the success 200; the
+			// record must describe the status the client actually saw.
+			stampCommittedErrorStatus(rec, resp.StatusCode)
+			rec.ErrorType, rec.ErrorMsg = typ, msg
+			if werr := writeProtocolStreamError(w, rec, inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
+				markClientGone(rec)
+			}
+			return
+		}
+	}
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	s.relayNonCompletionBody(ctx, w, resp, rec)
@@ -284,7 +343,12 @@ func applyNonStreamAnalysis(rec *metrics.Record, a metrics.NonStreamAnalysis) {
 	// the body's usage/model/id/tool detail did not type-decode, and it only
 	// ran at all while the record had no output tokens yet.
 	if a.RecordFieldsOK && rec.Usage.OutputTokens == 0 {
-		if a.HasUsage {
+		// Usage fills only a record that has no canonical usage yet. A native
+		// non-Chat body stamps its folded source usage before this analysis
+		// (including a zero-output body, whose raw Chat view would otherwise
+		// erase the cache folding), and an unrepresentable provider count is
+		// explicitly invalid rather than repopulated field by field.
+		if a.HasUsage && rec.Usage == (metrics.Usage{}) && !rec.UsageInvalid {
 			rec.Usage = a.Usage
 		}
 		if a.Model != "" && rec.ProviderModel == "" {
@@ -398,19 +462,21 @@ func spoolBody(body io.Reader) (b []byte, overflow bool, err error) {
 // in-band error envelope passthrough and the healthy commit) stay at their
 // call sites.
 // applyTranslatedStructure stamps the record fields the Chat-oriented
-// non-stream analyzer cannot see when the CLIENT-facing wire is Anthropic or
-// Responses: finish reason, answer presence, preview and tool calls. Usage,
-// model and id remain owned by the shared non-stream analysis of the
-// translated body.
+// non-stream analyzer cannot see when the client-facing wire is Anthropic or
+// Responses, translated or native: finish reason, answer presence, preview,
+// tool calls and the canonical usage. Model and id stay with the shared
+// non-stream analysis when it can read the body.
 func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bool) {
 	if rec == nil || resp == nil {
 		return
 	}
-	rec.FinishReason = providerformat.ChatFinishReason(resp.Finish)
-	if resp.Usage != (ir.Usage{}) {
+	// The record keeps the canonical source reason (for example Anthropic's
+	// pause_turn or refusal); only the Chat wire mapper approximates it.
+	rec.FinishReason = string(resp.Finish)
+	if resp.Usage != (ir.Usage{}) && !rec.UsageInvalid {
 		// The canonical usage is already normalized (Anthropic cache counts
 		// folded into input, total derived); the translated wire may omit the
-		// total field entirely.
+		// total field entirely. An explicitly invalid usage stays zeroed.
 		rec.Usage = metrics.Usage{
 			InputTokens:     resp.Usage.InputTokens,
 			OutputTokens:    resp.Usage.OutputTokens,
@@ -438,8 +504,11 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 				}
 			}
 		case ir.BlockRefusal:
+			// A refusal is answer-shaped output, but not answer content, on
+			// every path (streamed delta and non-stream native alike). Only
+			// the preview sees it; marking HadAnswerContent would keep a
+			// refusal+tool turn out of the tool-only settlement.
 			if b.Refusal != "" {
-				rec.HadAnswerContent = true
 				if preview && rec.ResponsePreview == "" {
 					rec.ResponsePreview = metrics.TruncatePreview(b.Refusal)
 				}
@@ -463,15 +532,114 @@ func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bo
 	if len(names) > 0 {
 		rec.ToolNames = names
 	}
+	// Provider-executed Responses call items have no block (the translated
+	// wire drops them with a warning), but they are model tool invocations:
+	// count them so the record's finish and tool-only token settlement agree
+	// with the streaming analyzer.
+	rec.ToolCalls += resp.ProviderToolCalls
+	// A canonical failure carried by the provider stop reason (or a native
+	// failed envelope) owns the record classification. The translated body
+	// may still be a Chat success shape, so the record must read the canonical
+	// response, not only the client wire.
+	stampNativeResponseError(rec, resp.Error)
+}
+
+// applyNativeNonChatStructure stamps the canonical structure of a native
+// Responses or Anthropic 2xx body. The Chat-oriented non-stream analysis
+// cannot see those wires, so finish reason, tool calls, answer presence,
+// preview and folded cache usage would stay empty. Best-effort by design: a
+// body the codec cannot decode keeps the existing analysis and relays
+// unchanged, because metrics must never block the client. Unrepresentable
+// source usage is the exception: it is parsed independently so accounting is
+// invalidated even when the envelope cannot be decoded into the canonical IR.
+func (s *Server) applyNativeNonChatStructure(rec *metrics.Record, t *target, spooled []byte) {
+	if rec == nil || t == nil {
+		return
+	}
+	wire := t.wire()
+	switch wire {
+	case ir.Responses, ir.Anthropic:
+	default:
+		return
+	}
+	// The provider's usage object is authoritative and honors custom
+	// usage_keys; the canonical decoder folds Anthropic's cache counts and
+	// derives the total only for its own documented shape. Parse it before
+	// the structural decode so an overflow cannot escape invalidation when
+	// DecodeResponse rejects the same envelope.
+	usage, ok, usageErr := providerformat.SourceUsage(wire, spooled, s.usageKeysFor(rec.Provider))
+	resp, err := providerformat.DecodeResponse(wire, spooled)
+	if err != nil || resp == nil {
+		// The canonical envelope is unrepresentable, but its parsed usage is
+		// still authoritative. Apply the folded source counts here; the later
+		// Chat-shaped fallback would otherwise read raw Anthropic counters as
+		// Chat input/output and charge the wrong total.
+		if usageErr != nil {
+			invalidateUsage(rec, usageErr)
+		} else if ok && !rec.UsageInvalid {
+			applyFoldedUsage(rec, usage)
+		}
+		return
+	}
+	applyTranslatedStructure(rec, resp, s.cfg().CaptureBodyPreview)
+	if usageErr != nil {
+		// Invalidate after the provider error is stamped so its type/code
+		// classification is preserved (invalidateUsage owns that rule).
+		invalidateUsage(rec, usageErr)
+		return
+	}
+	if ok && !rec.UsageInvalid {
+		applyFoldedUsage(rec, usage)
+	}
+}
+
+// applyFoldedUsage copies the canonical source usage onto the record. One
+// owner so the structural-decode success and failure paths cannot diverge.
+func applyFoldedUsage(rec *metrics.Record, usage ir.Usage) {
+	rec.Usage = metrics.Usage{
+		InputTokens:     usage.InputTokens,
+		OutputTokens:    usage.OutputTokens,
+		TotalTokens:     usage.TotalTokens,
+		CacheReadTokens: usage.CacheReadTokens,
+		CacheWrite:      usage.CacheWriteTokens,
+		ReasoningTokens: usage.ReasoningTokens,
+	}
+}
+
+// stampNativeResponseError records a terminal failure carried inside a 2xx
+// response: a native Responses failed envelope or a canonical error synthesized
+// by a translated source codec. A provider error object keeps its own
+// classification; a provider code without a type keeps the canonical
+// provider_error fallback; a bare failure (error null or absent) is an upstream
+// lifecycle failure. Existing error detail is never overwritten, and the body
+// and HTTP status stay untouched.
+func stampNativeResponseError(rec *metrics.Record, e *ir.Error) {
+	if rec == nil || e == nil {
+		return
+	}
+	if rec.ErrorType == "" {
+		switch {
+		case e.Type != "":
+			rec.ErrorType = e.Type
+		case e.Code != "":
+			rec.ErrorType = "provider_error"
+		default:
+			rec.ErrorType = sse.TypeUpstreamError
+		}
+	}
+	if rec.ErrorCode == "" {
+		rec.ErrorCode = e.Code
+	}
+	if rec.ErrorMsg == "" {
+		rec.ErrorMsg = e.Message
+	}
 }
 
 func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record, analysis metrics.NonStreamAnalysis) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if _, werr := w.Write(spooled); werr != nil {
+	if _, werr := writeCounted(w, rec, spooled); werr != nil {
 		markClientGone(rec)
-	} else {
-		rec.ResponseBytes += int64(len(spooled))
 	}
 	applyNonStreamAnalysis(rec, analysis)
 }
@@ -520,7 +688,7 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 	}
 	rec.StatusCode = next.StatusCode
 	if next.StatusCode >= 400 {
-		captureErrorFromResponse(next, rec)
+		s.captureErrorFromResponse(ctx, next, rec)
 	}
 	captureUpstreamHeaders(next, rec, t.authHeader)
 	return next, nextCancel, true
@@ -562,19 +730,48 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				// upstream status, and fall back to a bounded generic error
 				// when the body is not a recognizable envelope.
 				full, rerr := s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes)
+				status := resp.StatusCode
 				out, terr := providerformat.TranslateErrorBetween(t.inbound, t.outbound, resp.StatusCode, full)
-				if rerr != nil || terr != nil {
+				if !statusAllowsBody(resp.StatusCode) {
+					// A body-forbidden status (1xx, 204, 304) cannot carry the
+					// translated error: writing it makes writeCounted fail and
+					// markClientGone rewrite the record as a 499 client cancel.
+					// Fail closed with the gateway sink instead.
+					status = http.StatusBadGateway
+					rec.StatusCode = status
+					msg := fmt.Sprintf("upstream HTTP %d cannot carry an error body", resp.StatusCode)
+					if rec.ErrorType == "" {
+						rec.ErrorType = "upstream_error"
+						rec.ErrorMsg = msg
+					}
+					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
+						Type: "api_error", Status: status, Message: msg,
+					})
+				} else if rerr != nil {
+					// The provider's error document could not be read within
+					// the whole-document bound. Fail closed with a real
+					// gateway status instead of asserting the upstream status
+					// over a partial or missing envelope.
+					status = http.StatusBadGateway
+					rec.StatusCode = status
+					if rec.ErrorType == "" {
+						rec.ErrorType = "upstream_error"
+						rec.ErrorMsg = "upstream error body could not be read"
+					}
+					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
+						Type: "api_error", Status: status,
+						Message: "upstream error: " + transportErrText(rerr),
+					})
+				} else if terr != nil {
 					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
 						Type: "api_error", Message: fmt.Sprintf("upstream HTTP %d", resp.StatusCode),
 					})
 				}
 				copyResponseHeaders(w.Header(), resp.Header)
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(resp.StatusCode)
-				if _, werr := w.Write(out); werr != nil {
+				w.WriteHeader(status)
+				if _, werr := writeCounted(w, rec, out); werr != nil {
 					markClientGone(rec)
-				} else {
-					rec.ResponseBytes += int64(len(out))
 				}
 				return
 			}
@@ -612,7 +809,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// path invents an empty completion or translates a non-completion
 		// acknowledgement body.
 		if isNonCompletionStatus(resp.StatusCode) {
-			s.relayNonCompletionStatus(ctx, w, resp, rec)
+			s.relayNonCompletionStatus(ctx, w, resp, rec, t.inbound)
 			return
 		}
 
@@ -722,6 +919,10 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// The source document owns usage and cost accounting; provider
 			// usage_keys address its shape, not the normalized translated
 			// wire. Read the translated output for completion structure only.
+			// A canonical failure never reaches this point: a non-nil
+			// respIR.Error makes TranslateResponseBetweenIR return a nil
+			// canonical response, and the branch above already stamped the
+			// failure and the 502 status from the source error envelope.
 			analyzeNonStreamBytes(out, rec, nil, nil, s.cfg().CaptureBodyPreview)
 			if t.inbound != ir.Chat {
 				// The non-stream analyzer reads Chat-shaped choices. For an
@@ -729,6 +930,13 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				// canonical response, so stamp the structure the translated
 				// wire no longer exposes in that shape.
 				applyTranslatedStructure(rec, respIR, s.cfg().CaptureBodyPreview)
+			} else if respIR != nil && respIR.ProviderToolCalls > 0 {
+				// The Chat encoder has no shape for a provider-executed item,
+				// so the translated wire carries no tool_calls and the
+				// Chat-shaped analysis counts zero while the finish reason
+				// already says tool_calls. Blocks are counted by that
+				// analysis; add only the provider items.
+				rec.ToolCalls += respIR.ProviderToolCalls
 			}
 			if usageErr != nil {
 				invalidateUsage(rec, usageErr)
@@ -752,10 +960,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// upstream header of the same name cannot replace or mask them.
 			setWarningsHeader(w.Header(), warnings)
 			w.WriteHeader(clientStatus)
-			if _, werr := w.Write(out); werr != nil {
+			if _, werr := writeCounted(w, rec, out); werr != nil {
 				markClientGone(rec)
-			} else {
-				rec.ResponseBytes += int64(len(out))
 			}
 			return
 		}
@@ -926,6 +1132,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		}
 
 		// Healthy: commit the spooled body verbatim.
+		s.applyNativeNonChatStructure(rec, t, spooled)
 		s.commitSpooledBody(w, resp, spooled, rec, analysis)
 		s.respBudget.release(reserve)
 		return
@@ -966,7 +1173,14 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 	thinkingLeft := s.cfg().ThinkingRetries
 	for {
 		uerr := &upstreamErrorRescue{}
-		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr, chatShapedResponse(t, body))
+		// Seed the analyzer from the routed wire before any frame arrives.
+		// The request-shape fallback stays for an endpoint the router does
+		// not classify.
+		wire := t.wire()
+		if wire == "" && chatShapedResponse(t, body) {
+			wire = ir.Chat
+		}
+		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr, wire)
 		if rescue == rescueNone {
 			return
 		}
@@ -1068,9 +1282,24 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
 			// committed-SSE contract), never as raw JSON on the stream.
-			captureErrorFromResponse(resp, rec)
+			s.captureErrorFromResponse(ctx, resp, rec)
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
+				markClientGone(rec)
+			}
+			return
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 || !isEventStream(resp.Header.Get("Content-Type")) {
+			// The first attempt committed an event-stream socket. Only another
+			// 2xx event stream can continue that socket. A retry answering a
+			// 1xx, a redirect, or a non-SSE 2xx completion (for example JSON)
+			// must not be scanned and injected as raw stream bytes, and a
+			// redirect is never followed: surface one protocol-native in-band
+			// error and stop before streamBody reads the document as SSE.
+			rec.ErrorType = sse.TypeUpstreamError
+			rec.ErrorCode = metrics.CodeTruncated
+			rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, rec.ErrorType, rec.ErrorCode, rec.ErrorMsg); werr != nil {
 				markClientGone(rec)
 			}
 			return
@@ -1214,21 +1443,19 @@ func captureUpstreamMeta(at *metrics.RetryAttempt, resp *http.Response, authHead
 	at.RateLimitLimit = m.RateLimitLimit
 }
 
-// captureErrorFromResponse reads a bounded portion of an error response body
-// to record the provider's error type/message, then rewinds the body so it
-// can still be relayed to the client. The rewind REPLACES resp.Body with a
-// NopCloser: a caller that must close the real body has to register its
-// body-Close defer BEFORE this call (defer evaluates resp.Body at
-// registration, so an early-registered defer still closes the real body).
-func captureErrorFromResponse(resp *http.Response, rec *metrics.Record) {
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
+// captureErrorFromResponse reads a bounded prefix of an error response body
+// under the shared whole-document bound, then re-serves the captured prefix
+// followed by the live remainder so the client still receives the full
+// original body. The bound is what keeps a provider that holds or drips a
+// small error body from delaying the handler past whole_document_read_timeout
+// before the translated or buffered owner performs its own bounded read. A
+// timed-out read closes the body; the captured prefix is still re-served and
+// the owner's read then fails closed.
+func (s *Server) captureErrorFromResponse(ctx context.Context, resp *http.Response, rec *metrics.Record) {
+	b, err := s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes)
 	if err == nil && len(b) > 0 {
 		rec.ErrorType, rec.ErrorCode, rec.ErrorMsg = parseErrorBody(b)
 	}
-	// Re-serve the captured prefix followed by the live remainder so the client
-	// still receives the FULL original body byte-for-byte (the prefix alone
-	// would truncate a large error payload). resp.Body is still open, positioned
-	// right after the prefix we read.
 	resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(b), resp.Body))
 }
 
@@ -1909,7 +2136,12 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			costKeys := s.costKeysFor(rec.Provider)
 			// The source analyzer owns provider usage/cost keys; the
 			// translated wire is normalized and must not be read with them.
+			// Seed its wire so a zero-event source (empty body, comments or
+			// pings) still classifies as the routed protocol's truncation
+			// instead of returning an empty outcome and losing the canonical
+			// upstream_error/truncated stamp.
 			sourceAnalyzer := s.analyzerFor(rec)
+			sourceAnalyzer.SetWire(t.wire())
 			var sourceRec metrics.Record
 			var sourceCost float64
 			var sourceCostReported bool
@@ -1925,12 +2157,12 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				// (translation failure vs client disconnect) itself. The
 				// tracking writer records the translator's terminal frames so
 				// the handler can close an incomplete stream exactly once.
-				translationErr = providerformat.TranslateStreamBetween(t.inbound, t.outbound, tracked, resp.Body, nil, func(payload []byte) {
-					sourceAnalyzer.Feed(payload, time.Now())
+				translationErr = providerformat.TranslateStreamBetween(t.inbound, t.outbound, tracked, resp.Body, nil, func(eventType string, payload []byte) {
+					sourceAnalyzer.FeedEvent(eventType, payload, time.Now())
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}
-				})
+				}, providerformat.StreamOptions{IncludeUsage: t.streamIncludeUsage, FallbackModel: rec.Model})
 				pw.CloseWithError(translationErr)
 			}()
 			// Re-run the SSE analyzer over the transformed stream.
@@ -1953,9 +2185,46 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// Source accounting is authoritative for translated streams. The
 			// translated analyzer refused provider overrides; stamp what the
 			// source actually reported after the client turn is finalized.
-			sourceAnalyzer.Fill(&sourceRec)
-			if sourceAnalyzer.UsageReported() {
+			fillRecord(&sourceAnalyzer, &sourceRec)
+			// The source observer owns the provider error class. The
+			// client-wire analyzer sees the target encoder's normalized error
+			// (api_error, provider_error) and loses the source code, so the
+			// first real source error wins over that view. A truncation is
+			// synthesized by the translator inside TranslateStreamBetween and
+			// therefore never reaches the source analyzer as an error event;
+			// stamp the canonical truncation unless a genuine translator
+			// failure already owns the record. Healthy streams are unchanged.
+			if sourceRec.ErrorType != "" {
+				rec.ErrorType = sourceRec.ErrorType
+				rec.ErrorCode = sourceRec.ErrorCode
+				rec.ErrorMsg = sourceRec.ErrorMsg
+			} else if translationErr == nil && sourceAnalyzer.OutcomeCode() == metrics.CodeTruncated {
+				rec.ErrorType = sse.TypeUpstreamError
+				rec.ErrorCode = metrics.CodeTruncated
+				rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+			}
+			// A provider-executed item has no target block: every encoder drops
+			// it with a warning, so the translated analyzer counts zero. The
+			// source observer owns the activity and its retained names.
+			if sourceRec.ToolCalls > rec.ToolCalls {
+				rec.ToolCalls = sourceRec.ToolCalls
+				if len(sourceRec.ToolNames) > 0 {
+					rec.ToolNames = append([]string(nil), sourceRec.ToolNames...)
+				}
+			}
+			// Invalid accounting is sticky: the source observer may have
+			// captured only the usage object that failed validation (or a
+			// later partial one), and copying it would restore a refundable
+			// count for a turn already marked unavailable.
+			if sourceRec.UsageInvalid {
+				invalidateUsage(rec, metrics.ErrMetricRange)
+			}
+			if sourceAnalyzer.UsageReported() && !rec.UsageInvalid {
 				rec.Usage = sourceRec.Usage
+				// Provider usage also owns the generation count: the
+				// translated analyzer's chunk-derived fallback (tool-arg
+				// chunks excluded) must not survive real accounting.
+				rec.GenTokens = sourceRec.GenTokens
 			}
 			if sourceCostReported {
 				rec.Cost = sourceCost
@@ -2005,11 +2274,17 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		// decode window. The direct relay path anchors its timestamps the
 		// same way at the read site.
 		now := time.Now()
-		if _, err := w.Write(frame); err != nil {
+		if _, err := writeCounted(w, rec, frame); err != nil {
 			markClientGone(rec)
+			// An in-band provider error that already reached the client is
+			// the turn's outcome even though the following write failed; the
+			// native streamBody twin fills it in clientGone. Without this the
+			// 499 erases the provider classification.
+			if a.HasInBandError() {
+				fillRecord(&a, rec)
+			}
 			return false
 		}
-		rec.ResponseBytes += int64(len(frame))
 		// Feed the analyzer from the bytes actually delivered, in line order.
 		rest := frame
 		for len(rest) > 0 {
@@ -2038,7 +2313,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 				// post-terminal debris cannot surface as a translation error
 				// on a completed record; the caller closes the upstream body
 				// and joins the translator.
-				a.Fill(rec)
+				fillRecord(&a, rec)
 				return
 			}
 			continue
@@ -2056,9 +2331,20 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	if err := scanner.Err(); err != nil {
 		markStreamErr(ctx, rec, err)
 	}
-	a.Fill(rec)
+	fillRecord(&a, rec)
 	if err := scanner.Err(); errors.Is(err, metrics.ErrMetricRange) {
 		invalidateUsage(rec, err)
+	}
+}
+
+// fillRecord is the one stream-side bridge from analyzer accounting to the
+// record. The analyzer owns the source-usage validity signal because it sees
+// sum overflows that a later chunk fallback would otherwise hide; invalidation
+// runs after Fill so it clears any partial document Fill published.
+func fillRecord(a *sse.Analyzer, rec *metrics.Record) {
+	a.Fill(rec)
+	if a.UsageInvalid() {
+		invalidateUsage(rec, metrics.ErrMetricRange)
 	}
 }
 
@@ -2111,6 +2397,24 @@ type upstreamErrorRescue struct {
 	reasoning      bool
 }
 
+// endsWithUnframedDataLine reports whether b ends with a complete SSE data
+// line and no blank separator after it. Framing the next data line as a new
+// event prevents two payloads from concatenating into one event no spec
+// parser can dispatch.
+func endsWithUnframedDataLine(b []byte) bool {
+	if len(b) == 0 || b[len(b)-1] != '\n' {
+		return false
+	}
+	end := len(b) - 1
+	start := bytes.LastIndexByte(b[:end], '\n') + 1
+	line := bytes.TrimRight(b[start:end], "\r")
+	if len(bytes.TrimSpace(line)) == 0 {
+		return false
+	}
+	_, ok := sse.DataPayload(line)
+	return ok
+}
+
 // streamBody forwards an SSE body, preserving bytes exactly, and flushes after
 // each event boundary so TTFT == upstream TTFT. Alongside the copy it scans
 // for token timestamps and the final usage chunk using an SSE analyzer.
@@ -2150,7 +2454,7 @@ type upstreamErrorRescue struct {
 // and never rescuable. uerr receives the provider's envelope for a
 // rescueUpstreamError return (the caller's attempt bookkeeping); it is
 // untouched for every other outcome.
-func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue, chatlike bool) (rescue streamRescue) {
+func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue, wire ir.Protocol) (rescue streamRescue) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
@@ -2163,6 +2467,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		out     bytes.Buffer // released bytes awaiting one client write
 		hold    []byte       // bytes withheld from the terminal-candidate event onward
 		holding bool
+		// wireDataOpen records that the last bytes written to the client end
+		// with a data line and no blank separator. It survives writeOut's
+		// buffer reset, so a hold opened after an earlier flush still knows to
+		// start a new event.
+		wireDataOpen bool
 		// eventName and eventBody buffer one Responses terminal-named event
 		// until its blank-line boundary. The name alone cannot decide hold or
 		// release: a multi-line data payload may only become a terminal
@@ -2196,7 +2505,35 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		rescueRequested streamRescue
 	)
 	a := s.analyzerFor(rec)
-	a.SetChatLike(chatlike)
+	a.SetWire(wire)
+	// boundaryDrops reports whether finishHold will replace this attempt's
+	// terminal region with the in-band degenerate error instead of writing the
+	// held bytes. The tail-drop decision and finishHold share this predicate so
+	// delivery and record accounting cannot drift.
+	boundaryDrops := func(code string) bool {
+		return code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
+			a.ChatLike() && !holdAborted
+	}
+	// appendHeld frames one complete line into the withheld region. A second
+	// data line in the same event would concatenate onto the first payload
+	// (the SSE client joins data lines with a newline), so start a new event
+	// before it. A field line stays with the data line it introduces.
+	appendHeld := func(line []byte) {
+		if _, isData := sse.DataPayload(line); isData && endsWithUnframedDataLine(hold) {
+			hold = append(hold, '\n')
+		}
+		hold = append(hold, line...)
+		hold = append(hold, '\n')
+	}
+	// lastLineIsData reports whether the next data line would join an open
+	// event's existing data line, whether that line is still buffered in out
+	// or was already flushed to the client.
+	lastLineIsData := func() bool {
+		if out.Len() > 0 {
+			return endsWithUnframedDataLine(out.Bytes())
+		}
+		return wireDataOpen
+	}
 	// clientGone records a write-detected abort: the disconnect stamps
 	// the 499, and the analyzer's in-band error - when one reached the
 	// wire - still fills the record, so the abort counts like its 200
@@ -2206,7 +2543,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	clientGone := func() {
 		markClientGone(rec)
 		if a.HasInBandError() {
-			a.Fill(rec)
+			fillRecord(&a, rec)
 		}
 	}
 	writeOut := func() bool {
@@ -2214,15 +2551,46 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return true
 		}
 		o := out.Bytes()
-		if _, werr := w.Write(o); werr != nil {
+		if _, werr := writeCounted(w, rec, o); werr != nil {
 			clientGone()
 			return false
 		}
-		rec.ResponseBytes += int64(len(o))
+		wireDataOpen = endsWithUnframedDataLine(o)
 		if bytes.IndexByte(o, '\n') >= 0 {
 			flusher.Flush()
 		}
 		out.Reset()
+		return true
+	}
+	// writeRescueBoundary closes the client's pending SSE event before a rescue
+	// return or the degenerate terminal error. Complete lines already in out are
+	// written; the trailing partial line was never received by the client and is
+	// dropped. One newline ends the open event (and is a harmless blank
+	// separator between complete events), so the next data line cannot join an
+	// existing payload. The withheld terminal region is discarded with the
+	// attempt or replaced by the degenerate error.
+	writeRescueBoundary := func() bool {
+		o := out.Bytes()
+		if n := bytes.LastIndexByte(o, '\n'); n >= 0 {
+			o = o[:n+1]
+		} else {
+			o = nil
+		}
+		if len(o) > 0 {
+			if _, werr := writeCounted(w, rec, o); werr != nil {
+				clientGone()
+				return false
+			}
+		}
+		out.Reset()
+		hold = hold[:0]
+		holding = false
+		if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
+			clientGone()
+			return false
+		}
+		wireDataOpen = false
+		flusher.Flush()
 		return true
 	}
 	// finishHold resolves the withheld terminal region: classify the stream and
@@ -2251,7 +2619,32 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			clientGone()
 			return false
 		}
-		if !writeOut() {
+		code := a.OutcomeCode()
+		// The stop rescue requires the terminal region still WITHHELD: once a
+		// finishHold call released it the outcome was already signed on the
+		// wire, and no re-send may append behind it. RetryableReasoningStop is
+		// the analyzer's wire-safety gate (no refusal/function_call bytes, not
+		// a Responses-shaped feed). Close any pending event before returning;
+		// the held terminal bytes are discarded instead of written.
+		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected && a.ChatLike() &&
+			holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
+			if !writeRescueBoundary() {
+				return false
+			}
+			rescueRequested = rescueReasoningStop
+			return true
+		}
+		// A degenerate error is appended as a new SSE event. Close the
+		// pending event first: a complete data line in out still needs its
+		// blank separator, and a trailing partial line was never received and
+		// must be dropped. Without this boundary the error becomes a second
+		// data line in the open payload, or concatenates on the same line.
+		degenerate := boundaryDrops(code)
+		if degenerate {
+			if !writeRescueBoundary() {
+				return false
+			}
+		} else if !writeOut() {
 			return false
 		}
 		if holdAborted {
@@ -2260,18 +2653,17 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// after the overflow (a later marker opened a fresh hold) are
 			// still part of the verbatim stream.
 			if len(hold) > 0 {
-				if _, werr := w.Write(hold); werr != nil {
+				if _, werr := writeCounted(w, rec, hold); werr != nil {
 					clientGone()
 					return false
 				}
-				rec.ResponseBytes += int64(len(hold))
+				wireDataOpen = endsWithUnframedDataLine(hold)
 				hold = hold[:0]
 			}
 			holding = false
 			flusher.Flush()
 			return true
 		}
-		code := a.OutcomeCode()
 		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected {
 			if !a.ChatLike() {
 				// A foreign wire such as Anthropic Messages has its own
@@ -2281,32 +2673,42 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				rec.ErrorCode = code
 				rec.ErrorMsg = metrics.DegenerateMessage(code)
 			} else {
-				// The stop rescue requires the terminal region still WITHHELD:
-				// once a finishHold call released it the outcome was already
-				// signed on the wire, and no re-send may append behind it.
-				// RetryableReasoningStop is the analyzer's wire-safety gate (no
-				// refusal/function_call bytes, not a Responses-shaped feed).
-				if holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
-					hold = hold[:0]
-					holding = false
-					rescueRequested = rescueReasoningStop
-					return true
-				}
-				if a.ResponsesStream() {
+				if a.ResponsesFeed() {
 					emitDegenerateResponses(w, &a, time.Now(), code, rec)
 				} else {
 					emitDegenerateSSE(w, &a, time.Now(), code, rec)
 				}
 			}
 		} else if len(hold) > 0 {
-			if _, werr := w.Write(hold); werr != nil {
+			// A released terminal region is a complete SSE event: close the
+			// final line and add the blank boundary a spec parser needs at
+			// EOF. A held [DONE] or full terminal document already ends with
+			// a blank separator and is unchanged.
+			if !bytes.HasSuffix(hold, []byte("\n\n")) {
+				if !bytes.HasSuffix(hold, []byte("\n")) {
+					hold = append(hold, '\n')
+				}
+				hold = append(hold, '\n')
+			}
+			if _, werr := writeCounted(w, rec, hold); werr != nil {
 				clientGone()
 				return false
 			}
-			rec.ResponseBytes += int64(len(hold))
+			wireDataOpen = endsWithUnframedDataLine(hold)
 		}
 		hold = hold[:0]
 		holding = false
+		// A healthy turn whose last complete data line never got its blank
+		// separator must still close the client's SSE event at EOF; otherwise
+		// a spec parser discards the final event. Degenerate paths already
+		// wrote their own boundary above.
+		if code == "" && wireDataOpen {
+			if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
+				clientGone()
+				return false
+			}
+			wireDataOpen = false
+		}
 		flusher.Flush()
 		return true
 	}
@@ -2341,7 +2743,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			if rescueRequested != rescueNone {
 				return true
 			}
-			a.Fill(rec)
+			fillRecord(&a, rec)
 			return true
 		}
 		// The name announced a terminal event but the document is not one:
@@ -2362,6 +2764,17 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	// blank-line boundary, and the event name is remembered so a type-less
 	// document can still be classified there. No artificial blank line is
 	// fed at the overflow point - that would split the document mid-event.
+	//
+	// Known malformed-input residual (F5-7): after this commit, later bytes
+	// of the same malformed event continue through the ordinary verbatim
+	// relay. A delta, [DONE] or response.failed that follows an over-bound
+	// terminal is therefore relayed after the completion, while the record
+	// keeps the finish the terminal already signed. The normal path stops
+	// reading post-terminal debris, but here the terminal was never held as
+	// a unit and the relay has committed to byte preservation. Stopping or
+	// withholding the tail would require rejecting bytes the client's SSE
+	// parser may still accept, so this residual is documented rather than
+	// changed.
 	abandonEventBuffer := func(now time.Time) {
 		raw := make([]byte, 0, len(eventName)+len(eventBody))
 		raw = append(raw, eventName...)
@@ -2431,6 +2844,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				blank := len(bytes.TrimSpace(line)) == 0
 				prev := a.Terminated()
+				// A [DONE] on a Responses feed is not its terminal marker, but
+				// the line must still be withheld: a zero-event Responses body
+				// replaces it with one response.failed at the end. Other wires
+				// relay it as the foreign line it is.
+				heldDone := sse.DoneLine(line) && a.ResponsesFeed()
 				if blank {
 					eventHasData = false
 					if pendingName != "" {
@@ -2450,7 +2868,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if !writeOut() {
 							return rescueNone
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 				} else {
@@ -2461,12 +2879,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				switch {
 				case holding:
-					hold = append(hold, line...)
-					hold = append(hold, '\n')
-					if sse.TerminalLine(line) {
+					appendHeld(line)
+					if sse.TerminalLine(line) && (a.DoneTerminates() || !sse.DoneLine(line)) {
 						deferredFinish = true
 					}
-					if sse.DoneLine(line) {
+					if sse.DoneLine(line) && a.DoneTerminates() {
 						// [DONE] ends the stream at the line itself; emit the
 						// blank line its SSE block would have carried.
 						hold = append(hold, '\n')
@@ -2476,45 +2893,53 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 					// A Responses/Anthropic terminal document stays held until
 					// its blank-line boundary so a late event name can follow
-					// in its original position.
-					if blank && (deferredFinish || (!prev && a.Terminated())) {
+					// in its original position. A standalone error event is a
+					// terminal statement of its own and must not wait for EOF:
+					// a provider may keep the connection open after it. This
+					// release is scoped to an observed in-band error, so a
+					// Chat finish-reason hold still waits for usage/[DONE].
+					if blank && (deferredFinish || (!prev && a.Terminated()) || a.HasInBandError()) {
 						if !finishHold() {
 							return rescueNone
 						}
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
-				case !prev && a.Terminated() && !blank:
+				case !prev && (a.Terminated() || heldDone) && !blank:
 					// This line opened the terminal region: withhold it (and
-					// everything after) until the outcome is decided.
+					// everything after) until the outcome is decided. A data
+					// line already flushed in out is its own event; separate
+					// it before the held event starts.
 					holding = true
-					hold = append(hold, line...)
-					hold = append(hold, '\n')
-					if sse.DoneLine(line) {
+					if lastLineIsData() {
 						hold = append(hold, '\n')
 					}
-					if sse.TerminalLine(line) {
+					appendHeld(line)
+					if sse.DoneLine(line) && a.DoneTerminates() {
+						hold = append(hold, '\n')
+					}
+					if sse.TerminalLine(line) && (a.DoneTerminates() || !sse.DoneLine(line)) {
 						deferredFinish = true
 					}
 					if !writeOut() {
 						return rescueNone
 					}
-					if sse.DoneLine(line) {
+					if sse.DoneLine(line) && a.DoneTerminates() {
 						if !finishHold() {
 							return rescueNone
 						}
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						a.Fill(rec)
+						fillRecord(&a, rec)
 						return rescueNone
 					}
 				default:
@@ -2542,8 +2967,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						// first chunk. A blank line ends that event with no
 						// data - spec parsers discard it - and is a no-op
 						// between complete events.
-						out.WriteByte('\n')
-						if !writeOut() {
+						if !writeRescueBoundary() {
 							return rescueNone
 						}
 						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
@@ -2561,11 +2985,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if len(hold)+lineBuf.Len() > terminalHoldMax {
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
-					if _, werr := w.Write(hold); werr != nil {
+					if _, werr := writeCounted(w, rec, hold); werr != nil {
 						clientGone()
 						return rescueNone
 					}
-					rec.ResponseBytes += int64(len(hold))
+					wireDataOpen = endsWithUnframedDataLine(hold)
 					flusher.Flush()
 					hold = hold[:0]
 					holding = false
@@ -2610,21 +3034,50 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					return rescueNone
 				}
 			}
-			// Flush any trailing partial line into the analyzer. A partial
-			// line can never be a terminal marker, so it is never withheld.
-			// Its bytes stay in `out` (unflushed) until the outcome below
-			// decides whether to write them - a rescue drops them, so the
-			// client never sees an unterminated line; the fresh attempt
-			// opens a clean new event stream.
+			// Save any trailing partial line without feeding it to the
+			// analyzer yet. The line is never written by a rescue, so its
+			// content, tool call and preview state must not veto the pre-content
+			// rescues below. An unterminated final line can still carry a
+			// terminal marker ([DONE] or a non-null finish_reason); the
+			// analyzer's tail classifier owns that grammar. releaseTail feeds
+			// and releases it only on the paths that actually deliver it.
+			var tail []byte
 			if lineBuf.Len() > 0 {
-				b := lineBuf.Bytes()
-				a.Feed(b, now)
-				if holding {
-					hold = append(hold, b...)
-				} else {
-					out.Write(b)
-				}
+				tail = append(tail, lineBuf.Bytes()...)
 				lineBuf.Reset()
+			}
+			releaseTail := func() {
+				if len(tail) == 0 {
+					return
+				}
+				a.Feed(tail, now)
+				if holding {
+					// Close any pending event, then write the tail as its own
+					// event with a blank boundary. Without this framing a
+					// finish line and a content tail would form one SSE payload
+					// with two data lines, which no spec parser can dispatch at
+					// EOF.
+					if len(hold) > 0 && !bytes.HasSuffix(hold, []byte("\n\n")) {
+						if !bytes.HasSuffix(hold, []byte("\n")) {
+							hold = append(hold, '\n')
+						}
+						hold = append(hold, '\n')
+					} else if len(hold) == 0 && lastLineIsData() {
+						// The content line was already flushed into its own
+						// event. Start the held tail with a separator; a plain
+						// if followed by the boundary block would add a third
+						// newline.
+						hold = append(hold, '\n')
+					}
+					hold = append(hold, tail...)
+					hold = append(hold, '\n', '\n')
+				} else {
+					if _, isData := sse.DataPayload(tail); isData && lastLineIsData() {
+						out.WriteByte('\n')
+					}
+					out.Write(tail)
+				}
+				tail = nil
 			}
 			// An event released at the hold bound may also end at EOF without
 			// its blank-line boundary. The buffered prefix and every later
@@ -2635,6 +3088,20 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				pendingName = ""
 				a.FlushEventWithName(name, now)
 			}
+			// A reassembled event that ended at EOF without its blank-line
+			// boundary may be a complete Responses terminal document (pretty
+			// or split across data: lines). Resolve it before classification:
+			// the terminal bytes are already on the wire, and without this
+			// flush the analyzer reports a truncation and the relay appends a
+			// synthetic failure behind a completed turn.
+			if !holding {
+				a.FlushEventWithName("", now)
+			}
+			// An unterminated final line can itself carry the terminal marker.
+			// Decide before any pre-tail rescue so a complete answer is not
+			// re-sent or discarded. The classifier never commits analyzer
+			// state; the feed below is the only commit.
+			tailTerminates := a.TailTerminates(tail)
 			if err != io.EOF {
 				// A mid-thinking death by read error (connection reset,
 				// unexpected EOF from the upstream) is the same rescuable
@@ -2646,27 +3113,37 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// stays clean when it kills the read - reject the deadline
 				// sentinel itself (and any error wrapping it): a re-send
 				// would mint a fresh deadline the client did not ask for.
-				if allowThinkingRescue && ctx.Err() == nil &&
+				if allowThinkingRescue && ctx.Err() == nil && !tailTerminates &&
 					!errors.Is(err, context.DeadlineExceeded) &&
 					a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+					if !writeRescueBoundary() {
+						return rescueNone
+					}
 					return rescueReasoningTruncation
 				}
 				// A real read failure is the transport's own error - release
 				// the held bytes verbatim (byte preservation) and never
-				// substitute a synthetic outcome on top.
+				// substitute a synthetic outcome on top. A terminal tail is
+				// still delivered as its own framed event: the non-holding arm
+				// would write it without a trailing blank and the client would
+				// discard it at EOF.
 				markStreamErr(ctx, rec, err)
+				if tailTerminates {
+					holding = true
+				}
+				releaseTail()
 				if holding {
-					if _, werr := w.Write(hold); werr != nil {
+					if _, werr := writeCounted(w, rec, hold); werr != nil {
 						clientGone()
 						return rescueNone
 					}
-					rec.ResponseBytes += int64(len(hold))
+					wireDataOpen = endsWithUnframedDataLine(hold)
 					hold = hold[:0]
 				}
 				if !writeOut() {
 					return rescueNone
 				}
-				a.Fill(rec)
+				fillRecord(&a, rec)
 				return rescueNone
 			}
 			// Clean EOF: resolve the hold (truncation is decided here - a
@@ -2687,11 +3164,44 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// holding implies a seen terminator. A committed verbatim relay
 			// (holdAborted) must never be re-sent: the client already saw the
 			// oversized bytes.
-			if allowTruncationRetry && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
+			if !tailTerminates && allowTruncationRetry && ctx.Err() == nil && !holdAborted && a.RetryableTruncation() && !rec.ClientDisconnected {
+				if !writeRescueBoundary() {
+					return rescueNone
+				}
 				return rescueEmptyTruncation
 			}
-			if allowThinkingRescue && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+			if !tailTerminates && allowThinkingRescue && ctx.Err() == nil && !holdAborted && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+				if !writeRescueBoundary() {
+					return rescueNone
+				}
 				return rescueReasoningTruncation
+			}
+			// No rescue owns this attempt. finishHold either delivers the
+			// trailing partial line through its verbatim branch or drops it at
+			// the degenerate boundary. Decide that before feeding it: content
+			// the boundary drops was never delivered, so it must not set the
+			// answer content or first-answer time on the record. The
+			// truncation class is skipped only when the analyzer's own tail
+			// classifier says the line carries no completion terminal marker:
+			// a final Chat [DONE] or non-null finish_reason is fed rather than
+			// dropped. A fed tail is delivered only when it supplies a
+			// complete answer or tool call; an empty or reasoning-only
+			// completion resolves through the degenerate boundary, which
+			// withholds or replaces the terminal bytes. The other degenerate
+			// classes also run finishHold after the feed because the tail can
+			// supply the missing output.
+			if tailTerminates {
+				// Feed the terminal tail into the withheld region and let
+				// finishHold decide healthy, degenerate or reasoning-stop. It
+				// is released as its own framed SSE event.
+				holding = true
+				releaseTail()
+			} else {
+				preTailCode := a.OutcomeCode()
+				tailDropped := preTailCode == metrics.CodeTruncated && boundaryDrops(preTailCode)
+				if !tailDropped {
+					releaseTail()
+				}
 			}
 			if !finishHold() {
 				return rescueNone
@@ -2702,7 +3212,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// no [DONE] ever did).
 				return rescueRequested
 			}
-			a.Fill(rec)
+			fillRecord(&a, rec)
 			return rescueNone
 		}
 	}
@@ -2717,26 +3227,34 @@ func emitDegenerateResponses(w http.ResponseWriter, a *sse.Analyzer, now time.Ti
 	if id == "" {
 		id = rec.ID
 	}
-	obj := map[string]any{
-		"type": "response.failed",
-		"response": map[string]any{
-			"id": responsesWireID(id), "object": "response", "status": "failed",
-			"error":  map[string]any{"code": code, "message": metrics.DegenerateMessage(code)},
-			"output": []any{},
-		},
+	msg := metrics.DegenerateMessage(code)
+	// The substitution is proxy-minted, not a provider statement: stamp the
+	// local failure before feeding the synthetic frames so the standalone
+	// error classifier cannot attribute it to the provider.
+	a.SetLocalFailure(code, msg)
+	// The free-form error event carries the specific internal code; the
+	// response.failed envelope carries the closed ResponseErrorCode enum.
+	// Feed the error event first so the analyzer's first-real-error rule keeps
+	// the specific code on the record; the enum value is wire-only.
+	if payload, frame, err := providerformat.ResponsesSyntheticEvent(
+		"error", 0, id, rec.Model, code, msg); err == nil {
+		a.Feed(append([]byte("data: "), payload...), now)
+		a.Feed(nil, now)
+		if _, werr := writeCounted(w, rec, frame); werr != nil {
+			markClientGone(rec)
+			return
+		}
 	}
-	payload, err := sse.MarshalWireJSON(obj)
+	payload, frame, err := providerformat.ResponsesSyntheticEvent(
+		"response.failed", 1, id, rec.Model, code, msg)
 	if err != nil {
 		return
 	}
-	frame := append([]byte("event: response.failed\ndata: "), payload...)
-	frame = append(frame, '\n', '\n')
 	a.Feed(append([]byte("data: "), payload...), now)
-	if _, werr := w.Write(frame); werr != nil {
+	if _, werr := writeCounted(w, rec, frame); werr != nil {
 		markClientGone(rec)
 		return
 	}
-	rec.ResponseBytes += int64(len(frame))
 }
 
 // emitDegenerateSSE writes the in-band OpenAI error chunk + closing [DONE] in
@@ -2749,19 +3267,16 @@ func emitDegenerateSSE(w http.ResponseWriter, a *sse.Analyzer, now time.Time, co
 	if b, err := sse.ErrorEnvelope("", sse.TypeUpstreamError, code, metrics.DegenerateMessage(code)); err == nil {
 		line := sse.DataFrame(b)
 		a.Feed(line[:len(line)-2], now)
-		if _, werr := w.Write(line); werr != nil {
+		// The substituted frames replace a terminal region the client never
+		// saw, so writeCounted books the bytes the client received, never the
+		// withheld originals.
+		if _, werr := writeCounted(w, rec, line); werr != nil {
 			markClientGone(rec)
 			return
 		}
-		// The substituted frames replace a terminal region the client never
-		// saw, so they are the bytes the client received - count them, never
-		// the withheld originals.
-		rec.ResponseBytes += int64(len(line))
 	}
 	a.Feed([]byte("data: [DONE]"), now)
-	if _, werr := io.WriteString(w, sse.DoneFrame); werr != nil {
+	if _, werr := writeCounted(w, rec, []byte(sse.DoneFrame)); werr != nil {
 		markClientGone(rec)
-	} else {
-		rec.ResponseBytes += int64(len(sse.DoneFrame))
 	}
 }

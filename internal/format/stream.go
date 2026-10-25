@@ -23,8 +23,9 @@ type StreamDecoder interface {
 	// FlushBlocks closes every block the decoder still holds open. The
 	// translation facade calls it when an upstream stream is truncated so a
 	// client never receives an error or terminal event with an unclosed block.
-	// Payload retained by the source is flushed because it passed validation.
-	FlushBlocks() []*ir.Event
+	// Payload retained by the source is flushed only when it passes validation;
+	// an invalid retained value returns an error and aborts the translation.
+	FlushBlocks() ([]*ir.Event, error)
 }
 
 // StreamEncoder writes one client-facing SSE stream from canonical events.

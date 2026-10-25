@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -48,20 +49,27 @@ type Analyzer struct {
 	// Reasoning/answer separation: tracks when reasoning ("thinking") tokens
 	// vs answer tokens arrive. Reasoning tokens are from reasoning_content
 	// (DeepSeek R1, Qwen QwQ, etc.) or thinking blocks (Claude); answer tokens
-	// are from chat delta.content, Responses content deltas, and the legacy
-	// /v1/completions choices[].text field.
+	// are from chat delta.content, a non-empty Chat audio transcript,
+	// Responses content/transcript deltas, and the legacy /v1/completions
+	// choices[].text field.
 	firstReasoningAt time.Time
 	firstAnswerAt    time.Time
 
 	toolCalls int
 	// toolNames is the retained first-seen name list and toolNameSet is its
-	// O(1) membership index. Both are bounded by metrics.RetainedToolNamesMax
-	// while the stream is still running, so the record cap cannot be exceeded
-	// before Fill; every tool call is counted independently.
-	toolNames    []string
-	toolNameSet  map[string]struct{}
-	toolCallIDs  map[string]struct{}
-	finishReason string
+	// O(1) membership indexes. Names are bounded by
+	// metrics.RetainedToolNamesMax and Responses call ids by
+	// metrics.RetainedToolCallIDsMax while the stream is still running, so a
+	// hostile stream cannot grow either map without limit. Every tool call is
+	// counted independently; a call past the id bound is simply not deduped.
+	toolNames   []string
+	toolNameSet map[string]struct{}
+	toolCallIDs map[string]struct{}
+	// toolCallIndexes records the Chat delta indexes already counted, so an
+	// id-less first fragment and its later id-bearing continuation count once.
+	// It is bounded by metrics.RetainedToolCallIDsMax like the Responses id set.
+	toolCallIndexes map[int]struct{}
+	finishReason    string
 	// responseID is the Responses terminal document's id, retained so a
 	// synthetic failure frame uses a resp_-shaped identity instead of the
 	// proxy request id.
@@ -81,6 +89,12 @@ type Analyzer struct {
 	// classification (a stream without message_stop or a stop_reason) but never
 	// the OpenAI degenerate substitution or rescue rules.
 	anthropicWire bool
+
+	// responsesWire marks a feed routed to the Responses API before any frame
+	// arrives. A zero-event, comment-only or ping-only body carries no typed
+	// event to set responsesStream, so the routed wire owns its terminal shape
+	// (response.failed, never an OpenAI error chunk plus [DONE]).
+	responsesWire bool
 
 	// responsesStream marks a Responses-API-shaped feed (typed "response.*"
 	// events). Those events carry a per-response monotonic sequence_number
@@ -105,6 +119,14 @@ type Analyzer struct {
 	// reasoning presence exactly like a streamed reasoning delta.
 	terminalReasoningSeen bool
 
+	// responsesOutputSeen marks a Responses output item that is neither
+	// answer text, reasoning, nor a model tool call (for example a web search,
+	// file search, image generation or provider-specific item), or a
+	// non-empty audio data delta. It is still official output, so a completed
+	// terminal carrying it must never be replaced by the empty-completion
+	// failure.
+	responsesOutputSeen bool
+
 	// toolChunks counts content-bearing chunks that carry tool-call deltas.
 	// chunkCount (every content-bearing chunk: content, reasoning, AND tool
 	// calls) feeds the output-token fallback when the provider sends no usage
@@ -112,6 +134,13 @@ type Analyzer struct {
 	// answer) tokens, so the gen-TPS numerator must exclude them. toolChunks
 	// lets Fill derive the content+reasoning-only chunk count.
 	toolChunks int64
+
+	// textChunks and reasoningChunks count streamed chunks that carry answer
+	// text or reasoning. The terminal Responses document repeats the whole
+	// answer and reasoning, so their terminal units must count only the units
+	// that no streamed chunk already represents.
+	textChunks      int64
+	reasoningChunks int64
 
 	// err captures an IN-BAND error payload (data: {"error":{...}}): some
 	// providers signal failures inside a 200-OK stream instead of via the HTTP
@@ -157,10 +186,20 @@ type Analyzer struct {
 	// x_nanogpt_pricing) rather than inside usage itself. The usage object
 	// stays the fallback root so paths written against it keep resolving.
 	usageChunk []byte
+	// cost and costSeen retain the last payload whose cost_keys path
+	// resolved. A later usage-bearing or terminal chunk without a cost must
+	// not erase the provider's earlier charge.
+	cost     float64
+	costSeen bool
 	// usageSeen records that the source actually reported usage (a usage
 	// object or a provider usage-key path), so Fill's chunk-count fallback is
 	// distinguishable from a reported zero.
 	usageSeen bool
+	// usageInvalid records that a source usage document could not be summed
+	// or represented. It is sticky: a later partial document must not restore
+	// a refundable count for a turn already marked unavailable. The proxy
+	// wrapper turns this signal into the record's UsageInvalid state.
+	usageInvalid bool
 
 	// Anthropic streams split usage across message_start and message_delta.
 	// Custom usage/cost keys may live beside the standard usage object on
@@ -206,11 +245,39 @@ type Analyzer struct {
 	anthropicThinking   int64
 }
 
-// SetChatLike seeds the chat-completions shape from the request body before
-// any response frame arrives. A zero-frame, comment-only or [DONE]-only chat
-// stream must still classify as a degenerate completion; without this seed the
-// analyzer's chatlike flag can only be learned from a received payload.
-func (a *Analyzer) SetChatLike(v bool) { a.chatlike = v }
+// SetWire seeds the analyzer from the routed wire protocol before any frame
+// arrives. A zero-frame, comment-only or ping-only feed must classify as a
+// truncated stream of that wire instead of a healthy unknown protocol, and a
+// non-Chat wire must never enter the OpenAI degenerate substitution rules.
+func (a *Analyzer) SetWire(p ir.Protocol) {
+	switch p {
+	case ir.Anthropic:
+		a.anthropicWire = true
+	case ir.Responses:
+		a.responsesWire = true
+		a.chatlike = true
+	case ir.Chat, ir.Cursor:
+		a.chatlike = true
+	}
+}
+
+// DoneTerminates reports whether the [DONE] sentinel is this wire's
+// documented end-of-stream marker. It belongs to the Chat Completions family
+// (and the unknown-protocol fallback); Anthropic Messages closes with
+// message_stop or a stop_reason, and the Responses API closes with a typed
+// terminal event. An observed Responses event identifies the feed even when
+// the route did not seed it.
+func (a *Analyzer) DoneTerminates() bool {
+	return !a.anthropicWire && !a.responsesWire && !a.responsesStream
+}
+
+// ResponsesFeed reports whether this stream follows the Responses API: the
+// routed wire before any event arrived, or an observed typed response.* event.
+// It owns the Responses terminal substitution shape and the [DONE] hold
+// decision, so a zero-event Responses body still closes with response.failed.
+func (a *Analyzer) ResponsesFeed() bool {
+	return a.responsesWire || a.responsesStream
+}
 
 // Feed ingests one raw SSE line (the bytes between \n delimiters, NOT
 // including the trailing \n). It must be called in order for every line the
@@ -237,9 +304,13 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 
 	// Fast-path: check for the [DONE] sentinel. Tolerate "data:[DONE]" (no
 	// space) and a trailing \r. Anything else (e.g. "[DONE]extra") falls
-	// through to the normal JSON scan.
+	// through to the normal JSON scan. Only the Chat-completions family (and
+	// the unknown-protocol fallback) treats the sentinel as its terminator;
+	// Responses and Anthropic Messages have their own terminal events.
 	if isDonePayload(payload) {
-		a.terminatorSeen = true
+		if a.DoneTerminates() {
+			a.terminatorSeen = true
+		}
 		return
 	}
 
@@ -261,7 +332,9 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 		return
 	}
 	if isDonePayload(data) {
-		a.terminatorSeen = true
+		if a.DoneTerminates() {
+			a.terminatorSeen = true
+		}
 		return
 	}
 	// A terminal marker already signed the stream: a repeated terminal event
@@ -288,7 +361,10 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 // relay had to release verbatim at its hold bound. It preserves the
 // reassembled data for a later FlushEventWithName, then classifies each line
 // without adding it twice. Later data lines of the same event append normally
-// until the real blank-line boundary.
+// until the real blank-line boundary. A blank line that the relay already
+// released with the event is that boundary, but the relay resolves it through
+// FlushEventWithName (so a remembered terminal name can still classify the
+// document); feeding it here would flush and discard the reassembled data.
 func (a *Analyzer) FeedBufferedEvent(raw []byte, now time.Time) {
 	data := EventData(raw)
 	if len(data) > eventDataMax {
@@ -302,11 +378,15 @@ func (a *Analyzer) FeedBufferedEvent(raw []byte, now time.Time) {
 		if raw[i] != '\n' {
 			continue
 		}
-		a.Feed(raw[start:i], now)
+		if line := raw[start:i]; !isBlankLine(line) {
+			a.Feed(line, now)
+		}
 		start = i + 1
 	}
 	if start < len(raw) {
-		a.Feed(raw[start:], now)
+		if line := raw[start:]; !isBlankLine(line) {
+			a.Feed(line, now)
+		}
 	}
 	a.eventDataSeen = true
 	a.eventSkipAccum = false
@@ -320,20 +400,26 @@ func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
 	if len(a.eventData) > 0 && !a.terminatorSeen {
 		typ, _ := ResolveResponsesTerminal(name, a.eventData)
 		if typ != "" {
-			a.terminatorSeen = true
-			a.responsesStream = true
-			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
-			// The reassembled document is the whole event, so its usage
-			// object may span several data: lines that no per-line scan could
-			// parse. Capture it here exactly like feedData does for a
-			// single-line document.
-			var keys frameKeys
-			keys.scan(a.eventData)
-			a.captureUsage(&keys, a.eventData)
-			a.captureResponsesTerminalFinish(typ, a.eventData, now)
+			a.captureTerminalEvent(typ, a.eventData, now)
 		}
 	}
 	a.flushEvent(now)
+}
+
+// captureTerminalEvent records one Responses terminal document at any
+// boundary: line-oriented, buffered or reassembled. A reassembled document is
+// the whole event, so its usage object may span several data lines that no
+// per-line scan could parse. This owner keeps the terminal flag, wire family,
+// raw tail, cost, usage and finish in one place.
+func (a *Analyzer) captureTerminalEvent(eventType string, payload []byte, now time.Time) {
+	a.terminatorSeen = true
+	a.responsesStream = true
+	a.usageChunk = append(a.usageChunk[:0], payload...)
+	a.captureCost(payload)
+	var keys frameKeys
+	keys.scan(payload)
+	a.captureUsage(&keys, payload)
+	a.captureResponsesTerminalFinish(eventType, payload, now)
 }
 
 // captureUsage records the last usage object of one payload. The enclosing
@@ -348,6 +434,17 @@ func (a *Analyzer) captureUsage(keys *frameKeys, payload []byte) {
 	a.usage = append(a.usage[:0], raw...)
 	a.usageChunk = append(a.usageChunk[:0], payload...)
 	a.usageSeen = true
+	a.captureCost(payload)
+}
+
+// captureCost retains the last cost-bearing payload. Cost keys are relative to
+// the response root and providers may place the charge on an earlier chunk
+// than the usage they finish with, so the value is captured when it resolves
+// instead of re-read from whichever chunk happens to be last.
+func (a *Analyzer) captureCost(payload []byte) {
+	if cost, ok := a.extractCost(payload); ok {
+		a.cost, a.costSeen = cost, true
+	}
 }
 
 // feedData classifies one data payload. forcedType supplies the Responses
@@ -371,14 +468,15 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// line as valid JSON. Skipping the copy keeps the buffer empty for the
 	// ordinary one-object-per-event stream, saving a frame-sized copy and a
 	// second scan per frame plus the largest-frame retention. A type-less
-	// complete object on a Responses-shaped stream is the exception: it may be
-	// a terminal document whose SSE name arrives after its data line, so its
-	// bytes are retained for the boundary classifier.
+	// complete object that carries a top-level "response" or arrives on an
+	// established Responses stream is the exception: it may be a terminal
+	// document whose SSE name follows its data, so its bytes are retained for
+	// the boundary classifier even when it is the first stream event.
 	firstDataFrame := !a.eventDataSeen
 	if firstDataFrame {
 		a.eventDataSeen = true
 		a.eventSkipAccum = completeJSONObject(payload) &&
-			!(a.responsesStream && keys.eventType == nil)
+			!(keys.eventType == nil && (a.responsesStream || keys.hasResponse))
 	}
 	if !a.eventSkipAccum && len(a.eventData)+len(payload)+1 <= eventDataMax {
 		if len(a.eventData) > 0 {
@@ -395,8 +493,18 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	if eventType == "" {
 		eventType = forcedType
 	}
-	hasContent := keys.contentStart() || keys.textStart() || responsesContentEvent(eventType, &keys)
-	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
+	hasContent := keys.contentStart() || keys.textStart() || keys.audioTranscriptStart() ||
+		responsesContentEvent(eventType, &keys)
+	// The generic reasoning-key scan is the Chat/Anthropic-family detector.
+	// A Responses feed carries the official Response object in created and
+	// completed events, and that envelope's `reasoning` echo is not output
+	// presence. Keep the typed Responses owners, and run the generic scan only
+	// for a non-Responses-looking frame.
+	hasReasoning := responsesReasoningEvent(eventType, &keys) ||
+		responsesReasoningSummaryPart(eventType, payload)
+	if !a.responsesWire && !strings.HasPrefix(eventType, "response.") {
+		hasReasoning = hasReasoning || keys.reasoningStart()
+	}
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
 	// Responses tool activity: a function call is announced by
@@ -405,40 +513,41 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// answer content (the latter used to set HadAnswerContent and TTFT for the
 	// wrong channel).
 	hasToolDelta := eventType == "response.function_call_arguments.delta" && keys.deltaNonEmpty
+	// A Responses audio data delta carries output bytes, never transcript
+	// text: it is official output for the degenerate classifier but not
+	// answer content for HadAnswerContent/TTFT/preview.
+	if eventType == "response.audio.delta" && keys.deltaNonEmpty {
+		a.responsesOutputSeen = true
+	}
 	if eventType == "response.output_item.added" {
 		var ev struct {
 			Item struct {
-				Type   string `json:"type"`
-				CallID string `json:"call_id"`
-				Name   string `json:"name"`
+				Type             string `json:"type"`
+				CallID           string `json:"call_id"`
+				ID               string `json:"id"`
+				Name             string `json:"name"`
+				EncryptedContent string `json:"encrypted_content"`
 			} `json:"item"`
 		}
-		if json.Unmarshal(payload, &ev) == nil && ev.Item.Type == "function_call" {
-			a.countResponsesToolCall(ev.Item.CallID, ev.Item.Name)
-			hasToolDelta = true
+		if json.Unmarshal(payload, &ev) == nil {
+			switch {
+			case ResponsesToolCallItem(ev.Item.Type):
+				a.countResponsesToolCall(ev.Item.CallID, ev.Item.ID, ev.Item.Name)
+				hasToolDelta = true
+			case ev.Item.Type != "" && ev.Item.Type != "message" && ev.Item.Type != "reasoning":
+				a.responsesOutputSeen = true
+			}
+			if ev.Item.Type == "reasoning" && ev.Item.EncryptedContent != "" {
+				a.terminalReasoningSeen = true
+			}
 		}
 	}
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
 	// or a tool call) - not on the empty role chunk.
-	if hasContent || hasReasoning || hasToolCall || hasToolDelta {
-		if a.firstTokenAt.IsZero() {
-			a.firstTokenAt = now
-		}
-		a.lastTokenAt = now
-		a.chunkCount++
-		// A chunk that carries ONLY a tool call (no content, no reasoning) is
-		// not a generation token - track it separately so the output-token
-		// fallback can exclude tool-call argument chunks from gen TPS.
-		if (hasToolCall || hasToolDelta) && !hasContent && !hasReasoning {
-			a.toolChunks++
-		}
-	}
+	a.recordPresence(hasContent, hasReasoning, hasToolCall, hasToolDelta, now)
 
 	// Reasoning/answer separation for thinking models.
-	if hasReasoning && a.firstReasoningAt.IsZero() {
-		a.firstReasoningAt = now
-	}
 	if hasContent && a.firstAnswerAt.IsZero() {
 		a.firstAnswerAt = now
 		// Capture a short preview of the first content chunk (only when the
@@ -448,6 +557,9 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 			if a.preview == nil {
 				a.preview = extractPreview(keys.text)
 			}
+			if a.preview == nil {
+				a.preview = extractPreview(keys.transcript)
+			}
 			if a.preview == nil && responsesContentEvent(eventType, &keys) {
 				// Responses streams carry answer text in a top-level "delta"
 				// string, not choices[].content/text.
@@ -456,25 +568,60 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		}
 	}
 
-	// Count tool calls and capture their names. Each distinct tool call carries
-	// an "id" in its first delta chunk; subsequent argument chunks repeat the
-	// tool_calls key but do not include "id". The outer chunk `"id":"1"` is
-	// excluded by searching only within the tool_calls array. The retained name
-	// set is first-seen order and capped while streaming: dedupe is one map
-	// probe instead of a scan over every earlier name, and once the cap is
-	// reached new names are dropped (calls are still counted) so neither the
-	// list nor the set can grow with a hostile stream.
+	// Count tool calls and capture their names. A Chat tool call is identified
+	// by its required delta index; the id may be omitted on the first fragment
+	// (the official stream decoders synthesize one) and continuations repeat the
+	// index without the id. Count one call for a new index whose fragment
+	// carries a name or id, and retain a name from any fragment. A fragment with
+	// no index keeps the older id-presence fallback. The outer chunk `"id":"1"`
+	// is excluded by searching only within the tool_calls array. The retained
+	// name and index sets are bounded while streaming, so neither can grow with
+	// a hostile stream.
 	if hasToolCall {
-		var calls []struct {
-			ID       string `json:"id"`
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		}
+		// Decode each element independently. A malformed index in one element
+		// must not discard its healthy siblings or turn the whole frame into
+		// an empty tool call. The index is an exact non-negative integer;
+		// 0.0 and 1e3 are valid, while a string, fraction, negative or
+		// out-of-range value falls back to id presence.
+		var calls []json.RawMessage
 		if json.Unmarshal(toolBlock, &calls) == nil {
-			for _, call := range calls {
-				if call.ID == "" {
+			for _, raw := range calls {
+				var call struct {
+					Index    json.RawMessage `json:"index"`
+					ID       string          `json:"id"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				}
+				if json.Unmarshal(raw, &call) != nil {
 					continue
+				}
+				index := 0
+				hasIndex := false
+				if trimmed := bytes.TrimSpace(call.Index); len(trimmed) > 0 {
+					if n, err := jsonnum.Parse(trimmed); err == nil && n >= 0 {
+						index, hasIndex = n, true
+					}
+				}
+				if !hasIndex {
+					a.retainToolName(call.Function.Name)
+					if call.ID != "" {
+						a.toolCalls++
+					}
+					continue
+				}
+				if _, counted := a.toolCallIndexes[index]; counted {
+					a.retainToolName(call.Function.Name)
+					continue
+				}
+				if call.ID == "" && call.Function.Name == "" {
+					continue
+				}
+				if a.toolCallIndexes == nil {
+					a.toolCallIndexes = make(map[int]struct{}, 4)
+				}
+				if len(a.toolCallIndexes) < metrics.RetainedToolCallIDsMax {
+					a.toolCallIndexes[index] = struct{}{}
 				}
 				a.toolCalls++
 				a.retainToolName(call.Function.Name)
@@ -493,6 +640,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		// x_nanogpt_pricing rides exactly this chunk). Copied once - payload
 		// aliases the relay's reused line buffer.
 		a.usageChunk = append(a.usageChunk[:0], payload...)
+		a.captureCost(payload)
 	}
 
 	// Chat/Responses-API shape detection + Responses terminal events
@@ -507,21 +655,12 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		a.responsesStream = true
 	}
 	if responsesTerminalEvent(eventType) {
-		a.terminatorSeen = true
-		a.usageChunk = append(a.usageChunk[:0], payload...)
-		a.captureResponsesTerminalFinish(eventType, payload, now)
-	}
-	// A Responses failure states its provider error under response.error, not
-	// the top-level error key the frame gate looks for. Decode it only on the
-	// terminal failure event (the hot path for every other frame stays a byte
-	// scan), and let the first real error win like every other in-band path.
-	if eventType == "response.failed" {
-		a.captureResponseFailedError(payload)
+		a.captureTerminalEvent(eventType, payload, now)
 	}
 	// Refusal and deprecated function_call deltas are answer-shaped bytes:
 	// a rescue appending a fresh attempt after them would duplicate visible
 	// output-shaped text, so they disqualify the thinking rescue.
-	if keys.refusalNonEmpty || keys.functionCallNonEmpty {
+	if keys.refusalNonEmpty || keys.functionCallNonEmpty || keys.audioDataNonEmpty {
 		a.answerishSeen = true
 	}
 
@@ -564,6 +703,35 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	}
 }
 
+// recordPresence applies one parsed event's content/reasoning/tool presence to
+// the turn timers and chunk counters. feedData calls it per data line;
+// flushEvent calls it for a reassembled event whose payload only became
+// parseable at the SSE boundary, so the two paths cannot drift.
+func (a *Analyzer) recordPresence(hasContent, hasReasoning, hasToolCall, hasToolDelta bool, now time.Time) {
+	if hasContent || hasReasoning || hasToolCall || hasToolDelta {
+		if a.firstTokenAt.IsZero() {
+			a.firstTokenAt = now
+		}
+		a.lastTokenAt = now
+		a.chunkCount++
+		// A chunk that carries ONLY a tool call (no content, no reasoning) is
+		// not a generation token - track it separately so the output-token
+		// fallback can exclude tool-call argument chunks from gen TPS.
+		if (hasToolCall || hasToolDelta) && !hasContent && !hasReasoning {
+			a.toolChunks++
+		}
+		if hasContent {
+			a.textChunks++
+		}
+		if hasReasoning {
+			a.reasoningChunks++
+		}
+	}
+	if hasReasoning && a.firstReasoningAt.IsZero() {
+		a.firstReasoningAt = now
+	}
+}
+
 // extractCost runs the cost-key scan over a raw JSON document (the chunk
 // root or the bare usage object). Returns (0, false) when the bytes are
 // absent or unparseable - "no cost reported", never a fabricated number.
@@ -601,9 +769,30 @@ func (a *Analyzer) flushEvent(now time.Time) {
 		var keys frameKeys
 		keys.scan(a.eventData)
 		if typ := keys.responseEventType(a.eventData); responsesTerminalEvent(typ) {
-			a.terminatorSeen = true
-			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
-			a.captureResponsesTerminalFinish(typ, a.eventData, now)
+			a.captureTerminalEvent(typ, a.eventData, now)
+		}
+	}
+	// A standalone error event ({"type":"error","code":...,"message":...})
+	// carries no error object and never decodes line by line when it is
+	// pretty-printed. Resolve the reassembled document at this same boundary
+	// so its provider error is recorded and the stream stops as failed instead
+	// of being re-sent as a truncation.
+	if len(a.eventData) > 0 {
+		a.captureStandaloneError(a.eventData)
+	}
+	// A pretty-printed non-terminal event carries the same visible presence as
+	// its single-line twin. The summary-part announcement keeps its text under
+	// "part", which the flat key probe cannot see, so a reassembled
+	// announcement needs this boundary owner to record reasoning presence.
+	// Only a genuine multi-line document reaches this twin: a single-line
+	// event is already classified by feedData, including the one that
+	// FeedBufferedEvent seeds on overflow, and counting it here would record
+	// the same presence twice.
+	if len(a.eventData) > 0 && bytes.IndexByte(a.eventData, '\n') >= 0 {
+		var keys frameKeys
+		keys.scan(a.eventData)
+		if typ := keys.responseEventType(a.eventData); responsesReasoningSummaryPart(typ, a.eventData) {
+			a.recordPresence(false, true, false, false, now)
 		}
 	}
 	a.eventData = a.eventData[:0]
@@ -655,6 +844,60 @@ func (a *Analyzer) captureStreamError(payload []byte) {
 	a.setStreamError(metrics.ParseErrorEnvelope(payload))
 }
 
+// captureStandaloneError classifies one reassembled standalone error event:
+// a document whose code and message are top-level siblings of "type":"error"
+// (the Responses error shape) instead of a nested error object. A per-line
+// scan cannot see a pretty-printed event, and the document has no top-level
+// "error" key for captureStreamError, so only the event-boundary owner can
+// classify it. An error event is a terminal statement on every wire that
+// carries one; the first real error still wins.
+func (a *Analyzer) captureStandaloneError(payload []byte) {
+	var ev struct {
+		Type    string          `json:"type"`
+		Code    json.RawMessage `json:"code"`
+		Message json.RawMessage `json:"message"`
+	}
+	if json.Unmarshal(payload, &ev) != nil || ev.Type != "error" {
+		return
+	}
+	a.recordStandaloneError(ev.Code, ev.Message)
+}
+
+// recordStandaloneError registers the top-level code/message of an error
+// event that carries no nested error object. The error event itself is the
+// stream's terminal statement even when it names neither field.
+func (a *Analyzer) recordStandaloneError(code, message json.RawMessage) {
+	a.terminatorSeen = true
+	if a.errType != "" {
+		return
+	}
+	var msg string
+	_ = json.Unmarshal(message, &msg)
+	codeString := errorCodeString(code)
+	if codeString == "" && msg == "" {
+		// The event itself is the provider's terminal statement even when it
+		// names neither field (an absent or null nested object, or an empty
+		// Responses error event). Treat it as an upstream failure rather than
+		// leaving a healthy record behind.
+		a.setStreamError(TypeUpstreamError, "", "upstream response failed")
+		return
+	}
+	a.setStreamError("provider_error", codeString, msg)
+}
+
+// SetLocalFailure records a proxy-minted failure as an upstream_error with the
+// specific internal code. The synthetic frames the proxy substitutes for a
+// withheld terminal are not provider statements, so the standalone-error
+// classifier must not relabel them provider_error. The first-real-error rule
+// still applies: a provider error that already owns the record is never
+// overwritten.
+func (a *Analyzer) SetLocalFailure(code, msg string) {
+	if a.errType != "" {
+		return
+	}
+	a.setStreamError(TypeUpstreamError, code, msg)
+}
+
 // captureResponseFailedError records the nested provider error of a Responses
 // response.failed event. The same first-real-error rule applies.
 func (a *Analyzer) captureResponseFailedError(payload []byte) {
@@ -686,6 +929,23 @@ func responsesTerminalEvent(eventType string) bool {
 // The terminal document may also be the only place the turn's output appears,
 // so text, refusal and reasoning presence are recorded here before classifying.
 func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte, now time.Time) {
+	// A Responses failure states its provider error under response.error, not
+	// the top-level error key the per-line gate looks for. Decode it here so
+	// every terminal path - line-oriented, buffered event, and reassembled
+	// document at its blank-line boundary - shares one owner. The first real
+	// error wins like every other in-band path.
+	if eventType == "response.failed" {
+		a.captureResponseFailedError(payload)
+		// The failed terminal is itself the failure statement. A missing,
+		// null, or empty error object therefore still classifies as an
+		// upstream lifecycle failure; a provider type or a code-only object
+		// already set its own classification above. The client body stays
+		// untouched - this is the record view only.
+		if a.errType == "" {
+			a.errType = TypeUpstreamError
+			a.errMsg = "upstream response failed"
+		}
+	}
 	var ev struct {
 		Response struct {
 			ID                string `json:"id"`
@@ -693,12 +953,14 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				Reason string `json:"reason"`
 			} `json:"incomplete_details"`
 			Output []struct {
-				Type    string          `json:"type"`
-				Role    string          `json:"role"`
-				CallID  string          `json:"call_id"`
-				Name    string          `json:"name"`
-				Content json.RawMessage `json:"content"`
-				Summary []struct {
+				Type             string          `json:"type"`
+				Role             string          `json:"role"`
+				CallID           string          `json:"call_id"`
+				ID               string          `json:"id"`
+				Name             string          `json:"name"`
+				EncryptedContent string          `json:"encrypted_content"`
+				Content          json.RawMessage `json:"content"`
+				Summary          []struct {
 					Text string `json:"text"`
 				} `json:"summary"`
 			} `json:"output"`
@@ -706,7 +968,7 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 	parsed := json.Unmarshal(payload, &ev) == nil
 	terminalUnits := 0
-	hadStreamedAnswer := !a.firstAnswerAt.IsZero()
+	terminalReasoningCount := 0
 	if parsed {
 		if ev.Response.ID != "" {
 			a.responseID = ev.Response.ID
@@ -716,24 +978,29 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 			if typ == "" && item.Role != "" {
 				typ = "message"
 			}
-			switch typ {
-			case "function_call":
+			switch {
+			case ResponsesToolCallItem(typ):
 				// A function call may appear only in the terminal document;
-				// count each call once per call_id so a legitimate tool turn
-				// is never classified as empty and replaced by a failure.
-				a.countResponsesToolCall(item.CallID, item.Name)
-			case "message":
-				text, refusal := terminalMessageText(item.Content)
+				// count each call once per identity so a legitimate tool turn
+				// is never classified as empty and replaced by a failure. A
+				// call that was not announced by a streamed item contributes
+				// the chunk that announcement would have counted.
+				if a.countResponsesToolCall(item.CallID, item.ID, item.Name) {
+					a.recordTerminalToolUnit(now)
+				}
+			case typ == "message":
+				text, refusal, audioData := terminalMessageText(item.Content)
+				if audioData {
+					// Audio bytes in a terminal message are official output
+					// even when no transcript accompanies them.
+					a.responsesOutputSeen = true
+				}
 				if text != "" {
 					a.answerishSeen = true
-					// The terminal document is the whole stream for a
-					// terminal-only answer: count every non-empty text unit so
-					// the no-usage fallback matches the streamed equivalent.
-					// A streamed text delta already owns the chunk count; the
-					// terminal document merely repeats its value.
-					if !hadStreamedAnswer {
-						terminalUnits += terminalTextUnits(item.Content)
-					}
+					// The terminal document repeats the whole answer. Count
+					// every non-empty text unit here; only the units no
+					// streamed text chunk already represents are added below.
+					terminalUnits += terminalTextUnits(item.Content)
 					if a.CapturePreview && a.preview == nil {
 						a.preview = []byte(metrics.TruncatePreview(text))
 					}
@@ -746,15 +1013,27 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 						a.preview = []byte(metrics.TruncatePreview(refusal))
 					}
 				}
-			case "reasoning":
-				if terminalReasoningPresent(item.Content, item.Summary) {
+			case typ == "reasoning":
+				units := terminalReasoningUnits(item.Content, item.Summary)
+				if units > 0 {
 					a.terminalReasoningSeen = true
+					terminalReasoningCount += units
+				}
+				if item.EncryptedContent != "" {
+					a.terminalReasoningSeen = true
+				}
+			default:
+				if typ != "" {
+					a.responsesOutputSeen = true
 				}
 			}
 		}
 	}
-	if terminalUnits > 0 {
-		a.recordTerminalAnswerUnits(now, terminalUnits)
+	if a.textChunks < int64(terminalUnits) {
+		a.recordTerminalAnswerUnits(now, terminalUnits-int(a.textChunks))
+	}
+	if a.reasoningChunks < int64(terminalReasoningCount) {
+		a.recordTerminalReasoningUnits(now, terminalReasoningCount-int(a.reasoningChunks))
 	}
 	if a.finishReason != "" {
 		return
@@ -786,11 +1065,12 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 }
 
-// recordTerminalAnswerUnits records the content-bearing units of a
-// terminal-only Responses document. The terminal event is the chunk that
-// carried them, so it feeds the same TTFT/chunk-count accounting as the
-// equivalent streamed output_text deltas. units is already the count of
-// non-empty message text parts, so a no-usage record keeps one chunk per unit.
+// recordTerminalAnswerUnits records the content-bearing units of a Responses
+// terminal document that were not already streamed. The terminal event is the
+// chunk that carried them, so it feeds the same TTFT/chunk-count accounting as
+// the equivalent output_text delta. units is the number of non-empty message
+// text parts left after subtracting streamed answer chunks, so a no-usage
+// record keeps one chunk per unit without counting the same text twice.
 func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
 	if units <= 0 {
 		return
@@ -800,13 +1080,46 @@ func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
 	}
 	a.lastTokenAt = now
 	a.chunkCount += int64(units)
-	a.firstAnswerAt = now
+	if a.firstAnswerAt.IsZero() {
+		a.firstAnswerAt = now
+	}
+}
+
+// recordTerminalReasoningUnits records reasoning units delivered only inside a
+// Responses terminal document. It mirrors the streamed reasoning accounting:
+// TTFT and last-token timing, one chunk per unit, and the first-reasoning
+// time. Reasoning units are generation, never tool chunks.
+func (a *Analyzer) recordTerminalReasoningUnits(now time.Time, units int) {
+	if units <= 0 {
+		return
+	}
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
+	}
+	a.lastTokenAt = now
+	a.chunkCount += int64(units)
+	if a.firstReasoningAt.IsZero() {
+		a.firstReasoningAt = now
+	}
+}
+
+// recordTerminalToolUnit records a function call that appeared only in the
+// terminal document. It contributes the same content-bearing tool chunk an
+// announced function-call item would have: TTFT plus a chunk that is not
+// generation, so the no-usage fallback matches the streamed equivalent.
+func (a *Analyzer) recordTerminalToolUnit(now time.Time) {
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
+	}
+	a.lastTokenAt = now
+	a.chunkCount++
+	a.toolChunks++
 }
 
 // terminalTextUnits counts the non-empty answer text units in a message item's
-// terminal content: one per output_text/input_text/text part, or one for a
-// plain string. Refusal parts are answer-shaped but not content and never
-// count.
+// terminal content: one per output_text/input_text/text part, one per
+// output_audio transcript, or one for a plain string. Refusal parts are
+// answer-shaped but not content and never count.
 func terminalTextUnits(raw json.RawMessage) int {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return 0
@@ -822,8 +1135,9 @@ func terminalTextUnits(raw json.RawMessage) int {
 		return 0
 	}
 	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		Transcript string `json:"transcript"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
 		return 0
@@ -835,33 +1149,40 @@ func terminalTextUnits(raw json.RawMessage) int {
 			if part.Text != "" {
 				units++
 			}
+		case "output_audio":
+			if part.Transcript != "" {
+				units++
+			}
 		}
 	}
 	return units
 }
 
-// terminalMessageText returns the first non-empty answer text and refusal text
-// in a message item's terminal content. The value may be a plain string or the
-// documented part array. The two kinds stay separate: only text is answer
-// content, while a refusal is answer-shaped bytes.
-func terminalMessageText(raw json.RawMessage) (text, refusal string) {
+// terminalMessageText returns the first non-empty answer text, refusal text
+// and audio data presence in a message item's terminal content. The value may
+// be a plain string or the documented part array. Text, refusal and audio data
+// stay separate: text (including an output_audio transcript) is answer
+// content, while a refusal and audio data are answer-shaped bytes.
+func terminalMessageText(raw json.RawMessage) (text, refusal string, audioData bool) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", ""
+		return "", "", false
 	}
 	var plain string
 	if json.Unmarshal(raw, &plain) == nil {
-		return plain, ""
+		return plain, "", false
 	}
 	if !metrics.ContentPartsWithinLimit(raw) {
-		return "", ""
+		return "", "", false
 	}
 	var parts []struct {
-		Type    string `json:"type"`
-		Text    string `json:"text"`
-		Refusal string `json:"refusal"`
+		Type       string `json:"type"`
+		Text       string `json:"text"`
+		Refusal    string `json:"refusal"`
+		Transcript string `json:"transcript"`
+		Data       string `json:"data"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
-		return "", ""
+		return "", "", false
 	}
 	for _, part := range parts {
 		switch part.Type {
@@ -869,44 +1190,53 @@ func terminalMessageText(raw json.RawMessage) (text, refusal string) {
 			if part.Text != "" && text == "" {
 				text = part.Text
 			}
+		case "output_audio":
+			if part.Transcript != "" && text == "" {
+				text = part.Transcript
+			}
+			if part.Data != "" {
+				audioData = true
+			}
 		case "refusal":
 			if part.Refusal != "" && refusal == "" {
 				refusal = part.Refusal
 			}
 		}
 	}
-	return text, refusal
+	return text, refusal, audioData
 }
 
-// terminalReasoningPresent reports non-empty summary or reasoning_text content
-// in a terminal reasoning item.
-func terminalReasoningPresent(content json.RawMessage, summary []struct {
+// terminalReasoningUnits counts the non-empty summary and reasoning_text parts
+// of one terminal reasoning item. Each part is one content-bearing unit, the
+// same way one streamed reasoning delta is one chunk.
+func terminalReasoningUnits(content json.RawMessage, summary []struct {
 	Text string `json:"text"`
-}) bool {
+}) int {
+	units := 0
 	for _, part := range summary {
 		if part.Text != "" {
-			return true
+			units++
 		}
 	}
 	if len(content) == 0 {
-		return false
+		return units
 	}
 	if !metrics.ContentPartsWithinLimit(content) {
-		return false
+		return units
 	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(content, &parts) != nil {
-		return false
+		return units
 	}
 	for _, part := range parts {
 		if part.Type == "reasoning_text" && part.Text != "" {
-			return true
+			units++
 		}
 	}
-	return false
+	return units
 }
 
 // ResponsesStream reports whether the feed carried Responses-API typed events.
@@ -955,6 +1285,7 @@ func TerminalLine(line []byte) bool {
 // retained list and its dedupe set are bounded by RetainedToolNamesMax, so a
 // hostile stream cannot grow either; every wire family feeds this owner.
 func (a *Analyzer) retainToolName(name string) {
+	name = metrics.RetainToolName(name)
 	if name == "" || len(a.toolNames) >= metrics.RetainedToolNamesMax {
 		return
 	}
@@ -1014,49 +1345,82 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	// GenTokens fallback yields to FinalizeRecord's usage-based finalization
 	// (the same contract as a present usage object).
 	fallbackOutput := rec.Usage.OutputTokens
+	restoredOutput := false
 	if a.usage != nil {
 		decodeUsage(a.usage, rec, a.UsageKeys)
-		// A present-but-all-zero usage object is the translated wire's
-		// placeholder. Keep the chunk fallback rather than publishing zero.
-		if rec.Usage == (metrics.Usage{}) && fallbackOutput > 0 {
+		// A present usage object may omit output_tokens (a truncated
+		// Anthropic stream reported only message_start) or be the translated
+		// wire's all-zero placeholder. The streamed chunks are then the only
+		// output count; restore both the output and the tool-excluded
+		// generation count so FinalizeRecord cannot inflate either with
+		// tool-argument chunks.
+		if rec.Usage.OutputTokens == 0 && fallbackOutput > 0 {
 			rec.Usage.OutputTokens = fallbackOutput
+			rec.GenTokens = a.chunkCount - a.toolChunks
+			restoredOutput = true
 		}
 		// Provider usage-key paths may live beside the usage object in the
 		// raw chunk root; merge them without clobbering normalized counts.
-		if len(a.usageChunk) > 0 && mergeChunkUsage(a.usageChunk, rec, a.UsageKeys) {
-			rec.GenTokens = 0
-			a.usageSeen = true
+		if len(a.usageChunk) > 0 {
+			if m := mergeChunkUsage(a.usageChunk, rec, a.UsageKeys); m.merged {
+				if m.outputLanded {
+					rec.GenTokens = 0
+				}
+				a.usageSeen = true
+			}
 		}
 	} else if len(a.usageChunk) > 0 {
-		if mergeChunkUsage(a.usageChunk, rec, a.UsageKeys) {
-			rec.GenTokens = 0
+		if m := mergeChunkUsage(a.usageChunk, rec, a.UsageKeys); m.merged {
+			if m.outputLanded {
+				rec.GenTokens = 0
+			}
 			a.usageSeen = true
 		}
 	}
 	if a.anthropicCustomSeen {
-		mergeUsageValues(&rec.Usage, a.anthropicCustomUsage)
+		m := mergeUsageValues(&rec.Usage, a.anthropicCustomUsage)
 		if a.anthropicCustomTotal > 0 {
 			rec.Usage.TotalTokens = a.anthropicCustomTotal
-			rec.GenTokens = 0
+			if m.outputLanded {
+				rec.GenTokens = 0
+			}
 			a.usageSeen = true
 		} else if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
 			rec.Usage = metrics.Usage{}
 			a.usageSeen = false
+			a.usageInvalid = true
 		} else {
 			rec.Usage.TotalTokens = total
-			rec.GenTokens = 0
+			if m.outputLanded {
+				rec.GenTokens = 0
+			}
 			a.usageSeen = true
 		}
 	}
+	// A restored output count is part of the turn's usage, so a provider
+	// total captured before that restoration must not remain below
+	// input+restored output. A custom Anthropic total captured at
+	// message_start is similarly stale once a completed message_delta reports
+	// output, even though that output was not "restored". The custom-total
+	// merge above can overwrite the earlier value, so the consistency guard
+	// runs once after every usage owner. A zero total stays zero (settlement
+	// derives input+output), and a provider total at or above the sum stays
+	// authoritative.
+	if (restoredOutput || a.anthropicCustomTotal > 0) && rec.Usage.TotalTokens > 0 {
+		if total, err := metrics.SumCounts(rec.Usage.InputTokens, rec.Usage.OutputTokens); err != nil {
+			a.usageInvalid = true
+		} else if rec.Usage.TotalTokens < total {
+			rec.Usage.TotalTokens = total
+		}
+	}
 	// Cost is read straight from the provider's response (dynamic), so it
-	// reflects what the provider actually charged for this request. The cost
-	// root is the usage-bearing/terminal CHUNK (the stream's response
-	// document - cost_keys paths are response-root relative, and the cost may
-	// sit in a sibling object like nano-gpt's x_nanogpt_pricing); the bare
-	// usage object is the fallback, so paths written against usage keep
-	// working (a chunk root that lacks the path falls through).
-	if cost, ok := a.extractCost(a.usageChunk); ok {
-		rec.Cost = cost
+	// reflects what the provider actually charged for this request. Every
+	// usage-bearing or terminal chunk is scanned at capture time and the last
+	// cost-bearing value is retained; a later usage-less chunk therefore
+	// cannot erase an earlier charge. The bare usage object is the fallback,
+	// so paths written against usage keep working.
+	if a.costSeen {
+		rec.Cost = a.cost
 	} else if cost, ok := a.extractCost(a.usage); ok {
 		rec.Cost = cost
 	}
@@ -1095,10 +1459,43 @@ func (a *Analyzer) Terminated() bool { return a.terminatorSeen }
 // provider-reported zero.
 func (a *Analyzer) UsageReported() bool { return a.usageSeen }
 
+// UsageInvalid reports whether a source usage document could not be summed or
+// represented. The signal is sticky and independent of UsageReported, so the
+// proxy can invalidate the record even when a later partial document did land.
+func (a *Analyzer) UsageInvalid() bool { return a.usageInvalid }
+
 // HasInBandError reports whether an in-band error payload was observed (a
 // provider failure streamed inside a 200 - no synthetic stream-outcome
 // signaling should stack on top of the provider's own).
 func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
+
+// TailTerminates reports whether one unterminated trailing line (the bytes
+// after the last newline, without their newline) carries a completion terminal
+// marker for the chatlike wires: a Chat [DONE], a non-null Chat finish_reason,
+// or a Responses terminal event. It reads the same frame grammar as Feed and
+// never mutates analyzer state; the relay uses it to decide whether a
+// truncation-class tail is dropped or fed. Standalone in-band error terminals
+// and foreign-wire terminals such as Anthropic message_stop are deliberately
+// excluded: an unterminated in-band error line is dropped rather than
+// delivered, so it is not a delivery terminal. A fed tail is delivered only
+// when it supplies a complete answer or tool call; an empty or reasoning-only
+// completion resolves through the degenerate boundary, which withholds or
+// replaces the terminal bytes.
+func (a *Analyzer) TailTerminates(line []byte) bool {
+	payload, ok := DataPayload(line)
+	if !ok {
+		return false
+	}
+	if isDonePayload(payload) {
+		return a.DoneTerminates()
+	}
+	var keys frameKeys
+	keys.scan(payload)
+	if jsonValueString(keys.finishReason) != "" {
+		return true
+	}
+	return responsesTerminalEvent(keys.responseEventType(payload))
+}
 
 // OutcomeCode classifies the finished stream via the canonical degenerate
 // rules (metrics.ClassifyOutcome - the same predicate every relay path uses).
@@ -1121,7 +1518,22 @@ func (a *Analyzer) OutcomeCode() string {
 	hadAnswer := !a.firstAnswerAt.IsZero() || a.answerishSeen
 	hadReasoning := !a.firstReasoningAt.IsZero() || a.terminalReasoningSeen
 	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
-		hadAnswer, hadReasoning, a.toolCalls, a.chatlike)
+		hadAnswer, hadReasoning, a.responsesOutputSeen, a.toolCalls, a.chatlike)
+}
+
+// ResponsesToolCallItem reports whether one Responses output item is a model
+// tool invocation. These items are tool activity even when they carry no
+// function-call arguments, and they must never be classified as an empty
+// completion. Provider-executed output items (web search, file search, image
+// generation, code interpreter) are output presence instead. The streaming
+// analyzer and the non-stream Responses decoder share this one vocabulary.
+func ResponsesToolCallItem(typ string) bool {
+	switch typ {
+	case "function_call", "custom_tool_call", "local_shell_call", "mcp_call",
+		"shell_call", "apply_patch_call", "computer_call", "tool_search_call":
+		return true
+	}
+	return false
 }
 
 // ChatLike reports whether the analyzed feed follows the Chat/Responses
@@ -1273,35 +1685,48 @@ func decodeUsage(raw json.RawMessage, rec *metrics.Record, usageKeys map[string]
 // object (via usage_keys paths) into the record - WITHOUT replacing the
 // chunk-count fallbacks: only positive values are merged. Returns whether
 // anything merged.
-func mergeChunkUsage(raw []byte, rec *metrics.Record, usageKeys map[string]string) bool {
+func mergeChunkUsage(raw []byte, rec *metrics.Record, usageKeys map[string]string) usageMerge {
 	var obj any
 	if json.Unmarshal(raw, &obj) != nil {
-		return false
+		return usageMerge{}
 	}
 	return mergeUsageValues(&rec.Usage, metrics.ParseUsage(obj, usageKeys))
 }
 
+// usageMerge reports what one merge actually landed. OutputLanded gates the
+// chunk-derived GenTokens fallback: only a provider output count may displace
+// it, so a custom path that reports input alone keeps the tool-excluded chunk
+// count.
+type usageMerge struct {
+	merged       bool
+	outputLanded bool
+}
+
 // mergeUsageValues folds only positive counts into dst. A custom path that
 // resolves to zero never clobbers a standard count or the chunk fallback.
-func mergeUsageValues(dst *metrics.Usage, src metrics.Usage) bool {
-	merged := false
+func mergeUsageValues(dst *metrics.Usage, src metrics.Usage) usageMerge {
+	var out usageMerge
 	for _, f := range []struct {
-		got int64
-		dst *int64
+		got   int64
+		dst   *int64
+		field string
 	}{
-		{src.InputTokens, &dst.InputTokens},
-		{src.OutputTokens, &dst.OutputTokens},
-		{src.TotalTokens, &dst.TotalTokens},
-		{src.CacheReadTokens, &dst.CacheReadTokens},
-		{src.CacheWrite, &dst.CacheWrite},
-		{src.ReasoningTokens, &dst.ReasoningTokens},
+		{src.InputTokens, &dst.InputTokens, "input_tokens"},
+		{src.OutputTokens, &dst.OutputTokens, "output_tokens"},
+		{src.TotalTokens, &dst.TotalTokens, "total_tokens"},
+		{src.CacheReadTokens, &dst.CacheReadTokens, "cache_read_tokens"},
+		{src.CacheWrite, &dst.CacheWrite, "cache_write_tokens"},
+		{src.ReasoningTokens, &dst.ReasoningTokens, "reasoning_tokens"},
 	} {
 		if f.got > 0 {
 			*f.dst = f.got
-			merged = true
+			out.merged = true
+			if f.field == "output_tokens" {
+				out.outputLanded = true
+			}
 		}
 	}
-	return merged
+	return out
 }
 
 // responsesReasoningEvent matches OpenAI/xAI Responses-API reasoning stream
@@ -1316,6 +1741,24 @@ func responsesReasoningEvent(eventType string, keys *frameKeys) bool {
 	return false
 }
 
+// responsesReasoningSummaryPart reports whether a reasoning summary part
+// announcement carries visible text. The part is nested under "part", which
+// the flat key probe does not classify as a reasoning channel, so a
+// summary-part-only stream must still record reasoning presence (and never
+// classify as an empty completion). The payload decode is scoped to this one
+// documented event type.
+func responsesReasoningSummaryPart(eventType string, payload []byte) bool {
+	if eventType != "response.reasoning_summary_part.added" {
+		return false
+	}
+	var ev struct {
+		Part struct {
+			Text string `json:"text"`
+		} `json:"part"`
+	}
+	return json.Unmarshal(payload, &ev) == nil && ev.Part.Text != ""
+}
+
 // responsesContentEvents are the OpenAI/xAI Responses-API stream events that
 // carry user-visible payload in a generic "delta" field rather than a
 // chat-completions "content" key. They exist only when something IS streaming,
@@ -1324,7 +1767,8 @@ func responsesReasoningEvent(eventType string, keys *frameKeys) bool {
 // as a void (its terminal events carry no finish_reason at all).
 func responsesContentEvent(eventType string, keys *frameKeys) bool {
 	switch eventType {
-	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta":
+	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta",
+		"response.audio.transcript.delta":
 		return keys.deltaNonEmpty
 	}
 	return false
@@ -1332,18 +1776,33 @@ func responsesContentEvent(eventType string, keys *frameKeys) bool {
 
 // countResponsesToolCall records one Responses function_call item exactly once
 // per call id. The name is retained in first-seen order like the Chat path.
-func (a *Analyzer) countResponsesToolCall(callID, name string) {
-	if callID != "" {
+// It reports whether this call is new, so the caller can add the one chunk an
+// announced or terminal-only call contributes without double counting.
+func (a *Analyzer) countResponsesToolCall(callID, id, name string) bool {
+	// function_call and custom_tool_call carry call_id; MCPToolCall (and some
+	// provider items) carry only id. Either identity dedupes the streamed
+	// announcement against the terminal document; an item with neither is
+	// still counted but cannot be deduped. An over-long id is keyed by its
+	// digest so the set stays byte-bounded without merging distinct calls.
+	key := callID
+	if key == "" {
+		key = id
+	}
+	if key != "" {
+		key = metrics.RetainToolCallIDKey(key)
 		if a.toolCallIDs == nil {
 			a.toolCallIDs = make(map[string]struct{}, 4)
 		}
-		if _, seen := a.toolCallIDs[callID]; seen {
-			return
+		if _, seen := a.toolCallIDs[key]; seen {
+			return false
 		}
-		a.toolCallIDs[callID] = struct{}{}
+		if len(a.toolCallIDs) < metrics.RetainedToolCallIDsMax {
+			a.toolCallIDs[key] = struct{}{}
+		}
 	}
 	a.toolCalls++
 	a.retainToolName(name)
+	return true
 }
 
 // jsonValueString extracts the string text from a raw JSON value (the probe's

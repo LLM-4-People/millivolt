@@ -3,6 +3,7 @@ package format
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -50,42 +52,57 @@ const ResponsesStreamFrameMaxBytes = WireJSONEscapeExpansion*ResponsesStreamReta
 
 type responsesStreamEvent struct {
 	Type           string          `json:"type"`
-	SequenceNumber int64           `json:"sequence_number"`
+	SequenceNumber jsonnum.Int64   `json:"sequence_number"`
 	Response       json.RawMessage `json:"response"`
 	Item           json.RawMessage `json:"item"`
 	Part           json.RawMessage `json:"part"`
-	OutputIndex    int             `json:"output_index"`
-	ContentIndex   int             `json:"content_index"`
-	SummaryIndex   int             `json:"summary_index"`
+	OutputIndex    jsonnum.Int64   `json:"output_index"`
+	ContentIndex   jsonnum.Int64   `json:"content_index"`
+	SummaryIndex   jsonnum.Int64   `json:"summary_index"`
 	ItemID         string          `json:"item_id"`
 	Delta          string          `json:"delta"`
 	Text           string          `json:"text"`
 	Refusal        string          `json:"refusal"`
 	Arguments      string          `json:"arguments"`
-	Code           string          `json:"code"`
-	Message        string          `json:"message"`
-	Param          string          `json:"param"`
+	Code           json.RawMessage `json:"code"`
+	Message        json.RawMessage `json:"message"`
+	// Param is a provider hint with no canonical equivalent. It stays raw so
+	// a wrong-typed value cannot abort the terminal before its valid code and
+	// message siblings are classified.
+	Param json.RawMessage `json:"param"`
 }
 
 // ResponsesStreamDecoder converts Responses SSE events into canonical events.
+// toolArgumentCoverage is the bounded prefix of one tool call's emitted
+// argument bytes. partial means more bytes reached the target than this
+// decoder retains, so a later full value cannot be reconciled safely.
+type toolArgumentCoverage struct {
+	emitted strings.Builder
+	partial bool
+}
+
 type ResponsesStreamDecoder struct {
 	r        *sseReader
 	q        eventQueue
 	started  bool
 	terminal bool
 
-	// observe receives every raw source data payload before it is parsed.
-	// The translation facade uses it for source-only accounting (cost keys
-	// the target wire cannot carry); decoding itself never depends on it.
-	observe func([]byte)
+	// observe receives every raw source event name and data payload before
+	// it is parsed. The translation facade uses it for source-only accounting
+	// (cost keys the target wire cannot carry); decoding itself never depends
+	// on it.
+	observe func(string, []byte)
 
 	id      string
 	model   string
 	created int64
 
 	nextIndex int
-	itemBlock map[int]int
-	partBlock map[[2]int]int
+	// usageReported distinguishes a source that reported usage (even all
+	// zeros) from one that never did. Only a reported usage is forwarded.
+	usageReported bool
+	itemBlock     map[int]int
+	partBlock     map[[2]int]int
 	// initialArgs holds output_item.added item.arguments that have not been
 	// emitted yet. A partial prefix must not reach the target before the
 	// first delta or the full done/terminal value decides the continuation.
@@ -96,9 +113,48 @@ type ResponsesStreamDecoder struct {
 	// can be open at once.
 	initialArgsBytes int
 	openToolItems    int
-	// argsEmitted marks that at least one argument payload was emitted for an
-	// item identity, so a done/terminal full value must not repeat it.
-	argsEmitted map[string]bool
+	// argsEmitted retains the argument bytes already emitted for one item
+	// identity so a later authoritative done/terminal value can append only a
+	// strict extension. A provider that emits more than the bounded coverage
+	// keeps its streamed bytes and stops reconciling; the aggregate stays
+	// bounded by toolInitialBytesMax.
+	argsEmitted      map[string]*toolArgumentCoverage
+	argsEmittedBytes int
+	// argumentEvidence records that the source supplied argument bytes for a
+	// call. An incomplete or cancelled terminal needs it to distinguish an
+	// explicit empty object from a call that never carried arguments.
+	argumentEvidence map[string]bool
+	// openToolKeys names every announced function call whose target block may
+	// still be open, including a call that never carried argument bytes.
+	openToolKeys map[string]bool
+	// toolIDs is a lifetime set of committed function-call ids. Two target
+	// blocks with one id make the client's tool-result correlation ambiguous;
+	// synthesis never shadows a source id silently.
+	toolIDs map[string]struct{}
+	// announcedToolKeys names every announced function call for the whole
+	// stream, including one whose done event already closed its block. A
+	// terminal document can repeat a closed call; that entry must not be
+	// reassigned to a different open call by name or position.
+	announcedToolKeys map[string]bool
+	// toolAliases maps an alternate identity spelling of an announced call to
+	// its canonical key. A terminal entry can carry only the item id after the
+	// announcement used the call id, or the reverse. Aliases live for the
+	// whole stream: the terminal document still repeats a call after its done
+	// event closed the block.
+	toolAliases map[string]string
+	// toolNames maps an announced call key to its function name for
+	// identity-free terminal matching. Names stay available after the call
+	// closes so a terminal repeat can be recognized.
+	toolNames map[string]string
+	// toolArgsHash records the canonical fingerprint of the emitted argument
+	// value of an id-less announced call when it closes. A reordered terminal
+	// repeat has no identity, so the proxy compares the function name and this
+	// hash without retaining the argument bytes for the whole stream.
+	toolArgsHash map[string][sha256.Size]byte
+	// closedIdlessCalls counts closed id-less calls by function name and
+	// emitted argument hash. It is the constant-time lookup for a terminal
+	// repeat that no longer occupies its announcement position.
+	closedIdlessCalls map[string]map[[sha256.Size]byte]int
 	// Announcement identity. A provider's terminal output array is not
 	// required to preserve output_index positions, so dedupe and terminal
 	// completion use stable identities (call id, item id, content index) and
@@ -109,8 +165,13 @@ type ResponsesStreamDecoder struct {
 	itemBlockByKey   map[string]int
 	partBlockByKey   map[string]int
 	keyByOutput      map[int]string
-	keyByPart        map[[2]int]string
-	itemIDByOutput   map[int]string
+	// reasoningKeys names the announced key of every reasoning item.
+	// itemBlock and keyByOutput are kind-agnostic position caches, so a
+	// reasoning event must consult this set before routing its bytes onto an
+	// announced tool or message block.
+	reasoningKeys  map[string]bool
+	keyByPart      map[[2]int]string
+	itemIDByOutput map[int]string
 	// partSeed holds an announced content part whose start payload was empty.
 	// Its target block is deferred until the first delta, done event or
 	// terminal document, so a later announced part does not force an empty
@@ -122,39 +183,77 @@ type ResponsesStreamDecoder struct {
 	// (content part or reasoning summary part). The terminal document is
 	// authoritative, so a longer value contributes only its missing suffix;
 	// an identical or shorter value is never re-emitted. Keyed by the part
-	// identity (and summary index), never by wire position.
-	emittedText map[string]string
+	// identity (and summary index), never by wire position. A builder makes
+	// incremental delta appends amortized instead of copying the whole channel
+	// on every token; retainedText bounds the aggregate.
+	emittedText  map[string]*strings.Builder
+	retainedText int
+	// partOwner maps a content or summary part key to the logical item it
+	// belongs to, and partKind maps a content part key to its target channel.
+	// Terminal reconciliation compares the whole emitted channel with the
+	// whole terminal channel, so a provider that merges or splits parts cannot
+	// duplicate streamed bytes.
+	partOwner map[string]string
+	partKind  map[string]partChannel
+	// ownerParts indexes the parts that have emitted bytes by their logical
+	// item owner, so terminal reconciliation scans only the item's own parts
+	// instead of every part in the stream.
+	ownerParts map[string]map[string]struct{}
+	// warnings records streaming approximations that cannot be represented on
+	// the committed target wire.
+	warnings ir.Warnings
 	// terminalPending holds authoritative done-event values whose target block
 	// already ended or was never opened. They are emitted after every streamed
-	// block closes (closeAll), so target lifecycles never nest.
-	terminalPending []terminalEmission
-	open            map[int]bool
+	// block closes (closeAll), so target lifecycles never nest. Entries are
+	// keyed by part identity and coalesced: repeated unannounced deltas for one
+	// part append into the existing emission instead of growing one entry per
+	// delta. terminalPendingByKey records the first-seen position for each key.
+	terminalPending      []terminalEmission
+	terminalPendingByKey map[string]int
+	open                 map[int]bool
 
 	usage       ir.Usage
 	finish      ir.FinishReason
 	sawToolCall bool
+	// phaseSeen records that a streamed or terminal item carried the
+	// Responses output phase hint. The target wire has no equivalent, so the
+	// terminal reports it once.
+	phaseSeen bool
 }
 
 // NewResponsesStreamDecoder builds a decoder over one upstream body.
 func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 	return &ResponsesStreamDecoder{
-		r:                newSSEReader(r),
-		itemBlock:        map[int]int{},
-		partBlock:        map[[2]int]int{},
-		initialArgs:      map[string]string{},
-		argsEmitted:      map[string]bool{},
-		announcedOutputs: map[int]bool{},
-		announcedItems:   map[string]bool{},
-		announcedParts:   map[string]bool{},
-		itemBlockByKey:   map[string]int{},
-		partBlockByKey:   map[string]int{},
-		keyByOutput:      map[int]string{},
-		keyByPart:        map[[2]int]string{},
-		itemIDByOutput:   map[int]string{},
-		partSeed:         map[string]ir.Block{},
-		partPosition:     map[string][2]int{},
-		emittedText:      map[string]string{},
-		open:             map[int]bool{},
+		r:                    newSSEReader(r),
+		itemBlock:            map[int]int{},
+		partBlock:            map[[2]int]int{},
+		initialArgs:          map[string]string{},
+		argsEmitted:          map[string]*toolArgumentCoverage{},
+		argumentEvidence:     map[string]bool{},
+		openToolKeys:         map[string]bool{},
+		toolIDs:              map[string]struct{}{},
+		announcedToolKeys:    map[string]bool{},
+		toolAliases:          map[string]string{},
+		toolNames:            map[string]string{},
+		toolArgsHash:         map[string][sha256.Size]byte{},
+		closedIdlessCalls:    map[string]map[[sha256.Size]byte]int{},
+		announcedOutputs:     map[int]bool{},
+		announcedItems:       map[string]bool{},
+		announcedParts:       map[string]bool{},
+		itemBlockByKey:       map[string]int{},
+		partBlockByKey:       map[string]int{},
+		keyByOutput:          map[int]string{},
+		reasoningKeys:        map[string]bool{},
+		keyByPart:            map[[2]int]string{},
+		terminalPendingByKey: map[string]int{},
+		itemIDByOutput:       map[int]string{},
+		partSeed:             map[string]ir.Block{},
+		partPosition:         map[string][2]int{},
+		emittedText:          map[string]*strings.Builder{},
+		partOwner:            map[string]string{},
+		partKind:             map[string]partChannel{},
+		ownerParts:           map[string]map[string]struct{}{},
+		open:                 map[int]bool{},
 	}
 }
 
@@ -181,16 +280,40 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 		if d.observe != nil {
-			d.observe(raw.Data)
+			d.observe(raw.Name, raw.Data)
 		}
 		var ev responsesStreamEvent
 		if err := json.Unmarshal(raw.Data, &ev); err != nil {
+			return nil, err
+		}
+		// A terminal document can omit its top-level type; the SSE event name
+		// is then the only classifier. Resolve it before the switch so a
+		// type-less response.completed is terminal rather than debris.
+		if ev.Type == "" {
+			ev.Type = raw.Name
+		}
+		outputIndex, err := nonNegativeStreamIndex("output_index", ev.OutputIndex)
+		if err != nil {
+			return nil, err
+		}
+		contentIndex, err := nonNegativeStreamIndex("content_index", ev.ContentIndex)
+		if err != nil {
+			return nil, err
+		}
+		summaryIndex, err := nonNegativeStreamIndex("summary_index", ev.SummaryIndex)
+		if err != nil {
 			return nil, err
 		}
 		switch ev.Type {
 		case "response.created", "response.in_progress":
 			if d.started {
 				continue
+			}
+			// The created payload can carry a full output array even though
+			// this branch only needs identity. Preflight it with the same
+			// bounds owner as the non-stream decoder before the typed decode.
+			if err := checkResponsesResponseBounds(ev.Response); err != nil {
+				return nil, err
 			}
 			var resp responsesWireResponse
 			if err := json.Unmarshal(ev.Response, &resp); err != nil {
@@ -202,7 +325,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := checkNativeIdentity("model", resp.Model); err != nil {
 				return nil, err
 			}
-			d.id, d.model, d.created = resp.ID, resp.Model, resp.CreatedAt
+			d.id, d.model, d.created = resp.ID, resp.Model, int64(resp.CreatedAt)
 			if d.created == 0 {
 				d.created = time.Now().Unix()
 			}
@@ -212,18 +335,23 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.usage = usage
+				d.usageReported = true
 			}
 			d.started = true
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
 				ID: d.id, Model: d.model, Created: d.created, Usage: u,
+				Metadata: resp.Metadata.values, ServiceTier: resp.ServiceTier,
 			}})
 		case "response.output_item.added":
 			var item responsesWireItem
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
 			}
-			admitted, err := d.announceOutput(ev.OutputIndex)
+			if item.Phase != "" {
+				d.phaseSeen = true
+			}
+			admitted, err := d.announceOutput(outputIndex)
 			if err != nil {
 				return nil, err
 			}
@@ -234,13 +362,17 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			switch item.Type {
 			case "function_call":
-				if err := checkNativeIdentity("tool id", item.CallID); err != nil {
+				toolID := responsesFunctionCallID(item.CallID, item.ID, outputIndex)
+				if err := checkNativeIdentity("tool id", toolID); err != nil {
 					return nil, err
 				}
 				if err := checkNativeIdentity("tool name", item.Name); err != nil {
 					return nil, err
 				}
-				key := functionCallKey(item.CallID, item.ID, ev.OutputIndex)
+				if err := checkToolCallName(item.Name); err != nil {
+					return nil, err
+				}
+				key := functionCallKey(item.CallID, item.ID, outputIndex)
 				admitted, err := d.announceItem(key)
 				if err != nil {
 					return nil, err
@@ -248,21 +380,38 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if !admitted {
 					continue
 				}
+				if err := reserveToolID(d.toolIDs, toolID); err != nil {
+					return nil, err
+				}
 				d.sawToolCall = true
+				d.openToolKeys[key] = true
+				d.announcedToolKeys[key] = true
+				d.toolNames[key] = item.Name
 				d.openToolItems++
 				if d.openToolItems > toolBlocksMax {
 					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", toolBlocksMax)
 				}
 				idx := d.newBlock()
-				d.itemBlock[ev.OutputIndex] = idx
+				d.itemBlock[outputIndex] = idx
 				d.itemBlockByKey[key] = idx
-				d.keyByOutput[ev.OutputIndex] = key
-				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				d.keyByOutput[outputIndex] = key
+				d.itemIDByOutput[outputIndex] = item.ID
+				if item.CallID != "" && item.ID != "" {
+					alias := functionCallKey("", item.ID, outputIndex)
+					if _, exists := d.toolAliases[alias]; !exists {
+						if _, exists := d.itemBlockByKey[alias]; !exists {
+							d.toolAliases[alias] = key
+						}
+					}
+				}
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
-						ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
+						ID: toolID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 					},
 				}})
+				if !toolArgumentsMissing(item.Arguments) {
+					d.argumentEvidence[key] = true
+				}
 				// output_item.added may carry a prefix of the arguments, or the
 				// whole object. Buffer it: a partial prefix emitted alone would
 				// be invalid JSON when no delta follows. The first delta or the
@@ -278,7 +427,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
 					return nil, err
 				}
-				key := reasoningItemKey(item.ID, ev.OutputIndex)
+				key := reasoningItemKey(item.ID, outputIndex)
 				admitted, err := d.announceItem(key)
 				if err != nil {
 					return nil, err
@@ -287,10 +436,20 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 				idx := d.newBlock()
-				d.itemBlock[ev.OutputIndex] = idx
+				d.itemBlock[outputIndex] = idx
 				d.itemBlockByKey[key] = idx
-				d.keyByOutput[ev.OutputIndex] = key
-				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				d.keyByOutput[outputIndex] = key
+				d.reasoningKeys[key] = true
+				d.itemIDByOutput[outputIndex] = item.ID
+				// An announced reasoning item opens its target block now so
+				// summary/content deltas have a stable index. A provider that
+				// announces an empty item, closes it, then delivers every
+				// summary part only in the terminal document leaves one empty
+				// Anthropic thinking block. Suppressing it would require
+				// deferring the start or buffering a start already sent, which
+				// risks ordering and signature loss for a cosmetic residual;
+				// TestResponsesEmptyAnnouncedReasoningPinsThinkingBlock pins
+				// the accepted behavior.
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{
 						ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
@@ -303,21 +462,36 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					if part.Text == "" {
 						continue
 					}
+					partKey := summaryPartKey(key, summaryIndex)
+					if _, err := d.announcePart(partKey); err != nil {
+						return nil, err
+					}
+					d.setPartOwner(partKey, key)
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
-					d.emittedText[summaryPartKey(key, summaryIndex)] = part.Text
+					if err := d.setEmittedText(partKey, part.Text); err != nil {
+						return nil, err
+					}
 				}
 			case "message":
 				// Content parts arrive in response.content_part.added. The
 				// item id is still announced so a terminal document that
 				// repeats the item at another array position is recognized.
-				if _, err := d.announceItem(messageItemKey(item.ID, ev.OutputIndex)); err != nil {
+				if err := checkNativeIdentity("message id", item.ID); err != nil {
 					return nil, err
 				}
-				d.itemIDByOutput[ev.OutputIndex] = item.ID
+				if _, err := d.announceItem(messageItemKey(item.ID, outputIndex)); err != nil {
+					return nil, err
+				}
+				d.itemIDByOutput[outputIndex] = item.ID
 			default:
 				// A provider-specific item has no cross-protocol equivalent.
 				// Streaming cannot report the loss (the status line is already
-				// committed), so it is dropped without a record.
+				// committed), so it is dropped without a record. It is still a
+				// model tool invocation: the shared vocabulary keeps the turn's
+				// finish and settlement aligned with the non-stream decoder.
+				if sse.ResponsesToolCallItem(item.Type) {
+					d.sawToolCall = true
+				}
 			}
 		case "response.content_part.added":
 			var part struct {
@@ -328,26 +502,25 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Part, &part); err != nil {
 				return nil, err
 			}
-			var block ir.Block
-			switch part.Type {
-			case "output_text", "input_text", "text":
-				block = ir.Block{Type: ir.BlockText, Text: part.Text}
-			case "refusal":
-				block = ir.Block{Type: ir.BlockRefusal, Refusal: part.Refusal}
-			case "reasoning_text":
-				block = ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: part.Text, Provider: ir.Responses}}
-			default:
+			block, supported := responsesPartBlock(part.Type, part.Text, part.Refusal)
+			if !supported {
 				// Allocate the block only after the part type is accepted: an
 				// unsupported part must not consume an index or leave an open
 				// block whose stop would reach the client without a start.
 				// Streaming cannot report the loss, so it is dropped silently.
 				continue
 			}
+			if err := checkNativeIdentity("item id", ev.ItemID); err != nil {
+				return nil, err
+			}
 			itemID := ev.ItemID
 			if itemID == "" {
-				itemID = d.itemIDByOutput[ev.OutputIndex]
+				itemID = d.itemIDByOutput[outputIndex]
 			}
-			key := contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			if err := checkNativeIdentity("item id", itemID); err != nil {
+				return nil, err
+			}
+			key := contentPartKey(itemID, outputIndex, contentIndex)
 			admitted, err := d.announcePart(key)
 			if err != nil {
 				return nil, err
@@ -355,10 +528,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !admitted {
 				continue
 			}
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			pos := [2]int{outputIndex, contentIndex}
 			d.keyByPart[pos] = key
 			d.partPosition[key] = pos
-			d.itemIDByOutput[ev.OutputIndex] = itemID
+			d.itemIDByOutput[outputIndex] = itemID
+			d.setPartOwner(key, streamItemKey(itemID, outputIndex))
+			d.partKind[key] = partChannelForBlock(block.Type)
 			start := ""
 			switch block.Type {
 			case ir.BlockText:
@@ -384,30 +559,38 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// A non-empty start payload is already on the target wire as part
 			// of the block start. Record it as emitted so a delta or terminal
 			// document that repeats the prefix contributes only new bytes.
-			d.emittedText[key] = start
+			if err := d.setEmittedText(key, start); err != nil {
+				return nil, err
+			}
 		case "response.output_text.delta", "response.refusal.delta":
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
+			// An empty delta carries no bytes and must not materialize a
+			// deferred part: doing so would fix its target position before any
+			// content exists, forcing an earlier terminal-only part behind it.
+			if ev.Delta == "" {
+				continue
+			}
+			pos := [2]int{outputIndex, contentIndex}
 			key := d.keyByPart[pos]
+			if key == "" {
+				continue
+			}
 			idx, ok := d.startPartBlock(key)
 			if !ok {
 				continue
 			}
-			if ev.Delta != "" && key != "" {
-				emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
-				d.emittedText[key] = coverage
-				if emit != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
-				}
+			if err := d.appendEmittedText(key, ev.Delta); err != nil {
+				return nil, err
 			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: ev.Delta}})
 		case "response.output_text.done", "response.refusal.done":
 			// The done payload is the authoritative full part value. Emit it
 			// only when no delta carried bytes; repeating streamed text would
 			// duplicate the answer.
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			itemID := d.itemIDByOutput[ev.OutputIndex]
+			pos := [2]int{outputIndex, contentIndex}
+			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
 			if !ok {
-				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+				key = contentPartKey(itemID, outputIndex, contentIndex)
 			}
 			text := ev.Text
 			block := ir.Block{Type: ir.BlockText}
@@ -415,7 +598,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				text = ev.Refusal
 				block = ir.Block{Type: ir.BlockRefusal}
 			}
-			emit := pendingValueSuffix(d.emittedText[key], text)
+			emit := pendingValueSuffix(d.emittedValue(key), text)
 			if emit == "" {
 				continue
 			}
@@ -428,34 +611,52 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 			}
+			if _, owned := d.partOwner[key]; !owned {
+				d.setPartOwner(key, streamItemKey(itemID, outputIndex))
+			}
+			if _, kind := d.partKind[key]; !kind {
+				d.partKind[key] = partChannelForBlock(block.Type)
+			}
 			if idx, ok := d.startPartBlock(key); ok {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
-			} else {
-				d.terminalPending = append(d.terminalPending, terminalEmission{
-					block: block,
-					delta: &ir.Delta{Text: emit},
-				})
+			} else if err := d.queueTerminal(key, block, &ir.Delta{Text: emit}); err != nil {
+				return nil, err
 			}
-			d.emittedText[key] = text
+			if err := d.setEmittedText(key, text); err != nil {
+				return nil, err
+			}
 		case "response.function_call_arguments.delta":
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if !ok {
 				continue
 			}
-			d.toolArgumentsDelta(d.keyByOutput[ev.OutputIndex], idx, ev.Delta)
+			key := d.keyByOutput[outputIndex]
+			if !d.announcedToolKeys[key] || !d.openToolKeys[key] {
+				// itemBlock is an index cache: a reasoning or message
+				// announcement also sets it. Argument bytes belong to a tool
+				// block that is still open; anything else is a stray event.
+				continue
+			}
+			d.toolArgumentsDelta(key, idx, ev.Delta)
 		case "response.reasoning_summary_text.delta":
-			idx, ok := d.itemBlock[ev.OutputIndex]
+			idx, ok := d.itemBlock[outputIndex]
 			if !ok {
 				continue
 			}
-			key := d.keyByOutput[ev.OutputIndex]
+			key := d.keyByOutput[outputIndex]
+			if !d.reasoningKeys[key] {
+				continue
+			}
 			if ev.Delta != "" && key != "" {
-				partKey := summaryPartKey(key, ev.SummaryIndex)
-				emit, coverage := pendingDeltaSuffix(d.emittedText[partKey], ev.Delta)
-				d.emittedText[partKey] = coverage
-				if emit != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+				partKey := summaryPartKey(key, summaryIndex)
+				if _, err := d.announcePart(partKey); err != nil {
+					return nil, err
 				}
+				d.setPartOwner(partKey, key)
+				if err := d.appendEmittedText(partKey, ev.Delta); err != nil {
+					return nil, err
+				}
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
 			}
 		case "response.reasoning_summary_part.added":
 			// Some providers put the summary text in the part-start payload
@@ -466,62 +667,66 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Part, &part); err != nil {
 				return nil, err
 			}
-			key := d.keyByOutput[ev.OutputIndex]
-			idx, ok := d.itemBlock[ev.OutputIndex]
-			if part.Text == "" || !ok || key == "" {
+			key := d.keyByOutput[outputIndex]
+			idx, ok := d.itemBlock[outputIndex]
+			if part.Text == "" || !ok || !d.reasoningKeys[key] {
 				continue
 			}
-			partKey := summaryPartKey(key, ev.SummaryIndex)
-			emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
+			partKey := summaryPartKey(key, summaryIndex)
+			if _, err := d.announcePart(partKey); err != nil {
+				return nil, err
+			}
+			d.setPartOwner(partKey, key)
+			emit := pendingValueSuffix(d.emittedValue(partKey), part.Text)
 			if emit == "" {
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			d.emittedText[partKey] = part.Text
+			if err := d.setEmittedText(partKey, part.Text); err != nil {
+				return nil, err
+			}
 		case "response.reasoning_summary_text.done":
 			// The done payload is authoritative per summary part. Emit only
 			// the bytes no delta or start payload already covered.
-			key := d.keyByOutput[ev.OutputIndex]
-			idx, ok := d.itemBlock[ev.OutputIndex]
-			if ev.Text == "" || !ok || key == "" {
+			key := d.keyByOutput[outputIndex]
+			idx, ok := d.itemBlock[outputIndex]
+			if ev.Text == "" || !ok || !d.reasoningKeys[key] {
 				continue
 			}
-			partKey := summaryPartKey(key, ev.SummaryIndex)
-			emit := pendingValueSuffix(d.emittedText[partKey], ev.Text)
+			partKey := summaryPartKey(key, summaryIndex)
+			if _, err := d.announcePart(partKey); err != nil {
+				return nil, err
+			}
+			d.setPartOwner(partKey, key)
+			emit := pendingValueSuffix(d.emittedValue(partKey), ev.Text)
 			if emit == "" {
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			d.emittedText[partKey] = ev.Text
+			if err := d.setEmittedText(partKey, ev.Text); err != nil {
+				return nil, err
+			}
 		case "response.reasoning_text.delta":
 			// reasoning_text is a content part of the reasoning item, so its
 			// deltas belong to the part block the added event opened (C12).
 			// reasoning_summary_text has no content part and stays on the item
-			// block.
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			key := d.keyByPart[pos]
-			idx, ok := d.startPartBlock(key)
-			if !ok {
+			// block. An empty delta must not materialize a deferred part. A
+			// provider is not required to announce the part first: derive the
+			// identity exactly like the done fallback and emit on the open
+			// reasoning item block when the part block was never seeded.
+			if ev.Delta == "" {
 				continue
 			}
-			if ev.Delta != "" && key != "" {
-				emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
-				d.emittedText[key] = coverage
-				if emit != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-				}
+			if key := d.keyByOutput[outputIndex]; key != "" && !d.reasoningKeys[key] {
+				// The output position is announced as a tool or message item;
+				// its block is not a reasoning channel.
+				continue
 			}
-		case "response.reasoning_text.done":
-			// The done payload is authoritative. Emit it only when no delta
-			// carried the part's bytes. A provider may omit the part-start
-			// event entirely, so the reasoning item block is the fallback
-			// channel; the part identity is still recorded so the terminal
-			// document cannot repeat the value.
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			itemID := d.itemIDByOutput[ev.OutputIndex]
-			key, ok := d.keyByPart[pos]
-			if !ok {
-				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
+			pos := [2]int{outputIndex, contentIndex}
+			itemID := d.itemIDByOutput[outputIndex]
+			key := d.keyByPart[pos]
+			if key == "" {
+				key = contentPartKey(itemID, outputIndex, contentIndex)
 			}
 			if _, announced := d.announcedParts[key]; !announced {
 				admitted, err := d.announcePart(key)
@@ -532,67 +737,221 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 			}
-			emit := pendingValueSuffix(d.emittedText[key], ev.Text)
+			if _, owned := d.partOwner[key]; !owned {
+				d.setPartOwner(key, streamItemKey(itemID, outputIndex))
+			}
+			if _, kind := d.partKind[key]; !kind {
+				d.partKind[key] = partChannelReasoning
+			}
+			// The wire delta is incremental, exactly like output_text.delta:
+			// append it verbatim. Only the done payload is cumulative, and its
+			// own handler reconciles against the recorded coverage.
+			delta := ev.Delta
+			if err := d.appendEmittedText(key, delta); err != nil {
+				return nil, err
+			}
+			if idx, ok := d.startPartBlock(key); ok {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
+			} else if idx, ok := d.itemBlock[outputIndex]; ok && d.open[idx] {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: delta}})
+			} else if err := d.queueTerminal(key, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}, &ir.Delta{Reasoning: delta}); err != nil {
+				return nil, err
+			}
+		case "response.reasoning_text.done":
+			// The done payload is authoritative. Emit it only when no delta
+			// carried the part's bytes. A provider may omit the part-start
+			// event entirely, so the reasoning item block is the fallback
+			// channel; the part identity is still recorded so the terminal
+			// document cannot repeat the value.
+			if key := d.keyByOutput[outputIndex]; key != "" {
+				if !d.reasoningKeys[key] {
+					// The output position is announced as a tool item; its
+					// block is not a reasoning channel.
+					continue
+				}
+			} else if d.announcedItems[messageItemKey(d.itemIDByOutput[outputIndex], outputIndex)] {
+				// A message item owns this output position but has no
+				// keyByOutput entry. Do not turn its position into a fallback
+				// reasoning part; only an unannounced position may use the
+				// fallback below.
+				continue
+			}
+			pos := [2]int{outputIndex, contentIndex}
+			itemID := d.itemIDByOutput[outputIndex]
+			key, ok := d.keyByPart[pos]
+			if !ok {
+				key = contentPartKey(itemID, outputIndex, contentIndex)
+			}
+			if _, announced := d.announcedParts[key]; !announced {
+				admitted, err := d.announcePart(key)
+				if err != nil {
+					return nil, err
+				}
+				if !admitted {
+					continue
+				}
+			}
+			if _, owned := d.partOwner[key]; !owned {
+				d.setPartOwner(key, streamItemKey(itemID, outputIndex))
+			}
+			if _, kind := d.partKind[key]; !kind {
+				d.partKind[key] = partChannelReasoning
+			}
+			emit := pendingValueSuffix(d.emittedValue(key), ev.Text)
 			if emit == "" {
 				continue
 			}
 			if idx, ok := d.startPartBlock(key); ok {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
+			} else if idx, ok := d.itemBlock[outputIndex]; ok && d.open[idx] {
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			} else {
-				d.terminalPending = append(d.terminalPending, terminalEmission{
-					block: ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}},
-					delta: &ir.Delta{Reasoning: emit},
-				})
+			} else if err := d.queueTerminal(key, ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}, &ir.Delta{Reasoning: emit}); err != nil {
+				return nil, err
 			}
-			d.emittedText[key] = ev.Text
+			if err := d.setEmittedText(key, ev.Text); err != nil {
+				return nil, err
+			}
 		case "response.content_part.done":
-			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
-			key := d.keyByPart[pos]
-			idx, ok := d.startPartBlock(key)
-			if !ok {
-				continue
+			pos := [2]int{outputIndex, contentIndex}
+			if err := checkNativeIdentity("item id", ev.ItemID); err != nil {
+				return nil, err
 			}
-			delete(d.partBlock, pos)
-			delete(d.open, idx)
-			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
+			itemID := ev.ItemID
+			if itemID == "" {
+				itemID = d.itemIDByOutput[outputIndex]
+			}
+			key := d.keyByPart[pos]
+			if key == "" {
+				key = contentPartKey(itemID, outputIndex, contentIndex)
+			}
+			var part struct {
+				Type    string `json:"type"`
+				Text    string `json:"text"`
+				Refusal string `json:"refusal"`
+			}
+			trimmed := bytes.TrimSpace(ev.Part)
+			hasPart := len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+			if hasPart {
+				if err := json.Unmarshal(trimmed, &part); err != nil {
+					return nil, err
+				}
+			}
+			// Map the done payload through the same owner as the added
+			// event. A reasoning_text part must stay on the reasoning
+			// channel: once emitted as text it becomes visible answer
+			// content and, on Anthropic, a text delta inside a thinking
+			// block. A type-less done payload reuses the channel the added
+			// event announced.
+			var block ir.Block
+			var supported bool
+			if hasPart && part.Type != "" {
+				block, supported = responsesPartBlock(part.Type, part.Text, part.Refusal)
+			} else {
+				typ := "text"
+				switch d.partKind[key] {
+				case partChannelRefusal:
+					typ = "refusal"
+				case partChannelReasoning:
+					typ = "reasoning_text"
+				}
+				block, supported = responsesPartBlock(typ, part.Text, part.Refusal)
+			}
+			value := ""
+			if supported {
+				value = responsesPartValue(block)
+			}
+			if value != "" {
+				if _, announced := d.announcedParts[key]; !announced {
+					admitted, err := d.announcePart(key)
+					if err != nil {
+						return nil, err
+					}
+					if !admitted {
+						continue
+					}
+				}
+				if _, owned := d.partOwner[key]; !owned {
+					d.setPartOwner(key, streamItemKey(itemID, outputIndex))
+				}
+				if _, kind := d.partKind[key]; !kind {
+					d.partKind[key] = partChannelForBlock(block.Type)
+				}
+				emit := pendingValueSuffix(d.emittedValue(key), value)
+				if emit != "" {
+					// A queued block is a type-only start template: the
+					// value travels in the delta, so a block that also
+					// carried it would emit the same text twice.
+					d.appendContentValue(channelPart{
+						key: key, value: emit, channel: partChannelForBlock(block.Type),
+						block: responsesPartBlockStart(block),
+					}, &d.terminalPending)
+					if err := d.setEmittedText(key, value); err != nil {
+						return nil, err
+					}
+				}
+			}
+			// A deferred part whose payload is absent or empty never starts a
+			// target block; a started part is closed here because done ends it.
+			delete(d.partSeed, key)
+			if idx, started := d.partBlockByKey[key]; started && d.open[idx] {
+				delete(d.partBlock, pos)
+				delete(d.open, idx)
+				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
+			}
 		case "response.output_item.done":
 			var item responsesWireItem
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
 			}
-			if item.Type == "function_call" {
-				idx, ok := d.itemBlock[ev.OutputIndex]
+			if item.Phase != "" {
+				d.phaseSeen = true
+			}
+			typ := item.Type
+			if typ == "" && item.Role != "" {
+				typ = "message"
+			}
+			if typ == "function_call" {
+				idx, ok := d.itemBlock[outputIndex]
 				if !ok {
 					continue
 				}
-				key := d.keyByOutput[ev.OutputIndex]
-				d.flushToolArguments(key, idx, item.Arguments)
-				delete(d.itemBlock, ev.OutputIndex)
+				key := d.keyByOutput[outputIndex]
+				if err := d.flushToolArguments(key, idx, item.Arguments, responsesToolArgumentsComplete); err != nil {
+					return nil, err
+				}
+				delete(d.itemBlock, outputIndex)
 				delete(d.open, idx)
 				d.clearToolState(key)
 				d.openToolItems--
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
-			} else if item.Type == "reasoning" {
-				idx, ok := d.itemBlock[ev.OutputIndex]
+			} else if typ == "reasoning" {
+				idx, ok := d.itemBlock[outputIndex]
 				if !ok {
 					continue
 				}
-				delete(d.itemBlock, ev.OutputIndex)
+				if err := d.applyReasoningContent(item, d.keyByOutput[outputIndex], outputIndex, &d.terminalPending); err != nil {
+					return nil, err
+				}
+				delete(d.itemBlock, outputIndex)
 				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
-			} else if item.Type == "message" {
-				// Some providers skip content_part.done; close any part
-				// block that is still open for this output item, starting a
-				// deferred empty part first so its lifecycle stays valid.
+			} else if sse.ResponsesToolCallItem(typ) {
+				d.sawToolCall = true
+			} else if typ == "message" {
+				if err := d.applyMessageContent(item, outputIndex, &d.terminalPending); err != nil {
+					return nil, err
+				}
+				// Some providers skip content_part.done; close any part block
+				// that is still open for this output item. A deferred empty part
+				// never reached the target, so discard its seed rather than
+				// opening and immediately closing an empty block.
 				for pos, key := range d.keyByPart {
-					if pos[0] != ev.OutputIndex {
+					if pos[0] != outputIndex {
 						continue
 					}
-					d.startPartBlock(key)
-					idx, ok := d.partBlock[pos]
-					if !ok {
+					idx, started := d.partBlockByKey[key]
+					if !started || !d.open[idx] {
+						delete(d.partSeed, key)
 						continue
 					}
 					delete(d.partBlock, pos)
@@ -600,7 +959,53 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 				}
 			}
+		case "response.function_call_arguments.done":
+			idx, ok := d.itemBlock[outputIndex]
+			if !ok {
+				continue
+			}
+			key := d.keyByOutput[outputIndex]
+			if !d.announcedToolKeys[key] || !d.openToolKeys[key] {
+				continue
+			}
+			if err := d.flushToolArguments(key, idx, ev.Arguments, responsesToolArgumentsComplete); err != nil {
+				return nil, err
+			}
+		case "response.reasoning_summary_part.done":
+			var part struct {
+				Text string `json:"text"`
+			}
+			trimmed := bytes.TrimSpace(ev.Part)
+			if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+				if err := json.Unmarshal(trimmed, &part); err != nil {
+					return nil, err
+				}
+			}
+			text := part.Text
+			if text == "" {
+				text = ev.Text
+			}
+			key := d.keyByOutput[outputIndex]
+			idx, ok := d.itemBlock[outputIndex]
+			if text == "" || !ok || !d.reasoningKeys[key] {
+				continue
+			}
+			partKey := summaryPartKey(key, summaryIndex)
+			if _, err := d.announcePart(partKey); err != nil {
+				return nil, err
+			}
+			d.setPartOwner(partKey, key)
+			emit := pendingValueSuffix(d.emittedValue(partKey), text)
+			if emit != "" {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+			}
+			if err := d.setEmittedText(partKey, text); err != nil {
+				return nil, err
+			}
 		case "response.completed", "response.incomplete", "response.failed", "response.cancelled":
+			if err := checkResponsesResponseBounds(ev.Response); err != nil {
+				return nil, err
+			}
 			var resp responsesWireResponse
 			if err := json.Unmarshal(ev.Response, &resp); err != nil {
 				return nil, err
@@ -611,17 +1016,32 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.usage = usage
+				d.usageReported = true
 			}
 			d.terminal = true
-			if err := d.closeAll(resp.Output); err != nil {
+			for _, item := range resp.Output {
+				if item.Phase != "" {
+					d.phaseSeen = true
+					break
+				}
+			}
+			if d.phaseSeen {
+				d.warnings.AddOnce(ir.WarningDropped, "output.phase",
+					"Responses output phase has no cross-protocol equivalent")
+			}
+			// The terminal class owns the turn's outcome: completed,
+			// incomplete and cancelled validate tool arguments strictly, while
+			// failed, error and truncated drop the unparseable call.
+			if err := d.closeAll(resp.Output, responsesTerminalClassFor(ev.Type)); err != nil {
 				return nil, err
 			}
 			if ev.Type == "response.failed" {
 				e := &ir.Error{Message: "upstream response failed"}
-				if resp.Error != nil {
-					e.Code, e.Type = resp.Error.Code, resp.Error.Type
-					if resp.Error.Message != "" {
-						e.Message = resp.Error.Message
+				if typ, code, msg := metrics.ParseErrorComponents(resp.Error); typ != "" || code != "" || msg != "" {
+					bounded := boundedProviderError(typ, code, msg)
+					e.Type, e.Code = bounded.Type, bounded.Code
+					if msg != "" {
+						e.Message = bounded.Message
 					}
 				}
 				d.q.push(&ir.Event{Type: ir.EventError, Error: e})
@@ -646,17 +1066,26 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					finish = ir.FinishToolCalls
 				}
 			}
-			u := d.usage
-			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: finish}, Usage: &u})
+			delta := &ir.Event{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: finish}}
+			if d.usageReported {
+				u := d.usage
+				delta.Usage = &u
+			}
+			d.q.push(delta)
 			d.q.push(&ir.Event{Type: ir.EventDone})
 		case "error":
 			d.terminal = true
-			if err := d.closeAll(nil); err != nil {
+			// The standalone error event is the terminal statement; buffered
+			// initial argument bytes are incomplete by definition here.
+			if err := d.closeAll(nil, responsesTerminalError); err != nil {
 				return nil, err
 			}
-			d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-				Type: "api_error", Code: ev.Code, Message: ev.Message,
-			}})
+			_, code, msg := metrics.ParseErrorMembers(nil, ev.Code, ev.Message)
+			if code == "" && msg == "" {
+				msg = genericProviderErrorMessage
+			}
+			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
+				"api_error", code, msg)})
 		default:
 			// response.output_text.done, function_call_arguments.done,
 			// reasoning_summary_* and provider-specific events are already
@@ -666,12 +1095,81 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 	}
 }
 
+// responsesTerminalClass describes the outcome a Responses terminal carries.
+// It decides whether an incomplete argument value may fail the translation.
+type responsesTerminalClass uint8
+
+const (
+	responsesTerminalCompleted responsesTerminalClass = iota
+	responsesTerminalFailed
+	responsesTerminalIncomplete
+	responsesTerminalCancelled
+	responsesTerminalError
+	responsesTerminalTruncated
+)
+
+// responsesToolArgumentPolicy tells the terminal output walker how much
+// argument evidence a function call needs before it may reach the target.
+type responsesToolArgumentPolicy uint8
+
+const (
+	// responsesToolArgumentsComplete requires a valid value but accepts an
+	// empty one as the historical empty object.
+	responsesToolArgumentsComplete responsesToolArgumentPolicy = iota
+	// responsesToolArgumentsSkip discards a call whose value cannot be
+	// validated. A failed, errored or truncated terminal owns the outcome.
+	responsesToolArgumentsSkip
+	// responsesToolArgumentsRequired rejects an empty or unvalidated value.
+	// Incomplete and cancelled terminals are normal turn boundaries, so a
+	// call the model did not finish must not close as an executable empty
+	// object.
+	responsesToolArgumentsRequired
+)
+
+// toolArgumentPolicy maps the terminal class to its argument evidence rule.
+func (c responsesTerminalClass) toolArgumentPolicy() responsesToolArgumentPolicy {
+	switch c {
+	case responsesTerminalFailed, responsesTerminalError, responsesTerminalTruncated:
+		return responsesToolArgumentsSkip
+	case responsesTerminalIncomplete, responsesTerminalCancelled:
+		return responsesToolArgumentsRequired
+	default:
+		return responsesToolArgumentsComplete
+	}
+}
+
+// toolArgumentsMissing reports whether a raw value carries no evidence that
+// the source supplied arguments. Empty and JSON null are not evidence; the
+// explicit empty object is.
+func toolArgumentsMissing(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	return trimmed == "" || trimmed == "null"
+}
+
+func responsesTerminalClassFor(eventType string) responsesTerminalClass {
+	switch eventType {
+	case "response.completed":
+		return responsesTerminalCompleted
+	case "response.failed":
+		return responsesTerminalFailed
+	case "response.incomplete":
+		return responsesTerminalIncomplete
+	case "response.cancelled":
+		return responsesTerminalCancelled
+	default:
+		return responsesTerminalFailed
+	}
+}
+
 // closeAll closes every block still open at a terminal event and synthesizes
 // items that exist only in the terminal document. A provider may stream no
 // per-item events at all and place the whole answer, refusal, reasoning or
 // function call in response.completed.output; a translated client must still
-// receive those blocks exactly once.
-func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
+// receive those blocks exactly once. The terminal class decides how an
+// incomplete argument value is treated: a completed, incomplete or cancelled
+// terminal validates it, while a failed, errored or truncated terminal drops
+// the unparseable call and preserves the provider error or truncation.
+func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem, class responsesTerminalClass) error {
 	// Apply the authoritative terminal payload in terminal document order.
 	// Announced blocks that already carry bytes are filled in place; every
 	// block that still has to start (an unannounced item/part, or a deferred
@@ -679,46 +1177,615 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	// close. Done-event payloads queued earlier share that tail.
 	pending := d.terminalPending
 	d.terminalPending = nil
-	more, err := d.collectTerminalOutput(output)
+	clear(d.terminalPendingByKey)
+	policy := class.toolArgumentPolicy()
+	more, err := d.collectTerminalOutput(output, policy)
 	if err != nil {
 		return err
 	}
 	pending = append(pending, more...)
-	// A truncated stream can end before a terminal document supplies the full
-	// value. The buffered added payload is then the only argument bytes the
-	// source produced, so flush it before the block closes. The identities are
-	// sorted so the emitted delta order is deterministic.
-	toolKeys := make([]string, 0, len(d.initialArgs))
-	for key := range d.initialArgs {
-		toolKeys = append(toolKeys, key)
+	for i := range pending {
+		pending[i].materialize()
 	}
-	sort.Strings(toolKeys)
-	for _, key := range toolKeys {
-		if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-			d.flushToolArguments(key, idx, "")
+	// A terminal that validates tool arguments can arrive before the streamed
+	// value was complete: the buffered added payload is then the only argument
+	// bytes the source produced, so flush it before the block closes. The
+	// identities are sorted so the emitted delta order is deterministic. A
+	// failed, errored or truncated terminal instead discards the buffer below
+	// without parsing or emitting it: a partial value must neither reach the
+	// target nor replace the provider error or truncation with a translator
+	// failure.
+	if policy != responsesToolArgumentsSkip {
+		// Every open tool call is validated, including one that never carried
+		// argument bytes: the required policy must reject the missing
+		// evidence instead of letting the block close as an empty object.
+		toolKeys := make([]string, 0, len(d.openToolKeys))
+		for key := range d.openToolKeys {
+			toolKeys = append(toolKeys, key)
+		}
+		sort.Strings(toolKeys)
+		for _, key := range toolKeys {
+			if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
+				if err := d.flushToolArguments(key, idx, "", policy); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	// Close every block the source actually opened before starting queued
 	// terminal blocks, so a target block sequence never nests two lifecycles.
+	// A failure policy leaves an open tool block unclosed: BlockEnd would
+	// publish a call over partial argument bytes.
+	skipTools := map[int]struct{}{}
+	if policy == responsesToolArgumentsSkip {
+		for key := range d.openToolKeys {
+			if idx, ok := d.itemBlockByKey[key]; ok {
+				skipTools[idx] = struct{}{}
+			}
+		}
+	}
 	for _, idx := range sortedKeys(d.open) {
-		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 		delete(d.open, idx)
+		if _, skip := skipTools[idx]; skip {
+			continue
+		}
+		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 	}
 	clear(d.partBlock)
 	clear(d.itemBlock)
 	clear(d.initialArgs)
 	d.initialArgsBytes = 0
 	clear(d.argsEmitted)
+	clear(d.argumentEvidence)
+	clear(d.openToolKeys)
+	clear(d.announcedToolKeys)
+	clear(d.toolAliases)
+	clear(d.toolNames)
+	clear(d.toolArgsHash)
+	clear(d.closedIdlessCalls)
 	clear(d.keyByOutput)
 	clear(d.keyByPart)
 	clear(d.partSeed)
 	clear(d.partPosition)
 	clear(d.emittedText)
+	clear(d.ownerParts)
+	d.retainedText = 0
 	d.openToolItems = 0
 	for _, block := range pending {
 		d.syntheticBlock(block.block, block.delta)
 	}
 	return nil
+}
+
+// partChannel is one independently concatenated content channel of an item.
+// Terminal reconciliation never compares text bytes with refusal or reasoning
+// bytes, and reasoning summary parts form their own channel.
+type partChannel uint8
+
+const (
+	partChannelText partChannel = iota
+	partChannelRefusal
+	partChannelReasoning
+)
+
+// responsesPartBlock maps one Responses content-part payload to its canonical
+// block. It reports false for a provider part with no target representation.
+// The added and done events share this owner so a part's channel cannot change
+// between them.
+func responsesPartBlock(typ, text, refusal string) (ir.Block, bool) {
+	switch typ {
+	case "output_text", "input_text", "text":
+		return ir.Block{Type: ir.BlockText, Text: text}, true
+	case "refusal":
+		return ir.Block{Type: ir.BlockRefusal, Refusal: refusal}, true
+	case "reasoning_text":
+		return ir.Block{
+			Type: ir.BlockReasoning,
+			Reasoning: &ir.Reasoning{
+				Text: text, Provider: ir.Responses,
+			},
+		}, true
+	}
+	return ir.Block{}, false
+}
+
+// responsesPartBlockStart returns the type-only block a queued done payload
+// starts. The payload's value is emitted as a delta after the start, so the
+// block must not repeat it in its start payload.
+func responsesPartBlockStart(block ir.Block) ir.Block {
+	switch block.Type {
+	case ir.BlockReasoning:
+		return ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}}
+	case ir.BlockRefusal:
+		return ir.Block{Type: ir.BlockRefusal}
+	}
+	return ir.Block{Type: ir.BlockText}
+}
+
+// responsesPartValue returns the text a mapped part carries on its channel.
+func responsesPartValue(block ir.Block) string {
+	switch block.Type {
+	case ir.BlockRefusal:
+		return block.Refusal
+	case ir.BlockReasoning:
+		if block.Reasoning != nil {
+			return block.Reasoning.Text
+		}
+		return ""
+	}
+	return block.Text
+}
+
+func partChannelForBlock(t ir.BlockType) partChannel {
+	switch t {
+	case ir.BlockRefusal:
+		return partChannelRefusal
+	case ir.BlockReasoning:
+		return partChannelReasoning
+	}
+	return partChannelText
+}
+
+// channelPart is one part of a concatenated channel. key is the target part
+// identity (content part key or summary part key), index is its source order,
+// and order is its terminal-document position.
+type channelPart struct {
+	key     string
+	index   int
+	value   string
+	channel partChannel
+	block   ir.Block
+	order   int
+}
+
+// channelReconciliation is the terminal channel tail that still has to be
+// emitted. approximated reports that the terminal partition or text differs
+// from what was streamed, so the target wire is a best-effort representation.
+type channelReconciliation struct {
+	emit         []channelPart
+	approximated bool
+}
+
+// reconcileChannel compares the concatenated bytes already emitted for one
+// channel with the concatenated terminal bytes. A terminal document that only
+// re-partitions the same text contributes nothing; a longer terminal
+// contributes only the missing tail once, preserving the terminal partition
+// for the new bytes. A shorter or diverged terminal never repeats a visible
+// prefix; only a strict continuation of the same part or a genuinely new part
+// contributes bytes, and the mismatch is recorded as an approximation.
+func reconcileChannel(emitted, terminal []channelPart) channelReconciliation {
+	var res channelReconciliation
+	if len(terminal) == 0 {
+		return res
+	}
+	var emittedBuilder, terminalBuilder strings.Builder
+	for _, part := range emitted {
+		emittedBuilder.WriteString(part.value)
+	}
+	for _, part := range terminal {
+		terminalBuilder.WriteString(part.value)
+	}
+	emittedTotal, terminalTotal := emittedBuilder.String(), terminalBuilder.String()
+	if emittedTotal == terminalTotal {
+		return res
+	}
+	if strings.HasPrefix(terminalTotal, emittedTotal) {
+		covered := len(emittedTotal)
+		// A terminal part that straddles the end of the streamed bytes is the
+		// continuation of the LAST emitted part, whatever terminal index it
+		// carries. Keeping its terminal key would resolve to an earlier open
+		// block and append the tail there (the C1 text-order corruption).
+		// Fully new tail parts keep their own keys and order.
+		lastKey := ""
+		if len(emitted) > 0 {
+			lastKey = emitted[len(emitted)-1].key
+		}
+		offset := 0
+		for _, part := range terminal {
+			start := offset
+			offset += len(part.value)
+			if offset <= covered {
+				continue
+			}
+			if start < covered {
+				part.value = part.value[covered-start:]
+				part.key = lastKey
+			}
+			if part.value != "" {
+				res.emit = append(res.emit, part)
+			}
+		}
+		return res
+	}
+	res.approximated = true
+	// A partition-only difference in whitespace is already represented by the
+	// streamed words; emitting the terminal form would repeat them.
+	if strings.Join(strings.Fields(emittedTotal), "") == strings.Join(strings.Fields(terminalTotal), "") {
+		return res
+	}
+	emittedByIndex := make(map[int]string, len(emitted))
+	for _, part := range emitted {
+		emittedByIndex[part.index] = part.value
+	}
+	for _, part := range terminal {
+		if part.value == "" {
+			continue
+		}
+		if emittedValue, ok := emittedByIndex[part.index]; ok {
+			// Only a strict continuation of the same streamed part is a
+			// genuinely new tail. A shorter, reordered or diverged value is
+			// not representable without repeating visible bytes.
+			if strings.HasPrefix(part.value, emittedValue) {
+				suffix := part.value[len(emittedValue):]
+				if suffix != "" && !strings.Contains(emittedTotal, suffix) {
+					part.value = suffix
+					res.emit = append(res.emit, part)
+				}
+			}
+			continue
+		}
+		if strings.Contains(emittedTotal, part.value) {
+			continue
+		}
+		res.emit = append(res.emit, part)
+	}
+	return res
+}
+
+// partKeyIndex parses the trailing integer identity from a content or summary
+// part key. The key owner appends it last, so an item id containing colons is
+// harmless.
+func partKeyIndex(key string) (int, bool) {
+	i := strings.LastIndexByte(key, ':')
+	if i < 0 || i == len(key)-1 {
+		return 0, false
+	}
+	index, err := strconv.Atoi(key[i+1:])
+	if err != nil || index < 0 {
+		return 0, false
+	}
+	return index, true
+}
+
+// setPartOwner records the logical item that owns one part and keeps the
+// owner-to-parts index in step. A part key belongs to one item; a later
+// reassignment removes the old index entry.
+func (d *ResponsesStreamDecoder) setPartOwner(partKey, owner string) {
+	if previous, ok := d.partOwner[partKey]; ok {
+		if previous == owner {
+			return
+		}
+		delete(d.ownerParts[previous], partKey)
+		if len(d.ownerParts[previous]) == 0 {
+			delete(d.ownerParts, previous)
+		}
+	}
+	d.partOwner[partKey] = owner
+	if d.ownerParts[owner] == nil {
+		d.ownerParts[owner] = map[string]struct{}{}
+	}
+	d.ownerParts[owner][partKey] = struct{}{}
+}
+
+// emittedContentParts returns the non-empty streamed bytes for one item and
+// content channel, ordered by the part index the client saw.
+func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel partChannel) []channelPart {
+	var out []channelPart
+	for key := range d.ownerParts[itemKey] {
+		builder := d.emittedText[key]
+		if builder == nil {
+			continue
+		}
+		value := builder.String()
+		if value == "" || d.partKind[key] != channel {
+			continue
+		}
+		index, ok := partKeyIndex(key)
+		if !ok {
+			continue
+		}
+		out = append(out, channelPart{key: key, index: index, value: value, channel: channel, block: d.partSeed[key]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].index != out[j].index {
+			return out[i].index < out[j].index
+		}
+		return out[i].key < out[j].key
+	})
+	return out
+}
+
+// isSummaryPartKey reports whether one part key belongs to the summary
+// channel. The key owner encodes the channel as a prefix, so a reasoning
+// content part sharing the same item and index is a different channel.
+func isSummaryPartKey(key string) bool {
+	return strings.HasPrefix(key, "summary:")
+}
+
+// emittedSummaryParts returns the non-empty streamed summary bytes for one
+// reasoning item, ordered by summary index.
+func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
+	var out []channelPart
+	for key := range d.ownerParts[itemKey] {
+		if !isSummaryPartKey(key) {
+			continue
+		}
+		builder := d.emittedText[key]
+		if builder == nil {
+			continue
+		}
+		value := builder.String()
+		if value == "" {
+			continue
+		}
+		index, ok := partKeyIndex(key)
+		if !ok {
+			continue
+		}
+		out = append(out, channelPart{key: key, index: index, value: value, channel: partChannelReasoning})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].index < out[j].index })
+	return out
+}
+
+// hasEmittedParts reports whether any part of an item already reached the
+// target wire. A terminal item that was announced with only empty parts still
+// needs the announced identity, so this only gates the aggregate owner key.
+func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
+	for key := range d.ownerParts[itemKey] {
+		if d.emittedText[key] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// terminalContentItemKey resolves the aggregate item identity of a terminal
+// content item. The item id is stable across renumbering; when one side has no
+// id, the announced output position identifies the same logical item.
+func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int) string {
+	primary := streamItemKey(itemID, outputIndex)
+	if d.hasEmittedParts(primary) {
+		return primary
+	}
+	announcedID := d.itemIDByOutput[outputIndex]
+	if itemID == "" || announcedID == "" || announcedID == itemID {
+		positional := streamItemKey(announcedID, outputIndex)
+		if d.hasEmittedParts(positional) {
+			return positional
+		}
+	}
+	return primary
+}
+
+// warnApproximated records one streaming approximation per field. The decoder
+// runs before the target status line is committed for non-streaming bodies,
+// but a streamed status is already sent, so this is decoder-owned diagnostic
+// state rather than a header.
+func (d *ResponsesStreamDecoder) warnApproximated(field, detail string) {
+	for _, warning := range d.warnings {
+		if warning.Field == field && warning.Detail == detail {
+			return
+		}
+	}
+	d.warnings.Add(ir.WarningApproximated, field, detail)
+}
+
+func (d *ResponsesStreamDecoder) reconcileChannel(field string, emitted, terminal []channelPart) channelReconciliation {
+	res := reconcileChannel(emitted, terminal)
+	if res.approximated {
+		d.warnApproximated(field, "terminal partition differs from the streamed parts; emitted only non-overlapping bytes")
+	}
+	return res
+}
+
+func contentChannelDelta(channel partChannel, value string) *ir.Delta {
+	if channel == partChannelReasoning {
+		return &ir.Delta{Reasoning: value}
+	}
+	return &ir.Delta{Text: value}
+}
+
+// appendContentValue emits one reconciled content tail. It prefers the open
+// block the client already has. A part that never reached the target wire,
+// including a deferred announcement, is queued so it starts after every
+// streamed block has closed; starting it here would fix its position ahead of
+// an earlier terminal-only part.
+func (d *ResponsesStreamDecoder) appendContentValue(part channelPart, pending *[]terminalEmission) {
+	if part.value == "" {
+		return
+	}
+	if idx, ok := d.partBlockByKey[part.key]; ok && d.open[idx] {
+		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: contentChannelDelta(part.channel, part.value)})
+		return
+	}
+	*pending = append(*pending, terminalEmission{
+		block: part.block,
+		delta: contentChannelDelta(part.channel, part.value),
+	})
+}
+
+// appendReasoningValue emits one reconciled summary or reasoning-content tail
+// on the open item block, or queues a fresh reasoning block after it closes.
+func (d *ResponsesStreamDecoder) appendReasoningValue(item responsesWireItem, itemKey, value string, pending *[]terminalEmission) {
+	if value == "" {
+		return
+	}
+	if idx, ok := d.itemBlockByKey[itemKey]; ok && d.open[idx] {
+		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: value}})
+		return
+	}
+	*pending = append(*pending, terminalEmission{block: reasoningTerminalBlock(item), delta: &ir.Delta{Reasoning: value}})
+}
+
+// announcedToolCall is one open, unclaimed function call in output order.
+type announcedToolCall struct {
+	key  string
+	idx  int
+	name string
+}
+
+// resolveToolCallKey maps an alternate identity spelling to the announced
+// call's canonical key.
+func (d *ResponsesStreamDecoder) resolveToolCallKey(key string) string {
+	if canonical, ok := d.toolAliases[key]; ok {
+		return canonical
+	}
+	return key
+}
+
+// openAnnouncedToolCalls lists the open announced function calls the terminal
+// walk has not claimed yet, in output order.
+func (d *ResponsesStreamDecoder) openAnnouncedToolCalls(claimed map[string]bool) []announcedToolCall {
+	positions := make([]int, 0, len(d.keyByOutput))
+	for outputIndex := range d.keyByOutput {
+		positions = append(positions, outputIndex)
+	}
+	sort.Ints(positions)
+	out := make([]announcedToolCall, 0, len(positions))
+	for _, outputIndex := range positions {
+		key := d.keyByOutput[outputIndex]
+		if !d.openToolKeys[key] || claimed[key] {
+			continue
+		}
+		idx, ok := d.itemBlockByKey[key]
+		if !ok || !d.open[idx] {
+			continue
+		}
+		out = append(out, announcedToolCall{key: key, idx: idx, name: d.toolNames[key]})
+	}
+	return out
+}
+
+// terminalToolIdentityCompatible reports whether an identified terminal call
+// may still be the announced call. A call id on both sides with different
+// values is a different call; the name fallback is for mixed item-id and
+// call-id spellings and for id-less entries.
+func terminalToolIdentityCompatible(callID, itemID, candidateKey string) bool {
+	if callID != "" && strings.HasPrefix(candidateKey, "call:") {
+		return false
+	}
+	if callID == "" && itemID != "" && strings.HasPrefix(candidateKey, "item:") {
+		return false
+	}
+	return true
+}
+
+// toolArgumentsFingerprint hashes the canonical argument value when it is
+// small enough to canonicalize cheaply. Whitespace is removed, object keys are
+// sorted, and numeric literals are preserved; a missing, null or whitespace
+// value is the empty object the target emitted. An invalid, partial, non-object
+// or over-bound value cannot be canonicalized within the memory guard, so its
+// raw bytes are hashed instead.
+func toolArgumentsFingerprint(raw string) [sha256.Size]byte {
+	if toolArgumentsMissing(raw) {
+		return sha256.Sum256([]byte("{}"))
+	}
+	data := []byte(raw)
+	if !toolArgumentsWithinCanonicalBounds(data) {
+		return sha256.Sum256(data)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err != nil {
+		return sha256.Sum256(data)
+	}
+	dec := json.NewDecoder(bytes.NewReader(compact.Bytes()))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		return sha256.Sum256(data)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return sha256.Sum256(data)
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return sha256.Sum256(data)
+	}
+	return sha256.Sum256(canonical)
+}
+
+// closedToolCallRepeat reports whether this terminal entry repeats the named
+// announced call whose block already closed. A name mismatch at a reused
+// position is a different call. An id-less call has only its name and
+// effective arguments, so both must agree.
+func (d *ResponsesStreamDecoder) closedToolCallRepeat(key string, item responsesWireItem) bool {
+	if d.toolNames[key] != item.Name {
+		return false
+	}
+	if strings.HasPrefix(key, "output:") {
+		want, ok := d.toolArgsHash[key]
+		return ok && want == toolArgumentsFingerprint(item.Arguments)
+	}
+	return true
+}
+
+// matchesClosedIdlessCall reports whether an unmatched id-less terminal entry
+// repeats a closed id-less announced call by name and canonical argument
+// value.
+func (d *ResponsesStreamDecoder) matchesClosedIdlessCall(item responsesWireItem) bool {
+	if item.Name == "" {
+		return false
+	}
+	return d.closedIdlessCalls[item.Name][toolArgumentsFingerprint(item.Arguments)] > 0
+}
+
+// matchTerminalToolCall resolves a terminal function call that did not match
+// by identity. A named call matches only an open announced call with the same
+// name; an id-less terminal item then uses its wire position, a lone open call,
+// or the first open id-less call in output order. A named item never falls back
+// to a differently named open call, because the terminal array position is not
+// an identity.
+func (d *ResponsesStreamDecoder) matchTerminalToolCall(item responsesWireItem, index int, claimed map[string]bool) (string, int, bool) {
+	open := d.openAnnouncedToolCalls(claimed)
+	if item.Name != "" {
+		named := make([]announcedToolCall, 0, len(open))
+		for _, candidate := range open {
+			if candidate.name == item.Name {
+				named = append(named, candidate)
+			}
+		}
+		switch len(named) {
+		case 1:
+			if terminalToolIdentityCompatible(item.CallID, item.ID, named[0].key) {
+				return named[0].key, named[0].idx, true
+			}
+		case 0:
+			return "", 0, false
+		default:
+			// Several open calls share the name. Only the announcement at the
+			// terminal position can disambiguate them, and only when that
+			// announcement is one of the same-name candidates and the terminal
+			// identity can address it. Position is not an identity: an
+			// unannounced call at the same position must not take the block.
+			if positional, ok := d.keyByOutput[index]; ok {
+				for _, candidate := range named {
+					if candidate.key == positional &&
+						terminalToolIdentityCompatible(item.CallID, item.ID, candidate.key) {
+						return candidate.key, candidate.idx, true
+					}
+				}
+			}
+		}
+		return "", 0, false
+	}
+	if item.CallID != "" || item.ID != "" {
+		return "", 0, false
+	}
+	if fallback, exists := d.keyByOutput[index]; exists && d.openToolKeys[fallback] && !claimed[fallback] {
+		if fallbackIdx, open := d.itemBlockByKey[fallback]; open && d.open[fallbackIdx] {
+			return fallback, fallbackIdx, true
+		}
+	}
+	if len(open) == 1 {
+		return open[0].key, open[0].idx, true
+	}
+	for _, candidate := range open {
+		if strings.HasPrefix(candidate.key, "output:") {
+			return candidate.key, candidate.idx, true
+		}
+	}
+	return "", 0, false
 }
 
 // collectTerminalOutput walks the terminal document in its own order. It
@@ -727,8 +1794,9 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 // keeps each queued value's event position. The caller closes streamed blocks
 // before emitting the queue; perfect ordering is impossible only when a later
 // announced block already streamed bytes, because its target index is fixed.
-func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem) ([]terminalEmission, error) {
+func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, policy responsesToolArgumentPolicy) ([]terminalEmission, error) {
 	var pending []terminalEmission
+	claimedTools := map[string]bool{}
 	for i, item := range output {
 		typ := item.Type
 		if typ == "" && item.Role != "" {
@@ -736,20 +1804,58 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 		}
 		switch typ {
 		case "function_call":
-			key := functionCallKey(item.CallID, item.ID, i)
+			if item.CallID == "" && item.ID == "" && d.matchesClosedIdlessCall(item) {
+				// An id-less entry that repeats a closed id-less call by name
+				// and effective arguments must be skipped before its terminal
+				// position can assign it to a different open call. The closed
+				// call's announcement position and the terminal array position
+				// are independent.
+				continue
+			}
+			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
 			idx, ok := d.itemBlockByKey[key]
-			if !ok && item.CallID == "" && item.ID == "" {
-				// Positional fallback only when the terminal item carries no
-				// identity to match against.
-				if fallback, ok := d.keyByOutput[i]; ok {
-					key, idx, ok = fallback, d.itemBlockByKey[fallback], true
+			if d.announcedToolKeys[key] && !d.openToolKeys[key] && d.closedToolCallRepeat(key, item) {
+				// This terminal entry repeats an announced call whose block
+				// already closed. Its arguments belong to that call, not to a
+				// different open call with the same name. Non-tool
+				// announcements are absent from this set, so a cross-kind
+				// reorder still reaches the name fallback.
+				continue
+			}
+			if ok && !d.openToolKeys[key] {
+				// An identity can also name an announced non-tool item at the
+				// same position or with the same id. Only a function call this
+				// stream announced is a candidate for its arguments.
+				ok = false
+				idx = 0
+			}
+			if ok && item.CallID == "" && item.ID == "" && item.Name != "" && d.toolNames[key] != item.Name {
+				// An id-less terminal item has only its name and its array
+				// position. When the position names a different call but a
+				// unique open call carries this name, the name is the stronger
+				// correlation.
+				if matchedKey, matchedIdx, matched := d.matchTerminalToolCall(item, i, claimedTools); matched {
+					key, idx, ok = matchedKey, matchedIdx, true
+				} else {
+					// The position names a different call and no open call
+					// carries this name. Keeping the positional key would
+					// attribute these arguments to the wrong call.
+					ok = false
+				}
+			}
+			if !ok {
+				if matchedKey, matchedIdx, matched := d.matchTerminalToolCall(item, i, claimedTools); matched {
+					key, idx, ok = matchedKey, matchedIdx, true
 				}
 			}
 			if ok && d.open[idx] {
-				d.flushToolArguments(key, idx, item.Arguments)
+				claimedTools[key] = true
+				if err := d.flushToolArguments(key, idx, item.Arguments, policy); err != nil {
+					return nil, err
+				}
 				continue
 			}
-			if d.terminalItemAnnounced(key, i, item.ID) {
+			if d.terminalToolCallAnnounced(key, i, item.ID) {
 				continue
 			}
 			admitted, err := d.announceItem(key)
@@ -759,44 +1865,27 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			if !admitted {
 				continue
 			}
-			d.sawToolCall = true
-			emission, ok, err := functionCallTerminalEmission(item)
+			emission, ok, err := functionCallTerminalEmission(item, i, policy)
 			if err != nil {
+				if policy == responsesToolArgumentsSkip {
+					// A failed, errored or truncated terminal owns the
+					// outcome; drop the call whose arguments the source never
+					// completed rather than replacing the provider error or
+					// truncation with a translator failure.
+					continue
+				}
 				return nil, err
 			}
+			d.sawToolCall = true
 			if ok {
+				if err := reserveToolID(d.toolIDs, emission.block.ToolCall.ID); err != nil {
+					return nil, err
+				}
 				pending = append(pending, emission)
 			}
 		case "message":
-			parts, err := terminalMessageParts(item.Content)
-			if err != nil {
+			if err := d.applyMessageContent(item, i, &pending); err != nil {
 				return nil, err
-			}
-			for _, part := range parts {
-				key := d.terminalPartKey(item.ID, i, part.contentIndex)
-				value := part.delta.Text
-				if !d.announcedParts[key] {
-					admitted, err := d.announcePart(key)
-					if err != nil {
-						return nil, err
-					}
-					if !admitted {
-						continue
-					}
-					pending = append(pending, terminalEmission{block: part.block, delta: &ir.Delta{Text: value}})
-					d.emittedText[key] = value
-					continue
-				}
-				emit := pendingValueSuffix(d.emittedText[key], value)
-				if emit == "" {
-					continue
-				}
-				if idx, ok := d.partBlockByKey[key]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
-				} else {
-					pending = append(pending, terminalEmission{block: part.block, delta: &ir.Delta{Text: emit}})
-				}
-				d.emittedText[key] = value
 			}
 		case "reasoning":
 			key, announced := d.terminalAnnouncedItemKey(i, item.ID)
@@ -817,79 +1906,172 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				}
 				continue
 			}
-			for summaryIndex, part := range item.Summary {
-				if part.Text == "" {
-					continue
-				}
-				partKey := summaryPartKey(key, summaryIndex)
-				emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
-				if emit == "" {
-					continue
-				}
-				if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-				} else {
-					pending = append(pending, terminalEmission{
-						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: emit},
-					})
-				}
-				d.emittedText[partKey] = part.Text
-			}
-			parts, err := terminalMessageParts(item.Content)
-			if err != nil {
+			if err := d.applyReasoningContent(item, key, i, &pending); err != nil {
 				return nil, err
-			}
-			for _, part := range parts {
-				if part.block.Type != ir.BlockText {
-					continue
-				}
-				partKey := d.terminalPartKey(item.ID, i, part.contentIndex)
-				value := part.delta.Text
-				if !d.announcedParts[partKey] {
-					admitted, err := d.announcePart(partKey)
-					if err != nil {
-						return nil, err
-					}
-					if !admitted {
-						continue
-					}
-					pending = append(pending, terminalEmission{
-						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: value},
-					})
-					d.emittedText[partKey] = value
-					continue
-				}
-				emit := pendingValueSuffix(d.emittedText[partKey], value)
-				if emit == "" {
-					continue
-				}
-				if idx, ok := d.partBlockByKey[partKey]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-				} else {
-					pending = append(pending, terminalEmission{
-						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: emit},
-					})
-				}
-				d.emittedText[partKey] = value
 			}
 		}
 	}
 	return pending, nil
 }
 
-// terminalItemAnnounced reports whether a terminal item's stable identity was
-// already announced by a streamed item event. A positional fallback is used
-// only when the stream and terminal item share an item id (or one side has no
-// id), never to relabel a different item that happens to occupy the position.
-func (d *ResponsesStreamDecoder) terminalItemAnnounced(key string, outputIndex int, itemID string) bool {
-	if d.announcedItems[key] {
+// applyMessageContent reconciles one message item's content, whether it
+// arrived in output_item.done or in the terminal document. Open blocks receive
+// only the missing bytes; parts that never reached the target wire are queued
+// after every streamed block closes.
+func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, outputIndex int, pending *[]terminalEmission) error {
+	if err := checkNativeIdentity("message id", item.ID); err != nil {
+		return err
+	}
+	parts, err := terminalMessageParts(item.Content)
+	if err != nil {
+		return err
+	}
+	itemKey := d.terminalContentItemKey(item.ID, outputIndex)
+	var channels []partChannel
+	grouped := map[partChannel][]channelPart{}
+	for order, part := range parts {
+		channel := partChannelForBlock(part.block.Type)
+		if _, ok := grouped[channel]; !ok {
+			channels = append(channels, channel)
+		}
+		grouped[channel] = append(grouped[channel], channelPart{
+			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			index:   part.contentIndex,
+			value:   part.delta.Text,
+			channel: channel,
+			block:   part.block,
+			order:   order,
+		})
+	}
+	var emit []channelPart
+	for _, channel := range channels {
+		rec := d.reconcileChannel("content_partition", d.emittedContentParts(itemKey, channel), grouped[channel])
+		emit = append(emit, rec.emit...)
+	}
+	sort.SliceStable(emit, func(a, b int) bool { return emit[a].order < emit[b].order })
+	for _, part := range emit {
+		if !d.announcedParts[part.key] {
+			admitted, err := d.announcePart(part.key)
+			if err != nil {
+				return err
+			}
+			if !admitted {
+				continue
+			}
+		}
+		if _, owned := d.partOwner[part.key]; !owned {
+			d.setPartOwner(part.key, itemKey)
+		}
+		if _, kind := d.partKind[part.key]; !kind {
+			d.partKind[part.key] = part.channel
+		}
+		before := d.emittedValue(part.key)
+		d.appendContentValue(part, pending)
+		if err := d.setEmittedText(part.key, before+part.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// applyReasoningContent reconciles one reasoning item's summary and content
+// channels, whether the payload arrived in output_item.done or in the terminal
+// document. The open item block receives only the missing bytes.
+func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, key string, outputIndex int, pending *[]terminalEmission) error {
+	// A reasoning item's id is used to build content-part keys. Validate it at
+	// this shared owner so output_item.done and the terminal document cannot
+	// retain an over-bound identity after the added event was accepted.
+	if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
+		return err
+	}
+	// Summary parts are one concatenated reasoning channel; content
+	// parts are another. Reconcile each as a whole before emitting so
+	// a terminal re-partition cannot repeat streamed bytes.
+	var summaryTerminal []channelPart
+	for summaryIndex, summary := range item.Summary {
+		if summary.Text == "" {
+			continue
+		}
+		summaryTerminal = append(summaryTerminal, channelPart{
+			key:     summaryPartKey(key, summaryIndex),
+			index:   summaryIndex,
+			value:   summary.Text,
+			channel: partChannelReasoning,
+			order:   summaryIndex,
+		})
+	}
+	summaryRec := d.reconcileChannel("summary_partition", d.emittedSummaryParts(key), summaryTerminal)
+	for _, part := range summaryRec.emit {
+		if _, err := d.announcePart(part.key); err != nil {
+			return err
+		}
+		// Record the item that owns this summary part before the value is
+		// stored. emittedSummaryParts filters by owner, so a done-only summary
+		// without this assignment looks uncovered to the terminal copy and is
+		// emitted a second time.
+		d.setPartOwner(part.key, key)
+		before := d.emittedValue(part.key)
+		d.appendReasoningValue(item, key, part.value, pending)
+		if err := d.setEmittedText(part.key, before+part.value); err != nil {
+			return err
+		}
+	}
+	parts, err := terminalMessageParts(item.Content)
+	if err != nil {
+		return err
+	}
+	var contentTerminal []channelPart
+	for order, part := range parts {
+		if part.block.Type != ir.BlockText {
+			continue
+		}
+		contentTerminal = append(contentTerminal, channelPart{
+			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			index:   part.contentIndex,
+			value:   part.delta.Text,
+			channel: partChannelReasoning,
+			block:   reasoningTerminalBlock(item),
+			order:   order,
+		})
+	}
+	contentRec := d.reconcileChannel("reasoning_content_partition", d.emittedContentParts(key, partChannelReasoning), contentTerminal)
+	for _, part := range contentRec.emit {
+		if !d.announcedParts[part.key] {
+			admitted, err := d.announcePart(part.key)
+			if err != nil {
+				return err
+			}
+			if !admitted {
+				continue
+			}
+		}
+		if _, owned := d.partOwner[part.key]; !owned {
+			d.setPartOwner(part.key, key)
+		}
+		if _, kind := d.partKind[part.key]; !kind {
+			d.partKind[part.key] = partChannelReasoning
+		}
+		before := d.emittedValue(part.key)
+		d.appendContentValue(part, pending)
+		if err := d.setEmittedText(part.key, before+part.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// terminalToolCallAnnounced reports whether a terminal function call's stable
+// identity was already announced by a streamed tool item. The positional
+// fallback requires the position to name an announced TOOL call, never a
+// reasoning or message announcement: a foreign item at the same position is
+// not an identity and must not claim the call. The item-id agreement still
+// guards a tool announcement that carries an id.
+func (d *ResponsesStreamDecoder) terminalToolCallAnnounced(key string, outputIndex int, itemID string) bool {
+	if d.announcedToolKeys[key] {
 		return true
 	}
 	fallback, ok := d.keyByOutput[outputIndex]
-	if !ok || !d.announcedItems[fallback] {
+	if !ok || !d.announcedToolKeys[fallback] {
 		return false
 	}
 	announcedID := d.itemIDByOutput[outputIndex]
@@ -915,12 +2097,81 @@ func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, con
 	return key
 }
 
+// queueTerminal coalesces one authoritative terminal value into the pending
+// queue by part identity. A repeated delta for the same unopened part appends
+// its bytes to the existing emission, so a stream cannot turn the 8 MiB text
+// bound into one entry per delta. Every caller announces the part first, and
+// announcePart caps distinct keys at WireNestedCollectionMax, so the queue
+// shares that real bound.
+func (d *ResponsesStreamDecoder) queueTerminal(key string, block ir.Block, delta *ir.Delta) error {
+	if idx, ok := d.terminalPendingByKey[key]; ok {
+		d.terminalPending[idx].add(delta)
+		return nil
+	}
+	if len(d.terminalPending) >= WireNestedCollectionMax {
+		// Defensive only: the announced-part gate above already bounds the
+		// distinct keys, so no current call path reaches this branch. It stays
+		// as a local invariant for a future caller that queues a terminal
+		// value without announcing its part first.
+		return fmt.Errorf("responses stream exceeds %d pending terminal parts", WireNestedCollectionMax)
+	}
+	emission := terminalEmission{block: block, delta: &ir.Delta{}}
+	emission.add(delta)
+	d.terminalPendingByKey[key] = len(d.terminalPending)
+	d.terminalPending = append(d.terminalPending, emission)
+	return nil
+}
+
+// terminalAccumulator buffers repeated unannounced deltas for one part. A
+// strings.Builder grows amortized O(1), so n one-byte deltas allocate O(n)
+// rather than the O(n^2) of repeated string concatenation on the ir.Delta. The
+// builders are pointer fields because terminalEmission values are copied; a
+// strings.Builder must never be copied after use.
+type terminalAccumulator struct {
+	text      strings.Builder
+	reasoning strings.Builder
+	arguments strings.Builder
+	citation  *ir.Citation
+}
+
 // terminalEmission is a terminal value that belongs to a block which has
 // already ended, or to a terminal-only channel. It is emitted after every
-// streamed block has closed so target lifecycles never nest.
+// streamed block has closed so target lifecycles never nest. Entries created
+// by the coalescing queue carry an accumulator that materializes into delta
+// once, at emission time; direct terminal-document entries leave it nil.
 type terminalEmission struct {
 	block ir.Block
 	delta *ir.Delta
+	acc   *terminalAccumulator
+}
+
+func (e *terminalEmission) add(src *ir.Delta) {
+	if src == nil {
+		return
+	}
+	if e.acc == nil {
+		e.acc = &terminalAccumulator{}
+	}
+	e.acc.text.WriteString(src.Text)
+	e.acc.reasoning.WriteString(src.Reasoning)
+	e.acc.arguments.WriteString(src.Arguments)
+	if src.Citation != nil {
+		e.acc.citation = src.Citation
+	}
+}
+
+// materialize joins the buffered fragments into the emission delta exactly
+// once. Builder.String returns its buffer without copying, and no write follows
+// this call, so the buffer is never mutated again.
+func (e *terminalEmission) materialize() {
+	if e.acc == nil || e.delta == nil {
+		return
+	}
+	e.delta.Text = e.acc.text.String()
+	e.delta.Reasoning = e.acc.reasoning.String()
+	e.delta.Arguments = e.acc.arguments.String()
+	e.delta.Citation = e.acc.citation
+	e.acc = nil
 }
 
 // terminalAnnouncedItemKey resolves the announcement identity of a terminal
@@ -965,20 +2216,37 @@ func (d *ResponsesStreamDecoder) syntheticBlock(block ir.Block, delta *ir.Delta)
 
 // functionCallTerminalEmission builds the complete block for a function call
 // that appeared only in the terminal document.
-func functionCallTerminalEmission(item responsesWireItem) (terminalEmission, bool, error) {
-	if err := checkNativeIdentity("tool id", item.CallID); err != nil {
+func functionCallTerminalEmission(item responsesWireItem, index int, policy responsesToolArgumentPolicy) (terminalEmission, bool, error) {
+	toolID := responsesFunctionCallID(item.CallID, item.ID, index)
+	if err := checkNativeIdentity("tool id", toolID); err != nil {
 		return terminalEmission{}, false, err
 	}
 	if err := checkNativeIdentity("tool name", item.Name); err != nil {
 		return terminalEmission{}, false, err
 	}
+	if err := checkToolCallName(item.Name); err != nil {
+		return terminalEmission{}, false, err
+	}
+	if policy == responsesToolArgumentsRequired && toolArgumentsMissing(item.Arguments) {
+		return terminalEmission{}, false, errToolArgumentsMissing
+	}
+	args, err := parseToolArguments(item.Arguments)
+	if err != nil {
+		if policy == responsesToolArgumentsSkip {
+			return terminalEmission{}, false, nil
+		}
+		return terminalEmission{}, false, err
+	}
 	var delta *ir.Delta
-	if item.Arguments != "" && item.Arguments != "{}" {
-		delta = &ir.Delta{Arguments: item.Arguments}
+	if string(args) != "{}" {
+		delta = &ir.Delta{Arguments: string(args)}
 	}
 	return terminalEmission{
 		block: ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
-			ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
+			// The block is the type-only start template; the normalized
+			// arguments travel in the delta so a target encoder cannot count
+			// them twice.
+			ID: toolID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 		}},
 		delta: delta,
 	}, true, nil
@@ -1081,46 +2349,145 @@ func reasoningTerminalEmission(item responsesWireItem) (terminalEmission, bool, 
 	return terminalEmission{block: reasoningTerminalBlock(item), delta: delta}, true, nil
 }
 
-// toolArgumentsDelta applies the first streamed arguments delta for one item
-// identity. The buffered output_item.added payload is emitted first; when the
-// delta already repeats that prefix only its suffix is emitted. No delta means
-// no emission, so the done or terminal full value can still replace the
-// initial payload.
+// toolArgumentsDelta records one incremental argument delta. The buffered
+// output_item.added payload is emitted first, then the delta is appended
+// verbatim: OpenAI's document says each delta is added to the previous value,
+// so a prefix heuristic would corrupt a legitimate first delta that happens to
+// start with the inline prefix.
 func (d *ResponsesStreamDecoder) toolArgumentsDelta(key string, blockIndex int, delta string) {
 	if delta == "" || key == "" {
 		return
 	}
-	if !d.argsEmitted[key] {
+	if strings.TrimSpace(delta) != "" {
+		d.argumentEvidence[key] = true
+	}
+	if d.argsEmitted[key] == nil {
 		if initial := d.initialArgs[key]; initial != "" {
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: initial}})
-			if strings.HasPrefix(delta, initial) {
-				delta = delta[len(initial):]
-			}
+			d.recordEmittedArguments(key, initial)
 		}
 		d.dropInitialArgs(key)
-		d.argsEmitted[key] = true
 	}
-	if delta != "" {
-		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: delta}})
-	}
+	d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: delta}})
+	d.recordEmittedArguments(key, delta)
 }
 
-// flushToolArguments emits the full done/terminal arguments for an item
-// identity that never streamed a delta. When the completion carries no value
-// at all, the buffered output_item.added payload is the only available value.
-func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string) {
-	if key == "" || d.argsEmitted[key] {
-		return
+// flushToolArguments reconciles the authoritative done/terminal arguments
+// with the bytes already streamed. A full value that strictly extends the
+// emitted prefix appends only the missing suffix; a divergent value keeps the
+// already-committed bytes. A complete retained value must be valid JSON. Once
+// coverage is partial, the retained bytes are only a truncated prefix of what
+// the client already received: they cannot be reconciled or validated as the
+// final value, so the streamed bytes stand and reconciliation stops.
+func (d *ResponsesStreamDecoder) flushToolArguments(key string, blockIndex int, full string, policy responsesToolArgumentPolicy) error {
+	if key == "" {
+		return nil
 	}
+	if !toolArgumentsMissing(full) {
+		d.argumentEvidence[key] = true
+	}
+	if d.argsEmitted[key] != nil {
+		emitted, complete := d.emittedArguments(key)
+		if !complete {
+			return nil
+		}
+		if policy == responsesToolArgumentsRequired && !d.argumentEvidence[key] {
+			return errToolArgumentsMissing
+		}
+		if full != "" && len(full) > len(emitted) && strings.HasPrefix(full, emitted) {
+			if policy == responsesToolArgumentsSkip {
+				// Only append a suffix whose complete value is a valid tool
+				// object; a partial terminal value must not reach the wire.
+				if err := validateStreamedToolArguments(full); err != nil {
+					return nil
+				}
+			}
+			suffix := full[len(emitted):]
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: suffix}})
+			d.recordEmittedArguments(key, suffix)
+			emitted += suffix
+		}
+		if policy == responsesToolArgumentsRequired && strings.TrimSpace(emitted) == "" {
+			// A whitespace-only delta supplied no argument evidence. Empty
+			// bytes are allowed only when nothing was emitted; whitespace
+			// already reached the client and cannot become an executable
+			// object.
+			return errToolArgumentsMissing
+		}
+		if policy == responsesToolArgumentsSkip {
+			// The bytes already streamed are the client's only copy. A
+			// non-clean terminal must not reclassify them.
+			return nil
+		}
+		// Those bytes already reached the client, so the normalizing parser
+		// must not run: a completed streamed null or array fails closed
+		// instead of passing as the normalized object.
+		return validateStreamedToolArguments(emitted)
+	}
+
 	args := full
 	if args == "" {
 		args = d.initialArgs[key]
 	}
-	d.argsEmitted[key] = true
 	d.dropInitialArgs(key)
-	if args != "" && args != "{}" {
+	if !toolArgumentsMissing(args) {
+		d.argumentEvidence[key] = true
+	}
+	if policy == responsesToolArgumentsRequired && !d.argumentEvidence[key] {
+		return errToolArgumentsMissing
+	}
+	if d.argsEmitted[key] == nil {
+		d.argsEmitted[key] = &toolArgumentCoverage{}
+	}
+	normalized, err := parseToolArguments(args)
+	if err != nil {
+		if policy == responsesToolArgumentsSkip {
+			return nil
+		}
+		return err
+	}
+	args = string(normalized)
+	if args != "{}" {
 		d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: blockIndex, Delta: &ir.Delta{Arguments: args}})
 	}
+	d.recordEmittedArguments(key, args)
+	return nil
+}
+
+// recordEmittedArguments adds argument bytes to the bounded coverage for one
+// item identity. Coverage past toolInitialBytesMax is not retained.
+func (d *ResponsesStreamDecoder) recordEmittedArguments(key, value string) {
+	if key == "" || value == "" {
+		return
+	}
+	cov := d.argsEmitted[key]
+	if cov == nil {
+		cov = &toolArgumentCoverage{}
+		d.argsEmitted[key] = cov
+	}
+	if cov.partial {
+		return
+	}
+	remaining := toolInitialBytesMax - d.argsEmittedBytes
+	if len(value) > remaining {
+		if remaining > 0 {
+			cov.emitted.WriteString(value[:remaining])
+			d.argsEmittedBytes += remaining
+		}
+		cov.partial = true
+		return
+	}
+	cov.emitted.WriteString(value)
+	d.argsEmittedBytes += len(value)
+}
+
+// emittedArguments returns the retained coverage and whether it is complete.
+func (d *ResponsesStreamDecoder) emittedArguments(key string) (string, bool) {
+	cov := d.argsEmitted[key]
+	if cov == nil {
+		return "", true
+	}
+	return cov.emitted.String(), !cov.partial
 }
 
 // dropInitialArgs releases the buffered output_item.added arguments for one
@@ -1135,7 +2502,26 @@ func (d *ResponsesStreamDecoder) dropInitialArgs(key string) {
 // clearToolState releases every per-call entry once a function call closes.
 func (d *ResponsesStreamDecoder) clearToolState(key string) {
 	d.dropInitialArgs(key)
-	delete(d.argsEmitted, key)
+	delete(d.argumentEvidence, key)
+	wasOpen := d.openToolKeys[key]
+	delete(d.openToolKeys, key)
+	// Keep the name and, for an id-less call, a hash of the emitted arguments.
+	// A terminal repeat after the block closes still has to be recognized.
+	emitted := "{}"
+	if cov := d.argsEmitted[key]; cov != nil {
+		emitted = cov.emitted.String()
+		d.argsEmittedBytes -= cov.emitted.Len()
+		delete(d.argsEmitted, key)
+	}
+	if wasOpen && strings.HasPrefix(key, "output:") {
+		sum := toolArgumentsFingerprint(emitted)
+		d.toolArgsHash[key] = sum
+		name := d.toolNames[key]
+		if d.closedIdlessCalls[name] == nil {
+			d.closedIdlessCalls[name] = map[[sha256.Size]byte]int{}
+		}
+		d.closedIdlessCalls[name][sum]++
+	}
 }
 
 // startPartBlock starts the target block for an announced content part when
@@ -1162,6 +2548,22 @@ func (d *ResponsesStreamDecoder) startPartBlock(key string) (int, bool) {
 	return idx, true
 }
 
+// responsesFunctionCallID returns the target tool id for a streamed Responses
+// function call: call_id first, then the item id, then a synthetic id for the
+// output position. The non-stream decoder still rejects a call with both
+// identities absent, but a stream must not close a target block with an empty
+// id (Anthropic aborts and parallel Chat calls collide).
+func responsesFunctionCallID(callID, itemID string, index int) string {
+	switch {
+	case callID != "":
+		return callID
+	case itemID != "":
+		return itemID
+	default:
+		return "call_proxy_" + strconv.Itoa(index)
+	}
+}
+
 // Item and content-part identities. A provider's terminal output array is not
 // required to preserve output_index positions, so dedupe and terminal
 // completion match on the wire identity the target correlates with: call id
@@ -1178,11 +2580,18 @@ func functionCallKey(callID, itemID string, outputIndex int) string {
 	}
 }
 
-func reasoningItemKey(itemID string, outputIndex int) string {
+// streamItemKey identifies one logical item across its announcement and the
+// terminal document. Item ids are stable across renumbering; the output
+// position is the fallback only when no id was supplied.
+func streamItemKey(itemID string, outputIndex int) string {
 	if itemID != "" {
 		return "item:" + itemID
 	}
 	return "output:" + strconv.Itoa(outputIndex)
+}
+
+func reasoningItemKey(itemID string, outputIndex int) string {
+	return streamItemKey(itemID, outputIndex)
 }
 
 func messageItemKey(itemID string, outputIndex int) string {
@@ -1206,25 +2615,68 @@ func summaryPartKey(itemKey string, summaryIndex int) string {
 	return "summary:" + itemKey + ":" + strconv.Itoa(summaryIndex)
 }
 
-// pendingDeltaSuffix returns the bytes a streamed delta contributes after the
-// coverage already emitted for its channel, plus the new coverage. A delta
-// that repeats the emitted prefix contributes only its continuation; an exact
-// or shorter repeat contributes nothing. Anything else is ordinary
-// continuation text.
-func pendingDeltaSuffix(emitted, delta string) (string, string) {
-	if delta == "" {
-		return "", emitted
+// emittedValue returns the bytes already emitted for one channel. Builder
+// strings are safe to retain because appends never mutate existing bytes and
+// a replacement abandons the old builder.
+func (d *ResponsesStreamDecoder) emittedValue(key string) string {
+	if b := d.emittedText[key]; b != nil {
+		return b.String()
 	}
-	if emitted == "" {
-		return delta, delta
+	return ""
+}
+
+// appendEmittedText records incremental delta bytes for one channel without
+// copying the existing coverage. The aggregate retained-text bound mirrors the
+// encoder budget so a token-level stream cannot grow decoder memory without
+// limit.
+func (d *ResponsesStreamDecoder) appendEmittedText(key, value string) error {
+	if value == "" {
+		return nil
 	}
-	if strings.HasPrefix(delta, emitted) {
-		return delta[len(emitted):], delta
+	if d.retainedText+len(value) > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses stream exceeds %d retained text bytes", ResponsesStreamRetainedMaxBytes)
 	}
-	if strings.HasPrefix(emitted, delta) {
-		return "", emitted
+	b := d.emittedText[key]
+	if b == nil {
+		b = &strings.Builder{}
+		d.emittedText[key] = b
 	}
-	return delta, emitted + delta
+	b.WriteString(value)
+	d.retainedText += len(value)
+	return nil
+}
+
+// setEmittedText records a cumulative done/terminal value for one channel. A
+// value that extends the current coverage appends only the suffix; a shorter
+// or divergent authoritative value replaces the builder.
+func (d *ResponsesStreamDecoder) setEmittedText(key, value string) error {
+	old := d.emittedText[key]
+	oldLen := 0
+	if old != nil {
+		oldLen = old.Len()
+	}
+	if value == "" {
+		if old != nil {
+			delete(d.emittedText, key)
+			d.retainedText -= oldLen
+		}
+		return nil
+	}
+	if old != nil && strings.HasPrefix(value, old.String()) {
+		return d.appendEmittedText(key, value[oldLen:])
+	}
+	if d.retainedText-oldLen+len(value) > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses stream exceeds %d retained text bytes", ResponsesStreamRetainedMaxBytes)
+	}
+	if old != nil {
+		delete(d.emittedText, key)
+		d.retainedText -= oldLen
+	}
+	b := &strings.Builder{}
+	b.WriteString(value)
+	d.emittedText[key] = b
+	d.retainedText += len(value)
+	return nil
 }
 
 // pendingValueSuffix returns the bytes of a cumulative done/terminal value not
@@ -1243,20 +2695,6 @@ func pendingValueSuffix(emitted, value string) string {
 		return value[len(emitted):]
 	}
 	return ""
-}
-
-// responsesSummaryText joins the non-empty text parts of a Responses
-// reasoning summary. The value may arrive in output_item.added or in a
-// summary part event; both paths consume it once.
-func responsesSummaryText(parts []struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
-}) string {
-	var b strings.Builder
-	for _, part := range parts {
-		b.WriteString(part.Text)
-	}
-	return b.String()
 }
 
 func (d *ResponsesStreamDecoder) announceOutput(outputIndex int) (bool, error) {
@@ -1295,9 +2733,19 @@ func (d *ResponsesStreamDecoder) announcePart(key string) (bool, error) {
 // FlushBlocks closes every block this decoder still holds open. The
 // translation facade calls it when an upstream stream fails so a client never
 // receives an error or terminal event with an unclosed block.
-func (d *ResponsesStreamDecoder) FlushBlocks() []*ir.Event {
-	_ = d.closeAll(nil)
-	return drainQueue(&d.q)
+func (d *ResponsesStreamDecoder) FlushBlocks() ([]*ir.Event, error) {
+	// FlushBlocks runs only when the upstream stream failed or truncated. The
+	// buffered initial arguments are incomplete, so close the blocks without
+	// parsing or emitting them.
+	err := d.closeAll(nil, responsesTerminalTruncated)
+	return drainQueue(&d.q), err
+}
+
+// Warnings returns the streaming approximations recorded so far. A streamed
+// response cannot add X-Proxy-Warnings after its status line is committed, so
+// this is decoder diagnostic state rather than a client header.
+func (d *ResponsesStreamDecoder) Warnings() ir.Warnings {
+	return append(ir.Warnings(nil), d.warnings...)
 }
 
 func (d *ResponsesStreamDecoder) newBlock() int {
@@ -1310,7 +2758,11 @@ func (d *ResponsesStreamDecoder) newBlock() int {
 func (d *ResponsesStreamDecoder) blocksFromItems(items []responsesWireItem) []ir.Block {
 	var out []ir.Block
 	for _, item := range items {
-		if item.Type == "function_call" {
+		// The shared vocabulary covers function_call plus provider-executed
+		// custom, shell, MCP and computer calls. The target blocks are dropped
+		// where unrepresentable, but the finish and token settlement must
+		// still read as a tool turn.
+		if sse.ResponsesToolCallItem(item.Type) {
 			out = append(out, ir.Block{Type: ir.BlockToolCall})
 		}
 	}
@@ -1326,14 +2778,24 @@ type ResponsesStreamEncoder struct {
 	id      string
 	model   string
 	created int64
+	// fallbackModel names the model when the source omitted its start event,
+	// matching the Chat encoder's StreamOptions.FallbackModel contract.
+	fallbackModel string
 
 	started     bool
 	outputIndex int
 	items       map[int]*responsesItemState
 	open        map[int]bool
+	// pendingDone defers a message item's final output_item.done until the
+	// terminal status is known. The block closes before the canonical
+	// MessageDelta, so emitting "completed" at BlockEnd would lie for a
+	// length/content-filter/failed turn.
+	pendingDone *responsesItemState
 	order       []int
 	finish      ir.FinishReason
 	usage       ir.Usage
+	metadata    map[string]string
+	serviceTier string
 	failed      *ir.Error
 	retained    int
 	doneSent    bool
@@ -1354,6 +2816,10 @@ type responsesItemState struct {
 	refusal      strings.Builder
 	partOpen     bool
 	summaryOpen  bool
+	// status records the lifecycle status the item reached when it closed:
+	// completed for a normal close and incomplete for an aborted one. It stays
+	// empty while the item is still open.
+	status string
 }
 
 // NewResponsesStreamEncoder builds an encoder over one client response writer.
@@ -1376,13 +2842,16 @@ func (e *ResponsesStreamEncoder) startStream() error {
 	if e.id == "" {
 		e.id = "resp_" + randomID()
 	}
+	if e.model == "" {
+		e.model = e.fallbackModel
+	}
 	if e.created == 0 {
 		e.created = time.Now().Unix()
 	}
 	if err := e.retain(len(e.id)+len(e.model), "response identity"); err != nil {
 		return err
 	}
-	response, err := e.responseObject("in_progress", nil)
+	response, err := e.responseObject("in_progress", "", nil)
 	if err != nil {
 		return err
 	}
@@ -1411,8 +2880,17 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			if err := validateUsage(ev.Response.Usage); err != nil {
 				return err
 			}
-			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			// response.created/response.in_progress may already be on the
+			// wire (a source stream can deliver its start event late, or not
+			// at all). Identity is immutable once committed, exactly like the
+			// Chat encoder's !started guard; only late-arriving data that the
+			// target still needs is merged.
+			if !e.started {
+				e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+			}
 			e.usage = ev.Response.Usage
+			e.metadata = ev.Response.Metadata
+			e.serviceTier = ev.Response.ServiceTier
 		}
 		return e.startStream()
 	case ir.EventBlockStart:
@@ -1493,9 +2971,12 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			item.kind = "reasoning"
 			initial := ""
 			if ev.Block.Reasoning != nil {
-				item.encrypted = ev.Block.Reasoning.Encrypted
-				if err := e.retain(len(item.encrypted), "reasoning artifact"); err != nil {
-					return err
+				if ev.Block.Reasoning.Encrypted != "" &&
+					(ev.Block.Reasoning.Provider == "" || ev.Block.Reasoning.Provider == ir.Responses) {
+					item.encrypted = ev.Block.Reasoning.Encrypted
+					if err := e.retain(len(item.encrypted), "reasoning artifact"); err != nil {
+						return err
+					}
 				}
 				initial = ev.Block.Reasoning.Text
 				if initial == "" && len(ev.Block.Reasoning.Summary) > 0 {
@@ -1589,16 +3070,14 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 		return err
 	}
 	e.doneSent = true
-	status := "completed"
-	switch {
-	case e.failed != nil:
+	status, incompleteReason, _ := responsesTerminalStatus(e.finish, "")
+	if e.failed != nil {
 		status = "failed"
-	case e.finish == ir.FinishCancelled:
-		status = "cancelled"
-	case e.finish == ir.FinishLength || e.finish == ir.FinishContentFilter || e.finish == ir.FinishOther:
-		status = "incomplete"
 	}
-	response, err := e.responseObject(status, e.outputItems())
+	if err := e.flushPendingDone(); err != nil {
+		return err
+	}
+	response, err := e.responseObject(status, incompleteReason, e.outputItems(status))
 	if err != nil {
 		return err
 	}
@@ -1608,65 +3087,42 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 	})
 }
 
-func (e *ResponsesStreamEncoder) responseObject(status string, output []map[string]any) (map[string]any, error) {
-	if output == nil {
-		output = []map[string]any{}
-	}
-	obj := map[string]any{
-		"id": e.id, "object": "response", "created_at": e.created, "status": status,
-		"error": nil, "incomplete_details": nil, "instructions": nil,
-		"max_output_tokens": nil, "model": e.model, "output": output,
-		"parallel_tool_calls": true, "previous_response_id": nil, "reasoning": nil,
-		"store": false, "temperature": nil,
-		"text":        map[string]any{"format": map[string]any{"type": "text"}},
-		"tool_choice": "auto", "tools": []any{}, "top_p": nil, "truncation": "disabled",
-	}
-	if status == "incomplete" {
-		reason := ""
-		switch e.finish {
-		case ir.FinishContentFilter:
-			reason = "content_filter"
-		case ir.FinishLength:
-			reason = "max_output_tokens"
-		}
-		if reason != "" {
-			obj["incomplete_details"] = map[string]any{"reason": reason}
-		}
-	}
-	if status == "failed" && e.failed != nil {
-		code := e.failed.Code
-		if code == "" {
-			code = "server_error"
-		}
-		obj["error"] = map[string]any{"code": code, "message": e.failed.Message}
-	}
-	if e.usage != (ir.Usage{}) {
-		usage, err := encodeResponsesUsage(e.usage)
-		if err != nil {
-			return nil, err
-		}
-		obj["usage"] = usage
-	}
-	return obj, nil
+func (e *ResponsesStreamEncoder) responseObject(status, incompleteReason string, output []map[string]any) (map[string]any, error) {
+	return NewResponsesEnvelope(ResponsesEnvelope{
+		ID: e.id, Model: e.model, Created: e.created, Status: status,
+		IncompleteReason: incompleteReason,
+		Output:           responsesAnyItems(output),
+		Error:            e.failed, Usage: e.usage,
+		Metadata: e.metadata, ServiceTier: e.serviceTier,
+	})
 }
 
-func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
+func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
 	var out []map[string]any
 	for _, idx := range e.order {
 		item := e.items[idx]
 		if item == nil {
 			continue
 		}
+		// A failed turn omits an open function call: its argument value is
+		// incomplete and must not appear as an executable call. Other open
+		// items keep the incomplete status their terminal gives them.
+		if e.failed != nil && e.open[idx] && item.kind == "function_call" {
+			continue
+		}
+		// Each item owns the status it reached when it closed. Only an item
+		// still open at a non-completed terminal inherits the terminal status;
+		// an item that closed normally stays completed.
+		itemStatus := item.status
+		if itemStatus == "" {
+			itemStatus = "completed"
+			if status != "completed" {
+				itemStatus = "incomplete"
+			}
+		}
 		switch item.kind {
 		case "message":
-			part := map[string]any{"type": "output_text", "text": item.text.String(), "annotations": []any{}, "logprobs": []any{}}
-			if item.partType == "refusal" {
-				part = map[string]any{"type": "refusal", "refusal": item.refusal.String()}
-			}
-			out = append(out, map[string]any{
-				"type": "message", "id": item.id, "status": "completed", "role": "assistant",
-				"content": []any{part},
-			})
+			out = append(out, messageItemJSON(item, itemStatus))
 		case "function_call":
 			args := item.args.String()
 			if args == "" {
@@ -1674,18 +3130,66 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 			}
 			out = append(out, map[string]any{
 				"type": "function_call", "id": item.id, "call_id": item.callID,
-				"name": item.name, "arguments": args, "status": "completed",
+				"name": item.name, "arguments": args, "status": itemStatus,
 			})
 		case "reasoning":
-			out = append(out, reasoningItem(item, item.reasoning.String()))
+			out = append(out, reasoningItem(item, item.reasoning.String(), itemStatus))
 		}
 	}
 	return out
 }
 
+// messageItemJSON renders one message item with the supplied lifecycle status.
+func messageItemJSON(item *responsesItemState, status string) map[string]any {
+	var part map[string]any
+	if item.partType == "refusal" {
+		part = map[string]any{"type": "refusal", "refusal": item.refusal.String()}
+	} else {
+		part = map[string]any{
+			"type": "output_text", "text": item.text.String(), "annotations": []any{}, "logprobs": []any{},
+		}
+	}
+	return map[string]any{
+		"type": "message", "id": item.id, "status": status, "role": "assistant",
+		"content": []any{part},
+	}
+}
+
+// deferMessageDone holds a closed message item's final output_item.done until
+// the next item starts or the stream ends. A preceding deferred item is
+// flushed with its own close status first, so event order and the item count
+// stay unchanged.
+func (e *ResponsesStreamEncoder) deferMessageDone(item *responsesItemState) error {
+	if err := e.flushPendingDone(); err != nil {
+		return err
+	}
+	e.pendingDone = item
+	return nil
+}
+
+// flushPendingDone emits the deferred message done frame with the status the
+// item reached when it closed. A deferred item is always a normal close, so
+// the terminal envelope cannot rewrite it.
+func (e *ResponsesStreamEncoder) flushPendingDone() error {
+	item := e.pendingDone
+	if item == nil {
+		return nil
+	}
+	e.pendingDone = nil
+	status := item.status
+	if status == "" {
+		status = "completed"
+	}
+	return e.emit("response.output_item.done", map[string]any{
+		"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+		"output_index": item.outputIndex, "item": messageItemJSON(item, status),
+	})
+}
+
 // closeItem emits the normal completion frames for one open Responses item.
 // The caller removes the item from the open set only after every frame lands.
 func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
+	item.status = "completed"
 	switch item.kind {
 	case "message":
 		if item.partType == "refusal" {
@@ -1705,15 +3209,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 				return err
 			}
 			item.partOpen = false
-			return e.emit("response.output_item.done", map[string]any{
-				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-				"output_index": item.outputIndex,
-				"item": map[string]any{
-					"type": "message", "id": item.id, "status": "completed",
-					"role":    "assistant",
-					"content": []any{map[string]any{"type": "refusal", "refusal": text}},
-				},
-			})
+			return e.deferMessageDone(item)
 		}
 		text := item.text.String()
 		if err := e.emit("response.output_text.done", map[string]any{
@@ -1731,17 +3227,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 			return err
 		}
 		item.partOpen = false
-		return e.emit("response.output_item.done", map[string]any{
-			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
-			"output_index": item.outputIndex,
-			"item": map[string]any{
-				"type": "message", "id": item.id, "status": "completed",
-				"role": "assistant",
-				"content": []any{map[string]any{
-					"type": "output_text", "text": text, "annotations": []any{}, "logprobs": []any{},
-				}},
-			},
-		})
+		return e.deferMessageDone(item)
 	case "function_call":
 		args := item.args.String()
 		if args == "" {
@@ -1758,7 +3244,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 			"output_index": item.outputIndex,
 			"item": map[string]any{
 				"type": "function_call", "id": item.id, "call_id": item.callID,
-				"name": item.name, "arguments": args, "status": "completed",
+				"name": item.name, "arguments": args, "status": item.status,
 			},
 		})
 	case "reasoning":
@@ -1783,16 +3269,19 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 		return e.emit("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
 			"output_index": item.outputIndex,
-			"item":         reasoningItem(item, text),
+			"item":         reasoningItem(item, text, item.status),
 		})
 	}
 	return nil
 }
 
-// abortItem closes one Responses item after a target-side failure. It emits an
-// empty close for a content part or reasoning summary the encoder opened, then
-// the item done frame, and never flushes retained text, arguments or reasoning.
+// abortItem closes one non-tool Responses item after a target-side failure. It
+// emits an empty close for a content part or reasoning summary the encoder
+// opened, then the item done frame, and never flushes retained text or
+// reasoning. Abort leaves an open function call for the proxy error frame, so
+// this helper has no function-call shape.
 func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
+	item.status = "incomplete"
 	switch item.kind {
 	case "message":
 		if item.partOpen {
@@ -1821,15 +3310,11 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 			item.summaryOpen = false
 		}
 	}
-	closed := map[string]any{"type": item.kind, "id": item.id, "status": "incomplete"}
+	closed := map[string]any{"type": item.kind, "id": item.id, "status": item.status}
 	switch item.kind {
 	case "message":
 		closed["role"] = "assistant"
 		closed["content"] = []any{}
-	case "function_call":
-		closed["call_id"] = item.callID
-		closed["name"] = item.name
-		closed["arguments"] = "{}"
 	case "reasoning":
 		closed["summary"] = []any{}
 	}
@@ -1842,14 +3327,28 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 // Abort closes every item this encoder opened after a target-side failure,
 // without flushing retained payload. Chat completions need no close frame;
 // Anthropic emits a content_block_stop; Responses emits an empty part done
-// (when the part was opened) followed by an incomplete item done.
+// (when the part was opened) followed by an incomplete item done. An open
+// function_call is left without a done item because that item would carry
+// arguments {}, an executable empty call; the proxy error frame terminates the
+// stream instead.
 func (e *ResponsesStreamEncoder) Abort() error {
+	if err := e.flushPendingDone(); err != nil {
+		return err
+	}
 	for _, idx := range e.order {
 		if !e.open[idx] {
 			continue
 		}
 		item := e.items[idx]
 		if item == nil {
+			continue
+		}
+		if item.kind == "function_call" {
+			// An open function_call has no validated argument value. Its done
+			// item would carry arguments {}, an executable empty call, so it
+			// stays incomplete and the proxy's error frame terminates the
+			// stream.
+			delete(e.open, idx)
 			continue
 		}
 		if err := e.abortItem(item); err != nil {
@@ -1860,16 +3359,17 @@ func (e *ResponsesStreamEncoder) Abort() error {
 	return nil
 }
 
-// reasoningItem renders one completed Responses reasoning item. An opaque
-// encrypted artifact the source provided (Anthropic redacted_thinking or a
-// Responses encrypted reasoning item) is preserved where the target accepts it.
-func reasoningItem(item *responsesItemState, text string) map[string]any {
+// reasoningItem renders one Responses reasoning item with its close status. An
+// opaque encrypted artifact the source provided (Anthropic redacted_thinking
+// or a Responses encrypted reasoning item) is preserved where the target
+// accepts it.
+func reasoningItem(item *responsesItemState, text, status string) map[string]any {
 	summary := []any{}
 	if text != "" {
 		summary = []any{map[string]any{"type": "summary_text", "text": text}}
 	}
 	out := map[string]any{
-		"type": "reasoning", "id": item.id, "status": "completed", "summary": summary,
+		"type": "reasoning", "id": item.id, "status": status, "summary": summary,
 	}
 	if item.encrypted != "" {
 		out["encrypted_content"] = item.encrypted
@@ -1883,6 +3383,12 @@ func reasoningItem(item *responsesItemState, text string) map[string]any {
 // document within ResponsesStreamFrameMaxBytes even when the source opens
 // thousands of empty items.
 func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*responsesItemState, error) {
+	if err := e.flushPendingDone(); err != nil {
+		return nil, err
+	}
+	if e.items[index] != nil {
+		return nil, fmt.Errorf("responses stream item index %d already started", index)
+	}
 	if len(e.order) >= WireCollectionMax {
 		return nil, fmt.Errorf("responses stream exceeds %d items", WireCollectionMax)
 	}
@@ -1890,7 +3396,7 @@ func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*respo
 		return nil, err
 	}
 	item := &responsesItemState{
-		id:          e.newItemID(kind),
+		id:          newResponsesItemID(kind),
 		outputIndex: e.outputIndex,
 		kind:        string(kind),
 	}
@@ -1978,7 +3484,10 @@ func randomID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func (e *ResponsesStreamEncoder) newItemID(kind ir.BlockType) string {
+// newResponsesItemID builds one Responses output item identity. The stream
+// encoder and the non-stream encoder share it so every item carries the
+// type-appropriate required id.
+func newResponsesItemID(kind ir.BlockType) string {
 	switch kind {
 	case ir.BlockToolCall:
 		return "fc_" + randomID()

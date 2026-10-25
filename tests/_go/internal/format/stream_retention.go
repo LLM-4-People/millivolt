@@ -148,7 +148,7 @@ func drainResponsesStream(r *strings.Reader) error {
 
 func TestChatEncoderReleasesClosedBlockState(t *testing.T) {
 	var buf bytes.Buffer
-	enc := NewChatStreamEncoder(&buf, nil)
+	enc := NewChatStreamEncoder(&buf, nil, false)
 	for i := 0; i < 50; i++ {
 		if err := enc.Write(&ir.Event{Type: ir.EventBlockStart, Index: i, Block: &ir.Block{
 			Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{ID: "c", Name: "f", Arguments: json.RawMessage(`{"q":1}`)},
