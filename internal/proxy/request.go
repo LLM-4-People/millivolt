@@ -844,7 +844,13 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		provider: providerFromURL(parsed),
 	}
 	if h := strings.TrimSpace(r.Header.Get(hdrAuthHeader)); h != "" {
-		if !isValidAuthHeader(h) {
+		// The documented default is also a legal explicit selector. The
+		// defensive strip set keeps its lowercase spelling because the raw
+		// client header must never pass through; normalize the selector back
+		// to the wire spelling the default uses.
+		if strings.EqualFold(h, "Authorization") {
+			h = "Authorization"
+		} else if !isValidAuthHeader(h) {
 			return nil, fmt.Errorf("invalid %s header %q", hdrAuthHeader, clientEcho(h))
 		}
 		t.authHeader = h
