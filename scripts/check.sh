@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 die() { echo "check: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
-usage="usage: scripts/check.sh [core | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
+usage="usage: scripts/check.sh [core | race | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
 mode="${1:-core}"
 case "$mode" in
   core)
@@ -65,6 +65,16 @@ case "$mode" in
     # runs exactly once, and fixed-port packages stay serial and locked.
     python3 -B -O -m tests.shard
     wait_background
+    ;;
+  race)
+    (( $# == 1 )) || die "$usage"
+    need python3
+    need go
+    need git
+    # Forced full-race pass for the scheduled escalation job: identical to the
+    # core shard, but every test runs under -race. Never part of the default
+    # gate; the scheduled job owns when it runs.
+    python3 -B -O -m tests.shard --all-race
     ;;
   go)
     (( $# >= 2 )) || die "$usage"
