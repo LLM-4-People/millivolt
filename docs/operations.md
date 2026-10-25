@@ -872,11 +872,13 @@ second list.
   caller's credential is forwarded on the endpoint's internal calls.
 
 Present the credential as `Authorization: Bearer <value>`. A valid Bearer
-request also mints a session cookie, because the dashboard's live feed uses
-EventSource, which cannot send Authorization headers. The cookie is HttpOnly
-(script never reads it), SameSite Strict, scoped to 12 hours, and signed with
-a key derived from the operator token, so a container restart with the same
-credential keeps the session. Rotating the token invalidates outstanding
+request on a dashboard, admin, metrics or dash route also mints a session
+cookie, because the dashboard's live feed uses EventSource, which cannot send
+Authorization headers. The `/mcp` endpoint deliberately returns no cookie: its
+caller forwards the credential on the endpoint's internal calls. The cookie is
+HttpOnly (script never reads it), SameSite Strict, scoped to 12 hours, and
+signed with a key derived from the operator token, so a container restart with
+the same credential keeps the session. Rotating the token invalidates outstanding
 cookies. The cookie deliberately carries no `Secure` flag:
 millivolt's listener is plain HTTP, and the documented TLS deployments
 terminate at the ingress, where the remaining loopback hop is trusted-local.
