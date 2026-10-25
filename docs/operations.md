@@ -694,7 +694,11 @@ publishes the image; a delivered code-bearing main push is an idempotent
 fallback. It never pushes `main`. Dependabot security pull requests are the
 only other exception and normally do not cut a release by themselves; an
 untagged pending `VERSION` can publish. A manually pushed `v*` tag ships exactly
-as tagged. The full maintainer checklist lives in
+as tagged. If the version tag already points at the released commit but its
+GitHub release is missing, the publish job fails closed with a repair
+instruction instead of reporting a successful re-run. Repair the existing tag's
+release after verifying the image; the job never moves a tag or republishes
+images. The full maintainer checklist lives in
 [Contributing](../CONTRIBUTING.md#branch-workflow).
 
 `go run ./cmd/proxy -version` (or `/millivolt -version` in the image) prints
