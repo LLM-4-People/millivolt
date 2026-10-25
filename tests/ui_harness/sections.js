@@ -18,4 +18,7 @@ module.exports = [
   require('./sections/subconversations'),
   require('./sections/settings_dirty'),
   require('./sections/chart_registry'),
+  require('./sections/operator_menus'),
+  require('./sections/settings_search'),
+  require('./sections/live_invariants'),
 ];
