@@ -56,7 +56,9 @@ func TestCommittedKeepaliveNonCompletionRecords200(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(30 * time.Millisecond)
+	if !waitFor(t, func() bool { return calls.Load() >= 1 }) {
+		t.Fatal("first request never reached upstream")
+	}
 
 	queued, err := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"wait","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
@@ -177,7 +179,9 @@ func committedStatusRun(t *testing.T, status int, payload string) (string, map[s
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(30 * time.Millisecond)
+	if !waitFor(t, func() bool { return calls.Load() >= 1 }) {
+		t.Fatal("first request never reached upstream")
+	}
 
 	resp, err := http.DefaultClient.Do(newChat("queued", true))
 	if err != nil {

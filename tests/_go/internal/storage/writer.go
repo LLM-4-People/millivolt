@@ -18,7 +18,7 @@ import (
 // prior bindings cannot leak. The query/values lists come from the actual owner.
 func TestBatchInsertMatchesFullBindings(t *testing.T) {
 	open := func(name string) *Store {
-		s, err := Open(filepath.Join(t.TempDir(), name+".db"), testOpts)
+		s, err := Open(testDatabase(t), testOpts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestBatchInsertMatchesFullBindings(t *testing.T) {
 }
 
 func TestWriterRollbackAfterShapePromotion(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "rollback.db"), testOpts)
+	s, err := Open(testDatabase(t), testOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestWrittenSetEvictsOldestAtCap(t *testing.T) {
 // repeated id is skipped by ON CONFLICT DO NOTHING, the first durable row wins,
 // and totals count exactly the rows on disk instead of every Record call.
 func TestDuplicateRecordIDCountsOnce(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "duplicate.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)

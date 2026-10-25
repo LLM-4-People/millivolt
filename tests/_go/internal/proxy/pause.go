@@ -123,11 +123,7 @@ func TestPauseQueuesNewRequestsUntilUnpause(t *testing.T) {
 	}()
 
 	// Wait until the first request has hit upstream.
-	deadline := time.Now().Add(time.Second)
-	for hits.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if hits.Load() != 1 {
+	if !waitFor(t, func() bool { return hits.Load() != 0 }) {
 		t.Fatalf("first request never reached upstream (hits=%d)", hits.Load())
 	}
 
@@ -149,12 +145,8 @@ func TestPauseQueuesNewRequestsUntilUnpause(t *testing.T) {
 	// Parked IS observable: the hold queue counts the paused request, so poll
 	// for it instead of a fixed window - if the proxy were broken and the
 	// request slipped through to upstream, it would complete and never park.
-	parkDeadline := time.Now().Add(2 * time.Second)
-	for p.scheduler.Stats().Queued < 1 && time.Now().Before(parkDeadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if q := p.scheduler.Stats().Queued; q != 1 {
-		t.Fatalf("paused request never parked (queued=%d, upstream hits=%d)", q, hits.Load())
+	if !waitFor(t, func() bool { return p.scheduler.Stats().Queued >= 1 }) {
+		t.Fatalf("paused request never parked (queued=%d, upstream hits=%d)", p.scheduler.Stats().Queued, hits.Load())
 	}
 	if hits.Load() != 1 {
 		t.Fatalf("paused request hit upstream (hits=%d)", hits.Load())
@@ -233,10 +225,7 @@ func TestPauseTimerUnpauses(t *testing.T) {
 	if !p.scheduler.Paused() {
 		t.Fatal("expected hold")
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && p.scheduler.Paused() {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitFor(t, func() bool { return !p.scheduler.Paused() })
 	if p.scheduler.Paused() {
 		t.Fatal("timer did not clear the hold")
 	}
@@ -312,14 +301,10 @@ func TestPausedRequestPublishedAsPaused(t *testing.T) {
 		}
 	}()
 
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if rec := spy.last.Load(); rec != nil && rec.Paused {
-			p.applyHolds(nil)
-			<-done
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	if waitFor(t, func() bool { rec := spy.last.Load(); return rec != nil && rec.Paused }) {
+		p.applyHolds(nil)
+		<-done
+		return
 	}
 	p.applyHolds(nil)
 	<-done
@@ -375,11 +360,7 @@ func TestReplaceHoldPublishesPausedOnCapWaiter(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	deadline := time.Now().Add(time.Second)
-	for hits.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if hits.Load() != 1 {
+	if !waitFor(t, func() bool { return hits.Load() != 0 }) {
 		t.Fatal("first request never reached upstream")
 	}
 
@@ -392,12 +373,8 @@ func TestReplaceHoldPublishesPausedOnCapWaiter(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	deadline = time.Now().Add(time.Second)
-	for p.scheduler.Stats().Queued < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if q := p.scheduler.Stats().Queued; q != 1 {
-		t.Fatalf("queued = %d, want 1", q)
+	if !waitFor(t, func() bool { return p.scheduler.Stats().Queued >= 1 }) {
+		t.Fatalf("queued = %d, want 1", p.scheduler.Stats().Queued)
 	}
 
 	rr = httptest.NewRecorder()
@@ -407,16 +384,12 @@ func TestReplaceHoldPublishesPausedOnCapWaiter(t *testing.T) {
 		t.Fatalf("update = %d %s", rr.Code, rr.Body.Bytes())
 	}
 
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if rec := spy.last.Load(); rec != nil && rec.Paused {
-			close(gate)
-			<-firstDone
-			p.removePause(id, time.Time{})
-			<-secondDone
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	if waitFor(t, func() bool { rec := spy.last.Load(); return rec != nil && rec.Paused }) {
+		close(gate)
+		<-firstDone
+		p.removePause(id, time.Time{})
+		<-secondDone
+		return
 	}
 	close(gate)
 	<-firstDone
@@ -560,10 +533,7 @@ func TestOneHoldTimerLeavesTheOther(t *testing.T) {
 		{Clients: []string{"short"}, Until: time.Now().Add(50 * time.Millisecond)},
 		{Clients: []string{"long"}, Duration: "1h", Until: time.Now().Add(time.Hour)},
 	})
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && p.scheduler.Holds("short") {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitFor(t, func() bool { return !p.scheduler.Holds("short") })
 	if p.scheduler.Holds("short") {
 		t.Fatal("short hold timer did not fire")
 	}
@@ -660,10 +630,7 @@ func TestSameUntilTimersClearBoth(t *testing.T) {
 		{Clients: []string{"a"}, Until: until},
 		{Clients: []string{"b"}, Until: until},
 	})
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && p.scheduler.Paused() {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitFor(t, func() bool { return !p.scheduler.Paused() })
 	if p.scheduler.Paused() || p.scheduler.Holds("a") || p.scheduler.Holds("b") {
 		t.Fatal("same-Until timers did not clear both holds")
 	}
@@ -1019,12 +986,8 @@ func TestPauseIgnoresProxyTimeoutUntilUnpause(t *testing.T) {
 	// can still be in flight to the proxy when the sleep ends, which would
 	// unpause before the hold ever applied and let the 200ms send deadline
 	// govern the local upstream exchange. Poll the scheduler queue first.
-	parkDeadline := time.Now().Add(2 * time.Second)
-	for p.scheduler.Stats().Queued < 1 && time.Now().Before(parkDeadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if q := p.scheduler.Stats().Queued; q != 1 {
-		t.Fatalf("request never parked (queued=%d, upstream hits=%d)", q, hits.Load())
+	if !waitFor(t, func() bool { return p.scheduler.Stats().Queued >= 1 }) {
+		t.Fatalf("request never parked (queued=%d, upstream hits=%d)", p.scheduler.Stats().Queued, hits.Load())
 	}
 	if hits.Load() != 0 {
 		t.Fatal("paused request reached upstream")
@@ -1174,11 +1137,7 @@ func TestQualityRetryHonorsOperatorHold(t *testing.T) {
 	// Wait for the degenerate attempt to land (the hold is armed inside it).
 	// The re-send may already have fired too (that is the bug under test) -
 	// the window assertion below is the actual proof.
-	deadline := time.Now().Add(2 * time.Second)
-	for calls.Load() < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if calls.Load() < 1 {
+	if !waitFor(t, func() bool { return calls.Load() >= 1 }) {
 		t.Fatalf("void attempt never reached upstream (calls=%d)", calls.Load())
 	}
 	// Negative-proof window: the re-send must NOT fire while the hold is
@@ -1396,11 +1355,7 @@ func TestQueueStreamSendsSSEKeepalive(t *testing.T) {
 		resp.Body.Close()
 		close(firstDone)
 	}()
-	deadline := time.Now().Add(time.Second)
-	for hits.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if hits.Load() != 1 {
+	if !waitFor(t, func() bool { return hits.Load() != 0 }) {
 		t.Fatalf("first request never reached upstream (hits=%d)", hits.Load())
 	}
 
@@ -1514,7 +1469,11 @@ func TestQueueWaitExceededAfterKeepaliveEmitsSSEError(t *testing.T) {
 		}
 		close(firstDone)
 	}()
-	time.Sleep(30 * time.Millisecond)
+	// The first request holds the only concurrency slot; the second must queue
+	// and observe the queue-wait expiry.
+	if !waitFor(t, func() bool { return p.scheduler.Stats().InFlight >= 1 }) {
+		t.Fatal("first request never occupied the concurrency slot")
+	}
 
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"m","stream":true}`))

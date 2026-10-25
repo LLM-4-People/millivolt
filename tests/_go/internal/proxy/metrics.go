@@ -23,13 +23,7 @@ import (
 // parallel test load; polling removes that flake deterministically.
 func waitForRecord(t *testing.T, buf *metrics.Buffer, n int) []*metrics.Record {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if snap := buf.Snapshot(); len(snap) >= n {
-			return snap
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, func() bool { return len(buf.Snapshot()) >= n })
 	return buf.Snapshot()
 }
 

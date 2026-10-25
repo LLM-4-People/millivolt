@@ -76,14 +76,11 @@ func runDebugCaptureRequest(t *testing.T, p *Server, spy *liveSpy, upstream http
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 
-	deadline := time.Now().Add(2 * time.Second)
 	var rec *metrics.Record
-	for time.Now().Before(deadline) {
-		if rec = spy.final.Load(); rec != nil && rec.Debug && rec.StatusCode == http.StatusOK {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, func() bool {
+		rec = spy.final.Load()
+		return rec != nil && rec.Debug && rec.StatusCode == http.StatusOK
+	})
 	if rec == nil || !rec.Debug || rec.StatusCode != http.StatusOK {
 		t.Fatal("finalized record never observed with debug=true and status 200")
 	}
@@ -203,14 +200,9 @@ func pendingCaptureCount(p *Server) int {
 // marker left behind would hang the next drawer fetch for that id.
 func waitPendingCapturesEmpty(t *testing.T, p *Server) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if pendingCaptureCount(p) == 0 {
-			return
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, func() bool { return pendingCaptureCount(p) == 0 }) {
+		t.Fatalf("pending capture markers did not resolve: %d left", pendingCaptureCount(p))
 	}
-	t.Fatalf("pending capture markers did not resolve: %d left", pendingCaptureCount(p))
 }
 
 // TestDebugNoStoreRefusesSessionAndRetainsNothing pins the fail-closed storage

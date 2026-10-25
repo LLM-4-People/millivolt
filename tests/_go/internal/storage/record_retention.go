@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"encoding/json"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +79,7 @@ func assertRecordRetention(t *testing.T, label string, rec *metrics.Record) {
 // both views and the raw SQL columns stay bounded. A normal record keeps its
 // exact pre-entry JSON in the ring.
 func TestRecorderBoundsRecordRetentionInRingAndStore(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "retention.db"), testOpts)
+	s, err := Open(testDatabase(t), testOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,12 +226,12 @@ func retentionColumnValues(t *testing.T, s *Store, id string) map[string]string 
 // boundary itself must apply the same retention as Recorder(buffer). The two
 // paths must persist identical bounded fields.
 func TestDirectStoreRecordAppliesSharedRetention(t *testing.T) {
-	direct, err := Open(filepath.Join(t.TempDir(), "direct-retention.db"), testOpts)
+	direct, err := Open(testDatabase(t), testOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer direct.Close()
-	production, err := Open(filepath.Join(t.TempDir(), "production-retention.db"), testOpts)
+	production, err := Open(testDatabase(t), testOpts)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -120,7 +120,7 @@ func TestRequestOverridesRewriteBodyAcrossRetriesAndResends(t *testing.T) {
 		overrideReply{200, overrideGoodCompletion},
 	)
 	defer upstream.Close()
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.RequestOverrides = []config.RequestOverride{{
 		Client: "ov-client",
 		Body:   &config.OverrideBody{MaxTokens: &tokens},

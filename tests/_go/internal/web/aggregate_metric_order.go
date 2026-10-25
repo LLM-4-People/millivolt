@@ -240,23 +240,20 @@ func TestChartUnchangedViewAllocationBounded(t *testing.T) {
 	p.metrics.append(rows, 0)
 	now := time.Now().UnixMilli()
 	from, step, count := chartWindowEdges(now, now-15*60*1000)
-	res := testing.Benchmark(func(b *testing.B) {
-		b.ReportAllocs()
-		for b.Loop() {
-			f := newChartFold(from, step, count, "", nil)
-			f.prepare(p, nil)
-			for i := range rows {
-				if err := f.fold(&rows[i]); err != nil {
-					b.Fatal(err)
-				}
+	alloc, _ := allocStats(func() {
+		f := newChartFold(from, step, count, "", nil)
+		f.prepare(p, nil)
+		for i := range rows {
+			if err := f.fold(&rows[i]); err != nil {
+				t.Fatal(err)
 			}
-			f.freezeOrder()
-			_ = f.payload(now)
 		}
+		f.freezeOrder()
+		_ = f.payload(now)
 	})
 	const limit = 1 << 20
-	if got := res.AllocedBytesPerOp(); got > limit {
-		t.Fatalf("unchanged-view chart read allocated %d bytes/op, want at most %d", got, limit)
+	if alloc > limit {
+		t.Fatalf("unchanged-view chart read allocated %d bytes/op, want at most %d", alloc, limit)
 	}
 }
 

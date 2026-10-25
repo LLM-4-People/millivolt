@@ -143,25 +143,17 @@ func TestRequestBodyAllocationBounds(t *testing.T) {
 		{"declared under-hinted 16 MiB", body16, int64(len(body16)), 1 << 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res := testing.Benchmark(func(b *testing.B) {
-				if got, err := readRequestBody(bytes.NewReader(tc.body), tc.contentLength, 32<<20, tc.hintMax); err != nil || !bytes.Equal(got, tc.body) {
-					b.Fatalf("warm read: len=%d err=%v", len(got), err)
-				}
-				b.ReportAllocs()
-				b.ResetTimer()
-				for b.Loop() {
-					got, err := readRequestBody(bytes.NewReader(tc.body), tc.contentLength, 32<<20, tc.hintMax)
-					if err != nil || !bytes.Equal(got, tc.body) {
-						b.Fatalf("len=%d err=%v", len(got), err)
-					}
+			alloc, allocs := allocStats(func() {
+				got, err := readRequestBody(bytes.NewReader(tc.body), tc.contentLength, 32<<20, tc.hintMax)
+				if err != nil || !bytes.Equal(got, tc.body) {
+					t.Fatalf("len=%d err=%v", len(got), err)
 				}
 			})
-			alloc := res.AllocedBytesPerOp()
 			bound := int64(len(tc.body)) * 3 / 2
 			if alloc < int64(len(tc.body)) || alloc > bound {
 				t.Fatalf("%d-byte body buffered %d bytes/op, want about one body and at most %d", len(tc.body), alloc, bound)
 			}
-			t.Logf("%s: %d-byte body, %d bytes/op, %d allocs/op", tc.name, len(tc.body), alloc, res.AllocsPerOp())
+			t.Logf("%s: %d-byte body, %d bytes/op, %d allocs/op", tc.name, len(tc.body), alloc, int(allocs))
 		})
 	}
 }

@@ -34,13 +34,9 @@ func TestIdleCancelBodyCancelsSilentRead(t *testing.T) {
 		done <- err
 	}()
 	<-r.reached
-	deadline := time.Now().Add(2 * time.Second)
-	for !canceled.Load() {
-		if time.Now().After(deadline) {
-			close(r.gate)
-			t.Fatal("silent read never canceled the attempt context")
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, canceled.Load) {
+		close(r.gate)
+		t.Fatal("silent read never canceled the attempt context")
 	}
 	close(r.gate)
 	<-done

@@ -245,16 +245,14 @@ func TestRequestToolChoiceDecodeAllocationBounded(t *testing.T) {
 			if warm.ReqToolChoice != "tool:f" {
 				t.Fatalf("warm decode = %q, want tool:f", warm.ReqToolChoice)
 			}
-			res := testing.Benchmark(func(b *testing.B) {
-				for b.Loop() {
-					var rec metrics.Record
-					parseLLMRequest(body, &rec, false)
-					if rec.ReqToolChoice != "tool:f" {
-						b.Fatalf("ReqToolChoice = %q, want tool:f", rec.ReqToolChoice)
-					}
+			alloc, _ := allocStats(func() {
+				var rec metrics.Record
+				parseLLMRequest(body, &rec, false)
+				if rec.ReqToolChoice != "tool:f" {
+					t.Fatalf("ReqToolChoice = %q, want tool:f", rec.ReqToolChoice)
 				}
 			})
-			if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+			if alloc > 4<<20 {
 				t.Fatalf("%d-byte tool_choice allocated %d bytes/op, want <= 4 MiB", len(body), alloc)
 			} else {
 				t.Logf("%s tool_choice: %d bytes, %d bytes/op", name, len(body), alloc)
@@ -304,28 +302,26 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 	if rec.ReqMetadataKeys != 0 {
 		t.Fatalf("hostile metadata decoded %d keys before rejection", rec.ReqMetadataKeys)
 	}
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			var rec metrics.Record
-			if err := parseLLMRequest(raw, &rec, false); err == nil {
-				b.Fatal("hostile metadata accepted")
-			}
-			if rec.ReqMetadataKeys != 0 {
-				b.Fatalf("ReqMetadataKeys = %d, want no typed decode", rec.ReqMetadataKeys)
-			}
+	alloc, allocs := allocStats(func() {
+		var rec metrics.Record
+		if err := parseLLMRequest(raw, &rec, false); err == nil {
+			t.Fatal("hostile metadata accepted")
+		}
+		if rec.ReqMetadataKeys != 0 {
+			t.Fatalf("ReqMetadataKeys = %d, want no typed decode", rec.ReqMetadataKeys)
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+	if alloc > 4<<20 {
 		t.Fatalf("%d-byte metadata map allocated %d bytes/op, want <= 4 MiB", len(raw), alloc)
 	} else {
-		t.Logf("metadata flood: %d bytes, %d bytes/op, %d allocs/op", len(raw), alloc, res.AllocsPerOp())
+		t.Logf("metadata flood: %d bytes, %d bytes/op, %d allocs/op", len(raw), alloc, int(allocs))
 	}
 	// The former map decode made one allocation per key (about 87k for this
 	// fixture). The merge-aware distinct-key scan retains at most the 10,000-key
 	// bound, and each retained key costs a decoded string plus its map entry;
 	// 25k still keeps the work proportional to the bound, not the body.
-	if allocs := res.AllocsPerOp(); allocs > 25_000 {
-		t.Fatalf("%d-byte metadata map made %d allocs/op, want a bounded key scan", len(raw), allocs)
+	if allocs > 25_000 {
+		t.Fatalf("%d-byte metadata map made %d allocs/op, want a bounded key scan", len(raw), int(allocs))
 	}
 }
 
@@ -516,16 +512,14 @@ func TestReadRequestBoundedLengthHintAndErrors(t *testing.T) {
 // prefix plus a full right-sized copy.
 func TestReadRequestHintAvoidsLargeBodyCopy(t *testing.T) {
 	body := strings.Repeat("x", 2<<20)
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			rc := &requestTestBody{Reader: strings.NewReader(body)}
-			got, _, err := readRequestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
-			if err != nil || len(got) != len(body) {
-				b.Fatalf("len=%d err=%v", len(got), err)
-			}
+	alloc, _ := allocStats(func() {
+		rc := &requestTestBody{Reader: strings.NewReader(body)}
+		got, _, err := readRequestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
+		if err != nil || len(got) != len(body) {
+			t.Fatalf("len=%d err=%v", len(got), err)
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > int64(len(body))*3/2 {
+	if alloc > int64(len(body))*3/2 {
 		t.Fatalf("2 MiB hint allocated %d bytes/op, want about one body (prefix+copy regression)", alloc)
 	}
 }
@@ -797,25 +791,29 @@ func TestRequestElementOverflowReturns400BeforeUpstream(t *testing.T) {
 func TestRequestNestedPayloadAllocationBound(t *testing.T) {
 	nested := strings.TrimSuffix(strings.Repeat("{} ,", 200_000), ",")
 	for _, tc := range []struct {
-		name string
-		body string
+		name    string
+		body    string
+		wantErr bool
 	}{
-		{"content parts", `{"model":"m","messages":[{"role":"user","content":[` + nested + `]}]}`},
-		{"tool payload", `{"model":"m","tools":[{"nested":[` + nested + `],"n":1e999}]}`},
+		{"content parts", `{"model":"m","messages":[{"role":"user","content":[` + nested + `]}]}`, true},
+		{"tool payload", `{"model":"m","tools":[{"nested":[` + nested + `],"n":1e999}]}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := []byte(tc.body)
 			var parseErr error
-			res := testing.Benchmark(func(b *testing.B) {
-				for b.Loop() {
-					var rec metrics.Record
-					parseErr = parseLLMRequest(raw, &rec, false)
-					if parseErr != nil {
-						b.Fatalf("parse returned %v", parseErr)
-					}
-				}
+			alloc, _ := allocStats(func() {
+				var rec metrics.Record
+				parseErr = parseLLMRequest(raw, &rec, false)
 			})
-			if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+			// The 200,000-part fixture trips the aggregate guardrail before
+			// any typed expansion; the bounded rejection is the contract.
+			if parseErr != nil && !strings.Contains(parseErr.Error(), "content parts exceed") {
+				t.Fatalf("parse returned %v", parseErr)
+			}
+			if (parseErr != nil) != tc.wantErr {
+				t.Fatalf("parse error = %v, wantErr %v", parseErr, tc.wantErr)
+			}
+			if alloc > 4<<20 {
 				t.Fatalf("%d-byte %s allocated %d bytes/op, want bounded nested decoding", len(raw), tc.name, alloc)
 			} else {
 				t.Logf("%s: %d bytes, %d bytes/op", tc.name, len(raw), alloc)

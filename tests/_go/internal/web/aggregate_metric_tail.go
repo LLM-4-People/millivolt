@@ -328,15 +328,13 @@ func TestProjectionRecentAppendAllocationBounded(t *testing.T) {
 	if got := len(base.recentOrder().ttft); got != recentMetricRows {
 		t.Fatalf("tail samples = %d, want %d", got, recentMetricRows)
 	}
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			m := base
-			m.append(rows, history)
-			benchmarkProjectionMetrics = m
-		}
+	alloc, _ := allocStats(func() {
+		m := base
+		m.append(rows, history)
+		benchmarkProjectionMetrics = m
 	})
 	const limit = 64 << 10
-	if alloc := res.AllocedBytesPerOp(); alloc > limit {
+	if alloc > limit {
 		t.Fatalf("sub-threshold append allocated %d bytes/op, want at most %d (no tail-sized copy)", alloc, limit)
 	}
 }

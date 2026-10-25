@@ -562,7 +562,7 @@ func TestTransparentTransportErrorRetry(t *testing.T) {
 	defer upstream.Close()
 
 	buf := metrics.NewBuffer(8)
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.MaxRetries = 3
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
@@ -947,11 +947,8 @@ func TestRetrySerializesSameKey(t *testing.T) {
 	// happened (no fixed window can race the proxy's absorb path under
 	// load), and it parks in the handler until the siblings have been
 	// observed.
-	for deadline := time.Now().Add(5 * time.Second); calls.Load() < 2; {
-		if time.Now().After(deadline) {
-			t.Fatal("owner's retry attempt never arrived (the trip did not happen)")
-		}
-		time.Sleep(2 * time.Millisecond)
+	if !waitFor(t, func() bool { return calls.Load() >= 2 }) {
+		t.Fatal("owner's retry attempt never arrived (the trip did not happen)")
 	}
 
 	done2 := make(chan struct{})

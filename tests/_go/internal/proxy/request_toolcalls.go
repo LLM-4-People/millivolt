@@ -94,19 +94,17 @@ func TestRequestToolCallAllocationBound(t *testing.T) {
 	const calls = 100_000
 	raw := requestToolCallsBody(calls)
 	var parseErr error
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			var rec metrics.Record
-			parseErr = parseLLMRequest(raw, &rec, false)
-			if parseErr == nil {
-				b.Fatalf("%d-call body was accepted", calls)
-			}
+	alloc, _ := allocStats(func() {
+		var rec metrics.Record
+		parseErr = parseLLMRequest(raw, &rec, false)
+		if parseErr == nil {
+			t.Fatalf("%d-call body was accepted", calls)
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+	if alloc > 4<<20 {
 		t.Fatalf("%d-byte %d-call body allocated %d bytes/op, want the bounded lexical preflight", len(raw), calls, alloc)
 	}
-	t.Logf("tool-call over-bound: input=%d calls=%d alloc=%d", len(raw), calls, res.AllocedBytesPerOp())
+	t.Logf("tool-call over-bound: input=%d calls=%d alloc=%d", len(raw), calls, alloc)
 }
 
 // TestRequestToolCallsReturn400BeforeTranslationAndUpstream pins the HTTP
