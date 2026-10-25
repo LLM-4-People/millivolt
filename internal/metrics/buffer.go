@@ -713,9 +713,25 @@ type AggResult struct {
 // exposition renders, including the per-provider counts, flat TTFT samples and
 // their checked sum.
 func Aggregate(records []*Record) *AggResult {
+	return aggregateInto(records, nil)
+}
+
+// aggregateInto is the one owner of the fold. samples is a reusable scratch for
+// the flat TTFT set (usually one per record); a nil or undersized scratch is
+// replaced by an exact upper-bound allocation so the append never regrows. The
+// returned AggResult borrows samples, so the caller that supplies a pooled
+// scratch must not let the result escape past its release.
+func aggregateInto(records []*Record, samples []int64) *AggResult {
+	if cap(samples) < len(records) {
+		// Every record can contribute at most one TTFT sample. Preallocating the
+		// bound matters at the million-record ceiling: append growth spent about
+		// five times the final 8 MB on every scrape that kept only the flat set.
+		samples = make([]int64, 0, len(records))
+	}
 	a := &AggResult{
 		ProviderCounts: make(map[string]int),
 		ByStatus:       make(map[int]int),
+		TTFTSamples:    samples[:0],
 	}
 	a.Total = len(records)
 	ttftSumFailed := false

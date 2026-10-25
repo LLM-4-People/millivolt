@@ -201,10 +201,12 @@ func (a *AggAPI) queryCtx(r *http.Request) (context.Context, context.CancelFunc)
 // ---------- record materialization (shared by every endpoint) ----------
 
 // contribLabels owns the six single-valued dimension labels while a
-// contribution is still live. Projected rows drop this sidecar after
-// contribDimensions.intern and resolve labels from dimensionIDs instead;
-// retaining six string headers on every durable row duplicated bytes the
-// projection dictionaries already own.
+// contribution is still live. Durable rows never build this sidecar: the scan
+// returns the tuple by value for the one interning step (internLabels), so a
+// projected row never pays 112 bytes of garbage for labels the projection
+// dictionaries are about to own. Projected rows resolve labels from
+// dimensionIDs instead; retaining six string headers on every durable row
+// duplicated bytes the dictionaries already own.
 type contribLabels struct {
 	client, prov, model, key, conv, parentConv string
 }
@@ -383,24 +385,26 @@ const rowColumns = `id, started_at, status_code, error_type, error_code, error_m
 	tool_calls, cost, ttft_ms, gen_tps, tool_names,
 	(last_token_at - first_token_at) AS decode_ms`
 
-// scanContrib decodes one scanned row into a contrib (rowColumns order).
-func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
+// scanContrib decodes one scanned row into a contrib (rowColumns order) and
+// returns its six single-valued labels separately. The caller interns the row
+// into the projection dictionaries immediately, so building a live labels
+// sidecar here would allocate one 96-byte header per durable row only for the
+// intern step to drop it. The label tuple travels by value instead.
+func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, contribLabels, error) {
 	var c contrib
+	var labels contribLabels
 	var startedAt, status, ttft int64
 	var gen float64
 	var errType, errCode, errMsg string
 	var attemptsJSON, toolNamesJSON []byte
-	var client, prov, model, key, conv, parentConv string
+	var model string
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
-		&client, &prov, &model, &key, &conv, &parentConv,
+		&labels.client, &labels.prov, &model, &labels.key, &labels.conv, &labels.parentConv,
 		&c.in, &c.out, &c.cacheR, &c.reason,
 		&c.tools, &c.cost, &ttft, &gen, &toolNamesJSON, &c.dec); err != nil {
-		return c, err
+		return c, labels, err
 	}
-	c.labels = &contribLabels{
-		client: client, prov: prov, model: mcz.model(model),
-		key: key, conv: conv, parentConv: parentConv,
-	}
+	labels.model = mcz.model(model)
 	c.start = startedAt
 	c.status = int(status)
 	c.ttft = ttft
@@ -421,7 +425,7 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	c.isErr = r.IsError()
 	c.has429 = r.HasRateLimit()
 	c.ent = errorEntries(&r)
-	return c, nil
+	return c, labels, nil
 }
 
 // errorEntries is the Go mirror of the client's recordErrorEntries enumerator

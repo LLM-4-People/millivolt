@@ -44,7 +44,7 @@ func TestProjectionLabelBindingLiveStoredParity(t *testing.T) {
 			t.Fatalf("live row %s lost its label sidecar", r.ID)
 		}
 	}
-	p, err := buildProjection(slices.Clone(live), storage.ProjectionCursor{}, 1)
+	p, err := buildProjection(slices.Clone(live), labelTuples(live), storage.ProjectionCursor{}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

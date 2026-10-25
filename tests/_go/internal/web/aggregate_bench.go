@@ -383,7 +383,7 @@ func BenchmarkAggregateFlightCoalesce(b *testing.B) {
 }
 
 func benchmarkExplorerProjection(rows []contrib) *projectionData {
-	p, err := buildProjection(rows, storage.ProjectionCursor{}, 1)
+	p, err := buildProjection(rows, labelTuples(rows), storage.ProjectionCursor{}, 1)
 	if err != nil {
 		panic(err)
 	}

@@ -71,6 +71,17 @@ func mkRec(id string, start time.Time, status int, errType string, attempts []me
 	}
 }
 
+// labelTuples derives the by-value label tuples buildProjection consumes from
+// rows that still carry their live sidecar (fixtures and ring samples). The
+// production scan path passes its own tuples instead of building sidecars.
+func labelTuples(rows []contrib) []contribLabels {
+	out := make([]contribLabels, len(rows))
+	for i := range rows {
+		out[i] = rows[i].labelTuple()
+	}
+	return out
+}
+
 func get(t *testing.T, h http.Handler, target string) map[string]any {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
