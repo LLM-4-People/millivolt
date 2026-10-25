@@ -75,7 +75,15 @@ func TestRingSnapshotStoreAllocationCeiling(t *testing.T) {
 		}
 	})
 	bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
-	t.Logf("store ringSnapshot = %d B/op %d allocs/op (N=%d)", bytes, allocs, result.N)
+	t.Logf("store ringSnapshot = %d B/op %d allocs/op (%d allocations over N=%d)",
+		bytes, allocs, result.MemAllocs, result.N)
+	// This read holds the store lock and probes the written-id set, so the
+	// goroutine can migrate between Ps mid-loop and strand the pooled scratch.
+	// A miss then allocates the whole ring, and a strict total-allocation
+	// assertion is flaky (2-4 misses over ~170 plain reads). AllocsPerOp still
+	// rejects the per-read regression this test owns: the displaced id scratch
+	// cost one allocation per read. The tight nil-store sibling asserts the
+	// exact total.
 	if allocs != 0 {
 		t.Fatalf("store ringSnapshot = %d allocs/op, want 0", allocs)
 	}

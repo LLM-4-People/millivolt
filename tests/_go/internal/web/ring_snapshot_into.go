@@ -218,9 +218,13 @@ func TestRingSnapshotAllocationCeiling(t *testing.T) {
 		}
 	})
 	bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
-	t.Logf("ringSnapshot = %d B/op %d allocs/op (N=%d)", bytes, allocs, result.N)
-	if allocs != 0 {
-		t.Fatalf("ringSnapshot = %d allocs/op, want 0", allocs)
+	t.Logf("ringSnapshot = %d B/op %d allocs/op (%d allocations over N=%d)",
+		bytes, allocs, result.MemAllocs, result.N)
+	// AllocsPerOp is integer MemAllocs/N, so a single allocation every few
+	// hundred reads still rounds to zero. Assert the total instead: the
+	// measured loop must not allocate at all.
+	if result.MemAllocs != 0 {
+		t.Fatalf("ringSnapshot = %d total allocations over %d reads, want 0", result.MemAllocs, result.N)
 	}
 }
 
