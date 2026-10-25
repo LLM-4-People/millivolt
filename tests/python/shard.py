@@ -1,5 +1,6 @@
 """Unit contracts for the parallel Go test sharder and its race scope."""
 
+import re
 import tempfile
 import threading
 import unittest
@@ -121,6 +122,21 @@ class RaceScopeTests(unittest.TestCase):
         race, plain = race_scope.select(MODULE + "/cmd/proxy", names)
         self.assertEqual(race, names)
         self.assertEqual(plain, [])
+
+    def test_proxy_byte_ceiling_is_not_race_selected(self):
+        # The 37,000 B allocation ceiling is meaningful only without race
+        # shadow memory, so the test must stay in the plain pass. The name is
+        # derived from the owning file: a rename that matches a proxy race
+        # selector (for example *Stream*) fails here instead of silently
+        # moving the byte guard into the race pass, where it is not asserted.
+        source = (shard.ROOT / "tests/_go/internal/proxy/request_ceiling.go").read_text(
+            encoding="utf-8")
+        names = re.findall(r"^func (Test[A-Za-z0-9_]+)\(", source, re.MULTILINE)
+        self.assertEqual(len(names), 1, "request_ceiling.go must own exactly one test")
+        race, plain = race_scope.select(PROXY, names)
+        self.assertEqual(race, [],
+                         f"{names[0]} is race-selected, so its plain-only byte ceiling never runs")
+        self.assertEqual(plain, names)
 
     def test_all_race_escalates_every_test(self):
         names = ["TestRequestMetadata", "TestStreamPump"]
