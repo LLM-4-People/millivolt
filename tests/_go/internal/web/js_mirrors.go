@@ -696,7 +696,7 @@ func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
 // fifth call reddens here. The jsdom rows cover each path's behavior,
 // but none of them counts the call sites.
 func TestSettingsRevealCallSitesPinnedInSource(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_state.js")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -674,7 +674,16 @@ function applyDashValues(v) {
 // appends them one at a time, so no module runs before the module it was
 // split from, and index.html never references one (first paint stays free
 // of the whole sheet). A new settings module joins this list only.
-const SETTINGS_MODULES = ['settings.js', 'settings_backup.js', 'settings_providers.js', 'settings_model_rules.js', 'settings_overrides.js', 'settings_subconversations.js', 'settings_providers_actions.js'];
+const SETTINGS_MODULES = [
+  'settings.js',
+  'settings_backup.js',
+  'settings_providers.js',
+  'settings_model_rules.js',
+  'settings_overrides.js',
+  'settings_subconversations.js',
+  'settings_providers_actions.js',
+  'settings_state.js',
+];
 let settingsLoadPromise = null;
 let settingsLoading = false;
 let settingsWantOpen = false;
@@ -721,7 +730,15 @@ function loadSettingsModule(from = 0) {
       const script = document.createElement('script');
       script.src = settingsModuleURL(SETTINGS_MODULES[at++]);
       script.async = true;
-      script.onload = append;
+      // A page may register the sheet module itself (the loader tests do) or
+      // a module may register before the list ends: adopt it and stop, exactly
+      // as the one-module loader did. The split's last module owns the real
+      // registration, so a normal load walks the whole list.
+      script.onload = () => {
+        const module = window.settingsModule;
+        if (module && typeof module.open === 'function' && typeof module.close === 'function') resolve(module);
+        else append();
+      };
       script.onerror = () => reject(new Error(SETTINGS_LOAD_FAIL));
       document.head.appendChild(script);
     };
