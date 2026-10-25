@@ -522,7 +522,13 @@ func TestKPIMemoConcurrentCommitsConverge(t *testing.T) {
 			if err := s.Flush(); err != nil {
 				t.Fatal(err)
 			}
-			checkKPI(t, api, writers*perWriter, true)
+			// The speculative loop may already have observed the settled key
+			// (its last iteration can run after the final commit), so this call
+			// is a fold or a hit depending on timing; only the value is fixed.
+			// Assert convergence here, then pin reuse on the next call.
+			if p := api.kpi(); p.err != nil || p.Requests != writers*perWriter {
+				t.Fatalf("converged kpi = requests %d, err %v, want requests %d", p.Requests, p.err, writers*perWriter)
+			}
 			checkKPI(t, api, writers*perWriter, false)
 			return
 		default:

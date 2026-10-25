@@ -275,16 +275,14 @@ func TestLogPageDecodeBudget(t *testing.T) {
 		{"go_status_class_miss_limit_60", "/metrics/agg/log?limit=60&f=status:5xx", 80_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res := testing.Benchmark(func(b *testing.B) {
-				for b.Loop() {
-					w := httptest.NewRecorder()
-					h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.query, nil))
-					if w.Code != http.StatusOK {
-						b.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
-					}
+			bytes, allocs := allocStats(func() {
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.query, nil))
+				if w.Code != http.StatusOK {
+					t.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
 				}
 			})
-			if got, bytes := res.AllocsPerOp(), res.AllocedBytesPerOp(); got > tc.maxAllocs {
+			if got := int64(allocs); got > tc.maxAllocs {
 				t.Fatalf("%s allocated %d objects/op (%d bytes/op), want at most %d (decoded rows must follow the page)", tc.query, got, bytes, tc.maxAllocs)
 			}
 		})
@@ -614,19 +612,17 @@ func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 		{"status_class_5xx", "/metrics/agg/log?limit=60&f=status:5xx", 6 << 20, 120_000},
 	} {
 		t.Run("alloc/"+tc.name, func(t *testing.T) {
-			res := testing.Benchmark(func(b *testing.B) {
-				for b.Loop() {
-					w := httptest.NewRecorder()
-					h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.query, nil))
-					if w.Code != http.StatusOK {
-						b.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
-					}
+			bytes, allocs := allocStats(func() {
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.query, nil))
+				if w.Code != http.StatusOK {
+					t.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
 				}
 			})
-			if got := res.AllocedBytesPerOp(); got > tc.maxBytes {
-				t.Fatalf("%s allocated %d bytes/op, want at most %d", tc.query, got, tc.maxBytes)
+			if bytes > tc.maxBytes {
+				t.Fatalf("%s allocated %d bytes/op, want at most %d", tc.query, bytes, tc.maxBytes)
 			}
-			if got := res.AllocsPerOp(); got > tc.maxAllocs {
+			if got := int64(allocs); got > tc.maxAllocs {
 				t.Fatalf("%s allocated %d times/op, want at most %d", tc.query, got, tc.maxAllocs)
 			}
 		})

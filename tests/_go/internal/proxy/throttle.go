@@ -544,14 +544,10 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 		}
 		release(0)
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for p.scheduler.Stats().Queued == 0 {
-		if time.Now().After(deadline) {
-			holder(0)
-			<-waiterDone
-			t.Fatal("waiter never queued")
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, func() bool { return p.scheduler.Stats().Queued != 0 }) {
+		holder(0)
+		<-waiterDone
+		t.Fatal("waiter never queued")
 	}
 	defer func() {
 		holder(0)
@@ -666,16 +662,11 @@ func TestThrottleCrossKeyConcurrencyAtProxy(t *testing.T) {
 	// The provider slot being held IS observable: poll the throttle's live
 	// in-flight count until the first request is admitted, so the second key
 	// truly tests the cap rather than a start race.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	if !waitFor(t, func() bool {
 		infos := p.scheduler.ListThrottles()
-		if len(infos) == 1 && infos[0].InFlight == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("first request never held the provider slot: %+v", infos)
-		}
-		time.Sleep(time.Millisecond)
+		return len(infos) == 1 && infos[0].InFlight == 1
+	}) {
+		t.Fatalf("first request never held the provider slot: %+v", p.scheduler.ListThrottles())
 	}
 
 	done := make(chan struct{})

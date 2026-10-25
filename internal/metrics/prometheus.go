@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -35,16 +36,38 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	_, _ = io.WriteString(w, body)
 }
 
+// prometheusSamplePool recycles the flat TTFT scratch between scrapes. The
+// exposition is O(ring log ring) on every revision change, and a live ring
+// changes on every finalized request, so the 8 MB sample slice at the
+// million-record ceiling was fresh garbage per scrape. The disposed result
+// never escapes renderPrometheusExposition, so the slice is safe to reuse; the
+// pool drops it at GC like any other pooled buffer, and a miss allocates the
+// same slice the fold always did. This is a scratch reuse, never a cached
+// exposition: stale bodies remain impossible.
+var prometheusSamplePool = sync.Pool{New: func() any { return new([]int64) }}
+
 // renderPrometheusExposition folds one immutable ring snapshot into the
 // exposition text. A failed aggregate returns no partial body, so the handler
 // can fail the whole scrape.
 func renderPrometheusExposition(records []*Record) (string, error) {
-	agg := Aggregate(records)
+	samples := prometheusSamplePool.Get().(*[]int64)
+	agg := aggregateInto(records, *samples)
+	*samples = agg.TTFTSamples
+	defer prometheusSamplePool.Put(samples)
 	if agg.Err != nil {
 		return "", agg.Err
 	}
 
+	// Size the body once: the fixed preamble, one line per provider and the
+	// five summary lines. The estimate only avoids Builder growth; a longer
+	// label still grows the builder normally.
+	providers := sortedKeys(agg.ProviderCounts)
+	size := 1024 + len(providers)*48
+	for _, p := range providers {
+		size += len(p)
+	}
 	var b strings.Builder
+	b.Grow(size)
 	writeHeader := func(name, help, typ string) {
 		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, typ)
 	}
@@ -73,7 +96,7 @@ func renderPrometheusExposition(records []*Record) (string, error) {
 	// Per-provider request counts (low-cardinality dimension). Aggregate owns
 	// the single record pass, including no-TTFT records.
 	writeHeader("llm_proxy_requests_by_provider", "Requests grouped by provider (current ring).", "gauge")
-	for _, p := range sortedKeys(agg.ProviderCounts) {
+	for _, p := range providers {
 		fmt.Fprintf(&b, "llm_proxy_requests_by_provider{provider=\"%s\"} %d\n", prometheusLabelValue(p), agg.ProviderCounts[p])
 	}
 

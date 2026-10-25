@@ -271,14 +271,18 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		// Materialize off the lock. The version was read before the scan: a
 		// commit landing during it leaves the projection stamped older, so the
 		// next read catches up instead of falsely declaring the rows fresh.
+		// Labels travel beside the rows for the single interning step: the scan
+		// never builds the live sidecar a durable row would drop immediately.
 		var incoming []contrib
+		var incomingLabels []contribLabels
 		scanned := 0
 		next, full, err := projectionStream(ctx, store, budget, base.cursor, func(rows *sql.Rows) error {
-			c, err := scanContrib(rows, nil) // raw spelling; query rules apply later
+			c, labels, err := scanContrib(rows, nil) // raw spelling; query rules apply later
 			if err != nil {
 				return err
 			}
 			incoming = append(incoming, c)
+			incomingLabels = append(incomingLabels, labels)
 			scanned++
 			// Check cancellation periodically so an abandoned dashboard request
 			// cannot keep a full-history decode running to completion.
@@ -301,7 +305,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 			continue
 		}
 		if full {
-			data, err := buildProjection(incoming, next, version)
+			data, err := buildProjection(incoming, incomingLabels, next, version)
 			if err != nil {
 				p.finishBuildLocked(done)
 				p.mu.Unlock()
@@ -333,7 +337,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		for i := range incoming {
 			c := &incoming[i]
 			c.rowIndex = uint32(previousRows + i + 1)
-			data.dimensions.intern(c)
+			data.dimensions.internLabels(c, incomingLabels[i])
 			if !data.hasStart || c.start < data.minStart {
 				data.minStart, data.hasStart = c.start, true
 			}
@@ -358,12 +362,16 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 }
 
 // buildProjection constructs a complete replacement off the lock (destructive
-// invalidation, purge or external rewrite). The caller swaps it under the
-// write lock, so readers never observe a partially built table.
-func buildProjection(incoming []contrib, next storage.ProjectionCursor, version int64) (projectionData, error) {
+// invalidation, purge or external rewrite). labels pairs one-to-one with
+// incoming and is consumed by the interning step only. The caller swaps it
+// under the write lock, so readers never observe a partially built table.
+func buildProjection(incoming []contrib, labels []contribLabels, next storage.ProjectionCursor, version int64) (projectionData, error) {
 	// Compact metric-order indices are uint32; reject before narrowing.
 	if uint64(len(incoming)) > math.MaxUint32 {
 		return projectionData{}, errors.New("analytical row index capacity exceeded")
+	}
+	if len(labels) != len(incoming) {
+		return projectionData{}, errors.New("analytical labels do not pair with rows")
 	}
 	data := projectionData{
 		ids:        make(map[string]struct{}, len(incoming)),
@@ -376,7 +384,7 @@ func buildProjection(incoming []contrib, next storage.ProjectionCursor, version 
 	for i := range incoming {
 		c := incoming[i]
 		c.rowIndex = uint32(i + 1)
-		data.dimensions.intern(&c)
+		data.dimensions.internLabels(&c, labels[i])
 		if i == 0 || c.start < data.minStart {
 			data.minStart = c.start
 		}

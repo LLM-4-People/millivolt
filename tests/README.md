@@ -58,19 +58,28 @@ These behaviors are verified against the Go version in the root module. See
 the official [Go command documentation](https://pkg.go.dev/cmd/go) for overlay
 and package-pattern limitations.
 
-## Parallel race shards
+## Parallel race and plain shards
 
-`scripts/check.sh core` builds one race test binary per package, then runs
-disjoint top-level test groups through `tests/shard.py`. Temp-isolated packages
-split across several processes; fixed-port packages such as `cmd/proxy` stay
-single-process. Every name returned by `go test -list` is assigned exactly once,
-so a new test cannot silently fall outside the selected shards. The runner
-keeps the overlay, `-race`, `-count=1`, package working directory, and the
-bounded `-benchtime=200ms` for the allocation tests that call
-`testing.Benchmark` internally. Set `MILLIVOLT_TEST_WORKERS` to cap local
-parallelism, or use `python3 -B -O -m tests.shard --shard INDEX/TOTAL` for a CI
-matrix. The fixed-port packages remain serial because separate processes would
-collide on the same loopback fixture port.
+`scripts/check.sh core` builds two test binaries per package when both groups
+exist, then runs disjoint top-level test groups through `tests/shard.py`.
+`tests/race_scope.py` is the single owner of which tests need the race
+detector: concurrency, stream, retry, hold, throttle, fence, projection and
+pipeline tests run under `-race`; the rest run plain in the same gate. Coverage
+is default-deny, so every name returned by `go test -list` is assigned exactly
+once and the run fails before launching if a name is missing, duplicated, or a
+package with concurrency primitives declares no race selector.
+
+Temp-isolated packages split across several processes; fixed-port packages such
+as `cmd/proxy` stay single-process and additionally hold a per-package lock so
+their race and plain passes never overlap. The runner keeps the overlay,
+`-count=1`, package working directory, and the bounded `-benchtime=200ms` for
+the allocation tests that call `testing.Benchmark` internally. Set
+`MILLIVOLT_TEST_WORKERS` to cap local parallelism, or use
+`python3 -B -O -m tests.shard --shard INDEX/TOTAL` for a CI matrix.
+
+`scripts/check.sh race` (or `python3 -B -O -m tests.shard --all-race`) is the
+forced full-race escalation: every test runs under `-race`. It is the
+scheduled and pre-promotion coverage guarantee, not part of the default gate.
 
 The MCP server's live test is opt-in, because it starts a private dev instance
 and generates loopback fixture traffic. It never targets port 8080, and it owns

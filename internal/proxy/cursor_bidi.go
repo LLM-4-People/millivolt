@@ -430,10 +430,10 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		// pipe ends also releases a priming writer when no transport consumed it.
 		// The attempt's httptrace decomposition rides the same request context
 		// (x/net/http2 reads it from req.Context()), so an abandoned attempt's
-		// trace dies with it - see upstreamTiming in relay.go, the shared owner.
+		// trace dies with it - see upstreamTiming in relay_upstream.go, the shared owner.
 		timing := upstreamTiming{start: attemptStart}
 		pr, pw := io.Pipe()
-		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace()))
+		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace(t.tlsPossible())))
 		upstreamCancel := func() { cancel(); pr.Close(); pw.Close() }
 		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, cursorRunURL(t), pr)
 		if err != nil {

@@ -156,14 +156,12 @@ func TestProviderEnsureToolsAppendToClientTools(t *testing.T) {
 // messages array just to see that the member exists.
 func TestEnsureToolsSatisfiedDoesNotCopyMessages(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("x", 2<<20) + `"}],"tools":[{"function":{"name":"wanted"}}]}`)
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			if !ensureToolsSatisfied(body, []string{"wanted"}) {
-				b.Fatal("satisfied body reported unsatisfied")
-			}
+	alloc, _ := allocStats(func() {
+		if !ensureToolsSatisfied(body, []string{"wanted"}) {
+			t.Fatal("satisfied body reported unsatisfied")
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > 512<<10 {
+	if alloc > 512<<10 {
 		t.Fatalf("satisfied 2 MiB body allocated %d bytes/op, want no messages copy", alloc)
 	}
 }

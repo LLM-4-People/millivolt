@@ -667,7 +667,7 @@ tags; docs and site-only pushes use `docs.yml`. They also run on Dependabot's `m
 promotion pull request from `testing` requires its head to be the current
 `testing` tip, `main` to be already merged back into `testing`, and a
 successful full-gate record for that exact commit: the canonical `check.yml`
-push run's own check suite, with `checks` and both native container legs. When
+push run's own check suite, with `unit`, `browser` and both native container legs. When
 a final docs-only commit follows the closest gated `testing` commit, it reuses
 that gate if every path since it is docs/site-only; the fallback selects the
 closest gated testing commit from canonical `testing` push runs, with no
@@ -704,18 +704,22 @@ The [workflow](../.github/workflows/check.yml) runs source, race and browser
 checks, then native container smoke checks on Linux `amd64` and `arm64` for all
 `testing` pull requests, code-bearing `testing` pushes, manually dispatched
 `testing` gates, and manually pushed `v*` tags, and for Dependabot's `main`
-security PRs. Docs and site-only pushes use `docs.yml` instead. A normal
+security PRs. The `unit`, `browser` and `container` jobs start together. Docs
+and site-only pushes use `docs.yml` instead. A normal
 promotion PR proves the current testing tip, merged-back main and the full-gate
 record for that commit, or for the closest gated testing commit with only docs
-changes after it; docs-only promotions validate the docs, workflow policy and
+changes after it, and requires a successful
+[escalation](../.github/workflows/escalation.yml) run (every Go test under the
+race detector plus a five-run clock-sensitive flake sweep) for the reviewed
+head; docs-only promotions validate the docs, workflow policy and
 site directly. The merged promotion PR carries the reviewed merge commit and
 releases it; a delivered code-bearing `main` push only reuses the same reviewed
 merge and is idempotent.
 Publication is limited to this repository's merged promotion pull requests,
 delivered pushes to `main`, matching release tags, and `testing`-branch pushes
 (which publish only the moving `testing` tag). The release `publish` job waits
-for `required`. The `publish-testing` job waits for `checks` and `container`
-instead, because a testing push has no promotion proof to wait for. A release
+for `required`. The `publish-testing` job waits for `unit`, `browser` and
+`container` instead, because a testing push has no promotion proof to wait for. A release
 run whose `VERSION` is already tagged, such as a Dependabot security merge,
 normally does not publish; if main carries an untagged pending `VERSION`, that
 run can publish it. Open or unmerged pull requests do not publish images; a
@@ -1199,7 +1203,7 @@ Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
 beyond the menu's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
-[PurgeFilter](../internal/storage/store.go). Empty-body full deletion is
+[PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
 deliberate and destructive; never use malformed JSON as an all-records command.
 The delete fence preserves newer completions and in-flight work.
 

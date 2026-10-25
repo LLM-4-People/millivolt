@@ -371,7 +371,7 @@ function dimMenuUsed() {
   const t = $('xp-dim-trigger');
   return !!(t && getComputedStyle(t).display !== 'none');
 }
-// The dimension rail menu shares chrome.js's class-based menu lifecycle
+// The dimension rail menu shares chrome_menus.js's class-based menu lifecycle
 // (DIM_CLASS_MENU): same open class + aria-expanded contract as the header
 // nav flyout. The use-once guard is explorer-specific and stays here.
 function closeDimMenu() {

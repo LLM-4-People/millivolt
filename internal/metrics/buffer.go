@@ -445,12 +445,30 @@ func (b *Buffer) ringIndex(logical int) int {
 // copyRingWindow copies only the requested logical window, starting at its
 // physical slot, with at most two contiguous copies. Records and their paired
 // sequences share this one traversal; no full-ring allocation is needed for
-// a capped snapshot or small delta. Callers must hold the ring's lock.
+// a capped snapshot or small delta. Callers must hold the ring's lock. An
+// empty window is a non-nil empty slice, matching the historical contract of
+// Snapshot/SnapshotSince (nil and empty are distinguished by callers).
 func copyRingWindow[T any](ring []T, start, count int) []T {
-	out := make([]T, count)
-	n := copy(out, ring[start:])
-	copy(out[n:], ring)
-	return out
+	return copyRingWindowInto(make([]T, 0, count), ring, start, count)
+}
+
+// copyRingWindowInto is copyRingWindow into a caller-retained destination:
+// dst's length is ignored and its capacity is reused, so a caller that keeps
+// one scratch slice pays no ring-sized allocation per read. A dst too small
+// for the window is replaced by an exact-size slice. Callers must hold the
+// ring's lock.
+func copyRingWindowInto[T any](dst []T, ring []T, start, count int) []T {
+	if count == 0 {
+		return dst[:0]
+	}
+	if cap(dst) < count {
+		dst = make([]T, count)
+	} else {
+		dst = dst[:count]
+	}
+	n := copy(dst, ring[start:])
+	copy(dst[n:], ring)
+	return dst
 }
 
 // Snapshot returns a copy of the current buffer contents from oldest to
@@ -459,6 +477,23 @@ func (b *Buffer) Snapshot() []*Record {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return copyRingWindow(b.buf, b.ringIndex(0), b.size)
+}
+
+// SnapshotInto copies the current buffer contents from oldest to newest into
+// dst's capacity and returns the filled slice: the same records, in the same
+// oldest-to-newest order, under the same read lock as Snapshot. It exists for
+// callers that retain a scratch slice across reads: the aggregate layer copies
+// the whole ring on every fold, and at the one-million-record ceiling that was
+// an 8 MB allocation per read.
+//
+// The result aliases dst's backing array, so it is only safe to mutate until
+// the scratch is reused; the ring itself is never aliased. dst's length is
+// ignored (its capacity decides reuse), which lets a caller hand back a slice
+// shortened by a filter.
+func (b *Buffer) SnapshotInto(dst []*Record) []*Record {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return copyRingWindowInto(dst, b.buf, b.ringIndex(0), b.size)
 }
 
 // Revisions returns finalized and pending content revisions atomically. The
@@ -678,9 +713,25 @@ type AggResult struct {
 // exposition renders, including the per-provider counts, flat TTFT samples and
 // their checked sum.
 func Aggregate(records []*Record) *AggResult {
+	return aggregateInto(records, nil)
+}
+
+// aggregateInto is the one owner of the fold. samples is a reusable scratch for
+// the flat TTFT set (usually one per record); a nil or undersized scratch is
+// replaced by an exact upper-bound allocation so the append never regrows. The
+// returned AggResult borrows samples, so the caller that supplies a pooled
+// scratch must not let the result escape past its release.
+func aggregateInto(records []*Record, samples []int64) *AggResult {
+	if cap(samples) < len(records) {
+		// Every record can contribute at most one TTFT sample. Preallocating the
+		// bound matters at the million-record ceiling: append growth spent about
+		// five times the final 8 MB on every scrape that kept only the flat set.
+		samples = make([]int64, 0, len(records))
+	}
 	a := &AggResult{
 		ProviderCounts: make(map[string]int),
 		ByStatus:       make(map[int]int),
+		TTFTSamples:    samples[:0],
 	}
 	a.Total = len(records)
 	ttftSumFailed := false
@@ -700,7 +751,7 @@ func Aggregate(records []*Record) *AggResult {
 			// A rejected sum must leave the field fail-closed at 0; continuing
 			// to fold after it would retain a partial total.
 			if !ttftSumFailed {
-				sum, err := SumCounts(a.TTFTSumMs, r.TTFTMs)
+				sum, err := addCount(a.TTFTSumMs, r.TTFTMs)
 				if err != nil {
 					a.Err = err
 					a.TTFTSumMs = 0
@@ -710,12 +761,18 @@ func Aggregate(records []*Record) *AggResult {
 				}
 			}
 		}
-		if err := SumTerms(
-			Term{&a.TotalInput, r.Usage.InputTokens},
-			Term{&a.TotalOutput, r.Usage.OutputTokens},
-			Term{&a.TotalCache, r.Usage.CacheReadTokens},
-			Term{&a.ToolCalls, int64(r.ToolCalls)},
-		); err != nil {
+		// One contribution pass, admitted per record, overflow checked per
+		// step: the accumulator is never re-validated after admission.
+		if err := AddCount(&a.TotalInput, r.Usage.InputTokens); err != nil {
+			a.Err = err
+		}
+		if err := AddCount(&a.TotalOutput, r.Usage.OutputTokens); err != nil {
+			a.Err = err
+		}
+		if err := AddCount(&a.TotalCache, r.Usage.CacheReadTokens); err != nil {
+			a.Err = err
+		}
+		if err := AddCount(&a.ToolCalls, int64(r.ToolCalls)); err != nil {
 			a.Err = err
 		}
 		if r.IsError() {

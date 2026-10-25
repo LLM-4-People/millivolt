@@ -478,7 +478,7 @@ def base_values(
         "description": attr_escape(description),
         "canonical": attr_escape(canonical),
         "og_image": attr_escape(og_image),
-        "og_image_alt": attr_escape("millivolt: see every AI request, keep your own routing"),
+        "og_image_alt": attr_escape("millivolt: three client protocols in, any configured upstream out, every request recorded"),
         "site_name": "millivolt",
         "root": root,
         "body": body,

@@ -90,7 +90,13 @@ func TestDeliveryConsumersDoNotDeclareDefaults(t *testing.T) {
 		filepath.Join(root, "cmd", "proxy", "deadline.go"),
 		filepath.Join(root, "internal", "proxy", "sse_keepalive.go"),
 		filepath.Join(root, "internal", "proxy", "stream_idle.go"),
-		filepath.Join(root, "internal", "proxy", "relay.go"),
+		filepath.Join(root, "internal", "proxy", "relay_nonstream.go"),
+		filepath.Join(root, "internal", "proxy", "relay_translate.go"),
+		filepath.Join(root, "internal", "proxy", "relay_serve.go"),
+		filepath.Join(root, "internal", "proxy", "relay_upstream.go"),
+		filepath.Join(root, "internal", "proxy", "relay_retry.go"),
+		filepath.Join(root, "internal", "proxy", "relay_transform.go"),
+		filepath.Join(root, "internal", "proxy", "relay_stream.go"),
 		filepath.Join(root, "internal", "proxy", "proxy.go"),
 	}
 	for _, path := range files {
@@ -752,29 +758,35 @@ func exampleHelpText(example string) string {
 // Chat/Anthropic body before translation, and ensured tools require a Chat
 // client body on a Chat outbound wire.
 func TestSettingsHintsStateTranslationScope(t *testing.T) {
-	source := strings.Join(strings.Fields(string(settingsJSSource(t))), " ")
+	// Each hint is owned by the editor module that renders it; the read follows
+	// the literal, not the pre-split entry-point filename.
 	for _, tc := range []struct {
+		module  string
 		want    string
 		notWant string
 	}{
 		{
+			module:  "settings_overrides.js",
 			want:    "on Chat Completions or Anthropic client bodies, before translation",
 			notWant: "on the OpenAI wire",
 		},
 		{
+			module:  "settings_providers.js",
 			want:    "relayed Chat Completions client bodies on a Chat outbound wire",
 			notWant: "every chat request's tools array",
 		},
 		{
+			module:  "settings_overrides.js",
 			want:    "Chat or Anthropic client-body token",
 			notWant: "OpenAI-wire token ceilings",
 		},
 	} {
+		source := strings.Join(strings.Fields(string(settingsModuleSource(t, tc.module))), " ")
 		if !strings.Contains(source, tc.want) {
-			t.Errorf("settings.js omits %q", tc.want)
+			t.Errorf("%s omits %q", tc.module, tc.want)
 		}
 		if strings.Contains(source, tc.notWant) {
-			t.Errorf("settings.js still states %q", tc.notWant)
+			t.Errorf("%s still states %q", tc.module, tc.notWant)
 		}
 	}
 }
@@ -846,7 +858,7 @@ func TestEnsureToolsChoiceHelpMatchesRuntime(t *testing.T) {
 		t.Fatal("docs/adapters.md still states the unconditional none rule")
 	}
 	runtimeComments := strings.Join(strings.Fields(strings.ReplaceAll(
-		repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
+		repositoryText(t, filepath.Join("internal", "config", "config_defaults.go")), "//", " ")), " ")
 	if !strings.Contains(runtimeComments, "a required or named choice skips injection") {
 		t.Fatal("the bundled Zen comment omits the required/named injection rule")
 	}
@@ -868,7 +880,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	adapters := normalize("adapters.md")
 	protocol := normalize("protocol.md")
 	example := exampleHelpText(repositoryText(t, "proxy.example.yaml"))
-	configSource := strings.Join(strings.Fields(strings.ReplaceAll(repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
+	configSource := strings.Join(strings.Fields(strings.ReplaceAll(repositoryText(t, filepath.Join("internal", "config", "config_types.go")), "//", " ")), " ")
 
 	for _, tc := range []struct {
 		name string
@@ -930,12 +942,15 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		}
 	}
 
-	settings := repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings.js"))
+	// The strip label is owned by the sub-conversations editor; the negative
+	// scope check keeps its original whole-sheet reach through the module glob.
+	settings := repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings_subconversations.js"))
 	for name, text := range map[string]string{
 		"config comments": configSource,
 		"protocol doc":    protocol,
 		"operations doc":  operations,
 		"settings label":  settings,
+		"settings sheet":  settingsModuleText(t),
 	} {
 		if strings.Contains(text, "relayed upstream body") {
 			t.Errorf("%s still scopes strip to the relayed upstream body", name)
@@ -1062,7 +1077,7 @@ func TestModelRulesHelpNamesTheRealFilterSurfaces(t *testing.T) {
 // phase the ticker does not cover.
 func TestSSEKeepaliveCommentsOmitUncoveredPhases(t *testing.T) {
 	for _, rel := range []string{
-		"internal/config/config.go",
+		"internal/config/config_types.go",
 		"internal/proxy/sse_keepalive.go",
 		"internal/proxy/proxy.go",
 	} {

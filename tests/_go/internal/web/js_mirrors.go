@@ -129,7 +129,8 @@ func TestSettingsCategoryRefKeysMatchGoCategories(t *testing.T) {
 	}
 }
 
-// TestModelRuleModesMatchGoVocabulary pins settings.js MODEL_RULE_MODES to
+// TestModelRuleModesMatchGoVocabulary pins settings_model_rules.js
+// MODEL_RULE_MODES to
 // config's exported rule-mode constants (ModelRuleExact/Pattern/Lower - the
 // literals ValidateModelRules switches on, so they are the complete Go
 // vocabulary). The editor's mode dropdown and the draft fallback both read
@@ -140,7 +141,7 @@ func TestSettingsCategoryRefKeysMatchGoCategories(t *testing.T) {
 // so ui_check pins the rendered option values (the labels-as-values order)
 // while this Go pin owns the declared value half's sequence.
 func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_model_rules.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,22 +163,22 @@ func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
 	}
 	want := []string{config.ModelRuleExact, config.ModelRulePattern, config.ModelRuleLower}
 	if !slices.Equal(got, want) {
-		t.Fatalf("settings.js MODEL_RULE_MODES values = %v, want the config rule-mode vocabulary %v", got, want)
+		t.Fatalf("settings_model_rules.js MODEL_RULE_MODES values = %v, want the config rule-mode vocabulary %v", got, want)
 	}
 }
 
-// configOverrideSource reads internal/config/config.go from the repository
+// configSource reads one internal/config source module from the repository
 // root (moduleRoot's self-location rule, the same one the ui_check.js
-// contract uses). Config's forbidden-override-header set is package-private,
-// so its source text is this pin's only enumerable view: the exported
-// ForbiddenOverrideHeader oracle can confirm members but cannot list them.
-// A stripped source view (for example -trimpath) fails through moduleRoot with
-// the reason instead of guessing a path.
-func configOverrideSource(t *testing.T) string {
+// contract uses). Several config literals are package-private, so their owner
+// module's source text is the only enumerable view: an exported oracle can
+// confirm a member but cannot list the set. A stripped source view (for
+// example -trimpath) fails through moduleRoot with the reason instead of
+// guessing a path.
+func configSource(t *testing.T, file string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal", "config", "config.go"))
+	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal", "config", file))
 	if err != nil {
-		t.Fatalf("read internal/config/config.go: %v", err)
+		t.Fatalf("read internal/config/%s: %v", file, err)
 	}
 	return string(b)
 }
@@ -253,13 +254,13 @@ func goMapStringStringPairs(t *testing.T, block string) map[string]string {
 // RO_FORBIDDEN_HEADERS, the request-overrides editor's live validation
 // vocabulary, to config's forbidden-header owner, name by name and reason by
 // reason, plus the control-prefix rule both sides share. The JS half is read
-// from the embedded settings.js literal; the config half is derived from the
+// from the embedded settings_overrides.js literal; the config half is derived from the
 // forbiddenOverrideHeaders map source and confirmed against the exported
 // ForbiddenOverrideHeader oracle, so a stale parse can never pass. Either
 // side dropping, adding or relabeling an entry reddens here before the
 // editor and the server can disagree about what an operator may override.
 func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_overrides.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +268,7 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	if len(jsPairs) == 0 {
 		t.Fatal("RO_FORBIDDEN_HEADERS declares no entries")
 	}
-	cfgSrc := configOverrideSource(t)
+	cfgSrc := configSource(t, "config_validate_overrides.go")
 	goPairs := goMapStringStringPairs(t, sourceRegion(t, cfgSrc, "forbiddenOverrideHeaders = map[string]string{"))
 	if len(goPairs) == 0 {
 		t.Fatal("config forbiddenOverrideHeaders declares no entries")
@@ -275,11 +276,11 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	jsNames := slices.Sorted(maps.Keys(jsPairs))
 	goNames := slices.Sorted(maps.Keys(goPairs))
 	if !slices.Equal(jsNames, goNames) {
-		t.Fatalf("forbidden override header names differ:\nsettings.js RO_FORBIDDEN_HEADERS = %v\nconfig forbiddenOverrideHeaders = %v", jsNames, goNames)
+		t.Fatalf("forbidden override header names differ:\nsettings_overrides.js RO_FORBIDDEN_HEADERS = %v\nconfig forbiddenOverrideHeaders = %v", jsNames, goNames)
 	}
 	for _, name := range goNames {
 		if jsPairs[name] != goPairs[name] {
-			t.Errorf("forbidden header %q: settings.js reason %q, config reason %q", name, jsPairs[name], goPairs[name])
+			t.Errorf("forbidden header %q: settings_overrides.js reason %q, config reason %q", name, jsPairs[name], goPairs[name])
 		}
 		if reason, forbidden := config.ForbiddenOverrideHeader(name); !forbidden || reason != goPairs[name] {
 			t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", name, reason, forbidden, goPairs[name])
@@ -297,14 +298,14 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	jsControl := firstSubmatch(t, jsFn, `return '([^']+)'`)
 	goControl := firstSubmatch(t, goFn, `return "([^"]+)", true`)
 	if jsPrefix != goPrefix || jsControl != goControl {
-		t.Fatalf("the control-prefix rule differs: settings.js (%q returns %q), config (%q returns %q)", jsPrefix, jsControl, goPrefix, goControl)
+		t.Fatalf("the control-prefix rule differs: settings_overrides.js (%q returns %q), config (%q returns %q)", jsPrefix, jsControl, goPrefix, goControl)
 	}
 	if reason, forbidden := config.ForbiddenOverrideHeader(jsPrefix + "pin"); !forbidden || reason != goControl {
 		t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", jsPrefix+"pin", reason, forbidden, goControl)
 	}
 }
 
-// TestRequestOverrideRuleCardWiringsPinnedInSource guards the settings.js
+// TestRequestOverrideRuleCardWiringsPinnedInSource guards the settings_overrides.js
 // rule-card wirings jsdom cannot exercise: the three scope inputs'
 // datalist associations, the generator's matching datalist id, the
 // focus-time refresher's matching selector, and the rule-number label's
@@ -319,7 +320,7 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 // input without its autocomplete or a rule head whose number drifts from
 // the server's cited index.
 func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_overrides.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,9 +357,9 @@ func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
 
 // TestRequestOverrideCapAndBandMatchGoOwner pins the two numeric
 // contracts the request-overrides editor shares with config: the rule
-// cap (settings.js REQUEST_OVERRIDES_MAX, the count line and template
+// cap (settings_overrides.js REQUEST_OVERRIDES_MAX, the count line and template
 // add gate, against config.RequestOverridesMax, the load-boundary cap)
-// and the body-ceiling band (settings.js REQUEST_OVERRIDE_BODY_MAX plus
+// and the body-ceiling band (settings_overrides.js REQUEST_OVERRIDE_BODY_MAX plus
 // validateRoRow's band check and message, against config's
 // validateRequestOverrides comparison and errRange bounds). Both sides
 // are read from their sources, the ForbiddenHeaders-pin precedent, and
@@ -367,26 +368,27 @@ func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
 // a ceiling the server rejects, warn about one it accepts, or count
 // rules against a different cap than the load boundary.
 func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_overrides.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfgSrc := configOverrideSource(t)
+	caps := configSource(t, "config_defaults.go")
+	gate := configSource(t, "config_validate_overrides.go")
 
 	// The rule cap: both literals from source, the Go side confirmed
 	// against the exported constant (its compile-time identity).
 	jsCap := firstSubmatch(t, string(src), `const REQUEST_OVERRIDES_MAX = (\d+);`)
-	goCap := firstSubmatch(t, cfgSrc, `const RequestOverridesMax = (\d+)`)
+	goCap := firstSubmatch(t, caps, `const RequestOverridesMax = (\d+)`)
 	if jsCap != goCap {
-		t.Errorf("the rule cap differs: settings.js REQUEST_OVERRIDES_MAX = %s, config RequestOverridesMax = %s", jsCap, goCap)
+		t.Errorf("the rule cap differs: settings_overrides.js REQUEST_OVERRIDES_MAX = %s, config RequestOverridesMax = %s", jsCap, goCap)
 	}
 	if n, err := strconv.Atoi(goCap); err != nil || n != config.RequestOverridesMax {
-		t.Errorf("config.go's RequestOverridesMax literal %q disagrees with the exported config.RequestOverridesMax = %d", goCap, config.RequestOverridesMax)
+		t.Errorf("config_defaults.go's RequestOverridesMax literal %q disagrees with the exported config.RequestOverridesMax = %d", goCap, config.RequestOverridesMax)
 	}
 
 	// The body band, config side: the comparison and the errRange wording
 	// inside validateRequestOverrides must spell the same pair.
-	goBand := sourceRegion(t, cfgSrc, "func validateRequestOverrides")
+	goBand := sourceRegion(t, gate, "func validateRequestOverrides")
 	goMin := firstSubmatch(t, goBand, `\*f\.value < (\d+) \|\| \*f\.value > `)
 	goMax := strings.ReplaceAll(firstSubmatch(t, goBand, `\*f\.value > ([\d_]+)`), "_", "")
 	errMin := firstSubmatch(t, goBand, `, "(\d+)", "`)
@@ -395,28 +397,28 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 		t.Fatalf("config's body band disagrees with itself: comparison %s..%s, errRange %s..%s", goMin, goMax, errMin, errMax)
 	}
 
-	// The body band, settings.js side: the ceiling const owns the number,
+	// The body band, settings_overrides.js side: the ceiling const owns the number,
 	// the live check and its message route through it, and both body
 	// inputs' max attributes ride the same owner.
 	jsMax := firstSubmatch(t, string(src), `const REQUEST_OVERRIDE_BODY_MAX = (\d+);`)
 	if jsMax != goMax {
-		t.Errorf("the body ceiling differs: settings.js REQUEST_OVERRIDE_BODY_MAX = %s, config band max = %s", jsMax, goMax)
+		t.Errorf("the body ceiling differs: settings_overrides.js REQUEST_OVERRIDE_BODY_MAX = %s, config band max = %s", jsMax, goMax)
 	}
 	jsRow := sourceRegion(t, string(src), "function validateRoRow")
 	jsMin := firstSubmatch(t, jsRow, `n < (\d+) \|\| n > REQUEST_OVERRIDE_BODY_MAX`)
 	if jsMin != goMin {
-		t.Errorf("the body band minimum differs: settings.js validateRoRow uses %s, config uses %s", jsMin, goMin)
+		t.Errorf("the body band minimum differs: settings_overrides.js validateRoRow uses %s, config uses %s", jsMin, goMin)
 	}
 	msgMin := firstSubmatch(t, jsRow, `between (\d+) and \$\{REQUEST_OVERRIDE_BODY_MAX\}`)
 	if msgMin != goMin {
-		t.Errorf("the band message minimum differs: settings.js says between %s and the ceiling, config uses %s", msgMin, goMin)
+		t.Errorf("the band message minimum differs: settings_overrides.js says between %s and the ceiling, config uses %s", msgMin, goMin)
 	}
 	if n := strings.Count(sourceRegion(t, string(src), "function roRuleCardHTML"), `max="${REQUEST_OVERRIDE_BODY_MAX}"`); n != 2 {
 		t.Errorf("roRuleCardHTML wires %d body inputs through REQUEST_OVERRIDE_BODY_MAX, want 2", n)
 	}
 }
 
-// TestSubConversationEditorWiringsPinnedInSource guards the settings.js
+// TestSubConversationEditorWiringsPinnedInSource guards the
 // sub-conversations editor wirings jsdom cannot exercise: the client
 // input's datalist association, the generator's matching datalist id, the
 // focus-time refresher's matching selector, the options' shared known-set
@@ -431,7 +433,13 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 // its autocomplete, an entry head whose number drifts from the server's
 // cited index, or an add control that ignores the cap.
 func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The delegated remove branches live with the shared provider-editor click
+	// owner, not the card renderer: read the module that owns that function.
+	clickSrc, err := staticFS.ReadFile("static/js/settings_providers_actions.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +477,7 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 	if !strings.Contains(paramRegion, ">= SUB_CONVERSATION_PARAMS_MAX") {
 		t.Error("addScParamRow's param add gate no longer routes through SUB_CONVERSATION_PARAMS_MAX")
 	}
-	clickRegion := sourceRegion(t, string(src), "function providersEditorClick")
+	clickRegion := sourceRegion(t, string(clickSrc), "function providersEditorClick")
 	if !strings.Contains(clickRegion, "[data-sc-rm]") {
 		t.Error("providersEditorClick lost the entry-card remove branch [data-sc-rm]")
 	}
@@ -478,7 +486,8 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 	}
 }
 
-// TestSubConversationParamGrammarMatchGoOwner pins the settings.js live param
+// TestSubConversationParamGrammarMatchGoOwner pins the
+// settings_subconversations.js live param
 // grammar to config.checkSubConversationParam, the single owner of the
 // tracked-param name grammar, and the editor's live message vocabulary to
 // the server's exact wording. Both sides are read from their sources (the
@@ -489,12 +498,12 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 // editor can never warn about a name the server accepts or accept one the
 // server rejects with different words.
 func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	jsSrc := string(src)
-	cfgSrc := configOverrideSource(t)
+	cfgSrc := configSource(t, "config_validate_overrides.go")
 
 	jsFn := sourceRegion(t, jsSrc, "function scParamOK")
 	goFn := sourceRegion(t, cfgSrc, "func checkSubConversationParam")
@@ -506,10 +515,10 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 	goUpper := firstSubmatch(t, goFn, `b > 0x([0-9a-fA-F]+)`)
 	jsUpper := firstSubmatch(t, jsFn, `c > 0x([0-9a-fA-F]+)`)
 	if jsLower != goLower || jsUpper != goUpper {
-		t.Errorf("the param byte band differs: settings.js scParamOK rejects outside %s..%s, config checkSubConversationParam outside %s..%s", jsLower, jsUpper, goLower, goUpper)
+		t.Errorf("the param byte band differs: settings_subconversations.js scParamOK rejects outside %s..%s, config checkSubConversationParam outside %s..%s", jsLower, jsUpper, goLower, goUpper)
 	}
 	if !strings.Contains(jsFn, "c === 0x22") || !strings.Contains(jsFn, "c === 0x5c") {
-		t.Error("settings.js scParamOK no longer rejects the quote (0x22) and backslash (0x5c) bytes")
+		t.Error("settings_subconversations.js scParamOK no longer rejects the quote (0x22) and backslash (0x5c) bytes")
 	}
 	if !strings.Contains(goFn, `b == '"'`) || !strings.Contains(goFn, `b == '\\'`) {
 		t.Error("config checkSubConversationParam no longer rejects the quote and backslash bytes")
@@ -527,7 +536,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 			t.Errorf("config checkSubConversationParam no longer carries the wording %q", wording)
 		}
 		if !strings.Contains(jsCard, wording) {
-			t.Errorf("settings.js validateScCard lost the server wording %q", wording)
+			t.Errorf("settings_subconversations.js validateScCard lost the server wording %q", wording)
 		}
 	}
 	// The byte-bound message: the Go side routes through errRange with the
@@ -538,7 +547,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 		t.Error(`config checkSubConversationParam's byte-bound error no longer routes through errRange(key, "1", strconv.Itoa(subConversationParamMaxBytes)+" bytes"`)
 	}
 	if !strings.Contains(jsCard, "must be 1..${SUB_CONVERSATION_PARAM_MAX_BYTES} bytes, got ") {
-		t.Error("settings.js validateScCard's byte-bound message no longer routes through SUB_CONVERSATION_PARAM_MAX_BYTES with the errRange wording")
+		t.Error("settings_subconversations.js validateScCard's byte-bound message no longer routes through SUB_CONVERSATION_PARAM_MAX_BYTES with the errRange wording")
 	}
 
 	// The list-level vocabulary: the required client, the required param,
@@ -558,7 +567,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 			t.Errorf("config validateSubConversations no longer carries %s %q", w.what, w.goText)
 		}
 		if !strings.Contains(jsCard, w.jsText) {
-			t.Errorf("settings.js validateScCard lost %s: the server says %q", w.what, w.goText)
+			t.Errorf("settings_subconversations.js validateScCard lost %s: the server says %q", w.what, w.goText)
 		}
 	}
 }
@@ -566,45 +575,46 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 // TestSubConversationCapsMatchGoOwner pins the three numeric contracts the
 // sub-conversations editor shares with config (the
 // TestRequestOverrideCapAndBandMatchGoOwner precedent): the entry cap
-// (settings.js SUB_CONVERSATIONS_MAX, the count line and entry add gate,
+// (settings_subconversations.js SUB_CONVERSATIONS_MAX, the count line and entry add gate,
 // against config.SubConversationsMax, the load-boundary cap), the params
-// cap (settings.js SUB_CONVERSATION_PARAMS_MAX, the param add gate, against
-// config.SubConversationParamsMax) and the param byte bound (settings.js
+// cap (settings_subconversations.js SUB_CONVERSATION_PARAMS_MAX, the param add gate, against
+// config.SubConversationParamsMax) and the param byte bound
+// (settings_subconversations.js
 // SUB_CONVERSATION_PARAM_MAX_BYTES, the live grammar check, against the
 // package-private subConversationParamMaxBytes, readable from source
 // only), plus the count line's own label. Drift would let the editor count
 // entries against a different cap than the load boundary or accept a
 // param list or name the server rejects.
 func TestSubConversationCapsMatchGoOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	jsSrc := string(src)
-	cfgSrc := configOverrideSource(t)
+	caps := configSource(t, "config_defaults.go")
 
 	jsEntries := firstSubmatch(t, jsSrc, `const SUB_CONVERSATIONS_MAX = (\d+);`)
-	goEntries := firstSubmatch(t, cfgSrc, `SubConversationsMax\s*=\s*(\d+)`)
+	goEntries := firstSubmatch(t, caps, `SubConversationsMax\s*=\s*(\d+)`)
 	if jsEntries != goEntries {
-		t.Errorf("the entry cap differs: settings.js SUB_CONVERSATIONS_MAX = %s, config SubConversationsMax = %s", jsEntries, goEntries)
+		t.Errorf("the entry cap differs: settings_subconversations.js SUB_CONVERSATIONS_MAX = %s, config SubConversationsMax = %s", jsEntries, goEntries)
 	}
 	if n, err := strconv.Atoi(goEntries); err != nil || n != config.SubConversationsMax {
-		t.Errorf("config.go's SubConversationsMax literal %q disagrees with the exported config.SubConversationsMax = %d", goEntries, config.SubConversationsMax)
+		t.Errorf("config_defaults.go's SubConversationsMax literal %q disagrees with the exported config.SubConversationsMax = %d", goEntries, config.SubConversationsMax)
 	}
 
 	jsParams := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAMS_MAX = (\d+);`)
-	goParams := firstSubmatch(t, cfgSrc, `SubConversationParamsMax\s*=\s*(\d+)`)
+	goParams := firstSubmatch(t, caps, `SubConversationParamsMax\s*=\s*(\d+)`)
 	if jsParams != goParams {
-		t.Errorf("the params cap differs: settings.js SUB_CONVERSATION_PARAMS_MAX = %s, config SubConversationParamsMax = %s", jsParams, goParams)
+		t.Errorf("the params cap differs: settings_subconversations.js SUB_CONVERSATION_PARAMS_MAX = %s, config SubConversationParamsMax = %s", jsParams, goParams)
 	}
 	if n, err := strconv.Atoi(goParams); err != nil || n != config.SubConversationParamsMax {
-		t.Errorf("config.go's SubConversationParamsMax literal %q disagrees with the exported config.SubConversationParamsMax = %d", goParams, config.SubConversationParamsMax)
+		t.Errorf("config_defaults.go's SubConversationParamsMax literal %q disagrees with the exported config.SubConversationParamsMax = %d", goParams, config.SubConversationParamsMax)
 	}
 
 	jsBytes := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAM_MAX_BYTES = (\d+);`)
-	goBytes := firstSubmatch(t, cfgSrc, `const subConversationParamMaxBytes = (\d+)`)
+	goBytes := firstSubmatch(t, caps, `const subConversationParamMaxBytes = (\d+)`)
 	if jsBytes != goBytes {
-		t.Errorf("the param byte bound differs: settings.js SUB_CONVERSATION_PARAM_MAX_BYTES = %s, config subConversationParamMaxBytes = %s", jsBytes, goBytes)
+		t.Errorf("the param byte bound differs: settings_subconversations.js SUB_CONVERSATION_PARAM_MAX_BYTES = %s, config subConversationParamMaxBytes = %s", jsBytes, goBytes)
 	}
 
 	// The count line label: "N / 16 entries" names the list's own
@@ -632,7 +642,7 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 // two halves, absent continuing the scan (the next field is checked) while
 // drop stops it (no later field is consulted).
 func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +696,7 @@ func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
 // fifth call reddens here. The jsdom rows cover each path's behavior,
 // but none of them counts the call sites.
 func TestSettingsRevealCallSitesPinnedInSource(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_state.js")
 	if err != nil {
 		t.Fatal(err)
 	}

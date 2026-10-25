@@ -146,7 +146,7 @@ func modelCacheProjection(t *testing.T, models int) *projectionData {
 	for i := range rows {
 		rows[i] = contrib{labels: &contribLabels{model: fmt.Sprintf("Vendor/Model-%d", i)}, status: 200}
 	}
-	p, err := buildProjection(rows, storage.ProjectionCursor{}, 1)
+	p, err := buildProjection(rows, labelTuples(rows), storage.ProjectionCursor{}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

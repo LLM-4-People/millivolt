@@ -1020,7 +1020,7 @@ func TestPurgeRefusalDisclosesNoCount(t *testing.T) {
 }
 
 // TestPurgeStatusCodeBandMatchesTheProxyOwner pins purgeStatusCodeMax to the
-// band the proxy's own PurgeFilter.Validate enforces (internal/storage/store.go).
+// band the proxy's own PurgeFilter.Validate enforces (internal/storage/purge.go).
 // The local validation test alone hardcodes the message and would stay green
 // while the proxy band moved; probing the owner's boundary makes that drift
 // fail here instead of turning a model's valid filter into a raw 400.

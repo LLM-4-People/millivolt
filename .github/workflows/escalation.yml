@@ -1,0 +1,90 @@
+name: Escalation
+
+# Full-race and flake coverage are the safety net behind the default gate's
+# evidence-based race scope: the gate runs -race only in the packages and
+# behaviour areas that prove concurrency, and this workflow runs every Go test
+# under -race with real pacing on top, plus five repeated runs of the
+# clock-sensitive sweep. It never builds an image, tags a revision or publishes
+# a release.
+#
+# Triggers:
+# - `schedule`: the nightly full-race sweep of the default branch. A schedule
+#   always runs the default branch's copy of the workflow; `workflow_dispatch`
+#   on `testing` covers the development tip on demand.
+# - `workflow_dispatch`: an on-demand sweep of the selected ref.
+# - `pull_request` to main: the promotion proof. check.yml's
+#   `escalation-proof` job requires a completed, successful run of this
+#   workflow whose `race` job succeeded for the reviewed head commit. Running
+#   on the pull request itself, from its own workflow file at its own head
+#   commit, avoids the `workflow_dispatch` bootstrap problem: a workflow can
+#   only be dispatched once it exists on the default branch, so a
+#   dispatch-based proof could not gate the very promotion that introduces it.
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+concurrency:
+  group: escalation-${{ github.event.pull_request.number || github.ref }}
+  # A pull request update supersedes its own in-flight escalation. Scheduled
+  # and manually dispatched sweeps always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  race:
+    name: race
+    # The promotion proof accepts only a successful `race` job, so a skipped
+    # record can never satisfy it. Dependabot promotions run the full gate
+    # instead and do not escalate; fork pull requests must not consume this
+    # repository's runners for a run the promotion gate cannot use.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.user.login != 'dependabot[bot]' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GOTOOLCHAIN: local
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The reviewed head, not the pull-request merge ref: the proof names
+          # this exact commit, and the sweep must test the tree a reviewer
+          # approved. A push or dispatch checks out its own ref.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify the checked-out revision
+        env:
+          EXPECTED: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED" ]; then
+            echo "::error::Escalation checkout is $actual, expected $EXPECTED."
+            exit 1
+          fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+      # `bash scripts/check.sh race` owns the forced full-race pass (every
+      # test, real pacing) and `flake` owns the repeated clock-sensitive
+      # sweep. Both are the same entry points a developer runs locally.
+      - name: Run the forced full-race sweep
+        run: bash scripts/check.sh race
+      - name: Run the clock-sensitive flake sweep
+        run: bash scripts/check.sh flake

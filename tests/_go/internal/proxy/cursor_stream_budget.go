@@ -47,12 +47,8 @@ func cursorPendingRun(t *testing.T, callID string, argsLen int) (*providerformat
 	if _, err := pw.Write(cursorStreamExecFrame(1, callID, argsLen)); err != nil {
 		t.Fatalf("write tool-call frame: %v", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for !run.PendingToolCallIDs()[callID] {
-		if time.Now().After(deadline) {
-			t.Fatalf("pump did not register pending call %q", callID)
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, func() bool { return run.PendingToolCallIDs()[callID] }) {
+		t.Fatalf("pump did not register pending call %q", callID)
 	}
 	return run, pw
 }
@@ -62,12 +58,8 @@ func cursorPendingRun(t *testing.T, callID string, argsLen int) (*providerformat
 // deferred Close, so reading Closed immediately is a scheduling race.
 func waitCursorClosed(t *testing.T, run *providerformat.CursorRun) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for !run.Closed() {
-		if time.Now().After(deadline) {
-			t.Fatal("run did not close within 2s")
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, run.Closed) {
+		t.Fatal("run did not close within 2s")
 	}
 }
 

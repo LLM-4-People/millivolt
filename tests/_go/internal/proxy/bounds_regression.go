@@ -176,7 +176,7 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 // the document cannot be translated, and relaying it verbatim would break the
 // translated-shape contract, so the read fails closed as 502 (nothing has been
 // written to the client yet on that path - the status line is committed only
-// after a successful translation). The 32 MiB ceiling (relay.go's
+// after a successful translation). The 32 MiB ceiling (proxy.go's
 // maxTranslateBodyBytes, the request-side default scale) is pinned literally
 // here: silent drift of that constant must fail this test.
 func TestTranslatedResponseBodyBounded(t *testing.T) {
@@ -255,7 +255,7 @@ func TestTranslatedResponseBodyBounded(t *testing.T) {
 
 // TestAnthropicDefaultMaxTokensCeilingMatchesProxyBound pins the documented
 // mirror between internal/config's anthropic_default_max_tokens validation
-// ceiling and maxRequestOutputTokens (the request.go constant's comment
+// ceiling and maxRequestOutputTokens (the request_tokencap.go constant's comment
 // claims they are the same ceiling). The load-bearing direction: the
 // Anthropic translator injects the configured default into translated
 // bodies, which re-decode into a fresh record the proxy bound checks, so a

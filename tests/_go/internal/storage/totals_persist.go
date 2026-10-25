@@ -3,7 +3,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
-	"path/filepath"
+	"math"
 	"testing"
 	"time"
 
@@ -33,7 +33,7 @@ func seedTotalsRows(t *testing.T, s *Store) {
 // transaction as the rows, and any out-of-band request mutation advances the
 // projection epoch, forcing a rebuild instead of serving a stale claim.
 func TestPersistedTotalsSurviveReopenAndDetectExternalMutation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "totals.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestPersistedTotalsSurviveReopenAndDetectExternalMutation(t *testing.T) {
 // document is zeroed in the delete transaction, so a reopen never scans (or
 // resurrects) pre-purge aggregates.
 func TestFullPurgePersistsZeroTotals(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "purge-totals.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func rawInsertRequest(t *testing.T, db *sql.DB, id string, startedAt time.Time) 
 // unchanged, so the persisted document must also record high_rowid or a stale
 // aggregate is accepted at boot.
 func TestTotalsReloadDetectsExternalAppend(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "totals-append.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -195,5 +195,99 @@ func TestTotalsReloadDetectsExternalAppend(t *testing.T) {
 	defer reopened.Close()
 	if got := reopened.Totals(); got != want {
 		t.Fatalf("reloaded control totals = %+v, want %+v", got, want)
+	}
+}
+
+// Totals.valid is the trust boundary for a persisted document: hot folds use
+// AddCount/AddValue, whose checked induction starts at zero, so a negative or
+// non-finite field in the document would otherwise seed an accumulator the
+// fold can never reject.
+func TestTotalsValidRejectsUnrepresentableFields(t *testing.T) {
+	base := Totals{Requests: 2, Errors: 1, Cost: 0.5, InputTok: 13, OutputTok: 9,
+		CacheRead: 2, Reasoning: 3, TTFTSum: 100, TTFTN: 1, TPSSum: 4, TPSN: 1,
+		CostReqs: 1, CostInOut: 15}
+	if !base.valid() {
+		t.Fatalf("valid totals rejected: %+v", base)
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Totals)
+	}{
+		{"negative requests", func(v *Totals) { v.Requests = -1 }},
+		{"negative errors", func(v *Totals) { v.Errors = -1 }},
+		{"negative input tokens", func(v *Totals) { v.InputTok = -1 }},
+		{"negative output tokens", func(v *Totals) { v.OutputTok = -1 }},
+		{"negative cache tokens", func(v *Totals) { v.CacheRead = -1 }},
+		{"negative reasoning tokens", func(v *Totals) { v.Reasoning = -1 }},
+		{"negative ttft sum", func(v *Totals) { v.TTFTSum = -1 }},
+		{"negative ttft count", func(v *Totals) { v.TTFTN = -1 }},
+		{"negative tps count", func(v *Totals) { v.TPSN = -1 }},
+		{"negative cost requests", func(v *Totals) { v.CostReqs = -1 }},
+		{"negative cost", func(v *Totals) { v.Cost = -0.5 }},
+		{"negative tps sum", func(v *Totals) { v.TPSSum = -1 }},
+		{"negative cost in+out", func(v *Totals) { v.CostInOut = -1 }},
+		{"NaN cost", func(v *Totals) { v.Cost = math.NaN() }},
+		{"positive infinity tps", func(v *Totals) { v.TPSSum = math.Inf(1) }},
+		{"negative infinity cost in+out", func(v *Totals) { v.CostInOut = math.Inf(-1) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			corrupt := base
+			tc.mutate(&corrupt)
+			if corrupt.valid() {
+				t.Fatalf("%s accepted as representable: %+v", tc.name, corrupt)
+			}
+		})
+	}
+}
+
+// A corrupted persisted document must be rejected and rebuilt from the
+// authoritative rows. Without the validation, the matching witness makes
+// loadTotals trust requests=-5 and the store serves a negative since-inception
+// total that no later fold can correct.
+func TestPersistedTotalsOutOfRangeRebuildFromRows(t *testing.T) {
+	path := testDatabase(t)
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTotalsRows(t, s)
+	if got := s.Totals().Requests; got != 2 {
+		t.Fatalf("seed totals requests = %d, want 2", got)
+	}
+	raw, err := s.LoadMeta(t.Context(), totalsMetaKey)
+	if err != nil || raw == "" {
+		t.Fatalf("persisted totals = %q, %v", raw, err)
+	}
+	var doc totalsDoc
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc.Requests = -5
+	bad, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(t.Context(), `UPDATE meta SET value = ? WHERE key = ?`, string(bad), totalsMetaKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, found, err := loadTotals(t.Context(), s.rdb); err != nil || found {
+		t.Fatalf("loadTotals on an out-of-range document = found %v, err %v; want found=false", found, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got := reopened.Totals()
+	if got.Requests != 2 || got.InputTok != 13 || got.OutputTok != 9 || got.Err() != nil {
+		t.Fatalf("rebuilt totals = %+v, want the two durable rows", got)
+	}
+	if reopened.TotalsDegraded() {
+		t.Fatal("a rejected document with readable rows must rebuild, not degrade")
 	}
 }

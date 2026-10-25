@@ -6,7 +6,9 @@ Production sources, go.mod and go.sum are never replaced or copied.
 """
 
 from contextlib import contextmanager
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -15,6 +17,14 @@ import sys
 import tempfile
 
 from .support import ROOT, git_environment, require, source_inventory, test_layout_errors
+
+# The sharder proves whole-module package parity once, then hands this private
+# fingerprint to the builds it starts in the same run. It is an internal
+# handshake, not a caller flag: the value covers the overlay file mapping and
+# the environment that decides which sources Go sees, so a mismatched or stale
+# handshake verifies again instead of trusting the caller.
+PARITY_HANDSHAKE = "MILLIVOLT_GO_PARITY"
+PARITY_ENVIRONMENT = ("CGO_ENABLED", "GOARCH", "GOEXPERIMENT", "GOFLAGS", "GOOS", "GOTOOLCHAIN")
 
 # Go's filename platform suffix vocabulary, from internal/syslist, split by
 # suffix position. A test ignored for any other reason is a silent skip: it
@@ -267,6 +277,22 @@ def overlay(root):
         yield path, replacements
 
 
+def overlay_digest(replacements, environment):
+    """Fingerprint an overlay and the Go file-selection environment."""
+    digest = hashlib.sha256()
+    digest.update(json.dumps(replacements, sort_keys=True).encode("utf-8"))
+    for name in PARITY_ENVIRONMENT:
+        digest.update(b"\0" + name.encode("ascii") + b"="
+                      + environment.get(name, "").encode("utf-8"))
+    return digest.hexdigest()
+
+
+def parity_digest(root=ROOT, environment=None):
+    """Fingerprint the overlay whose package parity a run has already proven."""
+    environment = os.environ if environment is None else environment
+    return overlay_digest(discover(Path(root)), environment)
+
+
 def package_parity(replacements, document):
     """Every physical test must appear in Go's native package discovery.
 
@@ -327,6 +353,8 @@ def run(arguments, root=ROOT):
     root = Path(root).resolve(strict=True)
     with overlay(root) as (path, replacements):
         flag = "-overlay=" + str(path)
+        proven = env.get(PARITY_HANDSHAKE, "")
+        reused = offset != 2 and proven == overlay_digest(replacements, env)
 
         def verify():
             result = go_command(["list", flag, "-mod=readonly", "-json", "./..."], root, env, capture=True)
@@ -335,7 +363,7 @@ def run(arguments, root=ROOT):
 
         # Tidy can introduce a new test-only dependency; validate its package
         # graph after a successful update, not before the dependency exists.
-        if offset != 2:
+        if offset != 2 and not reused:
             verify()
         result = go_command([*arguments[:offset], flag, *arguments[offset:]], root, env)
         if offset == 2 and result.returncode == 0:

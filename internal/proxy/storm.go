@@ -228,7 +228,7 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 // stamps): the non-streaming loop's status line is still open, so it answers
 // the client with an api_error JSON http.Error; the streaming loop's status
 // line is already committed, so it emits the same upstream_unreachable
-// classification in-band on the SSE socket (relay.go).
+// classification in-band on the SSE socket (relay_stream.go).
 func (s *Server) writeTransportFailure(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, err error) {
 	if s.writeStormQueueError(w, rec, inbound, err) {
 		return

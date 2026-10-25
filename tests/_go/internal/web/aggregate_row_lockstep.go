@@ -48,12 +48,14 @@ func TestRowColumnsScanContribLockstep(t *testing.T) {
 	}
 
 	var decoded []contrib
+	var labels contribLabels
 	if _, _, err := s.StreamProjection(t.Context(), rowColumns, storage.ProjectionCursor{}, func(rows *sql.Rows) error {
-		c, err := scanContrib(rows, nil) // raw spelling; the canonizer is not under test
+		c, l, err := scanContrib(rows, nil) // raw spelling; the canonizer is not under test
 		if err != nil {
 			return err
 		}
 		decoded = append(decoded, c)
+		labels = l
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -72,26 +74,28 @@ func TestRowColumnsScanContribLockstep(t *testing.T) {
 	if c.status != 502 {
 		t.Errorf("status = %d, want 502", c.status)
 	}
-	if c.labels == nil {
-		t.Fatal("scanned row lost its live label sidecar")
+	// A durable row never builds the live sidecar: the six labels travel by
+	// value for the one interning step, and the projection owns their bytes.
+	if c.labels != nil {
+		t.Fatal("scanned row retained a live label sidecar")
 	}
-	if c.labels.client != "sentinel-client" {
-		t.Errorf("client = %q", c.labels.client)
+	if labels.client != "sentinel-client" {
+		t.Errorf("client = %q", labels.client)
 	}
-	if c.labels.prov != "sentinel.example" {
-		t.Errorf("prov = %q", c.labels.prov)
+	if labels.prov != "sentinel.example" {
+		t.Errorf("prov = %q", labels.prov)
 	}
-	if c.labels.model != "sentinel-model" {
-		t.Errorf("model = %q, want the raw spelling (nil canonizer)", c.labels.model)
+	if labels.model != "sentinel-model" {
+		t.Errorf("model = %q, want the raw spelling (nil canonizer)", labels.model)
 	}
-	if c.labels.key != "sentinel-key" {
-		t.Errorf("key = %q", c.labels.key)
+	if labels.key != "sentinel-key" {
+		t.Errorf("key = %q", labels.key)
 	}
-	if c.labels.conv != "sentinel-conversation" {
-		t.Errorf("conv = %q", c.labels.conv)
+	if labels.conv != "sentinel-conversation" {
+		t.Errorf("conv = %q", labels.conv)
 	}
-	if c.labels.parentConv != "sentinel-parent" {
-		t.Errorf("parentConv = %q", c.labels.parentConv)
+	if labels.parentConv != "sentinel-parent" {
+		t.Errorf("parentConv = %q", labels.parentConv)
 	}
 	if c.in != 11 || c.out != 22 || c.cacheR != 33 || c.reason != 44 {
 		t.Errorf("tokens in/out/cache/read-reasoning = %d/%d/%d/%d, want 11/22/33/44", c.in, c.out, c.cacheR, c.reason)

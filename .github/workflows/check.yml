@@ -28,6 +28,21 @@ name: Checks and images
 #   full gate. They normally create no release because their VERSION is already
 #   tagged; if main still carries an untagged pending VERSION, that merge can
 #   publish the pending version.
+# - The full gate is three independent jobs. `unit` runs the default core
+#   suite (Go, Node and Python), `browser` runs the isolated Playwright
+#   fixtures and the live MCP integration test without any Node setup, and
+#   `container` builds and checks both native images. They start together and
+#   `required` aggregates all three; a skipped leg fails the gate unless every
+#   leg was deliberately skipped together by the main-promotion reuse path.
+# - A non-Dependabot `main` promotion also needs a completed, successful
+#   `escalation.yml` run for the reviewed head commit. That workflow runs the
+#   forced full-race sweep and the repeated clock-sensitive flake sweep on the
+#   promotion pull request itself; `escalation-proof` only reads the exact
+#   run and fails closed while it is missing, pending, failed, from another
+#   workflow, from another branch, or for another commit. It does not
+#   dispatch: `workflow_dispatch` only exists once the workflow is on the
+#   default branch, so a dispatch-based proof could not gate the very
+#   promotion that introduces it.
 # - `publish` tags the reviewed promotion merge and never pushes `main`. It
 #   waits for `required`, which is the stable gate on every event. A merged
 #   promotion PR is the primary release trigger: the `pull_request: closed`
@@ -88,7 +103,7 @@ concurrency:
   cancel-in-progress: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.ref == 'refs/heads/testing' }}
 
 jobs:
-  checks:
+  unit:
     # Reuse the testing gate for a normal promotion. Dependabot opens its
     # security PRs against main, so those still need the full gate. Tag pushes
     # are included because a manually pushed release tag must be gated too.
@@ -99,6 +114,7 @@ jobs:
       (github.event_name == 'pull_request' && github.event.action != 'closed' &&
         (github.base_ref != 'main' ||
           github.event.pull_request.user.login == 'dependabot[bot]'))
+    name: unit
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -118,6 +134,8 @@ jobs:
         run: |
           # HEAD is the checked-out commit for both branch and annotated-tag
           # events. github.sha can name the tag object itself for a tag push.
+          # One gate job proves it: a tag push runs this job and the browser
+          # job together, and required fails when either one fails.
           revision="$(git rev-parse HEAD)"
           args=(release -revision "$revision")
           if [ -n "$RELEASE_TAG" ]; then args+=(-tag "$RELEASE_TAG"); fi
@@ -131,12 +149,52 @@ jobs:
           python-version-file: .python-version
           cache: pip
           cache-dependency-path: requirements-dev.txt
+      - name: Install development dependencies
+        # The default core suite runs the jsdom checks (`npm test`) and the
+        # Python repository/site/workflow contracts. It never starts a browser,
+        # so the Chromium download stays out of this job.
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          python3 -m pip install -r requirements-dev.txt
+      - name: Check source and unit tests
+        run: bash scripts/check.sh
+
+  browser:
+    # Same gate events as `unit`. Both jobs run the same reviewed commit; the
+    # browser fixtures are the expensive, browser-only half of the old single
+    # `checks` job, split out so it overlaps the core suite.
+    if: >-
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/testing' || github.ref_type == 'tag')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/testing') ||
+      (github.event_name == 'pull_request' && github.event.action != 'closed' &&
+        (github.base_ref != 'main' ||
+          github.event.pull_request.user.login == 'dependabot[bot]'))
+    name: browser
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - name: Cache Playwright browsers
         # Only the browser download is reusable. The install step below still
         # runs on every job, so OS dependencies are always refreshed and no
         # check can be skipped. requirements-dev.txt owns the Python Playwright
-        # pin that installs Chromium; package-lock.json covers unrelated Node
-        # tooling, so it must not invalidate the browser cache.
+        # pin that installs Chromium. Node tooling is not used by this job, so
+        # package-lock.json must not invalidate the browser cache.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
@@ -144,12 +202,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install development dependencies
+        # Python Playwright only. `scripts/check.sh browser`, its three Python
+        # harnesses, and `scripts/dev.sh up` (a Go build) never invoke Node or
+        # npm, so there is no `npm ci` and no setup-node in this job.
         run: |
-          npm ci --ignore-scripts --no-audit --no-fund
           python3 -m pip install -r requirements-dev.txt
           python3 -m playwright install --with-deps chromium
-      - name: Check source and unit tests
-        run: bash scripts/check.sh
       - name: Check isolated browser fixtures
         env:
           DEV_PORT: "18081"
@@ -165,10 +223,10 @@ jobs:
           trap 'scripts/dev.sh stop' EXIT
           scripts/dev.sh up
           bash scripts/check.sh browser --target "http://${DEV_HOST}:${DEV_PORT}"
-          # The live MCP integration test runs HERE, not in the core job: this
+          # The live MCP integration test runs HERE, not in the unit job: this
           # step already has a dev instance and an operator token, and the test
           # takes a port and a scratch database of its own, so it cannot disturb
-          # the browser fixture. In the core job it would mean a second proxy in
+          # the browser fixture. In the unit job it would mean a second proxy in
           # a source-and-unit suite, which is the wrong place for it. It used to
           # be manual, and a regression in the audit lifecycle or the purge
           # guards would merge green; it is opt-in only for local runs.
@@ -176,7 +234,17 @@ jobs:
 
   container:
     name: container (${{ matrix.platform }})
-    needs: checks
+    # The native image legs start with the other gate jobs. The gate reuse
+    # condition is repeated here because a skipped leg must never satisfy the
+    # required gate, and an unfiltered container job would rebuild both images
+    # on every ordinary main promotion.
+    if: >-
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/testing' || github.ref_type == 'tag')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/testing') ||
+      (github.event_name == 'pull_request' && github.event.action != 'closed' &&
+        (github.base_ref != 'main' ||
+          github.event.pull_request.user.login == 'dependabot[bot]'))
     strategy:
       fail-fast: false
       matrix:
@@ -222,14 +290,144 @@ jobs:
           IMAGE_ID: ${{ steps.build.outputs.imageid }}
         run: bash scripts/check.sh container --image "$IMAGE_ID"
 
+  escalation-proof:
+    name: escalation-proof
+    # A non-Dependabot main promotion must also carry a completed, successful
+    # full-race run for the exact reviewed head. The run belongs to
+    # `escalation.yml`, which triggers on main pull requests and is therefore
+    # executed from the pull request's own workflow file: no dispatch (and no
+    # actions: write) is needed, and a brand-new escalation workflow can gate
+    # the very promotion that introduces it. This job only reads the run.
+    if: >-
+      success() && github.event_name == 'pull_request' &&
+      github.event.action != 'closed' && github.base_ref == 'main' &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      checks: read
+    steps:
+      - name: Require the full-race escalation for the reviewed commit
+        # The selector is exact on workflow path, event, head branch and head
+        # commit, and the run must also contain a completed, successful `race`
+        # check run: a run whose only job was skipped still concludes success,
+        # so the job result is part of the proof. Missing, pending beyond the
+        # bounded wait, failed, cancelled, wrong-workflow, wrong-branch and
+        # wrong-commit runs all fail closed. Nothing is dispatched or retried.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          fetch_workflow_runs() {
+            gh api --paginate --slurp "repos/$REPO/actions/runs?$1&per_page=100" |
+              jq '{workflow_runs: [.[].workflow_runs[]]}'
+          }
+          fetch_check_runs() {
+            gh api --paginate --slurp "repos/$REPO/commits/$1/check-runs?filter=all&per_page=100" |
+              jq '{check_runs: [.[].check_runs[]]}'
+          }
+          # escalation_run selects the newest pull_request run of the
+          # escalation workflow on testing for one exact commit. The path,
+          # event, branch and sha filters are all mandatory, so the canonical
+          # gate, a schedule run, a manual dispatch, another branch or another
+          # commit can never stand in for the escalation proof.
+          escalation_run() {
+            printf '%s' "$1" | jq -c --arg sha "$2" '
+              [ .workflow_runs[]
+                | select(.path == ".github/workflows/escalation.yml")
+                | select(.event == "pull_request")
+                | select(.head_branch == "testing")
+                | select(.head_sha == $sha)
+              ]
+              | sort_by(.created_at, .id)
+              | last
+              | if . == null then empty else {status, conclusion, check_suite_id} end'
+          }
+          # race_outcome classifies only the named escalation job inside the
+          # selected run's suite. A successful duplicate wins over cancelled
+          # leftovers, a pending check is polled, and skipped or missing job
+          # records stay incomplete so they can never satisfy the gate.
+          race_outcome() {
+            printf '%s' "$1" | jq -r --argjson suite "$2" '
+              [ (.check_runs // [])[]
+                | select(.check_suite.id == $suite)
+                | select(.name == "race")
+              ] as $entries
+              | [ $entries[] | select(.status == "completed" and .conclusion == "success") ] | length
+              | . as $success
+              | if $success != 0 then "success"
+                elif ([ $entries[] | select(.status != "completed") ] | length) != 0 then "pending"
+                elif ([ $entries[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") ] | length) != 0 then "failed"
+                else "incomplete" end'
+          }
+          observed() {
+            printf '%s\n' "$1" | jq -r '(.check_runs // [])[] | "\(.name) [suite \(.check_suite.id // "none")]: \(.status)/\(.conclusion // "pending")"'
+          }
+          # The pull_request event creates the escalation run at the same time
+          # as this one, so a two-minute appearance budget is generous. Past
+          # it, a missing run (including a run filtered out as the wrong
+          # workflow, branch or commit) fails closed.
+          run=""
+          for attempt in 1 2 3 4; do
+            runs="$(fetch_workflow_runs "head_sha=$HEAD_SHA")"
+            run="$(escalation_run "$runs" "$HEAD_SHA")"
+            if [ -n "$run" ]; then break; fi
+            echo "No escalation.yml pull_request run on testing exists for $HEAD_SHA yet; waiting 30 seconds ($attempt/4)."
+            sleep 30
+          done
+          if [ -z "$run" ]; then
+            echo "::error::No escalation.yml pull_request run on testing exists for $HEAD_SHA."
+            exit 1
+          fi
+          # The forced full-race sweep plus the flake sweep can take tens of
+          # minutes on a four-core runner. Poll for completion, bounded at
+          # thirty minutes; a run that never completes fails closed.
+          for attempt in $(seq 1 60); do
+            run_status="$(printf '%s' "$run" | jq -r '.status')"
+            run_conclusion="$(printf '%s' "$run" | jq -r '.conclusion // ""')"
+            suite="$(printf '%s' "$run" | jq -r '.check_suite_id // 0')"
+            payload="$(fetch_check_runs "$HEAD_SHA")"
+            outcome="$(race_outcome "$payload" "$suite")"
+            if [ "$run_status" = "completed" ] && [ "$outcome" != "pending" ]; then break; fi
+            echo "The escalation run for $HEAD_SHA is $run_status with race $outcome; waiting 30 seconds ($attempt/60)."
+            sleep 30
+            runs="$(fetch_workflow_runs "head_sha=$HEAD_SHA")"
+            run="$(escalation_run "$runs" "$HEAD_SHA")"
+            if [ -z "$run" ]; then
+              echo "::error::The escalation run for $HEAD_SHA disappeared during the bounded wait."
+              exit 1
+            fi
+          done
+          if [ "$run_status" != "completed" ]; then
+            echo "::error::The escalation run for $HEAD_SHA was still pending after the bounded wait."
+            observed "$payload"
+            exit 1
+          fi
+          if [ "$run_conclusion" != "success" ]; then
+            echo "::error::The escalation run for $HEAD_SHA completed as ${run_conclusion:-unknown}."
+            observed "$payload"
+            exit 1
+          fi
+          if [ "$outcome" != "success" ]; then
+            echo "::error::The escalation run for $HEAD_SHA succeeded but its race job is $outcome."
+            observed "$payload"
+            exit 1
+          fi
+          echo "The escalation run and its race job succeeded for $HEAD_SHA."
+
   required:
     name: required
-    # One stable check for branch protection. A skipped matrix leg must fail
-    # the gate rather than silently satisfy it, except for the deliberate
-    # main-promotion reuse path where the full gate and its dependent container
-    # job are both skipped together. The ten-minute budget leaves room for the
-    # docs-only validation path (dependency install, site build, repository and
-    # workflow contracts, and the MCP package contracts).
+    # One stable check for branch protection. A skipped gate job must fail the
+    # gate rather than silently satisfy it. The only permitted skip is the
+    # deliberate main-promotion reuse path, where all three gate jobs are
+    # skipped together. The escalation job is required exactly on the
+    # non-Dependabot main promotion path that runs it, so its own skip fails
+    # the gate there. The ten-minute budget leaves room for the docs-only
+    # validation path (dependency install, site build, repository and workflow
+    # contracts, and the MCP package contracts).
     # A closed PR only needs this gate when it merged into main. Closed PRs to
     # testing, and unmerged PRs, do not publish.
     if: >-
@@ -237,7 +435,7 @@ jobs:
       (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/testing') &&
       (github.event_name != 'pull_request' || github.event.action != 'closed' ||
        (github.event.pull_request.merged == true && github.base_ref == 'main'))
-    needs: [checks, container]
+    needs: [unit, browser, container, escalation-proof]
     outputs:
       merged_docs_only: ${{ steps.merged.outputs.docs_only }}
     runs-on: ubuntu-24.04
@@ -259,21 +457,30 @@ jobs:
         .github/workflows/dependency-review.yml .github/workflows/security.yml
     steps:
       - name: Require every gate
-        # A skipped matrix leg must fail the gate, except for the deliberate
-        # main-promotion reuse path where both the full gate and its dependent
-        # container job are skipped together. Any failure or cancellation still
-        # fails, and a Dependabot main PR is never allowed to skip the gate.
+        # A skipped gate job must fail the gate except for the deliberate
+        # main-promotion reuse path, where unit, browser and container are all
+        # skipped together. A skipped escalation run fails the non-Dependabot
+        # main promotion path that requires it. Any failure or cancellation
+        # still fails, and a Dependabot main PR is never allowed to skip the
+        # gate.
         if: >-
           always() &&
           (contains(needs.*.result, 'failure') ||
            contains(needs.*.result, 'cancelled') ||
-           (contains(needs.*.result, 'skipped') &&
-            !(needs.checks.result == 'skipped' &&
+           ((needs.unit.result == 'skipped' ||
+             needs.browser.result == 'skipped' ||
+             needs.container.result == 'skipped') &&
+            !(needs.unit.result == 'skipped' &&
+              needs.browser.result == 'skipped' &&
               needs.container.result == 'skipped' &&
               ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
                (github.event_name == 'pull_request' && github.base_ref == 'main' &&
                 (github.event.action == 'closed' && github.event.pull_request.merged == true ||
-                 github.event.pull_request.user.login != 'dependabot[bot]'))))))
+                 github.event.pull_request.user.login != 'dependabot[bot]'))))) ||
+           (needs.escalation-proof.result == 'skipped' &&
+            github.event_name == 'pull_request' && github.base_ref == 'main' &&
+            github.event.action != 'closed' &&
+            github.event.pull_request.user.login != 'dependabot[bot]'))
         run: exit 1
 
       # A merged promotion PR releases from the merge event itself. GitHub
@@ -446,15 +653,15 @@ jobs:
         # The normal promotion path does not rerun the suite. It proves the
         # canonical testing gate run for the exact commit (or the closest
         # gated testing ancestor) completed successfully and that its own check
-        # suite contains completed, successful `checks` and both native
-        # container legs. The workflow path, testing event (push or dispatch),
-        # testing branch and suite id are all part of the selector, so a forged
-        # workflow, a pull-request run, or names from another suite can never
-        # stand in for the full gate. A docs-only commit pushed after the
-        # closest gated testing commit reuses that gate when the delta contains
-        # only docs paths, because check.yml deliberately skips docs pushes;
-        # the fallback selects the closest gated commit from canonical testing
-        # gate runs, with no commit bound.
+        # suite contains completed, successful `unit`, `browser` and both
+        # native container legs. The workflow path, testing event (push or
+        # dispatch), testing branch and suite id are all part of the selector,
+        # so a forged workflow, a pull-request run, or names from another suite
+        # can never stand in for the full gate. A docs-only commit pushed after
+        # the closest gated testing commit reuses that gate when the delta
+        # contains only docs paths, because check.yml deliberately skips docs
+        # pushes; the fallback selects the closest gated commit from canonical
+        # testing gate runs, with no commit bound.
         # Pending exact runs get six bounded 10-second polls; the proof fails
         # closed if they are still pending. A successful duplicate wins over
         # cancelled leftovers from a re-run within the canonical suite.
@@ -534,10 +741,10 @@ jobs:
             printf '%s' "$1" | jq -r --argjson suite "$2" '
               [ (.check_runs // [])[]
                 | select(.check_suite.id == $suite)
-                | select(.name == "checks" or .name == "container (linux/amd64)" or .name == "container (linux/arm64)")
+                | select(.name == "unit" or .name == "browser" or .name == "container (linux/amd64)" or .name == "container (linux/arm64)")
               ] as $entries
               | [ $entries[] | select(.status == "completed" and .conclusion == "success") | .name ] | unique as $success
-              | if ($success | length) == 3 then "success"
+              | if ($success | length) == 4 then "success"
                 elif ([ $entries[] | select(.status != "completed") ] | length) != 0 then "pending"
                 elif ([ $entries[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") ] | length) != 0 then "failed"
                 else "incomplete" end'
@@ -741,9 +948,9 @@ jobs:
     # handled by the docs and Pages workflows and do not publish an image.
     needs: required
     # always() defeats GitHub's implicit success gate, which otherwise skips
-    # this job when checks and container were deliberately skipped for a main
-    # push or a merged PR. The explicit result check still requires the
-    # required gate to pass.
+    # this job when the gate jobs were deliberately skipped for a main push or
+    # a merged PR. The explicit result check still requires the required gate
+    # to pass.
     if: >-
       always() && needs.required.result == 'success' &&
       github.repository == 'LLM-4-People/millivolt' &&
@@ -928,12 +1135,12 @@ jobs:
             gh release create "v$RELEASE_VERSION" "${flags[@]}"
 
   publish-testing:
-    needs: [checks, container]
+    needs: [unit, browser, container]
     # A moving development alias, not a release: every code-bearing push to
-    # testing republishes one tag after the same checks and native container
-    # gates as main. It waits for those jobs directly because a testing push
-    # has no promotion proof to wait for. No version is cut and no release is
-    # created.
+    # testing republishes one tag after the same unit, browser and native
+    # container gates as main. It waits for those jobs directly because a
+    # testing push has no promotion proof to wait for. No version is cut and no
+    # release is created.
     if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && github.ref == 'refs/heads/testing'
     runs-on: ubuntu-24.04
     timeout-minutes: 20

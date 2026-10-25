@@ -52,9 +52,11 @@ func scBody(n int, param string) string {
 }
 
 // scCfg builds a validated default config tracking one classified client.
+// Its tests assert extraction and body rewriting, never pacing, so the shared
+// retry ladders stay at testConfig()'s single-digit milliseconds.
 func scCfg(t *testing.T, strip bool, params ...string) *config.Config {
 	t.Helper()
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.SubConversations = []config.SubConversation{{
 		Client: "sc-client",
 		Params: params,

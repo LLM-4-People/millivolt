@@ -299,7 +299,7 @@ func TestResponsesClientStreamingFromAnthropicUpstream(t *testing.T) {
 func TestTranslatedUpstreamErrorUsesClientProtocol(t *testing.T) {
 	up := newFixtureUpstream(t, "application/json", 429,
 		`{"error":{"message":"rate limited","type":"rate_limit_error","code":"slow"}}`)
-	s := New(config.Default(), metrics.Noop{})
+	s := New(testConfig(), metrics.Noop{})
 	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
 
 	body := `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`

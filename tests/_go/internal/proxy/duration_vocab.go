@@ -16,9 +16,10 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-// The dashboard's duration dropdowns offer fixed token sets (chrome.js
-// PAUSE_DURS/DEBUG_DURS, LIMIT_WINDOWS, FILTER_AGES). These pins read the
-// chrome.js source (the TestDashCfgSeedsMatchDefault precedent) and assert
+// The dashboard's duration dropdowns offer fixed token sets (chrome_lists.js
+// PAUSE_DURS/DEBUG_DURS/LIMIT_WINDOWS and chrome_menus.js FILTER_AGES). These
+// pins read the module that owns each menu (the TestDashCfgSeedsMatchDefault
+// precedent) and assert
 // every token the menu actually offers is accepted by the Go owner of its
 // surface, so the menu can never widen to a duration the server would
 // reject - adding 45m to a menu without the server accepting it reddens
@@ -34,27 +35,27 @@ import (
 // chromeMenuSource locates the repository root from this file's
 // compile-time source path (the same self-location rule the web test suite
 // applies; test overlays keep the physical path, so the walk finds the
-// root's go.mod) and reads the dashboard's chrome.js from it. A stripped
+// root's go.mod) and reads one dashboard chrome module from it. A stripped
 // source view (for example a -trimpath build) cannot verify the menu tokens
 // and fails here instead of skipping green.
-func chromeMenuSource(t *testing.T) []byte {
+func chromeMenuSource(t *testing.T, name string) []byte {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
-		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): chrome.js menu tokens cannot be verified")
+		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): dashboard menu tokens cannot be verified")
 	}
 	dir := filepath.Dir(file)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			b, err := os.ReadFile(filepath.Join(dir, "internal", "web", "static", "js", "chrome.js"))
+			b, err := os.ReadFile(filepath.Join(dir, "internal", "web", "static", "js", name))
 			if err != nil {
-				t.Fatalf("read chrome.js: %v", err)
+				t.Fatalf("read %s: %v", name, err)
 			}
 			return b
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("no go.mod above %s: chrome.js menu tokens cannot be verified without the repository source view", file)
+			t.Fatalf("no go.mod above %s: dashboard menu tokens cannot be verified without the repository source view", file)
 		}
 		dir = parent
 	}
@@ -62,7 +63,7 @@ func chromeMenuSource(t *testing.T) []byte {
 
 // menuDeclStatementErr extracts one `const NAME = ...;` statement's text.
 // The cut at the first ";\n" stays the extraction boundary, and it is LOUD:
-// every real chrome.js menu statement closes its last pair literal or call
+// every real menu statement closes its last pair literal or call
 // before that semicolon, so a cut that leaves any other trailing character
 // truncated the statement (a `//` comment carrying a semicolon at
 // end-of-line, or a ";\n" inside a backtick template literal) and fails
@@ -73,12 +74,12 @@ func menuDeclStatementErr(src []byte, name string) (string, error) {
 	decl := "const " + name + " = "
 	start := strings.Index(string(src), decl)
 	if start < 0 {
-		return "", fmt.Errorf("chrome.js missing const %s", name)
+		return "", fmt.Errorf("menu source missing const %s", name)
 	}
 	rest := string(src[start:])
 	end := strings.Index(rest, ";\n")
 	if end < 0 {
-		return "", fmt.Errorf("chrome.js %s statement is not terminated", name)
+		return "", fmt.Errorf("menu source %s statement is not terminated", name)
 	}
 	stmt := rest[:end]
 	trimmed := strings.TrimRight(stmt, " \t\r\n")
@@ -87,7 +88,7 @@ func menuDeclStatementErr(src []byte, name string) (string, error) {
 		last = trimmed[len(trimmed)-1]
 	}
 	if last != ']' && last != ')' {
-		return "", fmt.Errorf("chrome.js %s statement truncated at the first %q cut (comment or template literal carrying it?): %q", name, ";\n", stmt)
+		return "", fmt.Errorf("menu source %s statement truncated at the first %q cut (comment or template literal carrying it?): %q", name, ";\n", stmt)
 	}
 	return stmt, nil
 }
@@ -413,7 +414,7 @@ func TestMenuDeclStatementCutIsLoud(t *testing.T) {
 // covers it; an own token list would need its own acceptance rows and
 // reddens until it gets them.
 func TestPauseDebugMenuDurationsAreServerAccepted(t *testing.T) {
-	js := chromeMenuSource(t)
+	js := chromeMenuSource(t, "chrome_lists.js")
 	toks := menuDurationTokens(t, menuDeclStatement(t, js, "PAUSE_DURS"))
 	debugStmt := menuDeclStatement(t, js, "DEBUG_DURS")
 	if !strings.Contains(debugStmt, "PAUSE_DURS.slice(1)") {
@@ -452,7 +453,7 @@ func TestPauseDebugMenuDurationsAreServerAccepted(t *testing.T) {
 // token through the limits owner; a menu window outside the server's
 // accepted range reddens.
 func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
-	toks := menuDurationTokens(t, menuDeclStatement(t, chromeMenuSource(t), "LIMIT_WINDOWS"))
+	toks := menuDurationTokens(t, menuDeclStatement(t, chromeMenuSource(t, "chrome_lists.js"), "LIMIT_WINDOWS"))
 	if len(toks) == 0 {
 		t.Fatal("LIMIT_WINDOWS offers no tokens")
 	}
@@ -481,7 +482,7 @@ func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
 // is not a canonical spelling (or parses to nothing) would silently widen
 // or no-op the confirmed deletion preview.
 func TestFilterAgeMenuTokensAreCanonicalGoDurations(t *testing.T) {
-	toks := menuDurationTokens(t, menuDeclStatement(t, chromeMenuSource(t), "FILTER_AGES"))
+	toks := menuDurationTokens(t, menuDeclStatement(t, chromeMenuSource(t, "chrome_menus.js"), "FILTER_AGES"))
 	ages := 0
 	for _, tok := range toks {
 		if tok == "" {

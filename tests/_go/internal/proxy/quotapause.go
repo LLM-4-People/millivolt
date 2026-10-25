@@ -56,14 +56,9 @@ func quotaStormRow(s *Server) (scheduler.StormStatus, bool) {
 // quotaPollCond polls a quota-gate predicate with a bounded deadline.
 func quotaPollCond(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
+	if !waitFor(t, cond) {
+		t.Fatal(what)
 	}
-	t.Fatal(what)
 }
 
 // TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery pins the confirmed

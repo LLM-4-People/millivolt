@@ -781,7 +781,7 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	// Exactly the classes internal/web statusClass can return, read from the
 	// exported owner instead of a repeated literal: a 3xx never reaches a
 	// recorded row, 499 is its own class, and a status under 200 is err. See
-	// tests/_go/internal/web/aggregate.go TestStatusClassAndBuckets for the
+	// tests/_go/internal/web/aggregate_explorer.go TestStatusClassAndBuckets for the
 	// classifier side of this contract.
 	want := web.StatusClasses
 	if got := byDimension["status"].Values; len(got) != len(want) {
@@ -835,7 +835,7 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 
 // TestDescribeDocumentsEveryTrackedRequestParam derives the presence-tracked
 // columns from the durable owner - storage.RequestParamColumns(), the bit
-// mapping in internal/storage/request_params.go whose DDL lives in store.go -
+// mapping in internal/storage/request_params.go whose DDL lives in store_schema.go -
 // rather than a second hand-written list. A column added to presence tracking
 // therefore cannot be missing from the reference, and the old blanket claim
 // that every req_* zero was indistinguishable from absent cannot come back.

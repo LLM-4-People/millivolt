@@ -3,7 +3,7 @@
   "private": true,
   "license": "MIT",
   "scripts": {
-    "test": "node tests/theme_check.js && node tests/ui_check.js && node tests/sw_check.js"
+    "test": "node tests/theme_check.js && node tests/log_merge_bench.js && node tests/ui_check.js && node tests/sw_check.js"
   },
   "description": "Dev-only test harness dependencies. The proxy itself has no build step and no runtime JS dependencies.",
   "devDependencies": {

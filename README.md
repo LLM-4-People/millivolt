@@ -2,9 +2,11 @@
 
 See every AI request. Keep your own routing.
 
-A self-hosted, OpenAI-compatible proxy with a live dashboard, SQLite history,
-and controls to pause, limit, or debug traffic. Request metadata, timing,
-tokens, cost, and outcomes; body capture is opt-in.
+A self-hosted, cross-protocol inference proxy with a live dashboard, SQLite
+history, and controls to pause, limit, or debug traffic. OpenAI Chat
+Completions, OpenAI Responses, and Anthropic Messages clients can target any
+configured upstream. Request metadata, timing, tokens, cost, and outcomes; body
+capture is opt-in.
 
 [![Checks and images](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml)
 
@@ -105,7 +107,7 @@ exactly-once contract. See [protocol](docs/protocol.md).
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover showing clients routing through the proxy to upstream APIs, with SQLite metadata below" width="1600" height="640">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600" height="640">
 </picture>
 
 The instrument panel is a dense operator surface in either Black or Clear, not

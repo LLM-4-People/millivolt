@@ -573,7 +573,7 @@ hold its metadata source.
 
 Owners: [format/anthropic.go](../internal/format/anthropic.go),
 [format/models.go](../internal/format/models.go),
-[proxy/relay.go](../internal/proxy/relay.go), and
+[proxy/relay_transform.go](../internal/proxy/relay_transform.go), and
 [proxy/models.go](../internal/proxy/models.go).
 
 ## Cursor Connect bridge

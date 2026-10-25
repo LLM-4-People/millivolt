@@ -164,12 +164,8 @@ func TestThrottleHeaderWriterCoalescesWithoutFlush(t *testing.T) {
 	for i := 0; i < gates; i++ {
 		applyThrottleHeader(t, p, throttleTestProvider(i), hdrLimitConcurrency, "1")
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for store.saveCount() == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("background writer never persisted the burst")
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, func() bool { return store.saveCount() != 0 }) {
+		t.Fatal("background writer never persisted the burst")
 	}
 	if err := p.FlushThrottles(context.Background()); err != nil {
 		t.Fatal(err)

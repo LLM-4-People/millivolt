@@ -110,22 +110,49 @@ func dimField(dim string, c *contrib) *string {
 	return nil
 }
 
+// labelTuple returns the contribution's live label sidecar as a value. A
+// projected or zero row has none, which yields the empty tuple: no
+// single-valued membership except the model slot the interning owner always
+// materializes.
+func (c *contrib) labelTuple() contribLabels {
+	if c.labels == nil {
+		return contribLabels{}
+	}
+	return *c.labels
+}
+
 // Intern derived membership once per materialized record. IDs preserve tool
 // and error occurrence order/multiplicity; only query membership is a set.
+// This entry point serves contributions that carry their live sidecar (ring
+// and pending rows, plus manually built fixtures); the durable scan path calls
+// internLabels with the label tuple so it never allocates a sidecar.
 func (d *contribDimensions) intern(c *contrib) {
-	for dim := range dimTool {
-		name, ok := dimValue(dimensionNames[dim], c)
-		if ok || dim == dimModel {
-			id := d.dict[dim].intern(name)
-			c.dimensionIDs[dim] = id
-			d.dict[dim].counts[id]++
+	d.internLabels(c, c.labelTuple())
+}
+
+// internLabels is the one owner of projection interning for an explicit label
+// tuple. A durable row's labels arrive by value from scanContrib and are
+// dropped here, after the dictionaries own their canonical bytes.
+func (d *contribDimensions) internLabels(c *contrib, labels contribLabels) {
+	for dim, name := range [...]string{labels.client, labels.prov, labels.model, labels.conv, labels.key} {
+		if name == "" && dim != dimModel {
+			continue
 		}
+		id := d.dict[dim].intern(name)
+		c.dimensionIDs[dim] = id
+		d.dict[dim].counts[id]++
 	}
-	if parent := c.parentLabel(); parent != "" {
+	for _, dim := range [...]int{dimStatus, dimTime} {
+		name, _ := dimValue(dimensionNames[dim], c)
+		id := d.dict[dim].intern(name)
+		c.dimensionIDs[dim] = id
+		d.dict[dim].counts[id]++
+	}
+	if labels.parentConv != "" {
 		// A declaration can name a parent before its first observed request.
 		// Reuse the conversation dictionary's slot, but do not increment its
 		// membership count: a parent reference is not an observed conversation.
-		c.parentConvID = d.dict[dimConversation].intern(parent)
+		c.parentConvID = d.dict[dimConversation].intern(labels.parentConv)
 	}
 	c.toolIDs = make([]uint32, len(c.toolsL))
 	for i, name := range c.toolsL {

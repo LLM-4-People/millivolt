@@ -332,7 +332,7 @@ func TestLineageDirtyExplorerAllocationIsPooled(t *testing.T) {
 	// A manual warm run and a bounded, GC-disabled sample avoid the
 	// testing.Benchmark calibration floor and keep sync.Pool reuse stable even
 	// when the gate runs with a short -benchtime under concurrent load.
-	measure := func(extra *contrib) (bytesPerOp, allocsPerOp uint64) {
+	measure := func(extra *contrib) uint64 {
 		fold := func() {
 			f := newExplorerFold("provider", "", nil)
 			f.prepare(p, nil)
@@ -355,18 +355,26 @@ func TestLineageDirtyExplorerAllocationIsPooled(t *testing.T) {
 		// runtime.GC clears sync.Pool's victim cache. Warm it again under GC-off
 		// before sampling so the first measured iteration is not charged cold.
 		fold()
-		var before, after runtime.MemStats
-		runtime.ReadMemStats(&before)
-		const runs = 4
+		// Sample each run separately and keep the smallest. A pooled path pays
+		// the full array only on a pool miss, so one cold run is not a
+		// regression; an unpooled path pays it on every run, so its minimum
+		// still fails the bound. Averaging let one miss masquerade as a
+		// systematic regression (observed 16 B to 721 KiB across race runs).
+		const runs = 8
+		best := ^uint64(0)
 		for range runs {
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
 			fold()
+			runtime.ReadMemStats(&after)
+			if got := after.TotalAlloc - before.TotalAlloc; got < best {
+				best = got
+			}
 		}
-		runtime.ReadMemStats(&after)
-		return (after.TotalAlloc - before.TotalAlloc) / runs,
-			(after.Mallocs - before.Mallocs) / runs
+		return best
 	}
-	cleanBytes, _ := measure(&clean)
-	dirtyBytes, _ := measure(&dirty)
+	cleanBytes := measure(&clean)
+	dirtyBytes := measure(&dirty)
 	delta := int64(dirtyBytes) - int64(cleanBytes)
 	t.Logf("dirty lineage adds %d B/op at %d nodes (clean=%d dirty=%d)",
 		delta, n, cleanBytes, dirtyBytes)

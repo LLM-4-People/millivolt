@@ -12,37 +12,42 @@ defines their supported combinations.
 | Owner | Responsibility |
 | --- | --- |
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
-| [internal/config](../internal/config/config.go) | Config/defaults/validation; schema, YAML generation, revision-checked Settings, model-rule execution. |
+| [internal/config](../internal/config/config.go) | Config/defaults/validation, split by subject into `config_types.go`, `config_defaults.go`, `config_clone.go`, `config_load.go`, `config_validate.go` and `config_validate_overrides.go`; schema, YAML generation, revision-checked Settings, model-rule execution. |
 | [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; inbound/outbound protocol selection and canonical paths in [protocol.go](../internal/proxy/protocol.go); the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
-| [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)); client-facing OpenAI SSE frames and completion envelopes. |
+| [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)), split into decode, feed, usage, terminal, error, fill and report modules; client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit wire codecs (Chat, Responses, Anthropic) over the canonical [IR](../internal/format/ir/ir.go), Connect/protobuf framing, and the same-protocol translation facade. |
-| [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
-| [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
+| [internal/storage](../internal/storage/store_open.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
+| [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates; `aggregate.go` owns the core row model and each surface has its own `aggregate_*.go` module. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
 
 ## Release identity and promotion
 
 [version.go](../version.go) owns VERSION validation and SemVer precedence. The
 [workflow](../.github/workflows/check.yml) owns the promotion gate and release
-publication: `checks` and `container` run the full gate on all `testing` pull
-requests, code-bearing `testing` pushes, and manually pushed `v*` tags, plus
-Dependabot's `main` PRs; docs and site-only pushes use `docs.yml`. `required`
+publication: `unit`, `browser` and `container` run the full gate on all
+`testing` pull requests, code-bearing `testing` pushes, and manually pushed `v*`
+tags, plus Dependabot's `main` PRs; docs and site-only pushes use `docs.yml`.
+The three gate jobs start independently and `required` aggregates them. `required`
 reuses that gate for ordinary promotions by requiring the head to be the current
 `testing` tip, `main` to be already merged back into it, a successful full-gate
 record for that exact commit or for the closest gated `testing` commit when
 every path since it is docs/site-only, and a VERSION newer than every tag for
-non-Dependabot code-bearing promotions. Pending exact check runs get a short bounded wait and
+non-Dependabot code-bearing promotions. A non-Dependabot promotion also requires
+a successful [escalation](../.github/workflows/escalation.yml) run (forced
+full-race sweep plus the repeated clock-sensitive flake sweep) for the reviewed
+head; the proof fails closed while that run is missing, pending, failed, from
+another workflow, branch or commit. Pending exact check runs get a short bounded wait and
 the proof fails closed if they are still pending; let the `testing` push gate
 finish before opening or re-running a promotion PR. Docs/site-only promotions
 skip the VERSION and full-gate proofs and validate docs, workflow policy and the
 site in `required`. The `required` job has a ten-minute budget for that path.
 `publish` tags the reviewed promotion merge, publishes the image and creates the
 release without pushing `main`; a manually pushed `v*` tag ships exactly as
-tagged. `publish-testing` instead waits for `checks` and `container` directly,
-because a testing push has no promotion proof to wait for. The
+tagged. `publish-testing` instead waits for `unit`, `browser` and `container`
+directly, because a testing push has no promotion proof to wait for. The
 `main-testing-first` ruleset adds the pull-request and merge-commit requirements
 with no bypass actors.
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
@@ -78,7 +83,7 @@ fits the bounded read cap, otherwise that cap, and refuses with a retryable
 `503` and `Retry-After` before reading the upstream body.
 
 `resolveRequestOverrides` in
-[request.go](../internal/proxy/request.go) merges the matching
+[request_overrides.go](../internal/proxy/request_overrides.go) merges the matching
 `request_overrides` rules once per request, after routing metadata is known,
 and its merge has exactly two application stages: the final header stage of
 `buildUpstreamRequest`, and the cursor identity headers at the native send. Its
@@ -193,7 +198,8 @@ full SSE snapshots recapture through that barrier by sequence/pending revision.
 
 Tests live under [tests/](../tests/README.md), with Go package mirrors in
 `tests/_go/`. Use the overlay-aware `scripts/check.sh go test` entry point.
-See buffer snapshot/stream tests and `tests/ui_check.js` lifecycle/bootstrap races.
+See buffer snapshot/stream tests and the harness sections under
+`tests/ui_harness/sections/` for the lifecycle and bootstrap races.
 Do not collapse these row, gauge, epoch and request-ownership gates into a
 whole-event drop rule.
 
@@ -312,6 +318,17 @@ leader ends recomputes as the next leader instead of inheriting its error.
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
 are filled at serve time and the ring snapshot itself is never retained.
+The unwritten set stays ring-derived. A record can be missing from the durable
+store while never having been queued: an enqueue that overflowed the writer
+channel and a batch whose insert failed are both dropped by design and counted
+only in `Dropped()`. The writer queue is therefore not a superset of "possibly
+not yet durable", and only the written-id set can say which ring rows are
+already durable, so the O(ring) probe under `aggMu` is the exact dedupe
+boundary. One cold fold measures 0.23-0.37 ms at the default 10,000-record ring
+and 96-107 ms at the one-million-record ceiling
+(`BenchmarkKPI/records_1000000/miss`); the ceiling is a non-default
+`history_size`, and a correct-but-slow cold fold is the accepted cost of
+never double counting.
 SQLite data_version is read on one retained connection; unsupported external
 writers are not made safe merely by cache invalidation. Log pages push exact
 provider/client/key/conversation/status equalities into SQLite before
@@ -473,11 +490,11 @@ when the same read fails. See the [MCP server guide](mcp.md).
 ## Dashboard render owners
 
 HTML embeds the canonical bootstrap builder's JSON, safely escaped in an inert
-data block. Deferred external assets download alongside HTML; `settings.js` is
-the one exception, injected once by the Settings trigger on first open under
-the same versioned URL and single-flighted across concurrent opens. Saved
-hash/chart choices apply before rendering; invalid/missing seed falls back to
-the endpoint.
+data block. Deferred external assets download alongside HTML; the Settings
+sheet is the one exception: its ordered `settings*.js` set is injected by the
+Settings trigger on first open, one module at a time under the same versioned
+URL, and single-flighted across concurrent opens. Saved hash/chart choices
+apply before rendering; invalid/missing seed falls back to the endpoint.
 Dynamic HTML/state is private/no-store. Every local `/dash/` CSS/JS URL in the
 shell carries the content version as `?v=`. On a hit, the service worker
 answers a `/dash/` request carrying exactly that version from its stamped
@@ -514,10 +531,10 @@ palette resolves in both modes and the Black/Clear mode material fallbacks,
 while `dashboard.css` owns the default Instrument Black base, the shared
 semantic status fills and the comparator/caption-bar layout. Each palette owns
 `--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
-cool Clear palettes get cool elevation and scrims. `chrome.js` owns the
+cool Clear palettes get cool elevation and scrims. `chrome_settings.js` owns the
 Settings trigger, loader, open-state probe, shared status line and the single
-close entry point; the module owns the sheet's state, editors and
-apply/revert/backup/purge behavior.
+close entry point; the lazy `settings*.js` modules own the sheet's state,
+editors and apply/revert/backup/purge behavior.
 A clean open at the same document revision and writable state still fetches
 freshness but keeps the
 retained rows and baseline; revision/writable changes, drafts and Revert refill.

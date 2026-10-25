@@ -446,7 +446,7 @@ func absorbedServerFailure(attempts []RetryAttempt) bool {
 
 // Use it everywhere instead of re-deriving the predicate so the live counter,
 // the aggregates, and the dashboard never disagree. The purge SQL predicate
-// (storage.store.go's HasError clause) must stay semantically identical to
+// (storage/purge.go's HasError clause) must stay semantically identical to
 // this function.
 func (r *Record) IsError() bool {
 	// A final 429 (rate limit) or 499 (local client closed the connection

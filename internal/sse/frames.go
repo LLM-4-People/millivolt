@@ -8,7 +8,8 @@ import (
 )
 
 // Client-facing OpenAI-compatible SSE frame primitives, the write-side
-// mirror of the parsing in analyzer.go: the proxy paths that inject an
+// mirror of the parsing in analyzer.go and analyzer_feed.go: the proxy paths
+// that inject an
 // in-band error, emit a usage chunk, or close a stream render through these
 // so the wire bytes have one owner.
 

@@ -119,6 +119,38 @@ func newPayloadDecoder(src io.Reader, maxPayload int64) (*zstd.Decoder, error) {
 // that many bytes.
 var payloadMax = int64(config.BackupMaxBytesMax)
 
+// newArchiveEncoder is the one owner of the archive's zstd encoder
+// configuration. It is shared by EncodeFile and by the tests' frozen-layout
+// reference so the tuning constants are never duplicated: the wire contract is
+// the header plus member framing, not the compressor's block choices, and a
+// level change must be accountable only through the measured size test.
+//
+// Encoder choice, measured on a 2 MiB config and on that config plus a 4 MiB
+// packed database (Go 1.27.2, klauspost/compress v1.20.3). Archive size barely
+// depends on the level here; throughput and encoder state do:
+//
+//	SpeedBestCompression   2.45-3.81 MB/s  77.1 MB/op  ratio 0.5103/0.3408
+//	SpeedBetterCompression 25.6-32.6 MB/s  44.9 MB/op  ratio 0.5098/0.3410
+//	SpeedDefault           faster still    ~45 MB/op   ratio 0.5129/0.5130
+//
+// BetterCompression is 7-10x the throughput of Best for a 0.1% size
+// difference, and Default inflates the database archive by 50%, so Better is
+// the measured choice; TestEncodeFileCompressedSizeWithinFactor pins it.
+// Concurrency stays 1: the async block path measured slower than a single
+// encoder on this fixture (default GOMAXPROCS was 1.0-1.4 s against 0.4-0.5 s
+// at Best) with identical output bytes, and a concurrent encoder multiplies
+// the retained state for no size gain, so the shared memory ceiling wins over
+// an unproven throughput claim. The self-check re-read stays: it is the
+// archive's integrity guarantee and now costs about a fifth to a quarter of
+// EncodeFile at this level.
+func newArchiveEncoder(w io.Writer) (*zstd.Encoder, error) {
+	return zstd.NewWriter(w,
+		zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+		zstd.WithEncoderCRC(true),
+		zstd.WithEncoderConcurrency(1),
+	)
+}
+
 // Archive is one operator backup. At least one member must be present.
 type Archive struct {
 	Created time.Time
@@ -285,11 +317,10 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 		return "", 0, ErrTooLarge
 	}
 	hasher := sha256.New()
-	enc, err := zstd.NewWriter(cap,
-		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
-		zstd.WithEncoderCRC(true),
-		zstd.WithEncoderConcurrency(1),
-	)
+	enc, err := newArchiveEncoder(cap)
+	if err != nil {
+		return "", 0, fmt.Errorf("compress backup: %w", err)
+	}
 	if err != nil {
 		return "", 0, fmt.Errorf("compress backup: %w", err)
 	}

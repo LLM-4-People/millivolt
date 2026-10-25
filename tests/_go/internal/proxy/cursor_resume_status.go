@@ -39,12 +39,8 @@ func parkMcpArgsRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) 
 	if _, err := testIn.Write(cframe(exec)); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for len(run.PendingToolCallIDs()) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("pump did not register the pending tool call")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitFor(t, func() bool { return len(run.PendingToolCallIDs()) > 0 }) {
+		t.Fatal("pump did not register the pending tool call")
 	}
 }
 
@@ -54,12 +50,8 @@ func parkMcpArgsRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) 
 // choreography.
 func finishResumedRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for len(run.PendingToolCallIDs()) > 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("resume did not consume the pending tool call")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitFor(t, func() bool { return len(run.PendingToolCallIDs()) == 0 }) {
+		t.Fatal("resume did not consume the pending tool call")
 	}
 	if _, err := testIn.Write(cend("{}")); err != nil {
 		t.Fatal(err)

@@ -1,7 +1,8 @@
 // DOM-free benchmark and regression probe for the request log's archive merge
-// (G6). It runs the production log.js in a Node vm with inert document
-// stubs, then drives the live-frame owner directly: a 20k-row durable archive
-// below a 10k-row live ring, one counter-only frame and one one-record update.
+// (G6). It runs the production log modules in the page's own deferred-script
+// order with inert document stubs, then drives the live-frame owner directly: a
+// 20k-row durable archive below a 10k-row live ring, one counter-only frame and
+// one one-record update.
 //
 // Timing alone is not the contract: the archive scan counter and the live
 // identity state prove that the unchanged archive is never rescanned. The
@@ -14,7 +15,21 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const LOG_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'internal/web/static/js/log.js'), 'utf8');
+const ROOT = path.join(__dirname, '..');
+const STATIC_JS = path.join(ROOT, 'internal/web/static/js');
+// index.html's deferred script order is the one owner of the log module list;
+// this bench loads the same sources in that order instead of keeping a second
+// copy that could drift from the page.
+function logModules() {
+  const html = fs.readFileSync(path.join(ROOT, 'internal/web/static/index.html'), 'utf8');
+  const names = [...html.matchAll(/<script\b[^>]*\bsrc="\/dash\/js\/(log(?:\.js|_[a-z0-9_]+\.js))[^"]*"[^>]*>/g)]
+    .map(m => m[1]);
+  if (!names.length) throw new Error('index.html references no log module');
+  if (!names.includes('log.js')) throw new Error('index.html references no log.js entry module');
+  return names;
+}
+const LOG_MODULES = logModules();
+const LOG_SOURCES = LOG_MODULES.map(name => fs.readFileSync(path.join(STATIC_JS, name), 'utf8'));
 const ARCHIVE_LEN = 20000;
 const RING_LEN = 10000;
 const FRAMES = 250;
@@ -38,7 +53,10 @@ const sandbox = {
 sandbox.globalThis = sandbox;
 const context = vm.createContext(sandbox);
 vm.runInContext('let logLimit = 0; let logArchive = []; let recordsRevision = 0;', context);
-vm.runInContext(LOG_SOURCE + `
+// Each module is its own script, exactly as the page runs them; the vm context
+// shares one global lexical scope across scripts, like the browser.
+for (const src of LOG_SOURCES) vm.runInContext(src, context);
+vm.runInContext(`
   globalThis.logApi = {
     mergeLogArchive, logWindowLength, logWindowRows, visibleLog, logVisible,
     logArchivePrepend, logArchiveClear, logArchiveIndex,
