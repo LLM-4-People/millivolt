@@ -531,10 +531,10 @@ palette resolves in both modes and the Black/Clear mode material fallbacks,
 while `dashboard.css` owns the default Instrument Black base, the shared
 semantic status fills and the comparator/caption-bar layout. Each palette owns
 `--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
-cool Clear palettes get cool elevation and scrims. `chrome.js` owns the
+cool Clear palettes get cool elevation and scrims. `chrome_settings.js` owns the
 Settings trigger, loader, open-state probe, shared status line and the single
-close entry point; the module owns the sheet's state, editors and
-apply/revert/backup/purge behavior.
+close entry point; the lazy `settings*.js` modules own the sheet's state,
+editors and apply/revert/backup/purge behavior.
 A clean open at the same document revision and writable state still fetches
 freshness but keeps the
 retained rows and baseline; revision/writable changes, drafts and Revert refill.

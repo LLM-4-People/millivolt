@@ -215,7 +215,7 @@ module.exports = async function w16Mirrors(H) {
       sw.togglePauseMenu({stopPropagation() {}});
 
       // holdMatchesRecord mirrors scheduler holdSnap.matches on the scope
-      // half (scheduler/hold.go); chrome.js holdLive owns the expiry half
+      // half (scheduler/hold.go); chrome_settings.js holdLive owns the expiry half
       // the Go matcher folds in. The matrix mirrors the Go suite's
       // TestHoldMatchesMatrix row for row (that suite owns the table, the
       // hand-mirror documented here): the wire keys are all/new/clients/

@@ -8,7 +8,7 @@ module.exports = async function lazySettings(H) {
   // Production keeps settings.js out of the first-paint shell; the trigger
   // injects exactly one versioned request and the sheet opens only after that
   // module has initialized. These checks assemble without settings.js so the
-  // real chrome.js trigger/loader path runs, then simulate the script element's
+  // real chrome_settings.js trigger/loader path runs, then simulate the script element's
   // load/error events (jsdom does not fetch external scripts).
   {
     const shell = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');

@@ -77,7 +77,7 @@ func settingsModuleText(t *testing.T) string {
 
 // settingsModuleSource reads one dashboard Settings module from the
 // repository. Each pin names the module that owns its literal; the lazy
-// sheet's modules are listed once in chrome.js SETTINGS_MODULES.
+// sheet's modules are listed once in chrome_settings.js SETTINGS_MODULES.
 func settingsModuleSource(t *testing.T, name string) []byte {
 	t.Helper()
 	return []byte(repositoryText(t, filepath.Join("internal", "web", "static", "js", name)))

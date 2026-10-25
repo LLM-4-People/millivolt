@@ -165,7 +165,7 @@ let throttleState = { throttles: [], [KNOWN_PROVIDERS_KEY]: [], active: false };
 let debugState = { enabled: false, sessions: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], [KNOWN_MODELS_KEY]: [], until: null, ttl: '', max_bytes: '' };
 let debugEditID = '';
 // localStorage key for the persisted status filter. One owner: the write
-// path in chrome.js (doFilter) references the same constant.
+// path in chrome_lists.js (doFilter) references the same constant.
 const FILTERS_STORAGE_KEY = 'dash.filters';
 // Filter state: only status remains a dropdown filter (client/provider/model/
 // conversation/error are explorer dimensions now). Persisted across reloads.
