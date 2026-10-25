@@ -348,13 +348,19 @@ func databaseFilePermissionError(path string, info os.FileInfo, err error) error
 }
 
 // restrictDatabaseSidecars narrows the WAL, shared-memory and rollback-journal
-// files SQLite created for path. It runs after WAL initialization, which is the
-// first point they exist; an absent suffix is not an error because SQLite owns
-// when each sidecar appears.
+// files SQLite created for path. Sidecars belong to the resolved live file, not
+// the configured db_path spelling: a symlinked installation leaves its WAL/SHM
+// beside the target, so deriving names from the link would miss them. It runs
+// after WAL initialization, which is the first point they exist; an absent
+// suffix is not an error because SQLite owns when each sidecar appears.
 func restrictDatabaseSidecars(path string) error {
+	resolved := path
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		resolved = target
+	}
 	for _, suffix := range snapshotSidecarSuffixes {
-		if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("chmod %s: %w", suffix, err)
+		if err := os.Chmod(resolved+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("chmod %s: %w", resolved+suffix, err)
 		}
 	}
 	return nil
