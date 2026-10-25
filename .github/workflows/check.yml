@@ -53,7 +53,8 @@ name: Checks and images
 # - Every release path uses the same idempotency key, the version tag. The
 #   merged-PR event, a delivered main push, and a manual tag push can all
 #   arrive for one revision; the release concurrency group serializes them and
-#   the first tag wins.
+#   the first tag wins. That non-cancelling group is the atomicity owner for
+#   the check-then-create tag guard, so the workflow test pins it.
 
 on:
   push:
@@ -962,6 +963,11 @@ jobs:
         needs.required.outputs.merged_docs_only != 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The release idempotency guard is a check-then-create over the version tag.
+    # This non-cancelling group is the atomicity owner: release runs are
+    # serialized, so the first run creates the tag and release while the next
+    # run sees the tag guard and skips. It must never cancel an in-flight
+    # publish, or two runs could pass the check before either creates the tag.
     concurrency:
       group: release
       cancel-in-progress: false

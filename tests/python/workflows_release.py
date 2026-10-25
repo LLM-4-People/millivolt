@@ -63,6 +63,24 @@ def publish_guard_errors(publish_if: str, publish_testing_if: str) -> list[str]:
     return errors
 
 
+def publish_concurrency_errors(concurrency) -> list[str]:
+    """The release group owns check-then-create atomicity for the version tag.
+
+    A cancelling group (or a missing flag) could start a second publish while
+    the first is between its tag guard and its release create, so both could
+    pass the check and publish. The release job must serialize without
+    cancellation.
+    """
+    if not isinstance(concurrency, dict):
+        return ["check.yml: publish must declare its release concurrency group"]
+    errors = []
+    if concurrency.get("group") != "release":
+        errors.append("check.yml: publish concurrency group must be release")
+    if concurrency.get("cancel-in-progress") is not False:
+        errors.append("check.yml: publish concurrency must set cancel-in-progress: false")
+    return errors
+
+
 MAIN_REF_NAMES = {"main", "refs/heads/main"}
 # `git` may carry options before the subcommand, including a value-taking
 # `-c key=value` or `-C path`. Stop at a command separator so a later `push`
@@ -136,6 +154,17 @@ def check_release(checks: dict, errors: list[str]) -> None:
     for needle in publish_testing_missing:
         errors.append(f"check.yml: publish-testing guard is missing {needle}")
     errors.extend(publish_guard_errors(publish_if, publish_testing_if))
+    errors.extend(publish_concurrency_errors(publish.get("concurrency")))
+    # Mutation proofs: a cancelling group, a renamed group and a missing flag
+    # must all fail, so the atomicity owner cannot silently drift.
+    for label, concurrency in (
+        ("a cancelling release group", {"group": "release", "cancel-in-progress": True}),
+        ("a renamed release group", {"group": "publish", "cancel-in-progress": False}),
+        ("a missing cancel flag", {"group": "release"}),
+        ("a missing concurrency block", None),
+    ):
+        if not publish_concurrency_errors(concurrency):
+            errors.append(f"workflows self-check: {label} must fail")
     # Mutation proofs: dropping any one event, repository or ref condition from
     # either publication guard must be caught, not masked by the others, and an
     # extra `||` ref must fail the exact normalized contract.
