@@ -1312,8 +1312,9 @@ indexes can overstate the tool-call count without growing memory past the
 bound.
 
 Errors count affected requests with a genuine failure, including recovered
-upstream failures. HTTP 429 counts requests that encountered a final or retried
-429; the two signals can overlap, but 429 alone is not an error. Client-local
+upstream failures. HTTP 429 counts requests that encountered a final, retried or
+in-band 429 (a 429 whose status line a committed 200 could not relay); the two
+signals can overlap, but 429 alone is not an error. Client-local
 cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
@@ -1461,12 +1462,14 @@ SELECT r.started_at, r.id, r.retries, r.status_code AS final_status,
 FROM requests r, json_each(r.attempts) j
 WHERE r.started_at >= strftime('%s','now')*1000 - 86400000
   AND json_array_length(r.attempts) > 0
+  AND COALESCE(json_extract(j.value,'$.in_band'),0)=0
 ORDER BY r.started_at, j.key
 ```
 
-One row per absorbed attempt, oldest first. The `json_array_length` gate is
-required: `attempts` defaults to the JSON literal `null`, and `json_each`
-over that literal still yields a row. `retry_after_ms` appears (nonzero)
+One row per absorbed retry, oldest first. The `in_band` filter excludes a 429
+recorded behind a committed 200: that entry is health evidence, not a retry.
+The `json_array_length` gate is required: `attempts` defaults to the JSON
+literal `null`, and `json_each` over that literal still yields a row. `retry_after_ms` appears (nonzero)
 when the provider sent a `Retry-After` header or a ratelimit-reset header
 (`x-ratelimit-reset-requests`/`-tokens`, `anthropic-ratelimit-requests-reset`,
 `anthropic-ratelimit-tokens-reset`), bounded by the proxy's hint ceiling.

@@ -371,14 +371,19 @@ adaptive cap and can therefore outlast it. A short hint does not reset the
 doubling, so a 1s "retry shortly" cannot re-hammer a struggling upstream.
 
 A finalized request retains its absorbed attempts and final outcome in one
-record. Every attempt - absorbed or final - stores the same upstream-response
+record. Every retried or final attempt stores the same upstream-response
 information: the provider request id, server, processing time, echoed model,
 rate-limit state and the redacted response headers. A provider-side request id
 therefore matches to the exact upstream attempt that produced it, including
 failures the client never saw. Transport failures have no HTTP response, so
-their attempt entries leave those fields empty. Recovered upstream failures can
-count as errors even when the final status succeeds. A final or retried 429
-is a separate affected-request signal.
+their attempt entries leave those fields empty. An in-band 429 is the one
+exception: when a keepalive already committed the client's success 200, the
+upstream status cannot replace it, so the record keeps
+`{status_code:429,at,in_band:true}` to preserve the distinct rate-limit signal.
+It carries no retry or error detail, is not counted as a retry, and is excluded
+from retry disclosures and error enumerations. Recovered upstream failures can
+count as errors even when the final status succeeds. A final, retried or
+in-band 429 is a separate affected-request signal.
 A client that disconnects before a final outcome is recorded as status 499
 with `client_disconnected`; a plain 499 is a flow event, but one carrying a
 structured error (the provider's in-band stream failure the client aborted

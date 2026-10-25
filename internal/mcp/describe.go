@@ -440,7 +440,7 @@ var tableDocs = []TableDoc{
 			{Name: "stream", Type: "INTEGER", Meaning: "1 when the client asked for a streamed response"},
 			{Name: "tool_calls", Type: "INTEGER", Meaning: "count of tool calls in the response"},
 			{Name: "tool_names", Type: "TEXT", Meaning: "JSON array of tool names, or 'null' when none; use json_each or json_extract"},
-			{Name: "attempts", Type: "TEXT", Meaning: "JSON array of absorbed upstream attempts; each has status_code, error_type and at"},
+			{Name: "attempts", Type: "TEXT", Meaning: "JSON array of absorbed retries plus at most one in-band 429; each has status_code and at, a retry also has error_type, and in_band marks a 429 a committed 200 hid (health evidence, not a retry)"},
 			{Name: "final_attempt_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "start of the attempt that produced the returned response"},
 			{Name: "error_type", Type: "TEXT", Meaning: "classified error class; empty on success"},
 			{Name: "error_code", Type: "TEXT", Meaning: "provider-specific error code"},

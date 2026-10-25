@@ -31,10 +31,11 @@ type Usage struct {
 // replacement.
 //
 // The upstream-response metadata fields mirror the record's final-response
-// capture exactly (same names, same meaning, same JSON tags): every attempt,
-// absorbed or final, stores the same information, so a provider-side request
-// id can be matched to the exact upstream attempt that produced it.
-// Transport failures have no HTTP response and leave them empty/zero.
+// capture exactly (same names, same meaning, same JSON tags): every retried or
+// final attempt stores the same information, so a provider-side request id can
+// be matched to the exact upstream attempt that produced it. An in-band 429
+// entry is the exception: it carries only the hidden status and time, no
+// metadata. Transport failures have no HTTP response and leave them empty/zero.
 // tests/_go/internal/metrics/attempt_metadata.go pins the field-set parity.
 type RetryAttempt struct {
 	StatusCode   int       `json:"status_code"`
