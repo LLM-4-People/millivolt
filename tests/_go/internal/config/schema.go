@@ -874,7 +874,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 	adapters := normalize("adapters.md")
 	protocol := normalize("protocol.md")
 	example := exampleHelpText(repositoryText(t, "proxy.example.yaml"))
-	configSource := strings.Join(strings.Fields(strings.ReplaceAll(repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
+	configSource := strings.Join(strings.Fields(strings.ReplaceAll(repositoryText(t, filepath.Join("internal", "config", "config_types.go")), "//", " ")), " ")
 
 	for _, tc := range []struct {
 		name string
@@ -1068,7 +1068,7 @@ func TestModelRulesHelpNamesTheRealFilterSurfaces(t *testing.T) {
 // phase the ticker does not cover.
 func TestSSEKeepaliveCommentsOmitUncoveredPhases(t *testing.T) {
 	for _, rel := range []string{
-		"internal/config/config.go",
+		"internal/config/config_types.go",
 		"internal/proxy/sse_keepalive.go",
 		"internal/proxy/proxy.go",
 	} {
