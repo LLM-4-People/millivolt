@@ -903,7 +903,8 @@ signed with a key derived from the operator token, so a container restart with
 the same credential keeps the session. Rotating the token invalidates outstanding
 cookies. The cookie carries `Secure` only when the request arrived over TLS or
 the first `X-Forwarded-Proto` token is `https` (the documented TLS deployments
-terminate at the ingress), so a loopback plain-HTTP dashboard keeps working
+terminate at the ingress, and the canonical NGINX sample overwrites that header
+with `$scheme`), so a loopback plain-HTTP dashboard keeps working
 while a TLS presentation gets the flag.
 Do not expose the listener over plaintext networks anyway. The login page
 served for unauthenticated dashboard visits exchanges the entered value for

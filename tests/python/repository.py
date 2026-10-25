@@ -732,6 +732,15 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("dashboard and inference share the operator boundary", landing)
         self.assertNotIn("dashboard and the inference listener", landing)
 
+    def test_canonical_tls_ingress_sets_forwarded_proto(self):
+        nginx = self.read("deploy/nginx.conf")
+        self.assertIn("proxy_set_header X-Forwarded-Proto $scheme;", nginx)
+        self.assertNotIn("$http_x_forwarded_proto", nginx.lower())
+        reverse = self.read("docs/reverse-proxy.md")
+        self.assertIn("X-Forwarded-Proto", reverse)
+        operations = self.read("docs/operations.md")
+        self.assertIn("X-Forwarded-Proto", operations)
+
     def test_adapters_pin_round8_contracts(self):
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
         for phrase in (

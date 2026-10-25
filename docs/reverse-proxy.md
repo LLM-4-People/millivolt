@@ -66,7 +66,10 @@ statuses intact, disables edge compression/caching, and ignores special upstream
 Millivolt uses SSE, not a WebSocket endpoint; no `Upgrade` block is needed.
 
 It preserves the external `Host`, including a nondefault port, so browser-origin
-checks on Settings and other mutations keep working. NGINX's body-size gate is
+checks on Settings and other mutations keep working. It also overwrites
+`X-Forwarded-Proto` with this server's `$scheme`, so a TLS presentation reaches
+millivolt as `https` and the session cookie carries `Secure`; a client-supplied
+value cannot spoof it. NGINX's body-size gate is
 disabled in the sample: millivolt's existing `max_request_bytes` remains the
 application limit, rather than an accidentally smaller duplicate at ingress.
 Choose edge idle timeouts for your deployment. `proxy_read_timeout` limits the
