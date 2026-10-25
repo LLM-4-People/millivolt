@@ -200,6 +200,11 @@ func DecodeAnthropicRequest(body []byte) (*ir.Request, error) {
 	}
 	ids := newRequestToolIDs()
 	for i, m := range in.Messages {
+		if err := preReserveAnthropicToolIDs(ids, m.Content); err != nil {
+			return nil, fmt.Errorf("anthropic message %d: %w", i, err)
+		}
+	}
+	for i, m := range in.Messages {
 		// One accumulator spans every message so AddOnce sees the whole
 		// request instead of restarting at each message.
 		msg, err := decodeAnthropicMessage(m, &req.Warnings, ids)
@@ -303,6 +308,55 @@ func decodeAnthropicSystem(raw json.RawMessage) ([]ir.Block, ir.Warnings, error)
 		})
 	}
 	return blocks, warns, nil
+}
+
+// preReserveAnthropicToolIDs claims every explicit tool_use id in one message
+// before any block is decoded. A later id-less tool_use then synthesizes
+// against the whole request instead of colliding with an explicit id that
+// appears after it.
+func preReserveAnthropicToolIDs(ids *requestToolIDs, content json.RawMessage) error {
+	return preReserveAnthropicContent(ids, content, "")
+}
+
+// preReserveAnthropicContent walks nested tool_result and document source
+// content so an explicit id anywhere in the request participates in the
+// namespace. A parse failure is left to the typed decoder, which owns the
+// error; the pre-scan only needs the arrays it can read.
+func preReserveAnthropicContent(ids *requestToolIDs, raw json.RawMessage, prefix string) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil
+	}
+	var parts []anthropicWireBlock
+	if err := json.Unmarshal(trimmed, &parts); err != nil {
+		return nil
+	}
+	for i, p := range parts {
+		where := fmt.Sprintf("block %d", i)
+		if prefix != "" {
+			where = prefix + " " + where
+		}
+		switch p.Type {
+		case "tool_use":
+			if p.ID == "" {
+				continue
+			}
+			if err := ids.preReserve(p.ID); err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+		case "tool_result":
+			if err := preReserveAnthropicContent(ids, p.Content, where+" content"); err != nil {
+				return err
+			}
+		case "document":
+			if p.Source != nil {
+				if err := preReserveAnthropicContent(ids, p.Source.Content, where+" source content"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func decodeAnthropicMessage(m anthropicWireMsg, warns *ir.Warnings, ids *requestToolIDs) (ir.Message, error) {

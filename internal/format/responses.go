@@ -377,6 +377,18 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 	phaseSeen := false
 	ids := newRequestToolIDs()
 	for i, item := range items {
+		if item.Type != "function_call" {
+			continue
+		}
+		id := responsesFunctionCallItemID(item)
+		if id == "" {
+			continue
+		}
+		if err := ids.preReserve(id); err != nil {
+			return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
+		}
+	}
+	for i, item := range items {
 		if item.Phase != "" {
 			phaseSeen = true
 		}
@@ -614,6 +626,15 @@ func decodeResponsesAnnotations(in []responsesWireAnnotation, offset, partRunes 
 	return out, warns, nil
 }
 
+// responsesFunctionCallItemID returns the id a function-call item references:
+// call_id when present, otherwise the item id.
+func responsesFunctionCallItemID(item responsesWireItem) string {
+	if item.CallID != "" {
+		return item.CallID
+	}
+	return item.ID
+}
+
 // decodeResponsesFunctionCall decodes one function-call item. requireEvidence
 // rejects a missing, null or whitespace argument value; the response decoder
 // sets it for a non-clean terminal, while request history keeps the empty
@@ -626,10 +647,7 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, i
 	if err := checkNativeIdentity("tool name", item.Name); err != nil {
 		return nil, nil, err
 	}
-	id := item.CallID
-	if id == "" {
-		id = item.ID
-	}
+	id := responsesFunctionCallItemID(item)
 	if id == "" {
 		return nil, nil, errors.New("function_call has no call_id")
 	}

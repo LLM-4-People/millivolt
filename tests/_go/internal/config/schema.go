@@ -893,6 +893,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"streamed item terminal status", adapters, "only an item still open at an incomplete or failed terminal is rendered `incomplete`"},
 		{"non-stream message item status", adapters, "A non-streaming translated Responses message item carries `status: \"incomplete\"` when the response-level status is not `completed`"},
 		{"non-stream function call status", adapters, "Function-call items always carry `status: \"completed\"`"},
+		{"request tool id pre-scan", adapters, "Tool ids are pre-reserved once per request across every message and item before any message is decoded"},
 		{"failure terminal open call", adapters, "On Anthropic and Responses, an already-announced open call is left unclosed on those three terminals"},
 		{"chat failure terminal announcement", adapters, "The Chat target already streamed the announcement with empty arguments"},
 		{"translated response identity default", adapters, "A translated non-streaming response assumes a schema-valid source identity"},

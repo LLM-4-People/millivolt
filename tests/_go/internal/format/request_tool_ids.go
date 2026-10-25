@@ -90,6 +90,42 @@ func TestRequestToolIDsAreUnique(t *testing.T) {
 		}
 	})
 
+	// The explicit id appears after the id-less call. The pre-scan must reserve
+	// it before the first call synthesizes, or a valid request is rejected with
+	// a false duplicate.
+	t.Run("generated then explicit Chat collision", func(t *testing.T) {
+		body := `{"model":"m","messages":[` +
+			`{"role":"assistant","content":null,"tool_calls":[{"type":"function","function":{"name":"f","arguments":"{}"}}]},` +
+			`{"role":"user","content":"x"},` +
+			`{"role":"assistant","content":null,"tool_calls":[{"id":"call_0_0","type":"function","function":{"name":"g","arguments":"{}"}}]}]}`
+		req, err := DecodeChatRequest([]byte(body))
+		if err != nil {
+			t.Fatalf("generated-then-explicit Chat request became a failure: %v", err)
+		}
+		ids := requestToolCallIDs(req)
+		if len(ids) != 2 || ids[0] != "call_0_0_1" || ids[1] != "call_0_0" {
+			t.Fatalf("Chat IR ids = %v, want call_0_0_1 and call_0_0", ids)
+		}
+		if !warningField(req.Warnings, "tool_calls.id") {
+			t.Fatalf("generated Chat id warning missing: %+v", req.Warnings)
+		}
+	})
+
+	t.Run("generated then explicit Anthropic collision", func(t *testing.T) {
+		body := anthropicRequestWithToolUses(anthropicToolUseBlockJSON("", "f"), anthropicToolUseBlockJSON("toolu_proxy_0", "g"))
+		req, err := DecodeAnthropicRequest([]byte(body))
+		if err != nil {
+			t.Fatalf("generated-then-explicit Anthropic request became a failure: %v", err)
+		}
+		ids := requestToolCallIDs(req)
+		if len(ids) != 2 || ids[0] != "toolu_proxy_0_1" || ids[1] != "toolu_proxy_0" {
+			t.Fatalf("Anthropic IR ids = %v, want toolu_proxy_0_1 and toolu_proxy_0", ids)
+		}
+		if !warningField(req.Warnings, "tool_use.id") {
+			t.Fatalf("generated Anthropic id warning missing: %+v", req.Warnings)
+		}
+	})
+
 	for _, tc := range []struct {
 		name   string
 		body   string

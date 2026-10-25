@@ -41,23 +41,49 @@ func checkToolCallName(name string) error {
 }
 
 // requestToolIDs is one request-scoped namespace for tool-call ids across every
-// message and item. A request decoder reserves each explicit id and allocates
-// synthetic ids from the same set, so a generated id can never collide with an
-// explicit one in another message. A nil namespace disables the check for
+// message and item. A request decoder pre-reserves every explicit id before it
+// decodes any message or item, then allocates synthetic ids from the same set,
+// so a generated id can never collide with an explicit one anywhere in the
+// request, including a later message. A nil namespace disables the check for
 // response decoders, whose stream counterparts already own their own set.
 type requestToolIDs struct {
 	seen map[string]struct{}
+	// preReserved holds the explicit ids claimed by the request pre-scan. The
+	// decode pass re-claims its own id from here instead of treating the
+	// pre-reservation as a duplicate.
+	preReserved map[string]struct{}
 }
 
 func newRequestToolIDs() *requestToolIDs {
-	return &requestToolIDs{seen: map[string]struct{}{}}
+	return &requestToolIDs{
+		seen:        map[string]struct{}{},
+		preReserved: map[string]struct{}{},
+	}
 }
 
-// reserve claims one explicit id and fails closed on a repeat. An explicit id
-// is never suffixed: that would break the client's correlation with the
-// provider's tool result.
+// preReserve claims one explicit id before any message or item is decoded. A
+// repeat fails closed here, before a generated id can be mistaken for one.
+func (r *requestToolIDs) preReserve(id string) error {
+	if r == nil {
+		return nil
+	}
+	if err := reserveToolID(r.seen, id); err != nil {
+		return err
+	}
+	r.preReserved[id] = struct{}{}
+	return nil
+}
+
+// reserve claims one explicit id during decoding. An id already claimed by the
+// request pre-scan belongs to this call and is consumed; any other repeat fails
+// closed. An explicit id is never suffixed: that would break the client's
+// correlation with the provider's tool result.
 func (r *requestToolIDs) reserve(id string) error {
 	if r == nil {
+		return nil
+	}
+	if _, ok := r.preReserved[id]; ok {
+		delete(r.preReserved, id)
 		return nil
 	}
 	return reserveToolID(r.seen, id)

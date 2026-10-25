@@ -269,9 +269,10 @@ target cannot consume them:
   audio output, non-text `modalities`, and `web_search_options` have no target
   equivalent and are dropped with a warning.
 - A request-history tool call without an id gets a generated id and reports the
-  recorded approximation. Tool ids are reserved once per request across every
-  message and item: a generated id can never collide with an explicit id in
-  another message, and a repeated explicit id fails closed with HTTP 400. The
+  recorded approximation. Tool ids are pre-reserved once per request across
+  every message and item before any message is decoded: a generated id can
+  never collide with an explicit id anywhere in the request, including one that
+  appears later, and a repeated explicit id fails closed with HTTP 400. The
   deprecated per-assistant Chat `function_call` keeps its function name as the
   id because that shape carries no id; a repeated same-name legacy call is
   inherently ambiguous and remains the documented exception. Pairing keeps the

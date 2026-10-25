@@ -342,7 +342,11 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		req.Warnings.Add(ir.WarningDropped, "web_search_options", "provider-hosted web search has no cross-protocol equivalent")
 	}
 
-	msgs, msgWarns, err := decodeChatMessages(in.Messages, newRequestToolIDs())
+	ids := newRequestToolIDs()
+	if err := preReserveChatToolIDs(ids, in.Messages); err != nil {
+		return nil, err
+	}
+	msgs, msgWarns, err := decodeChatMessages(in.Messages, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -446,6 +450,31 @@ func decodeChatMetadata(in map[string]json.RawMessage) (map[string]string, ir.Wa
 		return nil, warns
 	}
 	return out, warns
+}
+
+// preReserveChatToolIDs claims every explicit modern tool-call id before any
+// message is decoded. A later id-less call then synthesizes against the whole
+// request instead of colliding with an explicit id that appears after it. The
+// deprecated per-assistant function_call carries no id and stays outside this
+// namespace; it keeps its function name as the documented exception.
+func preReserveChatToolIDs(ids *requestToolIDs, messages []chatWireMessage) error {
+	for i, m := range messages {
+		// Only an assistant message's tool_calls become IR blocks. A tool_calls
+		// member on another role is ignored by the decoder and must not consume
+		// the request namespace.
+		if m.Role != "assistant" {
+			continue
+		}
+		for j, tc := range m.ToolCalls {
+			if tc.ID == "" {
+				continue
+			}
+			if err := ids.preReserve(tc.ID); err != nil {
+				return errParseOpenAIBody(fmt.Errorf("message %d tool call %d: %w", i, j, err))
+			}
+		}
+	}
+	return nil
 }
 
 // decodeChatMessages converts Chat messages into the canonical message list.
