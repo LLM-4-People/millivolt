@@ -124,7 +124,11 @@ func TestCommittedPacer202FailsClosed(t *testing.T) {
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader("accepted")),
 	}
-	rec := &metrics.Record{}
+	// Production stamps the upstream status (202) on the record before
+	// relayNonCompletionStatus; start from that value so a conditional "only
+	// rewrite a zero status" fix cannot pass here while leaving the live
+	// cursor path at 202.
+	rec := &metrics.Record{StatusCode: http.StatusAccepted}
 	s.relayNonCompletionStatus(context.Background(), pacer, resp, rec, ir.Chat)
 	body := recorder.Body.String()
 	if strings.Contains(body, "accepted") {
