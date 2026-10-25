@@ -2088,19 +2088,20 @@ func nonNegative(v int64) int64 {
 // non-2xx body or an SSE error event.
 func DecodeAnthropicError(body []byte) (*ir.Error, error) {
 	var in struct {
-		Type  string `json:"type"`
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Type  string          `json:"type"`
+		Error json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, err
 	}
-	if in.Error.Message == "" && in.Error.Type == "" {
-		return nil, errors.New("not an anthropic error envelope")
+	typ, code, msg := metrics.ParseErrorComponents(in.Error)
+	if typ == "" && code == "" && msg == "" {
+		if !errorValuePresent(in.Error) {
+			return nil, errors.New("not an anthropic error envelope")
+		}
+		typ, msg = "api_error", genericProviderErrorMessage
 	}
-	return boundedProviderError(in.Error.Type, "", in.Error.Message), nil
+	return boundedProviderError(typ, code, msg), nil
 }
 
 // EncodeAnthropicError renders the canonical error as an Anthropic error

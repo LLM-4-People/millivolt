@@ -11,6 +11,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/jsonnum"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
@@ -51,13 +52,9 @@ type chatWireChunk struct {
 		// become a successful empty answer.
 		Message json.RawMessage `json:"message"`
 	} `json:"choices"`
-	Usage       *chatWireUsage `json:"usage"`
-	ServiceTier string         `json:"service_tier"`
-	Error       *struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    any    `json:"code"`
-	} `json:"error"`
+	Usage       *chatWireUsage  `json:"usage"`
+	ServiceTier string          `json:"service_tier"`
+	Error       json.RawMessage `json:"error"`
 }
 
 // ChatStreamDecoder converts Chat Completions SSE chunks into canonical
@@ -160,12 +157,19 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 		if err := json.Unmarshal(raw.Data, &chunk); err != nil {
 			return nil, err
 		}
-		if chunk.Error != nil {
-			_ = d.closeAll(false)
-			d.terminal = true
-			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
-				chunk.Error.Type, stringifyCode(chunk.Error.Code), chunk.Error.Message)})
-			continue
+		if rawError := bytes.TrimSpace(chunk.Error); len(rawError) > 0 && !bytes.Equal(rawError, []byte("null")) {
+			typ, code, msg := metrics.ParseErrorComponents(rawError)
+			if typ == "" && code == "" && msg == "" && errorValuePresent(rawError) {
+				msg = genericProviderErrorMessage
+			}
+			if typ != "" || code != "" || msg != "" {
+				_ = d.closeAll(false)
+				d.terminal = true
+				d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(typ, code, msg)})
+				continue
+			}
+			// An empty error object or string is a decoy, not a provider
+			// statement: this chunk's choices stay decodable.
 		}
 		if chunk.Object != "" && chunk.Object != "chat.completion.chunk" {
 			// A full completion document is not a stream chunk. Its answer
@@ -277,18 +281,6 @@ func (d *ChatStreamDecoder) flushFinish() {
 	}
 	d.pendingFinish = nil
 	d.q.push(ev)
-}
-
-func stringifyCode(v any) string {
-	switch c := v.(type) {
-	case string:
-		return c
-	case nil:
-		return ""
-	default:
-		b, _ := json.Marshal(c)
-		return string(b)
-	}
 }
 
 func (d *ChatStreamDecoder) ensureText() {

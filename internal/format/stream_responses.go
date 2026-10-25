@@ -64,8 +64,8 @@ type responsesStreamEvent struct {
 	Text           string          `json:"text"`
 	Refusal        string          `json:"refusal"`
 	Arguments      string          `json:"arguments"`
-	Code           string          `json:"code"`
-	Message        string          `json:"message"`
+	Code           json.RawMessage `json:"code"`
+	Message        json.RawMessage `json:"message"`
 	Param          string          `json:"param"`
 }
 
@@ -1069,8 +1069,12 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := d.closeAll(nil, responsesTerminalError); err != nil {
 				return nil, err
 			}
+			_, code, msg := metrics.ParseErrorMembers(nil, ev.Code, ev.Message)
+			if code == "" && msg == "" {
+				msg = genericProviderErrorMessage
+			}
 			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
-				"api_error", ev.Code, ev.Message)})
+				"api_error", code, msg)})
 		default:
 			// response.output_text.done, function_call_arguments.done,
 			// reasoning_summary_* and provider-specific events are already

@@ -25,10 +25,7 @@ type anthropicStreamEvent struct {
 	ContentBlock anthropicWireBlock    `json:"content_block"`
 	Delta        json.RawMessage       `json:"delta"`
 	Usage        *anthropicStreamUsage `json:"usage"`
-	Error        *struct {
-		Type    string `json:"type"`
-		Message string `json:"message"`
-	} `json:"error"`
+	Error        json.RawMessage       `json:"error"`
 }
 
 type anthropicStreamUsage struct {
@@ -387,17 +384,20 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			// The provider already failed the turn; its error is the terminal
 			// statement, so an incomplete argument value is not reclassified.
 			_ = d.closeOpenBlocks(false)
-			if ev.Error == nil || (ev.Error.Type == "" && ev.Error.Message == "") {
-				// An empty error object is not a provider statement; treat it
-				// exactly like a missing completion marker.
-				d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
-					Type: sse.TypeUpstreamError, Code: metrics.CodeTruncated,
-					Message: metrics.DegenerateMessage(metrics.CodeTruncated),
-				}})
-				continue
+			typ, code, msg := metrics.ParseErrorComponents(ev.Error)
+			if typ == "" && code == "" && msg == "" {
+				if !errorValuePresent(ev.Error) {
+					// An empty error object is not a provider statement; treat
+					// it exactly like a missing completion marker.
+					d.q.push(&ir.Event{Type: ir.EventError, Error: &ir.Error{
+						Type: sse.TypeUpstreamError, Code: metrics.CodeTruncated,
+						Message: metrics.DegenerateMessage(metrics.CodeTruncated),
+					}})
+					continue
+				}
+				typ, msg = "api_error", genericProviderErrorMessage
 			}
-			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(
-				ev.Error.Type, "", ev.Error.Message)})
+			d.q.push(&ir.Event{Type: ir.EventError, Error: boundedProviderError(typ, code, msg)})
 		default:
 			continue
 		}
