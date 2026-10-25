@@ -154,9 +154,13 @@ func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
 }
 
 // TestRingSnapshotAllocationCeiling pins the pooled borrow at the 250k-slot
-// probe size. ringSnapshot copies and filters the whole ring; a local
+// probe size. ringSnapshot copies and filters the whole ring, and the invariant
+// is zero allocations: the borrowed scratch must be reused rather than
+// replaced. The byte figure is race-instrumented (-race shadow memory inflates
+// it), so it is logged for diagnosis, not asserted. A local
 // make([]*metrics.Record, 0, 64) would grow to the ring size on every read
-// (about 2 MB here) instead of reusing the released scratch.
+// (about 2 MB here) instead of reusing the released scratch, allocating on
+// every read and failing the zero-allocation ceiling.
 func TestRingSnapshotAllocationCeiling(t *testing.T) {
 	const slots = 250_000
 	buf := metrics.NewBuffer(slots)
@@ -198,9 +202,10 @@ func TestRingSnapshotAllocationCeiling(t *testing.T) {
 				releaseRing(scratch, view)
 			}
 		})
-		if got := result.AllocedBytesPerOp(); got > 64 || result.AllocsPerOp() != 0 {
-			t.Fatalf("run %d: ringSnapshot = %d B/op %d allocs/op, want <= 64 B and 0 allocs",
-				run, got, result.AllocsPerOp())
+		bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
+		t.Logf("run %d: ringSnapshot = %d B/op %d allocs/op", run, bytes, allocs)
+		if allocs != 0 {
+			t.Fatalf("run %d: ringSnapshot = %d allocs/op, want 0", run, allocs)
 		}
 	}
 }
