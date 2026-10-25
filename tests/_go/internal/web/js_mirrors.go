@@ -267,7 +267,7 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	if len(jsPairs) == 0 {
 		t.Fatal("RO_FORBIDDEN_HEADERS declares no entries")
 	}
-	cfgSrc := configSource(t, "config.go")
+	cfgSrc := configSource(t, "config_validate_overrides.go")
 	goPairs := goMapStringStringPairs(t, sourceRegion(t, cfgSrc, "forbiddenOverrideHeaders = map[string]string{"))
 	if len(goPairs) == 0 {
 		t.Fatal("config forbiddenOverrideHeaders declares no entries")
@@ -372,7 +372,7 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	caps := configSource(t, "config_defaults.go")
-	gate := configSource(t, "config.go")
+	gate := configSource(t, "config_validate_overrides.go")
 
 	// The rule cap: both literals from source, the Go side confirmed
 	// against the exported constant (its compile-time identity).
@@ -495,7 +495,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsSrc := string(src)
-	cfgSrc := configSource(t, "config.go")
+	cfgSrc := configSource(t, "config_validate_overrides.go")
 
 	jsFn := sourceRegion(t, jsSrc, "function scParamOK")
 	goFn := sourceRegion(t, cfgSrc, "func checkSubConversationParam")
