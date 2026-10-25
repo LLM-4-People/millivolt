@@ -153,6 +153,58 @@ func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
 	}
 }
 
+// TestRingSnapshotAllocationCeiling pins the pooled borrow at the 250k-slot
+// probe size. ringSnapshot copies and filters the whole ring; a local
+// make([]*metrics.Record, 0, 64) would grow to the ring size on every read
+// (about 2 MB here) instead of reusing the released scratch.
+func TestRingSnapshotAllocationCeiling(t *testing.T) {
+	const slots = 250_000
+	buf := metrics.NewBuffer(slots)
+	const distinct = 256
+	records := make([]*metrics.Record, distinct)
+	for i := range records {
+		records[i] = &metrics.Record{
+			ID:         fmt.Sprintf("ring-slot-%d", i),
+			StatusCode: 200,
+			Start:      time.UnixMilli(1_800_000_000_000 + int64(i)),
+		}
+	}
+	for i := 0; i < slots; i++ {
+		buf.Record(records[i%distinct])
+	}
+	api := NewAggAPI(buf, nil, time.Second)
+	// Warm the package pool with the exact ring-sized scratch.
+	scratch, view := api.ringSnapshot(0)
+	if len(view) != slots {
+		t.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
+	}
+	releaseRing(scratch, view)
+	for run := 0; run < 5; run++ {
+		result := testing.Benchmark(func(b *testing.B) {
+			// runN calls runtime.GC before this function, which can clear the
+			// package pool. Re-warm after that boundary so the measured loop
+			// starts from the reuse steady state rather than a cold miss.
+			scratch, view := api.ringSnapshot(0)
+			if len(view) != slots {
+				b.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
+			}
+			releaseRing(scratch, view)
+			b.ReportAllocs()
+			for b.Loop() {
+				scratch, view := api.ringSnapshot(0)
+				if len(view) != slots {
+					b.Fatalf("ringSnapshot = %d records, want %d", len(view), slots)
+				}
+				releaseRing(scratch, view)
+			}
+		})
+		if got := result.AllocedBytesPerOp(); got > 64 || result.AllocsPerOp() != 0 {
+			t.Fatalf("run %d: ringSnapshot = %d B/op %d allocs/op, want <= 64 B and 0 allocs",
+				run, got, result.AllocsPerOp())
+		}
+	}
+}
+
 // TestSnapshotIntoAllocationCeiling is the WS5a budget: a retained scratch
 // makes a ring snapshot allocation-free. At the one-million-record ceiling the
 // displaced copy was 8,005,296 B per KPI fold (BenchmarkKPI/records_1000000);
