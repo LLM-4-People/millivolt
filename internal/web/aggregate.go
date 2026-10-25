@@ -383,7 +383,7 @@ const rowColumns = `id, started_at, status_code, error_type, error_code, error_m
 // into the projection dictionaries immediately, so building a live labels
 // sidecar here would allocate one 96-byte header per durable row only for the
 // intern step to drop it. The label tuple travels by value instead.
-func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, contribLabels, error) {
+func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 	var c contrib
 	var labels contribLabels
 	var startedAt, status, ttft int64
@@ -397,7 +397,7 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, contribLabels, e
 		&c.tools, &c.cost, &ttft, &gen, &toolNamesJSON, &c.dec); err != nil {
 		return c, labels, err
 	}
-	labels.model = mcz.model(model)
+	labels.model = model
 	c.start = startedAt
 	c.status = int(status)
 	c.ttft = ttft
