@@ -265,7 +265,7 @@ message_stop|{"type":"message_stop"}`
 // limited to fields that are random or wall-clock by construction: a
 // target-invented identity and the Chat target's synthesized `created` for a
 // source that had no timestamp (Responses/Anthropic starts).
-func canonicalFrames(t *testing.T, body string, sourceHasCreated bool) string {
+func canonicalFrames(t testing.TB, body string, sourceHasCreated bool) string {
 	t.Helper()
 	var lines []string
 	for _, frame := range strings.Split(body, "\n\n") {
@@ -361,6 +361,9 @@ func BenchmarkTranslateStream(b *testing.B) {
 				StreamOptions{IncludeUsage: true, FallbackModel: "corpus-model"})
 			if err != nil {
 				b.Fatal(err)
+			}
+			if got := canonicalFrames(b, out.buf.String(), tc.sourceHasCreated); got != tc.want {
+				b.Fatalf("frames changed\n got: %s\nwant: %s", got, tc.want)
 			}
 			frames := strings.Count(out.buf.String(), "\n\n")
 			b.ReportAllocs()
