@@ -6,4 +6,8 @@ module.exports = [
   require('./sections/selection_drawer'),
   require('./sections/logs_menu'),
   require('./sections/model_canon'),
+  require('./sections/menus_scroll'),
+  require('./sections/archive_pages'),
+  require('./sections/archive_scale'),
+  require('./sections/chart_buckets'),
 ];

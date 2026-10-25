@@ -126,6 +126,8 @@ const state = {
   diagDump: null,
   jsdomReloads: 0,
   bootURL: '',
+  box: null,
+  innerPoint: null,
 };
 
 const TEST_DASHBOARD_VERSION = '0000000000000001';

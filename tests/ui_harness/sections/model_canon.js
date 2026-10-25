@@ -574,4 +574,7 @@ module.exports = async function modelCanon(H) {
     storeless.remove();
     w.eval("operatorCredential = ''; backupInspect = null; backupIncludeConfig = true; backupIncludeDatabase = true; backupMode = 'replace'; backupBusy = false; backupReq = 0;");
   }
+
+
+  w.applyModelCanon(modelFixture(), true);
 };
