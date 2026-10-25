@@ -88,10 +88,12 @@ func TestAnthropicMessageEnvelopeMembers(t *testing.T) {
 // TestAnthropicStreamUsageShapes pins the message_start (Usage) and
 // message_delta (MessageDeltaUsage) shapes separately.
 func TestAnthropicStreamUsageShapes(t *testing.T) {
+	usage := `"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5,` +
+		`"completion_tokens_details":{"reasoning_tokens":2}}`
 	source := "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"created\":1," +
-		"\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n" +
+		"\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hi\"}}]," + usage + "}\n\n" +
 		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"m\",\"created\":1," +
-		"\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n\n" +
+		"\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]," + usage + "}\n\n" +
 		"data: [DONE]\n\n"
 	out, err := translateStreamSource(t, ir.Chat, ir.Anthropic, source)
 	if err != nil {
@@ -158,5 +160,14 @@ func TestAnthropicStreamUsageShapes(t *testing.T) {
 		if _, ok := deltaUsage[key]; ok {
 			t.Fatalf("message_delta usage gained %q, which its type does not declare: %s", key, out)
 		}
+	}
+	// The final delta must carry the source's reasoning split, not the null
+	// placeholder: MessageDeltaUsage owns output_tokens_details too.
+	var deltaDetails map[string]int
+	if err := json.Unmarshal(deltaUsage["output_tokens_details"], &deltaDetails); err != nil {
+		t.Fatalf("message_delta output_tokens_details = %s: %v", deltaUsage["output_tokens_details"], err)
+	}
+	if deltaDetails["thinking_tokens"] != 2 {
+		t.Fatalf("message_delta thinking_tokens = %d, want 2: %s", deltaDetails["thinking_tokens"], out)
 	}
 }
