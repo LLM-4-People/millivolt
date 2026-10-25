@@ -238,19 +238,30 @@ func cantOpenContext(err error, path string) error {
 	if !errors.As(err, &serr) || serr.Code()&0xff != sqlite3.SQLITE_CANTOPEN {
 		return err
 	}
+	return fmt.Errorf("%w: cannot open %q: %s", err, path, databaseDirectoryDiagnosis(path))
+}
+
+// cantOpenFile is cantOpenContext for the pre-create open, whose failure is a
+// filesystem error rather than SQLite's CANTOPEN. It keeps the same observable
+// contract: SQLite's canonical phrase, the database path and the directory
+// diagnosis.
+func cantOpenFile(err error, path string) error {
+	return fmt.Errorf("unable to open database file: %w: cannot open %q: %s",
+		err, path, databaseDirectoryDiagnosis(path))
+}
+
+func databaseDirectoryDiagnosis(path string) string {
 	dir := filepath.Dir(path)
-	var cause string
 	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
-		cause = fmt.Sprintf("directory %q does not exist", dir)
+		return fmt.Sprintf("directory %q does not exist", dir)
 	} else if probe, probeErr := os.CreateTemp(dir, ".millivolt-open-probe-*"); probeErr != nil {
-		cause = fmt.Sprintf("directory %q is not writable by uid %d/gid %d; create it owned by that user or chown it",
+		return fmt.Sprintf("directory %q is not writable by uid %d/gid %d; create it owned by that user or chown it",
 			dir, os.Getuid(), os.Getgid())
 	} else {
 		_ = probe.Close()
 		_ = os.Remove(probe.Name())
-		cause = fmt.Sprintf("directory %q is writable, so the database file, its WAL/SHM sidecars or the filesystem rejected the open", dir)
+		return fmt.Sprintf("directory %q is writable, so the database file, its WAL/SHM sidecars or the filesystem rejected the open", dir)
 	}
-	return fmt.Errorf("%w: cannot open %q: %s", err, path, cause)
 }
 
 // initializeDatabase is the one owner of the startup schema sequence: the
@@ -278,6 +289,39 @@ func initializeDatabase(db *sql.DB, path string) error {
 	// and restore admission cannot disagree about a writable schema.
 	if err := probeWriterInsert(db); err != nil {
 		return fmt.Errorf("writer insert probe: %w", err)
+	}
+	return nil
+}
+
+// prepareDatabaseFile makes the live database owner-only before SQLite opens
+// it. O_CREATE with 0600 keeps a fresh file private even under a permissive
+// umask, and the explicit chmod narrows an installation created before this
+// guard. The mode is part of the storage privacy contract, not a deployment
+// preference.
+func prepareDatabaseFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return cantOpenFile(err, path)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return fmt.Errorf("chmod database file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close database file: %w", err)
+	}
+	return nil
+}
+
+// restrictDatabaseSidecars narrows the WAL, shared-memory and rollback-journal
+// files SQLite created for path. It runs after WAL initialization, which is the
+// first point they exist; an absent suffix is not an error because SQLite owns
+// when each sidecar appears.
+func restrictDatabaseSidecars(path string) error {
+	for _, suffix := range snapshotSidecarSuffixes {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("chmod %s: %w", suffix, err)
+		}
 	}
 	return nil
 }
@@ -331,6 +375,13 @@ func Open(path string, opts Options) (*Store, error) {
 	// would turn the upgrade into SQLITE_BUSY_SNAPSHOT instead of the busy
 	// wait the writer contract promises.
 	params.Set("_txlock", "immediate")
+	// SQLite creates a missing database with the process umask (commonly
+	// 0644), unlike the 0600 staged snapshots it admits. Create or narrow the
+	// main file before opening it; sidecars are narrowed after WAL
+	// initialization creates them.
+	if err := prepareDatabaseFile(path); err != nil {
+		return fail(fmt.Errorf("database permissions: %w", err))
+	}
 	db, err := sql.Open("sqlite", backup.SQLiteURI(path, params))
 	if err != nil {
 		return fail(fmt.Errorf("open sqlite: %w", err))
@@ -338,6 +389,10 @@ func Open(path string, opts Options) (*Store, error) {
 	if err := initializeDatabase(db, path); err != nil {
 		db.Close()
 		return fail(err)
+	}
+	if err := restrictDatabaseSidecars(path); err != nil {
+		db.Close()
+		return fail(fmt.Errorf("database sidecar permissions: %w", err))
 	}
 	db.SetMaxOpenConns(sqliteWriterConns)
 	// Planner statistics are a read-path guardrail, not request data. They let
