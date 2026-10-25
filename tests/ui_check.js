@@ -4,455 +4,19 @@
 // helper sections call production render/merge helpers directly to pin
 // optimizer contracts that the external paths cannot isolate; they supplement,
 // not replace, the end-to-end coverage.
-const fs = require('fs');
-const path = require('path');
-const { JSDOM, requestInterceptor } = require('jsdom');
-const {createHash} = require('crypto');
-function modelFixture(rules = [], names = {}) {
-  return {rules, revision: createHash('sha256').update(JSON.stringify({rules})).digest('hex'), names};
-}
-function observerFixture(p) {
-  if (!p || typeof p !== 'object') return p;
-  const records = [...(Array.isArray(p.records) ? p.records : []), ...(Array.isArray(p.in_flight_records) ? p.in_flight_records : []), ...(p.record ? [p.record] : []), ...(p.id ? [p] : [])];
-  const rawNames = [...records.map(r => r.model || ''), ...(p.known_models || []), ...(p.sessions || []).flatMap(s => s.models || [])];
-  const rules = p.model_canon?.rules || [];
-  const names = Object.fromEntries(rawNames.map(raw => {
-    let name = raw.trim();
-    for (const rule of rules) {
-      if (rule.disabled) continue;
-      if (rule.mode === 'lower') name = name.toLowerCase();
-      if (rule.mode === 'exact' && name === rule.from) name = rule.to;
-    }
-    return [raw, name || raw.trim()];
-  }));
-  const out = {...p, model_canon: {...modelFixture(rules, names), ...p.model_canon, names: {...names, ...p.model_canon?.names}}};
-  if (p.debug) out.debug = observerFixture({...p.debug, model_canon: {...modelFixture(rules), ...p.debug.model_canon}});
-  return out;
-}
-// Synthetic observers emit the same metadata contract as the server tests.
-// Tests of pattern semantics provide explicit Go-authored dictionary values.
-function dashboardDOM(html, options) {
-  const resources = options.resources || {};
-  return new JSDOM(html, {...options, resources: {
-    ...resources,
-    interceptors: [...(resources.interceptors || []), dashAssets],
-  }, beforeParse(win) {
-    options.beforeParse(win);
-    const original = win.fetch;
-    let wrapped;
-    Object.defineProperty(win, 'fetch', {configurable: true, get: () => wrapped, set(fetch) {
-      wrapped = (url, opts) => Promise.resolve(fetch(url, opts)).then(response => {
-        if (!String(url).includes('/metrics/bootstrap') && !String(url).includes('/metrics/agg/log') && !String(url).includes('/admin/debug')) return response;
-        return {...response, json: async () => observerFixture(await response.json())};
-      });
-    }});
-    win.fetch = original;
-  }});
-}
-
-// jsdom does not fetch <script src> / <link href> from disk. Stylesheets stay
-// inline for deterministic computed styles; scripts keep their real deferred
-// <script src> tags and load through the same requestInterceptor asset loader
-// theme_check uses. Building script elements as strings would make the fixture
-// an HTML-injection sink, which CodeQL rightly rejects.
-const STATIC = path.join(__dirname, '..', 'internal/web/static');
-const TEST_DASHBOARD_VERSION = '0000000000000001';
-const SETTINGS_SCRIPT = path.join(STATIC, 'js/settings.js');
-const dashAssets = requestInterceptor(request => {
-  const url = new URL(request.url);
-  if (!url.pathname.startsWith('/dash/')) return undefined;
-  const rel = decodeURIComponent(url.pathname.slice('/dash/'.length));
-  const file = path.resolve(STATIC, rel);
-  if (!file.startsWith(STATIC + path.sep)) return undefined;
-  // The lazy loader appends the unmarked production URL; leave that request
-  // pending so the loader tests can drive its onload/onerror contract. The
-  // fixture's includeSettings tag carries the marker and loads the real file.
-  if (file === SETTINGS_SCRIPT && url.searchParams.get('fixture') !== '1') {
-    return new Promise(() => {});
-  }
-  return new Response(fs.readFileSync(file), {
-    headers: { 'Content-Type': 'application/javascript' },
-  });
-});
-function assembleHTML(bootstrap, options = {}) {
-  let html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
-  html = html.replaceAll('__DASHBOARD_VERSION__', TEST_DASHBOARD_VERSION);
-  if (bootstrap !== undefined) {
-    const data = typeof bootstrap === 'string' ? bootstrap : JSON.stringify(observerFixture({pending_revision: 0, ...bootstrap})).replace(/</g, '\\u003c');
-    html = html.replace('__DASHBOARD_BOOTSTRAP__', () => data);
-  }
-  // Local asset URLs carry the ?v= version query; jsdom reads the file after
-  // stripping it, exactly as the server's lookup path does.
-  html = html.replace(/<link\s+rel="stylesheet"\s+href="\/dash\/([^"]+)"\s*>/g, (_, ref) => {
-    return `<style>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</style>`;
-  });
-  // settings.js is lazy in production (the trigger injects it with the shell's
-  // version), so the shell has no script tag. Add one only for the functional
-  // suite so every moved settings surface is exercised; the lazy-loader tests
-  // assemble without it to drive the real trigger path.
-  if (options.includeSettings !== false) {
-    html = html.replace('</body>', () =>
-      `<script defer src="/dash/js/settings.js?v=${TEST_DASHBOARD_VERSION}&amp;fixture=1"></script>\n</body>`);
-  }
-  return html;
-}
-function loaded(dom) {
-  return new Promise(resolve => {
-    if (dom.window.document.readyState === 'complete') resolve();
-    else dom.window.addEventListener('load', resolve, { once: true });
-  });
-}
-const html = assembleHTML();
-
-let failures = [];
-// diagDump is installed once the dashboard DOM exists; until then a failed
-// check carries only its label. On every red check it prints the recorded
-// activity that explains the failure, so a diagnosis needs no second run
-// and no ad-hoc instrumentation, locally or in CI output.
-let diagDump = null;
-const check = (label, cond) => {
-  console.log((cond ? 'PASS ' : 'FAIL ') + label);
-  if (!cond) {
-    failures.push(label);
-    if (diagDump) console.log(diagDump(label));
-  }
-};
-// The shared summary owner: the green path, a red run and a crash all
-// report the accumulated failures through this one printer.
-const reportFailures = crashed => {
-  if (failures.length) console.log('\nFAILURES: ' + failures.join(' | '));
-  else console.log(crashed ? '\nCRASHED BEFORE ANY CHECK FAILED' : '\nALL UI CHECKS PASSED');
-};
-
-const mkRec = (id, status = 200, start = Date.now() - 1000) => ({
-  id, provider: 'p', model: 'm', client: 'c', key_hash: 'k' + id,
-  conversation_id: 'cv', status_code: status, start: new Date(start).toISOString(),
-  end: new Date(start + 500).toISOString(), stream: true, time_bucket: 'work',
-  ttft_ms: 100, duration_ms: 500, usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-  retries: 0, attempts: [],
-});
-const LIST = Array.from({ length: 30 }, (_, i) => mkRec('req' + String(i).padStart(3, '0'), 200, 1700000000000 + i * 1000));
-
-let fullPayload = {
-  feed_id: 'feedA', seq: 30, incremental: false,
-  records: LIST.map((r, i) => ({ ...r, __seq: i + 1 })),
-  in_flight_records: [],
-  counters: { in_flight: 0, total_requests: 30, total_errors: 0 },
-};
-let logPage = { records: [], more: false, cursor_ms: 1 };
-let lastLogURL = '';
-let logPageGate = null; // when set, log-page responses wait on this promise
-// The traffic chart's stubbed payload: the REAL zero-traffic server shape
-// (HandleAggChart with an empty store + empty ring) - a clock-aligned
-// ZERO-FILLED buckets array (count >= 1, every req 0, all-null percentile
-// triples), never an empty one. Pinned server-side by
-// TestChartZeroTrafficPayloadShape; test 11g drives it end-to-end.
-const chartNow = Date.now();
-const chartStep = 120000; // the 60m window's ladder step (2m)
-const chartFrom = chartNow - 3600000 - ((chartNow - 3600000) % chartStep);
-let chartPayload = {
-  now_ms: chartNow, from_ms: chartFrom, bucket_ms: chartStep,
-  ttft_p: [null, null, null], tps_p: [null, null, null], dec_p: [null, null, null],
-  ttft_stat: null, tps_stat: null,
-  buckets: Array.from({ length: Math.ceil((chartNow - chartFrom) / chartStep) }, (_, i) => ({
-    t: chartFrom + i * chartStep,
-    req: 0, err: 0, rl: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
-    ttft: [null, null, null], tps: [null, null, null], dec: [null, null, null],
-  })),
-};
-let restartState = { restarted: false, postCount: 0, statusGate: null, postGate: null, status: {} };
-let cfgFetches = 0;
-// Default model canonicalization pipeline - the ui_check mirror of
-// config.DefaultModelRules, kept in lockstep with the Go table. It seeds
-// the harness like a real boot (the bootstrap payload's model_canon.rules,
-// so every grouped consumer below - debug checklist, explorer scope,
-// Clear/Logs optgroups - sees variants merged) and rides cfgDoc.defaults
-// .model_rules, the server-provided shape the restore-defaults control
-// reads in Settings.
-const DEF_RULES = [
-  { mode: 'lower' },
-  { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' },
-  { mode: 'pattern', from: ':[a-z0-9._-]+$', to: '' },
-  { mode: 'pattern', from: '-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$', to: '' },
-  { mode: 'pattern', from: '(\\d)\\.(\\d)', to: '$1-$2' },
-];
-// Providers editor fixture: the server-owned canonical usage fields plus one
-// mapped provider (neutral fixture label).
-const cfgDoc = {
-  revision: 'fixture-revision',
-  fields: [
-    { key: 'providers', category: 'providers', label: 'Provider field maps', help: 'Per-provider JSON key-path overrides.', kind: 'providers', hot_reload: true },
-    { key: 'provider_aliases', category: 'providers', label: 'Provider aliases', help: 'Merge an old provider label into its canonical one (old → canonical).', kind: 'aliases', hot_reload: true },
-  ],
-  categories: [{ id: 'providers', label: 'Providers', help: 'Per-provider usage/cost JSON field-name maps.' }],
-  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, ensure_tools: ['bash', 'read'], headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' } },
-  defaults: { providers: {}, model_rules: DEF_RULES },
-  effective: {},
-  overrides: {},
-  writable: true,
-  usage_fields: ['input_tokens', 'output_tokens', 'total_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens'],
-};
-
-const sseHandlers = {};
-const initialFetches = [];
-const pageOptions = {
-  url: 'http://127.0.0.1:8081/',
-  runScripts: 'dangerously',
-  pretendToBeVisual: true,
-  beforeParse(window) {
-    window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-    window.confirm = () => true;
-    window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
-    window.CSS = window.CSS || {};
-    if (!window.CSS.escape) window.CSS.escape = s => String(s).replace(/[\\"]/g, '\\$&');
-    Object.defineProperty(window.HTMLElement.prototype, 'offsetHeight', { get() { return 20; }, configurable: true });
-    // jsdom has no canvas path implementation. The mounted-chart smoke check
-    // exercises uPlot's lifecycle; raster drawing is verified in a browser.
-    window.Path2D = class {
-      moveTo() {} lineTo() {} arcTo() {} arc() {} rect() {} closePath() {} bezierCurveTo() {}
-    };
-    window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
-      get: (t, k) => (k === 'measureText' ? () => ({ width: 1 }) :
-        k === 'canvas' ? { width: 0, height: 0 } :
-        (typeof k === 'string' ? () => {} : undefined)),
-      set: () => true,
-    });
-    window.fetch = (url, opts) => {
-      const u = typeof url === 'string' ? url : '';
-      initialFetches.push(u);
-      if (u.includes('/admin/restart')) {
-        if (opts && opts.method === 'POST') {
-          restartState.postCount++;
-          // postFail simulates a refusal whose body is not JSON-with-an-
-          // error field (the operator plane writes plain-text denials): the
-          // fallback contract, not a server error message, must surface.
-          if (restartState.postFail) {
-            const status = restartState.postFail.status;
-            return Promise.resolve({
-              ok: false, status,
-              json: async () => { throw new SyntaxError('unexpected token < in HTML'); },
-              text: async () => '<html>bad gateway</html>',
-            });
-          }
-          const response = () => { restartState.restarted = true; return { ok: true, json: async () => ({ ok: true, phase: 'building', rank: 0, drain_timeout_ms: 600000, error: '' }) }; };
-          return restartState.postGate ? restartState.postGate.then(response) : Promise.resolve(response());
-        }
-        const status = { ok: true, phase: 'idle', rank: -1, error: '', pid: restartState.restarted ? 424243 : 424242, started_at: restartState.restarted ? 2000 : 1000, available: true, reason: '', ...restartState.status };
-        const response = { ok: true, json: async () => status };
-        return restartState.statusGate ? restartState.statusGate.then(() => response) : Promise.resolve(response);
-      }
-      if (u.includes('/admin/pause')) return Promise.resolve({ json: async () => ({ ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 }) });
-      if (u.includes('/admin/debug')) return Promise.resolve({ json: async () => ({ ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' }) });
-      if (u.includes('/admin/throttle')) return Promise.resolve({ json: async () => ({ ok: true, throttles: [], known_providers: ['p'], active: false }) });
-      if (u.includes('/admin/config')) { cfgFetches++; return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(cfgDoc)) }); }
-      if (u.includes('/metrics/agg/log')) {
-        lastLogURL = u;
-        const resp = { ok: true, json: async () => JSON.parse(JSON.stringify(logPage)) };
-        return logPageGate ? logPageGate.then(() => resp) : Promise.resolve(resp);
-      }
-      if (u.includes('/metrics/agg/chart')) {
-        return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(chartPayload)) });
-      }
-      if (u.includes('/metrics/agg/explorer')) {
-        return Promise.resolve({ok: true, json: async () => ({
-          dim: 'provider', total: 30, error_total: 0, rail: {}, groups: [], scope: {matches: 30, errors: 0},
-        })});
-      }
-      if (url.includes('/admin/purge/count')) return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
-      if (url.includes('/admin/purge')) return Promise.resolve({ ok: true, json: async () => ({ok: true}) });
-      // /metrics/bootstrap: the real payload carries the snapshot PLUS the
-      // state surfaces (kpi, dash, pause, throttle) - mirror the shapes the
-      // dedicated /admin/ endpoints serve so state-driven UI stays exercised.
-      if (u.includes('/metrics/bootstrap')) {
-        const bp = fullPayload;
-        const bparams = new URL(url, 'http://x').searchParams;
-        const bsince = bparams.get('since');
-        // A cursor resume delivers only the requested epoch's rows. Once a
-        // test moved the page's feed, fullPayload still holds the previous
-        // process's ring; serving it under the live feed's identity (below)
-        // would fold records the new process never had. The canned ring
-        // answers only its own feed; a foreign feed has nothing to add.
-        const bsameFeed = !bparams.get('feed') || bparams.get('feed') === bp.feed_id;
-        const brecs = bsince
-          ? (bsameFeed ? bp.records.filter(r => r.__seq > Number(bsince)) : [])
-          : bp.records;
-        return Promise.resolve({ ok: true, json: async () => ({
-          records: JSON.parse(JSON.stringify(brecs)),
-          in_flight_records: bp.in_flight_records,
-          counters: bp.counters,
-          pending_revision: bp.pending_revision ?? Math.max(0, window.eval('_pendingRevision')),
-          // The canned payload's feed identity tracks the page's live
-          // epoch: this stub also answers the page's real periodic tick,
-          // and a tick announcing a foreign feed fabricates a proxy
-          // restart - refreshAfterRestart re-pulls config and refills an
-          // open settings sheet, invalidating every DOM handle the
-          // current test holds - whenever a tick fires after some test
-          // moved the feed. Tests that exercise a restart supply the
-          // foreign feed explicitly through their own snapshot dispatches
-          // or bootstrap stubs, so the default keeps the same-feed
-          // contract and the cursor rule below applies unconditionally:
-          // the sample collection between scenarios never rewinds the
-          // live cursor.
-          seq: Math.max(bp.seq, window.eval('lastSeq')),
-          feed_id: window.eval('feedId') || bp.feed_id, incremental: !!bsince,
-          kpi: { requests: 30, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null },
-          dashboard_version: TEST_DASHBOARD_VERSION,
-          model_canon: {rules: []},
-          dash: {},
-          storage: { enabled: true, dropped: 0, totals_degraded: false },
-          pause: { ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 },
-          throttle: { ok: true, throttles: [], known_providers: ['p'], active: false },
-          debug: { ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' },
-        }) });
-      }
-      const fp = fullPayload;
-      const since = new URL(url, 'http://x').searchParams.get('since');
-      const recs = since ? fp.records.filter(r => r.__seq > Number(since)) : fp.records;
-      const payload = {
-        records: JSON.parse(JSON.stringify(recs)),
-        in_flight_records: [],
-        counters: fp.counters,
-        pending_revision: fp.pending_revision ?? 0,
-        seq: fp.seq,
-        feed_id: fp.feed_id, incremental: !!since,
-      };
-      return Promise.resolve({ json: async () => payload });
-    };
-    window.EventSource = function (url) {
-      return {
-        url, readyState: 1,
-        addEventListener(type, cb) { sseHandlers[type] = cb; },
-        close() { this.readyState = 2; },
-      };
-    };
-  },
-};
-const dom = dashboardDOM(html, pageOptions);
-
-const w = dom.window;
-const d = w.document;
-// jsdom reports uncaught page errors and its own not-implemented navigation
-// through virtualConsole jsdomError events; the default console forwarding
-// only prints them to stderr, where a green run can hide an uncaught
-// thrower. Install the counting listener at harness start, before any test
-// runs: a not-implemented navigation counts as the reload signal the
-// reload-boundary test reads (jsdomReloads); every other error fails the
-// run while still printing. Installed previously at the reload test, too
-// late to count throwers from earlier scenarios.
-let jsdomReloads = 0;
-dom.virtualConsole.removeAllListeners('jsdomError');
-dom.virtualConsole.on('jsdomError', error => {
-  if (error.type === 'not-implemented' && /navigation/.test(error.message)) jsdomReloads++;
-  else { failures.push(error.message); console.error(error); }
-});
-// ---------- failure diagnostics ----------
-// One bounded activity recorder feeds one dump owner, so any red check or
-// a crashed run reports the same decisive context in its own output. The
-// recorded owners are the page's lifecycle functions because the settings
-// sheet rebuilding under a cached DOM handle is the failure class that
-// hides from a bare label: a refill turns every element reference the
-// tests hold stale while focus and flags stay plausible. Recording is
-// passive - names and one key argument per call, the log capped - so a
-// green run prints nothing and pays almost nothing. Installed after the
-// deferred scripts load so every owner exists.
-function installDiagnostics() {
-  const diagT0 = Date.now();
-  const diagEvents = [];
-  const diagNote = entry => {
-    diagEvents.push(((Date.now() - diagT0) / 1000).toFixed(1) + 's ' + entry);
-    if (diagEvents.length > 100) diagEvents.shift();
-  };
-  for (const [name, describe] of [
-    ['fillSettingsForm', doc => 'settings refill, revision ' + (doc && doc.revision)],
-    ['fetchSettings', () => 'settings fetch'],
-    ['refreshAfterRestart', () => 'reconnect refresh of every server-fed surface'],
-    ['fetchBootstrap', mode => 'bootstrap fetch, mode ' + mode],
-    ['applySnapshotPayload', payload => 'snapshot, feed ' + (payload && payload.feed_id)],
-  ]) {
-    if (typeof w[name] !== 'function') continue;
-    const orig = w[name];
-    w[name] = function () {
-      diagNote(name + ' (' + describe(...arguments) + ')');
-      return orig.apply(this, arguments);
-    };
-  }
-  // The DOM truth supplements the owner names: any rebuild of the settings
-  // fields (including a load-failure render) and every sheet open or close
-  // are recorded whatever called them, since event listeners capture their
-  // handler references before this wrapper layer existed.
-  const diagFields = d.getElementById('settings-fields');
-  if (diagFields && typeof w.MutationObserver === 'function') {
-    new w.MutationObserver(() => diagNote('settings fields rebuilt')).observe(diagFields, { childList: true });
-    const diagSheet = d.getElementById('settings-sheet');
-    if (diagSheet) new w.MutationObserver(() => diagNote('settings sheet ' + (diagSheet.hidden ? 'closed' : 'opened'))).observe(diagSheet, { attributes: true, attributeFilter: ['hidden'] });
-  }
-  const diagActive = () => {
-    const el = d.activeElement;
-    if (!el) return null;
-    return el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).trim().split(/\s+/).join('.') : '');
-  };
-  diagDump = why => 'DIAG ' + JSON.stringify({
-    why,
-    activity: diagEvents,
-    activeElement: diagActive(),
-    settingsSheetOpen: (() => { const s = d.getElementById('settings-sheet'); return s ? !s.hidden : null; })(),
-    jsdomReloads,
-    feedId: w.eval('feedId'),
-    lastSeq: w.eval('lastSeq'),
-    cannedFeed: typeof fullPayload !== 'undefined' && fullPayload ? { feed_id: fullPayload.feed_id, seq: fullPayload.seq } : null,
-    settingsDoc: w.eval('typeof settingsDoc !== "undefined" && settingsDoc ? settingsDoc.revision : null'),
-    settingsCat: w.eval('typeof settingsCat !== "undefined" ? settingsCat : null'),
-  });
-}
-
-function checkEntityIdentity() {
-  for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'localhost',
-    'LOCALHOST', 'gateway.LOCALHOST', 'gateway.internal', 'gateway.local', 'host:443', 'https://host.example',
-    'bad_label.example', '-host.example', 'host-.example', 'host..example']) {
-    check('provider favicon rejects non-public host label ' + JSON.stringify(name),
-      w.providerOrigin(name) === '' && !w.entityBadge('provider', name).includes('<img'));
-  }
-  check('qualified provider favicon keeps the canonical host',
-    w.providerOrigin('API.vendor.example') === 'api.vendor.example' &&
-    w.entityBadge('provider', 'api.vendor.example').includes('domain=api.vendor.example'));
-  check('client labels show the recorded identity verbatim',
-    w.clientLabel('opencode/1.18.32') === 'opencode/1.18.32' &&
-    w.clientLabel('opencode/latest/2.0.26/cli') === 'opencode/latest/2.0.26/cli' &&
-    w.clientLabel('python 1.55') === 'python 1.55' &&
-    w.clientLabel('team/2fa') === 'team/2fa' &&
-    w.dimLabel('client', 'opencode/1.18.32') === 'opencode/1.18.32' &&
-    w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
-    w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
-}
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-// Poll the page's own observable state instead of sleeping a fixed time: a
-// loaded runner can stretch a fetch/render round trip past any hard-coded
-// sleep. Returning false on timeout lets the caller's own check()s fail with
-// their labels and the diagnostic dump, so a genuine product failure is not
-// turned into a harness crash.
-async function settleUntil(cond, timeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs;
-  while (!cond()) {
-    if (Date.now() >= deadline) return false;
-    await sleep(10);
-  }
-  return true;
-}
-
-const rows = () => [...d.querySelectorAll('#tbl-requests tr.exp-row[data-id]')].filter(tr => !tr.classList.contains('retry-sub'));
-const fire = (type, data, lastEventId) => {
-  const cb = sseHandlers[type];
-  if (!cb) throw new Error('no handler for ' + type);
-  if (typeof data === 'object' && type !== 'record' && data.pending_revision === undefined) {
-    // Ordinary fixtures model fresh lifecycle/snapshot state. Ordering tests
-    // below supply explicit server revisions to exercise delayed deliveries.
-    data = {...data, pending_revision: Math.max(0, w.eval('_pendingRevision')) + (type === 'snapshot' ? 0 : 1)};
-    if (type === 'snapshot' && !data.incremental && data.feed_id === w.eval('feedId')) {
-      data.seq = Math.max(data.seq, w.eval('lastSeq'));
-    }
-  }
-  cb({ type, data: typeof data === 'string' ? data : JSON.stringify(observerFixture(data)), lastEventId });
-};
+//
+// The shared page, fixtures and stub state live in tests/ui_harness/; the
+// ordered section modules under tests/ui_harness/sections/ run in registry
+// order. This file stays the single entry point (`npm test`).
+const harness = require('./ui_harness/harness');
+const sections = require('./ui_harness/sections');
+const {
+  dom, w, d, html, check, reportFailures, rows, fire, sleep, settleUntil,
+  installDiagnostics, checkEntityIdentity, assembleHTML, dashboardDOM, loaded,
+  JSDOM, fs, path, STATIC,
+  mkRec, LIST, BIG, CHART_FROM, BUCKET_MS, mkChart, modelFixture, observerFixture,
+  DEF_RULES, cfgDoc, TEST_DASHBOARD_VERSION, pageOptions, state,
+} = harness;
 
 async function main() {
   // Deferred asset scripts load through the interceptor after parsing. Wait
@@ -497,6 +61,7 @@ async function main() {
   }
   await sleep(200); // initial fetch + renderAll
 
+  for (const run of sections) await run(harness);
   // ---- test 1: full render painted 30 rows ----
   check('full render shows 30 rows', rows().length === 30);
   {
@@ -569,8 +134,8 @@ async function main() {
       rail.getAttribute('role') === 'group');
   }
   check('first paint fetches chart and explorer exactly once when model rules arrive',
-    initialFetches.filter(u => u.includes('/metrics/agg/chart')).length === 1 &&
-    initialFetches.filter(u => u.includes('/metrics/agg/explorer')).length === 1);
+    state.initialFetches.filter(u => u.includes('/metrics/agg/chart')).length === 1 &&
+    state.initialFetches.filter(u => u.includes('/metrics/agg/explorer')).length === 1);
   check('first chart fetch starts its refresh cadence instead of refetching on the first tick', w.eval('_lastChartFetch > 0'));
 
   // Shared explorer health signals/order and server-authored conversations.
@@ -896,7 +461,7 @@ async function main() {
   // (Feed B has seq 2; a poll with the old feedA cursor would ask since=34 -
   // the page's own cursor was invalidated to 2, so the page asks since=2 and
   // the stub returns an in-range delta. Verify the page cursor followed.)
-  fullPayload = {
+  state.fullPayload = {
     feed_id: 'feedB', seq: 3,
     records: [{ ...mkRec('fresh1', 200, 1700000100000), __seq: 1 },
               { ...mkRec('fresh2', 200, 1700000101000), __seq: 2 },
@@ -1034,13 +599,12 @@ async function main() {
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
   // folds missed records exactly like the stream does, and replay-tolerant
   // delivery (the same record twice) must not duplicate the row.
-  let bootURL = '';
   const origTick = w.fetch;
   w.fetch = (url) => {
     const u = String(url);
     if (u.includes('/metrics/bootstrap')) {
-      bootURL = u;
-      const fp = fullPayload;
+      state.bootURL = u;
+      const fp = state.fullPayload;
       const since = new URL(url, 'http://x').searchParams.get('since');
       const recs = since ? fp.records.filter(r => r.__seq > Number(since)) : fp.records;
       return Promise.resolve({ ok: true, json: async () => ({
@@ -1051,7 +615,7 @@ async function main() {
     }
     return origTick(url);
   };
-  fullPayload = { feed_id: 'feedB', seq: 4,
+  state.fullPayload = { feed_id: 'feedB', seq: 4,
     records: [{ ...mkRec('fresh4', 200, 1700000103000), __seq: 4 }],
     counters: { in_flight: 0, total_requests: 4, total_errors: 0 } };
   // Await the page's own fetch and then its painted end state instead of a
@@ -1059,7 +623,7 @@ async function main() {
   // while the next assertion 20 ms later passed. Capture the URL synchronously
   // so the check pins this call, not whatever fetch ran last.
   const resume = w.eval("fetchBootstrap('resume')");
-  const resumeURL = bootURL;
+  const resumeURL = state.bootURL;
   await resume;
   await settleUntil(() => rows().length === 4 && rows()[0].dataset.id === 'fresh4');
   check('tick resume URL carries since + feed', resumeURL.includes('since=3') && resumeURL.includes('feed=feedB'));
@@ -2256,7 +1820,7 @@ async function main() {
     w.maybeLoadMoreLog = originalFill;
   }
   const pinned = rows()[0];
-  logPage = {
+  state.logPage = {
     records: [
       mkRec('old004', 200, 1700000004000),
       mkRec('old003', 200, 1700000003000),
@@ -2270,14 +1834,14 @@ async function main() {
   Object.defineProperty(box, 'clientHeight', { configurable: true, get() { return 200; } });
   Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 4000; } });
   box.scrollTop = 4000 - 200 - 10;
-  lastLogURL = '';
+  state.lastLogURL = '';
   w.maybeLoadMoreLog();
   await sleep(40);
   const idsAfter = rows().map(tr => tr.dataset.id);
   check('near-bottom grows through the ring then appends store pages', rows().length === 85);
   check('scroll-load keeps existing row nodes', rows().includes(pinned));
   check('older store rows land at the bottom', idsAfter[idsAfter.length - 1] === 'old000');
-  check('first log archive page has no cutoff derived from ring arrivals', !lastLogURL.includes('before_ms='));
+  check('first log archive page has no cutoff derived from ring arrivals', !state.lastLogURL.includes('before_ms='));
   check('f-stats after fill lists loaded count', d.getElementById('f-stats').textContent === '85 records');
   w.openDrawer('old000');
   check('drawer opens a store-paged row', d.getElementById('drawer').classList.contains('open'));
@@ -2502,7 +2066,7 @@ async function main() {
   // rows contiguous with the live ring. Trimming the tail used to drop the
   // newest record, including the boundary row beside the ring.
   {
-    const saved = {fetch: w.fetch, fill: w.scheduleLogFill, page: logPage,
+    const saved = {fetch: w.fetch, fill: w.scheduleLogFill, page: state.logPage,
       data: w.eval('lastData')};
     w.scheduleLogFill = () => {};
     const base = 1600000000000;
@@ -2511,7 +2075,7 @@ async function main() {
     w.__arcRing = mkRec('arc-ring', 200, base + 20000 * 1000);
     w.eval('logArchive = window.__arcArchive; logCursor = {ms: 1600000000000, id: "arc00000"}; ' +
       'logLimit = 0; logExhausted = false; logFetching = false; logFailures = 0; logFetchFailed = false;');
-    logPage = {records: [mkRec('arc-old', 200, base - 1000)], more: false,
+    state.logPage = {records: [mkRec('arc-old', 200, base - 1000)], more: false,
       cursor_ms: base - 1000, cursor_id: 'arc-old'};
     w.fetchOlderLog();
     await settleUntil(() => w.eval('logArchive.length') === 20000 &&
@@ -2555,7 +2119,7 @@ async function main() {
       w.eval('_logArchiveScans') === scansBeforeTrim + 1);
     w.fetch = saved.fetch;
     w.scheduleLogFill = saved.fill;
-    logPage = saved.page;
+    state.logPage = saved.page;
     w.resetLogWindow();
     w.renderAll(saved.data);
     for (const key of ['__arcArchive', '__arcRing']) delete w[key];
@@ -2564,14 +2128,14 @@ async function main() {
   // ---- test 10a-retry: a failed older-page fetch retries on a delayed,
   // bounded owner and reports "history unavailable"; success clears it.
   {
-    const saved = {fetch: w.fetch, fill: w.scheduleLogFill, page: logPage,
+    const saved = {fetch: w.fetch, fill: w.scheduleLogFill, page: state.logPage,
       data: w.eval('lastData'), status: w.eval('filters.status')};
     w.scheduleLogFill = () => {};
     w.eval("filters.status = '';");
     w.resetLogWindow();
     w.eval('logFetching = false; logExhausted = false; logCursor = null;');
     w.__retryPage = mkRec('retry-ok', 200, 1599990000000);
-    logPage = {records: [w.eval('window.__retryPage')], more: false,
+    state.logPage = {records: [w.eval('window.__retryPage')], more: false,
       cursor_ms: 1599990000000, cursor_id: 'retry-ok'};
     const originalTimeout = w.setTimeout;
     const retryCallbacks = [];
@@ -2621,7 +2185,7 @@ async function main() {
       w.setTimeout = originalTimeout;
       w.fetch = saved.fetch;
       w.scheduleLogFill = saved.fill;
-      logPage = saved.page;
+      state.logPage = saved.page;
       w.eval('filters.status = ' + JSON.stringify(saved.status) + ';');
       w.resetLogWindow();
       w.renderAll(saved.data);
@@ -2633,12 +2197,12 @@ async function main() {
   // whole-database delete (now the settings sheet's storage action) must
   // fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
   // the deletions) and the empty post-purge snapshot IS the wipe render.
-  fullPayload = { feed_id: 'feedB', seq: 0, records: [],
+  state.fullPayload = { feed_id: 'feedB', seq: 0, records: [],
     counters: { in_flight: 0, total_requests: 0, total_errors: 0 } };
   const origPurge = w.fetch;
   w.fetch = (url, opts) => {
     const u = String(url);
-    if (u.includes('/metrics/bootstrap')) { bootURL = u; return origPurge(url, opts); }
+    if (u.includes('/metrics/bootstrap')) { state.bootURL = u; return origPurge(url, opts); }
     if (u.includes('/admin/purge') && !u.includes('/count')) { purgePOST = true; }
     return origPurge(url, opts);
   };
@@ -2654,7 +2218,7 @@ async function main() {
   check('the settings purge confirms the whole-database wipe without the log-view count',
     confirmText.includes('The entire database will be wiped.') && !confirmText.includes('records in view'));
   check('purge resync bootstrap is cursor-less (no since/feed)',
-    bootURL.includes('/metrics/bootstrap') && !bootURL.includes('since=') && !bootURL.includes('feed='));
+    state.bootURL.includes('/metrics/bootstrap') && !state.bootURL.includes('since=') && !state.bootURL.includes('feed='));
   check('the empty post-purge snapshot IS the wipe render', rows().length === 0);
   check('purge resets the log window state', w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0 &&
     w.eval('_logArchiveIndex') === null && w.eval('_logLiveIndex') === null);
@@ -2662,7 +2226,7 @@ async function main() {
     d.getElementById('settings-count').textContent === 'all metrics history deleted' &&
     d.getElementById('settings-count').classList.contains('ok'));
   // Restore a live view so the later suites run against real state.
-  fullPayload = { feed_id: 'feedB', seq: 80,
+  state.fullPayload = { feed_id: 'feedB', seq: 80,
     records: BIG.map((r, i) => ({ ...r, __seq: i + 1 })),
     counters: { in_flight: 0, total_requests: 80, total_errors: 0 } };
   w.eval("fetchBootstrap('full')");
@@ -2679,7 +2243,7 @@ async function main() {
   // user hasn't touched in a while) must page the store from its NEWEST rows -
   // the empty scoped window probes the durable newest edge without a ring
   // timestamp cutoff instead of dead-ending on "no matching requests".
-  logPage = {
+  state.logPage = {
     records: [
       { ...mkRec('stale1', 200, 1600000000000), provider: 'stale.example' },
       { ...mkRec('stale0', 200, 1599999999000), provider: 'stale.example' },
@@ -2696,11 +2260,11 @@ async function main() {
   // not resolved after 50ms, so a scheduling delay failed three checks that
   // the product actually satisfied.
   await settleUntil(() =>
-    lastLogURL.includes('f=provider%3Astale.example') && rows().length === 2 &&
+    state.lastLogURL.includes('f=provider%3Astale.example') && rows().length === 2 &&
     rows()[0].dataset.id === 'stale1' && rows()[1].dataset.id === 'stale0' &&
     d.getElementById('f-stats').textContent === '2 records');
   check('stale-provider scope probes the store at the newest edge',
-    !lastLogURL.includes('before_ms=') && lastLogURL.includes('f=provider%3Astale.example'));
+    !state.lastLogURL.includes('before_ms=') && state.lastLogURL.includes('f=provider%3Astale.example'));
   check('stale-provider rows paint instead of the empty state',
     rows().length === 2 && rows()[0].dataset.id === 'stale1' && rows()[1].dataset.id === 'stale0');
   check('stale-provider fill updates the log stats', d.getElementById('f-stats').textContent === '2 records');
@@ -2710,15 +2274,15 @@ async function main() {
   // A page that resolves after a window reset belongs to the OLD scope and
   // must be dropped - never merged into the new one.
   let gateResolve = null;
-  logPageGate = new Promise(res => { gateResolve = res; });
+  state.logPageGate = new Promise(res => { gateResolve = res; });
   w.navigateTo([{ dim: 'provider', id: 'other.example' }]); // resetLogWindow → fetch fires, held by the gate
   await sleep(50);
-  logPage = { records: [{ ...mkRec('other1', 200, 1599999980000), provider: 'other.example' }], more: false, cursor_ms: 1599999980000 };
+  state.logPage = { records: [{ ...mkRec('other1', 200, 1599999980000), provider: 'other.example' }], more: false, cursor_ms: 1599999980000 };
   gateResolve(); // both held pages resolve - only the current scope's may land
   await sleep(50);
   check('stale in-flight page is dropped after a scope change',
     rows().length === 1 && rows()[0].dataset.id === 'other1' && w.eval('logArchive.length') === 1);
-  logPageGate = null;
+  state.logPageGate = null;
   // Restore the tall-box stubs (test 10's geometry) before leaving the suite.
   Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 4000; } });
   w.navigateTo([]);
@@ -2746,7 +2310,7 @@ async function main() {
     // loaded runner can stretch a fetch/render round trip past any hard time.
     await settleUntil(() => rows().length === 7);
     check('the mixed ring paints the default window', rows().length === 7);
-    logPage = {
+    state.logPage = {
       records: [
         { ...mkRec('sa-old1', 200, 1699999900000), provider: 'scope-a.example' },
         { ...mkRec('sa-old0', 200, 1699999800000), provider: 'scope-a.example' },
@@ -2763,7 +2327,7 @@ async function main() {
       scopedIds.join() === 'sa-ring2,sa-ring1,sa-ring0,sa-old1,sa-old0' &&
         w.eval('logArchive.length') === 2);
     Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 4000; } });
-    logPage = { records: [], more: false, cursor_ms: 0 };
+    state.logPage = { records: [], more: false, cursor_ms: 0 };
     w.navigateTo([]);
     await settleUntil(() =>
       w.eval('logArchive.length') === 0 && rows().length === 7 &&
@@ -3658,7 +3222,7 @@ async function main() {
     // a valid switch must persist the merged view, issue a window-keyed
     // chart fetch, and apply the fetched payload; an unlisted window is
     // denied by default - no persist, no fetch.
-    const chartFetchURLs = () => initialFetches.filter(u => u.includes('/metrics/agg/chart'));
+    const chartFetchURLs = () => state.initialFetches.filter(u => u.includes('/metrics/agg/chart'));
     const fetchesBeforeWindow = chartFetchURLs().length;
     w.setChartWindow('15');
     check('setChartWindow persists the merged view and issues the window-keyed fetch',
@@ -3669,7 +3233,7 @@ async function main() {
         chartFetchURLs().at(-1).includes('window=15'));
     await sleep(30);
     check('setChartWindow applies the fetched window payload',
-      w.eval('chartAgg && chartAgg.now_ms') === chartPayload.now_ms);
+      w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms);
     const fetchesBeforeReject = chartFetchURLs().length;
     w.setChartWindow('bogus');
     check('setChartWindow rejects unlisted windows without persisting or fetching',
@@ -3687,7 +3251,7 @@ async function main() {
   // (commitChartView's contract - only a window switch needs new buckets).
   {
     const savedView = () => JSON.parse(w.eval('storage.get("dash.chart")') || 'null');
-    const chartFetchURLs = () => initialFetches.filter(u => u.includes('/metrics/agg/chart'));
+    const chartFetchURLs = () => state.initialFetches.filter(u => u.includes('/metrics/agg/chart'));
     // '60', not another '15': the chart request gate dedupes a re-issued
     // 'reuse' key (requestGate in core.js), so repeating the window the
     // previous block just fetched would issue no fetch at all.
@@ -3699,7 +3263,7 @@ async function main() {
     // or never applies anything (mutation-proven: a dropped window listener
     // left it green). Bump now_ms with a unique delta so only applying the
     // window drive's own fetched payload can satisfy it.
-    chartPayload.now_ms += 4000;
+    state.chartPayload.now_ms += 4000;
     windowSelect.value = '60';
     windowSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
     check('the window dropdown wiring persists the merged view and issues the window-keyed fetch',
@@ -3710,7 +3274,7 @@ async function main() {
         chartFetchURLs().at(-1).includes('window=60'));
     await sleep(30);
     check('the window dropdown wiring applies the fetched window payload',
-      w.eval('chartAgg && chartAgg.now_ms') === chartPayload.now_ms);
+      w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms);
     const presetSelect = d.getElementById('chart-preset');
     const fetchesBeforePresetWiring = chartFetchURLs().length;
     // The no-refetch conjunct below is otherwise masked by the chart request
@@ -4524,24 +4088,24 @@ async function main() {
     restartAction.getAttribute('aria-describedby') === restartDescription.id);
   await sleep(0); // settle the menu's initial GET before holding the preflight
   let releaseRestartStatus, releaseRestartPost;
-  restartState.statusGate = new Promise(resolve => { releaseRestartStatus = resolve; });
-  restartState.postGate = new Promise(resolve => { releaseRestartPost = resolve; });
+  state.restartState.statusGate = new Promise(resolve => { releaseRestartStatus = resolve; });
+  state.restartState.postGate = new Promise(resolve => { releaseRestartPost = resolve; });
   const restartPending = w.restartProxy();
   check('restart action disables immediately while its status check is pending', restartAction.disabled);
   await w.restartProxy(); // a rapid second call must not issue another POST
   releaseRestartStatus();
-  restartState.statusGate = null;
+  state.restartState.statusGate = null;
   await sleep(20);
   check('only one restart POST is issued and the pending request stays disabled',
-    restartState.postCount === 1 && restartAction.disabled && restartAction.textContent.includes('Restarting'));
+    state.restartState.postCount === 1 && restartAction.disabled && restartAction.textContent.includes('Restarting'));
   await w.fetchRestartStatus();
   check('an idle status refresh cannot re-enable a locally pending restart', restartAction.disabled);
   check('the header indicates busy while keeping progress accessible',
     d.getElementById('btn-restart').hasAttribute('data-busy') && !d.getElementById('btn-restart').disabled);
   releaseRestartPost();
-  restartState.postGate = null;
+  state.restartState.postGate = null;
   await restartPending;
-  check('restart POST hit the endpoint', restartState.restarted);
+  check('restart POST hit the endpoint', state.restartState.restarted);
   check('restart poll detects the fresh process via started_at', d.getElementById('restart-count').textContent.includes('restarted'));
   check('completed restart restores the action and clears the busy header',
     !restartAction.disabled && restartAction.textContent === 'Restart now' && !d.getElementById('btn-restart').hasAttribute('data-busy'));
@@ -4572,15 +4136,15 @@ async function main() {
     check('the step list hides when idle', d.getElementById('restart-steps').hidden);
   }
   for (const [rank, phase] of ['building', 'draining', 'flushing', 'handoff'].entries()) {
-    restartState.status = { phase, rank };
+    state.restartState.status = { phase, rank };
     await w.fetchRestartStatus();
     check(`server-reported ${phase} disables the restart action`, restartAction.disabled);
   }
-  restartState.status = { phase: 'idle', error: 'build failed', rank: 0 };
+  state.restartState.status = { phase: 'idle', error: 'build failed', rank: 0 };
   await w.fetchRestartStatus();
   check('failed restart restores the action and reports the error',
     !restartAction.disabled && d.getElementById('restart-count').textContent.includes('build failed'));
-  restartState.status = { available: false, reason: 'source unavailable' };
+  state.restartState.status = { available: false, reason: 'source unavailable' };
   await w.fetchRestartStatus();
   check('unavailable restart stays disabled', restartAction.disabled);
   // A binary that can never restart is not OFFERED at all: the control and its
@@ -4610,7 +4174,7 @@ async function main() {
   check('the bootstrap fold withholds the control for an ineligible binary', restartWrap.hidden);
   w.applyRestartState({ available: true, reason: '' });
   check('the bootstrap fold offers the control for an eligible binary', !restartWrap.hidden);
-  restartState.status = {};
+  state.restartState.status = {};
   await w.fetchRestartStatus();
   check('an available status offers the control again', !restartWrap.hidden);
   // The refusal path through operatorErrorBody: a non-2xx whose body is not
@@ -4619,15 +4183,15 @@ async function main() {
   // server answer so the generic transport prefix never wraps it. Nothing
   // reddened before this pin (the W20 mutation round proved the fallback
   // could be dropped silently).
-  restartState.postFail = { status: 502 };
-  const refusalPostCount = restartState.postCount;
+  state.restartState.postFail = { status: 502 };
+  const refusalPostCount = state.restartState.postCount;
   await w.restartProxy();
   const restartStatusLine = d.getElementById('restart-count');
   check('a non-JSON 502 restart refusal shows the designed fallback, never an empty error',
-    restartState.postCount === refusalPostCount + 1 &&
+    state.restartState.postCount === refusalPostCount + 1 &&
     restartStatusLine.textContent === 'restart failed (502)' &&
     restartStatusLine.dataset.err === '1');
-  restartState.postFail = null;
+  state.restartState.postFail = null;
   w.toggleRestartMenu({ stopPropagation() {} });
   check('restart menu closes on second toggle', rmenu.hidden);
 
@@ -4635,7 +4199,7 @@ async function main() {
   // A feed_id change is the page's "new process" signal: the snapshot resets
   // the log AND refreshAfterRestart re-pulls operator state (pause, throttle,
   // effective config) + aggregates in place when frontend assets match.
-  const cfgBefore = cfgFetches;
+  const cfgBefore = state.cfgFetches;
   fire('snapshot', { feed_id: 'feedC', seq: 1, incremental: false,
     records: [{ ...mkRec('restarted1', 200, 1700000200000) }],
     counters: { in_flight: 0, total_requests: 1, total_errors: 0 } });
@@ -4644,9 +4208,9 @@ async function main() {
   // hard time. Both waits return false on timeout, so the checks below still
   // fail with their labels and the diagnostic dump.
   await settleUntil(() => rows().length === 1 && rows()[0].dataset.id === 'restarted1');
-  await settleUntil(() => cfgFetches > cfgBefore);
+  await settleUntil(() => state.cfgFetches > cfgBefore);
   check('feed change resets the log to the fresh process snapshot', rows().length === 1 && rows()[0].dataset.id === 'restarted1');
-  check('feed change sweeps operator state (config re-fetched in place)', cfgFetches > cfgBefore);
+  check('feed change sweeps operator state (config re-fetched in place)', state.cfgFetches > cfgBefore);
   check('footer clock carries the weekday', (() => {
     const text = d.getElementById('f-clock').textContent.toLowerCase();
     const weekdays = Array.from({length: 7}, (_, i) =>
@@ -5247,10 +4811,10 @@ async function main() {
     check('typing an invalid pattern reddens the row and arms Apply',
       mrSettingsWrap.querySelector('.mr-row').dataset.mrState === 'error' &&
         !d.getElementById('btn-settings-apply').disabled);
-    const failuresBefore = failures.length;
+    const failuresBefore = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with an invalid model-rules draft blocks the save without an uncaught TypeError',
-      failures.length === failuresBefore &&
+      state.failures.length === failuresBefore &&
         d.getElementById('settings-count').textContent === 'model rules - fix the highlighted rule first');
     // The hidden-offender drive (the W53 live-verified bug, the mr leg): the
     // sheet showing another category hides the rules block's .st-row, so
@@ -5262,10 +4826,10 @@ async function main() {
     const mrBlockRow = mrSettingsWrap.closest('.st-row');
     check('switching the sheet to the rate category hides the model-rules block',
       mrBlockRow.hidden && !d.querySelector('[data-st-cat="providers"]').classList.contains('active'));
-    const mrHiddenFailures = failures.length;
+    const mrHiddenFailures = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with a hidden model-rules offender selects its category and focuses it',
-      failures.length === mrHiddenFailures &&
+      state.failures.length === mrHiddenFailures &&
         d.getElementById('settings-count').textContent === 'model rules - fix the highlighted rule first' &&
         w.eval('settingsCat') === 'providers' &&
         d.querySelector('[data-st-cat="providers"]').classList.contains('active') &&
@@ -5301,10 +4865,10 @@ async function main() {
     intIn.dispatchEvent(new w.Event('input', { bubbles: true }));
     check('switching the sheet to the providers category hides the scalar-int row',
       intRow.hidden && w.settingsIsDirty() && !d.getElementById('btn-settings-apply').disabled);
-    const intFailuresBefore = failures.length;
+    const intFailuresBefore = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with a hidden scalar-int offender selects its category and focuses it',
-      failures.length === intFailuresBefore &&
+      state.failures.length === intFailuresBefore &&
         /conc_cap: enter a valid integer/.test(d.getElementById('settings-count').textContent) &&
         w.eval('settingsCat') === 'rate' &&
         d.querySelector('[data-st-cat="rate"]').classList.contains('active') &&
@@ -5575,10 +5139,10 @@ async function main() {
       const chip = [...chips.querySelectorAll('.prov-chip')].pop();
       const button = chip.querySelector('[data-prov-chip-rm]');
       w.roDraftChanged(roWrap);
-      const removeFailuresBefore = failures.length;
+      const removeFailuresBefore = state.failures.length;
       captureInputFlash(() => d.getElementById('btn-settings-apply').click());
       check(`${removeCase.label} targets its remove button`,
-        failures.length === removeFailuresBefore && d.activeElement === button && button.classList.contains('prov-bad') &&
+        state.failures.length === removeFailuresBefore && d.activeElement === button && button.classList.contains('prov-bad') &&
         button.getAttribute('aria-invalid') === 'true' && roErrorDetail(button)?.textContent.includes(removeCase.detail));
       check(`${removeCase.label} keeps its visual and ARIA error state`,
         button.classList.contains('prov-bad') && button.getAttribute('aria-invalid') === 'true' &&
@@ -5674,10 +5238,10 @@ async function main() {
       if (init?.method === 'POST') collectPosts++;
       return collectFetch(url, init);
     };
-    const collectFailuresBefore = failures.length;
+    const collectFailuresBefore = state.failures.length;
     w.applySettings();
     check('a collect-time duplicate header opens its collapsed card, focuses the offender and sends no POST',
-      failures.length === collectFailuresBefore && collectPosts === 0 &&
+      state.failures.length === collectFailuresBefore && collectPosts === 0 &&
       !collectCard.querySelector('.ro-rule-body').hidden && collectToggle.getAttribute('aria-expanded') === 'true' &&
       d.activeElement === collectBadInput && collectBadInput.classList.contains('prov-bad') &&
       collectBadInput.getAttribute('aria-invalid') === 'true' &&
@@ -5702,10 +5266,10 @@ async function main() {
       if (init?.method === 'POST') earlierCollectPosts++;
       return earlierCollectFetch(url, init);
     };
-    const earlierCollectFailuresBefore = failures.length;
+    const earlierCollectFailuresBefore = state.failures.length;
     w.applySettings();
     check('collect-time duplicate input yields to the first invalid request-override card',
-      failures.length === earlierCollectFailuresBefore && earlierCollectPosts === 0 &&
+      state.failures.length === earlierCollectFailuresBefore && earlierCollectPosts === 0 &&
       d.activeElement === earlierCollectClient && d.activeElement !== laterCollectBadInput &&
       earlierCollectClient.getAttribute('aria-invalid') === 'true' &&
       roErrorDetail(earlierCollectClient)?.textContent.includes('no scope set'));
@@ -5762,10 +5326,10 @@ async function main() {
     // the blocked-Apply drive: an invalid request-overrides draft must stop
     // the POST, name the fix on the status line and focus the first
     // offender (the model-rules gate precedent).
-    const failuresBefore = failures.length;
+    const failuresBefore = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with an invalid request-overrides draft blocks the save and focuses the offending row',
-      failures.length === failuresBefore &&
+      state.failures.length === failuresBefore &&
       d.getElementById('settings-count').textContent === 'request overrides - fix the highlighted rule first' &&
       d.activeElement === dupRow.querySelector('.sp-hname') &&
       dupRow.querySelector('.sp-hname').classList.contains('prov-bad'));
@@ -5786,10 +5350,10 @@ async function main() {
       card0.dataset.roState === 'error' &&
       card0.querySelector('.ro-err').textContent.includes('value must be a non-empty single-line header value') &&
       ctlVal.classList.contains('prov-bad'));
-    const ctlFailuresBefore = failures.length;
+    const ctlFailuresBefore = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with a control-byte header value blocks the save and focuses the value input',
-      failures.length === ctlFailuresBefore &&
+      state.failures.length === ctlFailuresBefore &&
       d.getElementById('settings-count').textContent === 'request overrides - fix the highlighted rule first' &&
       d.activeElement === ctlVal);
     ctlVal.value = 'my app';
@@ -5805,10 +5369,10 @@ async function main() {
     check('a header-set/remove conflict names the conflict and targets the remove button',
       card0.dataset.roState === 'error' && conflictError.textContent.includes('both set in headers and removed') &&
       conflictButton.getAttribute('aria-invalid') === 'true' && roErrorDetail(conflictButton)?.textContent.includes('both set in headers and removed'));
-    const conflictFailuresBefore = failures.length;
+    const conflictFailuresBefore = state.failures.length;
     captureInputFlash(() => d.getElementById('btn-settings-apply').click());
     check('Apply focuses the conflicting remove button',
-      failures.length === conflictFailuresBefore && d.activeElement === conflictButton && conflictButton.classList.contains('prov-bad'));
+      state.failures.length === conflictFailuresBefore && d.activeElement === conflictButton && conflictButton.classList.contains('prov-bad'));
     check('the conflicting remove button keeps its visual and ARIA error state',
       conflictButton.classList.contains('prov-bad') && conflictButton.getAttribute('aria-invalid') === 'true' &&
       roErrorDetail(conflictButton)?.textContent.includes('both set in headers and removed'));
@@ -6117,10 +5681,10 @@ async function main() {
     // ro save-gate precedent).
     gin().value = 'ba"d';
     gin().dispatchEvent(new w.Event('input', { bubbles: true }));
-    const failuresBefore = failures.length;
+    const failuresBefore = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with an invalid sub-conversations draft blocks the save and focuses the offending row',
-      failures.length === failuresBefore &&
+      state.failures.length === failuresBefore &&
       d.getElementById('settings-count').textContent === 'sub-conversations - fix the highlighted entry first' &&
       d.activeElement === gin() && gin().classList.contains('prov-bad'));
     gin().value = 'threadId';
@@ -6137,10 +5701,10 @@ async function main() {
     const scBlockRow = scWrap.closest('.st-row');
     check('switching the sheet to the providers category hides the sub-conversations block',
       scBlockRow.hidden && !d.querySelector('[data-st-cat="conversation"]').classList.contains('active'));
-    const scHiddenFailures = failures.length;
+    const scHiddenFailures = state.failures.length;
     d.getElementById('btn-settings-apply').click();
     check('Apply with a hidden sub-conversations offender selects its category and focuses it',
-      failures.length === scHiddenFailures &&
+      state.failures.length === scHiddenFailures &&
         d.getElementById('settings-count').textContent === 'sub-conversations - fix the highlighted entry first' &&
         w.eval('settingsCat') === 'conversation' &&
         d.querySelector('[data-st-cat="conversation"]').classList.contains('active') &&
@@ -6630,7 +6194,7 @@ async function main() {
   // must re-derive the scoped log even with zero record mutations.
   {
     const origF = w.fetch;
-    fullPayload = { feed_id: 'feedB', seq: 3,
+    state.fullPayload = { feed_id: 'feedB', seq: 3,
       records: [{ ...mkRec('mix1', 200, 1700000200000), __seq: 1 },
                 { ...mkRec('mix2', 500, 1700000201000), __seq: 2 },
                 { ...mkRec('mix3', 200, 1700000202000), __seq: 3 }],
@@ -7561,7 +7125,7 @@ async function main() {
   // ---- test 12e: O(1) upsert - _recIdx map is maintained on insert/update ----
   {
     const origU = w.fetch;
-    fullPayload = { feed_id: 'feedB', seq: 5,
+    state.fullPayload = { feed_id: 'feedB', seq: 5,
       records: [{ ...mkRec('idx1', 200, 1700000400000), __seq: 1 },
                 { ...mkRec('idx2', 200, 1700000401000), __seq: 2 }],
       counters: { in_flight: 0, total_requests: 2, total_errors: 0 } };
@@ -7953,7 +7517,7 @@ async function main() {
   {
     w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;'); // a tick must not mask the route
     const navBase = 1700001000000;
-    fullPayload = { feed_id: 'feedB', seq: 200, incremental: false,
+    state.fullPayload = { feed_id: 'feedB', seq: 200, incremental: false,
       records: [
         { ...mkRec('nav-a1', 200, navBase + 1000), provider: 'nav-a.example', __seq: 1 },
         { ...mkRec('nav-a2', 200, navBase + 2000), provider: 'nav-a.example', __seq: 2 },
@@ -7965,7 +7529,7 @@ async function main() {
 
     // Establish a filtered scope with one durable archive page below the ring,
     // then give the log window a non-default limit and scroll position.
-    logPage = { records: [{ ...mkRec('nav-a-old', 200, navBase - 1000), provider: 'nav-a.example' }],
+    state.logPage = { records: [{ ...mkRec('nav-a-old', 200, navBase - 1000), provider: 'nav-a.example' }],
       more: false, cursor_ms: navBase - 1000, cursor_id: 'nav-a-old' };
     Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 200; } });
     w.navigateTo([{ dim: 'provider', id: 'nav-a.example' }]);
@@ -7986,7 +7550,7 @@ async function main() {
     const drawerBefore = d.getElementById('drawer-body').innerHTML;
     const footerBefore = d.getElementById('f-scope').textContent;
     const railBefore = d.querySelector('#xp-rail .xp-rail-item.active')?.dataset.xpDim;
-    const priorXp = new URL(initialFetches.filter(u => u.includes('/metrics/agg/explorer')).pop() || '',
+    const priorXp = new URL(state.initialFetches.filter(u => u.includes('/metrics/agg/explorer')).pop() || '',
       'http://x').searchParams;
     check('the canonical filter key is order-independent and value-sensitive',
       typeof w.explorerFilterKey === 'function' &&
@@ -8158,7 +7722,7 @@ async function main() {
     w.fetchBootstrap('resume');
     await sleep(20);
     check('unchanged frontend updates data without navigation or extra version requests',
-      jsdomReloads === 0 && calls === 1 && w.eval('kpiAgg.requests') === 37);
+      state.jsdomReloads === 0 && calls === 1 && w.eval('kpiAgg.requests') === 37);
 
     // An unexpected full response to a resume request is re-captured behind
     // the full/SSE barrier. The accepted full carries its own state/version.
@@ -8166,7 +7730,7 @@ async function main() {
     calls = 0;
     w.fetchBootstrap('resume');
     await sleep(20);
-    check('same-assets restart re-captures an unexpected full response without a page reload', jsdomReloads === 0 && calls === 2);
+    check('same-assets restart re-captures an unexpected full response without a page reload', state.jsdomReloads === 0 && calls === 2);
 
     // Do not start expensive scans that a changed-frontend reload would
     // immediately throw away. An SSE restart first checks the bootstrap.
@@ -8188,7 +7752,7 @@ async function main() {
       w.fetchBootstrap('resume');
       await sleep(10);
     }
-    check('missing or malformed asset versions never create a reload loop', jsdomReloads === 0);
+    check('missing or malformed asset versions never create a reload loop', state.jsdomReloads === 0);
 
     const pending = [];
     w.fetch = () => new Promise(resolve => pending.push(resolve));
@@ -8199,14 +7763,14 @@ async function main() {
     pending[0]({ok: true, json: async () => payload(newVersion, 999)});
     await sleep(10);
     check('a superseded bootstrap cannot reload the page using an outdated version',
-      jsdomReloads === 0 && w.eval('kpiAgg.requests') === 39);
+      state.jsdomReloads === 0 && w.eval('kpiAgg.requests') === 39);
 
     let afterRan = false;
     setResponse(payload(newVersion, 999));
     w.fetchBootstrap('resume', () => { afterRan = true; });
     await sleep(20);
     check('changed frontend requests one reload before applying state or boot callbacks',
-      jsdomReloads === 1 && !afterRan && w.eval('kpiAgg.requests') === 39);
+      state.jsdomReloads === 1 && !afterRan && w.eval('kpiAgg.requests') === 39);
     sweeps = 0;
     const callsBeforeReload = calls;
     w.refreshAfterRestart();
@@ -8214,7 +7778,7 @@ async function main() {
     w.fetchBootstrap('full');
     await sleep(10);
     check('reload in progress suppresses duplicate navigation and bootstrap work',
-      jsdomReloads === 1 && calls === callsBeforeReload && sweeps === 0);
+      state.jsdomReloads === 1 && calls === callsBeforeReload && sweeps === 0);
     w.fetch = originalFetch;
     w.refreshAggregates = originalAggregates;
     w.fetchSettings = originalSettings;
@@ -10051,7 +9615,7 @@ async function main() {
 
     const auditFeed = w.eval('feedId') || 'feedB';
     const auditBase = 1700002000000;
-    fullPayload = { feed_id: auditFeed, seq: Math.max(500, w.eval('lastSeq') + 10), incremental: false,
+    state.fullPayload = { feed_id: auditFeed, seq: Math.max(500, w.eval('lastSeq') + 10), incremental: false,
       records: Array.from({ length: 6 }, (_, i) => ({ ...mkRec('audit' + i, 200, auditBase + i * 1000), __seq: i + 1 })),
       counters: { in_flight: 0, total_requests: 6, total_errors: 0 } };
     w.eval("fetchBootstrap('full')");
@@ -10059,7 +9623,7 @@ async function main() {
     w.navigateTo([]);
     await sleep(50);
     const chartWith = n => {
-      const p = JSON.parse(JSON.stringify(chartPayload));
+      const p = JSON.parse(JSON.stringify(state.chartPayload));
       p.now_ms = Date.now();
       p.from_ms = p.now_ms - 3600000;
       p.buckets.forEach(b => { b.req = 0; b.err = 0; });
@@ -10105,7 +9669,7 @@ async function main() {
     // retained. The cursor/fill owner must end pagination after that one
     // request instead of growing logLimit and fetching forever.
     {
-      const saved = { fetch: w.fetch, fill: w.scheduleLogFill, page: logPage, data: w.eval('lastData') };
+      const saved = { fetch: w.fetch, fill: w.scheduleLogFill, page: state.logPage, data: w.eval('lastData') };
       w.scheduleLogFill = () => {};
       const capBase = 1600000000000;
       w.__auditCapArchive = Array.from({ length: 20000 }, (_, i) =>
@@ -10140,7 +9704,7 @@ async function main() {
       } finally {
         w.fetch = saved.fetch;
         w.scheduleLogFill = saved.fill;
-        logPage = saved.page;
+        state.logPage = saved.page;
         w.resetLogWindow();
         w.renderAll(saved.data);
         delete w.__auditCapArchive;
@@ -10187,7 +9751,7 @@ async function main() {
     // history. It must paint at the top when the page lands, not be appended
     // under the loaded rows.
     {
-      const saved = {data: w.eval('lastData'), page: logPage, fill: w.scheduleLogFill};
+      const saved = {data: w.eval('lastData'), page: state.logPage, fill: w.scheduleLogFill};
       w.scheduleLogFill = () => {};
       const base = 1700005000000;
       const ring = [
@@ -10200,8 +9764,8 @@ async function main() {
         'logFetching = false; logExhausted = false; logCursor = null; ' +
         'renderRequests(derive(lastData).scopedRecs); updateLogStats();');
       let release = null;
-      logPageGate = new Promise(resolve => { release = resolve; });
-      logPage = {records: [mkRec('race-old', 200, base)], more: false, cursor_ms: base, cursor_id: 'race-old'};
+      state.logPageGate = new Promise(resolve => { release = resolve; });
+      state.logPage = {records: [mkRec('race-old', 200, base)], more: false, cursor_ms: base, cursor_id: 'race-old'};
       try {
         w.fetchOlderLog();
         await sleep(10);
@@ -10217,8 +9781,8 @@ async function main() {
           rows().map(tr => tr.dataset.id).join() === 'race-live,race-r3,race-r2,race-r1,race-old');
         check('the racing live row is never duplicated under loaded history', rows().length === 5);
       } finally {
-        logPageGate = null;
-        logPage = saved.page;
+        state.logPageGate = null;
+        state.logPage = saved.page;
         w.resetLogWindow();
         w.renderAll(saved.data);
         w.scheduleLogFill = saved.fill;
@@ -10360,7 +9924,7 @@ async function main() {
     // resync settle. A failed chart resync keeps the deleted totals gone.
     {
       const savedFetch = w.fetch;
-      const savedFull = fullPayload;
+      const savedFull = state.fullPayload;
       const savedConfirm = w.confirm;
       const hold = { chart: [], explorer: [] };
       let phase = 'seed';
@@ -10392,7 +9956,7 @@ async function main() {
         await settleUntil(() => !!d.querySelector('#xp-gallery [data-xp-key="ghost.example"]') &&
           w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 40);
         const feed = w.eval('feedId');
-        fullPayload = { feed_id: feed, seq: Math.max(900, w.eval('lastSeq') + 10), incremental: false,
+        state.fullPayload = { feed_id: feed, seq: Math.max(900, w.eval('lastSeq') + 10), incremental: false,
           records: [], counters: { in_flight: 0, total_requests: 0, total_errors: 0 } };
         phase = 'hold';
         w.confirm = () => true;
@@ -10436,7 +10000,7 @@ async function main() {
         w.confirm = savedConfirm;
         w.fetch = savedFetch;
         savedFull.seq = Math.max(savedFull.seq || 0, w.eval('lastSeq') + 10);
-        fullPayload = savedFull;
+        state.fullPayload = savedFull;
         w.navigateTo([]);
         await w.fetchBootstrap('full');
         await settleUntil(() => rows().length === 6, 3000);
@@ -10756,14 +10320,14 @@ async function main() {
   }
 
   reportFailures(false);
-  process.exit(failures.length ? 1 : 0);
+  process.exit(state.failures.length ? 1 : 0);
 }
 // A crashed run must not swallow what it already knows: without this
 // handler the process dies on the raw exception and the accumulated
 // failures, the diagnostic dump and the check history never print.
 main().catch(err => {
   console.error(err);
-  if (diagDump) console.log(diagDump('crash: ' + (err && err.message)));
+  if (state.diagDump) console.log(state.diagDump('crash: ' + (err && err.message)));
   reportFailures(true);
   process.exit(1);
 });
