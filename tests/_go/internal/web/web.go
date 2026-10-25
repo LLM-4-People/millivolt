@@ -716,16 +716,16 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		t.Fatal("served index must carry exactly one stamped dashboard version meta and no unstamped marker")
 	}
 
-	// The Settings sheet is lazy: chrome.js owns one ordered SETTINGS_MODULES
-	// list, the trigger injects each module with the meta version on first
-	// open, so the first-paint index must not carry any js/settings* asset and
-	// the walk exemption is membership in that list.
+	// The Settings sheet is lazy: chrome_settings.js owns one ordered
+	// SETTINGS_MODULES list, the trigger injects each module with the meta
+	// version on first open, so the first-paint index must not carry any
+	// js/settings* asset and the walk exemption is membership in that list.
 	for _, ref := range rels {
 		if strings.HasPrefix(ref.rel, "js/settings") {
 			t.Errorf("index.html must not load %s on first paint", ref.rel)
 		}
 	}
-	chrome, err := staticFS.ReadFile("static/js/chrome.js")
+	chrome, err := staticFS.ReadFile("static/js/chrome_settings.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -740,10 +740,10 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 	// module: an unversioned lazy URL would pin stale bytes across a rebuild.
 	if !bytes.Contains(chrome, []byte(`'/dash/js/' + name + '?v='`)) ||
 		!bytes.Contains(chrome, []byte(`encodeURIComponent(version)`)) {
-		t.Error("chrome.js does not build each settings module URL from SETTINGS_MODULES and the dashboard version")
+		t.Error("chrome_settings.js does not build each settings module URL from SETTINGS_MODULES and the dashboard version")
 	}
 	if !bytes.Contains(chrome, []byte(`function loadSettingsModule(`)) {
-		t.Error("chrome.js is missing the sequential Settings loader")
+		t.Error("chrome_settings.js is missing the sequential Settings loader")
 	}
 
 	err = fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
@@ -774,7 +774,7 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 }
 
 // settingsModuleList extracts the ordered SETTINGS_MODULES owner list from
-// chrome.js and returns its entries as embed-relative js/ paths. The list is
+// chrome_settings.js and returns its entries as embed-relative js/ paths. The list is
 // the single owner of the lazy Settings scripts, so it fails loudly on a
 // missing declaration, an entry outside js/settings*.js, a duplicate, an
 // empty list, or an entry-first order that would load an editor first.
@@ -782,7 +782,7 @@ func settingsModuleList(t *testing.T, chrome []byte) []string {
 	t.Helper()
 	m := regexp.MustCompile(`(?s)const SETTINGS_MODULES = \[(.*?)\];`).FindSubmatch(chrome)
 	if m == nil {
-		t.Fatal("chrome.js missing const SETTINGS_MODULES")
+		t.Fatal("chrome_settings.js missing const SETTINGS_MODULES")
 	}
 	var mods []string
 	seen := map[string]bool{}
