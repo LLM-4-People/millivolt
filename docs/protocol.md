@@ -316,6 +316,16 @@ sequence numbers) are never rescued. An exhausted budget surfaces the
 `reasoning_only` class as a provider error (`upstream_error`) on both
 surfaces: in-band on the streaming connection, and as an HTTP 502 error
 envelope for non-streaming requests.
+Stream accounting has two accepted limits. A source that never reports a
+numeric tool-call index is counted per id-bearing fragment; a provider that
+repeats the same id across continuation fragments can overcount the calls, and
+the fallback is unchanged until such a provider shape is observed. Provider
+reasoning tokens are not cross-checked against output tokens: a reasoning count
+greater than the reported output is accepted, the derived answer count is
+`max(0, output - reasoning)`, and the record keeps the provider's own totals. A
+future observed shape that violates the relation needs a targeted validation
+rather than a universal rejection.
+
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 Before relay or translation, the upstream request is subject to the configured
