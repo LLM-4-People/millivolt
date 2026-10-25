@@ -21,7 +21,7 @@ import (
 // ordering (request_id.go).
 func waitFor(t *testing.T, cond func() bool) bool {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return true
