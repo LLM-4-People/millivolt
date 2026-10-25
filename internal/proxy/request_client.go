@@ -346,7 +346,8 @@ func headerIntValue(h http.Header, names ...string) (val int, ok bool) {
 // error outcome is decided - matching the accounting the analyzer streaming
 // paths do) and lets io.Copy abort on the failed write. Its Write also
 // accumulates the accepted bytes into the record's ResponseBytes, so the
-// raw-copy relay fallbacks (the io.Copy sites in relay.go) report
+// raw-copy relay fallbacks (the io.Copy sites in relay_nonstream.go and
+// relay_stream.go) report
 // response_bytes exactly like the explicit write loops.
 type disconnectWriter struct {
 	w   http.ResponseWriter

@@ -78,7 +78,7 @@ fits the bounded read cap, otherwise that cap, and refuses with a retryable
 `503` and `Retry-After` before reading the upstream body.
 
 `resolveRequestOverrides` in
-[request.go](../internal/proxy/request.go) merges the matching
+[request_overrides.go](../internal/proxy/request_overrides.go) merges the matching
 `request_overrides` rules once per request, after routing metadata is known,
 and its merge has exactly two application stages: the final header stage of
 `buildUpstreamRequest`, and the cursor identity headers at the native send. Its

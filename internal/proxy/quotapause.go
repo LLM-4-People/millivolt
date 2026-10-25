@@ -19,7 +19,7 @@ import (
 // quota pause uses isOpenAICompatibleWire below instead, because the Responses
 // wire returns the same insufficient_quota / insufficient_credits envelope
 // family. Request-body rewrite eligibility is a separate inbound-shape
-// decision (overrideBodyInbound in request.go), and translation itself uses
+// decision (overrideBodyInbound in request_overrides.go), and translation itself uses
 // target.translate; nothing hand-spells the openai pair outside this owner.
 func isOpenAIWire(format string) bool {
 	return format == "" || format == "openai"

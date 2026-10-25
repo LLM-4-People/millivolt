@@ -59,7 +59,8 @@ There is no automatic provider failover or model-selection registry.
 
 Only `X-Proxy-Base-URL` is required by the proxy. The upstream may require a key.
 Routing validation and request construction live in
-[request.go](../internal/proxy/request.go).
+[request_target.go](../internal/proxy/request_target.go) and
+[request_upstream.go](../internal/proxy/request_upstream.go).
 
 | Request header | Meaning |
 | --- | --- |
