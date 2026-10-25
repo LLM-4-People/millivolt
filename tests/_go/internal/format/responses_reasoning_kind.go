@@ -101,3 +101,75 @@ data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_
 		}
 	})
 }
+
+// TestResponsesReasoningGuardsDropAtNonReasoningIndexes pins every
+// summary/content terminal handler, not only the delta handlers: an event at
+// a tool or message output index is dropped, while a real reasoning item
+// still emits its thinking text once and closes once.
+func TestResponsesReasoningGuardsDropAtNonReasoningIndexes(t *testing.T) {
+	handlers := []struct {
+		name  string
+		event string
+	}{
+		{
+			name: "summary part added",
+			event: `event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"think"}}
+
+`,
+		},
+		{
+			name: "summary text done",
+			event: `event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","output_index":0,"summary_index":0,"text":"think"}
+
+`,
+		},
+		{
+			name: "reasoning text done",
+			event: `event: response.reasoning_text.done
+data: {"type":"response.reasoning_text.done","output_index":0,"content_index":0,"text":"think"}
+
+`,
+		},
+		{
+			name: "summary part done",
+			event: `event: response.reasoning_summary_part.done
+data: {"type":"response.reasoning_summary_part.done","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"think"},"text":"think"}
+
+`,
+		},
+	}
+	items := []struct {
+		name string
+		item string
+	}{
+		{"tool", `{"type":"function_call","call_id":"call_1","name":"f","arguments":""}`},
+		{"message", `{"type":"message","id":"msg_1","role":"assistant","content":[]}`},
+		{"reasoning", `{"type":"reasoning","id":"rs_1","summary":[]}`},
+	}
+	for _, handler := range handlers {
+		for _, item := range items {
+			t.Run(handler.name+"/"+item.name, func(t *testing.T) {
+				source := reasoningKindSource(item.item, handler.event)
+				out, err := translateStreamSource(t, ir.Responses, ir.Anthropic, source)
+				if err != nil {
+					t.Fatalf("stream failed: %v", err)
+				}
+				if n := strings.Count(out, "event: message_stop"); n != 1 {
+					t.Fatalf("message_stop count = %d, want 1: %s", n, out)
+				}
+				hasThinking := strings.Contains(out, `"thinking_delta"`)
+				if item.name != "reasoning" {
+					if hasThinking {
+						t.Fatalf("%s event landed on a %s block: %s", handler.name, item.name, out)
+					}
+					return
+				}
+				if !hasThinking || !strings.Contains(out, `"thinking":"think"`) {
+					t.Fatalf("%s lost the valid reasoning text: %s", handler.name, out)
+				}
+			})
+		}
+	}
+}

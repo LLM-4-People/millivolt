@@ -760,9 +760,17 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// event entirely, so the reasoning item block is the fallback
 			// channel; the part identity is still recorded so the terminal
 			// document cannot repeat the value.
-			if key := d.keyByOutput[outputIndex]; key != "" && !d.reasoningKeys[key] {
-				// The output position is announced as a tool or message item;
-				// its block is not a reasoning channel.
+			if key := d.keyByOutput[outputIndex]; key != "" {
+				if !d.reasoningKeys[key] {
+					// The output position is announced as a tool item; its
+					// block is not a reasoning channel.
+					continue
+				}
+			} else if d.announcedItems[messageItemKey(d.itemIDByOutput[outputIndex], outputIndex)] {
+				// A message item owns this output position but has no
+				// keyByOutput entry. Do not turn its position into a fallback
+				// reasoning part; only an unannounced position may use the
+				// fallback below.
 				continue
 			}
 			pos := [2]int{outputIndex, contentIndex}
