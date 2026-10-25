@@ -158,6 +158,12 @@ target cannot consume them:
   could answer the wrong tool. A system or developer turn before
   the first emitted turn is still lifted to the top-level prompt even when a
   dropped assistant or an empty user turn preceded it.
+- Consecutive same-role turns are merged. A merged user turn keeps Anthropic's
+  results-first rule: when the later turn would otherwise put text before a
+  `tool_result`, the results move to the front with their relative order
+  preserved and one `approximated:messages.tool_result` warning reports the
+  reorder. An already-ordered or text-only merge keeps source order and warns
+  nothing.
 - A non-clean non-streaming terminal can carry a missing, null, whitespace or
   partial tool-call argument value the source never finished: a Chat finish
   other than `stop`, `tool_calls` or `function_call`, or a Responses
