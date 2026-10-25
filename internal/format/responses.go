@@ -265,7 +265,12 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 				if err := json.Unmarshal(raw, &include); err != nil {
 					return nil, errors.New("responses request: stream_options.include_obfuscation must be a boolean")
 				}
-				req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation", "stream obfuscation settings have no cross-protocol equivalent")
+				// Obfuscation is on by default; false disables it and needs no
+				// equivalent on the target. Only true is a loss.
+				if include {
+					req.Warnings.Add(ir.WarningDropped, "stream_options.include_obfuscation",
+						"provider-generated stream obfuscation cannot be translated")
+				}
 				continue
 			}
 			req.Warnings.Add(ir.WarningDropped, "stream_options."+name, "stream option has no cross-protocol equivalent")

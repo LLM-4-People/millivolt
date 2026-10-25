@@ -8,6 +8,8 @@ package format
 import (
 	"strings"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 )
 
 func TestResponsesRequestDropsAudioWithWarning(t *testing.T) {
@@ -108,32 +110,58 @@ func TestResponsesProgrammaticOnlyToolRejected(t *testing.T) {
 }
 
 func TestResponsesAccessProgramsAndObfuscationWarn(t *testing.T) {
-	body := `{"model":"m","input":"hi","access_programs":{"cyber":true},` +
-		`"stream_options":{"include_obfuscation":false}}`
-	req, err := DecodeResponsesRequest([]byte(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, field := range []string{"access_programs", "stream_options.include_obfuscation"} {
+	countField := func(t *testing.T, warnings ir.Warnings, field string) int {
+		t.Helper()
 		count := 0
-		for _, warning := range req.Warnings {
+		for _, warning := range warnings {
 			if warning.Field == field {
 				count++
 			}
 		}
-		if count != 1 {
-			t.Fatalf("%s warnings = %d, want one: %+v", field, count, req.Warnings)
-		}
+		return count
 	}
 
-	control := `{"model":"m","input":"hi","access_programs":null,"stream_options":{}}`
-	req, err = DecodeResponsesRequest([]byte(control))
+	body := `{"model":"m","input":"hi","access_programs":{"cyber":true},` +
+		`"stream_options":{"include_obfuscation":true}}`
+	req, err := DecodeResponsesRequest([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if warningField(req.Warnings, "access_programs") ||
-		warningField(req.Warnings, "stream_options.include_obfuscation") {
-		t.Fatalf("absent knobs warned: %+v", req.Warnings)
+	if got := countField(t, req.Warnings, "access_programs"); got != 1 {
+		t.Fatalf("access_programs warnings = %d, want one: %+v", got, req.Warnings)
+	}
+	if got := countField(t, req.Warnings, "stream_options.include_obfuscation"); got != 1 {
+		t.Fatalf("include_obfuscation=true warnings = %d, want one: %+v", got, req.Warnings)
+	}
+
+	// Obfuscation is on by default, so false disables it and is honored by the
+	// translated wire: there is no loss to warn about.
+	for _, options := range []string{
+		`"stream_options":{"include_obfuscation":false}`,
+		`"stream_options":{}`,
+		``,
+	} {
+		body := `{"model":"m","input":"hi"}`
+		if options != "" {
+			body = `{"model":"m","input":"hi",` + options + `}`
+		}
+		req, err := DecodeResponsesRequest([]byte(body))
+		if err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if warningField(req.Warnings, "stream_options.include_obfuscation") {
+			t.Fatalf("%s warned about a disabled or absent option: %+v", body, req.Warnings)
+		}
+	}
+
+	// The Chat decoder's false control stays warning-free too.
+	chat, err := DecodeChatRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],` +
+		`"stream_options":{"include_obfuscation":false}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if warningField(chat.Warnings, "stream_options.include_obfuscation") {
+		t.Fatalf("Chat false warned: %+v", chat.Warnings)
 	}
 }
 
