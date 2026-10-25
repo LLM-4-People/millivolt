@@ -96,7 +96,7 @@ func TestDeliveryConsumersDoNotDeclareDefaults(t *testing.T) {
 		filepath.Join(root, "internal", "proxy", "relay_upstream.go"),
 		filepath.Join(root, "internal", "proxy", "relay_retry.go"),
 		filepath.Join(root, "internal", "proxy", "relay_transform.go"),
-		filepath.Join(root, "internal", "proxy", "relay.go"),
+		filepath.Join(root, "internal", "proxy", "relay_stream.go"),
 		filepath.Join(root, "internal", "proxy", "proxy.go"),
 	}
 	for _, path := range files {
