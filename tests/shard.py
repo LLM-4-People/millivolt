@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
 """Run the overlay-aware Go suite as parallel package/test shards.
 
-The default gate used to run one race test binary per package. Most packages
-are serial internally, so the slowest package set the floor. This runner keeps
-the same overlay, race detector, build tags and test names, but gives each
-disjoint test group its own process. Packages that own fixed ports or other
-cross-process resources stay single-shard.
+Each package is split into two passes. Tests declared by `tests/race_scope.py`
+run under the race detector; the rest run plain. Both passes use the same
+overlay, build tags and test names, and each disjoint group gets its own test
+binary and process. Packages that own fixed ports or other cross-process
+resources stay single-shard and are additionally locked so their race and
+plain passes never overlap.
 
-Coverage is explicit: every name returned by `go test -list` is assigned to
-exactly one shard, and a shard that selects no tests is never launched.
+Coverage is explicit and default-deny: every name returned by `go test -list`
+is assigned to exactly one pass (race or plain), the union of both passes must
+equal the listing, and a task that selects no tests is never launched.
+`--all-race` escalates every test to the race pass for the scheduled job.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable, Mapping, Sequence
 
+from . import race_scope
 from .go import PARITY_HANDSHAKE, parity_digest
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -109,6 +116,11 @@ class Task:
     names: tuple[str, ...]
     shard: int
     shards: int
+    race: bool = True
+
+    @property
+    def mode(self) -> str:
+        return "race" if self.race else "plain"
 
     @property
     def weight(self) -> float:
@@ -117,8 +129,8 @@ class Task:
     @property
     def label(self) -> str:
         if self.shards == 1:
-            return self.package
-        return f"{self.package} [{self.shard + 1}/{self.shards}]"
+            return f"{self.package} ({self.mode})"
+        return f"{self.package} [{self.shard + 1}/{self.shards}] ({self.mode})"
 
     def command(self, binary: str) -> list[str]:
         command = [binary, "-test.count=1", "-test.benchtime=200ms"]
@@ -147,34 +159,41 @@ def packages() -> dict[str, str]:
 
 
 def build_binaries(tasks: list[Task], directory: Path, workers: int,
-                   env: dict[str, str] | None = None) -> dict[str, str]:
-    packages = sorted({task.package for task in tasks})
-    binaries: dict[str, str] = {}
+                   env: dict[str, str] | None = None) -> dict[tuple[str, bool], str]:
+    targets = sorted({(task.package, task.race) for task in tasks})
+    binaries: dict[tuple[str, bool], str] = {}
 
-    def build(package: str) -> tuple[str, int, float, str, str]:
-        target = directory / (package.replace("/", "_") + ".test")
+    def build(package: str, race: bool) -> tuple[tuple[str, bool], int, float, str, str]:
+        suffix = ".race.test" if race else ".plain.test"
+        target = directory / (package.replace("/", "_") + suffix)
+        command = [sys.executable, "-B", "-m", "tests.go", "test", "-c", "-mod=readonly"]
+        if race:
+            command.append("-race")
+        command.extend(["-o", str(target), package])
         started = time.monotonic()
         result = subprocess.run(
-            [sys.executable, "-B", "-m", "tests.go", "test", "-c", "-mod=readonly",
-             "-race", "-o", str(target), package],
+            command,
             cwd=ROOT,
             capture_output=True,
             text=True,
             env=env,
         )
-        return package, result.returncode, time.monotonic() - started, result.stdout + result.stderr, str(target)
+        output = result.stdout + result.stderr
+        return (package, race), result.returncode, time.monotonic() - started, output, str(target)
 
     started = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(build, package) for package in packages]
+        futures = [pool.submit(build, package, race) for package, race in targets]
         for future in concurrent.futures.as_completed(futures):
-            package, code, elapsed, output, target = future.result()
+            key, code, elapsed, output, target = future.result()
+            package, race = key
             if code:
-                print(f"build FAIL {package} ({elapsed:.1f}s)\n{output}", file=sys.stderr)
+                print(f"build FAIL {package} ({'race' if race else 'plain'}, {elapsed:.1f}s)\n{output}",
+                      file=sys.stderr)
                 raise RuntimeError(f"test binary build failed for {package}")
-            binaries[package] = target
-            print(f"built {package} ({elapsed:.1f}s)")
-    print(f"built {len(packages)} test binaries in {time.monotonic() - started:.1f}s")
+            binaries[key] = target
+            print(f"built {package} ({'race' if race else 'plain'}, {elapsed:.1f}s)")
+    print(f"built {len(targets)} test binaries in {time.monotonic() - started:.1f}s")
     return binaries
 
 
@@ -206,7 +225,8 @@ def parse_test_listing(output: str) -> dict[str, list[str]]:
     return listing
 
 
-def discover_tests(packages: list[str]) -> tuple[list[Task], dict[str, str]]:
+def discover_tests(packages: list[str], *, all_race: bool = False
+                   ) -> tuple[list[Task], dict[str, list[str]], dict[str, str]]:
     """List every test once, then return the proven build environment.
 
     The listing call performs the run's only whole-module package-parity
@@ -232,8 +252,8 @@ def discover_tests(packages: list[str]) -> tuple[list[Task], dict[str, str]]:
                            + repr(sorted(set(listing) ^ set(packages))))
     tasks: list[Task] = []
     for package in packages:
-        tasks.extend(tasks_for_package(package, listing[package]))
-    return tasks, {**environment, PARITY_HANDSHAKE: parity_digest(environment=environment)}
+        tasks.extend(tasks_for_package(package, listing[package], all_race=all_race))
+    return tasks, listing, {**environment, PARITY_HANDSHAKE: parity_digest(environment=environment)}
 
 
 def package_weights(package: str) -> dict[str, float]:
@@ -255,27 +275,45 @@ def shard_names(names: list[str], shards: int, weights: dict[str, float] | None 
     return buckets
 
 
-def tasks_for_package(package: str, names: list[str]) -> list[Task]:
-    if package in SERIAL_PACKAGES:
-        shards = 1
-    else:
-        shards = SHARD_COUNTS.get(package, 1)
+def tasks_for_package(package: str, names: list[str], *, all_race: bool = False) -> list[Task]:
     if not names:
         # go test -c emits no binary for a package with no test files. Keep
         # the package out of the build entirely: launching a task with an
         # absent binary is not a test result.
         return []
-    shards = min(shards, len(names))
-    buckets = shard_names(names, shards, package_weights(package))
-    tasks = [
-        Task(package, tuple(bucket), index, len(buckets))
-        for index, bucket in enumerate(buckets)
-        if bucket
-    ]
-    assigned = [name for task in tasks for name in task.names]
-    if sorted(assigned) != sorted(names):
-        raise RuntimeError(f"shard assignment lost tests for {package}")
+    race_names, plain_names = race_scope.select(package, names, all_race=all_race)
+    limit = 1 if package in SERIAL_PACKAGES else SHARD_COUNTS.get(package, 1)
+    tasks: list[Task] = []
+    for race, group in ((True, race_names), (False, plain_names)):
+        if not group:
+            continue
+        shards = min(limit, len(group))
+        for index, bucket in enumerate(shard_names(group, shards, package_weights(package))):
+            tasks.append(Task(package, tuple(bucket), index, shards, race=race))
+    verify_assignments({package: names}, tasks)
     return tasks
+
+
+def verify_assignments(listing: Mapping[str, Sequence[str]], tasks: Iterable[Task]) -> None:
+    """Fail unless both passes cover the listing exactly once.
+
+    This is the mechanical default-deny guard: a name assigned to neither pass,
+    to both passes, or to two tasks fails the run before any test starts.
+    """
+    assigned: dict[str, list[str]] = {}
+    for task in tasks:
+        assigned.setdefault(task.package, []).extend(task.names)
+    for package in sorted(set(listing) | set(assigned)):
+        expected = list(listing.get(package, ()))
+        got = assigned.get(package, [])
+        if len(got) != len(set(got)):
+            duplicates = sorted(name for name in set(got) if got.count(name) > 1)
+            raise RuntimeError(f"tests assigned to more than one pass for {package}: {duplicates}")
+        if set(got) != set(expected) or len(got) != len(expected):
+            missing = sorted(set(expected) - set(got))
+            extra = sorted(set(got) - set(expected))
+            raise RuntimeError(f"test assignment differs from go test -list for {package}: "
+                               f"missing {missing}, unexpected {extra}")
 
 
 def selected(tasks: list[Task], index: int, total: int) -> list[Task]:
@@ -286,15 +324,40 @@ def selected(tasks: list[Task], index: int, total: int) -> list[Task]:
     return [task for position, task in enumerate(tasks) if position % total == index]
 
 
-def run_one(task: Task, binary: str, directory: str) -> tuple[Task, int, float, str]:
-    started = time.monotonic()
-    result = subprocess.run(
-        task.command(binary),
-        cwd=directory,
-        capture_output=True,
-        text=True,
-    )
-    return task, result.returncode, time.monotonic() - started, result.stdout + result.stderr
+class PackageLocks:
+    """Per-package exclusive locks for packages that own fixed ports.
+
+    The race and plain passes of a serial package are separate processes that
+    bind the same port and start the same child instance, so they must never
+    overlap. Other packages stay fully parallel.
+    """
+
+    def __init__(self, exclusive: Iterable[str]):
+        self._exclusive = frozenset(exclusive)
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    def hold(self, package: str):
+        if package not in self._exclusive:
+            return contextlib.nullcontext()
+        with self._guard:
+            lock = self._locks.setdefault(package, threading.Lock())
+        return lock
+
+
+def run_one(task: Task, binary: str, directory: str,
+            locks: PackageLocks) -> tuple[Task, int, float, str]:
+    # The lock wraps the whole process: fixed-port packages bind their port for
+    # the lifetime of the test binary, not only while a test function runs.
+    with locks.hold(task.package):
+        started = time.monotonic()
+        result = subprocess.run(
+            task.command(binary),
+            cwd=directory,
+            capture_output=True,
+            text=True,
+        )
+        return task, result.returncode, time.monotonic() - started, result.stdout + result.stderr
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -306,12 +369,19 @@ def main(argv: list[str] | None = None) -> int:
         workers = 0
     parser.add_argument("--workers", type=int, default=workers)
     parser.add_argument("--shard", default="0/1", help="select one CI shard as INDEX/TOTAL")
+    parser.add_argument("--all-race", action="store_true",
+                        default=os.environ.get("MILLIVOLT_TEST_ALL_RACE", "") in {"1", "true"},
+                        help="escalate every test to the race pass (scheduled full-race job)")
     args = parser.parse_args(argv)
     try:
         index_text, total_text = args.shard.split("/", 1)
         index, total = int(index_text), int(total_text)
         discovered = packages()
-        tasks, go_env = discover_tests(list(discovered))
+        tasks, listing, go_env = discover_tests(list(discovered), all_race=args.all_race)
+        race_scope_failures = race_scope.audit(discovered, listing)
+        if race_scope_failures:
+            raise RuntimeError("race scope audit failed: " + "; ".join(race_scope_failures))
+        verify_assignments(listing, tasks)
         tasks = selected(tasks, index, total)
         tasks.sort(key=lambda task: (-task.weight, task.label))
     except (OSError, RuntimeError, ValueError) as exc:
@@ -320,19 +390,25 @@ def main(argv: list[str] | None = None) -> int:
     if not tasks:
         print(f"shard: no tasks for shard {index}/{total}", file=sys.stderr)
         return 1
+    race_tasks = sum(1 for task in tasks if task.race)
+    plain_tasks = len(tasks) - race_tasks
     workers = max(1, args.workers)
     failed: list[tuple[Task, str]] = []
+    timings: list[tuple[Task, float]] = []
     try:
         with tempfile.TemporaryDirectory(prefix="millivolt-test-bin-") as directory:
             binaries = build_binaries(tasks, Path(directory), workers, go_env)
+            locks = PackageLocks(SERIAL_PACKAGES)
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
-                    pool.submit(run_one, task, binaries[task.package], discovered[task.package]): task
+                    pool.submit(run_one, task, binaries[(task.package, task.race)],
+                                discovered[task.package], locks): task
                     for task in tasks
                 }
                 for future in concurrent.futures.as_completed(futures):
                     task, code, elapsed, output = future.result()
+                    timings.append((task, elapsed))
                     if code:
                         failed.append((task, output))
                         print(f"FAIL {task.label} ({elapsed:.1f}s)", file=sys.stderr)
@@ -342,12 +418,18 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, RuntimeError) as exc:
         print(f"shard: {exc}", file=sys.stderr)
         return 1
+    task_seconds = sum(seconds for _, seconds in timings)
+    longest_task, longest_seconds = max(timings, key=lambda item: item[1])
+    summary = (f"{len(tasks)} tasks ({race_tasks} race, {plain_tasks} plain), "
+               f"task sum {task_seconds:.1f}s, longest {longest_task.label} {longest_seconds:.1f}s")
+    mode = "full-race" if args.all_race else "race/plain"
     if failed:
         for task, output in failed:
             print(f"\n===== {task.label} =====\n{output}", file=sys.stderr)
-        print(f"shard: {len(failed)} of {len(tasks)} tasks failed in {elapsed:.1f}s", file=sys.stderr)
+        print(f"shard: {len(failed)} of {len(tasks)} tasks failed in {elapsed:.1f}s "
+              f"({mode}; {summary})", file=sys.stderr)
         return 1
-    print(f"shard: {len(tasks)} tasks passed in {elapsed:.1f}s with {workers} workers")
+    print(f"shard: {summary} passed in {elapsed:.1f}s with {workers} workers ({mode})")
     return 0
 
 

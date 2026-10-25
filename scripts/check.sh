@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 die() { echo "check: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
-usage="usage: scripts/check.sh [core | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
+usage="usage: scripts/check.sh [core | race | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
 mode="${1:-core}"
 case "$mode" in
   core)
@@ -60,13 +60,21 @@ case "$mode" in
     # shards use the cores; collect failures after the gate.
     run_background python python_suites
     run_background npm npm test
-    # One race-enabled pass proves everything the plain pass used to: the
-    # same tests run under the same overlay (no build tags, no
-    # race-conditional skips), with the race detector as a strict superset
-    # of the plain instrumentation. The sharder keeps fixed-port packages
-    # serial and gives temp-isolated packages disjoint test shards.
+    # The shard runs two passes over the same overlay: tests declared by
+    # tests/race_scope.py under the race detector, the rest plain. Every test
+    # runs exactly once, and fixed-port packages stay serial and locked.
     python3 -B -O -m tests.shard
     wait_background
+    ;;
+  race)
+    (( $# == 1 )) || die "$usage"
+    need python3
+    need go
+    need git
+    # Forced full-race pass for the scheduled escalation job: identical to the
+    # core shard, but every test runs under -race. Never part of the default
+    # gate; the scheduled job owns when it runs.
+    python3 -B -O -m tests.shard --all-race
     ;;
   go)
     (( $# >= 2 )) || die "$usage"
