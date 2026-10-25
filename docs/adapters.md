@@ -114,7 +114,8 @@ target cannot consume them:
   (`custom_tool_call`, `local_shell_call`, `mcp_call`, `computer_call`,
   `tool_search_call` and their peers) are tool activity: they count toward a
   `tool_calls` finish even though no cross-protocol content block exists for
-  them. Provider-executed generation artifacts (`program`, `program_output`,
+  them, and a translated record still counts them (retaining streamed names)
+  when the target wire drops the item. Provider-executed generation artifacts (`program`, `program_output`,
   `image_generation_call`, `code_interpreter_call`) are output presence
   instead: a completed turn that carries only one of them is not an empty
   completion, while its finish stays the source's stop rather than

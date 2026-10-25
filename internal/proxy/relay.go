@@ -910,6 +910,13 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				// canonical response, so stamp the structure the translated
 				// wire no longer exposes in that shape.
 				applyTranslatedStructure(rec, respIR, s.cfg().CaptureBodyPreview)
+			} else if respIR != nil && respIR.ProviderToolCalls > 0 {
+				// The Chat encoder has no shape for a provider-executed item,
+				// so the translated wire carries no tool_calls and the
+				// Chat-shaped analysis counts zero while the finish reason
+				// already says tool_calls. Blocks are counted by that
+				// analysis; add only the provider items.
+				rec.ToolCalls += respIR.ProviderToolCalls
 			}
 			if usageErr != nil {
 				invalidateUsage(rec, usageErr)
@@ -2175,6 +2182,15 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				rec.ErrorType = sse.TypeUpstreamError
 				rec.ErrorCode = metrics.CodeTruncated
 				rec.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+			}
+			// A provider-executed item has no target block: every encoder drops
+			// it with a warning, so the translated analyzer counts zero. The
+			// source observer owns the activity and its retained names.
+			if sourceRec.ToolCalls > rec.ToolCalls {
+				rec.ToolCalls = sourceRec.ToolCalls
+				if len(sourceRec.ToolNames) > 0 {
+					rec.ToolNames = append([]string(nil), sourceRec.ToolNames...)
+				}
 			}
 			// Invalid accounting is sticky: the source observer may have
 			// captured only the usage object that failed validation (or a
