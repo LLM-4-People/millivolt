@@ -162,8 +162,13 @@ type ResponsesStreamDecoder struct {
 	itemBlockByKey   map[string]int
 	partBlockByKey   map[string]int
 	keyByOutput      map[int]string
-	keyByPart        map[[2]int]string
-	itemIDByOutput   map[int]string
+	// reasoningKeys names the announced key of every reasoning item.
+	// itemBlock and keyByOutput are kind-agnostic position caches, so a
+	// reasoning event must consult this set before routing its bytes onto an
+	// announced tool or message block.
+	reasoningKeys  map[string]bool
+	keyByPart      map[[2]int]string
+	itemIDByOutput map[int]string
 	// partSeed holds an announced content part whose start payload was empty.
 	// Its target block is deferred until the first delta, done event or
 	// terminal document, so a later announced part does not force an empty
@@ -235,6 +240,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		itemBlockByKey:       map[string]int{},
 		partBlockByKey:       map[string]int{},
 		keyByOutput:          map[int]string{},
+		reasoningKeys:        map[string]bool{},
 		keyByPart:            map[[2]int]string{},
 		terminalPendingByKey: map[string]int{},
 		itemIDByOutput:       map[int]string{},
@@ -430,6 +436,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.itemBlock[outputIndex] = idx
 				d.itemBlockByKey[key] = idx
 				d.keyByOutput[outputIndex] = key
+				d.reasoningKeys[key] = true
 				d.itemIDByOutput[outputIndex] = item.ID
 				// An announced reasoning item opens its target block now so
 				// summary/content deltas have a stable index. A provider that
@@ -576,6 +583,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// The done payload is the authoritative full part value. Emit it
 			// only when no delta carried bytes; repeating streamed text would
 			// duplicate the answer.
+			if key := d.keyByOutput[outputIndex]; key != "" && !d.reasoningKeys[key] {
+				// The output position is announced as a tool or message item;
+				// its block is not a reasoning channel.
+				continue
+			}
 			pos := [2]int{outputIndex, contentIndex}
 			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
@@ -634,6 +646,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				continue
 			}
 			key := d.keyByOutput[outputIndex]
+			if !d.reasoningKeys[key] {
+				continue
+			}
 			if ev.Delta != "" && key != "" {
 				partKey := summaryPartKey(key, summaryIndex)
 				if _, err := d.announcePart(partKey); err != nil {
@@ -656,7 +671,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			key := d.keyByOutput[outputIndex]
 			idx, ok := d.itemBlock[outputIndex]
-			if part.Text == "" || !ok || key == "" {
+			if part.Text == "" || !ok || !d.reasoningKeys[key] {
 				continue
 			}
 			partKey := summaryPartKey(key, summaryIndex)
@@ -677,7 +692,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// the bytes no delta or start payload already covered.
 			key := d.keyByOutput[outputIndex]
 			idx, ok := d.itemBlock[outputIndex]
-			if ev.Text == "" || !ok || key == "" {
+			if ev.Text == "" || !ok || !d.reasoningKeys[key] {
 				continue
 			}
 			partKey := summaryPartKey(key, summaryIndex)
@@ -745,6 +760,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// event entirely, so the reasoning item block is the fallback
 			// channel; the part identity is still recorded so the terminal
 			// document cannot repeat the value.
+			if key := d.keyByOutput[outputIndex]; key != "" && !d.reasoningKeys[key] {
+				// The output position is announced as a tool or message item;
+				// its block is not a reasoning channel.
+				continue
+			}
 			pos := [2]int{outputIndex, contentIndex}
 			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
@@ -956,7 +976,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			key := d.keyByOutput[outputIndex]
 			idx, ok := d.itemBlock[outputIndex]
-			if text == "" || !ok || key == "" {
+			if text == "" || !ok || !d.reasoningKeys[key] {
 				continue
 			}
 			partKey := summaryPartKey(key, summaryIndex)
