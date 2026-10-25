@@ -19,13 +19,12 @@ import (
 	"testing"
 )
 
-// repositoryText locates the repository root from this file's compile-time
+// repositoryRoot locates the repository root from this file's compile-time
 // source path (the same self-location rule the web test suite applies; test
-// overlays keep the physical path, so the walk finds the root's go.mod) and
-// reads one repository file. A stripped source view (for example a -trimpath
-// build) cannot verify repository text and fails here instead of skipping
-// green.
-func repositoryText(t *testing.T, rel string) string {
+// overlays keep the physical path, so the walk finds the root's go.mod). A
+// stripped source view (for example a -trimpath build) cannot verify
+// repository text and fails here instead of skipping green.
+func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
@@ -34,11 +33,7 @@ func repositoryText(t *testing.T, rel string) string {
 	dir := filepath.Dir(file)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			b, err := os.ReadFile(filepath.Join(dir, rel))
-			if err != nil {
-				t.Fatalf("read %s: %v", rel, err)
-			}
-			return string(b)
+			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -46,6 +41,38 @@ func repositoryText(t *testing.T, rel string) string {
 		}
 		dir = parent
 	}
+}
+
+// repositoryText reads one repository file from the self-located root.
+func repositoryText(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repositoryRoot(t), rel))
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	return string(b)
+}
+
+// settingsModuleText joins every dashboard Settings module from the
+// repository, for the negative copy pin that must prove a stale wording
+// appears nowhere in the sheet. The glob follows the split without a second
+// hand-maintained module list.
+func settingsModuleText(t *testing.T) string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(repositoryRoot(t), "internal", "web", "static", "js", "settings*.js"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("settings modules not found: %v", err)
+	}
+	var b strings.Builder
+	for _, p := range paths {
+		text, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		b.Write(text)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // settingsModuleSource reads one dashboard Settings module from the

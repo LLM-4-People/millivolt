@@ -674,7 +674,7 @@ function applyDashValues(v) {
 // appends them one at a time, so no module runs before the module it was
 // split from, and index.html never references one (first paint stays free
 // of the whole sheet). A new settings module joins this list only.
-const SETTINGS_MODULES = ['settings.js', 'settings_backup.js', 'settings_providers.js', 'settings_model_rules.js', 'settings_overrides.js'];
+const SETTINGS_MODULES = ['settings.js', 'settings_backup.js', 'settings_providers.js', 'settings_model_rules.js', 'settings_overrides.js', 'settings_subconversations.js'];
 let settingsLoadPromise = null;
 let settingsLoading = false;
 let settingsWantOpen = false;

@@ -418,7 +418,7 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 	}
 }
 
-// TestSubConversationEditorWiringsPinnedInSource guards the settings.js
+// TestSubConversationEditorWiringsPinnedInSource guards the
 // sub-conversations editor wirings jsdom cannot exercise: the client
 // input's datalist association, the generator's matching datalist id, the
 // focus-time refresher's matching selector, the options' shared known-set
@@ -433,7 +433,13 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 // its autocomplete, an entry head whose number drifts from the server's
 // cited index, or an add control that ignores the cap.
 func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The delegated remove branches live with the shared provider-editor click
+	// owner, not the card renderer: read the module that owns that function.
+	clickSrc, err := staticFS.ReadFile("static/js/settings.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +477,7 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 	if !strings.Contains(paramRegion, ">= SUB_CONVERSATION_PARAMS_MAX") {
 		t.Error("addScParamRow's param add gate no longer routes through SUB_CONVERSATION_PARAMS_MAX")
 	}
-	clickRegion := sourceRegion(t, string(src), "function providersEditorClick")
+	clickRegion := sourceRegion(t, string(clickSrc), "function providersEditorClick")
 	if !strings.Contains(clickRegion, "[data-sc-rm]") {
 		t.Error("providersEditorClick lost the entry-card remove branch [data-sc-rm]")
 	}
@@ -480,7 +486,8 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 	}
 }
 
-// TestSubConversationParamGrammarMatchGoOwner pins the settings.js live param
+// TestSubConversationParamGrammarMatchGoOwner pins the
+// settings_subconversations.js live param
 // grammar to config.checkSubConversationParam, the single owner of the
 // tracked-param name grammar, and the editor's live message vocabulary to
 // the server's exact wording. Both sides are read from their sources (the
@@ -491,7 +498,7 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 // editor can never warn about a name the server accepts or accept one the
 // server rejects with different words.
 func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,10 +515,10 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 	goUpper := firstSubmatch(t, goFn, `b > 0x([0-9a-fA-F]+)`)
 	jsUpper := firstSubmatch(t, jsFn, `c > 0x([0-9a-fA-F]+)`)
 	if jsLower != goLower || jsUpper != goUpper {
-		t.Errorf("the param byte band differs: settings.js scParamOK rejects outside %s..%s, config checkSubConversationParam outside %s..%s", jsLower, jsUpper, goLower, goUpper)
+		t.Errorf("the param byte band differs: settings_subconversations.js scParamOK rejects outside %s..%s, config checkSubConversationParam outside %s..%s", jsLower, jsUpper, goLower, goUpper)
 	}
 	if !strings.Contains(jsFn, "c === 0x22") || !strings.Contains(jsFn, "c === 0x5c") {
-		t.Error("settings.js scParamOK no longer rejects the quote (0x22) and backslash (0x5c) bytes")
+		t.Error("settings_subconversations.js scParamOK no longer rejects the quote (0x22) and backslash (0x5c) bytes")
 	}
 	if !strings.Contains(goFn, `b == '"'`) || !strings.Contains(goFn, `b == '\\'`) {
 		t.Error("config checkSubConversationParam no longer rejects the quote and backslash bytes")
@@ -529,7 +536,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 			t.Errorf("config checkSubConversationParam no longer carries the wording %q", wording)
 		}
 		if !strings.Contains(jsCard, wording) {
-			t.Errorf("settings.js validateScCard lost the server wording %q", wording)
+			t.Errorf("settings_subconversations.js validateScCard lost the server wording %q", wording)
 		}
 	}
 	// The byte-bound message: the Go side routes through errRange with the
@@ -540,7 +547,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 		t.Error(`config checkSubConversationParam's byte-bound error no longer routes through errRange(key, "1", strconv.Itoa(subConversationParamMaxBytes)+" bytes"`)
 	}
 	if !strings.Contains(jsCard, "must be 1..${SUB_CONVERSATION_PARAM_MAX_BYTES} bytes, got ") {
-		t.Error("settings.js validateScCard's byte-bound message no longer routes through SUB_CONVERSATION_PARAM_MAX_BYTES with the errRange wording")
+		t.Error("settings_subconversations.js validateScCard's byte-bound message no longer routes through SUB_CONVERSATION_PARAM_MAX_BYTES with the errRange wording")
 	}
 
 	// The list-level vocabulary: the required client, the required param,
@@ -560,7 +567,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 			t.Errorf("config validateSubConversations no longer carries %s %q", w.what, w.goText)
 		}
 		if !strings.Contains(jsCard, w.jsText) {
-			t.Errorf("settings.js validateScCard lost %s: the server says %q", w.what, w.goText)
+			t.Errorf("settings_subconversations.js validateScCard lost %s: the server says %q", w.what, w.goText)
 		}
 	}
 }
@@ -568,17 +575,18 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 // TestSubConversationCapsMatchGoOwner pins the three numeric contracts the
 // sub-conversations editor shares with config (the
 // TestRequestOverrideCapAndBandMatchGoOwner precedent): the entry cap
-// (settings.js SUB_CONVERSATIONS_MAX, the count line and entry add gate,
+// (settings_subconversations.js SUB_CONVERSATIONS_MAX, the count line and entry add gate,
 // against config.SubConversationsMax, the load-boundary cap), the params
-// cap (settings.js SUB_CONVERSATION_PARAMS_MAX, the param add gate, against
-// config.SubConversationParamsMax) and the param byte bound (settings.js
+// cap (settings_subconversations.js SUB_CONVERSATION_PARAMS_MAX, the param add gate, against
+// config.SubConversationParamsMax) and the param byte bound
+// (settings_subconversations.js
 // SUB_CONVERSATION_PARAM_MAX_BYTES, the live grammar check, against the
 // package-private subConversationParamMaxBytes, readable from source
 // only), plus the count line's own label. Drift would let the editor count
 // entries against a different cap than the load boundary or accept a
 // param list or name the server rejects.
 func TestSubConversationCapsMatchGoOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +596,7 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 	jsEntries := firstSubmatch(t, jsSrc, `const SUB_CONVERSATIONS_MAX = (\d+);`)
 	goEntries := firstSubmatch(t, caps, `SubConversationsMax\s*=\s*(\d+)`)
 	if jsEntries != goEntries {
-		t.Errorf("the entry cap differs: settings.js SUB_CONVERSATIONS_MAX = %s, config SubConversationsMax = %s", jsEntries, goEntries)
+		t.Errorf("the entry cap differs: settings_subconversations.js SUB_CONVERSATIONS_MAX = %s, config SubConversationsMax = %s", jsEntries, goEntries)
 	}
 	if n, err := strconv.Atoi(goEntries); err != nil || n != config.SubConversationsMax {
 		t.Errorf("config_defaults.go's SubConversationsMax literal %q disagrees with the exported config.SubConversationsMax = %d", goEntries, config.SubConversationsMax)
@@ -597,7 +605,7 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 	jsParams := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAMS_MAX = (\d+);`)
 	goParams := firstSubmatch(t, caps, `SubConversationParamsMax\s*=\s*(\d+)`)
 	if jsParams != goParams {
-		t.Errorf("the params cap differs: settings.js SUB_CONVERSATION_PARAMS_MAX = %s, config SubConversationParamsMax = %s", jsParams, goParams)
+		t.Errorf("the params cap differs: settings_subconversations.js SUB_CONVERSATION_PARAMS_MAX = %s, config SubConversationParamsMax = %s", jsParams, goParams)
 	}
 	if n, err := strconv.Atoi(goParams); err != nil || n != config.SubConversationParamsMax {
 		t.Errorf("config_defaults.go's SubConversationParamsMax literal %q disagrees with the exported config.SubConversationParamsMax = %d", goParams, config.SubConversationParamsMax)
@@ -606,7 +614,7 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 	jsBytes := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAM_MAX_BYTES = (\d+);`)
 	goBytes := firstSubmatch(t, caps, `const subConversationParamMaxBytes = (\d+)`)
 	if jsBytes != goBytes {
-		t.Errorf("the param byte bound differs: settings.js SUB_CONVERSATION_PARAM_MAX_BYTES = %s, config subConversationParamMaxBytes = %s", jsBytes, goBytes)
+		t.Errorf("the param byte bound differs: settings_subconversations.js SUB_CONVERSATION_PARAM_MAX_BYTES = %s, config subConversationParamMaxBytes = %s", jsBytes, goBytes)
 	}
 
 	// The count line label: "N / 16 entries" names the list's own
@@ -634,7 +642,7 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 // two halves, absent continuing the scan (the next field is checked) while
 // drop stops it (no later field is consulted).
 func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_subconversations.js")
 	if err != nil {
 		t.Fatal(err)
 	}

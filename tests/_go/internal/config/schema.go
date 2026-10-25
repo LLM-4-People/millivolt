@@ -942,12 +942,15 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		}
 	}
 
-	settings := repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings.js"))
+	// The strip label is owned by the sub-conversations editor; the negative
+	// scope check keeps its original whole-sheet reach through the module glob.
+	settings := repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings_subconversations.js"))
 	for name, text := range map[string]string{
 		"config comments": configSource,
 		"protocol doc":    protocol,
 		"operations doc":  operations,
 		"settings label":  settings,
+		"settings sheet":  settingsModuleText(t),
 	} {
 		if strings.Contains(text, "relayed upstream body") {
 			t.Errorf("%s still scopes strip to the relayed upstream body", name)
