@@ -380,10 +380,11 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 // would exceed the request byte budget.
 func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64, inbound ir.Protocol) (out []byte, changed bool, why string) {
 	// Narrow fast path: when ensured tools are the only configured action and
-	// the body already carries every name, one struct decode proves the
-	// document needs no rewrite. The general path would materialize every
-	// top-level value as json.RawMessage (a body-sized copy) and decode every
-	// tool entry again only to return the original bytes.
+	// the body already carries every name, one bounded lexical scan of the
+	// top-level keys plus the tools decode proves the document needs no
+	// rewrite. The general path would materialize every top-level value as
+	// json.RawMessage (a body-sized copy) and decode every tool entry again
+	// only to return the original bytes.
 	if ob == nil && len(strip) == 0 && len(ensureTools) > 0 && ensureToolsSatisfied(body, ensureTools) {
 		return body, false, ""
 	}
