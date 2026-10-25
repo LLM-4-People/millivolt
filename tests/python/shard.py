@@ -147,6 +147,35 @@ class RaceScopeTests(unittest.TestCase):
                 selectors={PROXY: ("*Stream*",)})
         self.assertEqual(failures, [])
 
+    def test_comment_and_literal_tokens_are_not_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "pkg.go").write_text(
+                "package fixture\n\n"
+                "// A future sync.Mutex, sync.WaitGroup and chan live here.\n"
+                "/* sync.Once in a block comment. */\n"
+                'var label = "sync.Pool and sync.Map"\n'
+                "var raw = `go work() and atomic.Int64`\n"
+                "var symbol = 'g'\n",
+                encoding="utf-8")
+            self.assertEqual(race_scope.primitive_evidence(Path(directory)), {})
+
+    def test_modern_sync_channel_and_go_statements_are_evidence(self):
+        cases = {
+            "waitgroup": "var wg sync.WaitGroup",
+            "once": "var once sync.Once",
+            "cond": "var cond *sync.Cond",
+            "map": "var table sync.Map",
+            "pool": "var pool sync.Pool",
+            "channel": "var events chan int",
+            "go statement": "func f() { go work() }",
+        }
+        for label, declaration in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                Path(directory, "pkg.go").write_text(
+                    'package fixture\n\nimport "sync"\n\n' + declaration + "\n",
+                    encoding="utf-8")
+                self.assertTrue(race_scope.primitive_evidence(Path(directory)))
+
     def test_selector_must_match_a_listed_test(self):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "pkg.go").write_text(

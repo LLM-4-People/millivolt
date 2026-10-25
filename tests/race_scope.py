@@ -22,22 +22,31 @@ race coverage without maintaining a second list.
 from __future__ import annotations
 
 import fnmatch
+import re
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 MODULE = "github.com/LLM-4-People/millivolt"
 
-# The production tokens that prove a package owns concurrency primitives. The
-# audit scans non-test Go sources in the package directory. Any package with a
-# hit must declare a race selector, unless AUDIT_EXEMPTIONS documents why the
-# primitive cannot be exercised concurrently by a test.
-PRIMITIVE_TOKENS = (
-    "go func(",
-    ".Go(func",
-    "errgroup.",
-    "sync.Mutex",
-    "sync.RWMutex",
-    "atomic.",
+# The production constructs that prove a package owns concurrency primitives.
+# The audit lexes non-test Go sources in the package directory, blanking
+# comments and string/rune literal bodies first, so prose and data can never
+# fake evidence. Any package with a hit must declare a race selector, unless
+# AUDIT_EXEMPTIONS documents why the primitive cannot be exercised
+# concurrently by a test.
+PRIMITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("go statement", re.compile(r"\bgo\s+\S")),
+    ("chan", re.compile(r"\bchan\b")),
+    (".Go(func", re.compile(r"\.Go\(func")),
+    ("errgroup.", re.compile(r"\berrgroup\.")),
+    ("sync.Mutex", re.compile(r"\bsync\.Mutex\b")),
+    ("sync.RWMutex", re.compile(r"\bsync\.RWMutex\b")),
+    ("sync.WaitGroup", re.compile(r"\bsync\.WaitGroup\b")),
+    ("sync.Once", re.compile(r"\bsync\.Once\b")),
+    ("sync.Cond", re.compile(r"\bsync\.Cond\b")),
+    ("sync.Map", re.compile(r"\bsync\.Map\b")),
+    ("sync.Pool", re.compile(r"\bsync\.Pool\b")),
+    ("atomic.", re.compile(r"\batomic\.")),
 )
 
 # Package import path -> test-name patterns that run under -race. Everything
@@ -216,8 +225,58 @@ def select(package: str, names: Sequence[str], *, all_race: bool = False
     return race, plain
 
 
+def _strip_comments_and_literals(text: str) -> str:
+    """Blank comment and string/rune literal bodies, preserving newlines.
+
+    Lexing in one pass means a ``//`` inside a string is data, not a comment,
+    and a quote inside a comment cannot start a literal. Newlines survive so
+    multi-line comments and raw strings keep their line shape.
+    """
+    blanked: list[str] = []
+    index = 0
+    length = len(text)
+
+    def blank(start: int, end: int) -> str:
+        return "".join("\n" if char == "\n" else " " for char in text[start:end])
+
+    while index < length:
+        char = text[index]
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            end = length if end < 0 else end
+            blanked.append(blank(index, end))
+            index = end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            end = length if end < 0 else end + 2
+            blanked.append(blank(index, end))
+            index = end
+        elif char in {'"', "'"}:
+            end = index + 1
+            while end < length:
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                if text[end] == char:
+                    end += 1
+                    break
+                end += 1
+            end = min(end, length)
+            blanked.append(blank(index, end))
+            index = end
+        elif char == "`":
+            end = text.find("`", index + 1)
+            end = length if end < 0 else end + 1
+            blanked.append(blank(index, end))
+            index = end
+        else:
+            blanked.append(char)
+            index += 1
+    return "".join(blanked)
+
+
 def primitive_evidence(directory: Path) -> dict[str, int]:
-    """Count production concurrency tokens in a package directory."""
+    """Count production concurrency constructs in a package directory."""
     evidence: dict[str, int] = {}
     for source in sorted(directory.glob("*.go")):
         if source.name.endswith("_test.go"):
@@ -226,10 +285,11 @@ def primitive_evidence(directory: Path) -> dict[str, int]:
             text = source.read_text(encoding="utf-8")
         except OSError as error:
             raise RuntimeError(f"cannot scan production source {source}") from error
-        for token in PRIMITIVE_TOKENS:
-            count = text.count(token)
+        code = _strip_comments_and_literals(text)
+        for label, pattern in PRIMITIVE_PATTERNS:
+            count = len(pattern.findall(code))
             if count:
-                evidence[token] = evidence.get(token, 0) + count
+                evidence[label] = evidence.get(label, 0) + count
     return evidence
 
 
