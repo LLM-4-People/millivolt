@@ -294,10 +294,32 @@ def overlay(root):
         yield path, replacements
 
 
+def _backing_digest(path):
+    """Hash one overlay backing file's bytes.
+
+    A content-only edit can change Go's file selection (adding a //go:build
+    constraint) while the path map and environment stay identical, so a
+    digest over paths alone certifies a selection that no longer exists.
+    """
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise RuntimeError("cannot hash Go test backing file: " + str(path)) from error
+
+
 def overlay_digest(replacements, environment):
-    """Fingerprint an overlay and the Go file-selection environment."""
+    """Fingerprint an overlay's paths, backing bytes and selection environment.
+
+    The handshake reuses one parity listing only while every input to that
+    listing is unchanged: which virtual path maps to which backing file, what
+    those files contain (their build constraints select tests), and the Go
+    file-selection environment.
+    """
     digest = hashlib.sha256()
     digest.update(json.dumps(replacements, sort_keys=True).encode("utf-8"))
+    for virtual in sorted(replacements):
+        digest.update(b"\0" + virtual.encode("utf-8") + b"\0"
+                      + _backing_digest(replacements[virtual]).encode("ascii"))
     for name in PARITY_ENVIRONMENT:
         digest.update(b"\0" + name.encode("ascii") + b"="
                       + environment.get(name, "").encode("utf-8"))

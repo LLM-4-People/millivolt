@@ -332,14 +332,22 @@ class DiscoveryTests(unittest.TestCase):
 class ParityHandshakeTests(unittest.TestCase):
     """The build handshake must describe exactly the overlay parity proved."""
 
-    mapping = {"/src/pkg/value_test.go": "/src/tests/_go/pkg/value.go"}
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="millivolt-parity-")
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.first = root / "value.go"
+        self.first.write_text("package fixture\n", encoding="utf-8")
+        self.second = root / "extra.go"
+        self.second.write_text("package fixture\n", encoding="utf-8")
+        self.mapping = {"/src/pkg/value_test.go": str(self.first)}
 
     def test_digest_is_stable_for_the_same_proof(self):
         self.assertEqual(go.overlay_digest(self.mapping, {}),
                          go.overlay_digest(dict(self.mapping), {}))
 
     def test_digest_changes_with_the_overlay(self):
-        extra = {**self.mapping, "/src/pkg/extra_test.go": "/src/tests/_go/pkg/extra.go"}
+        extra = {**self.mapping, "/src/pkg/extra_test.go": str(self.second)}
         self.assertNotEqual(go.overlay_digest(self.mapping, {}),
                             go.overlay_digest(extra, {}))
 
@@ -348,6 +356,15 @@ class ParityHandshakeTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(go.overlay_digest(self.mapping, {}),
                                     go.overlay_digest(self.mapping, {name: "fixture"}))
+
+    def test_digest_changes_with_backing_file_content(self):
+        # A content-only build-constraint edit changes which tests Go lists,
+        # but the path map and environment stay identical. The parity digest
+        # must cover the bytes, or a stale handshake skips verification and an
+        # assigned -test.run exits 0 without running the now-missing test.
+        before = go.overlay_digest(self.mapping, {})
+        self.first.write_text("//go:build integration\n\npackage fixture\n", encoding="utf-8")
+        self.assertNotEqual(go.overlay_digest(self.mapping, {}), before)
 
 
 if __name__ == "__main__":
