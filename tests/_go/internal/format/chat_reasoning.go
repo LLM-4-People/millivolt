@@ -74,6 +74,18 @@ func TestChatReasoningTextFallback(t *testing.T) {
 		}
 	})
 
+	t.Run("empty details carry no loss", func(t *testing.T) {
+		for _, value := range []string{`[]`, `[ ]`, `{}`, `{ }`, `""`, `null`} {
+			resp := chatReasoningResponse(t, `{"role":"assistant","content":"ok","reasoning_details":`+value+`}`)
+			if reasoning := chatReasoningBlock(resp); reasoning != nil {
+				t.Fatalf("empty reasoning_details %s produced a block: %+v", value, reasoning)
+			}
+			if got := warningCount(resp.Warnings, ir.WarningDropped, "reasoning_details"); got != 0 {
+				t.Fatalf("empty reasoning_details %s warned: %+v", value, resp.Warnings)
+			}
+		}
+	})
+
 	t.Run("plain text wins over structured details", func(t *testing.T) {
 		resp := chatReasoningResponse(t, `{"role":"assistant","content":"","reasoning_text":"plain","reasoning_details":[{"type":"reasoning.text","text":"structured"}]}`)
 		reasoning := chatReasoningBlock(resp)

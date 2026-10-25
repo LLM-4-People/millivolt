@@ -648,6 +648,26 @@ func rawPresent(raw json.RawMessage) bool {
 	return len(raw) > 0 && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
+// rawNonEmpty reports whether a JSON field carries any content. Absent, null,
+// an empty array, an empty object and an empty string are empty; every other
+// value is content. It is the predicate for a loss report, so an empty
+// compatibility extension never claims something was dropped.
+func rawNonEmpty(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return false
+	}
+	switch trimmed[0] {
+	case '[', '{':
+		return len(trimmed) > 2 && len(bytes.TrimSpace(trimmed[1:len(trimmed)-1])) > 0
+	case '"':
+		var s string
+		return json.Unmarshal(trimmed, &s) == nil && s != ""
+	default:
+		return true
+	}
+}
+
 // decodeLegacyChatFunctions converts the deprecated top-level Chat "functions"
 // array through the same validator as modern tools.
 func decodeLegacyChatFunctions(raw json.RawMessage) ([]ir.Tool, error) {
@@ -1976,10 +1996,11 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 			Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
 		}}, blocks...)
 	}
-	if rawPresent(choice.Message.ReasoningDetails) {
+	if rawNonEmpty(choice.Message.ReasoningDetails) {
 		// Structured detail items are provider-specific and no documented
 		// Chat field can carry them. Never synthesize reasoning text from
-		// their members; report the loss instead.
+		// their members; report the loss instead. An empty array, object or
+		// string carries no detail to drop.
 		warns.AddOnce(ir.WarningDropped, "reasoning_details",
 			"structured reasoning details have no canonical text representation")
 	}
