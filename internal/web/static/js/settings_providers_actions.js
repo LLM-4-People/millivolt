@@ -4,7 +4,7 @@
 // handlers mutate their DOM and rebuild only the affected section. The click
 // owner also carries the sub-conversations remove branches (the same delegated
 // sheet listener). settings.js owns the accepted document and the shell;
-// chrome.js's SETTINGS_MODULES list owns the load order.
+// chrome_settings.js's SETTINGS_MODULES list owns the load order.
 
 function addAliasRow(row) {
   const fromIn = row.querySelector('.al-new-from');

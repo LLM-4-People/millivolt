@@ -4,7 +4,7 @@
 // The sheet itself lives in the lazy settings modules.
 
 // ---------- settings shell and lazy module ----------
-// chrome.js keeps only the Settings shell: the header trigger, the one-shot
+// chrome_settings.js keeps only the Settings shell: the header trigger, the one-shot
 // versioned loader, the sheet's open-state probe, the shared status line and
 // the single close entry point. The sheet's state, rendering, editors,
 // apply/revert and backup/restore/purge controls live in the settings

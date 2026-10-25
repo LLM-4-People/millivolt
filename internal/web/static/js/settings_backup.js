@@ -3,7 +3,7 @@
 // deletions. The shared live snapshot and scalar field renderers live here too
 // because the backup pane and every category field row are painted by the same
 // fill pass. settings.js owns the accepted document and the shell; this module
-// only renders and runs these surfaces, and chrome.js's SETTINGS_MODULES list
+// only renders and runs these surfaces, and chrome_settings.js's SETTINGS_MODULES list
 // owns the load order.
 
 let backupMode = 'replace';

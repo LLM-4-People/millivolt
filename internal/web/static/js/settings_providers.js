@@ -2,7 +2,7 @@
 // maps, cost-key chips, upstream header rows, and the provider alias editor.
 // The two name grammars (PROV_PATH_RE for dotted JSON paths, PROV_HEADER_RE for
 // RFC 7230 field names) are mirrored by the Go owners in internal/config.
-// settings.js owns the accepted document and the shell; chrome.js's
+// settings.js owns the accepted document and the shell; chrome_settings.js's
 // SETTINGS_MODULES list owns the load order.
 
 // ---- providers editor ----

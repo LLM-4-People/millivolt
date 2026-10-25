@@ -2,7 +2,7 @@
 // reported model spelling before it reaches a dimension, their RE2 lint, the
 // traffic preview bench and the draft validators. The three mode literals are
 // mirrored by config's rule-mode vocabulary. settings.js owns the accepted
-// document and the shell; chrome.js's SETTINGS_MODULES list owns the load
+// document and the shell; chrome_settings.js's SETTINGS_MODULES list owns the load
 // order.
 
 // ---- model rules editor ----

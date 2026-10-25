@@ -2,7 +2,7 @@
 // its ordered top-level body fields, and the strip switch that removes those
 // fields from the client request body before relay or translation. The entry
 // cap, param cap and byte band are mirrored by config's owners. settings.js
-// owns the accepted document and the shell; chrome.js's SETTINGS_MODULES list
+// owns the accepted document and the shell; chrome_settings.js's SETTINGS_MODULES list
 // owns the load order.
 
 // ---- sub-conversations editor ----

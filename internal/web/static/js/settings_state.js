@@ -557,7 +557,7 @@ document.getElementById('settings-rail')?.addEventListener('click', e => {
 
 // ---------- storage purge controls ----------
 // These are the settings sheet's own destructive controls (the shared filter
-// preview primitives stay in chrome.js with the Logs menu). They announce
+// preview primitives stay in chrome_menus.js with the Logs menu). They announce
 // through the sheet's status line and share one in-flight gate.
 function updateDelCount() {
   return updateFilterCount('del', 'del-count', 'btn-del-matching', n => 'will delete ' + recPhrase(n), () => _purgeBusy);
@@ -630,5 +630,5 @@ async function purgeMetrics(filter) {
   }
 }
 
-// The chrome.js shell delegates close/open here after this module loads.
+// The chrome_settings.js shell delegates close/open here after this module loads.
 window.settingsModule = { open: openSettings, close: settingsClose };

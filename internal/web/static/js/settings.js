@@ -1,6 +1,6 @@
 // Settings sheet entry: the accepted document, the form shell, open/close and
-// the fetch/refill pass. chrome.js owns the header trigger, the lazy loader
-// (SETTINGS_MODULES) and the open-state probe; the editor, state and backup
+// the fetch/refill pass. chrome_settings.js owns the header trigger, the lazy
+// loader (SETTINGS_MODULES) and the open-state probe; the editor, state and backup
 // surfaces live in the settings modules that list loads after this one, on
 // the first Settings open. Keep every moved global global: the dashboard is
 // not an ES module and the existing tests drive these names directly.
@@ -89,7 +89,7 @@ function settingsBaseStatus(doc) {
   return doc.writable ? settingsRestartNotice(doc) : 'in-memory only - start with -config to persist';
 }
 
-// openSettings is the sheet's open owner, called by the chrome.js trigger
+// openSettings is the sheet's open owner, called by the chrome shell trigger
 // after this module loads. It preserves the original open sequence.
 function openSettings() {
   if (settingsIsOpen()) { settingsClose(); return; }
@@ -116,7 +116,7 @@ function openSettings() {
   });
 }
 
-// settingsClose is the real close owner behind chrome.js's closeSettings
+// settingsClose is the real close owner behind the chrome shell's closeSettings
 // delegate: the dirty-draft guard, focus restoration and veil/modal teardown
 // are unchanged.
 function settingsClose(force) {
@@ -282,7 +282,7 @@ function fillSettingsForm(doc) {
   updateSettingsActions();
 }
 
-// The entry is SETTINGS_MODULES[0] (chrome.js owns the list). A page that
+// The entry is SETTINGS_MODULES[0] (chrome_settings.js owns the list). A page that
 // included this script directly, without the production loader - the jsdom
 // suite does - still gets the rest of the sheet: resume the one sequential
 // pass after this module. Under the production loader that promise is

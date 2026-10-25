@@ -4,7 +4,7 @@
 // ceilings apply to Chat Completions or Anthropic client bodies before
 // translation. The rule cap, body band and forbidden-header vocabulary are
 // mirrored by config's owners. settings.js owns the accepted document and the
-// shell; chrome.js's SETTINGS_MODULES list owns the load order.
+// shell; chrome_settings.js's SETTINGS_MODULES list owns the load order.
 
 // ---- request overrides editor ----
 // request_overrides: ordered rules rewriting the upstream request before
