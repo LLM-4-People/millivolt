@@ -90,6 +90,7 @@ func TestDeliveryConsumersDoNotDeclareDefaults(t *testing.T) {
 		filepath.Join(root, "cmd", "proxy", "deadline.go"),
 		filepath.Join(root, "internal", "proxy", "sse_keepalive.go"),
 		filepath.Join(root, "internal", "proxy", "stream_idle.go"),
+		filepath.Join(root, "internal", "proxy", "relay_nonstream.go"),
 		filepath.Join(root, "internal", "proxy", "relay.go"),
 		filepath.Join(root, "internal", "proxy", "proxy.go"),
 	}
