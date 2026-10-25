@@ -446,19 +446,6 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, e
 	return out, true, ""
 }
 
-// chatMessagesPresence records whether the top-level messages member is a JSON
-// array without copying it. The enclosing document decode validates syntax, so
-// the one shared predicate can inspect the first token: null, an object, a
-// string or a scalar is not the documented chat-completions messages array.
-type chatMessagesPresence struct {
-	array bool
-}
-
-func (m *chatMessagesPresence) UnmarshalJSON(raw []byte) error {
-	m.array = chatMessagesArray(raw)
-	return nil
-}
-
 // chatMessagesArray is the single chat-body predicate shared by the no-copy
 // fast path and the general rewrite path. Only a top-level JSON array is the
 // documented messages member; every other shape leaves the body unrewritten,
@@ -469,39 +456,103 @@ func chatMessagesArray(raw json.RawMessage) bool {
 }
 
 // ensureToolsSatisfied reports whether the ensured-tools actor would leave the
-// body unchanged: no top-level messages array (the actor skips non-chat
-// bodies) or every configured name already present in the tools array. One
-// struct decode replaces the general path's raw-value map plus per-entry
-// decode; any shape it cannot prove satisfied falls back to that path, so the
-// skip semantics stay exactly ensureToolsInBody's.
+// body unchanged: no exact top-level messages array (the actor skips non-chat
+// bodies), a tools value that is not an array (the actor skips it), or every
+// configured name already present. One lexical scan finds the exact top-level
+// keys with last-occurrence-wins semantics, the same keys the general path's
+// map decode sees; a case variant is a different key to both paths. Any shape
+// the scan cannot prove unchanged falls back to the general path, which owns
+// the rewrite and its fail-closed errors.
 func ensureToolsSatisfied(body []byte, ensureTools []string) bool {
-	var doc struct {
-		Messages chatMessagesPresence `json:"messages"`
-		Tools    []struct {
-			Function struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
-	}
-	if json.Unmarshal(body, &doc) != nil {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' || !json.Valid(trimmed) {
 		return false
 	}
-	if !doc.Messages.array {
+	var messages, tools json.RawMessage
+	i := metrics.SkipSpace(trimmed, 1)
+	for i < len(trimmed) && trimmed[i] != '}' {
+		keyStart := i
+		keyEnd := skipJSONString(trimmed, i)
+		if keyEnd < 0 {
+			return false
+		}
+		var key string
+		if json.Unmarshal(trimmed[keyStart:keyEnd], &key) != nil {
+			return false
+		}
+		i = metrics.SkipSpace(trimmed, keyEnd)
+		if i >= len(trimmed) || trimmed[i] != ':' {
+			return false
+		}
+		i = metrics.SkipSpace(trimmed, i+1)
+		valueStart := i
+		valueEnd := skipJSONValue(trimmed, i)
+		if valueEnd < 0 {
+			return false
+		}
+		switch key {
+		case "messages":
+			messages = trimmed[valueStart:valueEnd]
+		case "tools":
+			tools = trimmed[valueStart:valueEnd]
+		}
+		i = metrics.SkipSpace(trimmed, valueEnd)
+		if i >= len(trimmed) {
+			return false
+		}
+		if trimmed[i] == ',' {
+			i = metrics.SkipSpace(trimmed, i+1)
+			if i >= len(trimmed) || trimmed[i] == '}' {
+				return false
+			}
+			continue
+		}
+		if trimmed[i] != '}' {
+			return false
+		}
+	}
+	if i >= len(trimmed) || trimmed[i] != '}' || metrics.SkipSpace(trimmed, i+1) != len(trimmed) {
+		return false
+	}
+	if !chatMessagesArray(messages) {
+		return true
+	}
+	if len(tools) == 0 {
+		return false
+	}
+	have, _, array := toolsArrayNames(tools)
+	if !array {
 		return true
 	}
 	for _, want := range ensureTools {
-		found := false
-		for i := range doc.Tools {
-			if doc.Tools[i].Function.Name == want {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !have[want] {
 			return false
 		}
 	}
 	return true
+}
+
+// toolsArrayNames decodes the function names one top-level tools value
+// declares. array is false when the value is not a JSON array, which the actor
+// treats as a body it must not touch. Malformed entries are ignored exactly
+// like the rewrite path ignores them.
+func toolsArrayNames(raw json.RawMessage) (names map[string]bool, entries int, array bool) {
+	names = make(map[string]bool)
+	var decoded []json.RawMessage
+	if json.Unmarshal(raw, &decoded) != nil {
+		return names, 0, false
+	}
+	for _, entry := range decoded {
+		var fn struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(entry, &fn) == nil && fn.Function.Name != "" {
+			names[fn.Function.Name] = true
+		}
+	}
+	return names, len(decoded), true
 }
 
 // ensureToolStub is the inert function stub injected for a configured name a
@@ -538,21 +589,11 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 	have := make(map[string]bool, len(ensureTools))
 	clientTools := 0
 	if raw, ok := doc["tools"]; ok {
-		var entries []json.RawMessage
-		if err := json.Unmarshal(raw, &entries); err != nil {
+		var array bool
+		have, clientTools, array = toolsArrayNames(raw)
+		if !array {
 			// Not an array: not a chat tools field the stubs belong in.
 			return false, ""
-		}
-		clientTools = len(entries)
-		for _, entry := range entries {
-			var fn struct {
-				Function struct {
-					Name string `json:"name"`
-				} `json:"function"`
-			}
-			if json.Unmarshal(entry, &fn) == nil && fn.Function.Name != "" {
-				have[fn.Function.Name] = true
-			}
 		}
 	}
 	var additions []json.RawMessage

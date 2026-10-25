@@ -216,9 +216,9 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 	const maxBytes = 1 << 20
 	names := []string{"wanted"}
 	for _, tc := range []struct {
-		name string
-		body string
-		chat bool
+		name     string
+		body     string
+		rewrites bool
 	}{
 		{"absent", `{"model":"m"}`, false},
 		{"null", `{"model":"m","messages":null}`, false},
@@ -229,6 +229,13 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 		{"number", `{"model":"m","messages":1}`, false},
 		{"duplicate messages last array", `{"model":"m","messages":null,"messages":[]}`, true},
 		{"duplicate messages last null", `{"model":"m","messages":[],"messages":null}`, false},
+		{"case-variant Messages null", `{"model":"m","messages":[{"role":"user","content":"hi"}],"Messages":null}`, true},
+		{"case-variant Tools satisfied", `{"model":"m","messages":[{"role":"user","content":"hi"}],"Tools":[{"type":"function","function":{"name":"wanted"}}]}`, true},
+		{"canonical satisfied control", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"wanted"}}]}`, false},
+		{"non-array tools object", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":{}}`, false},
+		{"non-array tools string", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":"x"}`, false},
+		{"duplicate tools last satisfied", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[],"tools":[{"type":"function","function":{"name":"wanted"}}]}`, false},
+		{"duplicate tools last empty", `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"wanted"}}],"tools":[]}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(tc.body)
@@ -248,9 +255,17 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 			if why != "" {
 				t.Fatal(why)
 			}
-			if !tc.chat {
+			// A non-nil override forces the general path. The fast path must
+			// produce exactly the same bytes and rewrite decision as that
+			// authoritative path for the same body.
+			forced, forcedRewrote, forcedWhy := overrideRequestBody(body, &config.OverrideBody{}, nil, names, maxBytes, ir.Chat)
+			if forcedWhy != why || forcedRewrote != rewrote || !bytes.Equal(forced, out) {
+				t.Fatalf("empty override changed the outcome: fast rewrote=%v why=%q vs forced rewrote=%v why=%q\nfast: %s\nforced: %s",
+					rewrote, why, forcedRewrote, forcedWhy, out, forced)
+			}
+			if !tc.rewrites {
 				if rewrote || !bytes.Equal(out, body) {
-					t.Fatalf("non-chat body rewritten:\n got %s\nwant %s", out, body)
+					t.Fatalf("unchanged body was rewritten:\n got %s\nwant %s", out, body)
 				}
 				return
 			}
@@ -279,12 +294,16 @@ func TestEnsureToolsChatShapeParity(t *testing.T) {
 
 	// Invalid JSON never parses, so the fast path cannot claim satisfaction and
 	// the general path fails closed; the caller relays the original bytes.
-	invalid := []byte(`{"model":"m","messages":`)
-	if ensureToolsSatisfied(invalid, names) {
-		t.Fatal("invalid JSON must not report a satisfied ensure-tools body")
-	}
-	if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes, ir.Chat); rewrote || why == "" || out != nil {
-		t.Fatalf("invalid JSON rewrite = %q/%v/%q, want the fail-closed outcome", out, rewrote, why)
+	for _, invalid := range [][]byte{
+		[]byte(`{"model":"m","messages":`),
+		[]byte(`{"model":"m","messages":[],"tools":[}`),
+	} {
+		if ensureToolsSatisfied(invalid, names) {
+			t.Fatalf("invalid JSON must not report a satisfied ensure-tools body: %s", invalid)
+		}
+		if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes, ir.Chat); rewrote || why == "" || out != nil {
+			t.Fatalf("invalid JSON rewrite = %q/%v/%q, want the fail-closed outcome", out, rewrote, why)
+		}
 	}
 }
 
