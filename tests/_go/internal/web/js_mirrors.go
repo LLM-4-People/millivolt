@@ -129,7 +129,8 @@ func TestSettingsCategoryRefKeysMatchGoCategories(t *testing.T) {
 	}
 }
 
-// TestModelRuleModesMatchGoVocabulary pins settings.js MODEL_RULE_MODES to
+// TestModelRuleModesMatchGoVocabulary pins settings_model_rules.js
+// MODEL_RULE_MODES to
 // config's exported rule-mode constants (ModelRuleExact/Pattern/Lower - the
 // literals ValidateModelRules switches on, so they are the complete Go
 // vocabulary). The editor's mode dropdown and the draft fallback both read
@@ -140,7 +141,7 @@ func TestSettingsCategoryRefKeysMatchGoCategories(t *testing.T) {
 // so ui_check pins the rendered option values (the labels-as-values order)
 // while this Go pin owns the declared value half's sequence.
 func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_model_rules.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,7 @@ func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
 	}
 	want := []string{config.ModelRuleExact, config.ModelRulePattern, config.ModelRuleLower}
 	if !slices.Equal(got, want) {
-		t.Fatalf("settings.js MODEL_RULE_MODES values = %v, want the config rule-mode vocabulary %v", got, want)
+		t.Fatalf("settings_model_rules.js MODEL_RULE_MODES values = %v, want the config rule-mode vocabulary %v", got, want)
 	}
 }
 
