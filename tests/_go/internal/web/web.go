@@ -570,23 +570,23 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 // TestCanonicalFieldFallbacksMatchOwners locks the dashboard's settings
 // fallback lists and the ui_check fixture to their single Go owners, so a
 // field added or removed on either side fails the build:
-//   - settings.js USAGE_FIELDS_FALLBACK == metrics.CanonicalUsageFields (the
-//     canonical token fields, served by GET /admin/config as usage_fields)
-//   - settings.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields (the
-//     /v1/models enrichment vocabulary, served as model_fields)
+//   - settings_providers.js USAGE_FIELDS_FALLBACK == metrics.CanonicalUsageFields
+//     (the canonical token fields, served by GET /admin/config as usage_fields)
+//   - settings_providers.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields
+//     (the /v1/models enrichment vocabulary, served as model_fields)
 //   - ui_harness/fixtures.js cfgDoc.usage_fields ==
 //     metrics.CanonicalUsageFields (the harness stubs the /admin/config
 //     payload and asserts its dropdown)
 func TestCanonicalFieldFallbacksMatchOwners(t *testing.T) {
-	js, err := staticFS.ReadFile("static/js/settings.js")
+	js, err := staticFS.ReadFile("static/js/settings_providers.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := jsStringList(t, js, "USAGE_FIELDS_FALLBACK = "), metrics.CanonicalUsageFields; !slices.Equal(got, want) {
-		t.Errorf("settings.js USAGE_FIELDS_FALLBACK = %v, want metrics.CanonicalUsageFields %v", got, want)
+		t.Errorf("settings_providers.js USAGE_FIELDS_FALLBACK = %v, want metrics.CanonicalUsageFields %v", got, want)
 	}
 	if got, want := jsStringList(t, js, "MODEL_FIELDS_FALLBACK = "), format.CanonicalModelFields; !slices.Equal(got, want) {
-		t.Errorf("settings.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
+		t.Errorf("settings_providers.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
 	}
 	root := moduleRoot(t)
 	// cfgDoc lives in the harness fixtures owner, not the runner: the jsdom
@@ -716,21 +716,34 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		t.Fatal("served index must carry exactly one stamped dashboard version meta and no unstamped marker")
 	}
 
-	// settings.js is the one lazy shell asset: the Settings trigger injects
-	// it with the meta version on first open, so the first-paint index must
-	// not carry it and the loader must name the versioned URL.
-	if referenced["js/settings.js"] {
-		t.Error("index.html must not load settings.js on first paint")
+	// The Settings sheet is lazy: chrome_settings.js owns one ordered
+	// SETTINGS_MODULES list, the trigger injects each module with the meta
+	// version on first open, so the first-paint index must not carry any
+	// js/settings* asset and the walk exemption is membership in that list.
+	for _, ref := range rels {
+		if strings.HasPrefix(ref.rel, "js/settings") {
+			t.Errorf("index.html must not load %s on first paint", ref.rel)
+		}
 	}
-	chrome, err := staticFS.ReadFile("static/js/chrome.js")
+	chrome, err := staticFS.ReadFile("static/js/chrome_settings.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(chrome, []byte(`'/dash/js/settings.js?v='`)) {
-		t.Error("chrome.js does not name the versioned settings.js trigger URL")
+	settingsModule := map[string]bool{}
+	for _, rel := range settingsModuleList(t, chrome) {
+		settingsModule[rel] = true
+		if !dashExists(rel) {
+			t.Errorf("SETTINGS_MODULES names %s but embedded static/%s is missing", rel, rel)
+		}
 	}
-	if !dashExists("js/settings.js") {
-		t.Error("embedded static/js/settings.js missing")
+	// One URL builder must carry the dashboard version for every listed
+	// module: an unversioned lazy URL would pin stale bytes across a rebuild.
+	if !bytes.Contains(chrome, []byte(`'/dash/js/' + name + '?v='`)) ||
+		!bytes.Contains(chrome, []byte(`encodeURIComponent(version)`)) {
+		t.Error("chrome_settings.js does not build each settings module URL from SETTINGS_MODULES and the dashboard version")
+	}
+	if !bytes.Contains(chrome, []byte(`function loadSettingsModule(`)) {
+		t.Error("chrome_settings.js is missing the sequential Settings loader")
 	}
 
 	err = fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
@@ -747,7 +760,7 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		if _, brand := brandByURL["/"+rel]; brand {
 			return nil
 		}
-		if rel == "js/settings.js" {
+		if settingsModule[rel] {
 			return nil // lazy: injected by the Settings trigger, never first paint
 		}
 		if !referenced[rel] {
@@ -758,6 +771,42 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// settingsModuleList extracts the ordered SETTINGS_MODULES owner list from
+// chrome_settings.js and returns its entries as embed-relative js/ paths. The list is
+// the single owner of the lazy Settings scripts, so it fails loudly on a
+// missing declaration, an entry outside js/settings*.js, a duplicate, an
+// empty list, or an entry-first order that would load an editor first.
+func settingsModuleList(t *testing.T, chrome []byte) []string {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)const SETTINGS_MODULES = \[(.*?)\];`).FindSubmatch(chrome)
+	if m == nil {
+		t.Fatal("chrome_settings.js missing const SETTINGS_MODULES")
+	}
+	var mods []string
+	seen := map[string]bool{}
+	for _, q := range regexp.MustCompile(`'([^']+)'`).FindAllSubmatch(m[1], -1) {
+		name := string(q[1])
+		if !strings.HasPrefix(name, "settings") || !strings.HasSuffix(name, ".js") {
+			t.Errorf("SETTINGS_MODULES entry %q is not a settings*.js module", name)
+			continue
+		}
+		rel := "js/" + name
+		if seen[rel] {
+			t.Errorf("SETTINGS_MODULES repeats %q", rel)
+			continue
+		}
+		seen[rel] = true
+		mods = append(mods, rel)
+	}
+	if len(mods) == 0 {
+		t.Fatal("SETTINGS_MODULES lists no modules")
+	}
+	if mods[0] != "js/settings.js" {
+		t.Errorf("SETTINGS_MODULES[0] = %q, want the js/settings.js entry", mods[0])
+	}
+	return mods
 }
 
 // TestStaticETagRevalidation: static responses carry a weak ETag and

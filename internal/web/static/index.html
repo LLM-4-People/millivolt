@@ -56,7 +56,16 @@ try {
      Do not strip the license header in vendor/uplot.js. -->
 <script defer src="/dash/vendor/uplot.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/core.js?v=__DASHBOARD_VERSION__"></script>
-<script defer src="/dash/js/chrome.js?v=__DASHBOARD_VERSION__"></script>
+<!-- The chrome modules initialize in this order: chrome_lists.js owns the
+     duration vocabulary chrome_menus.js FILTER_AGES reads, and the pause
+     menu sync owners chrome_operator.js operatorState captures; the
+     settings shell owns the rest of those sync owners. -->
+<script defer src="/dash/js/chrome_storm.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/chrome_lists.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/chrome_settings.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/chrome_operator.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/chrome_menus.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/chrome_restart.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chart.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/entities.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log.js?v=__DASHBOARD_VERSION__"></script>
