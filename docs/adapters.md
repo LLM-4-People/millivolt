@@ -405,10 +405,12 @@ empty input, and Responses emits no done function-call item with empty
 arguments. The proxy error frame terminates the stream, so a client that keeps
 reading cannot execute an empty call. A failed, errored or truncated terminal
 instead drops only the unparseable call and keeps the provider error or
-truncation. An already-announced call on one of those three terminals can still
-close with `{}` because its block already reached the client; Chat reports a
-cancelled finish as `stop`, so that accepted limit is not distinguishable
-there. A Chat `[DONE]`
+truncation. On Anthropic and Responses, an already-announced open call is left
+unclosed on those three terminals: Anthropic emits no `content_block_stop`,
+Responses emits no done function-call item, and the proxy error frame ends the
+stream. The Chat target already streamed the announcement with empty arguments,
+and Chat reports a cancelled finish as `stop`, so that accepted limit is not
+distinguishable there. A Chat `[DONE]`
 without a preceding non-null finish reason is a clean transport terminator but
 an empty finish: a Responses target receives `response.incomplete` with
 `incomplete_details: null`, and the record reports `finish=other`. That
