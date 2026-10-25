@@ -49,6 +49,36 @@ func TestParseErrorComponentsKeepsStringSiblings(t *testing.T) {
 			raw:     `"boom"`,
 			wantMsg: "boom",
 		},
+		{
+			name:    "boolean code ignored with valid siblings",
+			raw:     `{"type":"server_error","code":true,"message":"boom"}`,
+			wantTyp: "server_error",
+			wantMsg: "boom",
+		},
+		{
+			name:    "object code ignored with valid siblings",
+			raw:     `{"type":"server_error","code":{"x":1},"message":"boom"}`,
+			wantTyp: "server_error",
+			wantMsg: "boom",
+		},
+		{
+			name:    "array code ignored with valid siblings",
+			raw:     `{"type":"server_error","code":[],"message":"boom"}`,
+			wantTyp: "server_error",
+			wantMsg: "boom",
+		},
+		{
+			name:    "zero numeric code retained",
+			raw:     `{"type":"provider_error","code":0,"message":"boom"}`,
+			wantTyp: "provider_error",
+			wantCde: "0",
+			wantMsg: "boom",
+		},
+		{
+			name:    "null code ignored",
+			raw:     `{"code":null,"message":"boom"}`,
+			wantMsg: "boom",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

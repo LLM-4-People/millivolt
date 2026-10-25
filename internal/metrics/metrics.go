@@ -606,12 +606,8 @@ func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 	}
 	switch raw[0] {
 	case '"':
-		_ = json.Unmarshal(raw, &msg)
+		typ, code, msg = ParseErrorMembers(nil, nil, raw)
 	case '{':
-		// Decode each member independently. One wrong-typed member (a gateway
-		// that nests a detail object under message, or a numeric type) must not
-		// erase its valid string siblings: the client still receives the error
-		// frame, and the record must still classify it.
 		var e struct {
 			Type    json.RawMessage `json:"type"`
 			Code    json.RawMessage `json:"code"`
@@ -620,14 +616,7 @@ func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return "", "", ""
 		}
-		typ, msg = rawErrorString(e.Type), rawErrorString(e.Message)
-		if c := bytes.TrimSpace(e.Code); len(c) > 0 && !bytes.Equal(c, []byte("null")) {
-			if c[0] == '"' {
-				_ = json.Unmarshal(c, &code)
-			} else {
-				code = string(c) // numeric code, kept verbatim
-			}
-		}
+		typ, code, msg = ParseErrorMembers(e.Type, e.Code, e.Message)
 	default:
 		// A number/bool/array under "error" is not a failure we can classify.
 		return "", "", ""
@@ -635,7 +624,37 @@ func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 	if typ == "" && code == "" && msg == "" {
 		return "", "", "" // empty object/string: a decoy, not a failure
 	}
-	return typ, code, TruncatePreview(msg)
+	return typ, code, msg
+}
+
+// ParseErrorMembers decodes the three independent members of an error value.
+// A wrong-typed member (a gateway that nests a detail object under message, a
+// numeric type, a boolean code) is ignored so its valid siblings survive. Code
+// accepts a JSON string or a bare number. The message is bounded.
+func ParseErrorMembers(typeRaw, codeRaw, messageRaw json.RawMessage) (typ, code, msg string) {
+	typ = rawErrorString(typeRaw)
+	code = rawErrorCode(codeRaw)
+	msg = TruncatePreview(rawErrorString(messageRaw))
+	return typ, code, msg
+}
+
+// rawErrorCode accepts the two documented code spellings, a string or a bare
+// number, and ignores every other JSON shape. Zero is a valid numeric code.
+func rawErrorCode(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		_ = json.Unmarshal(raw, &s)
+		return s
+	}
+	var n json.Number
+	if json.Unmarshal(raw, &n) == nil {
+		return n.String()
+	}
+	return ""
 }
 
 // parseErrorValue is the classification view every record path uses: the
