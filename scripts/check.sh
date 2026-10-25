@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 die() { echo "check: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
-usage="usage: scripts/check.sh [core | race | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
+usage="usage: scripts/check.sh [core | race | flake | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
 mode="${1:-core}"
 case "$mode" in
   core)
@@ -75,6 +75,24 @@ case "$mode" in
     # core shard, but every test runs under -race. Never part of the default
     # gate; the scheduled job owns when it runs.
     python3 -B -O -m tests.shard --all-race
+    ;;
+  flake)
+    (( $# == 1 )) || die "$usage"
+    need python3
+    need go
+    need git
+    # Escalation flake sweep: the clock-sensitive tests whose assertions
+    # observe real pacing, so the duration is the behaviour under test. Five
+    # repetitions each under the race detector, because this sweep is the
+    # safety net for every evidence-based plain-test decision in the default
+    # gate. Names are exact, not patterns: a rename must not silently shrink
+    # the sweep, and tests/python/workflows.py fails when a name declared here
+    # no longer exists in its package. Extend this list when a fixed sleep is
+    # replaced by a condition wait and the test keeps a timing contract.
+    flake_proxy='^(TestConsecutiveFailuresDoubleBackoff|TestRecoveredRequestResetsBackoff|TestConsecutiveExhausted429sDoubleBackoff|TestExhaustedRetriesPaceNextFirstSend|TestRetryAfterNotClampedToMaxBackoff|TestShortRetryAfterDoesNotResetAttemptBackoff|TestQuota429OnLastAttemptDoesNotPace|TestQuota429DoesNotPaceSibling|TestQuota429MaxRetriesZeroDoesNotPace|TestQuotaPauseRetryHonorsRetryAfterAndOperatorRelease)$'
+    flake_scheduler='^(TestRateLimitPacing|TestAdaptiveBackoff|TestBackoffForShortHintKeepsGrowing|TestBackoffForHonorsLongRetryAfter|TestBackoffForCapsPathologicalHint|TestWaitSendRetryAfterRemainingAcrossPause|TestWaitSendRetryAfterRemainingAfterShortPause|TestBackoffForDoesNotTripGroup|TestFailSendDoublesRequestBackoff|TestFailSendOwnClearsAttemptBackoff|TestQuotaGatePacingGrowsOnProbeFailuresAndHonorsRetryAfter|TestMixedFacetCloseKeepsTheQuotaProbePaced)$'
+    python3 -B -m tests.go test -race -count=5 -run "$flake_proxy" ./internal/proxy
+    python3 -B -m tests.go test -race -count=5 -run "$flake_scheduler" ./internal/scheduler
     ;;
   go)
     (( $# >= 2 )) || die "$usage"

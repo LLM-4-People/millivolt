@@ -645,7 +645,8 @@ class PublishedContracts(unittest.TestCase):
         # phrase itself rather than its leading article.
         self.assertIn("merged-pr event carries the exact merge commit", contributing.lower())
         self.assertIn("The release `publish` job waits for `required`", contributing)
-        self.assertIn("The `publish-testing` job waits for `checks` and `container`", contributing)
+        self.assertIn("The `publish-testing` job waits for `unit`, `browser` and "
+                      "`container`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
         self.assertIn("`main` and `latest` exclude prereleases", contributing)
 

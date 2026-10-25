@@ -52,11 +52,14 @@ docs and site-only pushes to `testing` run the smaller documentation gate in
 pull request to `main` runs only `check.yml`'s lightweight `required` promotion
 gate: it verifies the head is the current `testing` tip, `main` is already
 merged back into `testing`, and the full gate already succeeded for that
-commit: the canonical `check.yml` push run's own check suite, with `checks` and
-both native container legs. A final docs-only commit after the closest gated
-`testing` commit reuses that gate when every path since it is docs/site-only.
-The fallback selects the closest gated testing commit from canonical `testing`
-push runs, with no commit-count bound. For a
+commit: the canonical `check.yml` push run's own check suite, with `unit`,
+`browser` and both native container legs. A final docs-only commit after the
+closest gated `testing` commit reuses that gate when every path since it is
+docs/site-only. Every non-Dependabot promotion also starts
+[`escalation.yml`](.github/workflows/escalation.yml) on its head and must
+carry a successful `race` job for that exact commit; the proof waits under a
+bounded budget and fails closed. The fallback selects the closest gated testing
+commit from canonical `testing` push runs, with no commit-count bound. For a
 code-bearing head, let the `testing` `check.yml` push gate finish before opening
 or re-running a promotion PR; pending exact check runs get a short bounded wait
 and the proof fails closed while they remain pending. A docs/site-only head has
@@ -101,7 +104,9 @@ directly and therefore still runs the full gate.
    `main` is already merged back into `testing`; code-bearing promotions must
    also have a successful full-gate record for that exact commit, or for the
    closest gated `testing` commit when every path since it is docs/site-only,
-   and `VERSION` newer than every release tag.
+   and `VERSION` newer than every release tag. A non-Dependabot promotion also
+   needs the escalation workflow's `race` job to succeed for this head; it
+   starts with the PR, and `required` waits for it under a bounded budget.
    If it fails with "Promote the current testing tip", push the final commit to
    `testing` and reopen or update the PR. If it fails with "Merge main back
    into testing", merge `origin/main` into `testing` first. If it fails with
@@ -231,7 +236,7 @@ GitHub Pages Actions flow. Repository-level Pages enablement and the
 
 Never push `main` directly: open a promotion pull request and merge it with a
 merge commit. Do not push `testing` until the exact commit you will push has
-passed the same `checks` job CI runs. A request to push is not a waiver.
+passed the same CI gate jobs. A request to push is not a waiver.
 Package-scoped `go test` and `npm test` during development are not sufficient.
 CI's source-and-unit step is the default core suite:
 
@@ -245,12 +250,12 @@ matching toolchain before running the gate; `GOTOOLCHAIN=local` alone cannot
 upgrade an older installation.
 
 Full-gate CI events also run the isolated browser fixtures (desktop and mobile)
-in the `checks` job. Use `scripts/dev.sh` plus `scripts/check.sh browser` as
+in the `browser` job. Use `scripts/dev.sh` plus `scripts/check.sh browser` as
 below, with `MILLIVOLT_OPERATOR_TOKEN` set. Re-run both after the last commit. A
 red GitHub check after a push means the gate was skipped, stale, or unmonitored:
 fix, re-run, and push only a passing tree, then watch the new run to completion.
 
-That same `checks` job also runs the live MCP integration test, which
+That same `browser` job also runs the live MCP integration test, which
 `scripts/check.sh browser` alone does not run. It is mandatory on the same
 commit:
 
@@ -487,13 +492,17 @@ go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version
 
 Publication is automatic. A code-bearing versioned promotion releases when the
 promotion PR merges, after the full gate has passed for the promoted commit, or
-after the closest gated `testing` commit plus a docs-only delta. The merged-PR
+after the closest gated `testing` commit plus a docs-only delta. A non-Dependabot
+promotion also requires a successful
+[escalation](.github/workflows/escalation.yml) run for the reviewed head; the
+promotion PR starts it automatically, and `required` waits for it under a
+bounded, fail-closed proof. The merged-PR
 event carries the exact merge commit; a delivered `main` push is an idempotent
 fallback, so a dropped push event cannot leave the release untagged. A
 Dependabot security PR targets `main` and runs the full gate itself rather than
 reusing a `testing` result. The release `publish` job waits for `required`.
-The `publish-testing` job waits for `checks` and `container` instead, because a
-testing push has no promotion proof to wait for:
+The `publish-testing` job waits for `unit`, `browser` and `container` instead,
+because a testing push has no promotion proof to wait for:
 
 1. A code-bearing promotion PR owns the version bump. `required` compares
    VERSION against every existing `v*` tag with SemVer precedence and rejects a
