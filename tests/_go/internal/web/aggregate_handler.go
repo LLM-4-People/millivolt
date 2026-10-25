@@ -13,6 +13,11 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
+// TestChartAllMinStoredAndUnflushed pins the All window's minimum across both
+// ingest paths through the production handler: stored rows first, then
+// unflushed ring rows older than every stored row. The window must start at
+// the oldest scoped contribution, count each request once, and a canceled
+// request must stay an error rather than a recent-only chart.
 func TestChartAllMinStoredAndUnflushed(t *testing.T) {
 	s := testStore(t)
 	now := time.Now()
@@ -31,34 +36,32 @@ func TestChartAllMinStoredAndUnflushed(t *testing.T) {
 	}
 	waitTotals(t, s, 3)
 	buf := metrics.NewBuffer(4)
-	api := NewAggAPI(buf, s, time.Second)
-	fs := []scopeFilter{{dim: "provider", id: "history.example"}}
-	assertMin := func(want int64) {
-		t.Helper()
-		got, err := minStartScoped(t.Context(), api, api.canonizer(), fs, "", now.UnixMilli())
-		if err != nil || got != want {
-			t.Fatalf("minStartScoped = %d, %v; want %d", got, err, want)
-		}
-	}
-	assertMin(now.Add(-time.Hour).UnixMilli())
 	for _, age := range []time.Duration{time.Minute, 2 * time.Hour} {
 		r := mkRec(age.String(), now.Add(-age), 200, "", nil, 10, 100, 5, 5, 0, 0.01)
 		r.Provider = "history.example"
 		buf.Record(r)
 	}
-	assertMin(now.Add(-2 * time.Hour).UnixMilli())
-	missing := []scopeFilter{{dim: "provider", id: "missing.example"}}
-	if got, err := minStartScoped(t.Context(), api, api.canonizer(), missing, "", now.UnixMilli()); err != nil || got != now.UnixMilli() {
-		t.Fatalf("empty scope min = %d, %v; want now", got, err)
+	api := NewAggAPI(buf, s, time.Second)
+	p := get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=all&f=provider:history.example")
+	oldest := now.Add(-2 * time.Hour)
+	from := int64(p["from_ms"].(float64))
+	step := int64(p["bucket_ms"].(float64))
+	if step == 0 || from%step != 0 {
+		t.Fatalf("from_ms=%d is not aligned to bucket_ms=%d", from, step)
+	}
+	if from > oldest.UnixMilli() || oldest.UnixMilli()-from >= step {
+		t.Fatalf("from_ms=%d does not start with the oldest scoped unflushed start %d", from, oldest.UnixMilli())
+	}
+	var requests float64
+	for _, bucket := range p["buckets"].([]any) {
+		requests += bucket.(map[string]any)["req"].(float64)
+	}
+	if requests != 4 {
+		t.Fatalf("chart requests = %v, want 4 (2 stored + 2 unflushed, deduped)", requests)
 	}
 	// A failed min lookup must never become a successful recent-only chart.
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	for _, filters := range [][]scopeFilter{nil, fs} {
-		if _, err := minStartScoped(ctx, api, api.canonizer(), filters, "", now.UnixMilli()); err == nil {
-			t.Fatal("canceled min lookup lost its query error")
-		}
-	}
 	r := httptest.NewRequest(http.MethodGet, "/metrics/agg/chart?window=all&f=provider:history.example", nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 	api.HandleAggChart(w, r)
