@@ -766,7 +766,7 @@ func TestSettingsHintsStateTranslationScope(t *testing.T) {
 		notWant string
 	}{
 		{
-			module:  "settings.js",
+			module:  "settings_overrides.js",
 			want:    "on Chat Completions or Anthropic client bodies, before translation",
 			notWant: "on the OpenAI wire",
 		},
@@ -776,7 +776,7 @@ func TestSettingsHintsStateTranslationScope(t *testing.T) {
 			notWant: "every chat request's tools array",
 		},
 		{
-			module:  "settings.js",
+			module:  "settings_overrides.js",
 			want:    "Chat or Anthropic client-body token",
 			notWant: "OpenAI-wire token ceilings",
 		},

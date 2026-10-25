@@ -56,14 +56,6 @@ func settingsModuleSource(t *testing.T, name string) []byte {
 	return []byte(repositoryText(t, filepath.Join("internal", "web", "static", "js", name)))
 }
 
-// settingsJSSource is the entry module's source, for the copy pins that still
-// live in settings.js while the sheet is being split. Each is moved to its
-// owning module below as that module takes the literal.
-func settingsJSSource(t *testing.T) []byte {
-	t.Helper()
-	return settingsModuleSource(t, "settings.js")
-}
-
 // jsRegexLiteral extracts the pattern text of a `const NAME = /pattern/;`
 // declaration. Both mirrored patterns are slash-free; a future pattern
 // carrying one fails here loudly rather than half-matching.

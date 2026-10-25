@@ -254,13 +254,13 @@ func goMapStringStringPairs(t *testing.T, block string) map[string]string {
 // RO_FORBIDDEN_HEADERS, the request-overrides editor's live validation
 // vocabulary, to config's forbidden-header owner, name by name and reason by
 // reason, plus the control-prefix rule both sides share. The JS half is read
-// from the embedded settings.js literal; the config half is derived from the
+// from the embedded settings_overrides.js literal; the config half is derived from the
 // forbiddenOverrideHeaders map source and confirmed against the exported
 // ForbiddenOverrideHeader oracle, so a stale parse can never pass. Either
 // side dropping, adding or relabeling an entry reddens here before the
 // editor and the server can disagree about what an operator may override.
 func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_overrides.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,11 +276,11 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	jsNames := slices.Sorted(maps.Keys(jsPairs))
 	goNames := slices.Sorted(maps.Keys(goPairs))
 	if !slices.Equal(jsNames, goNames) {
-		t.Fatalf("forbidden override header names differ:\nsettings.js RO_FORBIDDEN_HEADERS = %v\nconfig forbiddenOverrideHeaders = %v", jsNames, goNames)
+		t.Fatalf("forbidden override header names differ:\nsettings_overrides.js RO_FORBIDDEN_HEADERS = %v\nconfig forbiddenOverrideHeaders = %v", jsNames, goNames)
 	}
 	for _, name := range goNames {
 		if jsPairs[name] != goPairs[name] {
-			t.Errorf("forbidden header %q: settings.js reason %q, config reason %q", name, jsPairs[name], goPairs[name])
+			t.Errorf("forbidden header %q: settings_overrides.js reason %q, config reason %q", name, jsPairs[name], goPairs[name])
 		}
 		if reason, forbidden := config.ForbiddenOverrideHeader(name); !forbidden || reason != goPairs[name] {
 			t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", name, reason, forbidden, goPairs[name])
@@ -298,14 +298,14 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	jsControl := firstSubmatch(t, jsFn, `return '([^']+)'`)
 	goControl := firstSubmatch(t, goFn, `return "([^"]+)", true`)
 	if jsPrefix != goPrefix || jsControl != goControl {
-		t.Fatalf("the control-prefix rule differs: settings.js (%q returns %q), config (%q returns %q)", jsPrefix, jsControl, goPrefix, goControl)
+		t.Fatalf("the control-prefix rule differs: settings_overrides.js (%q returns %q), config (%q returns %q)", jsPrefix, jsControl, goPrefix, goControl)
 	}
 	if reason, forbidden := config.ForbiddenOverrideHeader(jsPrefix + "pin"); !forbidden || reason != goControl {
 		t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", jsPrefix+"pin", reason, forbidden, goControl)
 	}
 }
 
-// TestRequestOverrideRuleCardWiringsPinnedInSource guards the settings.js
+// TestRequestOverrideRuleCardWiringsPinnedInSource guards the settings_overrides.js
 // rule-card wirings jsdom cannot exercise: the three scope inputs'
 // datalist associations, the generator's matching datalist id, the
 // focus-time refresher's matching selector, and the rule-number label's
@@ -320,7 +320,7 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 // input without its autocomplete or a rule head whose number drifts from
 // the server's cited index.
 func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_overrides.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,9 +357,9 @@ func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
 
 // TestRequestOverrideCapAndBandMatchGoOwner pins the two numeric
 // contracts the request-overrides editor shares with config: the rule
-// cap (settings.js REQUEST_OVERRIDES_MAX, the count line and template
+// cap (settings_overrides.js REQUEST_OVERRIDES_MAX, the count line and template
 // add gate, against config.RequestOverridesMax, the load-boundary cap)
-// and the body-ceiling band (settings.js REQUEST_OVERRIDE_BODY_MAX plus
+// and the body-ceiling band (settings_overrides.js REQUEST_OVERRIDE_BODY_MAX plus
 // validateRoRow's band check and message, against config's
 // validateRequestOverrides comparison and errRange bounds). Both sides
 // are read from their sources, the ForbiddenHeaders-pin precedent, and
@@ -368,7 +368,7 @@ func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
 // a ceiling the server rejects, warn about one it accepts, or count
 // rules against a different cap than the load boundary.
 func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
-	src, err := staticFS.ReadFile("static/js/settings.js")
+	src, err := staticFS.ReadFile("static/js/settings_overrides.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +380,7 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 	jsCap := firstSubmatch(t, string(src), `const REQUEST_OVERRIDES_MAX = (\d+);`)
 	goCap := firstSubmatch(t, caps, `const RequestOverridesMax = (\d+)`)
 	if jsCap != goCap {
-		t.Errorf("the rule cap differs: settings.js REQUEST_OVERRIDES_MAX = %s, config RequestOverridesMax = %s", jsCap, goCap)
+		t.Errorf("the rule cap differs: settings_overrides.js REQUEST_OVERRIDES_MAX = %s, config RequestOverridesMax = %s", jsCap, goCap)
 	}
 	if n, err := strconv.Atoi(goCap); err != nil || n != config.RequestOverridesMax {
 		t.Errorf("config_defaults.go's RequestOverridesMax literal %q disagrees with the exported config.RequestOverridesMax = %d", goCap, config.RequestOverridesMax)
@@ -397,21 +397,21 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 		t.Fatalf("config's body band disagrees with itself: comparison %s..%s, errRange %s..%s", goMin, goMax, errMin, errMax)
 	}
 
-	// The body band, settings.js side: the ceiling const owns the number,
+	// The body band, settings_overrides.js side: the ceiling const owns the number,
 	// the live check and its message route through it, and both body
 	// inputs' max attributes ride the same owner.
 	jsMax := firstSubmatch(t, string(src), `const REQUEST_OVERRIDE_BODY_MAX = (\d+);`)
 	if jsMax != goMax {
-		t.Errorf("the body ceiling differs: settings.js REQUEST_OVERRIDE_BODY_MAX = %s, config band max = %s", jsMax, goMax)
+		t.Errorf("the body ceiling differs: settings_overrides.js REQUEST_OVERRIDE_BODY_MAX = %s, config band max = %s", jsMax, goMax)
 	}
 	jsRow := sourceRegion(t, string(src), "function validateRoRow")
 	jsMin := firstSubmatch(t, jsRow, `n < (\d+) \|\| n > REQUEST_OVERRIDE_BODY_MAX`)
 	if jsMin != goMin {
-		t.Errorf("the body band minimum differs: settings.js validateRoRow uses %s, config uses %s", jsMin, goMin)
+		t.Errorf("the body band minimum differs: settings_overrides.js validateRoRow uses %s, config uses %s", jsMin, goMin)
 	}
 	msgMin := firstSubmatch(t, jsRow, `between (\d+) and \$\{REQUEST_OVERRIDE_BODY_MAX\}`)
 	if msgMin != goMin {
-		t.Errorf("the band message minimum differs: settings.js says between %s and the ceiling, config uses %s", msgMin, goMin)
+		t.Errorf("the band message minimum differs: settings_overrides.js says between %s and the ceiling, config uses %s", msgMin, goMin)
 	}
 	if n := strings.Count(sourceRegion(t, string(src), "function roRuleCardHTML"), `max="${REQUEST_OVERRIDE_BODY_MAX}"`); n != 2 {
 		t.Errorf("roRuleCardHTML wires %d body inputs through REQUEST_OVERRIDE_BODY_MAX, want 2", n)
