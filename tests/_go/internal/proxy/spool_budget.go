@@ -35,12 +35,8 @@ func paddedSpoolBody(t *testing.T, size int) []byte {
 // the client observes the last body byte.
 func waitForSpoolBudgetRelease(t *testing.T, p *Server) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for p.respBudget.bytes.Load() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("response budget still holds %d bytes, want 0", p.respBudget.bytes.Load())
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, func() bool { return p.respBudget.bytes.Load() == 0 }) {
+		t.Fatalf("response budget still holds %d bytes, want 0", p.respBudget.bytes.Load())
 	}
 }
 
@@ -269,12 +265,8 @@ func TestQualitySpoolReservesResponseBudget(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first upstream request never started")
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for p.respBudget.bytes.Load() < int64(qualitySpoolMax) {
-		if time.Now().After(deadline) {
-			t.Fatalf("first spool never reserved its bounded bytes: held %d, want %d", p.respBudget.bytes.Load(), qualitySpoolMax)
-		}
-		time.Sleep(time.Millisecond)
+	if !waitFor(t, func() bool { return p.respBudget.bytes.Load() >= int64(qualitySpoolMax) }) {
+		t.Fatalf("first spool never reserved its bounded bytes: held %d, want %d", p.respBudget.bytes.Load(), qualitySpoolMax)
 	}
 
 	resp, err := spoolChatRequest(t, srv.URL, upstream.URL)

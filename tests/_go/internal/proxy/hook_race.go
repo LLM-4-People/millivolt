@@ -126,12 +126,7 @@ func TestHookPublishSerializesSeededHoldAndThrottleDispatch(t *testing.T) {
 	}
 	// Every request finalized through the live recorder: the seeded-hold
 	// dispatches never lost a record into a stuck publish path.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(buf.Snapshot()) >= workers*rounds {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitFor(t, func() bool { return len(buf.Snapshot()) >= workers*rounds }) {
+		t.Fatalf("finalized records = %d, want %d", len(buf.Snapshot()), workers*rounds)
 	}
-	t.Fatalf("finalized records = %d, want %d", len(buf.Snapshot()), workers*rounds)
 }

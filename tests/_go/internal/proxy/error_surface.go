@@ -184,9 +184,8 @@ func TestCommittedNonOKStatusIsInBand(t *testing.T) {
 
 	// Wait until the single concurrency slot is occupied, then start the
 	// queued request whose pacer commits SSE during the wait.
-	deadline := time.Now().Add(5 * time.Second)
-	for calls.Load() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
+	if !waitFor(t, func() bool { return calls.Load() != 0 }) {
+		t.Fatal("first request never reached upstream")
 	}
 	second := make(chan string, 1)
 	go func() {

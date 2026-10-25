@@ -81,7 +81,11 @@ func runPacerCapture(t *testing.T, maxBytes int64) pacerCaptureRun {
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(30 * time.Millisecond)
+	// The first request holds the only concurrency slot; the queued request
+	// must observe the keepalive-committed wait.
+	if !waitFor(t, func() bool { return p.scheduler.Stats().InFlight >= 1 }) {
+		t.Fatal("first request never occupied the concurrency slot")
+	}
 
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"queued","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
