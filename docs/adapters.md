@@ -120,8 +120,9 @@ target cannot consume them:
   `tool_search_call` and their peers) are tool activity: they count toward a
   `tool_calls` finish even though no cross-protocol content block exists for
   them, and a translated record still counts them (retaining streamed names)
-  when the target wire drops the item. Provider-executed generation artifacts (`program`, `program_output`,
-  `image_generation_call`, `code_interpreter_call`) are output presence
+  when the target wire drops the item. Provider-executed generation artifacts
+  (`program`, `program_output`, `image_generation_call`,
+  `code_interpreter_call`) are output presence
   instead: a completed turn that carries only one of them is not an empty
   completion, while its finish stays the source's stop rather than
   `tool_calls`, because the item is generated source or media rather than a
@@ -317,9 +318,9 @@ minutes), so a provider that holds an error stream open can delay the client
 until that bound expires. A non-200 status that forbids a response body (1xx,
 204 or 304) cannot carry the translated envelope, so it fails closed as 502
 `upstream_error` naming the upstream status instead of committing a status
-whose error body the client cannot receive. Pre-commit failures (routing, request validation,
-translation, or an oversized translated body) answer in the client protocol's
-own error envelope. Non-streaming translation reads the complete upstream 200
+whose error body the client cannot receive. Pre-commit failures (routing,
+request validation, translation, or an oversized translated body) answer in the
+client protocol's own error envelope. Non-streaming translation reads the complete upstream 200
 body and the translated document under a fixed 32 MiB cap each; exceeding
 either fails closed with 502 `response_too_large` before any client bytes. The
 cap is an internal safety constant, not a configurable limit.
@@ -605,8 +606,9 @@ A lost park cold-starts from provided history. The quality-retry path may re-ask
 an empty continuation; a fresh Run is accepted only on HTTP 200, so any other
 response to the re-ask is a failed re-ask and the void surfaces instead of an
 acknowledgement being driven as a stream. Exhausted/invalid continuations
-surface errors rather than silently completing. Cursor's wire reports one combined output total with
-no answer/reasoning split, so the generic mid-thinking rescue
+surface errors rather than silently completing. Cursor's wire reports one
+combined output total with no answer/reasoning split, so the generic
+mid-thinking rescue
 (`thinking_retries`) does not apply here: a Cursor turn that produced nothing
 is the existing empty-turn re-ask's business. This is not exactly-once
 execution, checkpoint persistence, or a guarantee that an upstream keeps a
