@@ -26,4 +26,9 @@ module.exports = [
   require('./sections/purge_lifecycle'),
   require('./sections/delegated_actions'),
   require('./sections/operator_unlock'),
+  require('./sections/w16_mirrors'),
+  require('./sections/lazy_settings'),
+  require('./sections/regressions_a'),
+  require('./sections/regressions_b'),
+  require('./sections/regressions_c'),
 ];
