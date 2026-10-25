@@ -131,7 +131,7 @@ func TestMCPHTTPEndpointAuthAndInProcessDispatch(t *testing.T) {
 	})
 
 	t.Run("a cookie session alone is refused", func(t *testing.T) {
-		cookie, err := gate.mintSessionCookie()
+		cookie, err := gate.mintSessionCookie(httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
 		if err != nil {
 			t.Fatal(err)
 		}
