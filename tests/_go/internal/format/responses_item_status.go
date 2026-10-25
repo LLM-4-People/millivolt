@@ -258,34 +258,57 @@ func TestResponsesStreamMultiItemIncompleteKeepsClosedStatuses(t *testing.T) {
 	}
 }
 
-// TestResponsesStreamOpenMessageAtIncompleteTerminal pins the other half of the
-// contract: an item that never closed is rendered incomplete in the terminal
-// output and has no done frame.
-func TestResponsesStreamOpenMessageAtIncompleteTerminal(t *testing.T) {
-	var buf bytes.Buffer
-	enc := NewResponsesStreamEncoder(&buf, nil)
-	for _, event := range []*ir.Event{
-		{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText}},
-		{Type: ir.EventBlockDelta, Index: 0, Delta: &ir.Delta{Text: "hi"}},
-		{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: ir.FinishLength}},
-		{Type: ir.EventDone},
+// TestResponsesStreamOpenMessageAtTerminal pins the other half of the contract:
+// an item that never closed is rendered incomplete in the terminal output and
+// has no done frame, whether the terminal is incomplete or failed.
+func TestResponsesStreamOpenMessageAtTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		terminal []*ir.Event
+		want     string
+	}{
+		{
+			name: "incomplete",
+			terminal: []*ir.Event{
+				{Type: ir.EventMessageDelta, Finish: &ir.Finish{Reason: ir.FinishLength}},
+				{Type: ir.EventDone},
+			},
+			want: "incomplete",
+		},
+		{
+			name: "failed",
+			terminal: []*ir.Event{
+				{Type: ir.EventError, Error: &ir.Error{Type: "server_error", Message: "boom"}},
+			},
+			want: "failed",
+		},
 	} {
-		if err := enc.Write(event); err != nil {
-			t.Fatalf("Write(%v): %v", event.Type, err)
-		}
-	}
-	_, terminal := responsesStreamItemStatus(t, buf.String())
-	if terminal.Status != "incomplete" {
-		t.Fatalf("terminal status = %q, want incomplete: %s", terminal.Status, buf.String())
-	}
-	if len(terminal.Output) != 1 || terminal.Output[0].Type != "message" ||
-		terminal.Output[0].Status != "incomplete" {
-		t.Fatalf("terminal output = %+v, want one incomplete open message: %s", terminal.Output, buf.String())
-	}
-	for _, frame := range errorCloseFrames(buf.String()) {
-		if frame.name == "response.output_item.done" {
-			t.Fatalf("an open item emitted a done frame: %s", buf.String())
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			enc := NewResponsesStreamEncoder(&buf, nil)
+			events := append([]*ir.Event{
+				{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText}},
+				{Type: ir.EventBlockDelta, Index: 0, Delta: &ir.Delta{Text: "hi"}},
+			}, tc.terminal...)
+			for _, event := range events {
+				if err := enc.Write(event); err != nil {
+					t.Fatalf("Write(%v): %v", event.Type, err)
+				}
+			}
+			_, terminal := responsesStreamItemStatus(t, buf.String())
+			if terminal.Status != tc.want {
+				t.Fatalf("terminal status = %q, want %q: %s", terminal.Status, tc.want, buf.String())
+			}
+			if len(terminal.Output) != 1 || terminal.Output[0].Type != "message" ||
+				terminal.Output[0].Status != "incomplete" {
+				t.Fatalf("terminal output = %+v, want one incomplete open message: %s", terminal.Output, buf.String())
+			}
+			for _, frame := range errorCloseFrames(buf.String()) {
+				if frame.name == "response.output_item.done" {
+					t.Fatalf("an open item emitted a done frame: %s", buf.String())
+				}
+			}
+		})
 	}
 }
 

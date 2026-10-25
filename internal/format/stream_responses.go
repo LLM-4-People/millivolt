@@ -3079,9 +3079,10 @@ func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
 		if item == nil {
 			continue
 		}
-		// A failed turn omits an item whose block never closed: its argument
-		// value is incomplete and must not appear as an executable call.
-		if e.failed != nil && e.open[idx] {
+		// A failed turn omits an open function call: its argument value is
+		// incomplete and must not appear as an executable call. Other open
+		// items keep the incomplete status their terminal gives them.
+		if e.failed != nil && e.open[idx] && item.kind == "function_call" {
 			continue
 		}
 		// Each item owns the status it reached when it closed. Only an item
