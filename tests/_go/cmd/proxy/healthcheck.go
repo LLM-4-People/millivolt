@@ -55,3 +55,18 @@ func TestHealthcheckRejectsInvalidBaseConfig(t *testing.T) {
 		t.Fatalf("healthcheck rewrote the invalid base file: %v\n%s", err, got)
 	}
 }
+
+// TestHealthcheckMissingConfigUsesDefaults pins the documented missing-file
+// exception: healthcheck probes with the built-in defaults instead of failing
+// the config load. An invalid document is covered above and still exits 1.
+func TestHealthcheckMissingConfigUsesDefaults(t *testing.T) {
+	oldPath, oldListen := liveConfigPath, liveListenOverride
+	t.Cleanup(func() { liveConfigPath, liveListenOverride = oldPath, oldListen })
+	probe := httptest.NewServer(http.HandlerFunc(handleHealthz))
+	defer probe.Close()
+	liveConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	liveListenOverride = strings.TrimPrefix(probe.URL, "http://")
+	if code := runHealthcheck(); code != 0 {
+		t.Fatalf("healthcheck with a missing config = %d, want 0 via defaults", code)
+	}
+}

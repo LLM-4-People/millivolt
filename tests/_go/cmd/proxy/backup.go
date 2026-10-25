@@ -2737,3 +2737,38 @@ func TestRestoreConfigKeepsCLIOverrides(t *testing.T) {
 		})
 	}
 }
+
+// TestBackupCaptureMissingConfigFailsClosed pins the one consumer that does
+// not substitute defaults: a config backup with no file has nothing to archive
+// and must report the missing document.
+func TestBackupCaptureMissingConfigFailsClosed(t *testing.T) {
+	liveReloadFixture(t)
+	liveConfigPath = filepath.Join(t.TempDir(), "missing.yaml")
+	_, cleanup, err := buildBackup(t.Context(), true, false)
+	defer cleanup()
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-config backup error = %v, want the missing-file error", err)
+	}
+}
+
+// TestRestoreMergeMissingConfigUsesDefaults pins the restore merge exception:
+// a missing live file merges the archive over the built-in defaults and does
+// not create the missing file during preparation.
+func TestRestoreMergeMissingConfigUsesDefaults(t *testing.T) {
+	liveReloadFixture(t)
+	missing := filepath.Join(t.TempDir(), "missing.yaml")
+	liveConfigPath = missing
+	plan, err := prepareRestoreConfig([]byte("max_retries: 9\n"), "merge")
+	if err != nil {
+		t.Fatalf("prepareRestoreConfig with a missing file = %v", err)
+	}
+	if plan.next.MaxRetries != 9 {
+		t.Fatalf("merged max_retries = %d, want 9", plan.next.MaxRetries)
+	}
+	if plan.previousExists {
+		t.Fatal("missing file was reported as an existing previous document")
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore preparation created the missing config file: %v", err)
+	}
+}

@@ -40,11 +40,13 @@ extra YAML documents are dropped and the file is rewritten without them. An
 invalid recognized value fails startup without rewriting the file, and an
 unparseable file is moved to `PATH.invalid` and replaced with the documented
 defaults, except an ambiguous duplicate top-level key, which fails closed and
-stays in place. Reload rejects an invalid document without rewriting it. Settings,
-backup capture, restore merge and healthcheck read the file fail-closed and
-report an error instead of substituting a default. Settings POST still rejects
-those inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck
-loads the file read-only and never rewrites it.
+stays in place. Reload rejects an invalid document without rewriting it.
+Settings, healthcheck and restore merge treat a missing file as defaults, while
+an invalid or unreadable document fails closed and is reported instead of
+substituting a default. Backup capture is stricter: a missing config file is an
+error because there is nothing to archive. Settings POST still rejects invalid
+inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck loads
+the file read-only and never rewrites it.
 
 To regenerate the public example after changing its canonical owners:
 

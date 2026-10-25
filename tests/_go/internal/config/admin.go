@@ -482,3 +482,17 @@ func TestSettingsRejectsInvalidBaseConfig(t *testing.T) {
 		t.Fatalf("invalid base file was rewritten: %v\n%s", err, got)
 	}
 }
+
+// TestSettingsMissingConfigUsesDefaults pins the Settings read path for a
+// missing file: the documented default document, not a failed read. An
+// unreadable or invalid document still fails closed.
+func TestSettingsMissingConfigUsesDefaults(t *testing.T) {
+	h := &Handler{Path: filepath.Join(t.TempDir(), "missing.yaml")}
+	got, err := h.fileConfig()
+	if err != nil {
+		t.Fatalf("fileConfig missing file = %v", err)
+	}
+	if !reflect.DeepEqual(got, Default()) {
+		t.Fatalf("missing file config = %+v, want the built-in defaults", got)
+	}
+}
