@@ -556,8 +556,10 @@ function backupScalar(v) {
 // through a restore. prepareRestoreConfig applies the live listen/db_path after
 // either mode, so the preview must not claim a replace resets them.
 function cliOverrideKeys() {
+  // The settings payload already enumerates the process-start CLI overrides.
+  // Sort for a stable preview; never keep a second hardcoded key list here.
   const overrides = (settingsDoc && settingsDoc.overrides) || {};
-  return ['listen', 'db_path'].filter(k => Object.prototype.hasOwnProperty.call(overrides, k));
+  return Object.keys(overrides).sort();
 }
 
 function backupDiffRowsHTML(doc) {

@@ -2040,7 +2040,7 @@ async function main() {
       preservedRow.textContent.includes('preserved by the CLI override') &&
       !preservedRow.textContent.includes('replace resets it'));
     check('replace hint excludes CLI-overridden settings',
-      d.querySelector('[data-backup="restore"]').textContent.includes('except CLI-overridden listen and db_path'));
+      d.querySelector('[data-backup="restore"]').textContent.includes('except CLI-overridden db_path and listen'));
     const mergeRadio = d.querySelector('input[name="backup-mode"][value="merge"]');
     mergeRadio.checked = true;
     mergeRadio.dispatchEvent(new w.Event('change', { bubbles: true }));

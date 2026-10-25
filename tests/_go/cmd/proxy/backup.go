@@ -2572,3 +2572,37 @@ func TestRestoreConfigCaptureFailsClosed(t *testing.T) {
 	}
 	assertRejected(restore(), "config document limit")
 }
+
+// TestRestoreConfigKeepsCLIOverrides pins the preview's premise: a replace and
+// a merge both keep the process-start listen and db_path overrides, so the
+// settings panel must not render them as reset by the backup.
+func TestRestoreConfigKeepsCLIOverrides(t *testing.T) {
+	liveReloadFixture(t)
+	liveListenOverride = "127.0.0.1:19090"
+	liveDBOverride = filepath.Join(t.TempDir(), "live.db")
+	liveCfg.Listen = liveListenOverride
+	liveCfg.DBPath = liveDBOverride
+	bootCfg = liveCfg.Clone()
+	if err := config.WriteFile(liveConfigPath, liveCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	var incoming bytes.Buffer
+	if err := config.WriteYAML(&incoming, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"replace", "merge"} {
+		t.Run(mode, func(t *testing.T) {
+			plan, err := prepareRestoreConfig(incoming.Bytes(), mode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.next.Listen != liveListenOverride {
+				t.Fatalf("restored listen = %q, want the CLI override %q", plan.next.Listen, liveListenOverride)
+			}
+			if plan.dbPath != liveDBOverride {
+				t.Fatalf("staged db path = %q, want the CLI override %q", plan.dbPath, liveDBOverride)
+			}
+		})
+	}
+}
