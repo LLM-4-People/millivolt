@@ -308,7 +308,10 @@ the client status becomes 502: a translated client would read 200 as a
 successful completion. A non-200 translated error body is buffered before the
 client sees it, at most 64 KiB, under `whole_document_read_timeout` (default 2
 minutes), so a provider that holds an error stream open can delay the client
-until that bound expires. Pre-commit failures (routing, request validation,
+until that bound expires. A non-200 status that forbids a response body (1xx,
+204 or 304) cannot carry the translated envelope, so it fails closed as 502
+`upstream_error` naming the upstream status instead of committing a status
+whose error body the client cannot receive. Pre-commit failures (routing, request validation,
 translation, or an oversized translated body) answer in the client protocol's
 own error envelope. Non-streaming translation reads the complete upstream 200
 body and the translated document under a fixed 32 MiB cap each; exceeding

@@ -239,6 +239,17 @@ func isNonCompletionStatus(status int) bool {
 	return status == http.StatusAccepted || status == http.StatusNoContent || status == http.StatusResetContent
 }
 
+// statusAllowsBody reports whether an HTTP status permits a response body.
+// net/http refuses one for every 1xx, 204 and 304, so a translated non-200
+// with one of those statuses cannot carry the protocol error envelope it
+// promises; the caller fails closed with 502 instead.
+func statusAllowsBody(status int) bool {
+	if status >= 100 && status < 200 {
+		return false
+	}
+	return status != http.StatusNoContent && status != http.StatusNotModified
+}
+
 // relayNonCompletionStatus relays a non-completion status verbatim with the
 // upstream headers. It is the one writer for 202/204/205 on the native and
 // non-streaming translated paths, so neither translation nor completion
@@ -701,7 +712,22 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				full, rerr := s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes)
 				status := resp.StatusCode
 				out, terr := providerformat.TranslateErrorBetween(t.inbound, t.outbound, resp.StatusCode, full)
-				if rerr != nil {
+				if !statusAllowsBody(resp.StatusCode) {
+					// A body-forbidden status (1xx, 204, 304) cannot carry the
+					// translated error: writing it makes writeCounted fail and
+					// markClientGone rewrite the record as a 499 client cancel.
+					// Fail closed with the gateway sink instead.
+					status = http.StatusBadGateway
+					rec.StatusCode = status
+					msg := fmt.Sprintf("upstream HTTP %d cannot carry an error body", resp.StatusCode)
+					if rec.ErrorType == "" {
+						rec.ErrorType = "upstream_error"
+						rec.ErrorMsg = msg
+					}
+					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
+						Type: "api_error", Status: status, Message: msg,
+					})
+				} else if rerr != nil {
 					// The provider's error document could not be read within
 					// the whole-document bound. Fail closed with a real
 					// gateway status instead of asserting the upstream status
