@@ -65,15 +65,6 @@ func chatToResponsesAnnotations(t *testing.T, body string) map[string][][2]int {
 	return spans
 }
 
-func hasChatSpanWarning(w ir.Warnings) bool {
-	for _, warning := range w {
-		if warning.Field == "annotations.span" {
-			return true
-		}
-	}
-	return false
-}
-
 func TestChatCitationMessageRelativeSpans(t *testing.T) {
 	parts := `[{"type":"text","text":"foo"},{"type":"text","text":"bar"}]`
 
@@ -84,7 +75,7 @@ func TestChatCitationMessageRelativeSpans(t *testing.T) {
 	if c := resp.Blocks[1].Citations[0]; c.StartIndex != 2 || c.EndIndex != 3 {
 		t.Fatalf("IR span = %d..%d, want block-relative 2..3", c.StartIndex, c.EndIndex)
 	}
-	if hasChatSpanWarning(warns) {
+	if warningField(warns, "annotations.span") {
 		t.Fatalf("valid span warned: %+v", warns)
 	}
 	spans := chatToResponsesAnnotations(t, chatAnnotationBody(parts, "5", "6"))
