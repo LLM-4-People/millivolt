@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -20,7 +21,19 @@ import (
 // file over the live path, so a WAL sidecar left behind would either be lost
 // or apply to the wrong database. The initializer is the same one Open runs,
 // so a snapshot admitted here cannot fail Open's schema sequence later.
+//
+// The pending path must already exist as a regular file. sql.Open would
+// otherwise create an empty database that passes preflight, and a later boot
+// would admit it over live history; an absent file is a missing snapshot
+// (errors.Is(err, fs.ErrNotExist)), never an empty one.
 func preflightPendingSnapshot(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("pending snapshot: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("pending snapshot is not a regular file: %s", path)
+	}
 	// The packed file is self-contained; sidecars beside it are debris from an
 	// interrupted earlier preflight. Remove them before opening: a hot journal
 	// would otherwise be applied to this (possibly different) snapshot and

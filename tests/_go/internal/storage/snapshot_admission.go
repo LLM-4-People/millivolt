@@ -2,6 +2,7 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,23 @@ func TestOpenRejectsUnwritableLiveWriterSchema(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "writer insert probe") {
 		t.Fatalf("Open error %q does not name the writer insert probe", err)
+	}
+}
+
+// TestValidatePendingSnapshotRejectsMissingPendingFile pins fail-closed
+// validation: an absent pending file is not an empty snapshot to initialize.
+// Before this guard, preflight's sql.Open created a fresh empty database at the
+// pending path, ValidatePendingSnapshot returned nil, and the next boot would
+// have admitted that empty file over live history.
+func TestValidatePendingSnapshotRejectsMissingPendingFile(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	err := ValidatePendingSnapshot(dstPath)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ValidatePendingSnapshot missing pending = %v, want a not-exist rejection", err)
+	}
+	if _, statErr := os.Stat(PendingSnapshotPath(dstPath)); !os.IsNotExist(statErr) {
+		t.Fatalf("validation created the missing pending file: %v", statErr)
 	}
 }
 
