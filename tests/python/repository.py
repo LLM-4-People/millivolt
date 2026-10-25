@@ -309,20 +309,23 @@ class RepositoryChecks(unittest.TestCase):
     def test_template_spans_scan_the_real_shadowed_regions(self):
         """Corpus canaries: the regions the regex-blind lexer lost to quote
         desync must be scanned. fillSettingsLive is the first region the
-        settings_backup.js backup-download regex shadows; reqIdentityText and
-        fillDrawerDebug sit behind the escapeHtml regex in log.js."""
+        settings_backup.js backup-download regex shadows; reqIdentityText
+        (log_rows.js) and fillDrawerDebug (log.js) are the request-log
+        canaries."""
         settings = (check.ROOT / "internal/web/static/js/settings_backup.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(settings)
         needle = '<div class="st-live-row"><span class="k">listen</span>'
         start = settings.index(needle)
         self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
                         "fillSettingsLive template body is not scanned")
-        log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")
-        spans = _template_comment_spans(log)
-        expr = log.index("clientLabel(r && r.client) || '?'")
-        sep = log.index(" · ", expr)
+        log_rows = (check.ROOT / "internal/web/static/js/log_rows.js").read_text(encoding="utf-8")
+        spans = _template_comment_spans(log_rows)
+        expr = log_rows.index("clientLabel(r && r.client) || '?'")
+        sep = log_rows.index(" · ", expr)
         self.assertTrue(any(s <= sep and sep + 3 <= e for s, e in spans),
                         "reqIdentityText template body is not scanned")
+        log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")
+        spans = _template_comment_spans(log)
         for needle in ("<h4>Request body", "<h4>Response body"):
             start = log.index(needle)
             self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
