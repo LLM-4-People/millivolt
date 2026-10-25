@@ -98,7 +98,16 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			d.sawToolCall = true
 			if ok {
 				if err := reserveToolID(d.toolIDs, emission.block.ToolCall.ID); err != nil {
-					return nil, err
+					if policy == responsesToolArgumentsComplete {
+						// A completed terminal claims success for both calls, so
+						// a shared target id is a translation failure.
+						return nil, err
+					}
+					// A failed, incomplete or cancelled terminal owns the
+					// provider outcome. Keep the first terminal-only call and
+					// drop the duplicate rather than replacing that outcome
+					// with a translator error.
+					continue
 				}
 				pending = append(pending, emission)
 			}
