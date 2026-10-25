@@ -3100,6 +3100,21 @@ func (s *Store) queryScan(ctx context.Context, query string, jsonOut *[]byte, ke
 	if err != nil {
 		return err
 	}
+	// Keys, their order and the duplicate-name collapse are decided once per
+	// query; the per-row cost is one leaf encode per column and nothing else.
+	// One reusable value/pointer pair and one reusable row buffer replace the
+	// per-row map, its key sort and its marshal.
+	proj, err := newQueryProjection(cols)
+	if err != nil {
+		return err
+	}
+	values := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+	var row jsonSink
+	rowEnc := json.NewEncoder(&row)
 
 	resultBytes := 2 // JSON array brackets, including the empty-array case
 	rowCount := 0
@@ -3107,39 +3122,37 @@ func (s *Store) queryScan(ctx context.Context, query string, jsonOut *[]byte, ke
 		if rowCount == s.opts.QueryMaxRows {
 			return ErrQueryLimit
 		}
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return err
 		}
-		row := make(map[string]any, len(cols))
-		for i, c := range cols {
-			row[c] = values[i]
-		}
-		encoded, e := json.Marshal(row)
-		if e != nil {
-			return e
+		row.buf = row.buf[:0]
+		if err := proj.encodeRow(&row, rowEnc, values); err != nil {
+			return err
 		}
 		separator := 0
 		if rowCount > 0 {
 			separator = 1
 		}
-		if len(encoded) > s.opts.QueryMaxBytes-resultBytes-separator {
+		// The cap counts the encoded row, never a map slice: this is the same
+		// length json.Marshal of the row map produces, so the boundary is
+		// unchanged.
+		if len(row.buf) > s.opts.QueryMaxBytes-resultBytes-separator {
 			return ErrQueryLimit
 		}
-		resultBytes += len(encoded) + separator
+		resultBytes += len(row.buf) + separator
 		rowCount++
 		if jsonOut != nil {
 			if separator == 1 {
 				*jsonOut = append(*jsonOut, ',')
 			}
-			*jsonOut = append(*jsonOut, encoded...)
+			*jsonOut = append(*jsonOut, row.buf...)
 		}
 		if keepRow != nil {
-			keepRow(row)
+			decoded := make(map[string]any, len(cols))
+			for i, c := range cols {
+				decoded[c] = values[i]
+			}
+			keepRow(decoded)
 		}
 	}
 	return rows.Err()
