@@ -7,28 +7,6 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-type queuedRecord struct {
-	record *metrics.Record
-	seq    uint64
-}
-
-// Recorder couples the live ring and durable enqueue at their shared, short
-// publication fence. It does not wait for storage: channel overflow still drops
-// only the durable copy. Lifecycle events remain exclusively in the live buffer.
-func (s *Store) Recorder(buffer *metrics.Buffer) metrics.Recorder {
-	return liveRecorder{s, buffer}
-}
-
-type liveRecorder struct {
-	store  *Store
-	buffer *metrics.Buffer
-}
-
-func (r liveRecorder) Record(record *metrics.Record) { r.store.record(record, r.buffer) }
-func (r liveRecorder) PublishLive(phase string, record *metrics.Record) {
-	r.buffer.PublishLive(phase, record)
-}
-
 // PurgeResult carries the store-level deletion counts Clear returns: durable
 // rows deleted and live-ring records removed. Purely internal - the purge
 // response dropped its wire keys ({"ok": true} only, pinned by the strict
