@@ -563,6 +563,20 @@ func ParseResponseFailedEnvelope(b []byte) (typ, code, msg string) {
 	return parseErrorValue(probe.Response.Error)
 }
 
+// rawErrorString returns a member's decoded string only when it is a JSON
+// string. A non-string member is ignored so the valid siblings survive.
+func rawErrorString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '"' {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s
+}
+
 // ParseErrorValue applies the canonical envelope rules to an already-captured
 // "error" value and supplies the provider_error classification when the source
 // carried no type. Callers that hold the raw member on a typed wire struct use
@@ -588,15 +602,19 @@ func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 	case '"':
 		_ = json.Unmarshal(raw, &msg)
 	case '{':
+		// Decode each member independently. One wrong-typed member (a gateway
+		// that nests a detail object under message, or a numeric type) must not
+		// erase its valid string siblings: the client still receives the error
+		// frame, and the record must still classify it.
 		var e struct {
-			Type    string          `json:"type"`
+			Type    json.RawMessage `json:"type"`
 			Code    json.RawMessage `json:"code"`
-			Message string          `json:"message"`
+			Message json.RawMessage `json:"message"`
 		}
 		if err := json.Unmarshal(raw, &e); err != nil {
 			return "", "", ""
 		}
-		typ, msg = e.Type, e.Message
+		typ, msg = rawErrorString(e.Type), rawErrorString(e.Message)
 		if c := bytes.TrimSpace(e.Code); len(c) > 0 && !bytes.Equal(c, []byte("null")) {
 			if c[0] == '"' {
 				_ = json.Unmarshal(c, &code)
