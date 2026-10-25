@@ -275,27 +275,32 @@ func TestUncommittedRateLimitKeepsFlowClassification(t *testing.T) {
 	}
 }
 
-// TestCommittedKeepaliveServerFailureKeepsClassification pins the 5xx twin:
-// the committed 200 remains the client status, the failure stays an error, no
-// rate-limit count appears, and no synthetic attempt entry is invented.
+// TestCommittedKeepaliveServerFailureKeepsClassification pins the retryable
+// failure twin: the committed 200 remains the client status, the failure stays
+// an error, no rate-limit count appears, and no synthetic attempt entry is
+// invented. Only the 429 health signal needs the in-band entry.
 func TestCommittedKeepaliveServerFailureKeepsClassification(t *testing.T) {
-	body, records := committedStatusRun(t, http.StatusBadGateway,
-		`{"error":{"type":"server_error","message":"boom"}}`)
-	if !strings.Contains(body, `"type":"server_error"`) {
-		t.Fatalf("queued body = %q, want an in-band server error", body)
-	}
-	queued := records["queued"]
-	if queued == nil {
-		t.Fatalf("no queued record: %+v", records)
-	}
-	if queued.StatusCode != http.StatusOK || !queued.IsError() || queued.HasRateLimit() {
-		t.Fatalf("queued record = status %d isError=%v hasRateLimit=%v, want 200/error/no-rate-limit",
-			queued.StatusCode, queued.IsError(), queued.HasRateLimit())
-	}
-	if queued.ErrorType == "" || queued.ErrorMsg == "" {
-		t.Fatalf("queued record lost the in-band error detail: %+v", queued)
-	}
-	if len(queued.Attempts) != 0 {
-		t.Fatalf("5xx in-band failure invented an attempt entry: %+v", queued.Attempts)
+	for _, status := range []int{http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			body, records := committedStatusRun(t, status,
+				`{"error":{"type":"server_error","message":"boom"}}`)
+			if !strings.Contains(body, `"type":"server_error"`) {
+				t.Fatalf("queued body = %q, want an in-band server error", body)
+			}
+			queued := records["queued"]
+			if queued == nil {
+				t.Fatalf("no queued record: %+v", records)
+			}
+			if queued.StatusCode != http.StatusOK || !queued.IsError() || queued.HasRateLimit() {
+				t.Fatalf("queued record = status %d isError=%v hasRateLimit=%v, want 200/error/no-rate-limit",
+					queued.StatusCode, queued.IsError(), queued.HasRateLimit())
+			}
+			if queued.ErrorType == "" || queued.ErrorMsg == "" {
+				t.Fatalf("queued record lost the in-band error detail: %+v", queued)
+			}
+			if len(queued.Attempts) != 0 {
+				t.Fatalf("retryable in-band failure invented an attempt entry: %+v", queued.Attempts)
+			}
+		})
 	}
 }
