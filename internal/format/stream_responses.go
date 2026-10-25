@@ -210,6 +210,10 @@ type ResponsesStreamDecoder struct {
 	// warnings records streaming approximations that cannot be represented on
 	// the committed target wire.
 	warnings ir.Warnings
+	// testOwnerVisits is nil in production. Package tests install it to count
+	// the owners an item lookup visits, proving the owner index stays
+	// proportional to one item instead of scanning every emitted part.
+	testOwnerVisits func(visited int)
 	// terminalPending holds authoritative done-event values whose target block
 	// already ended or was never opened. They are emitted after every streamed
 	// block closes (closeAll), so target lifecycles never nest. Entries are

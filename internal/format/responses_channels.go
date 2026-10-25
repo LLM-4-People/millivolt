@@ -218,11 +218,23 @@ func (d *ResponsesStreamDecoder) setPartOwner(partKey, owner string) {
 	d.ownerParts[owner][partKey] = struct{}{}
 }
 
+// ownerPartsFor returns the part keys indexed under one logical item. The
+// production lookup is one map read; the optional test hook reports how many
+// owners this lookup visited so a full emittedText scan cannot pass as the
+// owner-index shape.
+func (d *ResponsesStreamDecoder) ownerPartsFor(itemKey string) map[string]struct{} {
+	parts := d.ownerParts[itemKey]
+	if d.testOwnerVisits != nil {
+		d.testOwnerVisits(len(parts))
+	}
+	return parts
+}
+
 // emittedContentParts returns the non-empty streamed bytes for one item and
 // content channel, ordered by the part index the client saw.
 func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel partChannel) []channelPart {
 	var out []channelPart
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		builder := d.emittedText[key]
 		if builder == nil {
 			continue
@@ -257,7 +269,7 @@ func isSummaryPartKey(key string) bool {
 // reasoning item, ordered by summary index.
 func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
 	var out []channelPart
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		if !isSummaryPartKey(key) {
 			continue
 		}
@@ -283,7 +295,7 @@ func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPa
 // target wire. A terminal item that was announced with only empty parts still
 // needs the announced identity, so this only gates the aggregate owner key.
 func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		if d.emittedText[key] != nil {
 			return true
 		}
@@ -296,7 +308,7 @@ func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
 // item key after a renumber, so a message terminal must not treat reasoning
 // coverage as its own.
 func (d *ResponsesStreamDecoder) hasEmittedContent(itemKey string) bool {
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		if d.emittedText[key] == nil {
 			continue
 		}
