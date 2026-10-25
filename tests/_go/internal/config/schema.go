@@ -758,29 +758,35 @@ func exampleHelpText(example string) string {
 // Chat/Anthropic body before translation, and ensured tools require a Chat
 // client body on a Chat outbound wire.
 func TestSettingsHintsStateTranslationScope(t *testing.T) {
-	source := strings.Join(strings.Fields(string(settingsJSSource(t))), " ")
+	// Each hint is owned by the editor module that renders it; the read follows
+	// the literal, not the pre-split entry-point filename.
 	for _, tc := range []struct {
+		module  string
 		want    string
 		notWant string
 	}{
 		{
+			module:  "settings.js",
 			want:    "on Chat Completions or Anthropic client bodies, before translation",
 			notWant: "on the OpenAI wire",
 		},
 		{
+			module:  "settings_providers.js",
 			want:    "relayed Chat Completions client bodies on a Chat outbound wire",
 			notWant: "every chat request's tools array",
 		},
 		{
+			module:  "settings.js",
 			want:    "Chat or Anthropic client-body token",
 			notWant: "OpenAI-wire token ceilings",
 		},
 	} {
+		source := strings.Join(strings.Fields(string(settingsModuleSource(t, tc.module))), " ")
 		if !strings.Contains(source, tc.want) {
-			t.Errorf("settings.js omits %q", tc.want)
+			t.Errorf("%s omits %q", tc.module, tc.want)
 		}
 		if strings.Contains(source, tc.notWant) {
-			t.Errorf("settings.js still states %q", tc.notWant)
+			t.Errorf("%s still states %q", tc.module, tc.notWant)
 		}
 	}
 }

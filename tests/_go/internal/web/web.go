@@ -570,23 +570,23 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 // TestCanonicalFieldFallbacksMatchOwners locks the dashboard's settings
 // fallback lists and the ui_check fixture to their single Go owners, so a
 // field added or removed on either side fails the build:
-//   - settings.js USAGE_FIELDS_FALLBACK == metrics.CanonicalUsageFields (the
-//     canonical token fields, served by GET /admin/config as usage_fields)
-//   - settings.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields (the
-//     /v1/models enrichment vocabulary, served as model_fields)
+//   - settings_providers.js USAGE_FIELDS_FALLBACK == metrics.CanonicalUsageFields
+//     (the canonical token fields, served by GET /admin/config as usage_fields)
+//   - settings_providers.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields
+//     (the /v1/models enrichment vocabulary, served as model_fields)
 //   - ui_harness/fixtures.js cfgDoc.usage_fields ==
 //     metrics.CanonicalUsageFields (the harness stubs the /admin/config
 //     payload and asserts its dropdown)
 func TestCanonicalFieldFallbacksMatchOwners(t *testing.T) {
-	js, err := staticFS.ReadFile("static/js/settings.js")
+	js, err := staticFS.ReadFile("static/js/settings_providers.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := jsStringList(t, js, "USAGE_FIELDS_FALLBACK = "), metrics.CanonicalUsageFields; !slices.Equal(got, want) {
-		t.Errorf("settings.js USAGE_FIELDS_FALLBACK = %v, want metrics.CanonicalUsageFields %v", got, want)
+		t.Errorf("settings_providers.js USAGE_FIELDS_FALLBACK = %v, want metrics.CanonicalUsageFields %v", got, want)
 	}
 	if got, want := jsStringList(t, js, "MODEL_FIELDS_FALLBACK = "), format.CanonicalModelFields; !slices.Equal(got, want) {
-		t.Errorf("settings.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
+		t.Errorf("settings_providers.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
 	}
 	root := moduleRoot(t)
 	// cfgDoc lives in the harness fixtures owner, not the runner: the jsdom

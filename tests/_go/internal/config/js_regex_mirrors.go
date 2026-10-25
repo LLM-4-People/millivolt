@@ -1,10 +1,11 @@
 package config
 
 // Cross-language regex mirrors: the dashboard's PROV_PATH_RE and
-// PROV_HEADER_RE (settings.js, the lazily loaded provider editor) must accept
-// and reject exactly what the Go owners (provPathRE, ValidHeaderName) do. The
-// JS literals are extracted from the real settings.js source and compiled with
-// Go's regexp engine, so one shared table drives both sides of each pair: any
+// PROV_HEADER_RE (settings_providers.js, the lazily loaded provider editor)
+// must accept and reject exactly what the Go owners (provPathRE,
+// ValidHeaderName) do. The JS literals are extracted from the real provider
+// module source and compiled with Go's regexp engine, so one shared table
+// drives both sides of each pair: any
 // verdict change on either side reddens here. The extraction itself fails
 // loudly if a future pattern uses JS-only syntax or an unescaped slash, instead
 // of silently comparing nothing.
@@ -47,10 +48,20 @@ func repositoryText(t *testing.T, rel string) string {
 	}
 }
 
-// settingsJSSource reads the dashboard's settings.js from the repository.
+// settingsModuleSource reads one dashboard Settings module from the
+// repository. Each pin names the module that owns its literal; the lazy
+// sheet's modules are listed once in chrome.js SETTINGS_MODULES.
+func settingsModuleSource(t *testing.T, name string) []byte {
+	t.Helper()
+	return []byte(repositoryText(t, filepath.Join("internal", "web", "static", "js", name)))
+}
+
+// settingsJSSource is the entry module's source, for the copy pins that still
+// live in settings.js while the sheet is being split. Each is moved to its
+// owning module below as that module takes the literal.
 func settingsJSSource(t *testing.T) []byte {
 	t.Helper()
-	return []byte(repositoryText(t, filepath.Join("internal", "web", "static", "js", "settings.js")))
+	return settingsModuleSource(t, "settings.js")
 }
 
 // jsRegexLiteral extracts the pattern text of a `const NAME = /pattern/;`
@@ -80,7 +91,7 @@ func jsRegexLiteral(t *testing.T, src []byte, name string) string {
 // verdict on every crafted path, so the Settings editor can never accept a
 // path the server would reject (or refuse one it accepts).
 func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
-	js := jsRegexLiteral(t, settingsJSSource(t), "PROV_PATH_RE")
+	js := jsRegexLiteral(t, settingsModuleSource(t, "settings_providers.js"), "PROV_PATH_RE")
 	jsRE, err := regexp.Compile(js)
 	if err != nil {
 		t.Fatalf("the extracted PROV_PATH_RE %q is not a Go-compilable pattern: %v", js, err)
@@ -92,7 +103,7 @@ func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("provPathRE(%q) = false, want true", s)
 		}
 		if !jsRE.MatchString(s) {
-			t.Errorf("settings.js PROV_PATH_RE(%q) = false, want true (Go accepts)", s)
+			t.Errorf("settings_providers.js PROV_PATH_RE(%q) = false, want true (Go accepts)", s)
 		}
 	}
 	for _, s := range reject {
@@ -100,7 +111,7 @@ func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("provPathRE(%q) = true, want false", s)
 		}
 		if jsRE.MatchString(s) {
-			t.Errorf("settings.js PROV_PATH_RE(%q) = true, want false (Go rejects)", s)
+			t.Errorf("settings_providers.js PROV_PATH_RE(%q) = true, want false (Go rejects)", s)
 		}
 	}
 }
@@ -111,7 +122,7 @@ func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
 // must agree on every crafted name, so the Settings editor denies exactly
 // the names the server denies.
 func TestValidHeaderNameGrammarAndJSRegexAgree(t *testing.T) {
-	js := jsRegexLiteral(t, settingsJSSource(t), "PROV_HEADER_RE")
+	js := jsRegexLiteral(t, settingsModuleSource(t, "settings_providers.js"), "PROV_HEADER_RE")
 	jsRE, err := regexp.Compile(js)
 	if err != nil {
 		t.Fatalf("the extracted PROV_HEADER_RE %q is not a Go-compilable pattern: %v", js, err)
@@ -123,7 +134,7 @@ func TestValidHeaderNameGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("ValidHeaderName(%q) = false, want true", s)
 		}
 		if !jsRE.MatchString(s) {
-			t.Errorf("settings.js PROV_HEADER_RE(%q) = false, want true (Go accepts)", s)
+			t.Errorf("settings_providers.js PROV_HEADER_RE(%q) = false, want true (Go accepts)", s)
 		}
 	}
 	for _, s := range reject {
@@ -131,7 +142,7 @@ func TestValidHeaderNameGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("ValidHeaderName(%q) = true, want false", s)
 		}
 		if jsRE.MatchString(s) {
-			t.Errorf("settings.js PROV_HEADER_RE(%q) = true, want false (Go rejects)", s)
+			t.Errorf("settings_providers.js PROV_HEADER_RE(%q) = true, want false (Go rejects)", s)
 		}
 	}
 }
