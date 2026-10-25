@@ -31,7 +31,7 @@ func queryEndpointProbeStatement() string {
 func TestQueryEndpointAllocationBounded(t *testing.T) {
 	budgetAllocs, budgetBytes := int64(4604), int64(1_286_000)
 	if raceInstrumented {
-		budgetAllocs, budgetBytes = 6400, 2 << 20
+		budgetAllocs, budgetBytes = 6400, 2<<20
 	}
 	s, err := Open(filepath.Join(t.TempDir(), "query-probe.db"), testOpts)
 	if err != nil {
