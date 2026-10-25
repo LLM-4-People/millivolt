@@ -313,6 +313,17 @@ leader ends recomputes as the next leader instead of inheriting its error.
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
 are filled at serve time and the ring snapshot itself is never retained.
+The unwritten set stays ring-derived. A record can be missing from the durable
+store while never having been queued: an enqueue that overflowed the writer
+channel and a batch whose insert failed are both dropped by design and counted
+only in `Dropped()`. The writer queue is therefore not a superset of "possibly
+not yet durable", and only the written-id set can say which ring rows are
+already durable, so the O(ring) probe under `aggMu` is the exact dedupe
+boundary. One cold fold measures 0.23-0.37 ms at the default 10,000-record ring
+and 96-107 ms at the one-million-record ceiling
+(`BenchmarkKPI/records_1000000/miss`); the ceiling is a non-default
+`history_size`, and a correct-but-slow cold fold is the accepted cost of
+never double counting.
 SQLite data_version is read on one retained connection; unsupported external
 writers are not made safe merely by cache invalidation. Log pages push exact
 provider/client/key/conversation/status equalities into SQLite before

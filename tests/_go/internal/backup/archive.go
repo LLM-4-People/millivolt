@@ -1233,7 +1233,7 @@ func benchEncode(b *testing.B, buffered bool) {
 // whole-database os.ReadFile before each encode, so its B/op includes the
 // packed-database heap copy this change removes; the path sub-benchmark never
 // materializes it. Both write and self-check the same archive, so what remains
-// allocated in either case is zstd's encoder/decoder state (SpeedBestCompression
+// allocated in either case is zstd's encoder/decoder state (the encoder level
 // dominates the absolute B/op) plus the 32 KiB streaming chunks, not the
 // database member.
 func BenchmarkEncodeFileDatabaseSource(b *testing.B) {
@@ -1319,11 +1319,10 @@ func framedArchive(t *testing.T, flags byte, created time.Time, payload []byte) 
 	t.Helper()
 	sum := sha256.Sum256(payload)
 	var body bytes.Buffer
-	enc, err := zstd.NewWriter(&body,
-		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
-		zstd.WithEncoderCRC(true),
-		zstd.WithEncoderConcurrency(1),
-	)
+	// The zstd configuration comes from the production owner, so this
+	// reference freezes the header and member framing - the actual wire
+	// contract - instead of duplicating a tuning constant.
+	enc, err := newArchiveEncoder(&body)
 	if err != nil {
 		t.Fatal(err)
 	}
