@@ -15,7 +15,7 @@ func apply(rules []ModelRule, name string) string {
 }
 
 // TestCanonicalModel is the Go half of the canonicalization contract. The
-// default-pipeline rows are shared with the ui_check.js mirror (the JS
+// default-pipeline rows are shared with the ui_harness mirror (the JS
 // `canonicalModel` in explorer.js applies them to the same spellings); the
 // custom rule-list rows below (exact/pattern ordering, case-sensitivity,
 // `(?i)` flags) run only here, with adjacent JS checks of their own. Keep

@@ -105,7 +105,7 @@ module.exports = async function w16Mirrors(H) {
       check('recordIsError agrees with the 26-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
 
-      // statusClass mirrors contribStatusClass/statusClass in aggregate.go on
+      // statusClass mirrors contribStatusClass/statusClass in aggregate_status.go on
       // the boundary rows: 429 stays a 4xx class (never an error), 499 is its
       // own cancel class, live rows use the pill vocabulary with the
       // paused > throttled > streaming precedence, and a stored stream row
@@ -127,7 +127,7 @@ module.exports = async function w16Mirrors(H) {
       check('statusClass agrees with the Go owner on the boundary rows' + (classMisses.length ? ' (missed: ' + classMisses.join('; ') + ')' : ''),
         classMisses.length === 0);
 
-      // The live pill vocabulary mirrors liveStatusFilter (aggregate.go): the
+      // The live pill vocabulary mirrors liveStatusFilter (aggregate_scope.go): the
       // exact set the server accepts as s=, routed through statusClass,
       // while numeric codes match the exact HTTP status.
       check('the live pill vocabulary is exactly the server-accepted s= set',

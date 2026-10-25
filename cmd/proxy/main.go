@@ -215,7 +215,8 @@ func main() {
 	// active before the startup projection preload allocates its burst. A
 	// zero config value leaves an operator GOMEMLIMIT untouched and otherwise
 	// applies a detected cgroup ceiling when GOMEMLIMIT is unset; GOGC is
-	// independent (config.go and memory.go own the semantics).
+	// independent (config_defaults.go, config_validate.go and memory.go own
+	// the semantics).
 	cgroupLimit, hasCgroup := cgroupMemoryMax()
 	if limit := effectiveMemoryLimit(int64(cfg.MemoryLimit), os.Getenv("GOMEMLIMIT"), cgroupLimit, hasCgroup); limit > 0 {
 		debug.SetMemoryLimit(limit)

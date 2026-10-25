@@ -12,7 +12,7 @@ defines their supported combinations.
 | Owner | Responsibility |
 | --- | --- |
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
-| [internal/config](../internal/config/config.go) | Config/defaults/validation; schema, YAML generation, revision-checked Settings, model-rule execution. |
+| [internal/config](../internal/config/config.go) | Config/defaults/validation, split by subject into `config_types.go`, `config_defaults.go`, `config_clone.go`, `config_load.go`, `config_validate.go` and `config_validate_overrides.go`; schema, YAML generation, revision-checked Settings, model-rule execution. |
 | [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; inbound/outbound protocol selection and canonical paths in [protocol.go](../internal/proxy/protocol.go); the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
@@ -20,7 +20,7 @@ defines their supported combinations.
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)); client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit wire codecs (Chat, Responses, Anthropic) over the canonical [IR](../internal/format/ir/ir.go), Connect/protobuf framing, and the same-protocol translation facade. |
 | [internal/storage](../internal/storage/store_open.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
-| [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
+| [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates; `aggregate.go` owns the core row model and each surface has its own `aggregate_*.go` module. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
 
 ## Release identity and promotion

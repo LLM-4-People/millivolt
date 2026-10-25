@@ -267,7 +267,7 @@ function errorKeyMatches(key, type, code, msg) {
 }
 
 // statusClass buckets a record's HTTP status into a coarse class. Keep in
-// lockstep with contribStatusClass in aggregate.go. Live in-flight rows
+// lockstep with contribStatusClass in aggregate_status.go. Live in-flight rows
 // (the live flag - status_code may already be set after upstream headers)
 // are 'paused', 'throttled', 'streaming', or 'pending'; a stored stream:true
 // row with status 0 is a finalized transport error, never "currently

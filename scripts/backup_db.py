@@ -60,7 +60,7 @@ FIELD_TYPES = {**dict.fromkeys(INTEGER_FIELDS, 'INTEGER'),
                **dict.fromkeys(('id', 'key_hash', 'attempts', 'tool_names'), 'TEXT'),
                'debug': 'INTEGER'}
 # The migration columns internal/storage appends with INTEGER NOT NULL
-# DEFAULT 0, in the migration's own order (store.go's needed map). A docs
+# DEFAULT 0, in the migration's own order (store_schema.go's needed map). A docs
 # source may predate them: an operator's local history database is a
 # migration ancestor, and the derive accepts it by projecting each missing
 # column as exactly the migration's zero backfill - identical to migrating

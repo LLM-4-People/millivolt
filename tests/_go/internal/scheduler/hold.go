@@ -38,7 +38,8 @@ func TestHoldsOverlapCases(t *testing.T) {
 
 // TestHoldMatchesMatrix pins holdSnap.matches over a crafted hold/record
 // matrix. This table is the Go owner of the pair's truth:
-// tests/ui_check.js mirrors the same rows against the dashboard's
+// tests/ui_harness/sections/w16_mirrors.js mirrors the same rows against the
+// dashboard's
 // holdMatchesRecord (which shares the scope semantics; its callers own the
 // expiry half through holdLive), so drift on either side reddens at least
 // one suite and forces a deliberate re-sync of the pair.

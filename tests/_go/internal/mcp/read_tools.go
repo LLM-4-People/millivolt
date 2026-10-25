@@ -781,7 +781,7 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	// Exactly the classes internal/web statusClass can return, read from the
 	// exported owner instead of a repeated literal: a 3xx never reaches a
 	// recorded row, 499 is its own class, and a status under 200 is err. See
-	// tests/_go/internal/web/aggregate.go TestStatusClassAndBuckets for the
+	// tests/_go/internal/web/aggregate_explorer.go TestStatusClassAndBuckets for the
 	// classifier side of this contract.
 	want := web.StatusClasses
 	if got := byDimension["status"].Values; len(got) != len(want) {

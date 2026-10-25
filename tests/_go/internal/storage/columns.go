@@ -66,7 +66,7 @@ func recordColumnNames() []string {
 }
 
 // TestInsertColumnsMatchRecordColumns pins the two hand-maintained column
-// lists (writer.go insertColumns, store.go recordColumns) to content AND
+// lists (writer.go insertColumns, store_query.go recordColumns) to content AND
 // order equality. They are written in lockstep by hand (the write side's
 // values list and the read side's scanRecord follow the same order), and the
 // dangerous drift direction - a column added to the INSERT but not the SELECT
