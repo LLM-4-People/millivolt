@@ -60,11 +60,9 @@ case "$mode" in
     # shards use the cores; collect failures after the gate.
     run_background python python_suites
     run_background npm npm test
-    # One race-enabled pass proves everything the plain pass used to: the
-    # same tests run under the same overlay (no build tags, no
-    # race-conditional skips), with the race detector as a strict superset
-    # of the plain instrumentation. The sharder keeps fixed-port packages
-    # serial and gives temp-isolated packages disjoint test shards.
+    # The shard runs two passes over the same overlay: tests declared by
+    # tests/race_scope.py under the race detector, the rest plain. Every test
+    # runs exactly once, and fixed-port packages stay serial and locked.
     python3 -B -O -m tests.shard
     wait_background
     ;;
