@@ -184,6 +184,23 @@ def _constraint_tags(node):
     return _constraint_tags(node[1]) | _constraint_tags(node[2])
 
 
+def _race_constrained(content):
+    """True when any build constraint on the file mentions the race tag."""
+    try:
+        constraints = _build_constraints(content)
+    except ValueError:
+        return False
+    return any("race" in _constraint_tags(constraint) for constraint in constraints)
+
+
+# Go recognizes a test, benchmark, fuzz target or example by its top-level
+# function name. Race-gated files may only carry helpers, so this predicate
+# deliberately errs on the side of rejecting a name that begins with one of
+# those prefixes.
+_TEST_FUNCTION = re.compile(
+    r"(?m)^func\s+(?:Test|Benchmark|Fuzz|Example)[A-Za-z0-9_]*\s*\(")
+
+
 def _constraint_matches(node, tags):
     if node[0] == "tag":
         return node[1] in tags
@@ -226,14 +243,14 @@ def platform_constraint_only(name, content):
     return False
 
 
-def ignored_test_source(replacements, package_dir, name):
-    """Read an ignored test from its real file, following the overlay map."""
+def test_source(replacements, package_dir, name):
+    """Read a discovered test from its real file, following the overlay map."""
     path = str(Path(package_dir) / name)
     source = replacements.get(path, path)
     try:
         return Path(source).read_text(encoding="utf-8")
     except OSError as error:
-        raise RuntimeError("cannot inspect ignored Go test: " + path) from error
+        raise RuntimeError("cannot inspect Go test: " + path) from error
 
 
 def discover(root):
@@ -324,8 +341,10 @@ def package_parity(replacements, document, race_document=None):
 
     IgnoredGoFiles is accepted when the filename suffix and the file's own
     build constraints together make this a genuine GOOS/GOARCH exclusion. A
-    race-gated file is also deliberate: the forced full-race gate runs it, so a
-    second listing taken with the race tag must discover the same path. A
+    race-gated file is accepted only when a second listing taken with the race
+    tag discovers the same path, and only as a helper: a race-tagged file that
+    declares a Test, Benchmark, Fuzz or Example function is rejected because
+    one pass can list it while the other's binary silently excludes it. A
     platform-suffixed file behind ``//go:build integration`` is still a silent
     skip, and every other non-platform tag stays a hard error. No second
     package registry or fixed test count can silently drift from Go.
@@ -344,10 +363,16 @@ def package_parity(replacements, document, race_document=None):
                     if field == "IgnoredGoFiles":
                         platform = platform_test_name(name)
                         if platform:
-                            content = ignored_test_source(replacements, package["Dir"], name)
+                            content = test_source(replacements, package["Dir"], name)
                             platform = platform_constraint_only(name, content)
                         require(platform or (alternate is not None and path in alternate),
                                 "Go ignored a test for a non-platform reason, so it never runs: " + path)
+                    if path in replacements:
+                        content = test_source(replacements, package["Dir"], name)
+                        require(not (_race_constrained(content)
+                                     and _TEST_FUNCTION.search(content)),
+                                "Go test " + path + " is race-gated and defines a test function, "
+                                "so one pass can silently skip it; race-tagged files may be helpers only")
                     require(path not in found, "Go discovered a duplicate test: " + path)
                     found.add(path)
     require(found == set(replacements),
