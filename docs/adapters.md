@@ -214,7 +214,10 @@ target cannot consume them:
   Responses `user` value is rejected before any upstream send rather than
   truncated, because truncation can collide two distinct identifiers.
   Chat/Responses `service_tier: priority` maps to Anthropic `speed: fast` with
-  an approximation warning; `fast` maps without one.
+  an approximation warning; `fast` maps without one. A translated stream takes
+  its tier and metadata from the source start event. A value that appears only
+  in the terminal document is not applied retroactively, because the target
+  `message_start` and earlier chunks are already on the wire.
 - An Anthropic document `title` is limited to 500 characters. A longer source
   filename is dropped with a `document.title` warning while the document bytes
   still translate; strict mode rejects the loss before any upstream send.
