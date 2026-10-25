@@ -562,7 +562,7 @@ func TestTransparentTransportErrorRetry(t *testing.T) {
 	defer upstream.Close()
 
 	buf := metrics.NewBuffer(8)
-	cfg := config.Default()
+	cfg := testConfig()
 	cfg.MaxRetries = 3
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
