@@ -115,6 +115,50 @@ func TestRingSnapshotBorrowsNotRing(t *testing.T) {
 	}
 }
 
+// TestRingSnapshotKeepsScratchWhenAllWritten pins the empty-unwritten case: a
+// ring whose records are already durable filters down to an empty view, and the
+// caller still has to return the borrowed scratch to the pool. Returning a nil
+// view dropped the ring-sized buffer instead (releaseRing could not see its
+// capacity), so the next aggregate read allocated a fresh one.
+func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
+	s := testStore(t)
+	buf := metrics.NewBuffer(8)
+	for i := 0; i < 3; i++ {
+		s.Recorder(buf).Record(&metrics.Record{
+			ID:         fmt.Sprintf("durable-%d", i),
+			Provider:   "fixture.example",
+			Start:      time.UnixMilli(1_800_000_000_000 + int64(i)),
+			StatusCode: 200,
+		})
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(buf, s, time.Second)
+
+	firstScratch, first := api.ringSnapshot(0)
+	if len(first) != 0 {
+		t.Fatalf("ringSnapshot returned %d records, want 0: every ring record is durable", len(first))
+	}
+	if cap(first) < 3 {
+		t.Fatalf("empty ringSnapshot view capacity = %d, want the 3-record scratch retained (the scratch was dropped)", cap(first))
+	}
+	base := &first[:cap(first)][0]
+	releaseRing(firstScratch, first)
+
+	secondScratch, second := api.ringSnapshot(0)
+	defer releaseRing(secondScratch, second)
+	if len(second) != 0 {
+		t.Fatalf("second ringSnapshot returned %d records, want 0", len(second))
+	}
+	if cap(second) < 3 {
+		t.Fatalf("second empty ringSnapshot capacity = %d, want the retained scratch", cap(second))
+	}
+	if &second[:cap(second)][0] != base {
+		t.Fatal("the empty-unwritten read discarded the pooled scratch: the next read allocated a new buffer")
+	}
+}
+
 // TestSnapshotIntoAllocationCeiling is the WS5a budget: a retained scratch
 // makes a ring snapshot allocation-free. At the one-million-record ceiling the
 // displaced copy was 8,005,296 B per KPI fold (BenchmarkKPI/records_1000000);

@@ -551,7 +551,11 @@ func (a *AggAPI) ringSnapshot(since int64) (*ringScratch, []*metrics.Record) {
 		return scratch, out
 	}
 	if len(unwritten) == 0 {
-		return scratch, nil
+		// Every ring record is already durable. Return the borrowed view with
+		// its capacity, never nil: releaseRing hands the scratch back to the
+		// pool through this slice, so a nil view would drop the pooled buffer
+		// and make the next read allocate a fresh ring-sized one.
+		return scratch, out[:0]
 	}
 	keep := make(map[string]struct{}, len(unwritten))
 	for _, id := range unwritten {
