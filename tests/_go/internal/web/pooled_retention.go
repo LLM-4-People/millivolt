@@ -75,6 +75,19 @@ func TestRingScratchReleaseClearsFilteredTail(t *testing.T) {
 	assertNoRetainedRecords(t, scratch, "filtered ring")
 }
 
+func TestRingIDScratchReleaseClearsPooledStrings(t *testing.T) {
+	ids := acquireRingIDs(4)
+	for index := range *ids {
+		(*ids)[index] = fmt.Sprintf("id-%d", index)
+	}
+	releaseRingIDs(ids)
+	for index, id := range (*ids)[:cap(*ids)] {
+		if id != "" {
+			t.Fatalf("pooled id scratch slot %d still pins %q", index, id)
+		}
+	}
+}
+
 func TestWriteJSONClearsPooledBuffer(t *testing.T) {
 	const marker = "pooled-preview-marker-6f1c2b"
 	// The pool drops entries at GC. Pin it so the just-released buffer is the

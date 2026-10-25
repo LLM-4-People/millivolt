@@ -512,7 +512,12 @@ func acquireRingIDs(size int) *ringIDScratch {
 	return ids
 }
 
+// releaseRingIDs returns the store-probe scratch. The full usable capacity is
+// cleared for the same reason as the record scratch: after a purge or a skip
+// the ring may no longer reference those records, and a retained string header
+// would pin the id bytes (16 MB of headers at the one-million-slot ceiling).
 func releaseRingIDs(ids *ringIDScratch) {
+	clear((*ids)[:cap(*ids)])
 	*ids = (*ids)[:0]
 	ringIDPool.Put(ids)
 }
