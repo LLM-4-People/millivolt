@@ -17,10 +17,13 @@ const (
 	// sseLineBufInit / sseLineBufMax bound a single SSE event line while
 	// scanning an upstream Anthropic stream (initial buffer / hard cap). The
 	// small initial buffer fits the ordinary event and grows on demand, so a
-	// stream that never exceeds it retains 4 KiB instead of 64. Safety
-	// guardrail against pathological lines, not user-tunable.
+	// stream that never exceeds it retains 4 KiB instead of 2 MiB. The 2 MiB
+	// cap admits a 1 MiB answer repeated in a terminal response.completed
+	// frame plus its JSON envelope; the decoder's retained-text and overall
+	// response bounds remain the separate authority on total body size.
+	// Safety guardrail against pathological lines, not user-tunable.
 	sseLineBufInit = 4 * 1024
-	sseLineBufMax  = 1024 * 1024
+	sseLineBufMax  = 2 * 1024 * 1024
 
 	// nativeIdentityMaxBytes bounds provider-controlled identity strings
 	// (message id/model and tool-call id/name) at the translation boundary
