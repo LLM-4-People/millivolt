@@ -844,14 +844,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		maxConc = n
 	}
+	// Wrap the debug tap around the original writer first, then build the
+	// streaming pacer over it. The pacer is the lowest choke point and writes
+	// keepalives and pre-commit JSON errors directly, so a tap above the pacer
+	// would miss exactly those client-facing bytes.
+	if debugTap != nil {
+		w = debugTap.wrapWriter(w)
+	}
 	var pacer *ssePacer
 	if stream {
 		pacer = s.newSSEPacerFor(w)
 		w = pacer
 		pacer.Arm()
-	}
-	if debugTap != nil {
-		w = debugTap.wrapWriter(w)
 	}
 	defer func() { pacer.Stop() }()
 	// hookMu serializes the four lifecycle-hook bodies below. The scheduler
