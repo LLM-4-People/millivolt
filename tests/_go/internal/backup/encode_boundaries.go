@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,20 +140,22 @@ func TestEncodeFileRoundTripAtBlockBoundaries(t *testing.T) {
 }
 
 // TestEncodeFileDocumentedSizeFloor pins the two sizes below the smallest
-// encodable member so a future change cannot treat "empty" as a valid archive:
-// no members is ErrEmptyArchive, and a 1-byte config member is not a config the
-// validator can accept (the self-check refuses it). Both are rejections, never
-// a zero-length or partial artifact.
+// encodable member: no members is ErrEmptyArchive, and a 1-byte config member
+// sets the config flag but is not a YAML mapping, so the self-check's config
+// validation rejects it. Both fail closed with no staged artifact, never a
+// zero-length or partial archive.
 func TestEncodeFileDocumentedSizeFloor(t *testing.T) {
 	stage := t.TempDir()
 	limit := int64(config.BackupMaxBytesMax)
+	created := time.Unix(1_700_000_123, 0).UTC()
 	for _, tc := range []struct {
 		name string
 		a    Archive
-		want error
+		want error // nil means the self-check must reject it
+		why  string
 	}{
-		{"zero-members", Archive{Created: time.Unix(1_700_000_123, 0).UTC()}, ErrEmptyArchive},
-		{"one-byte-config", Archive{Created: time.Unix(1_700_000_123, 0).UTC(), Config: []byte("x")}, nil},
+		{"zero-members", Archive{Created: created}, ErrEmptyArchive, ""},
+		{"one-byte-config", Archive{Created: created, Config: []byte("x")}, nil, "backup config"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path, size, err := EncodeFile(stage, tc.a, limit)
@@ -160,18 +163,8 @@ func TestEncodeFileDocumentedSizeFloor(t *testing.T) {
 				if !errors.Is(err, tc.want) {
 					t.Fatalf("encode = %v, want %v", err, tc.want)
 				}
-			} else if err == nil {
-				// The validator accepts this config, so the archive is real and
-				// must decode to the same single byte.
-				defer os.Remove(path)
-				got, err := DecodeFile(stage, path)
-				if err != nil {
-					t.Fatalf("decode: %v", err)
-				}
-				if !bytes.Equal(got.Config, tc.a.Config) {
-					t.Fatalf("config member changed: %q", got.Config)
-				}
-				return
+			} else if err == nil || !strings.Contains(err.Error(), tc.why) {
+				t.Fatalf("encode = %v, want a %q rejection", err, tc.why)
 			}
 			if size != 0 || path != "" {
 				t.Fatalf("rejected encode returned path=%q size=%d", path, size)
