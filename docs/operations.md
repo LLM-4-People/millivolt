@@ -574,9 +574,11 @@ declares a larger size is rejected before its bytes are copied, and encoding
 refuses to emit one, so an older archive whose config member exceeds that bound
 fails restore. The bound covers only the config member; the database member
 stays streamed under the payload ceiling. It validates that hash, the
-zstd frame, member framing and config `Validate()` before applying anything,
-and a selected database member additionally passes `PRAGMA integrity_check`
-before it is staged. Decode refuses an uncompressed payload larger than the
+zstd frame, member framing and config `Validate()` before applying anything.
+A selected database member is decoded into its private staging file first,
+then must pass `PRAGMA integrity_check`; only that checked file is published
+as the pending snapshot, which restore then preflights for admission before
+the config member is written. Decode refuses an uncompressed payload larger than the
 Schema maximum for `backup_max_bytes`, so a small compressed file cannot expand
 without bound. Download lists how many live settings differ from default and how
 many stored requests would be packed. Picking a file first inspects the
