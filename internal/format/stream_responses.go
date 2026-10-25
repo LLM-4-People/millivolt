@@ -66,7 +66,10 @@ type responsesStreamEvent struct {
 	Arguments      string          `json:"arguments"`
 	Code           json.RawMessage `json:"code"`
 	Message        json.RawMessage `json:"message"`
-	Param          string          `json:"param"`
+	// Param is a provider hint with no canonical equivalent. It stays raw so
+	// a wrong-typed value cannot abort the terminal before its valid code and
+	// message siblings are classified.
+	Param json.RawMessage `json:"param"`
 }
 
 // ResponsesStreamDecoder converts Responses SSE events into canonical events.

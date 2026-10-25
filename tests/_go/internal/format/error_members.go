@@ -207,6 +207,8 @@ func TestTranslatorErrorMemberTolerance(t *testing.T) {
 			{"numeric code keeps its message", `,"code":529,"message":"boom"`, "boom"},
 			{"object message is generic", `,"message":{"detail":"x"}`, genericProviderErrorMessage},
 			{"wrong-typed only is generic", `,"code":{"x":1},"message":{"y":2}`, genericProviderErrorMessage},
+			{"object param keeps valid siblings", `,"param":{"x":1},"code":"server_error","message":"boom"`, "boom"},
+			{"array param keeps valid siblings", `,"param":[1],"code":"server_error","message":"boom"`, "boom"},
 			{"empty event is generic", ``, genericProviderErrorMessage},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
