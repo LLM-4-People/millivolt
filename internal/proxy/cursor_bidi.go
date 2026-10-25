@@ -433,7 +433,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		// trace dies with it - see upstreamTiming in relay.go, the shared owner.
 		timing := upstreamTiming{start: attemptStart}
 		pr, pw := io.Pipe()
-		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace()))
+		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace(t.tlsPossible())))
 		upstreamCancel := func() { cancel(); pr.Close(); pw.Close() }
 		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, cursorRunURL(t), pr)
 		if err != nil {

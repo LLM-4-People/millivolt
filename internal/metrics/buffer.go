@@ -445,12 +445,30 @@ func (b *Buffer) ringIndex(logical int) int {
 // copyRingWindow copies only the requested logical window, starting at its
 // physical slot, with at most two contiguous copies. Records and their paired
 // sequences share this one traversal; no full-ring allocation is needed for
-// a capped snapshot or small delta. Callers must hold the ring's lock.
+// a capped snapshot or small delta. Callers must hold the ring's lock. An
+// empty window is a non-nil empty slice, matching the historical contract of
+// Snapshot/SnapshotSince (nil and empty are distinguished by callers).
 func copyRingWindow[T any](ring []T, start, count int) []T {
-	out := make([]T, count)
-	n := copy(out, ring[start:])
-	copy(out[n:], ring)
-	return out
+	return copyRingWindowInto(make([]T, 0, count), ring, start, count)
+}
+
+// copyRingWindowInto is copyRingWindow into a caller-retained destination:
+// dst's length is ignored and its capacity is reused, so a caller that keeps
+// one scratch slice pays no ring-sized allocation per read. A dst too small
+// for the window is replaced by an exact-size slice. Callers must hold the
+// ring's lock.
+func copyRingWindowInto[T any](dst []T, ring []T, start, count int) []T {
+	if count == 0 {
+		return dst[:0]
+	}
+	if cap(dst) < count {
+		dst = make([]T, count)
+	} else {
+		dst = dst[:count]
+	}
+	n := copy(dst, ring[start:])
+	copy(dst[n:], ring)
+	return dst
 }
 
 // Snapshot returns a copy of the current buffer contents from oldest to
@@ -459,6 +477,23 @@ func (b *Buffer) Snapshot() []*Record {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return copyRingWindow(b.buf, b.ringIndex(0), b.size)
+}
+
+// SnapshotInto copies the current buffer contents from oldest to newest into
+// dst's capacity and returns the filled slice: the same records, in the same
+// oldest-to-newest order, under the same read lock as Snapshot. It exists for
+// callers that retain a scratch slice across reads: the aggregate layer copies
+// the whole ring on every fold, and at the one-million-record ceiling that was
+// an 8 MB allocation per read.
+//
+// The result aliases dst's backing array, so it is only safe to mutate until
+// the scratch is reused; the ring itself is never aliased. dst's length is
+// ignored (its capacity decides reuse), which lets a caller hand back a slice
+// shortened by a filter.
+func (b *Buffer) SnapshotInto(dst []*Record) []*Record {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return copyRingWindowInto(dst, b.buf, b.ringIndex(0), b.size)
 }
 
 // Revisions returns finalized and pending content revisions atomically. The

@@ -483,13 +483,50 @@ func errorEntries(r *metrics.Record) []errEnt {
 	return out
 }
 
-// ringSnapshot captures potentially unflushed records with start >= since.
+// ringScratch is the recycled destination for a ring copy. The aggregate
+// readers copy the whole ring on every fold (the ring is the conservative
+// source of "possibly not yet durable"), and at the one-million-record ceiling
+// that copy was 8 MB of fresh garbage per read.
+type ringScratch []*metrics.Record
+
+// ringScratchPool owns the ring-copy buffers between reads. It is package
+// level, not per AggAPI, so a process that rebuilds an API (or a benchmark
+// that does) still reuses them; sync.Pool drops them at GC like any other
+// pooled buffer, so a shrink or an idle period returns the memory. A Get miss
+// allocates exactly the slice Snapshot always allocated: the pool is a reuse
+// win, never a correctness dependency.
+var ringScratchPool = sync.Pool{New: func() any { return new(ringScratch) }}
+
+// acquireRing copies the ring into a pooled scratch, oldest to newest. The
+// view aliases the scratch until releaseRing, so it must not outlive the read
+// that holds it; both readers (the KPI fold and ringSnapshot) release it with a
+// defer at their own scope.
+func (a *AggAPI) acquireRing() (*ringScratch, []*metrics.Record) {
+	buf := ringScratchPool.Get().(*ringScratch)
+	return buf, a.buf.SnapshotInto(*buf)
+}
+
+// releaseRing returns a scratch acquired by acquireRing. view must be the
+// slice acquireRing returned, not a filter of it: the scratch is reused from
+// its capacity, and the original backing array is the owner.
+func releaseRing(buf *ringScratch, view []*metrics.Record) {
+	*buf = view[:0]
+	ringScratchPool.Put(buf)
+}
+
+// ringSnapshot captures potentially unflushed records with start >= since into
+// a borrowed scratch view, oldest to newest. The caller must hand the scratch
+// back with releaseRing(scratch, view) once it has finished reading the view
+// (a defer at the caller is the intended shape): the view aliases the pooled
+// buffer, and filtering happens inside it, so a read allocates nothing.
+//
 // Filter BEFORE the durable snapshot: commits arriving afterward are still
 // deduped by its exact ID set, while already-written rows that were deleted
 // externally can never be resurrected from their obsolete ring copies.
-func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
-	out := make([]*metrics.Record, 0, 64)
-	for _, r := range a.buf.Snapshot() {
+func (a *AggAPI) ringSnapshot(since int64) (*ringScratch, []*metrics.Record) {
+	scratch, view := a.acquireRing()
+	out := view[:0]
+	for _, r := range view {
 		if r == nil {
 			continue
 		}
@@ -499,7 +536,7 @@ func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
 		out = append(out, r)
 	}
 	if a.store == nil || len(out) == 0 {
-		return out
+		return scratch, out
 	}
 	ids := make([]string, len(out))
 	for i, r := range out {
@@ -507,10 +544,10 @@ func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
 	}
 	unwritten := a.store.FilterUnwritten(ids)
 	if len(unwritten) == len(out) {
-		return out
+		return scratch, out
 	}
 	if len(unwritten) == 0 {
-		return nil
+		return scratch, nil
 	}
 	keep := make(map[string]struct{}, len(unwritten))
 	for _, id := range unwritten {
@@ -523,7 +560,7 @@ func (a *AggAPI) ringSnapshot(since int64) []*metrics.Record {
 			n++
 		}
 	}
-	return out[:n]
+	return scratch, out[:n]
 }
 
 // streamWindow is the shared analytical read boundary. Snapshot the ring
@@ -534,7 +571,8 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ring := a.ringSnapshot(since)
+	scratch, ring := a.ringSnapshot(since)
+	defer releaseRing(scratch, ring)
 	return a.withProjection(ctx, func(p *projectionData) error {
 		if prepare != nil {
 			prepare(p)
@@ -679,6 +717,11 @@ type kpiMemo struct {
 	entry *kpiMemoEntry
 	// fold serializes cold folds. It is never held for a memo hit.
 	fold sync.Mutex
+	// ring is the cold fold's retained ring-copy scratch. fold serializes cold
+	// folds, so exactly one fold owns it at a time; keeping it here (rather
+	// than borrowing a pooled buffer) means the 1M-row ring copy is allocated
+	// once for the process instead of once per poll.
+	ring []*metrics.Record
 	// testFold is nil in production. Package tests install it to hold one cold
 	// fold in flight while same-key callers arrive; it runs under fold after
 	// folds is incremented.
@@ -749,7 +792,11 @@ func (a *AggAPI) kpi() kpiPayload {
 	}
 	return a.kpiFromTotals(a.kpiMemo.foldKPI(key, func() (storage.Totals, bool) {
 		t := storage.Totals{}
-		ring := a.buf.Snapshot()
+		// The cold fold is serialized by foldKPI, so the retained scratch is
+		// owned here. TotalsAndUnwritten may shorten the view in place; the
+		// memo keeps the original backing array for the next fold.
+		ring := a.buf.SnapshotInto(a.kpiMemo.ring)
+		a.kpiMemo.ring = ring[:0]
 		if a.store != nil {
 			t, ring = a.store.TotalsAndUnwritten(ring)
 		}
@@ -1101,7 +1148,8 @@ func minStartScoped(ctx context.Context, a *AggAPI, mcz *modelCanonizer, fs []sc
 			min = c.start
 		}
 	}
-	ring := a.ringSnapshot(0)
+	scratch, ring := a.ringSnapshot(0)
+	defer releaseRing(scratch, ring)
 	err := a.withProjection(ctx, func(p *projectionData) error {
 		if p != nil {
 			fs = bindScope(fs, p, mcz)
@@ -1144,7 +1192,8 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	ring := a.ringSnapshot(0)
+	scratch, ring := a.ringSnapshot(0)
+	defer releaseRing(scratch, ring)
 	return a.withProjection(ctx, func(p *projectionData) error {
 		if p != nil {
 			fs = bindScope(fs, p, mcz)

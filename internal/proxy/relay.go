@@ -1566,8 +1566,15 @@ type upstreamTiming struct {
 // fires (no dial on a pooled connection, no handshake on plaintext, no
 // headers on a transport failure) simply leaves its zero value, and adopt
 // renders that as "not observed".
-func (u *upstreamTiming) trace() *httptrace.ClientTrace {
-	return &httptrace.ClientTrace{
+//
+// tlsPossible comes from the target's own scheme (target.tlsPossible), so the
+// handshake pair is installed only where a handshake can happen. Redirects are
+// never followed (preserveUpstreamRedirect), so one attempt's request always
+// carries its target's scheme. An absent hook is indistinguishable from a hook
+// that cannot fire: both leave the zero value adopt renders as "not observed",
+// so a plaintext target saves the two closures and shifts no timing semantics.
+func (u *upstreamTiming) trace(tlsPossible bool) *httptrace.ClientTrace {
+	trace := &httptrace.ClientTrace{
 		ConnectStart: func(network, addr string) {
 			u.mu.Lock()
 			defer u.mu.Unlock()
@@ -1579,18 +1586,6 @@ func (u *upstreamTiming) trace() *httptrace.ClientTrace {
 			u.mu.Lock()
 			defer u.mu.Unlock()
 			u.connectD = time.Now()
-		},
-		TLSHandshakeStart: func() {
-			u.mu.Lock()
-			defer u.mu.Unlock()
-			if u.tlsS.IsZero() {
-				u.tlsS = time.Now()
-			}
-		},
-		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
-			u.mu.Lock()
-			defer u.mu.Unlock()
-			u.tlsD = time.Now()
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
 			u.mu.Lock()
@@ -1605,6 +1600,21 @@ func (u *upstreamTiming) trace() *httptrace.ClientTrace {
 			}
 		},
 	}
+	if tlsPossible {
+		trace.TLSHandshakeStart = func() {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			if u.tlsS.IsZero() {
+				u.tlsS = time.Now()
+			}
+		}
+		trace.TLSHandshakeDone = func(state tls.ConnectionState, err error) {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.tlsD = time.Now()
+		}
+	}
+	return trace
 }
 
 // adopt stamps the record with this attempt's four observations. It runs
@@ -1777,7 +1787,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// same context, so an abandoned attempt's trace dies with it (see
 		// upstreamTiming).
 		timing := upstreamTiming{start: attemptStart}
-		attemptCtx, attemptCancel := withSendTimeout(httptrace.WithClientTrace(ctx, timing.trace()), t.timeout)
+		attemptCtx, attemptCancel := withSendTimeout(httptrace.WithClientTrace(ctx, timing.trace(t.tlsPossible())), t.timeout)
 		// Rebuild the upstream request (body can't be reused across retries).
 		upstream, err := s.buildUpstreamRequest(attemptCtx, r, t, key, body)
 		if err != nil {

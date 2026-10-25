@@ -40,26 +40,40 @@ var costKeyScales = map[string]float64{
 // and returns the terminal value. Arrays are indexed by numeric path segments.
 // The single dotted-path resolver for provider field maps (cost_keys,
 // usage_keys, and models_keys all share this shape).
+//
+// The path is walked in place: each segment is a substring of path, so no
+// segment slice is allocated. Splitting the path (as this used to) allocated
+// one slice per candidate, about sixteen times per standard usage parse. The
+// walk is the compiled form: every path is still declared once, as a string,
+// in CostKeys, costKeyScales, usageKeyPaths or a provider override.
 func DigJSON(v any, path string) (any, bool) {
 	cur := v
-	for _, seg := range strings.Split(path, ".") {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			// allow indexing into arrays with a numeric segment
-			if arr, isArr := cur.([]any); isArr {
-				if i, err := strconv.Atoi(seg); err == nil && i >= 0 && i < len(arr) {
-					cur = arr[i]
-					continue
-				}
+	for {
+		seg, rest, more := path, "", false
+		if i := strings.IndexByte(path, '.'); i >= 0 {
+			seg, rest, more = path[:i], path[i+1:], true
+		}
+		switch node := cur.(type) {
+		case map[string]any:
+			next, ok := node[seg]
+			if !ok {
+				return nil, false
 			}
+			cur = next
+		case []any:
+			i, err := strconv.Atoi(seg)
+			if err != nil || i < 0 || i >= len(node) {
+				return nil, false
+			}
+			cur = node[i]
+		default:
 			return nil, false
 		}
-		cur, ok = m[seg]
-		if !ok {
-			return nil, false
+		if !more {
+			return cur, true
 		}
+		path = rest
 	}
-	return cur, true
 }
 
 // asFloat coerces a JSON scalar to float64. Accepts JSON numbers and numeric
@@ -192,9 +206,11 @@ type usageField struct {
 }
 
 // usageFields lists every canonical count in one place so the override-only
-// parser and ParseUsage stay in lockstep.
-func usageFields(u *Usage) []usageField {
-	return []usageField{
+// parser and ParseUsage stay in lockstep. It is a value array, not a slice:
+// both callers range over it immediately, so a fixed-size value keeps that
+// shared owner allocation-free on the per-response path.
+func usageFields(u *Usage) [6]usageField {
+	return [6]usageField{
 		{"input_tokens", &u.InputTokens},
 		{"output_tokens", &u.OutputTokens},
 		{"total_tokens", &u.TotalTokens},

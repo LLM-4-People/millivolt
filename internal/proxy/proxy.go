@@ -232,6 +232,16 @@ type target struct {
 	streamIncludeUsage bool
 }
 
+// tlsPossible reports whether an upstream send to this target can ever run a
+// TLS handshake. resolveTarget accepts only http and https, and the client
+// never follows a redirect (preserveUpstreamRedirect), so the base URL's
+// scheme is the whole answer. The httptrace handshake hooks are installed only
+// when this is true: a plaintext attempt could never fire them, and an absent
+// hook renders exactly like a hook that never fired ("not observed").
+func (t *target) tlsPossible() bool {
+	return strings.HasPrefix(t.baseURL, "https://")
+}
+
 // wire is the upstream response protocol. X-Proxy-Format selects an explicit
 // outbound wire; without it the request is a native passthrough on the path
 // protocol. Cursor and unknown paths have no inferred wire.
