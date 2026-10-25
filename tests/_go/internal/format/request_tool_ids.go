@@ -127,11 +127,15 @@ func TestRequestToolIDsAreUnique(t *testing.T) {
 		}
 	})
 
-	t.Run("base64 document decoy is ignored", func(t *testing.T) {
-		decoy := base64.StdEncoding.EncodeToString([]byte(
-			`{"type":"tool_use","id":"call_real","name":"decoy","input":{}}`))
+	t.Run("base64 document content decoy is ignored", func(t *testing.T) {
+		data := base64.StdEncoding.EncodeToString([]byte(
+			`{"type":"tool_use","id":"embedded","name":"decoy","input":{}}`))
+		// A base64 document carries a stray content array whose tool id equals
+		// the later real call. Only a content-source document decodes that
+		// array, so the pre-scan must ignore it. The unscoped pre-scan on
+		// bb060c0 walked every document source and rejected this body.
 		body := `{"model":"m","max_tokens":16,"messages":[` +
-			`{"role":"user","content":[{"type":"text","text":"read"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"` + decoy + `"}}]},` +
+			`{"role":"user","content":[{"type":"text","text":"read"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"` + data + `","content":[{"type":"tool_use","id":"call_real","name":"decoy","input":{}}]}}]},` +
 			`{"role":"assistant","content":[{"type":"tool_use","id":"call_real","name":"f","input":{}}]},` +
 			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_real","content":"ok"}]}]}`
 		req, err := DecodeAnthropicRequest([]byte(body))
