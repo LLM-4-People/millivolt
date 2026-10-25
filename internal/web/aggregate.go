@@ -494,6 +494,29 @@ type ringScratch []*metrics.Record
 // win, never a correctness dependency.
 var ringScratchPool = sync.Pool{New: func() any { return new(ringScratch) }}
 
+// ringIDScratch is the ring-sized id slice used only to ask the durable store
+// which records are still unwritten. It is pooled separately from the record
+// pointers because the store call consumes strings, not records; a fresh
+// []string per read was about 16 MB at the one-million-slot ceiling.
+type ringIDScratch []string
+
+var ringIDPool = sync.Pool{New: func() any { return new(ringIDScratch) }}
+
+func acquireRingIDs(size int) *ringIDScratch {
+	ids := ringIDPool.Get().(*ringIDScratch)
+	if cap(*ids) < size {
+		*ids = make([]string, size)
+	} else {
+		*ids = (*ids)[:size]
+	}
+	return ids
+}
+
+func releaseRingIDs(ids *ringIDScratch) {
+	*ids = (*ids)[:0]
+	ringIDPool.Put(ids)
+}
+
 // acquireRing copies the ring into a pooled scratch, oldest to newest. The
 // view aliases the scratch until releaseRing, so it must not outlive the read
 // that holds it; both readers (the KPI fold and ringSnapshot) release it with a
@@ -515,7 +538,9 @@ func releaseRing(buf *ringScratch, view []*metrics.Record) {
 // a borrowed scratch view, oldest to newest. The caller must hand the scratch
 // back with releaseRing(scratch, view) once it has finished reading the view
 // (a defer at the caller is the intended shape): the view aliases the pooled
-// buffer, and filtering happens inside it, so a read allocates nothing.
+// buffer, and filtering happens inside it, so a steady-state read allocates
+// nothing. When a durable store is attached, its written-id probe uses a
+// separate pooled scratch instead of a fresh ring-sized []string.
 //
 // Filter BEFORE the durable snapshot: commits arriving afterward are still
 // deduped by its exact ID set, while already-written rows that were deleted
@@ -535,11 +560,12 @@ func (a *AggAPI) ringSnapshot(since int64) (*ringScratch, []*metrics.Record) {
 	if a.store == nil || len(out) == 0 {
 		return scratch, out
 	}
-	ids := make([]string, len(out))
+	ids := acquireRingIDs(len(out))
+	defer releaseRingIDs(ids)
 	for i, r := range out {
-		ids[i] = r.ID
+		(*ids)[i] = r.ID
 	}
-	unwritten := a.store.FilterUnwritten(ids)
+	unwritten := a.store.FilterUnwritten(*ids)
 	if len(unwritten) == len(out) {
 		return scratch, out
 	}
