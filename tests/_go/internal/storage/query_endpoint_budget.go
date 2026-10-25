@@ -21,10 +21,11 @@ func queryEndpointProbeStatement() string {
 
 // TestQueryEndpointAllocationBounded is the WS10 budget probe. The endpoint
 // encoded every row twice: once into a map and once into JSON. Streaming the
-// row into the response buffer removed the map layer, so the ceiling below is
-// 20% over the post-change measurement (500 rows, 300-byte payload):
-// 4,000 allocs and 1.25 MB/op. A regression that re-materializes the map layer
-// roughly doubles the alloc count and fails here.
+// row into the response buffer removed the map layer. Measured post-change
+// (500 rows, 300-byte payload): 3,836 allocs/op and about 1,071,370 B/op. Each
+// ceiling adds just over 20%: 4,604 allocs and 1,286,000 bytes. A regression
+// that re-materializes the map layer roughly doubles the alloc count and fails
+// here.
 func TestQueryEndpointAllocationBounded(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "query-probe.db"), testOpts)
 	if err != nil {
@@ -59,11 +60,11 @@ func TestQueryEndpointAllocationBounded(t *testing.T) {
 		}
 	})
 	allocs, bytes := res.AllocsPerOp(), res.AllocedBytesPerOp()
-	if allocs > 6400 {
-		t.Fatalf("Query endpoint allocates %d allocs/op for 500 rows, budget 6400", allocs)
+	if allocs > 4604 {
+		t.Fatalf("Query endpoint allocates %d allocs/op for 500 rows, budget 4604", allocs)
 	}
-	if bytes > 2<<20 {
-		t.Fatalf("Query endpoint allocates %d B/op for 500 rows, budget %d", bytes, 2<<20)
+	if bytes > 1_286_000 {
+		t.Fatalf("Query endpoint allocates %d B/op for 500 rows, budget %d", bytes, 1_286_000)
 	}
 	t.Logf("Query endpoint: %d allocs/op %d B/op for 500 rows", allocs, bytes)
 }
