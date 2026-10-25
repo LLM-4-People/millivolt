@@ -50,6 +50,23 @@ func TestClientEscapedPathPreserved(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("decoded base segment joins the base path", func(t *testing.T) {
+		up, s := targetServer(t)
+		r := httptest.NewRequest(http.MethodPost, "http://proxy.example/%76%31/chat/completions",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", "http://fixture.example/v1")
+		r.Header.Set("X-Proxy-Format", "openai")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if got := up.lastEscapedPath(); got != "/v1/chat/completions" {
+			t.Fatalf("upstream escaped path = %q, want the decoded base join", got)
+		}
+	})
 }
 
 func targetHeaderRequest(t *testing.T, s *Server, header, value string) *httptest.ResponseRecorder {

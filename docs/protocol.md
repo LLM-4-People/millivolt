@@ -40,8 +40,14 @@ forwarding the client's path, unless `X-Proxy-Path` overrides that endpoint. A s
 endpoints normalizes to the same canonical spelling, while one on any other path
 keeps the path the client chose. The path is matched in its escaped spelling, so
 an encoded spelling of a known route (for example `/v1%2Fchat%2Fcompletions` or
-`/v1%2Fmodels`) is an unknown path: it is relayed unchanged and is never
-normalized, translated or treated as model discovery.
+`/v1%2Fmodels`) is an unknown path: on a same-protocol passthrough, or when no
+inbound override is present, it is relayed unchanged and is never normalized,
+translated or treated as model discovery. When `X-Proxy-In-Format` selects a
+wire that differs from `X-Proxy-Format`, the request is a translation like any
+other and addresses the outbound protocol's canonical endpoint. A base URL with
+a path joins by comparing the first client segment's decoded spelling with the
+base's last segment, so an encoded client spelling of that segment can be
+dropped from the joined upstream path.
 
 Forwarding a body is not the same as understanding every field in it. The normal
 relay does not rewrite an unfamiliar JSON shape just to observe it, but usage,

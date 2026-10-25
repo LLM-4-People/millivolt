@@ -1194,6 +1194,48 @@ func TestTranslatedInBandErrorIsAFailure(t *testing.T) {
 	})
 }
 
+// TestEncodedKnownRouteWithInFormatTranslation pins G1/H4: the encoded
+// spelling is preserved on a same-protocol passthrough, but an inbound
+// override that differs from the target format makes it a translated request,
+// which addresses the outbound canonical endpoint.
+func TestEncodedKnownRouteWithInFormatTranslation(t *testing.T) {
+	t.Run("translation retargets", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200,
+			`{"id":"msg_1","type":"message","role":"assistant","model":"m",`+
+				`"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn",`+
+				`"usage":{"input_tokens":3,"output_tokens":2}}`)
+		s := New(config.Default(), metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+		r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1%2Fchat%2Fcompletions",
+			strings.NewReader(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+		r.Header.Set("X-Proxy-In-Format", "openai")
+		r.Header.Set("X-Proxy-Format", "anthropic")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+		if got := up.lastPath(); got != "/v1/messages" {
+			t.Fatalf("translated upstream path = %q, want /v1/messages", got)
+		}
+	})
+
+	t.Run("same-protocol passthrough preserves", func(t *testing.T) {
+		up, s := targetServer(t)
+		w := proxyRequest(t, s, "/v1%2Fchat%2Fcompletions", "openai",
+			`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+		}
+		if got := up.lastEscapedPath(); got != "/v1%2Fchat%2Fcompletions" {
+			t.Fatalf("passthrough upstream escaped path = %q, want the client spelling", got)
+		}
+	})
+}
+
 // TestTranslatedFrameBufCoversEncoderCaps pins TC8-9: the relay's derived
 // scanner bound must cover every frame the format encoders can legally emit.
 func TestTranslatedFrameBufCoversEncoderCaps(t *testing.T) {
