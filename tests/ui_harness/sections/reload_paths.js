@@ -1,7 +1,7 @@
 // test 12k: a render between a hash assignment and its queued
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function reloadPaths(H) {
-  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, sleep, w} = H;
+  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, settleUntil, sleep, w} = H;
   const state = H.state;
 
   // ---- test 12k: a render between a hash assignment and its queued
@@ -16,10 +16,9 @@ module.exports = async function reloadPaths(H) {
       w.eval('renderAll(lastData)');
       check('a render before the queued hashchange leaves the pending scope unclaimed',
         w.eval('_navScopeKey') === scopeBefore);
-      await sleep(30);
       check('the queued hashchange still routes the new scope',
-        w.eval('_navScopeKey') !== scopeBefore &&
-        w.eval('_routedHash') === w.eval('location.hash'));
+        await settleUntil(() => w.eval('_navScopeKey') !== scopeBefore &&
+          w.eval('_routedHash') === w.eval('location.hash')));
     } finally {
       w.navigateTo([]);
       await sleep(20);
@@ -49,6 +48,8 @@ module.exports = async function reloadPaths(H) {
     };
     setResponse(payload(TEST_DASHBOARD_VERSION));
     w.fetchBootstrap('resume');
+    // Negative proof: an unchanged frontend must not reload. The fixed bound
+    // is the proof window; there is no observable "no reload" state.
     await sleep(20);
     check('unchanged frontend updates data without navigation or extra version requests',
       state.jsdomReloads === 0 && calls === 1 && w.eval('kpiAgg.requests') === 37);
@@ -58,6 +59,7 @@ module.exports = async function reloadPaths(H) {
     setResponse({ ...payload(TEST_DASHBOARD_VERSION), feed_id: 'same-assets-new-process', incremental: false });
     calls = 0;
     w.fetchBootstrap('resume');
+    // Negative proof: re-capture must not reload the page.
     await sleep(20);
     check('same-assets restart re-captures an unexpected full response without a page reload', state.jsdomReloads === 0 && calls === 2);
 
@@ -73,8 +75,8 @@ module.exports = async function reloadPaths(H) {
     w.refreshAfterRestart();
     check('SSE restart waits for the asset version before starting aggregate scans', sweeps === 0);
     finishRestartBootstrap({ok: true, json: async () => payload(TEST_DASHBOARD_VERSION)});
-    await sleep(20);
-    check('unchanged frontend runs the deferred restart sweep once', sweeps === 2);
+    check('unchanged frontend runs the deferred restart sweep once',
+      await settleUntil(() => sweeps === 2));
 
     for (const version of [undefined, '', 'not-a-version']) {
       setResponse(payload(version, 38));
@@ -88,8 +90,9 @@ module.exports = async function reloadPaths(H) {
     w.fetchBootstrap('resume');
     w.fetchBootstrap('resume');
     pending[1]({ok: true, json: async () => payload(TEST_DASHBOARD_VERSION, 39)});
-    await sleep(10);
+    await settleUntil(() => w.eval('kpiAgg.requests') === 39);
     pending[0]({ok: true, json: async () => payload(newVersion, 999)});
+    // Negative proof: the superseded response must not reload or overwrite 39.
     await sleep(10);
     check('a superseded bootstrap cannot reload the page using an outdated version',
       state.jsdomReloads === 0 && w.eval('kpiAgg.requests') === 39);
@@ -147,8 +150,9 @@ module.exports = async function reloadPaths(H) {
         },
       });
       await loaded(seeded);
-      await sleep(100);
       const sw = seeded.window;
+      await settleUntil(() => bootstrapFetches === expectedFetches &&
+        !sw.document.getElementById('dashboard-bootstrap'));
       check(`${label} HTML seed uses ${expectedFetches} bootstrap fetches`, bootstrapFetches === expectedFetches);
       check(`${label} HTML seed is discarded after consumption`, !sw.document.getElementById('dashboard-bootstrap'));
       if (label === 'valid') {
@@ -162,12 +166,11 @@ module.exports = async function reloadPaths(H) {
         handlers.snapshot({data: JSON.stringify(observerFixture({feed_id:'seed-feed',seq:13,incremental:true,pending_revision:2,
           records:[finalized],in_flight_records:[],counters:{in_flight:0}}))});
         handlers.record({data:JSON.stringify(observerFixture(finalized)),lastEventId:'13'});
-        await sleep(20);
         check('completion between HTML and SSE replay finalizes once without duplicating a row',
-          sw.eval('lastData.records.filter(r => r.id === "seed-pending").length') === 1 &&
-          !sw.eval('lastData.records.find(r => r.id === "seed-pending")?.live'));
+          await settleUntil(() => sw.eval('lastData.records.filter(r => r.id === "seed-pending").length') === 1 &&
+            !sw.eval('lastData.records.find(r => r.id === "seed-pending")?.live')));
         sw.fetchBootstrap('full');
-        await sleep(20);
+        await settleUntil(() => bootstrapFetches === 1);
         check('later full resync fetches fresh state rather than reusing HTML seed', bootstrapFetches === 1);
       }
       sw.close();

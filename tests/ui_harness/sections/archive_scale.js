@@ -1,7 +1,7 @@
 // test 10c-ter: archive revision and incremental live reconciliation
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function archiveScale(H) {
-  const {check, d, fire, mkRec, rows, sleep, w} = H;
+  const {check, d, fire, mkRec, rows, settleUntil, w} = H;
   const state = H.state;
 
   // ---- test 10c-ter: archive revision and incremental live reconciliation ----
@@ -232,10 +232,10 @@ module.exports = async function archiveScale(H) {
     mkRec('day1', 200, at(1)),
     mkRec('day0', 200, at(0)),
   ];
+  const seps = () => [...d.querySelectorAll('#tbl-requests tr.day-sep')];
   fire('snapshot', { feed_id: 'feedB', seq: 3, incremental: false,
     records: MIXED, counters: { in_flight: 0, total_requests: 3, total_errors: 0 } });
-  await sleep(30);
-  const seps = () => [...d.querySelectorAll('#tbl-requests tr.day-sep')];
+  await settleUntil(() => seps().length === 3 && seps()[0]?.nextElementSibling?.dataset.id === 'day0');
   check('day dividers: exactly one per local day', seps().length === 3);
   check('day dividers span the full request column count',
     seps()[0]?.querySelector('td')?.colSpan === w.eval('REQ_COLS'));
@@ -245,22 +245,25 @@ module.exports = async function archiveScale(H) {
     seps()[1]?.nextElementSibling?.dataset.id === 'day1' &&
     seps()[2]?.nextElementSibling?.dataset.id === 'day2');
   fire('record', { ...mkRec('day0b', 200, at(0) + 3600000) }, '4');
-  await sleep(20);
+  await settleUntil(() => seps().length === 3 &&
+    seps()[0]?.nextElementSibling?.dataset.id === 'day0b' &&
+    seps()[0]?.nextElementSibling?.nextElementSibling?.dataset.id === 'day0');
   check('same-day live insert moves the divider, never duplicates it',
     seps().length === 3 && seps()[0]?.nextElementSibling?.dataset.id === 'day0b' &&
     seps()[0]?.nextElementSibling?.nextElementSibling?.dataset.id === 'day0');
   fire('record', { ...mkRec('day1b', 200, at(1) + 7200000) }, '5');
-  await sleep(20);
+  await settleUntil(() => seps().length === 4 && seps()[0]?.nextElementSibling?.dataset.id === 'day1b');
   // An out-of-order arrival (a late-finalized older record) opens its own day
   // boundary at its arrival position - the display is arrival-ordered, so the
   // divider tracks the displayed sequence, never a re-sorted one.
   check('late-arriving previous-day record opens its own divider at its arrival position',
     seps().length === 4 && seps()[0]?.nextElementSibling?.dataset.id === 'day1b');
+  const preResyncRow = rows()[0];
   fire('snapshot', { feed_id: 'feedB', seq: 5, incremental: false,
     records: [ mkRec('day2', 200, at(2)), mkRec('day1', 200, at(1)), mkRec('day0', 200, at(0)),
       mkRec('day0b', 200, at(0) + 3600000), mkRec('day1b', 200, at(1) + 7200000) ],
     counters: { in_flight: 0, total_requests: 5, total_errors: 0 } });
-  await sleep(30);
+  await settleUntil(() => rows()[0] && rows()[0] !== preResyncRow && seps().length === 4);
   check('full resync rebuilds the dividers exactly (no orphans)', seps().length === 4);
   check('dividers are not request rows (log stats unchanged)', rows().length === 5);
 };

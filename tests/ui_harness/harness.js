@@ -197,6 +197,19 @@ function checkEntityIdentity() {
     w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
     w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
 }
+// Fixed waits are the exception, not a scheduling shortcut. A wait may stay a
+// literal duration only when the duration itself is the asserted behavior or
+// when the assertion is a negative proof with no observable state to poll:
+//   - protocol pacing and poll cadence (SSE debounce windows, explorer
+//     live-status refresh above one second),
+//   - negative proofs ("nothing was added / changed / reloaded / retried"):
+//     poll instead when the finished state exists, and keep the fixed bound
+//     only for the window that proves absence,
+//   - draining a queued frame/timer callback before a case swaps the scheduler
+//     hook that would otherwise own it, or before leaving a suite,
+//   - hidden-at-load timer proofs, where the fixed window is the assertion.
+// Everything else waits on the page's observable state via settleUntil so a
+// loaded runner cannot turn a slow fetch or render into a false failure.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Poll the page's own observable state instead of sleeping a fixed time: a
 // loaded runner can stretch a fetch/render round trip past any hard-coded

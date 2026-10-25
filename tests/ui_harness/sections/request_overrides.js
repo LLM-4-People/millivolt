@@ -1,7 +1,7 @@
 // request-overrides editor: the settings dashboard surface
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function requestOverrides(H) {
-  const {cfgDoc, check, d, sleep, w} = H;
+  const {cfgDoc, check, d, settleUntil, w} = H;
   const state = H.state;
 
   // ---- request-overrides editor: the settings dashboard surface ----
@@ -181,9 +181,9 @@ module.exports = async function requestOverrides(H) {
       d.activeElement === roTemplateMenu.querySelector('[data-ro-tpl="blank"]'));
     const roSecondItem = roTemplateMenu.querySelector('[data-ro-tpl="budget"]');
     roSecondItem.focus();
-    await sleep(0);
     check('focus moving between request-override template items keeps the menu open',
-      !roTemplateMenu.hidden && roAddButton.getAttribute('aria-expanded') === 'true' && d.activeElement === roSecondItem);
+      await settleUntil(() => !roTemplateMenu.hidden &&
+        roAddButton.getAttribute('aria-expanded') === 'true' && d.activeElement === roSecondItem));
     const roEscape = new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
     roSecondItem.dispatchEvent(roEscape);
     check('Escape from the request-override template menu keeps Settings open and restores Add rule focus',
@@ -191,10 +191,10 @@ module.exports = async function requestOverrides(H) {
       roAddButton.getAttribute('aria-expanded') === 'false' && d.activeElement === roAddButton);
     roAddButton.click();
     roTemplateMenu.querySelector('[data-ro-tpl="blank"]').dispatchEvent(new w.KeyboardEvent('keydown', { key: '/', bubbles: true, cancelable: true }));
-    await sleep(0);
     check('the Settings search shortcut dismisses the request-override template menu',
-      !d.getElementById('settings-sheet').hidden && roTemplateMenu.hidden &&
-      roAddButton.getAttribute('aria-expanded') === 'false' && d.activeElement === d.getElementById('settings-q'));
+      await settleUntil(() => !d.getElementById('settings-sheet').hidden && roTemplateMenu.hidden &&
+        roAddButton.getAttribute('aria-expanded') === 'false' &&
+        d.activeElement === d.getElementById('settings-q')));
     roAddButton.click();
     roTemplateMenu.querySelector('[data-ro-tpl="header"]').click();
     const menuCard = cards()[2];

@@ -1,7 +1,7 @@
 // Delegated operator actions repaint in place, so the clicked node stays
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function delegatedActions(H) {
-  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, modelFixture, observerFixture, pageOptions, sleep} = H;
+  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, modelFixture, observerFixture, pageOptions, settleUntil, sleep} = H;
   const state = H.state;
 
   // Delegated operator actions repaint in place, so the clicked node stays
@@ -13,7 +13,7 @@ module.exports = async function delegatedActions(H) {
     await loaded(isolated);
     const sw = isolated.window, sd = sw.document;
     try {
-      await sleep(60);
+      await settleUntil(() => sw.eval('!!lastData'));
       let resolveMutation;
       const originalFetch = sw.fetch;
       sw.fetch = (url, options) => options?.method === 'POST'
@@ -35,7 +35,7 @@ module.exports = async function delegatedActions(H) {
       if (resolveMutation) {
         const confirmed = kind === 'pause' ? {...pause,paused:false,holds:[]} : {...debug,sessions:[debug.sessions[1]]};
         resolveMutation({ok:true,json:async()=>confirmed});
-        await sleep(5);
+        await sleep(5); // negative proof: a confirmed scoped mutation must not close the menu
         check(action + ' remains open after confirmed scoped mutation', !menu.hidden);
       }
       sd.querySelector('main').click();
@@ -80,7 +80,7 @@ module.exports = async function delegatedActions(H) {
     const emit = (type, data, seq) => streams.at(-1).handlers[type]({type, data: JSON.stringify(data), lastEventId: seq});
     const reply = p => requests.shift()({ok: true, json: async () => p});
     try {
-      await sleep(40);
+      await settleUntil(() => sw.eval('!!lastData'));
       check('observer dictionary uses exact raw keys and Go named-capture output without JS execution',
         sw.canonicalModel(' a ') === 'ax' && sw.canonicalModel('a') === 'a');
       check('time scope uses server classification even when browser time differs',
@@ -103,35 +103,35 @@ module.exports = async function delegatedActions(H) {
       const incidentButton = banner.querySelector('button');
       incidentButton.focus();
       incidentButton.click();
-      await sleep(20);
       const incidentDialog = sd.getElementById('storm-dialog');
       const detail = label => [...incidentDialog.querySelectorAll('dt')].find(node => node.textContent === label)?.nextElementSibling.textContent;
       const closeIncident = incidentDialog.querySelector('[data-operator="storm-close"]');
       check('incident click opens shared modal with distinct requests, attempt rates and provider evidence',
-        !incidentDialog.hidden && incidentDialog.getAttribute('role') === 'dialog' &&
-        sd.activeElement === closeIncident && sd.querySelector('main').hasAttribute('inert') &&
-        detail('Requests affected') === '9' && detail('Failed upstream attempts') === '15' &&
-        detail('Sampled upstream attempts') === '20' && detail('Upstream attempt failure rate') === '75%' &&
-        detail('Queued requests') === '4' && detail('Detection window') === '1m' && detail('Error') === 'http_503' &&
-        detail('Next retry') === new sw.Date(stormFixture.storms[0].retry_at).toLocaleString() &&
-        detail('Affected active models') === '2 / 3 (66.7%)');
+        await settleUntil(() => !incidentDialog.hidden && incidentDialog.getAttribute('role') === 'dialog' &&
+          sd.activeElement === closeIncident && sd.querySelector('main').hasAttribute('inert') &&
+          detail('Requests affected') === '9' && detail('Failed upstream attempts') === '15' &&
+          detail('Sampled upstream attempts') === '20' && detail('Upstream attempt failure rate') === '75%' &&
+          detail('Queued requests') === '4' && detail('Detection window') === '1m' && detail('Error') === 'http_503' &&
+          detail('Next retry') === new sw.Date(stormFixture.storms[0].retry_at).toLocaleString() &&
+          detail('Affected active models') === '2 / 3 (66.7%)'));
       const updatedStorm = {...stormFixture,storms:[{...stormFixture.storms[0],queued:7,error_requests:10,
         state:'half_open',recovery_successes:1,retry_at:'2026-09-05T12:00:30Z'}]};
       sw.applyBootstrapState({...state,storm:updatedStorm});
       check('accepted bootstrap updates the open incident while keeping close control and trigger focus identities',
-        sd.activeElement === closeIncident && incidentDialog.querySelector('[data-operator="storm-close"]') === closeIncident &&
-        banner.querySelector('button') === incidentButton && detail('Queued requests') === '7' &&
-        detail('Requests affected') === '10' && detail('Successful recovery probes') === '1 / 2' &&
-        detail('Next retry') === new sw.Date(updatedStorm.storms[0].retry_at).toLocaleString());
+        await settleUntil(() => sd.activeElement === closeIncident &&
+          incidentDialog.querySelector('[data-operator="storm-close"]') === closeIncident &&
+          banner.querySelector('button') === incidentButton && detail('Queued requests') === '7' &&
+          detail('Requests affected') === '10' && detail('Successful recovery probes') === '1 / 2' &&
+          detail('Next retry') === new sw.Date(updatedStorm.storms[0].retry_at).toLocaleString()));
       closeIncident.dispatchEvent(new sw.KeyboardEvent('keydown', {key:'Escape',bubbles:true,cancelable:true}));
       check('incident Escape closes shared modal and restores the current incident trigger',
         incidentDialog.hidden && sd.activeElement === incidentButton && !sd.querySelector('main').hasAttribute('inert'));
       incidentButton.click();
-      await sleep(20);
       sw.applyBootstrapState({...state,storm:{...stormFixture,storms:[]}});
       check('resolved incident stays reviewable without showing stale counts or stealing focus',
-        !incidentDialog.hidden && incidentDialog.textContent.includes('no longer active') && !incidentDialog.querySelector('dl') &&
-        sd.activeElement === closeIncident);
+        await settleUntil(() => !incidentDialog.hidden &&
+          incidentDialog.textContent.includes('no longer active') && !incidentDialog.querySelector('dl') &&
+          sd.activeElement === closeIncident));
       closeIncident.click();
       check('resolved incident close restores a visible dashboard control',
         incidentDialog.hidden && (sd.activeElement === sd.getElementById('btn-settings') ||
@@ -142,8 +142,8 @@ module.exports = async function delegatedActions(H) {
       check('unspecified model incident remains distinct from the provider and does not hide valid incidents',
         banner.querySelectorAll('button').length === 2 && banner.textContent.includes('(unspecified model)'));
       banner.querySelectorAll('button')[1].click();
-      await sleep(20);
-      check('unspecified model details preserve exact empty-model scope', detail('Model scope') === '(unspecified model)');
+      check('unspecified model details preserve exact empty-model scope',
+        await settleUntil(() => detail('Model scope') === '(unspecified model)'));
       closeIncident.click();
 
       const modelStorm = {...stormFixture,storms:[{...stormFixture.storms[0],provider:'<img src=x onerror=alert(1)>',
@@ -154,10 +154,11 @@ module.exports = async function delegatedActions(H) {
         banner.textContent.includes('Checking recovery') &&
         !banner.textContent.includes('active models affected'));
       banner.querySelector('button').click();
-      await sleep(20);
       check('incident details render hostile provider/model/error values as inert text',
-        detail('Provider') === modelStorm.storms[0].provider && detail('Model scope') === modelStorm.storms[0].model &&
-        detail('Successful recovery probes') === '1 / 2' && !incidentDialog.querySelector('img, script') && !detail('Active models'));
+        await settleUntil(() => detail('Provider') === modelStorm.storms[0].provider &&
+          detail('Model scope') === modelStorm.storms[0].model &&
+          detail('Successful recovery probes') === '1 / 2' && !incidentDialog.querySelector('img, script') &&
+          !detail('Active models')));
       const stormRow = banner.querySelector('.storm-row');
       sw.applyBootstrapState({...state,storm:modelStorm});
       check('unchanged storm polls retain the rendered nodes', banner.querySelector('.storm-row') === stormRow);
@@ -199,29 +200,29 @@ module.exports = async function delegatedActions(H) {
           !banner.textContent.includes('% failed attempts'));
         const quotaRow = banner.querySelector('button');
         quotaRow.click();
-        await sleep(20);
         check('quota incident dialog shows the pause title, probe facts and a resume action, without storm noise',
-          !incidentDialog.hidden && sd.getElementById('storm-dialog-title').textContent === 'Provider quota pause' &&
-          detail('Error') === 'insufficient_quota' && detail('Queued requests') === '5' &&
-          detail('Successful recovery probes') === '0 / 1' && !detail('Failed upstream attempts') &&
-          incidentDialog.querySelector('[data-operator="quota-resume"]')?.dataset.value === 'neutral.example');
+          await settleUntil(() => !incidentDialog.hidden &&
+            sd.getElementById('storm-dialog-title').textContent === 'Provider quota pause' &&
+            detail('Error') === 'insufficient_quota' && detail('Queued requests') === '5' &&
+            detail('Successful recovery probes') === '0 / 1' && !detail('Failed upstream attempts') &&
+            incidentDialog.querySelector('[data-operator="quota-resume"]')?.dataset.value === 'neutral.example'));
         const releaseQuota = Promise.resolve({ok:true,json:async()=>({enabled:true,banner_enabled:true,storms:[]})});
         adminReply = releaseQuota;
         const callsBeforeResume = adminCalls;
         incidentDialog.querySelector('[data-operator="quota-resume"]').click();
-        await sleep(20);
         check('operator resume posts to the quota endpoint and repaints from the confirmed storm snapshot',
-          adminCalls === callsBeforeResume + 1 && banner.hidden &&
-          incidentDialog.textContent.includes('no longer active'));
+          await settleUntil(() => adminCalls === callsBeforeResume + 1 && banner.hidden &&
+            incidentDialog.textContent.includes('no longer active')));
         adminReply = Promise.resolve({ok:false,json:async()=>({error:'quota endpoint unavailable'})});
         sw.applyBootstrapState({...state,storm:quotaStorm});
         banner.querySelector('button').click();
-        await sleep(20);
+        await settleUntil(() => !incidentDialog.hidden &&
+          incidentDialog.querySelector('[data-operator="quota-resume"]'));
         incidentDialog.querySelector('[data-operator="quota-resume"]').click();
-        await sleep(20);
         check('a failed resume keeps the dialog open with the failure beside the action',
-          !incidentDialog.hidden && incidentDialog.querySelector('[data-operator="quota-resume"]') &&
-          incidentDialog.textContent.includes('quota endpoint unavailable'));
+          await settleUntil(() => !incidentDialog.hidden &&
+            incidentDialog.querySelector('[data-operator="quota-resume"]') &&
+            incidentDialog.textContent.includes('quota endpoint unavailable')));
         closeIncident.click();
         adminReply = null;
         sw.togglePauseMenu({stopPropagation(){}});
@@ -256,14 +257,14 @@ module.exports = async function delegatedActions(H) {
       state = {...state, seq: 2, records: [state.records[0], event]};
       delete state.records[1].model_canon;
       reply(state);
-      await sleep(20);
-      check('foreign observer metadata re-captures through the existing full barrier', requests.length === 0 && streams.at(-1).url.includes('since=2'));
+      check('foreign observer metadata re-captures through the existing full barrier',
+        await settleUntil(() => requests.length === 0 && streams.at(-1).url.includes('since=2')));
 
       // A reload between bootstrap and Debug serialization cannot install
       // mixed dictionary revisions or even expose that response's storage state.
       const mixed = sw.fetchBootstrap('full');
       reply({...state,storage:{enabled:true,dropped:99},debug:{ok:true,enabled:false,sessions:[],known_models:[],model_canon:modelFixture()}});
-      await sleep(10);
+      await sleep(10); // negative proof: the rejected response must not adopt any state
       check('mixed bootstrap observer revisions are rejected before any state adoption',
         requests.length===1 && !sd.getElementById('f-state').textContent.includes('99 storage drops') && sw.eval('source')===null);
       reply(state);
@@ -399,10 +400,10 @@ module.exports = async function delegatedActions(H) {
       }
       const open=sd.querySelector('button[data-open-req]');
       open.focus(); open.click();
-      await sleep(20);
       const drawer=sd.getElementById('drawer');
       check('keyboard-operable log button opens an accessible modal and makes background inert',
-        !drawer.hidden && !drawer.hasAttribute('inert') && drawer.contains(sd.activeElement) && sd.querySelector('main').hasAttribute('inert'));
+        await settleUntil(() => !drawer.hidden && !drawer.hasAttribute('inert') &&
+          drawer.contains(sd.activeElement) && sd.querySelector('main').hasAttribute('inert')));
       const focus=sw.modalFocusables(drawer);
       focus.at(-1).focus();
       sd.dispatchEvent(new sw.KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true}));
@@ -453,10 +454,10 @@ module.exports = async function delegatedActions(H) {
       const settingsButton=sd.getElementById('btn-settings');
       settingsButton.focus();
       sw.toggleSettings({stopPropagation(){}});
-      await sleep(30);
       const sheet=sd.getElementById('settings-sheet');
       check('Settings shares modal focus containment and background inertness',
-        !sheet.hidden && sheet.contains(sd.activeElement) && sd.querySelector('main').hasAttribute('inert'));
+        await settleUntil(() => !sheet.hidden && sheet.contains(sd.activeElement) &&
+          sd.querySelector('main').hasAttribute('inert')));
       sw.closeSettings(true);
       check('Settings closes with focus restored and controls removed from tab order',
         sheet.hidden && sheet.hasAttribute('inert') && sd.activeElement===settingsButton);
@@ -487,9 +488,9 @@ module.exports = async function delegatedActions(H) {
         return savedFetch(url,options);
       };
       await sw.restartProxy();
-      await sleep(10);
       check('a rejected restart cancels its already-open watcher and releases the reader',
-        watchedSignal?.aborted && readerCanceled===1 && sd.getElementById('restart-count').textContent.includes('restart rejected'));
+        await settleUntil(() => watchedSignal?.aborted && readerCanceled===1 &&
+          sd.getElementById('restart-count').textContent.includes('restart rejected')));
       sw.fetch=savedFetch;
 
       const OriginalDate=sw.Date, oldTZ=process.env.TZ;

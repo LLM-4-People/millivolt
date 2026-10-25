@@ -24,7 +24,8 @@ module.exports = async function regressionsA(H) {
     w.eval("fetchBootstrap('full')");
     await settleUntil(() => rows().length === 6);
     w.navigateTo([]);
-    await sleep(50);
+    await settleUntil(() => rows().length === 6 &&
+      !d.getElementById('f-scope').textContent.includes('…'));
     const chartWith = n => {
       const p = JSON.parse(JSON.stringify(state.chartPayload));
       p.now_ms = Date.now();
@@ -96,13 +97,13 @@ module.exports = async function regressionsA(H) {
       try {
         w.fetchOlderLog();
         await settleUntil(() => urls.length === 1 && !w.eval('logFetching'));
-        await sleep(120);
+        await sleep(120); // negative-proof window: the terminal cap must not page again
         check('the archive cap is terminal: one older-page request, no retained rows',
           urls.length === 1 && w.eval('logArchive.length') === 20000 &&
           !w.eval('logArchive.some(r => r.id === "cap-old")') && w.eval('logExhausted') === true);
         check('the terminal cap does not grow logLimit for discarded rows', w.eval('logLimit') === 20001);
         w.fetchOlderLog();
-        await sleep(80);
+        await sleep(80); // negative-proof window: scroll and delayed fills stay capped
         check('scroll and delayed fills stop at the terminal archive cap', urls.length === 1);
       } finally {
         w.fetch = saved.fetch;
@@ -171,7 +172,7 @@ module.exports = async function regressionsA(H) {
       state.logPage = {records: [mkRec('race-old', 200, base)], more: false, cursor_ms: base, cursor_id: 'race-old'};
       try {
         w.fetchOlderLog();
-        await sleep(10);
+        await settleUntil(() => w.eval('logFetching') === true);
         // The live event lands in the ring while the page is still held; its
         // scheduled paint has not run yet.
         ring.push(mkRec('race-live', 200, base + 4000));
@@ -407,7 +408,7 @@ module.exports = async function regressionsA(H) {
         w.navigateTo([]);
         await w.fetchBootstrap('full');
         await settleUntil(() => rows().length === 6, 3000);
-        await sleep(50);
+        await sleep(50); // drain the restored view's queued fill before leaving the case
       }
     }
   }

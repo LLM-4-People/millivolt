@@ -1,7 +1,7 @@
 // Lifecycle and mandatory full refresh ordering share the real application
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function purgeLifecycle(H) {
-  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, sleep} = H;
+  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, settleUntil} = H;
   const state = H.state;
 
   // Lifecycle and mandatory full refresh ordering share the real application
@@ -37,7 +37,7 @@ module.exports = async function purgeLifecycle(H) {
     const ids = () => sw.eval('lastData.records.map(r => r.id).join(",")');
     const reply = (request, payload) => request.resolve({ok: true, json: async () => JSON.parse(JSON.stringify(payload))});
     try {
-      await sleep(40);
+      await settleUntil(() => streams.length > 0 && sw.eval('_dashTickTimer !== null'));
       sw.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
       const chartBefore = sw.eval('JSON.stringify(chartAgg)');
       const first = streams.at(-1);
@@ -103,7 +103,7 @@ module.exports = async function purgeLifecycle(H) {
 
       const unexpected = sw.fetchBootstrap('resume');
       reply(pending.shift(), {...state, seq: 1, records: [mkRec('ordered-base')]});
-      await sleep(5);
+      await settleUntil(() => pending.length > 0);
       const replacement = pending.shift();
       check('an unexpected full resume response uses the barrier without erasing newer live state',
         replacement && !replacement.url.includes('since=') && sw.eval('source') === null &&
@@ -172,7 +172,7 @@ module.exports = async function purgeLifecycle(H) {
       // Its outer completion must not reopen while its replacement is pending.
       const staleHTTP = sw.fetchBootstrap('full');
       reply(pending.shift(), state); // revision1, older than accepted update4
-      await sleep(5);
+      await settleUntil(() => pending.length > 0);
       const finalReplacement = pending.shift();
       const countBeforeReplacement = streams.length;
       check('a rejected full HTTP snapshot cannot reopen over its newer recapture owner',

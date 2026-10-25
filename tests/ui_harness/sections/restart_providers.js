@@ -26,9 +26,9 @@ module.exports = async function restartProviders(H) {
   await w.restartProxy(); // a rapid second call must not issue another POST
   releaseRestartStatus();
   state.restartState.statusGate = null;
-  await sleep(20);
   check('only one restart POST is issued and the pending request stays disabled',
-    state.restartState.postCount === 1 && restartAction.disabled && restartAction.textContent.includes('Restarting'));
+    await settleUntil(() => state.restartState.postCount === 1 && restartAction.disabled &&
+      restartAction.textContent.includes('Restarting')));
   await w.fetchRestartStatus();
   check('an idle status refresh cannot re-enable a locally pending restart', restartAction.disabled);
   check('the header indicates busy while keeping progress accessible',
@@ -153,8 +153,9 @@ module.exports = async function restartProviders(H) {
   // Cards with removable cost-key chips and canonical-dropdown usage rows;
   // edits drive the dirty tracking and collect() round-trips the map.
   w.toggleSettings();
-  await sleep(20);
+  await settleUntil(() => !d.getElementById('settings-sheet').hidden);
   w.eval('settingsCat = "providers"; showSettingsCat()');
+  await settleUntil(() => d.querySelector('.st-row[data-key="providers"] .st-prov'));
   const provRow = d.querySelector('.st-row[data-key="providers"]');
   const card = provRow && provRow.querySelector('.st-prov');
   check('providers field renders the card editor', !!card);
@@ -164,8 +165,9 @@ module.exports = async function restartProviders(H) {
   check('canonical dropdown is the server-owned field list', card.querySelectorAll('.prov-urow .sp-ufield option').length === 6);
   check('collect round-trips the provider map', JSON.stringify(w.collectSettingsValues().providers) === JSON.stringify(cfgDoc.values.providers));
   card.querySelector('.prov-chip [data-prov-chip-rm]').click();
-  await sleep(10);
-  check('chip removal reflects in collect + enables apply', w.collectSettingsValues().providers['epsilon.example'].cost_keys.length === 0 && !d.getElementById('btn-settings-apply').disabled);
+  check('chip removal reflects in collect + enables apply',
+    await settleUntil(() => w.collectSettingsValues().providers['epsilon.example'].cost_keys.length === 0 &&
+      !d.getElementById('btn-settings-apply').disabled));
   const cin = card.querySelector('.sp-cost-in');
   cin.value = 'not a path';
   card.querySelector('[data-prov-add-cost]').click();
@@ -319,8 +321,9 @@ module.exports = async function restartProviders(H) {
   // ---- test 14b: provider aliases editor - rows of [old label] → [canonical],
   // with add/remove driving the same dirty tracking and collect() round-trip.
   w.toggleSettings();
-  await sleep(20);
+  await settleUntil(() => !d.getElementById('settings-sheet').hidden);
   w.eval('settingsCat = "providers"; showSettingsCat()');
+  await settleUntil(() => d.querySelector('.st-row[data-key="provider_aliases"]'));
   const aliasRow = d.querySelector('.st-row[data-key="provider_aliases"]');
   const aliasWrap = aliasRow && aliasRow.querySelector('[data-kind="aliases"]');
   check('aliases field renders the row editor', !!aliasWrap && aliasWrap.querySelectorAll('.al-row').length === 1);

@@ -1,7 +1,7 @@
 // lazy Settings module
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function lazySettings(H) {
-  const {STATIC, TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, dom, fs, loaded, pageOptions, path, sleep} = H;
+  const {STATIC, TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, dom, fs, loaded, pageOptions, path, settleUntil, sleep} = H;
   const state = H.state;
 
   // ---- lazy Settings module ----
@@ -63,7 +63,7 @@ module.exports = async function lazySettings(H) {
       check('the sheet stays closed while the settings module is loading',
         ok.sd.getElementById('settings-sheet').hidden);
       script.onload();
-      await sleep(0);
+      await settleUntil(() => opened === 1);
       check('the loaded settings module opens the sheet exactly once', opened === 1);
     } finally { ok.dom.window.close(); }
 
@@ -76,7 +76,7 @@ module.exports = async function lazySettings(H) {
       cancelled.sw.closeSettings(true);
       cancelled.sw.settingsModule = { open() { opened++; }, close() {} };
       cancelled.appended[0].onload();
-      await sleep(0);
+      await sleep(0); // negative proof: a close during load must cancel the pending open
       check('closing during the settings load cancels the pending open', opened === 0);
       cancelled.sw.toggleSettings({ stopPropagation() {} });
       check('a later settings open uses the loaded module exactly once', opened === 1);
@@ -104,14 +104,14 @@ module.exports = async function lazySettings(H) {
       check('a settings load attempt starts with the sheet closed',
         failed.appended.length === 1 && failed.sd.getElementById('settings-sheet').hidden);
       failed.appended[0].onerror();
-      await sleep(0);
+      await settleUntil(() => failed.sd.getElementById('settings-count').textContent === 'could not load config');
       check('a settings load failure stays closed and surfaces the shared status',
         failed.sd.getElementById('settings-sheet').hidden &&
         failed.sd.getElementById('settings-count').textContent === 'could not load config');
       check('a settings load failure reports a console error',
         failed.errors.some(line => line.includes('settings module failed to load')));
       failed.sw.toggleSettings({ stopPropagation() {} });
-      await sleep(0);
+      await sleep(0); // negative proof: a failed load is not retried on the next open
       check('a failed settings load is not retried on the next open',
         failed.appended.length === 1);
     } finally { failed.dom.window.close(); }

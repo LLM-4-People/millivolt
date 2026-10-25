@@ -235,11 +235,16 @@ module.exports = async function settingsSearch(H) {
     w.fillSettingsForm = function () { fillCalls++; return realFill.apply(this, arguments); };
     w.settingsFingerprint = function () { fingerprintCalls++; return realFingerprint.apply(this, arguments); };
     const valueInput = () => box.querySelector('input[data-key="noop_count"]');
-    const openWith = async next => {
+    const openWith = async (next, ready) => {
       w.toggleSettings({ stopPropagation() {} });
       await settleUntil(() => pending.length === 1);
       pending.shift()(reply(next));
-      await sleep(20);
+      // A caller with an observable accepted state polls it. A caller that
+      // proves a refresh must NOT replace local state passes no predicate and
+      // keeps the fixed negative-proof bound: "nothing changed yet" is not an
+      // observable state to poll.
+      if (ready) await settleUntil(ready);
+      else await sleep(20);
     };
     // A first open has no baseline and no rendered rows: it must fill.
     w.closeSettings(true);
@@ -247,7 +252,7 @@ module.exports = async function settingsSearch(H) {
     box.innerHTML = '';
     d.getElementById('settings-rail').innerHTML = '';
     q.value = '';
-    await openWith(doc);
+    await openWith(doc, () => w.eval('settingsDoc?.revision') === 'noop-r1' && valueInput()?.value === '2');
     const firstInput = valueInput();
     check('settings first open still fills the accepted document',
       fillCalls === 1 && !!firstInput && firstInput.value === '2' &&
@@ -260,7 +265,7 @@ module.exports = async function settingsSearch(H) {
     w.closeSettings(true);
     fillCalls = 0;
     fingerprintCalls = 0;
-    await openWith(doc);
+    await openWith(doc, () => q.value === '' && d.querySelector('[data-st-cat="beta"]')?.classList.contains('active'));
     check('a clean, unchanged reopen performs no fill and no full fingerprint collection',
       fillCalls === 0 && fingerprintCalls === 0 &&
       valueInput() === firstInput && firstInput.value === '2');
@@ -284,7 +289,7 @@ module.exports = async function settingsSearch(H) {
     w.closeSettings(true);
     fillCalls = 0;
     fingerprintCalls = 0;
-    await openWith(revisionDoc);
+    await openWith(revisionDoc, () => w.eval('settingsDoc.revision') === 'noop-r2' && valueInput()?.value === '7');
     check('an out-of-band revision change refills and reflects the new document',
       fillCalls === 1 && valueInput() !== firstInput && valueInput().value === '7' &&
       w.eval('settingsDoc.revision') === 'noop-r2');
@@ -295,7 +300,7 @@ module.exports = async function settingsSearch(H) {
     w.closeSettings(true);
     fillCalls = 0;
     fingerprintCalls = 0;
-    await openWith(readOnlyDoc);
+    await openWith(readOnlyDoc, () => w.eval('settingsDoc.writable') === false && valueInput()?.value === '8');
     check('a writable flip refills and reflects the read-only document',
       fillCalls === 1 && valueInput().value === '8' &&
       status() === 'in-memory only - start with -config to persist' &&
@@ -306,7 +311,7 @@ module.exports = async function settingsSearch(H) {
     w.closeSettings(true);
     fillCalls = 0;
     fingerprintCalls = 0;
-    await openWith(cleanDoc);
+    await openWith(cleanDoc, () => w.eval('settingsDoc.revision') === 'noop-r3');
     const dirtyInput = valueInput();
     dirtyInput.value = '5';
     dirtyInput.dispatchEvent(new w.Event('input', { bubbles: true }));

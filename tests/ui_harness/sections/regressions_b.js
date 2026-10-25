@@ -149,7 +149,7 @@ module.exports = async function regressionsB(H) {
       check('a legend activation restores focus to the equivalent toggle',
         before !== after && after.classList.contains('off') && d.activeElement === after);
       after.click();
-      await sleep(0);
+      await settleUntil(() => !leg().classList.contains('off'));
     }
     {
       const legend = d.getElementById('traffic-legend');

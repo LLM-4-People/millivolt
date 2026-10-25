@@ -1,7 +1,7 @@
 // test 1: full render painted 30 rows
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function renderLive(H) {
-  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, rows, sleep, w} = H;
+  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
   // ---- test 1: full render painted 30 rows ----
@@ -312,42 +312,40 @@ module.exports = async function renderLive(H) {
       w.__restoreRailAgg = savedAgg;
       w.eval('explorerAgg = ' + JSON.stringify({dim: 'provider', rail: {provider: 77, model: 3}}));
       w.renderDimRail({activeDim: 'provider', filters: []});
-      await sleep(0);
-      const firstMutations = mutations.length;
       check('a changed rail payload repaints the dimension trigger',
-        firstMutations > 0 && trigger.querySelector('.rail-n')?.textContent === '77');
+        await settleUntil(() => mutations.length > 0 && trigger.querySelector('.rail-n')?.textContent === '77'));
+      const firstMutations = mutations.length;
       w.renderDimRail({activeDim: 'provider', filters: []});
+      // Negative proof: an unchanged render must not touch the observed node.
       await sleep(0);
       check('an unchanged rail render does not touch the dimension trigger',
         mutations.length === firstMutations);
 
       mutations = [];
       w.renderDimRail({activeDim: 'model', filters: []});
-      await sleep(0);
       const expectedHost = d.createElement('div');
       expectedHost.innerHTML = `<span class="xp-dim-by">by</span>${w.entityBadge('model', '', 'Model')}<span class="rail-n">3</span><svg class="hdr-ico xp-dim-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>`;
       check('an active-dimension change repaints the complete trigger presentation',
-        mutations.length > 0 && trigger.innerHTML === expectedHost.innerHTML &&
-        trigger.style.getPropertyValue('--ent') === '#CC79A7' &&
-        trigger.getAttribute('aria-label') === 'break down by Model' &&
-        trigger.title === 'break down by Model' &&
-        trigger.querySelector('.xp-dim-caret path')?.getAttribute('d') === 'M4 6.5 8 10.5 12 6.5');
+        await settleUntil(() => mutations.length > 0 && trigger.innerHTML === expectedHost.innerHTML &&
+          trigger.style.getPropertyValue('--ent') === '#CC79A7' &&
+          trigger.getAttribute('aria-label') === 'break down by Model' &&
+          trigger.title === 'break down by Model' &&
+          trigger.querySelector('.xp-dim-caret path')?.getAttribute('d') === 'M4 6.5 8 10.5 12 6.5'));
 
       mutations = [];
       w.eval('explorerAgg = ' + JSON.stringify({dim: 'provider', rail: {provider: 77, model: 4}}));
       w.renderDimRail({activeDim: 'model', filters: []});
-      await sleep(0);
       check('a rail count change repaints the dimension trigger again',
-        mutations.length > 0 && trigger.querySelector('.rail-n')?.textContent === '4');
+        await settleUntil(() => mutations.length > 0 && trigger.querySelector('.rail-n')?.textContent === '4'));
 
       const staleHost = d.createElement('div');
       staleHost.innerHTML = `<span class="xp-dim-by">by</span>${w.entityBadge('model', '', 'Model')}<span class="rail-n">4</span><svg class="hdr-ico xp-dim-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>`;
       const stale = trigger.cloneNode(false);
       trigger.replaceWith(stale);
       w.renderDimRail({activeDim: 'model', filters: []});
-      await sleep(0);
       check('a replaced trigger node is repainted even while the module key matches',
-        stale.innerHTML === staleHost.innerHTML && stale.getAttribute('aria-label') === 'break down by Model');
+        await settleUntil(() => stale.innerHTML === staleHost.innerHTML &&
+          stale.getAttribute('aria-label') === 'break down by Model'));
     } finally {
       observer.disconnect();
       w.eval('explorerAgg=window.__restoreRailAgg;delete window.__restoreRailAgg');
@@ -358,20 +356,23 @@ module.exports = async function renderLive(H) {
   // ---- test 2: live 'record' event → incremental insertion, stable nodes ----
   const oldFifth = rows()[5];
   fire('record', { ...mkRec('reqnew0', 200, 1700000031000) }, '31');
-  await sleep(20);
-  check('record event inserts new row at top', rows().length === 31 && rows()[0].dataset.id === 'reqnew0');
+  check('record event inserts new row at top',
+    await settleUntil(() => rows().length === 31 && rows()[0].dataset.id === 'reqnew0'));
   check('existing rows keep the SAME nodes (no table rebuild)', rows().includes(oldFifth));
 
   // ---- test 3: in-flight begin → final end replaces ONLY that row ----
   const inRec = { ...mkRec('reqnew1', 200, 1700000032000) };
   delete inRec.status_code;
   fire('begin', { record: inRec, in_flight: 1 });
-  await sleep(20);
+  await settleUntil(() => !!d.querySelector('#tbl-requests tr.live-row[data-id="reqnew1"]'));
   const inRow = d.querySelector('#tbl-requests tr.live-row[data-id="reqnew1"]');
   check('begin event renders the in-flight live-row', !!inRow);
   const stable = rows().find(tr => tr === oldFifth);
   fire('end', { record: mkRec('reqnew1', 200, 1700000032000), in_flight: 0 });
-  await sleep(20);
+  await settleUntil(() => {
+    const row = d.querySelector('#tbl-requests tr.exp-row[data-id="reqnew1"]');
+    return !!row && !row.classList.contains('live-row') && row.textContent.includes('200');
+  });
   const finRow = d.querySelector('#tbl-requests tr.exp-row[data-id="reqnew1"]');
   check('end event finalizes only that row', finRow && !finRow.classList.contains('live-row') && finRow.textContent.includes('200'));
   check('unrelated rows untouched across lifecycle events', rows().some(tr => tr === stable));
@@ -381,21 +382,21 @@ module.exports = async function renderLive(H) {
   const cont = d.getElementById('tbl-requests');
   cont.scrollTop = 200;
   fire('record', { ...mkRec('reqnew2', 200, 1700000033000) }, '32');
-  await sleep(20);
-  check('scrollTop compensated for the inserted row height', cont.scrollTop === 220);
+  check('scrollTop compensated for the inserted row height',
+    await settleUntil(() => cont.scrollTop === 220));
 
   // ---- test 5: incremental snapshot merge (SSE reconnect with cursor) ----
   fire('snapshot', { feed_id: 'feedA', seq: 34, incremental: true,
     records: [{ ...mkRec('reqnew3', 200, 1700000034000) }],
     counters: { in_flight: 0, total_requests: 34, total_errors: 0 } });
-  await sleep(20);
-  check('incremental snapshot merges without full replace', rows().includes(oldFifth) && rows().length === 34);
+  check('incremental snapshot merges without full replace',
+    await settleUntil(() => rows().includes(oldFifth) && rows().length === 34));
 
   // ---- test 6: feed change (proxy restart) → full replace ----
   fire('snapshot', { feed_id: 'feedB', seq: 2, incremental: false,
     records: [{ ...mkRec('fresh1', 200, 1700000100000) }, { ...mkRec('fresh2', 200, 1700000101000) }],
     counters: { in_flight: 0, total_requests: 2, total_errors: 0 } });
-  await sleep(20);
+  await settleUntil(() => rows().length === 2);
   const ids = rows().map(tr => tr.dataset.id);
   check('feed change resets view to the new snapshot', rows().length === 2 && ids.includes('fresh1') && ids.includes('fresh2'));
 
@@ -424,9 +425,9 @@ module.exports = async function renderLive(H) {
   fire('snapshot', { feed_id: 'feedB', seq: 3, incremental: true,
     records: [{ ...mkRec('fresh3', 200, 1700000102000) }],
     counters: { in_flight: 0, total_requests: 3, total_errors: 0 } });
-  await sleep(20);
-  const ok = rows().length === 3 && rows().includes(rows().find(tr => tr.dataset.id === 'fresh3'));
-  check('post-restart incremental delta applies on the new feed', ok);
+  check('post-restart incremental delta applies on the new feed',
+    await settleUntil(() => rows().length === 3 &&
+      rows().includes(rows().find(tr => tr.dataset.id === 'fresh3'))));
 
   // ---- test 7b: a kpiAgg swap with an EMPTY delta must still repaint the
   // KPI band (the derivation is memoized on the record revision -
@@ -451,7 +452,8 @@ module.exports = async function renderLive(H) {
     return origBootstrap(url);
   };
   w.eval("fetchBootstrap('none')");
-  await sleep(20);
+  await settleUntil(() => bootstrapStateApplied &&
+    d.getElementById('kpis').textContent.includes('31'));
   w.fetch = origBootstrap;
   check('bootstrap state-only pull repaints the band from fresh kpiAgg',
     bootstrapStateApplied && d.getElementById('kpis').textContent.includes('31'));
@@ -472,7 +474,10 @@ module.exports = async function renderLive(H) {
     return origBootstrap(url);
   };
   w.eval("fetchBootstrap('none')");
-  await sleep(20);
+  await settleUntil(() => {
+    const text = d.getElementById('kpis').textContent;
+    return text.includes('0 of 0') && text.includes('0 / 0 in') && !text.includes('%');
+  });
   w.fetch = origBootstrap;
   const neverMeasured = d.getElementById('kpis').textContent;
   check('a never-measured band shows - rates and honest zero counts',

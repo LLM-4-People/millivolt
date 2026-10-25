@@ -81,8 +81,7 @@ module.exports = async function menusScroll(H) {
   
   fire('snapshot', { feed_id: 'feedB', seq: 80, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
-  await sleep(30);
-  check('first paint caps at dash_log_rows (60 of 80)', rows().length === 60);
+  check('first paint caps at dash_log_rows (60 of 80)', await settleUntil(() => rows().length === 60));
   check('newest row is on top', rows()[0].dataset.id === 'big079');
   check('f-stats shows window of loaded', d.getElementById('f-stats').textContent === '60 of 80 records');
   {
@@ -141,7 +140,7 @@ module.exports = async function menusScroll(H) {
   state.box.scrollTop = 4000 - 200 - 10;
   state.lastLogURL = '';
   w.maybeLoadMoreLog();
-  await sleep(40);
+  await settleUntil(() => rows().length === 85);
   const idsAfter = rows().map(tr => tr.dataset.id);
   check('near-bottom grows through the ring then appends store pages', rows().length === 85);
   check('scroll-load keeps existing row nodes', rows().includes(pinned));
@@ -151,8 +150,8 @@ module.exports = async function menusScroll(H) {
   w.openDrawer('old000');
   check('drawer opens a store-paged row', d.getElementById('drawer').classList.contains('open'));
   fire('record', { ...mkRec('bignew', 200, 1800000000000 + 80 * 1000) }, '81');
-  await sleep(20);
-  check('live insert stays at top after paging', rows()[0].dataset.id === 'bignew');
+  check('live insert stays at top after paging',
+    await settleUntil(() => rows()[0].dataset.id === 'bignew'));
   check('paged oldest row is not evicted by a live insert', rows().some(tr => tr.dataset.id === 'old000'));
   // The Clear/Logs preview and durable-pagination suites below install
   // URL-agnostic fetch wrappers and assert exact fetch counts (a failed
@@ -165,8 +164,7 @@ module.exports = async function menusScroll(H) {
   state.box.scrollTop = 0; // full rebuild resets scroll (jsdom keeps the stubbed top)
   fire('snapshot', { feed_id: 'feedB', seq: 81, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
-  await sleep(30);
-  check('full resync after paging resets to page size', rows().length === 60);
+  check('full resync after paging resets to page size', await settleUntil(() => rows().length === 60));
   check('resync drops store-paged rows', !rows().some(tr => tr.dataset.id === 'old000'));
 
   // Delete/Logs preview ownership and failed mutations: exercise each actual
@@ -218,7 +216,7 @@ module.exports = async function menusScroll(H) {
       resyncs++;
       return savedFetch(url, options);
     };
-    await sleep(5);
+    await sleep(5); // drain the previous case's queued count render before the fetch swap
     await w.deleteMatching();
     check('filtered deletion uses the previewed cutoff, not a later time', submitted.before_ms === preview.filter.before_ms);
     check('failed deletion reports through the sheet status without wiping or resyncing the log', resyncs === 0 &&
@@ -296,13 +294,13 @@ module.exports = async function menusScroll(H) {
       return {ok: true, json: async () => payload};
     };
     w.fetchOlderLog();
-    await sleep(10);
-    check('a duplicate-only durable page advances without ending pagination', !w.eval('logExhausted') && w.eval('logCursor.id') === 'tie-z');
+    check('a duplicate-only durable page advances without ending pagination',
+      await settleUntil(() => !w.eval('logExhausted') && w.eval('logCursor && logCursor.id') === 'tie-z'));
     w.fetchOlderLog();
-    await sleep(10);
-    check('log keyset sends both timestamp zero and its tie-break ID', urls[1].includes('before_ms=0') && urls[1].includes('before_id=tie-z'));
+    check('log keyset sends both timestamp zero and its tie-break ID',
+      await settleUntil(() => urls[1] && urls[1].includes('before_ms=0') && urls[1].includes('before_id=tie-z')));
     check('same-timestamp archive records retain the server tie order',
-      w.logVisible().filter(r => r.id.startsWith('tie-')).map(r => r.id).join(',') === 'tie-b,tie-a');
+      await settleUntil(() => w.logVisible().filter(r => r.id.startsWith('tie-')).map(r => r.id).join(',') === 'tie-b,tie-a'));
     // The fetch above went through the page's real fetchOlderLog path; the
     // visible DOM must carry both the live ring window and the durable page in
     // one newest-first order.
@@ -316,8 +314,8 @@ module.exports = async function menusScroll(H) {
     w.resetLogWindow();
     pageRequest = 1;
     w.fetchOlderLog();
-    await sleep(10);
-    check('an entirely empty ring still loads durable request history', w.eval('logArchive.length') === 2 && !urls[2].includes('before_ms='));
+    check('an entirely empty ring still loads durable request history',
+      await settleUntil(() => w.eval('logArchive.length') === 2 && urls[2] && !urls[2].includes('before_ms=')));
     w.eval('lastData = null');
     w.renderAll(snapshot);
     w.fetch = savedFetch;
@@ -347,18 +345,17 @@ module.exports = async function menusScroll(H) {
       return {ok: true, json: async () => payload};
     };
     w.fetchOlderLog();
-    await sleep(10);
     check('an empty-id boundary advances the durable cursor instead of ending pagination',
-      !w.eval('logExhausted') && w.eval('logCursor.ms') === boundaryMs &&
-      w.eval('logCursor.id') === '');
+      await settleUntil(() => !w.eval('logExhausted') && w.eval('logCursor && logCursor.ms') === boundaryMs &&
+        w.eval('logCursor && logCursor.id') === ''));
     w.fetchOlderLog();
-    await sleep(10);
+    await settleUntil(() => urls[1]);
     const continuationURL = urls[1] || '';
     check('the continuation sends an explicit empty before_id after an empty-id boundary',
       continuationURL.includes('before_ms=' + boundaryMs) && continuationURL.includes('before_id=') &&
       !continuationURL.includes('before_id=undefined'));
     check('older durable pages load past a hidden empty-id boundary row',
-      w.eval('logArchive.length') === 1 && w.eval('logArchive[0].id') === 'older-after-empty');
+      await settleUntil(() => w.eval('logArchive.length') === 1 && w.eval('logArchive[0].id') === 'older-after-empty'));
     w.eval('lastData = null');
     w.resetLogWindow();
     w.renderAll(snapshot);

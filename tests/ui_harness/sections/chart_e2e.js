@@ -1,7 +1,7 @@
 // test 11g: REAL zero-traffic chart payload end-to-end (live-verify
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function chartE2e(H) {
-  const {check, d, mkChart, sleep, w} = H;
+  const {check, d, mkChart, settleUntil, w} = H;
   const state = H.state;
 
   // ---- test 11g: REAL zero-traffic chart payload end-to-end (live-verify
@@ -22,9 +22,8 @@ module.exports = async function chartE2e(H) {
     w.eval("window.__blankMsgs = []; window.__drawBlankOrig = drawBlank; drawBlank = (ctx, msg) => { window.__blankMsgs.push(msg); window.__drawBlankOrig(ctx, msg); };");
     w.eval("chartView = { window: '60', pct: 50, preset: 'cost', hidden: {} }");
     w.eval("fetchChart('invalidate')");
-    await sleep(30);
     check('zero-traffic server payload is zero-FILLED buckets, never an empty array',
-      w.eval('chartAgg && chartAgg.buckets.length >= 1 && chartAgg.buckets.every(b => b.req === 0)') === true);
+      await settleUntil(() => w.eval('chartAgg && chartAgg.buckets.length >= 1 && chartAgg.buckets.every(b => b.req === 0)') === true));
     check('zero-traffic merged chart reads as empty (chartIsEmpty)',
       w.eval('chartIsEmpty()') === true);
     check('bar preset yields no data on all-zero buckets (no compaction slots)',

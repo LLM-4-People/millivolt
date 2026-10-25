@@ -1,7 +1,7 @@
 // const canonCases = [
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function modelCanon(H) {
-  const {DEF_RULES, cfgDoc, check, d, modelFixture, path, rows, sleep, w} = H;
+  const {DEF_RULES, cfgDoc, check, d, modelFixture, path, rows, settleUntil, w} = H;
   const state = H.state;
 
   const canonCases = [
@@ -434,9 +434,9 @@ module.exports = async function modelCanon(H) {
       return originalFetch(url, opts);
     };
     w.runBackupDownload();
-    await sleep(20);
     check('backup download uses the operator fetch gate',
-      calls.some(c => c.u.includes('/admin/backup') && c.auth === 'Bearer op-token'));
+      await settleUntil(() => calls.some(c => c.u.includes('/admin/backup') && c.auth === 'Bearer op-token') &&
+        d.getElementById('btn-backup-download')?.dataset.busy !== '1'));
     // The generic operatorErrorBody site: an empty-body 502 (no JSON
     // anywhere, like a bare gateway refusal) must reject with the caller's
     // designed fallback message, never an empty Error. The W20 mutation
@@ -447,9 +447,8 @@ module.exports = async function modelCanon(H) {
       return originalFetch(url, opts);
     };
     w.runBackupDownload();
-    await sleep(20);
     check('an empty-body 502 backup download surfaces the designed fallback message',
-      d.getElementById('settings-count').textContent === 'backup failed');
+      await settleUntil(() => d.getElementById('settings-count').textContent === 'backup failed'));
     calls.length = 0;
     const inspectPayload = {
       ok: true, created: '2026-09-07T12:00:00Z',
@@ -478,20 +477,20 @@ module.exports = async function modelCanon(H) {
     const file = new w.File(['archive'], 't.mvb', { type: 'application/octet-stream' });
     Object.defineProperty(input, 'files', { configurable: true, value: [file] });
     input.dispatchEvent(new w.Event('change', { bubbles: true }));
-    await sleep(0);
     check('inspect holds the busy gate until the archive is reviewed',
-      d.getElementById('btn-backup-download')?.dataset.busy === '1' &&
+      await settleUntil(() => d.getElementById('btn-backup-download')?.dataset.busy === '1' &&
       d.getElementById('btn-backup-restore')?.dataset.busy === '1' &&
-      !d.getElementById('btn-backup-apply'));
+      !d.getElementById('btn-backup-apply')));
     w.fillSettingsForm(doc);
     check('settings refresh during inspect keeps the busy gate',
       d.getElementById('btn-backup-download')?.dataset.busy === '1' &&
       d.getElementById('btn-backup-restore')?.dataset.busy === '1' &&
       !d.getElementById('btn-backup-apply'));
     releaseInspect();
-    await sleep(20);
     check('backup inspect uses the operator fetch gate',
-      calls.some(c => c.u.includes('/admin/restore') && c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
+      await settleUntil(() => calls.some(c => c.u.includes('/admin/restore') && c.u.includes('inspect=1') && c.auth === 'Bearer op-token') &&
+        !!d.querySelector('input[name="backup-mode"][value="merge"]') &&
+        !!d.getElementById('backup-preview')));
     check('restore does not show download actions',
       !d.getElementById('btn-backup-download') && !d.getElementById('btn-backup-restore') &&
       !d.getElementById('backup-dl-config') &&
@@ -550,9 +549,9 @@ module.exports = async function modelCanon(H) {
       d.getElementById('backup-preview').textContent.includes('2GiB'));
     calls.length = 0;
     w.runBackupApply();
-    await sleep(20);
     check('backup apply uses the operator fetch gate',
-      calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
+      await settleUntil(() => calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.auth === 'Bearer op-token') &&
+        calls.some(c => c.u.includes('/admin/config') && c.method === 'GET')));
     check('apply omits an unchecked config member',
       calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1') && !c.u.includes('config=1')));
     check('restore refreshes settings even when a database restart is pending',

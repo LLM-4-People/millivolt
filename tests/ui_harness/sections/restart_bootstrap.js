@@ -39,7 +39,7 @@ module.exports = async function restartBootstrap(H) {
         },
       });
       await loaded(isolated);
-      await sleep(100);
+      await settleUntil(() => isolated.window.eval('!!lastData'));
       const wrap = isolated.window.document.getElementById('restart-wrap');
       check(`${label} seed decides the Restart control from the payload it already loads`,
         bootstrapFetches === 0 && !!wrap && wrap.hidden === !!(restart && restart.available === false));
@@ -103,7 +103,7 @@ module.exports = async function restartBootstrap(H) {
       sw.renderLive = () => { liveRenders++; originalLive(); };
       payload = {...payload, incremental: false, records: seed.records};
       sw.fetchBootstrap('full');
-      await sleep(30);
+      await sleep(30); // negative-proof window: replacement must not queue a second live render
       check('a full bootstrap replacement does not queue a second live render', stateRows().length === 17 && liveRenders === 0);
     } finally {
       sw.close();
@@ -151,16 +151,16 @@ module.exports = async function restartBootstrap(H) {
     const emit = (stream, type, data, seq) => stream.handlers[type]({type, data: JSON.stringify(observerFixture(data)), lastEventId: seq});
     const IDs = () => sw.eval('lastData.records.map(r => r.id).join(",")');
     try {
-      await sleep(50);
+      await settleUntil(() => sw.eval('!!lastData') && streams.length > 0);
       const original = streams.at(-1);
       delayNext = true;
       sw.fetchBootstrap('resume');
       payload = {...seed, feed_id: 'purge-epoch-2', records: [mkRec('survivor')]};
       emit(original, 'snapshot', payload);
-      await sleep(20);
-      const replacement = streams.at(-1);
       check('a changed SSE epoch closes and repins the stream URL exactly once',
-        streams.length === 2 && original.readyState === 2 && replacement.url.includes('feed=purge-epoch-2') && replacement.url.includes('since=2'));
+        await settleUntil(() => streams.length === 2 && original.readyState === 2 &&
+          streams.at(-1).url.includes('feed=purge-epoch-2') && streams.at(-1).url.includes('since=2')));
+      const replacement = streams.at(-1);
       for (const type of ['begin', 'update', 'end']) {
         emit(original, type, {record: mkRec('deleted-' + type), in_flight: 99});
       }
@@ -168,9 +168,9 @@ module.exports = async function restartBootstrap(H) {
       emit(original, 'snapshot', seed);
       original.onerror();
       resolveOld();
-      await sleep(20);
       check('old stream lifecycle/record/snapshot and older bootstrap cannot resurrect purged rows',
-        IDs() === 'survivor' && sw.eval('feedId') === 'purge-epoch-2' && sw.eval('lastSeq') === 2 && sw.eval('lastData.counters.in_flight') === 0);
+        await settleUntil(() => IDs() === 'survivor' && sw.eval('feedId') === 'purge-epoch-2' &&
+          sw.eval('lastSeq') === 2 && sw.eval('lastData.counters.in_flight') === 0));
 
       // A server reset starts one immediate full refresh; no native retry delay
       // or second polling timer is needed for another tab's clear operation.
@@ -178,18 +178,18 @@ module.exports = async function restartBootstrap(H) {
       const before = requests.length;
       emit(replacement, 'reset', {feed_id: payload.feed_id});
       emit(replacement, 'record', mkRec('deleted-during-reset'), '100');
-      await sleep(30);
-      const resetStream = streams.at(-1);
       check('cross-tab reset immediately fetches one full snapshot and resumes the new epoch',
-        requests.length === before + 1 && !requests.at(-1).includes('since=') &&
-        IDs() === 'during-purge' && resetStream !== replacement && resetStream.url.includes('feed=purge-epoch-3'));
+        await settleUntil(() => requests.length === before + 1 && requests.at(-1) && !requests.at(-1).includes('since=') &&
+          IDs() === 'during-purge' && streams.at(-1) !== replacement &&
+          streams.at(-1).url.includes('feed=purge-epoch-3')));
+      const resetStream = streams.at(-1);
       emit(resetStream, 'snapshot', {...payload, incremental: true, seq: 4, records: [mkRec('after-purge')]});
       check('new arrivals between purge snapshot and SSE subscribe survive delta replay', IDs() === 'during-purge,after-purge');
 
       // The existing bootstrap poll is also sufficient if the stream is down.
       payload = {...payload, feed_id: 'purge-epoch-4', records: [mkRec('poll-survivor')]};
       sw.fetchBootstrap('resume');
-      await sleep(20);
+      await settleUntil(() => IDs() === 'poll-survivor' && streams.at(-1).url.includes('feed=purge-epoch-4'));
       emit(resetStream, 'end', {record: mkRec('deleted-poll-end'), in_flight: 7});
       check('poll-detected purge replaces the view and rejects the previous stream',
         IDs() === 'poll-survivor' && streams.at(-1).url.includes('feed=purge-epoch-4'));

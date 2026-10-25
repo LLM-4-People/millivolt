@@ -391,6 +391,8 @@ module.exports = async function chartBuckets(H) {
   const raceRec = { ...mkRec('chartend', 200, CHART_FROM + 4 * BUCKET_MS) };
   fire('end', { record: raceRec, in_flight: 0 }, '91');
   fire('record', raceRec, '92');
+  // Negative proof: the two live deliveries must NOT add a chart bucket. The
+  // fixed window is the bound; there is no "nothing happened" state to poll.
   await sleep(20);
   check('live end/record delivery never adds to canonical chart buckets', w.eval('chartAgg.buckets[4].req') === 0);
   w.eval('chartAgg = null; chartView.preset = "traffic"; chartView.hidden = {}');

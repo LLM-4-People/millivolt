@@ -1,7 +1,7 @@
 // test 8: Logs menu (filter menu + export URL)
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function logsMenu(H) {
-  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, settleUntil, sleep, w} = H;
+  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, settleUntil, w} = H;
   const state = H.state;
 
   // ---- test 8: Logs menu (filter menu + export URL) ----
@@ -56,8 +56,8 @@ module.exports = async function logsMenu(H) {
   check('debug-only export encodes the flag', w.logsExportURL({ provider: '', model: '', client: '', status_code: 0, has_error: false, debug: true, before_ms: 0 }) === '/metrics/export?debug=1');
   d.getElementById('lf-provider').value = 'p';
   w.updateLogsCount();
-  await sleep(30);
-  check('logs count preview reads the backend count', d.getElementById('logs-count').textContent.includes('download 3 records'));
+  check('logs count preview reads the backend count',
+    await settleUntil(() => d.getElementById('logs-count').textContent.includes('download 3 records')));
   w.toggleLogsMenu({ stopPropagation() {} });
   check('logs menu closes on second toggle', logsMenu.hidden);
   check('logs close clears aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'false');
@@ -120,9 +120,9 @@ module.exports = async function logsMenu(H) {
   {
     const pausedRec = { ...mkRec('paused-live-rec', 0, 1700000105000), paused: true };
     fire('begin', { record: pausedRec, in_flight: 1 });
-    await sleep(20);
     const pausedPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="paused-live-rec"] .pill.paused[data-edit-pause]');
-    check('a paused live record renders the paused pill on its row', !!pausedPill());
+    check('a paused live record renders the paused pill on its row',
+      await settleUntil(() => !!pausedPill()));
     w.eval("pauseState = {...pauseState, paused: true, holds: [" +
       "{id: 'hold-other', clients: ['other-client'], duration: '1h'}," +
       "{id: 'hold-named', clients: ['c'], duration: '15m'}," +
@@ -142,9 +142,9 @@ module.exports = async function logsMenu(H) {
 
     const throttledRec = { ...mkRec('throttled-live-rec', 0, 1700000106000), throttled: true };
     fire('begin', { record: throttledRec, in_flight: 2 });
-    await sleep(20);
     const throttledPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="throttled-live-rec"] .pill.throttled[data-edit-limit]');
-    check('a throttled live record renders the throttled pill on its row', !!throttledPill());
+    check('a throttled live record renders the throttled pill on its row',
+      await settleUntil(() => !!throttledPill()));
     w.eval("throttleState = {...throttleState, active: true, throttles: [" +
       "{provider: 'other.example', requests: 1, request_window: '1m'}," +
       "{provider: 'p', requests: 2, request_window: '2m'}]," +
@@ -172,9 +172,9 @@ module.exports = async function logsMenu(H) {
   {
     const liveRec = { ...mkRec('gapc-live-rec', 0, 1700000107000) };
     fire('begin', { record: liveRec, in_flight: 1 });
-    await sleep(20);
     const gapcPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill');
-    check('the in-flight row paints the live pill first', !!gapcPill() && gapcPill().classList.contains('live'));
+    check('the in-flight row paints the live pill first',
+      await settleUntil(() => !!gapcPill() && gapcPill().classList.contains('live')));
     w.eval("lastData.records[lastData.records.findIndex(r => r.id === 'gapc-live-rec')]" +
       " = {...lastData.records.find(r => r.id === 'gapc-live-rec'), paused: true}; bumpData();");
     check('no feed event leaves the painted row stale', gapcPill().classList.contains('live'));
@@ -183,7 +183,8 @@ module.exports = async function logsMenu(H) {
     w.renderLive = () => { livePaints++; originalLive(); };
     w.applyPauseState({ ok: true, paused: true, holds: [{ id: 'gapc-hold', all: true, duration: '15m' }],
       known_clients: ['c'], known_providers: ['p'], until: null, queued: 0, default_max_queued: 0 });
-    await sleep(20);
+    await settleUntil(() => livePaints === 1 &&
+      !!d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill.paused[data-edit-pause]'));
     w.renderLive = originalLive;
     check('applying a pause state repaints the held row without a feed event',
       livePaints === 1 &&

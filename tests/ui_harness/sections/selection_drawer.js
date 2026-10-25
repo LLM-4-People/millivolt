@@ -1,7 +1,7 @@
 // test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function selectionDrawer(H) {
-  const {check, d, fire, mkRec, rows, settleUntil, sleep, w} = H;
+  const {check, d, fire, mkRec, rows, settleUntil, w} = H;
   const state = H.state;
 
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
@@ -88,12 +88,11 @@ module.exports = async function selectionDrawer(H) {
         mkRec('fresh3', 200, 1700000102000), mkRec('fresh4', 200, 1700000103000),
         { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }],
       counters: { in_flight: 0, total_requests: 5, total_errors: 0 } });
-    await sleep(20);
     check('a full resync re-renders drawer and log from the same selection identity',
-      d.getElementById('drawer').classList.contains('open') &&
+      await settleUntil(() => d.getElementById('drawer').classList.contains('open') &&
         d.getElementById('drawer-body').textContent.includes('sel-live') &&
         d.getElementById('drawer-body').textContent.includes('999ms') &&
-        expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
+        expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live'));
     w.closeDrawer();
   }
 
@@ -111,7 +110,7 @@ module.exports = async function selectionDrawer(H) {
         at: new Date(1700000104800).toISOString() },
     ];
     fire('end', { record: { ...mkRec('att-meta', 200, 1700000104000), retries: 2, attempts: atts }, in_flight: 0 });
-    await sleep(20);
+    await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="att-meta"]:not(.retry-sub)'));
     w.openDrawer('att-meta');
     const attRows = [...d.querySelectorAll('.attempt-link')];
     check('the drawer attempt log renders the absorbed attempts with their own provider request ids',
@@ -147,7 +146,7 @@ module.exports = async function selectionDrawer(H) {
     ];
     fire('end', { record: { ...mkRec('att-open', 200, 1700000104000), retries: 2, attempts: atts,
       prompt_preview: 'PROMPT-PREVIEW-7F', response_preview: 'RESPONSE-PREVIEW-7F' }, in_flight: 0 });
-    await sleep(20);
+    await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="att-open"]:not(.retry-sub)'));
     w.openDrawer('att-open');
     const title = () => d.getElementById('drawer-title').textContent;
     const bodyText = () => d.getElementById('drawer-body').textContent;
@@ -255,11 +254,10 @@ module.exports = async function selectionDrawer(H) {
             { status_code: 500, error_type: 'server_error', at: new Date(1700000105100).toISOString() }],
           prompt_preview: 'PROMPT-PREVIEW-7F', response_preview: 'RESPONSE-PREVIEW-7F' }],
       counters: { in_flight: 0, total_requests: 6, total_errors: 0 } });
-    await sleep(20);
     check('the attempt selection re-resolves through a wholesale record replacement',
-      title().includes('attempt 1 of 3') && title().includes('502') &&
+      await settleUntil(() => title().includes('attempt 1 of 3') && title().includes('502') &&
         bodyText().includes('req_meta_1') && attemptSel() === 0 &&
-        d.getElementById('drawer').classList.contains('open'));
+        d.getElementById('drawer').classList.contains('open')));
     w.eval('drawerAttempt = 99');
     w.renderDrawer();
     check('a dangling attempt key fails closed to the parent view',
@@ -296,7 +294,7 @@ module.exports = async function selectionDrawer(H) {
         at: new Date(1700000104500).toISOString() },
     ];
     fire('end', { record: { ...mkRec('att-200', 200, 1700000104000), retries: 1, attempts: atts }, in_flight: 0 });
-    await sleep(20);
+    await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="att-200"]:not(.retry-sub)'));
     w.openDrawer('att-200');
     const listPill = d.querySelector('.attempt-link .pill');
     check('the drawer retry list classes the degenerate 200 attempt warn',
@@ -327,7 +325,7 @@ module.exports = async function selectionDrawer(H) {
     ];
     fire('end', { record: { ...mkRec('att-inband', 200, 1700000104000),
       error_type: 'rate_limit_error', error_msg: 'slow down', retries: 1, attempts: atts }, in_flight: 0 });
-    await sleep(20);
+    await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="att-inband"]:not(.retry-sub)'));
     const row = d.querySelector('#tbl-requests tr.exp-row[data-id="att-inband"]:not(.retry-sub)');
     const toggle = row && row.querySelector('.retry-toggle');
     check('an in-band entry does not inflate the retry badge',
