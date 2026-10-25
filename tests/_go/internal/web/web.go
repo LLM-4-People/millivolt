@@ -574,8 +574,9 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 //     canonical token fields, served by GET /admin/config as usage_fields)
 //   - settings.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields (the
 //     /v1/models enrichment vocabulary, served as model_fields)
-//   - ui_check.js cfgDoc.usage_fields == metrics.CanonicalUsageFields (the
-//     harness stubs the /admin/config payload and asserts its dropdown)
+//   - ui_harness/fixtures.js cfgDoc.usage_fields ==
+//     metrics.CanonicalUsageFields (the harness stubs the /admin/config
+//     payload and asserts its dropdown)
 func TestCanonicalFieldFallbacksMatchOwners(t *testing.T) {
 	js, err := staticFS.ReadFile("static/js/settings.js")
 	if err != nil {
@@ -588,12 +589,15 @@ func TestCanonicalFieldFallbacksMatchOwners(t *testing.T) {
 		t.Errorf("settings.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
 	}
 	root := moduleRoot(t)
-	ui, err := os.ReadFile(filepath.Join(root, "tests", "ui_check.js"))
+	// cfgDoc lives in the harness fixtures owner, not the runner: the jsdom
+	// suite was split into tests/ui_harness/ and this contract must follow the
+	// literal rather than the entry-point filename.
+	fixtures, err := os.ReadFile(filepath.Join(root, "tests", "ui_harness", "fixtures.js"))
 	if err != nil {
-		t.Fatalf("read ui_check.js: %v", err)
+		t.Fatalf("read ui_harness/fixtures.js: %v", err)
 	}
-	if got, want := jsStringList(t, ui, "usage_fields: "), metrics.CanonicalUsageFields; !slices.Equal(got, want) {
-		t.Errorf("ui_check.js cfgDoc.usage_fields = %v, want metrics.CanonicalUsageFields %v", got, want)
+	if got, want := jsStringList(t, fixtures, "usage_fields: "), metrics.CanonicalUsageFields; !slices.Equal(got, want) {
+		t.Errorf("ui_harness/fixtures.js cfgDoc.usage_fields = %v, want metrics.CanonicalUsageFields %v", got, want)
 	}
 }
 
@@ -621,13 +625,13 @@ func jsStringList(t *testing.T, src []byte, decl string) []string {
 // moduleRoot locates the repo root from this file's compile-time source path
 // (the same self-location rule cmd/proxy/restart.go applies). A stripped
 // source view (for example a -trimpath build) cannot self-locate its source,
-// so the ui_check.js contract fails with that reason instead of skipping or
+// so the JS harness contract fails with that reason instead of skipping or
 // guessing a path.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
-		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): ui_check.js contract cannot be verified")
+		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): JS harness contract cannot be verified")
 	}
 	dir := filepath.Dir(file)
 	for {
@@ -636,7 +640,7 @@ func moduleRoot(t *testing.T) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("no go.mod above %s: ui_check.js contract cannot be verified without the repository source view", dir)
+			t.Fatalf("no go.mod above %s: JS harness contract cannot be verified without the repository source view", dir)
 		}
 		dir = parent
 	}
