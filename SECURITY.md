@@ -85,14 +85,19 @@ convenience. The current categories and their trust-boundary evidence:
   console sits behind the operator gate, accepts one SELECT, and enforces
   execution time, row, column and result-byte limits. The operator is already
   trusted with the database, so this is not an unauthenticated SQL surface.
-- JSON, SSE and gzip response writers. These encode and flush the proxy's own
-  output to an authenticated operator; framing and compression state are
-  bounded by the response-size guard, and no writer is reachable before the
-  operator gate.
-- Bounded allocations (`cmd/proxy/mcp.go`, `internal/sse/frames.go`). The
-  flagged sizes come from configured MCP/transport limits or the negotiated
-  frame bound, and input is rejected at that bound before the sized allocation.
-  They are not attacker-controlled unbounded sizes.
+- JSON, SSE and gzip response writers. The operator surfaces behind the gate
+  encode the proxy's own output, and framing and compression state are bounded
+  by the response-size guard. Two writers are intentionally reachable without
+  the operator gate: the `/healthz` liveness JSON and the transparent inference
+  SSE relay, which streams the upstream response to a client that supplied its
+  own provider credentials. Neither exposes operator data, so this category is
+  not an authentication bypass.
+- Bounded allocations (`cmd/proxy/mcp.go`, `internal/sse/frames.go`). The MCP
+  recorder cap is the fixed `mcp.MaxResponseBytes` read budget (64 MiB) plus one
+  byte, not a configurable limit. The SSE frame capacity is the marshaled
+  payload length, bounded by the relay's scanner and encoder frame caps and the
+  response-size guard. Input is rejected at those bounds before the sized
+  allocation, so neither is an attacker-controlled unbounded size.
 
 Two alerts were true positives and are fixed: the operator session cookie now
 sets `Secure` when the request arrived over TLS or through an https-forwarding
