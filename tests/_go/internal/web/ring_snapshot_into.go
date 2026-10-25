@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -177,6 +178,14 @@ func TestRingSnapshotAllocationCeiling(t *testing.T) {
 		buf.Record(records[i%distinct])
 	}
 	api := NewAggAPI(buf, nil, time.Second)
+	// sync.Pool drops its buffers at every GC, so a cycle during the measured
+	// loop would turn steady-state reuse into a GC-timing lottery under -race.
+	// Disable automatic collection for the benchmark and restore it before the
+	// test returns; testing.Benchmark still forces a GC before each run, and
+	// the loop re-warms after that boundary. Any allocation in ringSnapshot
+	// itself still counts.
+	previousGC := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(previousGC)
 	// Warm the package pool with the exact ring-sized scratch.
 	scratch, view := api.ringSnapshot(0)
 	if len(view) != slots {
