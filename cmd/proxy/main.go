@@ -46,6 +46,11 @@ var (
 	liveConfigPath     string
 	liveListenOverride string
 	liveDBOverride     string
+	// dashPayload memoizes the bootstrap's exported config payload by live
+	// config POINTER identity: a reload always publishes a fresh clone, so the
+	// cache is invalidated by the swap itself and never by a time window. It
+	// rides the liveCfg declaration because that pointer is its only key.
+	dashPayload config.PayloadMemo
 )
 
 // rejectUnless is the RFC 9110 method gate for mux handlers in this
@@ -332,8 +337,13 @@ func main() {
 	// builders are the single owner).
 	agg.Dash = func() any {
 		liveMu.Lock()
-		defer liveMu.Unlock()
-		return liveCfg.Clone().Map()
+		live := liveCfg
+		liveMu.Unlock()
+		// Export outside liveMu: the snapshot is immutable (a reload swaps the
+		// pointer, never the object), so a bootstrap poll must not hold the
+		// reload lock across the schema walk - and after the first poll it is a
+		// map lookup, not a walk.
+		return dashPayload.Map(live)
 	}
 	agg.Pause = func() any { return proxySrv.PauseSnapshot() }
 	agg.Throttle = func() any { return proxySrv.ThrottleSnapshot() }

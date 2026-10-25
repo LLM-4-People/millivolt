@@ -9,8 +9,47 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// PayloadMemo is the one-entry cache for one live config's exported payload.
+// The dashboard bootstrap polls every few seconds per open tab and Map() walks
+// the whole schema through reflection on every call; that payload changes only
+// when an accepted reload swaps the live *Config. Pointer identity is the exact
+// invalidation: boot and every reload publish a NEW *Config and never mutate
+// the old one, so a cached payload cannot outlive its config. The retained
+// source pointer also keeps that address from being reused by a later
+// allocation, so an address match is never a false hit. Never key on a time
+// window or on content equality.
+type PayloadMemo struct {
+	mu      sync.Mutex
+	source  *Config
+	payload map[string]any
+}
+
+// Map returns the exported payload for cfg, computing it at most once per
+// distinct *Config. The result is SHARED with every caller until the live
+// config pointer changes and must be treated as immutable: encode it, never
+// mutate the map or a value inside it. Concurrent first callers serialize on
+// the one computation (a bootstrap burst per tab, not a hot path) and then
+// reuse the stored payload.
+func (m *PayloadMemo) Map(cfg *Config) map[string]any {
+	if cfg == nil {
+		// No silent empty payload: a nil live config is a wiring defect.
+		panic("config: PayloadMemo.Map called with a nil config")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.source == cfg && m.payload != nil {
+		return m.payload
+	}
+	// Clone first, exactly like the pre-memo bootstrap did: the payload is
+	// shared beyond this call, so it must not alias the live snapshot.
+	payload := cfg.Clone().Map()
+	m.source, m.payload = cfg, payload
+	return payload
+}
 
 // Map exports every schema field as a JSON-friendly value: durations are Go
 // duration strings ("5s", "2m") and byte sizes are magnitude-plus-unit strings
