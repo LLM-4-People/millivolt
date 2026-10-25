@@ -14,7 +14,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const sqliteHeader = "SQLite format 3\x00"
+// DatabaseHeader is the fixed 16-byte header of a SQLite database file.
+const DatabaseHeader = "SQLite format 3\x00"
 
 // SQLiteURI composes the file: URI every SQLite connection uses for path.
 // The path is percent-escaped and params are query-escaped, so metacharacters
@@ -92,7 +93,7 @@ func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error)
 	if stageDir == "" {
 		return SnapshotCounts{}, ErrSnapshotStaging
 	}
-	if len(data) < len(sqliteHeader) || string(data[:len(sqliteHeader)]) != sqliteHeader {
+	if len(data) < len(DatabaseHeader) || string(data[:len(DatabaseHeader)]) != DatabaseHeader {
 		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
 	dir, err := os.MkdirTemp(stageDir, InspectDatabaseStagingPattern)
@@ -115,13 +116,13 @@ func inspectSQLiteFile(path string) (SnapshotCounts, error) {
 	if err != nil {
 		return SnapshotCounts{}, err
 	}
-	hdr := make([]byte, len(sqliteHeader))
+	hdr := make([]byte, len(DatabaseHeader))
 	n, readErr := f.Read(hdr)
 	_ = f.Close()
 	if readErr != nil && !errors.Is(readErr, io.EOF) {
 		return SnapshotCounts{}, readErr
 	}
-	if n < len(sqliteHeader) || string(hdr[:n]) != sqliteHeader {
+	if n < len(DatabaseHeader) || string(hdr[:n]) != DatabaseHeader {
 		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
 	db, err := sql.Open("sqlite", SQLiteURI(path, url.Values{"mode": {"ro"}}))

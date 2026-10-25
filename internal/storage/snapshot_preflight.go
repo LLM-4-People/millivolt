@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"sort"
@@ -14,6 +15,48 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
+
+// checkPendingSnapshotFile is the one pending-slot file-type guard shared by
+// admission and preflight. It runs before any SQLite open so a FIFO can never
+// block boot, a directory or symlink is quarantined instead of followed, and
+// an empty or headerless file is rejected before initializeDatabase can turn
+// it into an empty database. Sql.Open alone would create or accept all four.
+func checkPendingSnapshotFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("pending snapshot: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return invalidPendingSnapshotFile(path, "is a symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return invalidPendingSnapshotFile(path, "is not a regular file")
+	}
+	if info.Size() == 0 {
+		return invalidPendingSnapshotFile(path, "is empty")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("pending snapshot: %w", err)
+	}
+	header := make([]byte, len(backup.DatabaseHeader))
+	n, readErr := io.ReadFull(file, header)
+	closeErr := file.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("pending snapshot: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("pending snapshot: %w", closeErr)
+	}
+	if n < len(header) || string(header) != backup.DatabaseHeader {
+		return invalidPendingSnapshotFile(path, "has no SQLite header")
+	}
+	return nil
+}
+
+func invalidPendingSnapshotFile(path, reason string) error {
+	return fmt.Errorf("%w: pending snapshot %s %s", backup.ErrInvalidSnapshot, path, reason)
+}
 
 // preflightPendingSnapshot initializes the staged database in place before any
 // live file is touched. It opens read-write with the standard bounded busy
@@ -27,12 +70,8 @@ import (
 // would admit it over live history; an absent file is a missing snapshot
 // (errors.Is(err, fs.ErrNotExist)), never an empty one.
 func preflightPendingSnapshot(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("pending snapshot: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("pending snapshot is not a regular file: %s", path)
+	if err := checkPendingSnapshotFile(path); err != nil {
+		return err
 	}
 	// The packed file is self-contained; sidecars beside it are debris from an
 	// interrupted earlier preflight. Remove them before opening: a hot journal

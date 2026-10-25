@@ -30,6 +30,23 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		return nil, err
 	}
 	incoming := path + pendingSnapshotSuffix
+	// The pending slot is one private file, not a path to follow. Check its
+	// type and header before backup.CheckDatabaseFile opens it: a FIFO would
+	// block that open forever, while a directory or symlink must be quarantined
+	// without touching the live database or the symlink target.
+	if err := checkPendingSnapshotFile(incoming); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if !errors.Is(err, backup.ErrInvalidSnapshot) {
+			return nil, err
+		}
+		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
+			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
+		}
+		log.Printf("storage: pending snapshot rejected: %v", err)
+		return nil, nil
+	}
 	// A packed pending snapshot is a self-contained file. Any sidecar beside
 	// it is crash debris from an interrupted preflight, not part of the
 	// snapshot: a hot rollback journal would either fail the read-only
