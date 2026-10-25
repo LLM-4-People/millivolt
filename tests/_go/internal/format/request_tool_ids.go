@@ -5,6 +5,7 @@ package format
 // with an explicit id; duplicate explicit ids fail closed.
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -126,6 +127,22 @@ func TestRequestToolIDsAreUnique(t *testing.T) {
 		}
 	})
 
+	t.Run("base64 document decoy is ignored", func(t *testing.T) {
+		decoy := base64.StdEncoding.EncodeToString([]byte(
+			`{"type":"tool_use","id":"call_real","name":"decoy","input":{}}`))
+		body := `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":[{"type":"text","text":"read"},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"` + decoy + `"}}]},` +
+			`{"role":"assistant","content":[{"type":"tool_use","id":"call_real","name":"f","input":{}}]},` +
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_real","content":"ok"}]}]}`
+		req, err := DecodeAnthropicRequest([]byte(body))
+		if err != nil {
+			t.Fatalf("base64 document decoy rejected: %v", err)
+		}
+		if ids := requestToolCallIDs(req); len(ids) != 1 || ids[0] != "call_real" {
+			t.Fatalf("IR ids = %v, want the real id unchanged with no suffix", ids)
+		}
+	})
+
 	for _, tc := range []struct {
 		name   string
 		body   string
@@ -149,6 +166,21 @@ func TestRequestToolIDsAreUnique(t *testing.T) {
 				`{"type":"function_call","call_id":"call_x","name":"f","arguments":"{}"},` +
 				`{"type":"function_call","call_id":"call_x","name":"g","arguments":"{}"}]}`,
 			decode: DecodeResponsesRequest,
+		},
+		{
+			name: "content-source document duplicate",
+			body: `{"model":"m","max_tokens":16,"messages":[` +
+				`{"role":"user","content":[{"type":"document","source":{"type":"content","media_type":"text/plain","content":[{"type":"text","text":"x"},{"type":"tool_use","id":"call_real","name":"nested","input":{}}]}}]},` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"call_real","name":"f","input":{}}]}]}`,
+			decode: DecodeAnthropicRequest,
+		},
+		{
+			name: "nested tool-result duplicate",
+			body: `{"model":"m","max_tokens":16,"messages":[` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"outer","name":"outer","input":{}}]},` +
+				`{"role":"user","content":[{"type":"tool_result","tool_use_id":"outer","content":[{"type":"tool_use","id":"call_real","name":"nested","input":{}}]}]},` +
+				`{"role":"assistant","content":[{"type":"tool_use","id":"call_real","name":"f","input":{}}]}]}`,
+			decode: DecodeAnthropicRequest,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
