@@ -145,6 +145,41 @@ func TestPrivate(t *testing.T) {
             with self.subTest(document=invalid), self.assertRaises((RuntimeError, ValueError)):
                 runner.package_parity(self.mapping, invalid)
 
+    def test_package_parity_accepts_race_files_only_with_race_listing(self):
+        race = self.tests / "race_on.go"
+        race.write_text("//go:build race\n\npackage fixture\n", encoding="utf-8")
+        mapping = dict(self.mapping)
+        mapping[str(self.root / "race_on_test.go")] = str(race)
+        plain = json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go"],
+            "IgnoredGoFiles": ["race_on_test.go"],
+        })
+        raced = json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go", "race_on_test.go"],
+        })
+        # The default listing alone cannot distinguish a deliberate race gate
+        # from any other tag that silently excludes the test.
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(mapping, plain)
+        runner.package_parity(mapping, plain, raced)
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(mapping, plain, json.dumps({
+                "Dir": str(self.root), "TestGoFiles": ["value_test.go"],
+            }))
+        # A race listing does not launder a different non-platform tag.
+        integration = self.tests / "integration.go"
+        integration.write_text("//go:build integration\n\npackage fixture\n", encoding="utf-8")
+        mapping[str(self.root / "integration_test.go")] = str(integration)
+        ignored = json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go"],
+            "IgnoredGoFiles": ["race_on_test.go", "integration_test.go"],
+        })
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(mapping, ignored, raced)
+
     def test_command_ownership_exit_status_and_cleanup(self):
         paths = []
 

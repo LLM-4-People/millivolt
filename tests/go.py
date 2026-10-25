@@ -293,22 +293,47 @@ def parity_digest(root=ROOT, environment=None):
     return overlay_digest(discover(Path(root)), environment)
 
 
-def package_parity(replacements, document):
-    """Every physical test must appear in Go's native package discovery.
-
-    IgnoredGoFiles is accepted only when the filename suffix and the file's own
-    build constraints together make this a genuine GOOS/GOARCH exclusion. A
-    platform-suffixed file behind ``//go:build integration`` is still a silent
-    skip, so it is a hard error. No second package registry or fixed test count
-    can silently drift from Go.
-    """
+def _packages(document):
+    """Yield package metadata from a ``go list -json`` stream."""
     decoder = json.JSONDecoder()
-    found = set()
     document = document.lstrip()
     while document:
         package, end = decoder.raw_decode(document)
         require(isinstance(package, dict) and isinstance(package.get("Dir"), str),
                 "invalid Go package metadata")
+        yield package
+        document = document[end:].lstrip()
+
+
+def _listed_tests(document, fields):
+    """Return the native test paths the named package fields list."""
+    paths = set()
+    for package in _packages(document):
+        for field in fields:
+            names = package.get(field, [])
+            require(isinstance(names, list), "invalid Go test file metadata")
+            for name in names:
+                require(isinstance(name, str), "invalid Go test filename")
+                if name.endswith("_test.go"):
+                    paths.add(str(Path(package["Dir"]) / name))
+    return paths
+
+
+def package_parity(replacements, document, race_document=None):
+    """Every physical test must appear in Go's native package discovery.
+
+    IgnoredGoFiles is accepted when the filename suffix and the file's own
+    build constraints together make this a genuine GOOS/GOARCH exclusion. A
+    race-gated file is also deliberate: the forced full-race gate runs it, so a
+    second listing taken with the race tag must discover the same path. A
+    platform-suffixed file behind ``//go:build integration`` is still a silent
+    skip, and every other non-platform tag stays a hard error. No second
+    package registry or fixed test count can silently drift from Go.
+    """
+    alternate = None if race_document is None else _listed_tests(
+        race_document, ("TestGoFiles", "XTestGoFiles"))
+    found = set()
+    for package in _packages(document):
         for field in ("TestGoFiles", "XTestGoFiles", "IgnoredGoFiles"):
             names = package.get(field, [])
             require(isinstance(names, list), "invalid Go test file metadata")
@@ -317,14 +342,14 @@ def package_parity(replacements, document):
                 if name.endswith("_test.go"):
                     path = str(Path(package["Dir"]) / name)
                     if field == "IgnoredGoFiles":
-                        require(platform_test_name(name),
-                                "Go ignored a test for a non-platform reason, so it never runs: " + path)
-                        content = ignored_test_source(replacements, package["Dir"], name)
-                        require(platform_constraint_only(name, content),
+                        platform = platform_test_name(name)
+                        if platform:
+                            content = ignored_test_source(replacements, package["Dir"], name)
+                            platform = platform_constraint_only(name, content)
+                        require(platform or (alternate is not None and path in alternate),
                                 "Go ignored a test for a non-platform reason, so it never runs: " + path)
                     require(path not in found, "Go discovered a duplicate test: " + path)
                     found.add(path)
-        document = document[end:].lstrip()
     require(found == set(replacements),
             "Go test discovery differs from physical tests: " + repr(sorted(found ^ set(replacements))))
 
@@ -359,7 +384,17 @@ def run(arguments, root=ROOT):
         def verify():
             result = go_command(["list", flag, "-mod=readonly", "-json", "./..."], root, env, capture=True)
             require(result.returncode == 0, "Go package discovery failed: " + result.stderr.strip())
-            package_parity(replacements, result.stdout)
+            # A race-gated test is ignored by the default build. Prove it is a
+            # deliberate selection by discovering it again with the race tag;
+            # package_parity still rejects every other non-platform tag.
+            race_document = None
+            if _listed_tests(result.stdout, ("IgnoredGoFiles",)):
+                raced = go_command(["list", flag, "-mod=readonly", "-tags=race", "-json", "./..."],
+                                   root, env, capture=True)
+                require(raced.returncode == 0,
+                        "Go race package discovery failed: " + raced.stderr.strip())
+                race_document = raced.stdout
+            package_parity(replacements, result.stdout, race_document)
 
         # Tidy can introduce a new test-only dependency; validate its package
         # graph after a successful update, not before the dependency exists.
