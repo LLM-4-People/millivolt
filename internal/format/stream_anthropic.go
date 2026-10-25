@@ -611,6 +611,11 @@ type AnthropicStreamEncoder struct {
 	finishSent bool
 	usage      ir.Usage
 	doneSent   bool
+	// serviceTier and speed come from the start event's response tier. The
+	// Anthropic message_start is emitted once and never rewritten, so a tier
+	// that arrives later cannot retroactively change it.
+	serviceTier string
+	speed       string
 	// refusalSeen and toolSeen record the content that owns the Anthropic
 	// terminal when the canonical finish reason maps to end_turn. A refusal
 	// wins when both appear.
@@ -654,7 +659,7 @@ func (e *AnthropicStreamEncoder) startStream() error {
 			"id": e.id, "type": "message", "role": "assistant", "content": []any{},
 			"model": model, "stop_reason": nil, "stop_sequence": nil,
 			"stop_details": nil, "container": nil, "diagnostics": nil,
-			"usage": anthropicMessageUsage(e.usage, "", ""),
+			"usage": anthropicMessageUsage(e.usage, e.serviceTier, e.speed),
 		},
 	})
 }
@@ -678,6 +683,10 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			}
 			if !e.started {
 				e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
+				// Map the tier before message_start commits it. A stream has no
+				// warning channel; the non-stream encoder owns the unknown-tier
+				// warning.
+				e.serviceTier, e.speed, _ = anthropicResponseUsageTier(ev.Response.ServiceTier)
 			}
 			e.usage = ev.Response.Usage
 		}
