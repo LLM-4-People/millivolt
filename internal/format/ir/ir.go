@@ -553,11 +553,11 @@ func ValidateRequest(r *Request) error {
 		if t.Type != "" && t.Type != "function" {
 			return fmt.Errorf("ir: tool %d has unsupported type %q", i, t.Type)
 		}
-		if params := bytes.TrimSpace(t.Parameters); len(params) > 0 {
-			if !json.Valid(params) || params[0] != '{' {
-				return fmt.Errorf("ir: tool %d parameters must be a JSON object", i)
-			}
+		params, err := CanonicalToolParameters(t.Parameters)
+		if err != nil {
+			return fmt.Errorf("ir: tool %d: %w", i, err)
 		}
+		r.Tools[i].Parameters = params
 	}
 	if r.ToolChoice != nil {
 		switch r.ToolChoice.Mode {
@@ -660,4 +660,41 @@ func ValidateResponse(r *Response) error {
 		}
 	}
 	return nil
+}
+
+// CanonicalToolParameters renders one tool parameter schema as the root-object
+// JSON Schema every supported target requires. A tool's arguments are a JSON
+// object, so an omitted, null or empty source schema becomes the canonical
+// empty object schema. A schema without a root type gains type "object" while
+// keeping its other members, including properties, required and root
+// combinators. An explicit non-object or non-string root type is rejected
+// because no target accepts it.
+func CanonicalToolParameters(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return json.RawMessage(`{"type":"object","properties":{}}`), nil
+	}
+	if trimmed[0] != '{' || !json.Valid(trimmed) {
+		return nil, fmt.Errorf("parameters must be a JSON object")
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		return nil, fmt.Errorf("parameters: %w", err)
+	}
+	if len(obj) == 0 {
+		return json.RawMessage(`{"type":"object","properties":{}}`), nil
+	}
+	if typ, ok := obj["type"]; ok {
+		var name string
+		if err := json.Unmarshal(typ, &name); err != nil || name != "object" {
+			return nil, fmt.Errorf("parameters root type must be %q", "object")
+		}
+		return append(json.RawMessage(nil), trimmed...), nil
+	}
+	obj["type"] = json.RawMessage(`"object"`)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("parameters: %w", err)
+	}
+	return out, nil
 }

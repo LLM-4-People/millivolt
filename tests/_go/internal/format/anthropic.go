@@ -80,8 +80,12 @@ func TestTranslateRequestContentArraysAndToolDefaults(t *testing.T) {
 		t.Fatalf("array tool result = %#v, want result", toolResult["content"])
 	}
 	tool := got["tools"].([]any)[0].(map[string]any)
-	if schema, ok := tool["input_schema"].(map[string]any); !ok || len(schema) != 0 {
-		t.Fatalf("omitted parameters schema = %#v, want {}", tool["input_schema"])
+	schema, ok := tool["input_schema"].(map[string]any)
+	if !ok || schema["type"] != "object" {
+		t.Fatalf("omitted parameters schema = %#v, want a root object schema", tool["input_schema"])
+	}
+	if props, ok := schema["properties"].(map[string]any); !ok || len(props) != 0 {
+		t.Fatalf("omitted parameters properties = %#v, want {}", schema["properties"])
 	}
 }
 
