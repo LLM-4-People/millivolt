@@ -89,6 +89,57 @@ func TestAnthropicCitationSpanIsReportedApproximated(t *testing.T) {
 		}
 	})
 
+	// A zero-span citation on a later text part is emitted at that part's start
+	// offset, so the approximation warning must name the same span.
+	t.Run("responses zero span later part", func(t *testing.T) {
+		resp := &ir.Response{
+			ID: "resp_1", Model: "m", Finish: ir.FinishStop,
+			Blocks: []ir.Block{
+				{Type: ir.BlockText, Text: "foo"},
+				{Type: ir.BlockText, Text: "bar", Citations: []ir.Citation{web}},
+			},
+		}
+		body, err := EncodeResponsesResponse(resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Output []struct {
+				Content []struct {
+					Text        string `json:"text"`
+					Annotations []struct {
+						Start int `json:"start_index"`
+						End   int `json:"end_index"`
+					} `json:"annotations"`
+				} `json:"content"`
+			} `json:"output"`
+		}
+		if err := json.Unmarshal(body, &doc); err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.Output) != 1 || len(doc.Output[0].Content) != 2 {
+			t.Fatalf("responses parts = %s", body)
+		}
+		part := doc.Output[0].Content[1]
+		if part.Text != "bar" || len(part.Annotations) != 1 ||
+			part.Annotations[0].Start != 3 || part.Annotations[0].End != 3 {
+			t.Fatalf("later-part annotation = %+v, want bar 3..3: %s", part, body)
+		}
+		want := "source citation has no character span; target span is 3..3"
+		if warningCount(resp.Warnings, ir.WarningApproximated, "citations") != 1 {
+			t.Fatalf("later-part span approximation not reported: %+v", resp.Warnings)
+		}
+		found := false
+		for _, warning := range resp.Warnings {
+			if warning.Kind == ir.WarningApproximated && warning.Field == "citations" && warning.Detail == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("span warning = %+v, want %q", resp.Warnings, want)
+		}
+	})
+
 	for _, tc := range []struct {
 		name string
 		c    ir.Citation

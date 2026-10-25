@@ -1853,8 +1853,8 @@ func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings)
 func responsesAnnotations(citations []ir.Citation, offset int, warns *ir.Warnings) []map[string]any {
 	var out []map[string]any
 	// Anthropic's web_search_result_location carries url/title but no
-	// character span, while Responses requires both span fields. The zero span
-	// is therefore fabricated; report it once for this text part.
+	// character span, while Responses requires both span fields. The part-start
+	// offset is therefore fabricated; report it once for this text part.
 	spanApproximated := false
 	for _, c := range citations {
 		if c.URL != "" && c.Type != "url_citation" && c.StartIndex == 0 && c.EndIndex == 0 {
@@ -1863,7 +1863,8 @@ func responsesAnnotations(citations []ir.Citation, offset int, warns *ir.Warning
 		}
 	}
 	if spanApproximated && warns != nil {
-		warns.Add(ir.WarningApproximated, "citations", "source citation has no character span; target span is 0..0")
+		warns.Add(ir.WarningApproximated, "citations",
+			fmt.Sprintf("source citation has no character span; target span is %d..%d", offset, offset))
 	}
 	for _, c := range citations {
 		if c.URL == "" {
