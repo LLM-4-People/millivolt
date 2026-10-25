@@ -324,10 +324,10 @@ class RepositoryChecks(unittest.TestCase):
         sep = log_rows.index(" · ", expr)
         self.assertTrue(any(s <= sep and sep + 3 <= e for s, e in spans),
                         "reqIdentityText template body is not scanned")
-        log = (check.ROOT / "internal/web/static/js/log_debug.js").read_text(encoding="utf-8")
-        spans = _template_comment_spans(log)
+        log_debug = (check.ROOT / "internal/web/static/js/log_debug.js").read_text(encoding="utf-8")
+        spans = _template_comment_spans(log_debug)
         for needle in ("<h4>Request body", "<h4>Response body"):
-            start = log.index(needle)
+            start = log_debug.index(needle)
             self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
                             "fillDrawerDebug template body is not scanned: " + needle)
 
