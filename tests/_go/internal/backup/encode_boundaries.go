@@ -218,8 +218,9 @@ func TestEncodeFileCompressedSizeWithinFactor(t *testing.T) {
 // dominates the retained/allocated encoder state: SpeedBestCompression
 // measured 77.1 MB/op and SpeedBetterCompression 44.9 MB/op for the same 2 MiB
 // config, with the same 14k allocations (the decode side of the self-check).
-// The 56 MB ceiling carries 20% headroom over the post-change measurement so a
-// level or option change that reintroduces a heavyweight encoder fails here.
+// The 56 MiB (58,720,256 B) ceiling carries 32.9% headroom over the measured
+// 44,175,057 B/op, so a level or option change that reintroduces a heavyweight
+// encoder fails here.
 func TestEncodeFileAllocationBounded(t *testing.T) {
 	created := time.Unix(1_700_000_123, 0).UTC()
 	a := Archive{Created: created, Config: largeValidConfig(t, 2<<20)}

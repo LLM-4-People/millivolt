@@ -24,6 +24,10 @@ func queryEndpointProbeStatement() string {
 // row into the response buffer removed the map layer. Measured post-change
 // plain (500 rows, 300-byte payload): 3,836 allocs/op and about 1,071,370 B/op.
 // Each plain ceiling adds just over 20%: 4,604 allocs and 1,286,000 bytes.
+// The 4,604 budget leaves 768 allocations over the 3,836 measurement. That is
+// the headroom for flake, and it deliberately targets the map layer's doubling
+// (about +3,800 allocations); a +1-per-row regression (+500) passes. The byte
+// ceiling has the same shape: about 214 KB over the 1,071,370 measurement.
 // Under -race the detector's shadow memory and instrumentation inflate both
 // counts (about 5,158 allocs/op), so race builds use 6,400 allocs and 2 MiB.
 // Both ceilings still reject a regression that re-materializes the map layer,

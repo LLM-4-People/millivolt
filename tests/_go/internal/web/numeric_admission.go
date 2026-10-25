@@ -423,7 +423,10 @@ func TestTotalsNumericAdmission(t *testing.T) {
 
 // TestChartFoldAllocationBounded is the WS7 budget probe: accumulation at the
 // fold must not trade the removed validation for per-row allocation. Measured
-// 29 allocs; the 35 ceiling is just over 20% headroom.
+// 29 allocs and 28,880 bytes; the 35 ceiling is just over 20% headroom. The
+// allocation count is the per-row guard: one added allocation per row fails it
+// by 10,000. The 128 KiB byte ceiling leaves about 102 KiB, so a one-off 80 KiB
+// scratch passes by design; it bounds gross scratch, not per-row work.
 func TestChartFoldAllocationBounded(t *testing.T) {
 	now := int64(1_700_000_000_000)
 	const rows = 10000
