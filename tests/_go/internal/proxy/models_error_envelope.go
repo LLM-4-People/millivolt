@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -43,6 +44,65 @@ func TestModelsDiscoveryErrorEnvelope(t *testing.T) {
 	t.Run("unroutable discovery request", func(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
 		req.Header.Set("X-Proxy-In-Format", "anthropic")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		assertOpenAIModelsError(t, modelsErrorBody(t, resp))
+	})
+
+	modelsErrorRequest := func(t *testing.T, base string) *http.Request {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+		req.Header.Set("X-Proxy-In-Format", "anthropic")
+		if base != "" {
+			req.Header.Set("X-Proxy-Base-URL", base)
+		}
+		return req
+	}
+
+	t.Run("in-flight saturation", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.MaxInflightRequests = 1
+		saturated := New(cfg, metrics.Noop{})
+		if !saturated.inflight.acquire(0) {
+			t.Fatal("could not take the only in-flight slot")
+		}
+		defer saturated.inflight.release(0)
+		limited := httptest.NewServer(saturated)
+		defer limited.Close()
+
+		req, _ := http.NewRequest(http.MethodGet, limited.URL+"/v1/models", nil)
+		req.Header.Set("X-Proxy-In-Format", "anthropic")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503", resp.StatusCode)
+		}
+		assertOpenAIModelsError(t, modelsErrorBody(t, resp))
+	})
+
+	t.Run("invalid session", func(t *testing.T) {
+		req := modelsErrorRequest(t, "http://fixture.example")
+		req.Header.Set("X-Proxy-Session", strings.Repeat("s", 513))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		assertOpenAIModelsError(t, modelsErrorBody(t, resp))
+	})
+
+	t.Run("invalid throttle", func(t *testing.T) {
+		req := modelsErrorRequest(t, "http://fixture.example")
+		req.Header.Set("X-Proxy-Limit-Concurrency", "not-a-number")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
