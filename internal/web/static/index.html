@@ -68,9 +68,14 @@ try {
 <script defer src="/dash/js/chrome_restart.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chart.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/entities.js?v=__DASHBOARD_VERSION__"></script>
+<!-- The log modules load in one dependency order: the archive window and its
+     paging, the row markup and column floors, the debug capture, the detail
+     drawer, then log.js, whose live frame and full-rebuild entry points the
+     later dashboard modules call. Keep this the only ordered list. -->
 <script defer src="/dash/js/log_archive.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log_rows.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log_debug.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/log_drawer.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/explorer.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/live.js?v=__DASHBOARD_VERSION__"></script>
