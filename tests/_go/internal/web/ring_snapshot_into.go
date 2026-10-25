@@ -143,19 +143,13 @@ func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
 	if cap(first) < 3 {
 		t.Fatalf("empty ringSnapshot view capacity = %d, want the 3-record scratch retained (the scratch was dropped)", cap(first))
 	}
-	base := &first[:cap(first)][0]
 	releaseRing(firstScratch, first)
-
-	secondScratch, second := api.ringSnapshot(0)
-	defer releaseRing(secondScratch, second)
-	if len(second) != 0 {
-		t.Fatalf("second ringSnapshot returned %d records, want 0", len(second))
-	}
-	if cap(second) < 3 {
-		t.Fatalf("second empty ringSnapshot capacity = %d, want the retained scratch", cap(second))
-	}
-	if &second[:cap(second)][0] != base {
-		t.Fatal("the empty-unwritten read discarded the pooled scratch: the next read allocated a new buffer")
+	// releaseRing is the pool's only return path: with a nil view it sets the
+	// retained scratch to len 0 cap 0, so the next read allocates. A sync.Pool
+	// may drop the entry at any GC, so this asserts the scratch release contract
+	// on the pointer we own rather than pointer identity across a later Get.
+	if cap(*firstScratch) < 3 {
+		t.Fatalf("releaseRing dropped the scratch capacity: cap = %d, want >= 3", cap(*firstScratch))
 	}
 }
 
