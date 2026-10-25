@@ -835,7 +835,7 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 
 // TestDescribeDocumentsEveryTrackedRequestParam derives the presence-tracked
 // columns from the durable owner - storage.RequestParamColumns(), the bit
-// mapping in internal/storage/request_params.go whose DDL lives in store.go -
+// mapping in internal/storage/request_params.go whose DDL lives in store_schema.go -
 // rather than a second hand-written list. A column added to presence tracking
 // therefore cannot be missing from the reference, and the old blanket claim
 // that every req_* zero was indistinguishable from absent cannot come back.

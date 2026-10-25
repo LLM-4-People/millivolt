@@ -688,7 +688,7 @@ type PurgeFilterInput struct {
 }
 
 // purgeStatusCodeMax mirrors the proxy's own status_code band
-// (internal/storage/store.go PurgeFilter.Validate), so a value the proxy would
+// (internal/storage/purge.go PurgeFilter.Validate), so a value the proxy would
 // reject is a corrective message here instead of a raw 400.
 const purgeStatusCodeMax = 999
 
