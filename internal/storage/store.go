@@ -459,8 +459,11 @@ func (t *Totals) Add(r *metrics.Record) {
 	if r.IsError() {
 		t.Errors++
 	}
-	t.Cost, t.err = metrics.SumValues(t.Cost, r.Cost)
-	if t.err != nil {
+	// Contributions are admitted per record and every step's overflow is
+	// checked, so the durable accumulator is a checked sum by induction and is
+	// never re-validated here. t.err keeps the fail-closed latch.
+	if err := metrics.AddValue(&t.Cost, r.Cost); err != nil {
+		t.err = err
 		return
 	}
 	// Only cost-reporting requests feed the blended denominators - a 0-cost
@@ -468,32 +471,43 @@ func (t *Totals) Add(r *metrics.Record) {
 	// blended rate down.
 	if r.Cost > 0 {
 		t.CostReqs++
-		t.CostInOut, t.err = metrics.SumValues(t.CostInOut, float64(r.Usage.InputTokens), float64(r.Usage.OutputTokens))
-		if t.err != nil {
+		if err := metrics.AddValue(&t.CostInOut, float64(r.Usage.InputTokens)); err != nil {
+			t.err = err
+			return
+		}
+		if err := metrics.AddValue(&t.CostInOut, float64(r.Usage.OutputTokens)); err != nil {
+			t.err = err
 			return
 		}
 	}
-	if err := metrics.SumTerms(
-		metrics.Term{Dst: &t.InputTok, Value: r.Usage.InputTokens},
-		metrics.Term{Dst: &t.OutputTok, Value: r.Usage.OutputTokens},
-		metrics.Term{Dst: &t.CacheRead, Value: r.Usage.CacheReadTokens},
-		metrics.Term{Dst: &t.Reasoning, Value: r.Usage.ReasoningTokens},
-	); err != nil {
+	if err := metrics.AddCount(&t.InputTok, r.Usage.InputTokens); err != nil {
+		t.err = err
+		return
+	}
+	if err := metrics.AddCount(&t.OutputTok, r.Usage.OutputTokens); err != nil {
+		t.err = err
+		return
+	}
+	if err := metrics.AddCount(&t.CacheRead, r.Usage.CacheReadTokens); err != nil {
+		t.err = err
+		return
+	}
+	if err := metrics.AddCount(&t.Reasoning, r.Usage.ReasoningTokens); err != nil {
 		t.err = err
 		return
 	}
 	// TTFTMs == 0 means "absent", not "0 ms" - no-token requests must not
 	// dilute the mean (same gate as the client's truthy r.ttft_ms).
 	if r.TTFTMs > 0 {
-		t.TTFTSum, t.err = metrics.SumCounts(t.TTFTSum, r.TTFTMs)
-		if t.err != nil {
+		if err := metrics.AddCount(&t.TTFTSum, r.TTFTMs); err != nil {
+			t.err = err
 			return
 		}
 		t.TTFTN++
 	}
 	if tps := r.DecodeTPS; tps > 0 {
-		t.TPSSum, t.err = metrics.SumValues(t.TPSSum, tps)
-		if t.err != nil {
+		if err := metrics.AddValue(&t.TPSSum, tps); err != nil {
+			t.err = err
 			return
 		}
 		t.TPSN++

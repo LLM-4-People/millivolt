@@ -982,29 +982,36 @@ func (f *chartFold) fold(c *contrib) error {
 	if c.has429 {
 		b.rl++
 	}
-	if err := metrics.SumTerms(
-		metrics.Term{Dst: &b.in, Value: c.in},
-		metrics.Term{Dst: &b.out, Value: c.out},
-		metrics.Term{Dst: &b.cache, Value: c.cacheR},
-		metrics.Term{Dst: &b.reason, Value: c.reason},
-	); err != nil {
+	// Counts and cost are admitted per contribution here; AddCount/AddValue
+	// check the step's overflow exactly, so the fold never re-validates an
+	// accumulator that is finite and non-negative by induction.
+	if err := metrics.AddCount(&b.in, c.in); err != nil {
 		return err
 	}
-	var err error
-	b.cost, err = metrics.SumValues(b.cost, c.cost)
-	if err != nil {
+	if err := metrics.AddCount(&b.out, c.out); err != nil {
 		return err
 	}
-	f.cost, err = metrics.SumValues(f.cost, c.cost)
-	if err != nil {
+	if err := metrics.AddCount(&b.cache, c.cacheR); err != nil {
+		return err
+	}
+	if err := metrics.AddCount(&b.reason, c.reason); err != nil {
+		return err
+	}
+	// Cost feeds two accumulators (bucket and period), each admitted once.
+	if err := metrics.AddValue(&b.cost, c.cost); err != nil {
+		return err
+	}
+	if err := metrics.AddValue(&f.cost, c.cost); err != nil {
 		return err
 	}
 	// Blended-price denominator: only cost-REPORTING requests contribute
 	// tokens - the SAME rule the explorer/KPI aggregates apply, so the tile
 	// and the KPI band can never quote different figures for one period.
 	if c.cost > 0 {
-		f.costInOut, err = metrics.SumValues(f.costInOut, float64(c.in), float64(c.out))
-		if err != nil {
+		if err := metrics.AddValue(&f.costInOut, float64(c.in)); err != nil {
+			return err
+		}
+		if err := metrics.AddValue(&f.costInOut, float64(c.out)); err != nil {
 			return err
 		}
 	}
@@ -2072,23 +2079,30 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 		return g, nil
 	}
 	g.n++
-	var err error
-	g.cost, err = metrics.SumValues(g.cost, c.cost)
-	if err != nil {
+	// Same accumulator contract as the chart fold: every contribution is
+	// admitted, every step's overflow is checked, nothing re-validates the
+	// accumulator itself.
+	if err := metrics.AddValue(&g.cost, c.cost); err != nil {
 		return nil, err
 	}
 	if c.cost > 0 {
-		g.costInOut, err = metrics.SumValues(g.costInOut, float64(c.in), float64(c.out))
-		if err != nil {
+		if err := metrics.AddValue(&g.costInOut, float64(c.in)); err != nil {
+			return nil, err
+		}
+		if err := metrics.AddValue(&g.costInOut, float64(c.out)); err != nil {
 			return nil, err
 		}
 	}
-	if err := metrics.SumTerms(
-		metrics.Term{Dst: &g.in, Value: c.in},
-		metrics.Term{Dst: &g.out, Value: c.out},
-		metrics.Term{Dst: &g.cacheR, Value: c.cacheR},
-		metrics.Term{Dst: &g.tools, Value: c.tools},
-	); err != nil {
+	if err := metrics.AddCount(&g.in, c.in); err != nil {
+		return nil, err
+	}
+	if err := metrics.AddCount(&g.out, c.out); err != nil {
+		return nil, err
+	}
+	if err := metrics.AddCount(&g.cacheR, c.cacheR); err != nil {
+		return nil, err
+	}
+	if err := metrics.AddCount(&g.tools, c.tools); err != nil {
 		return nil, err
 	}
 	if firstRequest {

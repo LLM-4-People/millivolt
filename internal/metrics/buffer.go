@@ -751,7 +751,7 @@ func aggregateInto(records []*Record, samples []int64) *AggResult {
 			// A rejected sum must leave the field fail-closed at 0; continuing
 			// to fold after it would retain a partial total.
 			if !ttftSumFailed {
-				sum, err := SumCounts(a.TTFTSumMs, r.TTFTMs)
+				sum, err := addCount(a.TTFTSumMs, r.TTFTMs)
 				if err != nil {
 					a.Err = err
 					a.TTFTSumMs = 0
@@ -761,12 +761,18 @@ func aggregateInto(records []*Record, samples []int64) *AggResult {
 				}
 			}
 		}
-		if err := SumTerms(
-			Term{&a.TotalInput, r.Usage.InputTokens},
-			Term{&a.TotalOutput, r.Usage.OutputTokens},
-			Term{&a.TotalCache, r.Usage.CacheReadTokens},
-			Term{&a.ToolCalls, int64(r.ToolCalls)},
-		); err != nil {
+		// One contribution pass, admitted per record, overflow checked per
+		// step: the accumulator is never re-validated after admission.
+		if err := AddCount(&a.TotalInput, r.Usage.InputTokens); err != nil {
+			a.Err = err
+		}
+		if err := AddCount(&a.TotalOutput, r.Usage.OutputTokens); err != nil {
+			a.Err = err
+		}
+		if err := AddCount(&a.TotalCache, r.Usage.CacheReadTokens); err != nil {
+			a.Err = err
+		}
+		if err := AddCount(&a.ToolCalls, int64(r.ToolCalls)); err != nil {
 			a.Err = err
 		}
 		if r.IsError() {
