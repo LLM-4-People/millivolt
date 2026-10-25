@@ -987,6 +987,13 @@ func ValidateSelected(stageDir string, a Archive, validateDatabase bool) error {
 	if a.flags() == 0 && !a.DatabasePresent {
 		return ErrEmptyArchive
 	}
+	// A selection-aware decode stream-discards an unselected database member
+	// after checking its framing: it stays present and sized, with no bytes or
+	// path to inspect. A caller that explicitly requests database validation
+	// must not receive success for a member that was never materialized.
+	if validateDatabase && a.DatabasePresent && !a.hasDatabase() {
+		return fmt.Errorf("backup database member was not decoded")
+	}
 	if len(a.Config) > 0 {
 		cfg, skipped, err := config.LoadBytes(a.Config)
 		if err != nil {
