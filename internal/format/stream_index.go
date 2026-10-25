@@ -16,3 +16,16 @@ func intFromJSONIndex(field string, value jsonnum.Int64) (int, error) {
 	}
 	return n, nil
 }
+
+// nonNegativeStreamIndex narrows one exact stream position and rejects a
+// negative value. Positions address announced items and parts; a negative
+// index has no announced entry, so accepting it emits bytes on a channel the
+// part-coverage owner never records, and the terminal copy repeats them. Not a
+// global replacement for intFromJSONIndex: citation spans narrow negatives and
+// drop them with a warning instead.
+func nonNegativeStreamIndex(field string, value jsonnum.Int64) (int, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("%s %d is negative", field, value)
+	}
+	return intFromJSONIndex(field, value)
+}

@@ -289,15 +289,15 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		if ev.Type == "" {
 			ev.Type = raw.Name
 		}
-		outputIndex, err := intFromJSONIndex("output_index", ev.OutputIndex)
+		outputIndex, err := nonNegativeStreamIndex("output_index", ev.OutputIndex)
 		if err != nil {
 			return nil, err
 		}
-		contentIndex, err := intFromJSONIndex("content_index", ev.ContentIndex)
+		contentIndex, err := nonNegativeStreamIndex("content_index", ev.ContentIndex)
 		if err != nil {
 			return nil, err
 		}
-		summaryIndex, err := intFromJSONIndex("summary_index", ev.SummaryIndex)
+		summaryIndex, err := nonNegativeStreamIndex("summary_index", ev.SummaryIndex)
 		if err != nil {
 			return nil, err
 		}
