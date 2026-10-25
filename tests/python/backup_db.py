@@ -275,7 +275,7 @@ class BackupTest(unittest.TestCase):
 
     def test_migration_ancestor_sources_derive_the_zero_backfill(self):
         # An operator's local history can predate the latest migration
-        # columns: store.go appends each with INTEGER NOT NULL DEFAULT 0, so
+        # columns: store_schema.go appends each with INTEGER NOT NULL DEFAULT 0, so
         # the derive accepts the ancestor and projects the migration's own
         # backfill - identical to migrating the source first and deriving
         # afterwards. The destination always carries the complete schema.
@@ -306,7 +306,7 @@ class BackupTest(unittest.TestCase):
         # MIGRATION_ZERO_COLUMNS name as exactly the migration's zero
         # backfill, and that projection is only truthful while the tuple
         # equals the migration's own lineage: the tail of migrate's needed
-        # slice in internal/storage/store.go. This is the mechanical
+        # slice in internal/storage/store_schema.go. This is the mechanical
         # contract between the two sides: a migration column added,
         # removed or reordered must move scripts/backup_db.py's
         # MIGRATION_ZERO_COLUMNS and the Go needed-slice tail in the same
@@ -314,12 +314,12 @@ class BackupTest(unittest.TestCase):
         # DDL-shape filter over the whole slice: older entries share the
         # zero-DDL shape (rate_limit_remaining) without being lineage
         # columns, and req_param_presence concatenates a DDL constant.
-        source = (ROOT / 'internal' / 'storage' / 'store.go').read_text(encoding='utf-8')
+        source = (ROOT / 'internal' / 'storage' / 'store_schema.go').read_text(encoding='utf-8')
         declaration = 'needed := []struct{ name, ddl string }{'
         head = source.find(declaration)
         self.assertNotEqual(head, -1,
                              'migrate\'s needed slice declaration not found in '
-                             'internal/storage/store.go; if the migration list moved, '
+                             'internal/storage/store_schema.go; if the migration list moved, '
                              'update this guard and MIGRATION_ZERO_COLUMNS together')
         entries = []
         for line in source[head + len(declaration):].splitlines():
@@ -334,7 +334,7 @@ class BackupTest(unittest.TestCase):
         tail = entries[-len(subject.MIGRATION_ZERO_COLUMNS):]
         self.assertEqual([name for name, _ in tail], list(subject.MIGRATION_ZERO_COLUMNS),
                          'scripts/backup_db.py MIGRATION_ZERO_COLUMNS no longer equals the '
-                         'tail of migrate\'s needed slice in internal/storage/store.go; both '
+                         'tail of migrate\'s needed slice in internal/storage/store_schema.go; both '
                          'sides must move together: add, remove or reorder the migration '
                          'column in the Go slice and this tuple in the same change')
         for name, ddl in tail:

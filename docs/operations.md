@@ -1203,7 +1203,7 @@ Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
 beyond the menu's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
-[PurgeFilter](../internal/storage/store.go). Empty-body full deletion is
+[PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
 deliberate and destructive; never use malformed JSON as an all-records command.
 The delete fence preserves newer completions and in-flight work.
 
