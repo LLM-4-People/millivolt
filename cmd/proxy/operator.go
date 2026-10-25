@@ -91,9 +91,9 @@ func loadOperatorToken() (string, error) {
 		log.Printf("operator plane disabled: %s is empty, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
 		return "", nil
 	case len(value) < mcp.OperatorTokenMinLen:
-		return "", errors.New(mcp.ProxyTokenEnv + " must be at least " + strconv.Itoa(mcp.OperatorTokenMinLen) + " characters")
+		return "", errors.New(mcp.ProxyTokenEnv + " must be at least " + strconv.Itoa(mcp.OperatorTokenMinLen) + " bytes")
 	case len(value) > mcp.OperatorTokenMaxLen:
-		return "", errors.New(mcp.ProxyTokenEnv + " must be at most " + strconv.Itoa(mcp.OperatorTokenMaxLen) + " characters")
+		return "", errors.New(mcp.ProxyTokenEnv + " must be at most " + strconv.Itoa(mcp.OperatorTokenMaxLen) + " bytes")
 	}
 	log.Printf("operator plane enabled (%s)", mcp.ProxyTokenEnv)
 	return value, nil

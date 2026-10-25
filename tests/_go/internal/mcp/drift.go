@@ -867,7 +867,7 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	text := string(guide)
 
 	// Operator token band: internal/mcp/limits.go OperatorTokenMinLen/MaxLen.
-	band := regexp.MustCompile(`band matches the proxy's own boot check \((\d+) to (\d+)\s+characters\)`).FindStringSubmatch(text)
+	band := regexp.MustCompile(`band matches the proxy's own boot check \((\d+) to (\d+)\s+bytes\)`).FindStringSubmatch(text)
 	if band == nil {
 		t.Fatal("docs/mcp.md must state the token band sentence")
 	}
@@ -884,7 +884,7 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the operations guide: %v", err)
 	}
-	operationsBand := regexp.MustCompile(`shorter than (\d+)\s+or longer than (\d+) characters fails the boot`).FindStringSubmatch(string(operations))
+	operationsBand := regexp.MustCompile(`shorter than (\d+)\s+or longer than (\d+) bytes fails the boot`).FindStringSubmatch(string(operations))
 	if operationsBand == nil {
 		t.Fatal("docs/operations.md must state the operator boot token band")
 	}
@@ -1034,5 +1034,33 @@ func TestGuidePinsTheFilterVocabularies(t *testing.T) {
 	if !reflect.DeepEqual(listed, LiveStatusClasses) {
 		t.Fatalf("docs/mcp.md lists %v for the live in-flight classes, the owner is %v (internal/mcp scope.go LiveStatusClasses)",
 			listed, LiveStatusClasses)
+	}
+}
+
+// TestValidateOperatorTokenUsesBytes pins the MCP validator to the same byte
+// unit as the proxy boot gate and both documented bands: multibyte content is
+// counted by its encoded length, not its character count.
+func TestValidateOperatorTokenUsesBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token string
+		valid bool
+	}{
+		{"minimum ASCII", strings.Repeat("x", OperatorTokenMinLen), true},
+		{"maximum ASCII", strings.Repeat("x", OperatorTokenMaxLen), true},
+		{"minimum in two-byte characters", strings.Repeat("é", OperatorTokenMinLen/2), true},
+		{"below the minimum in two-byte characters", strings.Repeat("é", OperatorTokenMinLen/2-1), false},
+		{"one byte over the maximum", strings.Repeat("x", OperatorTokenMaxLen+1), false},
+		{"513 bytes in three-byte characters", strings.Repeat("€", OperatorTokenMaxLen/3+1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateOperatorToken(tc.token)
+			if tc.valid && err != nil {
+				t.Fatalf("%d-byte token rejected: %v", len(tc.token), err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("%d-byte token accepted", len(tc.token))
+			}
+		})
 	}
 }

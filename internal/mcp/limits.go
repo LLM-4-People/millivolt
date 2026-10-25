@@ -107,9 +107,9 @@ func ValidateOperatorToken(token string) error {
 	case token == "":
 		return errors.New("operator token is required: pass the proxy's " + ProxyTokenEnv + " value")
 	case len(token) < OperatorTokenMinLen:
-		return errors.New("operator token must be at least " + strconv.Itoa(OperatorTokenMinLen) + " characters")
+		return errors.New("operator token must be at least " + strconv.Itoa(OperatorTokenMinLen) + " bytes")
 	case len(token) > OperatorTokenMaxLen:
-		return errors.New("operator token must be at most " + strconv.Itoa(OperatorTokenMaxLen) + " characters")
+		return errors.New("operator token must be at most " + strconv.Itoa(OperatorTokenMaxLen) + " bytes")
 	}
 	return nil
 }

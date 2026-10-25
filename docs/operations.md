@@ -912,7 +912,7 @@ response is `429` with a coarse rounded `Retry-After` and a generic body.
 With the variable unset or empty the deny-all state holds: the whole dashboard
 returns 403, the open `POST /session` handshake cannot mint a cookie, and only
 `/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
-or longer than 512 characters fails the boot instead of silently weakening
+or longer than 512 bytes fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart
 or a fresh deployment; the dashboard's restart handoff inherits the parent
