@@ -187,7 +187,7 @@ let lastRender = {}; // dirty-check hashes to avoid re-rendering unchanged secti
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if (settingsIsOpen()) { closeSettings(); return; }
+    if (cancelSettingsOpen()) return;
     if (closeDimMenu()) return;
     const metricsMenu = $('chart-metrics-menu');
     if (metricsMenu && !metricsMenu.hidden) {
