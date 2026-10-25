@@ -292,8 +292,10 @@ func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
 }
 
 // terminalContentItemKey resolves the aggregate item identity of a terminal
-// content item. The item id is stable across renumbering; when one side has no
-// id, the announced output position identifies the same logical item.
+// content item. The item id is stable across renumbering, so a unique
+// announced identity wins over the terminal array position; when one side has
+// no id, the announced output position identifies the same logical item. Only
+// a key that owns emitted parts can reconcile the terminal copy.
 func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int) string {
 	primary := streamItemKey(itemID, outputIndex)
 	if d.hasEmittedParts(primary) {
@@ -305,6 +307,9 @@ func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputInd
 		if d.hasEmittedParts(positional) {
 			return positional
 		}
+	}
+	if announced, ok := d.announcedItemKey(itemID); ok && d.hasEmittedParts(announced) {
+		return announced
 	}
 	return primary
 }

@@ -31,7 +31,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				// are independent.
 				continue
 			}
-			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
+			key := d.resolveToolCallKey(item.CallID, item.ID, i)
 			idx, ok := d.itemBlockByKey[key]
 			if d.announcedToolKeys[key] && !d.openToolKeys[key] && d.closedToolCallRepeat(key, item) {
 				// This terminal entry repeats an announced call whose block
@@ -154,7 +154,7 @@ func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, out
 			channels = append(channels, channel)
 		}
 		grouped[channel] = append(grouped[channel], channelPart{
-			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			key:     d.terminalPartKey(itemKey, item.ID, outputIndex, part.contentIndex),
 			index:   part.contentIndex,
 			value:   part.delta.Text,
 			channel: channel,
@@ -245,7 +245,7 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 			continue
 		}
 		contentTerminal = append(contentTerminal, channelPart{
-			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			key:     d.terminalPartKey(key, item.ID, outputIndex, part.contentIndex),
 			index:   part.contentIndex,
 			value:   part.delta.Text,
 			channel: partChannelReasoning,
@@ -298,10 +298,11 @@ func (d *ResponsesStreamDecoder) terminalToolCallAnnounced(key string, outputInd
 }
 
 // terminalPartKey resolves the announcement identity of one terminal content
-// part. The content index is the part identity; the output position is used
-// only when both sides agree on the item id (or one side has none).
-func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, contentIndex int) string {
-	key := contentPartKey(itemID, outputIndex, contentIndex)
+// part. The item key already accounts for terminal renumbering; the content
+// index is the part identity. The positional fallback is used only when both
+// sides agree on the item id (or one side has none).
+func (d *ResponsesStreamDecoder) terminalPartKey(itemKey, itemID string, outputIndex, contentIndex int) string {
+	key := contentPartKey(itemKey, contentIndex)
 	if d.announcedParts[key] {
 		return key
 	}

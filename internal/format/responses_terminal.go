@@ -226,12 +226,18 @@ func (e *terminalEmission) materialize() {
 }
 
 // terminalAnnouncedItemKey resolves the announcement identity of a terminal
-// reasoning item. The output position is a fallback only when both sides agree
-// on the item id (or one side has none).
+// reasoning item. A unique announced item id wins over the terminal array
+// position; the output position is a fallback only when both sides agree on
+// the item id (or one side has none).
 func (d *ResponsesStreamDecoder) terminalAnnouncedItemKey(outputIndex int, itemID string) (string, bool) {
 	key := reasoningItemKey(itemID, outputIndex)
 	if _, ok := d.itemBlockByKey[key]; ok {
 		return key, true
+	}
+	if announced, ok := d.announcedItemKey(itemID); ok {
+		if _, exists := d.itemBlockByKey[announced]; exists {
+			return announced, true
+		}
 	}
 	fallback, ok := d.keyByOutput[outputIndex]
 	if !ok {

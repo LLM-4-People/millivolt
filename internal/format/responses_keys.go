@@ -30,23 +30,40 @@ func responsesFunctionCallID(callID, itemID string, index int) string {
 // completion match on the wire identity the target correlates with: call id
 // for function calls, item id for messages/reasoning, then content index for a
 // part. A source that supplies no identity falls back to its wire position.
-func functionCallKey(callID, itemID string, outputIndex int) string {
+// functionCallIdentityKey is the position-independent spelling of a call
+// identity. A terminal entry can appear at another array position, so aliases
+// keyed by this spelling resolve back to the announced position-qualified key.
+// Empty means the item carries no identity and is position-only.
+func functionCallIdentityKey(callID, itemID string) string {
 	switch {
 	case callID != "":
 		return "call:" + callID
 	case itemID != "":
 		return "item:" + itemID
 	default:
-		return "output:" + strconv.Itoa(outputIndex)
+		return ""
 	}
 }
 
-// streamItemKey identifies one logical item across its announcement and the
-// terminal document. Item ids are stable across renumbering; the output
-// position is the fallback only when no id was supplied.
+// functionCallKey identifies one announced function call. The output position
+// is part of every identity key so two distinct items that share a call id or
+// item id never collapse into one announcement. Terminal matching reaches the
+// position-qualified key through the identity aliases when the terminal array
+// was renumbered.
+func functionCallKey(callID, itemID string, outputIndex int) string {
+	if identity := functionCallIdentityKey(callID, itemID); identity != "" {
+		return identity + ":" + strconv.Itoa(outputIndex)
+	}
+	return "output:" + strconv.Itoa(outputIndex)
+}
+
+// streamItemKey identifies one logical item (message or reasoning) across its
+// announcement and the terminal document. The position keeps two items that
+// share an item id distinct; a terminal renumber is resolved through the
+// announced item identity index.
 func streamItemKey(itemID string, outputIndex int) string {
 	if itemID != "" {
-		return "item:" + itemID
+		return "item:" + itemID + ":" + strconv.Itoa(outputIndex)
 	}
 	return "output:" + strconv.Itoa(outputIndex)
 }
@@ -57,16 +74,13 @@ func reasoningItemKey(itemID string, outputIndex int) string {
 
 func messageItemKey(itemID string, outputIndex int) string {
 	if itemID != "" {
-		return "message:" + itemID
+		return "message:" + itemID + ":" + strconv.Itoa(outputIndex)
 	}
 	return "output:" + strconv.Itoa(outputIndex)
 }
 
-func contentPartKey(itemID string, outputIndex, contentIndex int) string {
-	if itemID != "" {
-		return "part:" + itemID + ":" + strconv.Itoa(contentIndex)
-	}
-	return "output:" + strconv.Itoa(outputIndex) + ":part:" + strconv.Itoa(contentIndex)
+func contentPartKey(itemKey string, contentIndex int) string {
+	return "part:" + itemKey + ":" + strconv.Itoa(contentIndex)
 }
 
 // summaryPartKey identifies one reasoning summary part. Summary parts share a
@@ -189,6 +203,57 @@ func (d *ResponsesStreamDecoder) announcePart(key string) (bool, error) {
 	}
 	d.announcedParts[key] = true
 	return true, nil
+}
+
+// itemIdentityKey names one provider item id in the announced identity index.
+func itemIdentityKey(itemID string) string {
+	return "id:" + itemID
+}
+
+// registerItemIdentity records the announced position-qualified key for an item
+// id so a terminal document that renumbers items still finds the block. A
+// second, different key for the same id clears the entry: the id is then
+// ambiguous and terminal matching must use the wire position.
+func (d *ResponsesStreamDecoder) registerItemIdentity(itemID, key string) {
+	if itemID == "" {
+		return
+	}
+	identity := itemIdentityKey(itemID)
+	if existing, ok := d.itemKeyByID[identity]; ok {
+		if existing != key {
+			d.itemKeyByID[identity] = ""
+		}
+		return
+	}
+	d.itemKeyByID[identity] = key
+}
+
+// announcedItemKey returns the unique announced key for an item id.
+func (d *ResponsesStreamDecoder) announcedItemKey(itemID string) (string, bool) {
+	if itemID == "" {
+		return "", false
+	}
+	key, ok := d.itemKeyByID[itemIdentityKey(itemID)]
+	if !ok || key == "" {
+		return "", false
+	}
+	return key, true
+}
+
+// aliasToolKey records one alternate identity spelling for an announced call.
+// A spelling claimed by two distinct announcements is ambiguous (empty value),
+// so a terminal entry carrying only that spelling is never routed to a sibling.
+func (d *ResponsesStreamDecoder) aliasToolKey(alias, key string) {
+	if alias == "" || alias == key {
+		return
+	}
+	if existing, ok := d.toolAliases[alias]; ok {
+		if existing != key {
+			d.toolAliases[alias] = ""
+		}
+		return
+	}
+	d.toolAliases[alias] = key
 }
 
 // FlushBlocks closes every block this decoder still holds open. The

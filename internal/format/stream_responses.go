@@ -132,10 +132,12 @@ type ResponsesStreamDecoder struct {
 	// reassigned to a different open call by name or position.
 	announcedToolKeys map[string]bool
 	// toolAliases maps an alternate identity spelling of an announced call to
-	// its canonical key. A terminal entry can carry only the item id after the
-	// announcement used the call id, or the reverse. Aliases live for the
-	// whole stream: the terminal document still repeats a call after its done
-	// event closed the block.
+	// its canonical position-qualified key. A terminal entry can carry only
+	// the item id after the announcement used the call id, or the reverse.
+	// Aliases live for the whole stream: the terminal document still repeats a
+	// call after its done event closed the block. An empty value marks a
+	// spelling claimed by two announcements, where only the wire position can
+	// disambiguate.
 	toolAliases map[string]string
 	// toolNames maps an announced call key to its function name for
 	// identity-free terminal matching. Names stay available after the call
@@ -151,15 +153,20 @@ type ResponsesStreamDecoder struct {
 	// repeat that no longer occupies its announcement position.
 	closedIdlessCalls map[string]map[[sha256.Size]byte]int
 	// Announcement identity. A provider's terminal output array is not
-	// required to preserve output_index positions, so dedupe and terminal
-	// completion use stable identities (call id, item id, content index) and
-	// fall back to a position only when the source supplied no identity.
+	// required to preserve output_index positions, so every item key carries
+	// its announced position and stable identities (call id, item id, content
+	// index) are retained as aliases for terminal matching. Two items that
+	// share an id at different positions stay distinct.
 	announcedOutputs map[int]bool
 	announcedItems   map[string]bool
 	announcedParts   map[string]bool
 	itemBlockByKey   map[string]int
 	partBlockByKey   map[string]int
 	keyByOutput      map[int]string
+	// itemKeyByID maps a stable item id to its announced positional key for a
+	// terminal document that renumbers items. An empty value marks an id used
+	// by more than one announcement, where identity alone cannot choose.
+	itemKeyByID map[string]string
 	// reasoningKeys names the announced key of every reasoning item.
 	// itemBlock and keyByOutput are kind-agnostic position caches, so a
 	// reasoning event must consult this set before routing its bytes onto an
@@ -238,6 +245,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		itemBlockByKey:       map[string]int{},
 		partBlockByKey:       map[string]int{},
 		keyByOutput:          map[int]string{},
+		itemKeyByID:          map[string]string{},
 		reasoningKeys:        map[string]bool{},
 		keyByPart:            map[[2]int]string{},
 		terminalPendingByKey: map[string]int{},
@@ -391,13 +399,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.itemBlockByKey[key] = idx
 				d.keyByOutput[outputIndex] = key
 				d.itemIDByOutput[outputIndex] = item.ID
+				d.aliasToolKey(functionCallIdentityKey(item.CallID, item.ID), key)
 				if item.CallID != "" && item.ID != "" {
-					alias := functionCallKey("", item.ID, outputIndex)
-					if _, exists := d.toolAliases[alias]; !exists {
-						if _, exists := d.itemBlockByKey[alias]; !exists {
-							d.toolAliases[alias] = key
-						}
-					}
+					d.aliasToolKey(functionCallIdentityKey("", item.ID), key)
 				}
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
@@ -436,6 +440,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.keyByOutput[outputIndex] = key
 				d.reasoningKeys[key] = true
 				d.itemIDByOutput[outputIndex] = item.ID
+				d.registerItemIdentity(item.ID, key)
 				// An announced reasoning item opens its target block now so
 				// summary/content deltas have a stable index. A provider that
 				// announces an empty item, closes it, then delivers every
@@ -478,6 +483,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.itemIDByOutput[outputIndex] = item.ID
+				d.registerItemIdentity(item.ID, streamItemKey(item.ID, outputIndex))
 			default:
 				// A provider-specific item has no cross-protocol equivalent.
 				// Streaming cannot report the loss (the status line is already
@@ -515,7 +521,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := checkNativeIdentity("item id", itemID); err != nil {
 				return nil, err
 			}
-			key := contentPartKey(itemID, outputIndex, contentIndex)
+			itemKey := streamItemKey(itemID, outputIndex)
+			key := contentPartKey(itemKey, contentIndex)
 			admitted, err := d.announcePart(key)
 			if err != nil {
 				return nil, err
@@ -527,7 +534,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.keyByPart[pos] = key
 			d.partPosition[key] = pos
 			d.itemIDByOutput[outputIndex] = itemID
-			d.setPartOwner(key, streamItemKey(itemID, outputIndex))
+			d.registerItemIdentity(itemID, itemKey)
+			d.setPartOwner(key, itemKey)
 			d.partKind[key] = partChannelForBlock(block.Type)
 			start := ""
 			switch block.Type {
@@ -585,7 +593,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
 			if !ok {
-				key = contentPartKey(itemID, outputIndex, contentIndex)
+				key = contentPartKey(streamItemKey(itemID, outputIndex), contentIndex)
 			}
 			text := ev.Text
 			block := ir.Block{Type: ir.BlockText}
@@ -721,7 +729,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			itemID := d.itemIDByOutput[outputIndex]
 			key := d.keyByPart[pos]
 			if key == "" {
-				key = contentPartKey(itemID, outputIndex, contentIndex)
+				key = contentPartKey(streamItemKey(itemID, outputIndex), contentIndex)
 			}
 			if _, announced := d.announcedParts[key]; !announced {
 				admitted, err := d.announcePart(key)
@@ -775,7 +783,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
 			if !ok {
-				key = contentPartKey(itemID, outputIndex, contentIndex)
+				key = contentPartKey(streamItemKey(itemID, outputIndex), contentIndex)
 			}
 			if _, announced := d.announcedParts[key]; !announced {
 				admitted, err := d.announcePart(key)
@@ -817,7 +825,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			key := d.keyByPart[pos]
 			if key == "" {
-				key = contentPartKey(itemID, outputIndex, contentIndex)
+				key = contentPartKey(streamItemKey(itemID, outputIndex), contentIndex)
 			}
 			var part struct {
 				Type    string `json:"type"`
