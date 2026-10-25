@@ -5,8 +5,13 @@ package sse
 // the empty-completion failure.
 
 import (
+	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -125,5 +130,53 @@ func TestResponsesReasoningEchoIsNotPresence(t *testing.T) {
 	})
 	if chat.FirstReasoningAt == 0 {
 		t.Fatal("Chat reasoning_content recorded no reasoning timestamp")
+	}
+}
+
+// prettyDataLines formats one pretty-printed JSON document as SSE data lines
+// followed by the event boundary.
+func prettyDataLines(t *testing.T, compact string) []string {
+	t.Helper()
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, []byte(compact), "", "  "); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(indented.String(), "\n")
+	for i := range lines {
+		lines[i] = "data: " + lines[i]
+	}
+	return append(lines, "")
+}
+
+// TestResponsesReasoningEchoPrettyPrintedSeeded pins F1 on the production
+// shape: the relay seeds both analyzers with SetWire before any frame arrives,
+// and a pretty-printed official echo must still record no output presence. If
+// the wire seed is removed, the multi-line document is not recognized and the
+// echo is counted as TTFT, reasoning and a chunk.
+func TestResponsesReasoningEchoPrettyPrintedSeeded(t *testing.T) {
+	var a Analyzer
+	a.SetWire(ir.Responses)
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for _, payload := range []string{
+		`{"type":"response.created","response":{"id":"r1","status":"in_progress","reasoning":{"effort":null,"summary":null}}}`,
+		`{"type":"response.completed","response":{"id":"r1","status":"completed","reasoning":{"effort":null,"summary":null},"output":[]}}`,
+	} {
+		for _, line := range prettyDataLines(t, payload) {
+			a.Feed([]byte(line), now)
+		}
+	}
+	var rec metrics.Record
+	a.Fill(&rec)
+	if !rec.FirstTokenAt.IsZero() {
+		t.Fatalf("first token at %v, want zero for an empty turn", rec.FirstTokenAt)
+	}
+	if rec.FirstReasoningAt != 0 {
+		t.Fatalf("first reasoning at %d, want zero", rec.FirstReasoningAt)
+	}
+	if rec.Chunks != 0 || rec.GenTokens != 0 {
+		t.Fatalf("chunks/gen = %d/%d, want 0/0", rec.Chunks, rec.GenTokens)
+	}
+	if got := a.OutcomeCode(); got != metrics.CodeEmptyCompletion {
+		t.Fatalf("outcome = %q, want empty_completion", got)
 	}
 }
