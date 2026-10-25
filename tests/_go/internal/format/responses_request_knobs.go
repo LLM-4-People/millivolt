@@ -136,14 +136,18 @@ func TestResponsesAccessProgramsAndObfuscationWarn(t *testing.T) {
 
 	// Obfuscation is on by default, so false disables it and is honored by the
 	// translated wire: there is no loss to warn about.
-	for _, options := range []string{
-		`"stream_options":{"include_obfuscation":false}`,
-		`"stream_options":{}`,
-		``,
+	for _, tc := range []struct {
+		name    string
+		options string
+	}{
+		{"obfuscation false", `"stream_options":{"include_obfuscation":false}`},
+		{"stream options empty", `"stream_options":{}`},
+		{"absent", ``},
+		{"access programs null", `"access_programs":null`},
 	} {
 		body := `{"model":"m","input":"hi"}`
-		if options != "" {
-			body = `{"model":"m","input":"hi",` + options + `}`
+		if tc.options != "" {
+			body = `{"model":"m","input":"hi",` + tc.options + `}`
 		}
 		req, err := DecodeResponsesRequest([]byte(body))
 		if err != nil {
@@ -151,6 +155,9 @@ func TestResponsesAccessProgramsAndObfuscationWarn(t *testing.T) {
 		}
 		if warningField(req.Warnings, "stream_options.include_obfuscation") {
 			t.Fatalf("%s warned about a disabled or absent option: %+v", body, req.Warnings)
+		}
+		if warningField(req.Warnings, "access_programs") {
+			t.Fatalf("%s warned about null or absent access_programs: %+v", body, req.Warnings)
 		}
 	}
 
