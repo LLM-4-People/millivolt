@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -68,12 +69,16 @@ func cursorReaskUpstream(t *testing.T, matchAction func(payload []byte)) *httpte
 }
 
 func cursorVoidRequest(srv *httptest.Server, upstream *httptest.Server) *http.Request {
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"claude-sonnet-5","messages":[
+	return cursorVoidRequestStream(srv, upstream, true)
+}
+
+func cursorVoidRequestStream(srv *httptest.Server, upstream *httptest.Server, stream bool) *http.Request {
+	body := `{"model":"claude-sonnet-5","messages":[
 			{"role":"user","content":"Plan the tweet."},
 			{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"plan","arguments":"{}"}}]},
 			{"role":"tool","tool_call_id":"call-1","name":"plan","content":"the sky is blue"}
-		],"stream":true}`))
+		],"stream":` + strconv.FormatBool(stream) + `}`
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer cursor-key")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
 	req.Header.Set("X-Proxy-Format", "cursor")
@@ -481,5 +486,118 @@ func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
 	if rec.UpstreamTTFBMs >= reaskDelay.Milliseconds()/2 {
 		t.Fatalf("UpstreamTTFBMs = %d, want the void run's own fast send (< %d), not the failed re-ask's ~%dms header wait",
 			rec.UpstreamTTFBMs, reaskDelay.Milliseconds()/2, reaskDelay.Milliseconds())
+	}
+}
+
+// cursorReaskStatusUpstream serves the void on the first Run exchange and a
+// non-200 status on the re-ask. A body on a body-allowed status carries a
+// recognisable marker so a test can prove it was never driven as a Run.
+func cursorReaskStatusUpstream(t *testing.T, calls *atomic.Int32, status int) *httptest.Server {
+	t.Helper()
+	h2s := &http2.Server{}
+	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			body := r.Body
+			w.Header().Set("Content-Type", "application/connect+proto")
+			fl := w.(http.Flusher)
+			w.WriteHeader(200)
+			readFrame(t, body)
+			cursorConnectHandshake(t, w, body, fl)
+			w.Write(cframe(cmsg(1, cmsg(14, nil))))
+			w.Write(cend("{}"))
+			fl.Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if status != http.StatusNoContent && status != http.StatusNotModified {
+			_, _ = w.Write([]byte(`{"ack":"not-a-delta"}`))
+		}
+	}), h2s))
+	upstream.EnableHTTP2 = true
+	upstream.Start()
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// TestCursorReaskNon200Statuses is the round 12 E1 regression: a Connect Run is
+// exactly HTTP 200, so a 202/204/205/304 re-ask must surface the void instead of
+// adopting the acknowledgement as a live Run.
+func TestCursorReaskNon200Statuses(t *testing.T) {
+	for _, status := range []int{
+		http.StatusAccepted, http.StatusNoContent,
+		http.StatusResetContent, http.StatusNotModified,
+	} {
+		t.Run("stream "+strconv.Itoa(status), func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := cursorReaskStatusUpstream(t, &calls, status)
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(config.Default(), buf))
+			defer srv.Close()
+
+			resp, err := http.DefaultClient.Do(cursorVoidRequest(srv, upstream))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			got := string(b)
+			if !strings.Contains(got, `"code":"empty_turn"`) {
+				t.Fatalf("a non-200 re-ask must surface the void: %s", got)
+			}
+			if strings.Contains(got, "stream_read_error") {
+				t.Fatalf("the acknowledgement was driven as a Run: %s", got)
+			}
+			if strings.Contains(got, "not-a-delta") {
+				t.Fatalf("acknowledgement bytes leaked into client deltas: %s", got)
+			}
+			if n := calls.Load(); n != 2 {
+				t.Fatalf("upstream Run calls = %d, want 2 (void + one re-ask)", n)
+			}
+			recs := waitForRecord(t, buf, 1)
+			rec := recs[0]
+			if rec.ErrorCode != cursorEmptyTurn || !rec.IsError() {
+				t.Fatalf("record = type %q code %q, want the surfaced void", rec.ErrorType, rec.ErrorCode)
+			}
+			if rec.ErrorType == errStreamRead {
+				t.Fatalf("record classified the acknowledgement as a stream read failure: %+v", rec)
+			}
+		})
+
+		t.Run("non-stream "+strconv.Itoa(status), func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := cursorReaskStatusUpstream(t, &calls, status)
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(config.Default(), buf))
+			defer srv.Close()
+
+			resp, err := http.DefaultClient.Do(cursorVoidRequestStream(srv, upstream, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			got := string(b)
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 (body %s)", resp.StatusCode, got)
+			}
+			if !strings.Contains(got, `"type":"empty_turn"`) {
+				t.Fatalf("non-stream body = %s, want the void envelope", got)
+			}
+			if strings.Contains(got, "not-a-delta") {
+				t.Fatalf("acknowledgement bytes leaked into the body: %s", got)
+			}
+			if n := calls.Load(); n != 2 {
+				t.Fatalf("upstream Run calls = %d, want 2 (void + one re-ask)", n)
+			}
+			recs := waitForRecord(t, buf, 1)
+			rec := recs[0]
+			if rec.StatusCode != http.StatusBadGateway || rec.ErrorCode != cursorEmptyTurn {
+				t.Fatalf("record status/code = %d/%q, want 502/%s", rec.StatusCode, rec.ErrorCode, cursorEmptyTurn)
+			}
+			if rec.ErrorType == "transform_error" {
+				t.Fatalf("record classified the acknowledgement as a transform failure: %+v", rec)
+			}
+		})
 	}
 }

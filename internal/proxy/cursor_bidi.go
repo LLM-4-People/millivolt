@@ -548,9 +548,9 @@ func cursorSendFailed(resp *http.Response) bool {
 }
 
 // openCursorRun opens a fresh agent.v1 Run stream for the given request body.
-// forceUser selects the re-ask translation (fresh user turn). Errors are
-// returned to the caller (never written to the client); the caller classifies
-// them - a failed re-ask falls back to surfacing the void. When the response
+// forceUser selects the re-ask translation (fresh user turn). Only HTTP 200 is
+// a Run; every other status is a failed re-ask, and an error is returned to the
+// caller (never written to the client) so it falls back to surfacing the void. When the response
 // is adopted (a live Run will be driven on it), captureUpstreamHeaders
 // re-captures the record's upstream header metadata from it - the cursor twin
 // of the generic quality loops, which re-capture at every adoption so the
@@ -575,7 +575,11 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
+	// A Connect Run is exactly HTTP 200 plus envelopes. A 202/204/205/304 (or
+	// any other adopted status) carries no Run body: driving its acknowledgement
+	// as a live stream would surface a read error as the re-ask's answer.
+	// Return an error so the caller restores the voided attempt instead.
+	if resp.StatusCode != http.StatusOK {
 		detail := fmt.Sprintf("cursor run: HTTP %d", resp.StatusCode)
 		upstreamCancel()
 		pw.Close()

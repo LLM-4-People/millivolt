@@ -593,8 +593,10 @@ without the HTTP relay's shared-segment deduplication. Query overrides and the
 incoming query are not used.
 
 A lost park cold-starts from provided history. The quality-retry path may re-ask
-an empty continuation; exhausted/invalid continuations surface errors rather
-than silently completing. Cursor's wire reports one combined output total with
+an empty continuation; a fresh Run is accepted only on HTTP 200, so any other
+response to the re-ask is a failed re-ask and the void surfaces instead of an
+acknowledgement being driven as a stream. Exhausted/invalid continuations
+surface errors rather than silently completing. Cursor's wire reports one combined output total with
 no answer/reasoning split, so the generic mid-thinking rescue
 (`thinking_retries`) does not apply here: a Cursor turn that produced nothing
 is the existing empty-turn re-ask's business. This is not exactly-once
