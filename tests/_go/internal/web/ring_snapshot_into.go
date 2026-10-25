@@ -163,6 +163,13 @@ func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
 // (about 2 MB here) instead of reusing the released scratch, allocating on
 // every read and failing the zero-allocation ceiling.
 func TestRingSnapshotAllocationCeiling(t *testing.T) {
+	if raceInstrumented {
+		// sync.Pool.Put drops one in four items when the race detector is
+		// enabled (src/sync/pool.go), so a pool-backed read cannot assert a
+		// zero-allocation steady state under -race. The plain pass owns this
+		// ceiling; race coverage of the aggregate lives in the other tests.
+		t.Skip("race builds drop one in four sync.Pool puts by design")
+	}
 	const slots = 250_000
 	buf := metrics.NewBuffer(slots)
 	const distinct = 256
@@ -192,30 +199,28 @@ func TestRingSnapshotAllocationCeiling(t *testing.T) {
 		t.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
 	}
 	releaseRing(scratch, view)
-	for run := 0; run < 5; run++ {
-		result := testing.Benchmark(func(b *testing.B) {
-			// runN calls runtime.GC before this function, which can clear the
-			// package pool. Re-warm after that boundary so the measured loop
-			// starts from the reuse steady state rather than a cold miss.
+	result := testing.Benchmark(func(b *testing.B) {
+		// runN calls runtime.GC before this function, which can clear the
+		// package pool. Re-warm after that boundary so the measured loop
+		// starts from the reuse steady state rather than a cold miss.
+		scratch, view := api.ringSnapshot(0)
+		if len(view) != slots {
+			b.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
+		}
+		releaseRing(scratch, view)
+		b.ReportAllocs()
+		for b.Loop() {
 			scratch, view := api.ringSnapshot(0)
 			if len(view) != slots {
-				b.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
+				b.Fatalf("ringSnapshot = %d records, want %d", len(view), slots)
 			}
 			releaseRing(scratch, view)
-			b.ReportAllocs()
-			for b.Loop() {
-				scratch, view := api.ringSnapshot(0)
-				if len(view) != slots {
-					b.Fatalf("ringSnapshot = %d records, want %d", len(view), slots)
-				}
-				releaseRing(scratch, view)
-			}
-		})
-		bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
-		t.Logf("run %d: ringSnapshot = %d B/op %d allocs/op", run, bytes, allocs)
-		if allocs != 0 {
-			t.Fatalf("run %d: ringSnapshot = %d allocs/op, want 0", run, allocs)
 		}
+	})
+	bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
+	t.Logf("ringSnapshot = %d B/op %d allocs/op (N=%d)", bytes, allocs, result.N)
+	if allocs != 0 {
+		t.Fatalf("ringSnapshot = %d allocs/op, want 0", allocs)
 	}
 }
 

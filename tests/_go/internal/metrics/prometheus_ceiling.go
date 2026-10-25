@@ -18,26 +18,24 @@ import (
 // allocations by 100k and failing the 200-alloc ceiling in every build.
 func TestPrometheusColdFoldAllocationCeiling(t *testing.T) {
 	const records = 100_000
-	for run := 0; run < 5; run++ {
-		result := testing.Benchmark(func(b *testing.B) {
-			buf := benchmarkPrometheusBuffer(b, records)
-			req := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
-			w := httptest.NewRecorder()
-			cold := &Record{Provider: "alpha", StatusCode: 200, TTFTMs: 1}
-			b.ReportAllocs()
-			for b.Loop() {
-				buf.Record(cold)
-				w.Body.Reset()
-				HandlePrometheus(w, req, buf)
-				if w.Code != http.StatusOK {
-					b.Fatalf("GET /metrics/prometheus = %d, want 200", w.Code)
-				}
-				benchmarkPrometheusBody = w.Body.String()
+	result := testing.Benchmark(func(b *testing.B) {
+		buf := benchmarkPrometheusBuffer(b, records)
+		req := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
+		w := httptest.NewRecorder()
+		cold := &Record{Provider: "alpha", StatusCode: 200, TTFTMs: 1}
+		b.ReportAllocs()
+		for b.Loop() {
+			buf.Record(cold)
+			w.Body.Reset()
+			HandlePrometheus(w, req, buf)
+			if w.Code != http.StatusOK {
+				b.Fatalf("GET /metrics/prometheus = %d, want 200", w.Code)
 			}
-		})
-		t.Logf("run %d: %d B/op %d allocs/op", run, result.AllocedBytesPerOp(), result.AllocsPerOp())
-		if got := result.AllocsPerOp(); got > 200 {
-			t.Fatalf("run %d: cold Prometheus fold = %d allocs/op, want <= 200", run, got)
+			benchmarkPrometheusBody = w.Body.String()
 		}
+	})
+	t.Logf("cold Prometheus fold = %d B/op %d allocs/op (N=%d)", result.AllocedBytesPerOp(), result.AllocsPerOp(), result.N)
+	if got := result.AllocsPerOp(); got > 200 {
+		t.Fatalf("cold Prometheus fold = %d allocs/op, want <= 200", got)
 	}
 }

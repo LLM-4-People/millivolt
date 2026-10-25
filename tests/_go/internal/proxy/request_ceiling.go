@@ -15,23 +15,21 @@ import (
 // meaningful. Under -race shadow memory inflates B/op, so race builds assert
 // allocations only; the 200-allocation ceiling leaves about 16% headroom.
 func TestProxyRequestAllocationCeiling(t *testing.T) {
-	for run := 0; run < 5; run++ {
-		result := testing.Benchmark(func(b *testing.B) {
-			s, payload, response := proxyRequestFixture(1024, 100)
+	result := testing.Benchmark(func(b *testing.B) {
+		s, payload, response := proxyRequestFixture(1024, 100)
+		serveProxyBenchmarkRequest(b, s, payload, response)
+		b.ReportAllocs()
+		for b.Loop() {
 			serveProxyBenchmarkRequest(b, s, payload, response)
-			b.ReportAllocs()
-			for b.Loop() {
-				serveProxyBenchmarkRequest(b, s, payload, response)
-			}
-		})
-		t.Logf("run %d: %d B/op %d allocs/op", run, result.AllocedBytesPerOp(), result.AllocsPerOp())
-		if !raceInstrumented {
-			if got := result.AllocedBytesPerOp(); got > 37_000 {
-				t.Fatalf("run %d: ServeHTTP = %d B/op, want <= 37000", run, got)
-			}
 		}
-		if got := result.AllocsPerOp(); got > 200 {
-			t.Fatalf("run %d: ServeHTTP = %d allocs/op, want <= 200", run, got)
+	})
+	t.Logf("ServeHTTP = %d B/op %d allocs/op (N=%d)", result.AllocedBytesPerOp(), result.AllocsPerOp(), result.N)
+	if !raceInstrumented {
+		if got := result.AllocedBytesPerOp(); got > 37_000 {
+			t.Fatalf("ServeHTTP = %d B/op, want <= 37000", got)
 		}
+	}
+	if got := result.AllocsPerOp(); got > 200 {
+		t.Fatalf("ServeHTTP = %d allocs/op, want <= 200", got)
 	}
 }

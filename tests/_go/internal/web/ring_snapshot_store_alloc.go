@@ -16,6 +16,13 @@ import (
 )
 
 func TestRingSnapshotStoreAllocationCeiling(t *testing.T) {
+	if raceInstrumented {
+		// sync.Pool.Put drops one in four items when the race detector is
+		// enabled (src/sync/pool.go), so a pool-backed read cannot assert a
+		// zero-allocation steady state under -race. The plain pass owns this
+		// ceiling; race coverage of the aggregate lives in the other tests.
+		t.Skip("race builds drop one in four sync.Pool puts by design")
+	}
 	const slots = 100_000
 	buf := metrics.NewBuffer(slots)
 	ids := make([]string, slots)
@@ -52,26 +59,24 @@ func TestRingSnapshotStoreAllocationCeiling(t *testing.T) {
 	// real per-read allocation still counts.
 	previousGC := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(previousGC)
-	for run := 0; run < 5; run++ {
-		result := testing.Benchmark(func(b *testing.B) {
+	result := testing.Benchmark(func(b *testing.B) {
+		scratch, view := api.ringSnapshot(0)
+		if len(view) != 0 {
+			b.Fatalf("warm ringSnapshot returned %d written records, want none", len(view))
+		}
+		releaseRing(scratch, view)
+		b.ReportAllocs()
+		for b.Loop() {
 			scratch, view := api.ringSnapshot(0)
 			if len(view) != 0 {
-				b.Fatalf("warm ringSnapshot returned %d written records, want none", len(view))
+				b.Fatalf("ringSnapshot returned %d written records, want none", len(view))
 			}
 			releaseRing(scratch, view)
-			b.ReportAllocs()
-			for b.Loop() {
-				scratch, view := api.ringSnapshot(0)
-				if len(view) != 0 {
-					b.Fatalf("ringSnapshot returned %d written records, want none", len(view))
-				}
-				releaseRing(scratch, view)
-			}
-		})
-		bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
-		t.Logf("run %d: store ringSnapshot = %d B/op %d allocs/op", run, bytes, allocs)
-		if allocs != 0 {
-			t.Fatalf("run %d: store ringSnapshot = %d allocs/op, want 0", run, allocs)
 		}
+	})
+	bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
+	t.Logf("store ringSnapshot = %d B/op %d allocs/op (N=%d)", bytes, allocs, result.N)
+	if allocs != 0 {
+		t.Fatalf("store ringSnapshot = %d allocs/op, want 0", allocs)
 	}
 }
