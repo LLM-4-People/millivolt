@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
@@ -295,22 +296,55 @@ func initializeDatabase(db *sql.DB, path string) error {
 
 // prepareDatabaseFile makes the live database owner-only before SQLite opens
 // it. O_CREATE with 0600 keeps a fresh file private even under a permissive
-// umask, and the explicit chmod narrows an installation created before this
-// guard. The mode is part of the storage privacy contract, not a deployment
-// preference.
+// umask. An existing file is narrowed only when its mode is broader than 0600:
+// a foreign-owned 0600 installation is already private and must boot without a
+// chmod it cannot perform. A broader mode that cannot be narrowed fails with
+// the path, owner, current mode and the ownership requirement.
 func prepareDatabaseFile(path string) error {
 	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return cantOpenFile(err, path)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	info, err := file.Stat()
+	if err != nil {
 		file.Close()
-		return fmt.Errorf("chmod database file: %w", err)
+		return fmt.Errorf("stat database file %s: %w", path, err)
+	}
+	if databaseFileNeedsNarrowing(info) {
+		if err := file.Chmod(0o600); err != nil {
+			file.Close()
+			if os.IsPermission(err) {
+				return databaseFilePermissionError(path, info, err)
+			}
+			return fmt.Errorf("chmod database file %s: %w", path, err)
+		}
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("close database file: %w", err)
 	}
 	return nil
+}
+
+// databaseFileNeedsNarrowing reports whether the file mode is broader than the
+// storage privacy contract. A mode already at 0600 is left alone, including
+// when the runtime user does not own the file.
+func databaseFileNeedsNarrowing(info os.FileInfo) bool {
+	return info.Mode().Perm() != 0o600
+}
+
+// databaseFileOwner names the owning uid/gid for a permission failure. The
+// syscall stat shape is available on the supported Linux deployment; an
+// unknown shape still produces a useful message.
+func databaseFileOwner(info os.FileInfo) string {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return fmt.Sprintf("uid %d/gid %d", stat.Uid, stat.Gid)
+	}
+	return "an unknown owner"
+}
+
+func databaseFilePermissionError(path string, info os.FileInfo, err error) error {
+	return fmt.Errorf("database file %s is owned by %s with mode %04o; the runtime must own the database or the file must be pre-set to 0600: %w",
+		path, databaseFileOwner(info), info.Mode().Perm(), err)
 }
 
 // restrictDatabaseSidecars narrows the WAL, shared-memory and rollback-journal

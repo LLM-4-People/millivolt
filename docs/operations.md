@@ -397,9 +397,14 @@ These bundle semantics apply to images built from this revision. Existing releas
 images are not changed by a main-branch update; consult the documentation at the
 selected release tag for older images.
 
-Existing volumes and host bind mounts must permit the runtime UID to read/write
-their contents. Bind mounts hide bundled files: supply a config yourself when
-using one, or intentionally accept the application's missing-file defaults.
+Existing volumes and host bind mounts must be owned by the runtime UID, or the
+database file must already be mode `0600`. Read/write permission alone is not
+sufficient: startup narrows a broader database mode to `0600` and fails closed
+when it cannot, naming the file path, owner and current mode. A foreign-owned
+`0600` database is left unchanged; a broader foreign-owned file must be pre-set
+to `0600` or chown'd to `65532:65532`.
+Bind mounts hide bundled files: supply a config yourself when using one, or
+intentionally accept the application's missing-file defaults.
 Use private directory permissions and mode `0600` for a supplied config; with
 rootless Docker or user namespaces, account for the host UID mapping. Do not
 make sensitive directories world-writable to work around ownership failures.
@@ -532,7 +537,8 @@ names or bind mounts, which can point the new project at existing data.
 ```
 
 Keep the tar streams intact and retain `--archive` on restore: the private config
-must remain readable/writable by runtime UID/GID `65532:65532`, with mode `0600`.
+must remain owned by runtime UID/GID `65532:65532` with mode `0600`; the restored
+database is subject to the same ownership and mode check at boot.
 Check Settings and retained history on the new private port before redirecting
 clients. Save the printed project name and deployment inputs for later commands;
 the example bypasses automatic `.env` loading during recovery.
