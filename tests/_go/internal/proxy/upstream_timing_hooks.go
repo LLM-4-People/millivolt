@@ -2,9 +2,14 @@ package proxy
 
 import (
 	"crypto/tls"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -20,6 +25,9 @@ func TestUpstreamTimingHooksByScheme(t *testing.T) {
 		{"http://upstream.example", false},
 		{"https://upstream.example", true},
 		{"https://upstream.example:8443/base", true},
+		// url.Parse lowercases the scheme, so a client-supplied uppercase
+		// spelling reaches the same TLS transport and must install the hooks.
+		{"HTTPS://upstream.example", true},
 	}
 	for _, c := range cases {
 		tgt := &target{baseURL: c.base}
@@ -38,6 +46,42 @@ func TestUpstreamTimingHooksByScheme(t *testing.T) {
 		if installed := trace.TLSHandshakeStart != nil && trace.TLSHandshakeDone != nil; installed != c.tlsWant {
 			t.Errorf("%s: TLS hooks installed = %v, want %v", c.base, installed, c.tlsWant)
 		}
+	}
+}
+
+// TestUpstreamTLSTraceWithUppercaseBaseURL drives a real TLS handshake: the
+// client's X-Proxy-Base-URL spelling is HTTPS://, while url.Parse reports the
+// scheme as https. The trace hooks must follow the parsed scheme, not a
+// case-sensitive prefix, or a real handshake records UpstreamTLSMs as absent.
+func TestUpstreamTLSTraceWithUppercaseBaseURL(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}`)
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(16)
+	s := New(config.Default(), buf)
+	s.client.Store(upstream.Client())
+	base := strings.ToUpper(upstream.URL[:5]) + upstream.URL[5:]
+
+	req := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer fixture")
+	req.Header.Set("X-Proxy-Base-URL", base)
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	records := waitForRecord(t, buf, 1)
+	if len(records) != 1 {
+		t.Fatalf("recorded %d records, want 1", len(records))
+	}
+	if records[0].UpstreamTLSMs <= 0 {
+		t.Fatalf("UpstreamTLSMs = %d, want > 0 for a real TLS handshake (base %q)",
+			records[0].UpstreamTLSMs, base)
 	}
 }
 
