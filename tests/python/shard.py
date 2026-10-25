@@ -2,7 +2,7 @@
 
 import unittest
 
-from tests import shard
+from tests import go, shard
 
 
 class ShardTests(unittest.TestCase):
@@ -51,6 +51,56 @@ class ShardTests(unittest.TestCase):
         self.assertIn("-test.count=1", command)
         self.assertIn("-test.benchtime=200ms", command)
         self.assertIn("^(?:TestA|TestB)$", command)
+
+
+class DiscoveryTests(unittest.TestCase):
+    def test_listing_blocks_are_attributed_to_their_package(self):
+        output = "\n".join([
+            "TestAlpha",
+            "TestBeta",
+            "ok  \texample.invalid/a\t0.002s",
+            "?   \texample.invalid/empty\t[no test files]",
+            "FuzzGamma",
+            "ExampleDelta",
+            "ok  \texample.invalid/b\t0.003s",
+        ])
+        self.assertEqual(shard.parse_test_listing(output), {
+            "example.invalid/a": ["TestAlpha", "TestBeta"],
+            "example.invalid/empty": [],
+            "example.invalid/b": ["FuzzGamma", "ExampleDelta"],
+        })
+
+    def test_listing_rejects_ambiguous_records(self):
+        cases = {
+            "failed package": "FAIL\texample.invalid/a\t[build failed]",
+            "duplicate package": "ok  \texample.invalid/a\t0.001s\nok  \texample.invalid/a\t0.001s",
+            "unattributed name": "TestAlpha",
+            "stray output": "TestAlpha\nhas no package result\nok  \texample.invalid/a\t0.001s",
+        }
+        for label, output in cases.items():
+            with self.subTest(label=label), self.assertRaises(RuntimeError):
+                shard.parse_test_listing(output)
+
+
+class ParityHandshakeTests(unittest.TestCase):
+    """The build handshake must describe exactly the overlay parity proved."""
+
+    mapping = {"/src/pkg/value_test.go": "/src/tests/_go/pkg/value.go"}
+
+    def test_digest_is_stable_for_the_same_proof(self):
+        self.assertEqual(go.overlay_digest(self.mapping, {}),
+                         go.overlay_digest(dict(self.mapping), {}))
+
+    def test_digest_changes_with_the_overlay(self):
+        extra = {**self.mapping, "/src/pkg/extra_test.go": "/src/tests/_go/pkg/extra.go"}
+        self.assertNotEqual(go.overlay_digest(self.mapping, {}),
+                            go.overlay_digest(extra, {}))
+
+    def test_digest_changes_with_source_selection_environment(self):
+        for name in go.PARITY_ENVIRONMENT:
+            with self.subTest(name=name):
+                self.assertNotEqual(go.overlay_digest(self.mapping, {}),
+                                    go.overlay_digest(self.mapping, {name: "fixture"}))
 
 
 if __name__ == "__main__":

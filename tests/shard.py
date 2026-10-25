@@ -24,8 +24,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .go import PARITY_HANDSHAKE, parity_digest
+
 ROOT = Path(__file__).resolve().parent.parent
 TEST_LIST = re.compile(r"^(?:Test|Fuzz|Example)\w*$")
+TEST_PATTERN = "^(Test|Fuzz|Example)"
+# One `go test -list ./...` block ends with a per-package result line; these
+# are the only statuses it can report for a package that built.
+TEST_RESULT = re.compile(r"^(ok|FAIL|\?)\s+(\S+)")
 # Packages with expensive, temp-isolated tests get several shards. Fixed-port
 # and child-process packages remain one process; sharding them would collide.
 SHARD_COUNTS = {
@@ -122,19 +128,8 @@ class Task:
         return command
 
 
-def go_packages() -> list[str]:
-    result = subprocess.run(
-        ["go", "list", "./..."],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode:
-        raise RuntimeError("go list failed: " + result.stderr.strip())
-    return [line for line in result.stdout.splitlines() if line]
-
-
-def package_dirs() -> dict[str, str]:
+def packages() -> dict[str, str]:
+    """Return Go's package order and directories from one discovery call."""
     result = subprocess.run(
         ["go", "list", "-f", "{{.ImportPath}}\t{{.Dir}}", "./..."],
         cwd=ROOT,
@@ -143,15 +138,16 @@ def package_dirs() -> dict[str, str]:
     )
     if result.returncode:
         raise RuntimeError("go list failed: " + result.stderr.strip())
-    dirs = {}
+    found = {}
     for line in result.stdout.splitlines():
         package, _, directory = line.partition("\t")
         if package and directory:
-            dirs[package] = directory
-    return dirs
+            found[package] = directory
+    return found
 
 
-def build_binaries(tasks: list[Task], directory: Path, workers: int) -> dict[str, str]:
+def build_binaries(tasks: list[Task], directory: Path, workers: int,
+                   env: dict[str, str] | None = None) -> dict[str, str]:
     packages = sorted({task.package for task in tasks})
     binaries: dict[str, str] = {}
 
@@ -164,6 +160,7 @@ def build_binaries(tasks: list[Task], directory: Path, workers: int) -> dict[str
             cwd=ROOT,
             capture_output=True,
             text=True,
+            env=env,
         )
         return package, result.returncode, time.monotonic() - started, result.stdout + result.stderr, str(target)
 
@@ -181,16 +178,62 @@ def build_binaries(tasks: list[Task], directory: Path, workers: int) -> dict[str
     return binaries
 
 
-def list_tests(package: str) -> list[str]:
+def parse_test_listing(output: str) -> dict[str, list[str]]:
+    """Map each package's `go test -list ./...` name block to that package.
+
+    The go command emits one contiguous block per package: the matching test
+    names, then a single result line naming the package. Names are never
+    attributed across a boundary, so output order cannot mix two packages.
+    """
+    listing: dict[str, list[str]] = {}
+    pending: list[str] = []
+    for line in output.splitlines():
+        result = TEST_RESULT.match(line)
+        if result:
+            status, package = result.groups()
+            if status == "FAIL":
+                raise RuntimeError(f"go test -list failed for {package}")
+            if package in listing:
+                raise RuntimeError(f"go test -list repeated package {package}")
+            listing[package] = pending
+            pending = []
+        elif TEST_LIST.match(line):
+            pending.append(line)
+        elif line.strip():
+            raise RuntimeError("unexpected go test -list output: " + line)
+    if pending:
+        raise RuntimeError("go test -list output ended without a package result")
+    return listing
+
+
+def discover_tests(packages: list[str]) -> tuple[list[Task], dict[str, str]]:
+    """List every test once, then return the proven build environment.
+
+    The listing call performs the run's only whole-module package-parity
+    verification. An inherited handshake is dropped here so this run always
+    proves parity itself; builds then receive the fingerprint of that verified
+    overlay instead of re-listing the module graph.
+    """
+    environment = {name: value for name, value in os.environ.items()
+                   if name != PARITY_HANDSHAKE}
     result = subprocess.run(
-        [sys.executable, "-B", "-m", "tests.go", "test", "-list", "^(Test|Fuzz|Example)", package],
+        [sys.executable, "-B", "-m", "tests.go", "test", "-list", TEST_PATTERN, "./..."],
         cwd=ROOT,
         capture_output=True,
         text=True,
+        env=environment,
     )
     if result.returncode:
-        raise RuntimeError(f"go test -list failed for {package}: {result.stderr.strip()}")
-    return [line for line in result.stdout.splitlines() if TEST_LIST.match(line)]
+        raise RuntimeError("go test -list failed: "
+                           + (result.stderr.strip() or result.stdout.strip()))
+    listing = parse_test_listing(result.stdout)
+    if set(listing) != set(packages):
+        raise RuntimeError("go test -list package mismatch: "
+                           + repr(sorted(set(listing) ^ set(packages))))
+    tasks: list[Task] = []
+    for package in packages:
+        tasks.extend(tasks_for_package(package, listing[package]))
+    return tasks, {**environment, PARITY_HANDSHAKE: parity_digest(environment=environment)}
 
 
 def package_weights(package: str) -> dict[str, float]:
@@ -235,14 +278,6 @@ def tasks_for_package(package: str, names: list[str]) -> list[Task]:
     return tasks
 
 
-def build_tasks(packages: list[str]) -> list[Task]:
-    tasks: list[Task] = []
-    for package in packages:
-        names = list_tests(package)
-        tasks.extend(tasks_for_package(package, names))
-    return tasks
-
-
 def selected(tasks: list[Task], index: int, total: int) -> list[Task]:
     if total <= 1:
         return tasks
@@ -275,9 +310,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         index_text, total_text = args.shard.split("/", 1)
         index, total = int(index_text), int(total_text)
-        packages = go_packages()
-        directories = package_dirs()
-        tasks = selected(build_tasks(packages), index, total)
+        discovered = packages()
+        tasks, go_env = discover_tests(list(discovered))
+        tasks = selected(tasks, index, total)
         tasks.sort(key=lambda task: (-task.weight, task.label))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"shard: {exc}", file=sys.stderr)
@@ -289,11 +324,11 @@ def main(argv: list[str] | None = None) -> int:
     failed: list[tuple[Task, str]] = []
     try:
         with tempfile.TemporaryDirectory(prefix="millivolt-test-bin-") as directory:
-            binaries = build_binaries(tasks, Path(directory), workers)
+            binaries = build_binaries(tasks, Path(directory), workers, go_env)
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
-                    pool.submit(run_one, task, binaries[task.package], directories[task.package]): task
+                    pool.submit(run_one, task, binaries[task.package], discovered[task.package]): task
                     for task in tasks
                 }
                 for future in concurrent.futures.as_completed(futures):
