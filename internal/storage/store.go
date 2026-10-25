@@ -432,6 +432,30 @@ type Totals struct {
 // Err reports invalid arithmetic without exposing partial or wrapped totals.
 func (t Totals) Err() error { return t.err }
 
+// valid reports whether every field is representable: counts are non-negative
+// and floats are finite and non-negative. Hot folds use AddCount/AddValue,
+// whose induction is "start at zero and fold admitted contributions", so a
+// persisted document is the one base they cannot re-derive; loadTotals rejects
+// an out-of-range document and rebuilds from the authoritative rows instead of
+// seeding an accumulator that can no longer detect the corruption.
+func (t Totals) valid() bool {
+	if t.err != nil {
+		return false
+	}
+	for _, v := range [...]int64{t.Requests, t.Errors, t.InputTok, t.OutputTok,
+		t.CacheRead, t.Reasoning, t.TTFTSum, t.TTFTN, t.TPSN, t.CostReqs} {
+		if _, err := metrics.SumCounts(v); err != nil {
+			return false
+		}
+	}
+	for _, v := range [...]float64{t.Cost, t.TPSSum, t.CostInOut} {
+		if _, err := metrics.SumValues(v); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // AvgTTFT returns the mean over captured TTFT samples (ttft_ms > 0), or null
 // when no sample exists - mirrors the dashboard's "- not 0" rule.
 func (t Totals) AvgTTFT() *float64 {
@@ -1587,7 +1611,12 @@ func loadTotals(ctx context.Context, db interface {
 		// projection triggers fired); the cached aggregate is no longer exact.
 		return Totals{}, totalsWitness{}, false, nil
 	}
-	return d.totals(), totalsWitness{epoch: epoch, highRowID: highRowID}, true, nil
+	t = d.totals()
+	if !t.valid() {
+		log.Printf("storage: persisted totals outside their representable range; rebuilding")
+		return Totals{}, totalsWitness{}, false, nil
+	}
+	return t, totalsWitness{epoch: epoch, highRowID: highRowID}, true, nil
 }
 
 // projectionEpoch reads the current mutation witness on the caller's
