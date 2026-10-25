@@ -1,8 +1,9 @@
 package format
 
-// Round 12 B2 regression: a non-completed Responses envelope must not describe
-// its message item as completed. OutputMessage.status is required and admits
-// only in_progress, completed and incomplete.
+// Round 12 B2 regression: a non-completed Responses envelope must mark its
+// non-stream message item incomplete. OutputMessage.status is required and
+// admits only in_progress, completed and incomplete. Streamed items follow a
+// separate per-item close rule.
 
 import (
 	"bytes"
@@ -130,11 +131,11 @@ func responsesStreamItemStatus(t *testing.T, out string) (doneStatus string, ter
 	return doneStatus, event.Response
 }
 
-// TestResponsesStreamIncompleteItemStatus pins the per-item contract: an item
-// that closed normally keeps status completed even when the terminal envelope
-// is incomplete. The envelope owns the turn outcome; each item owns its own
-// close status.
-func TestResponsesStreamIncompleteItemStatus(t *testing.T) {
+// TestResponsesStreamClosedItemStatus pins the per-item contract: an item that
+// closed normally keeps status completed even when the terminal envelope is
+// incomplete. The envelope owns the turn outcome; each item owns its close
+// status.
+func TestResponsesStreamClosedItemStatus(t *testing.T) {
 	chat := func(finish string) string {
 		chunk := func(extra string) string {
 			return `data: {"id":"c","object":"chat.completion.chunk","model":"m","created":1,"choices":[{"index":0,` + extra + `}]}` + "\n\n"
