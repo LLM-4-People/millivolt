@@ -74,6 +74,44 @@ func TestChatReasoningTextFallback(t *testing.T) {
 		}
 	})
 
+	t.Run("wrong-typed reasoning_text is reported, not fatal", func(t *testing.T) {
+		for _, value := range []string{`42`, `{"detail":"x"}`, `[1]`, `true`} {
+			resp := chatReasoningResponse(t, `{"role":"assistant","content":"ok","reasoning_text":`+value+`}`)
+			if reasoning := chatReasoningBlock(resp); reasoning != nil {
+				t.Fatalf("wrong-typed reasoning_text %s produced a block: %+v", value, reasoning)
+			}
+			if got := warningCount(resp.Warnings, ir.WarningDropped, "reasoning_text"); got != 1 {
+				t.Fatalf("wrong-typed reasoning_text %s warnings = %d, want 1: %+v", value, got, resp.Warnings)
+			}
+		}
+		for _, value := range []string{`null`, `""`} {
+			resp := chatReasoningResponse(t, `{"role":"assistant","content":"ok","reasoning_text":`+value+`}`)
+			if reasoning := chatReasoningBlock(resp); reasoning != nil {
+				t.Fatalf("empty reasoning_text %s produced a block: %+v", value, reasoning)
+			}
+			if got := warningCount(resp.Warnings, ir.WarningDropped, "reasoning_text"); got != 0 {
+				t.Fatalf("empty reasoning_text %s warned: %+v", value, resp.Warnings)
+			}
+		}
+
+		// The fallback is consulted only after both primary spellings, so a
+		// wrong-typed extension does not warn when reasoning_content wins.
+		resp := chatReasoningResponse(t, `{"role":"assistant","content":"ok","reasoning_content":"primary","reasoning_text":{"detail":"x"}}`)
+		if reasoning := chatReasoningBlock(resp); reasoning == nil || reasoning.Text != "primary" {
+			t.Fatalf("reasoning = %+v, want reasoning_content to win", reasoning)
+		}
+		if got := warningCount(resp.Warnings, ir.WarningDropped, "reasoning_text"); got != 0 {
+			t.Fatalf("hidden wrong-typed fallback warned: %+v", resp.Warnings)
+		}
+
+		// A client replaying such a message must decode exactly like the
+		// provider response that produced it.
+		body := `{"model":"m","messages":[{"role":"assistant","content":"ok","reasoning_text":{"detail":"x"}}]}`
+		if _, err := DecodeChatRequest([]byte(body)); err != nil {
+			t.Fatalf("request replay with a wrong-typed reasoning_text aborted: %v", err)
+		}
+	})
+
 	t.Run("empty details carry no loss", func(t *testing.T) {
 		for _, value := range []string{`[]`, `[ ]`, `{}`, `{ }`, `""`, `null`} {
 			resp := chatReasoningResponse(t, `{"role":"assistant","content":"ok","reasoning_details":`+value+`}`)

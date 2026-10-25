@@ -84,8 +84,10 @@ type chatWireMessage struct {
 	Reasoning        string             `json:"reasoning"`
 	// ReasoningText and ReasoningDetails are provider-specific Chat
 	// compatibility spellings. Only the explicit plain-text member is
-	// representable; structured details are reported as dropped.
-	ReasoningText    string               `json:"reasoning_text"`
+	// representable; structured details are reported as dropped. ReasoningText
+	// stays raw because the fallback is an extension: a wrong-typed value is
+	// ignored and reported, never a reason to abort a body the baseline read.
+	ReasoningText    json.RawMessage      `json:"reasoning_text"`
 	ReasoningDetails json.RawMessage      `json:"reasoning_details"`
 	Annotations      []chatWireAnnotation `json:"annotations"`
 	// Audio replays a prior assistant audio output. The canonical model has
@@ -556,7 +558,7 @@ func decodeChatMessages(in []chatWireMessage, ids *requestToolIDs) ([]ir.Message
 			if m.Audio != nil {
 				warns.Add(ir.WarningDropped, "messages.audio", "Chat audio output has no cross-protocol equivalent")
 			}
-			if reasoning := m.reasoningText(); reasoning != "" {
+			if reasoning := m.reasoningText(&warns); reasoning != "" {
 				// Reasoning precedes the visible answer in canonical order.
 				blocks = append([]ir.Block{{
 					Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
@@ -633,14 +635,27 @@ func decodeChatMessages(in []chatWireMessage, ids *requestToolIDs) ([]ir.Message
 // reasoningText returns the provider's hidden chain-of-thought spelling.
 // reasoning_content is the Chat-compatible convention; some gateways use
 // reasoning instead, and a compatibility fallback accepts reasoning_text.
-func (m chatWireMessage) reasoningText() string {
+// The two primary spellings stay strict, matching the rest of the wire model.
+// reasoning_text is an extension, so a wrong-typed value is reported and
+// ignored instead of aborting a response the baseline decoded.
+func (m chatWireMessage) reasoningText(warns *ir.Warnings) string {
 	if m.ReasoningContent != "" {
 		return m.ReasoningContent
 	}
 	if m.Reasoning != "" {
 		return m.Reasoning
 	}
-	return m.ReasoningText
+	if len(m.ReasoningText) == 0 {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(m.ReasoningText, &text); err == nil {
+		return text
+	}
+	if warns != nil {
+		warns.AddOnce(ir.WarningDropped, "reasoning_text", "reasoning_text is not a string")
+	}
+	return ""
 }
 
 // rawPresent reports whether a JSON field was supplied with a non-null value.
@@ -1991,7 +2006,7 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		blocks = annotated
 		warns = append(warns, annotationWarns...)
 	}
-	if reasoning := choice.Message.reasoningText(); reasoning != "" {
+	if reasoning := choice.Message.reasoningText(&warns); reasoning != "" {
 		blocks = append([]ir.Block{{
 			Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
 		}}, blocks...)
