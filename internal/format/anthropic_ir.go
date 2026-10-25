@@ -349,7 +349,9 @@ func preReserveAnthropicContent(ids *requestToolIDs, raw json.RawMessage, prefix
 				return err
 			}
 		case "document":
-			if p.Source != nil {
+			// Only a content-source document contributes nested blocks; the
+			// other source types carry no content array the decoder reads.
+			if p.Source != nil && p.Source.Type == "content" {
 				if err := preReserveAnthropicContent(ids, p.Source.Content, where+" source content"); err != nil {
 					return err
 				}
