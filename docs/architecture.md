@@ -490,11 +490,11 @@ when the same read fails. See the [MCP server guide](mcp.md).
 ## Dashboard render owners
 
 HTML embeds the canonical bootstrap builder's JSON, safely escaped in an inert
-data block. Deferred external assets download alongside HTML; `settings.js` is
-the one exception, injected once by the Settings trigger on first open under
-the same versioned URL and single-flighted across concurrent opens. Saved
-hash/chart choices apply before rendering; invalid/missing seed falls back to
-the endpoint.
+data block. Deferred external assets download alongside HTML; the Settings
+sheet is the one exception: its ordered `settings*.js` set is injected by the
+Settings trigger on first open, one module at a time under the same versioned
+URL, and single-flighted across concurrent opens. Saved hash/chart choices
+apply before rendering; invalid/missing seed falls back to the endpoint.
 Dynamic HTML/state is private/no-store. Every local `/dash/` CSS/JS URL in the
 shell carries the content version as `?v=`. On a hit, the service worker
 answers a `/dash/` request carrying exactly that version from its stamped
