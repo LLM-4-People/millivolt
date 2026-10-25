@@ -15,13 +15,14 @@ function recordIsError(r) {
     // A structured error on a 499 is a genuine provider failure.
     if (s === 499 && r.error_type) return true;
     // Flow events: only an absorbed 5xx from an earlier attempt makes one a
-    // genuine failure. An in-band entry is the status a committed 200 hid,
-    // already owned by the final error entry, so it is not absorbed evidence.
-    return (r.attempts || []).some(a => !a.in_band && (a.status_code || 0) >= 500);
+    // genuine failure. The proxy creates only in-band 429 entries today; a
+    // synthetic in-band 5xx follows the same >= 500 rule as Go and the
+    // published SQL, so the predicates cannot disagree on any entry shape.
+    return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
   }
   if (r.error_type) return true;
   if (s >= 400) return true;
-  return (r.attempts || []).some(a => !a.in_band && (a.status_code || 0) >= 500);
+  return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
 }
 
 // ---------- explorer: entity-type visual registry ----------

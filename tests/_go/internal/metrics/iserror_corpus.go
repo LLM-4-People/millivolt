@@ -48,4 +48,8 @@ var isErrorCorpus = []isErrorRow{
 	{"final 499 with in-band error", Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, ErrorType: "api_error", ErrorCode: "internal_error"}, true, false},
 	{"final 499 with in-band rate limit error", Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, ErrorType: "rate_limit_error"}, true, false},
 	{"committed 200 with an in-band 429", Record{StatusCode: 200, ErrorType: "rate_limit_error", Attempts: []RetryAttempt{{StatusCode: 429, InBand: true}}}, true, true},
+	// The proxy creates only in-band 429 entries, but Go, the dashboard and the
+	// published SQL must agree on any entry shape, so this synthetic 5xx is
+	// locked as an absorbed failure.
+	{"synthetic in-band 500 counts as an absorbed failure", Record{StatusCode: 200, Attempts: []RetryAttempt{{StatusCode: 500, InBand: true}}}, true, false},
 }

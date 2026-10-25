@@ -9561,9 +9561,10 @@ async function main() {
         ['final 499 with in-band error', {status_code: 499, error_type: 'api_error', error_code: 'internal_error'}, true],
         ['final 499 with in-band rate limit error', {status_code: 499, error_type: 'rate_limit_error'}, true],
         ['committed 200 with an in-band 429', {status_code: 200, error_type: 'rate_limit_error', attempts: [{status_code: 429, in_band: true}]}, true],
+        ['synthetic in-band 500 counts as an absorbed failure', {status_code: 200, attempts: [{status_code: 500, in_band: true}]}, true],
       ];
       const errorMisses = corpus.filter(([, rec, want]) => sw.recordIsError(rec) !== want).map(([name]) => name);
-      check('recordIsError agrees with the 25-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
+      check('recordIsError agrees with the 26-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
 
       // statusClass mirrors contribStatusClass/statusClass in aggregate.go on
