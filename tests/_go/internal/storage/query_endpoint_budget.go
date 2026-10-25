@@ -22,11 +22,17 @@ func queryEndpointProbeStatement() string {
 // TestQueryEndpointAllocationBounded is the WS10 budget probe. The endpoint
 // encoded every row twice: once into a map and once into JSON. Streaming the
 // row into the response buffer removed the map layer. Measured post-change
-// (500 rows, 300-byte payload): 3,836 allocs/op and about 1,071,370 B/op. Each
-// ceiling adds just over 20%: 4,604 allocs and 1,286,000 bytes. A regression
-// that re-materializes the map layer roughly doubles the alloc count and fails
-// here.
+// plain (500 rows, 300-byte payload): 3,836 allocs/op and about 1,071,370 B/op.
+// Each plain ceiling adds just over 20%: 4,604 allocs and 1,286,000 bytes.
+// Under -race the detector's shadow memory and instrumentation inflate both
+// counts (about 5,158 allocs/op), so race builds use 6,400 allocs and 2 MiB.
+// Both ceilings still reject a regression that re-materializes the map layer,
+// which roughly doubles the alloc count.
 func TestQueryEndpointAllocationBounded(t *testing.T) {
+	budgetAllocs, budgetBytes := int64(4604), int64(1_286_000)
+	if raceInstrumented {
+		budgetAllocs, budgetBytes = 6400, 2 << 20
+	}
 	s, err := Open(filepath.Join(t.TempDir(), "query-probe.db"), testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -60,11 +66,11 @@ func TestQueryEndpointAllocationBounded(t *testing.T) {
 		}
 	})
 	allocs, bytes := res.AllocsPerOp(), res.AllocedBytesPerOp()
-	if allocs > 4604 {
-		t.Fatalf("Query endpoint allocates %d allocs/op for 500 rows, budget 4604", allocs)
+	if allocs > budgetAllocs {
+		t.Fatalf("Query endpoint allocates %d allocs/op for 500 rows, budget %d", allocs, budgetAllocs)
 	}
-	if bytes > 1_286_000 {
-		t.Fatalf("Query endpoint allocates %d B/op for 500 rows, budget %d", bytes, 1_286_000)
+	if bytes > budgetBytes {
+		t.Fatalf("Query endpoint allocates %d B/op for 500 rows, budget %d", bytes, budgetBytes)
 	}
 	t.Logf("Query endpoint: %d allocs/op %d B/op for 500 rows", allocs, bytes)
 }
