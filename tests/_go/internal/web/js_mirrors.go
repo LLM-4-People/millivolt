@@ -166,18 +166,18 @@ func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
 	}
 }
 
-// configOverrideSource reads internal/config/config.go from the repository
+// configSource reads one internal/config source module from the repository
 // root (moduleRoot's self-location rule, the same one the ui_check.js
-// contract uses). Config's forbidden-override-header set is package-private,
-// so its source text is this pin's only enumerable view: the exported
-// ForbiddenOverrideHeader oracle can confirm members but cannot list them.
-// A stripped source view (for example -trimpath) fails through moduleRoot with
-// the reason instead of guessing a path.
-func configOverrideSource(t *testing.T) string {
+// contract uses). Several config literals are package-private, so their owner
+// module's source text is the only enumerable view: an exported oracle can
+// confirm a member but cannot list the set. A stripped source view (for
+// example -trimpath) fails through moduleRoot with the reason instead of
+// guessing a path.
+func configSource(t *testing.T, file string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal", "config", "config.go"))
+	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal", "config", file))
 	if err != nil {
-		t.Fatalf("read internal/config/config.go: %v", err)
+		t.Fatalf("read internal/config/%s: %v", file, err)
 	}
 	return string(b)
 }
@@ -267,7 +267,7 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	if len(jsPairs) == 0 {
 		t.Fatal("RO_FORBIDDEN_HEADERS declares no entries")
 	}
-	cfgSrc := configOverrideSource(t)
+	cfgSrc := configSource(t, "config.go")
 	goPairs := goMapStringStringPairs(t, sourceRegion(t, cfgSrc, "forbiddenOverrideHeaders = map[string]string{"))
 	if len(goPairs) == 0 {
 		t.Fatal("config forbiddenOverrideHeaders declares no entries")
@@ -371,22 +371,23 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfgSrc := configOverrideSource(t)
+	caps := configSource(t, "config_defaults.go")
+	gate := configSource(t, "config.go")
 
 	// The rule cap: both literals from source, the Go side confirmed
 	// against the exported constant (its compile-time identity).
 	jsCap := firstSubmatch(t, string(src), `const REQUEST_OVERRIDES_MAX = (\d+);`)
-	goCap := firstSubmatch(t, cfgSrc, `const RequestOverridesMax = (\d+)`)
+	goCap := firstSubmatch(t, caps, `const RequestOverridesMax = (\d+)`)
 	if jsCap != goCap {
 		t.Errorf("the rule cap differs: settings.js REQUEST_OVERRIDES_MAX = %s, config RequestOverridesMax = %s", jsCap, goCap)
 	}
 	if n, err := strconv.Atoi(goCap); err != nil || n != config.RequestOverridesMax {
-		t.Errorf("config.go's RequestOverridesMax literal %q disagrees with the exported config.RequestOverridesMax = %d", goCap, config.RequestOverridesMax)
+		t.Errorf("config_defaults.go's RequestOverridesMax literal %q disagrees with the exported config.RequestOverridesMax = %d", goCap, config.RequestOverridesMax)
 	}
 
 	// The body band, config side: the comparison and the errRange wording
 	// inside validateRequestOverrides must spell the same pair.
-	goBand := sourceRegion(t, cfgSrc, "func validateRequestOverrides")
+	goBand := sourceRegion(t, gate, "func validateRequestOverrides")
 	goMin := firstSubmatch(t, goBand, `\*f\.value < (\d+) \|\| \*f\.value > `)
 	goMax := strings.ReplaceAll(firstSubmatch(t, goBand, `\*f\.value > ([\d_]+)`), "_", "")
 	errMin := firstSubmatch(t, goBand, `, "(\d+)", "`)
@@ -494,7 +495,7 @@ func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsSrc := string(src)
-	cfgSrc := configOverrideSource(t)
+	cfgSrc := configSource(t, "config.go")
 
 	jsFn := sourceRegion(t, jsSrc, "function scParamOK")
 	goFn := sourceRegion(t, cfgSrc, "func checkSubConversationParam")
@@ -581,28 +582,28 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	jsSrc := string(src)
-	cfgSrc := configOverrideSource(t)
+	caps := configSource(t, "config_defaults.go")
 
 	jsEntries := firstSubmatch(t, jsSrc, `const SUB_CONVERSATIONS_MAX = (\d+);`)
-	goEntries := firstSubmatch(t, cfgSrc, `SubConversationsMax\s*=\s*(\d+)`)
+	goEntries := firstSubmatch(t, caps, `SubConversationsMax\s*=\s*(\d+)`)
 	if jsEntries != goEntries {
 		t.Errorf("the entry cap differs: settings.js SUB_CONVERSATIONS_MAX = %s, config SubConversationsMax = %s", jsEntries, goEntries)
 	}
 	if n, err := strconv.Atoi(goEntries); err != nil || n != config.SubConversationsMax {
-		t.Errorf("config.go's SubConversationsMax literal %q disagrees with the exported config.SubConversationsMax = %d", goEntries, config.SubConversationsMax)
+		t.Errorf("config_defaults.go's SubConversationsMax literal %q disagrees with the exported config.SubConversationsMax = %d", goEntries, config.SubConversationsMax)
 	}
 
 	jsParams := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAMS_MAX = (\d+);`)
-	goParams := firstSubmatch(t, cfgSrc, `SubConversationParamsMax\s*=\s*(\d+)`)
+	goParams := firstSubmatch(t, caps, `SubConversationParamsMax\s*=\s*(\d+)`)
 	if jsParams != goParams {
 		t.Errorf("the params cap differs: settings.js SUB_CONVERSATION_PARAMS_MAX = %s, config SubConversationParamsMax = %s", jsParams, goParams)
 	}
 	if n, err := strconv.Atoi(goParams); err != nil || n != config.SubConversationParamsMax {
-		t.Errorf("config.go's SubConversationParamsMax literal %q disagrees with the exported config.SubConversationParamsMax = %d", goParams, config.SubConversationParamsMax)
+		t.Errorf("config_defaults.go's SubConversationParamsMax literal %q disagrees with the exported config.SubConversationParamsMax = %d", goParams, config.SubConversationParamsMax)
 	}
 
 	jsBytes := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAM_MAX_BYTES = (\d+);`)
-	goBytes := firstSubmatch(t, cfgSrc, `const subConversationParamMaxBytes = (\d+)`)
+	goBytes := firstSubmatch(t, caps, `const subConversationParamMaxBytes = (\d+)`)
 	if jsBytes != goBytes {
 		t.Errorf("the param byte bound differs: settings.js SUB_CONVERSATION_PARAM_MAX_BYTES = %s, config subConversationParamMaxBytes = %s", jsBytes, goBytes)
 	}

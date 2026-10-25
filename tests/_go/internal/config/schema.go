@@ -852,7 +852,7 @@ func TestEnsureToolsChoiceHelpMatchesRuntime(t *testing.T) {
 		t.Fatal("docs/adapters.md still states the unconditional none rule")
 	}
 	runtimeComments := strings.Join(strings.Fields(strings.ReplaceAll(
-		repositoryText(t, filepath.Join("internal", "config", "config.go")), "//", " ")), " ")
+		repositoryText(t, filepath.Join("internal", "config", "config_defaults.go")), "//", " ")), " ")
 	if !strings.Contains(runtimeComments, "a required or named choice skips injection") {
 		t.Fatal("the bundled Zen comment omits the required/named injection rule")
 	}
