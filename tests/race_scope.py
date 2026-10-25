@@ -34,20 +34,39 @@ MODULE = "github.com/LLM-4-People/millivolt"
 # fake evidence. Any package with a hit must declare a race selector, unless
 # AUDIT_EXEMPTIONS documents why the primitive cannot be exercised
 # concurrently by a test.
+SYNC_MEMBERS: tuple[tuple[str, str], ...] = (
+    ("sync.Mutex", r"Mutex"),
+    ("sync.RWMutex", r"RWMutex"),
+    ("sync.WaitGroup", r"WaitGroup"),
+    # OnceFunc, OnceValue and OnceValues synchronize one initialization the
+    # same way Once does, and share its evidence label.
+    ("sync.Once*", r"Once(?:Func|Value|Values)?"),
+    ("sync.Cond", r"Cond"),
+    ("sync.Map", r"Map"),
+    ("sync.Pool", r"Pool"),
+)
+
 PRIMITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("go statement", re.compile(r"\bgo\s+\S")),
     ("chan", re.compile(r"\bchan\b")),
     (".Go(func", re.compile(r"\.Go\(func")),
     ("errgroup.", re.compile(r"\berrgroup\.")),
-    ("sync.Mutex", re.compile(r"\bsync\.Mutex\b")),
-    ("sync.RWMutex", re.compile(r"\bsync\.RWMutex\b")),
-    ("sync.WaitGroup", re.compile(r"\bsync\.WaitGroup\b")),
-    ("sync.Once", re.compile(r"\bsync\.Once\b")),
-    ("sync.Cond", re.compile(r"\bsync\.Cond\b")),
-    ("sync.Map", re.compile(r"\bsync\.Map\b")),
-    ("sync.Pool", re.compile(r"\bsync\.Pool\b")),
+) + tuple(
+    (label, re.compile(r"\bsync\." + member + r"\b"))
+    for label, member in SYNC_MEMBERS
+) + (
     ("atomic.", re.compile(r"\batomic\.")),
 )
+
+# Import declarations, read from the source text because the lexer blanks
+# string bodies. A commented or raw-string "import" can only register an alias;
+# evidence still requires the alias to be used in lexed code, where comments
+# and literals are blank.
+_IMPORT_BLOCK = re.compile(r"(?ms)^\s*import\s*\((.*?)^\s*\)")
+_IMPORT_SINGLE = re.compile(
+    r'(?m)^\s*import\s+(?:([A-Za-z_][A-Za-z0-9_]*|\.|_)\s+)?"([^"]+)"')
+_IMPORT_SPEC = re.compile(
+    r'(?m)^\s*(?:([A-Za-z_][A-Za-z0-9_]*|\.|_)\s+)?"([^"]+)"')
 
 # Package import path -> test-name patterns that run under -race. Everything
 # else in the package runs plain. Keep each entry tied to the production
@@ -286,6 +305,27 @@ def _strip_comments_and_literals(text: str) -> str:
     return "".join(blanked)
 
 
+def _concurrency_aliases(text: str) -> dict[str, str]:
+    """Return non-default aliases for sync and sync/atomic in one source file."""
+    specs: list[tuple[str, str]] = []
+    for block in _IMPORT_BLOCK.finditer(text):
+        specs.extend(_IMPORT_SPEC.findall(block.group(1)))
+    specs.extend(_IMPORT_SINGLE.findall(text))
+    aliases: dict[str, str] = {}
+    for alias, path in specs:
+        if alias in {".", "_"}:
+            continue
+        if path == "sync":
+            name = alias or "sync"
+            if name != "sync":
+                aliases[name] = "sync"
+        elif path == "sync/atomic":
+            name = alias or "atomic"
+            if name != "atomic":
+                aliases[name] = "atomic"
+    return aliases
+
+
 def primitive_evidence(directory: Path) -> dict[str, int]:
     """Count production concurrency constructs in a package directory."""
     evidence: dict[str, int] = {}
@@ -301,6 +341,17 @@ def primitive_evidence(directory: Path) -> dict[str, int]:
             count = len(pattern.findall(code))
             if count:
                 evidence[label] = evidence.get(label, 0) + count
+        for alias, package in _concurrency_aliases(text).items():
+            if package == "atomic":
+                count = len(re.findall(r"\b" + re.escape(alias) + r"\.", code))
+                if count:
+                    evidence["atomic."] = evidence.get("atomic.", 0) + count
+                continue
+            for label, member in SYNC_MEMBERS:
+                count = len(re.findall(
+                    r"\b" + re.escape(alias) + r"\." + member + r"\b", code))
+                if count:
+                    evidence[label] = evidence.get(label, 0) + count
     return evidence
 
 

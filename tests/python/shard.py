@@ -195,6 +195,9 @@ class RaceScopeTests(unittest.TestCase):
         cases = {
             "waitgroup": "var wg sync.WaitGroup",
             "once": "var once sync.Once",
+            "once value": "var onceValue = sync.OnceValue(func() int { return 1 })",
+            "once func": "var onceFunc = sync.OnceFunc(func() {})",
+            "once values": "var onceValues = sync.OnceValues(func() (int, error) { return 1, nil })",
             "cond": "var cond *sync.Cond",
             "map": "var table sync.Map",
             "pool": "var pool sync.Pool",
@@ -207,6 +210,28 @@ class RaceScopeTests(unittest.TestCase):
                     'package fixture\n\nimport "sync"\n\n' + declaration + "\n",
                     encoding="utf-8")
                 self.assertTrue(race_scope.primitive_evidence(Path(directory)))
+
+    def test_aliased_sync_and_atomic_imports_are_evidence(self):
+        cases = {
+            "aliased sync Mutex": ('import s "sync"', "var _ s.Mutex"),
+            "aliased sync OnceValue": ('import s "sync"',
+                                       "var _ = s.OnceValue(func() int { return 1 })"),
+            "aliased atomic Int64": ('import a "sync/atomic"', "var _ a.Int64"),
+        }
+        for label, (import_line, declaration) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                Path(directory, "pkg.go").write_text(
+                    "package fixture\n\n" + import_line + "\n\n" + declaration + "\n",
+                    encoding="utf-8")
+                self.assertTrue(race_scope.primitive_evidence(Path(directory)), label)
+        # A commented import is prose, not an alias declaration, and the use
+        # must appear in code rather than a comment or literal.
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "pkg.go").write_text(
+                'package fixture\n\n// import s "sync"\n\nvar label = "s.Mutex"\n'
+                "/* var state s.Mutex */\n",
+                encoding="utf-8")
+            self.assertEqual(race_scope.primitive_evidence(Path(directory)), {})
 
     def test_selector_must_match_a_listed_test(self):
         with tempfile.TemporaryDirectory() as directory:
