@@ -439,7 +439,7 @@ func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
 	}
 	// The delegated remove branches live with the shared provider-editor click
 	// owner, not the card renderer: read the module that owns that function.
-	clickSrc, err := staticFS.ReadFile("static/js/settings.js")
+	clickSrc, err := staticFS.ReadFile("static/js/settings_providers_actions.js")
 	if err != nil {
 		t.Fatal(err)
 	}
