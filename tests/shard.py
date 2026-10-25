@@ -133,11 +133,11 @@ class Task:
         return f"{self.package} [{self.shard + 1}/{self.shards}] ({self.mode})"
 
     def command(self, binary: str) -> list[str]:
-        command = [binary, "-test.count=1", "-test.benchtime=200ms"]
-        if self.shards > 1:
-            pattern = "^(?:" + "|".join(re.escape(name) for name in self.names) + ")$"
-            command.extend(["-test.run", pattern])
-        return command
+        # Every task runs exactly its assigned names, including a one-shard
+        # serial package: without the filter both passes would run the whole
+        # package, duplicating the plain tests under -race.
+        pattern = "^(?:" + "|".join(re.escape(name) for name in self.names) + ")$"
+        return [binary, "-test.count=1", "-test.benchtime=200ms", "-test.run", pattern]
 
 
 def packages() -> dict[str, str]:

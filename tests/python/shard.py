@@ -37,6 +37,7 @@ class ShardTests(unittest.TestCase):
             tasks = shard.tasks_for_package(package, ["TestA", "TestB", "TestC"])
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].names, ("TestA", "TestB", "TestC"))
+            self.assertIn("^(?:TestA|TestB|TestC)$", tasks[0].command("/tmp/serial.test"))
 
     def test_fixed_port_package_keeps_one_task_per_pass(self):
         names = ["TestReloadPublishesNewConfig", "TestPlainHandler"]
@@ -44,6 +45,9 @@ class ShardTests(unittest.TestCase):
         self.assertEqual(len(tasks), 2)
         self.assertEqual({task.shards for task in tasks}, {1})
         self.assertEqual({task.race for task in tasks}, {True, False})
+        for task in tasks:
+            command = task.command("/tmp/serial.test")
+            self.assertIn("^(?:" + "|".join(task.names) + ")$", command)
 
     def test_small_packages_do_not_create_empty_shards(self):
         tasks = shard.tasks_for_package(
@@ -65,6 +69,19 @@ class ShardTests(unittest.TestCase):
         self.assertIn("-test.count=1", command)
         self.assertIn("-test.benchtime=200ms", command)
         self.assertIn("^(?:TestA|TestB)$", command)
+
+    def test_single_shard_task_runs_only_its_assigned_names(self):
+        task = shard.Task("example.invalid/pkg", ("TestAlpha", "TestBeta"), 0, 1)
+        command = task.command("/tmp/example.test")
+        pattern = command[command.index("-test.run") + 1]
+        self.assertEqual(pattern, "^(?:TestAlpha|TestBeta)$")
+        self.assertIsNotNone(shard.re.fullmatch(pattern, "TestAlpha"))
+        self.assertIsNone(shard.re.fullmatch(pattern, "TestAlphaSibling"))
+
+    def test_run_pattern_escapes_regex_metacharacters(self):
+        task = shard.Task("example.invalid/pkg", ("TestA.1", "TestB[2]"), 0, 1)
+        pattern = task.command("/tmp/example.test")[4]
+        self.assertEqual(pattern, r"^(?:TestA\.1|TestB\[2\])$")
 
 
 class RaceScopeTests(unittest.TestCase):
