@@ -193,7 +193,8 @@ full SSE snapshots recapture through that barrier by sequence/pending revision.
 
 Tests live under [tests/](../tests/README.md), with Go package mirrors in
 `tests/_go/`. Use the overlay-aware `scripts/check.sh go test` entry point.
-See buffer snapshot/stream tests and `tests/ui_check.js` lifecycle/bootstrap races.
+See buffer snapshot/stream tests and the harness sections under
+`tests/ui_harness/sections/` for the lifecycle and bootstrap races.
 Do not collapse these row, gauge, epoch and request-ownership gates into a
 whole-event drop rule.
 
