@@ -19,7 +19,7 @@ defines their supported combinations.
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)); client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit wire codecs (Chat, Responses, Anthropic) over the canonical [IR](../internal/format/ir/ir.go), Connect/protobuf framing, and the same-protocol translation facade. |
-| [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
+| [internal/storage](../internal/storage/store_open.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
 
