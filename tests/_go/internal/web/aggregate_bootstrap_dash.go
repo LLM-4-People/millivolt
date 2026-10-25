@@ -126,10 +126,21 @@ func BenchmarkBootstrapConfigPayload(b *testing.B) {
 		{name: "memo", dash: func() any { return memo.Map(live) }},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			b.ReportAllocs()
 			agg := NewAggAPI(metrics.NewBuffer(4), nil, time.Second)
 			agg.Dash = tc.dash
 			h := http.HandlerFunc(agg.HandleBootstrap)
+			// Warm the API before measuring: the first request builds the
+			// memo/projection state and the second publishes the bootstrap
+			// cache, so both one-time phases stay outside the timed loop and
+			// B/op no longer depends on the scheduled benchtime.
+			for range 2 {
+				warm := httptest.NewRecorder()
+				h.ServeHTTP(warm, httptest.NewRequest(http.MethodGet, "/metrics/bootstrap", nil))
+				if warm.Code != http.StatusOK {
+					b.Fatalf("bootstrap warmup status %d", warm.Code)
+				}
+			}
+			b.ReportAllocs()
 			for b.Loop() {
 				rec := httptest.NewRecorder()
 				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics/bootstrap", nil))
