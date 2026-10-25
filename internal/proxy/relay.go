@@ -2678,6 +2678,17 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		hold = hold[:0]
 		holding = false
+		// A healthy turn whose last complete data line never got its blank
+		// separator must still close the client's SSE event at EOF; otherwise
+		// a spec parser discards the final event. Degenerate paths already
+		// wrote their own boundary above.
+		if code == "" && wireDataOpen {
+			if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
+				clientGone()
+				return false
+			}
+			wireDataOpen = false
+		}
 		flusher.Flush()
 		return true
 	}
@@ -3056,6 +3067,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				name := pendingName
 				pendingName = ""
 				a.FlushEventWithName(name, now)
+			}
+			// A reassembled event that ended at EOF without its blank-line
+			// boundary may be a complete Responses terminal document (pretty
+			// or split across data: lines). Resolve it before classification:
+			// the terminal bytes are already on the wire, and without this
+			// flush the analyzer reports a truncation and the relay appends a
+			// synthetic failure behind a completed turn.
+			if !holding {
+				a.FlushEventWithName("", now)
 			}
 			// An unterminated final line can itself carry the terminal marker.
 			// Decide before any pre-tail rescue so a complete answer is not
