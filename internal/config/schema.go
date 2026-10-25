@@ -351,7 +351,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 
 		// ---- mcp ----
 		{Key: "mcp_enabled", Category: "mcp", Label: "Enable MCP endpoint",
-			Help: "Register the streamable HTTP MCP endpoint at /mcp for LLM tool clients, operator-gated and Bearer-only like /metrics. Off keeps the route reserved (404, never inference); the /mcp/ look-alike reservation and the operator gate stay either way. Restart required.",
+			Help: "Register the streamable HTTP MCP endpoint at /mcp for LLM tool clients, operator-gated like /metrics and Bearer-only: a session cookie alone is refused. Off keeps the route reserved (404, never inference); the /mcp/ look-alike reservation and the operator gate stay either way. Restart required.",
 			Kind: KindBool, HotReload: false},
 		{Key: "mcp_page_size", Category: "mcp", Label: "Page size",
 			Help: "Default page for the records, values and audit capture listings the endpoint serves to a model. Restart required.",

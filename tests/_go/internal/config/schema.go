@@ -701,6 +701,7 @@ func TestSchemaHelpStatesTranslationScope(t *testing.T) {
 		{"request_overrides", "on a Chat Completions or Anthropic client body", "on the OpenAI wire", "on the OpenAI wire"},
 		{"request_overrides", "Responses client body is not rewritten", "translated-anthropic requests", "translated-anthropic requests"},
 		{"sub_conversations", "a duplicate top-level key drops the identity", "resolve by their first occurrence", "resolve by their first occurrence"},
+		{"mcp_enabled", "operator-gated like /metrics and Bearer-only: a session cookie alone is refused", "Bearer-only like /metrics", "Bearer-only like /metrics"},
 	}
 	for _, tc := range cases {
 		field := FieldByKey(tc.key)

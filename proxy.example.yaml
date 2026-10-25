@@ -646,8 +646,9 @@ backup_max_bytes: 1GiB
 # reserved (404, never inference), and the limits bound what its tools return to a model.
 # Restart to apply; the route table and the endpoint's services are built once at boot.
 # Register the streamable HTTP MCP endpoint at /mcp for LLM tool clients, operator-gated
-# and Bearer-only like /metrics. Off keeps the route reserved (404, never inference); the
-# /mcp/ look-alike reservation and the operator gate stay either way. Restart required.
+# like /metrics and Bearer-only: a session cookie alone is refused. Off keeps the route
+# reserved (404, never inference); the /mcp/ look-alike reservation and the operator gate
+# stay either way. Restart required.
 # Hot-reload: NO (restart required).
 #   type: bool · default true
 mcp_enabled: true
