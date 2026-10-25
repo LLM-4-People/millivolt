@@ -201,7 +201,7 @@ scripts/check.sh
 The shared script owns the core verification commands, including offline
 documentation-link, publication-ignore and typography regressions (Git is required),
 the generated-site contract, and the workflow/automation policy. `npm test` runs
-the jsdom suite separately. All tests and disposable harnesses
+the jsdom suites and the request-log merge regression probe separately. All tests and disposable harnesses
 live in [tests/](tests/README.md), with suffix-free physical filenames. Go's
 temporary overlay adds its required virtual `_test.go` names; Python unit
 modules live in `tests/python/`. Use `scripts/check.sh go test` for targeted Go
