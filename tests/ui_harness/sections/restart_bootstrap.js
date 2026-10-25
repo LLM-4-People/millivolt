@@ -1,4 +1,4 @@
-// // The Restart control's eligibility rides the payload the page ALREADY
+// The Restart control's eligibility rides the payload the page ALREADY
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function restartBootstrap(H) {
   const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, settleUntil, sleep} = H;

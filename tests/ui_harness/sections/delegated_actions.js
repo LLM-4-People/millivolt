@@ -1,4 +1,4 @@
-// // Delegated operator actions repaint in place, so the clicked node stays
+// Delegated operator actions repaint in place, so the clicked node stays
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function delegatedActions(H) {
   const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, modelFixture, observerFixture, pageOptions, sleep} = H;

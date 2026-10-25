@@ -1,4 +1,4 @@
-// // Lifecycle and mandatory full refresh ordering share the real application
+// Lifecycle and mandatory full refresh ordering share the real application
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function purgeLifecycle(H) {
   const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, sleep} = H;
