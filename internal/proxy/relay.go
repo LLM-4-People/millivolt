@@ -250,6 +250,26 @@ func statusAllowsBody(status int) bool {
 	return status != http.StatusNoContent && status != http.StatusNotModified
 }
 
+// stampCommittedErrorStatus records the outcome of an in-band error written
+// after a keepalive committed the success status line: the client saw 200, so
+// the record reports 200. A 429 is also retained in the attempt history as one
+// in-band entry, because HasRateLimit and its durable SQL mirror are defined by
+// the upstream HTTP status and the committed 200 must not erase the distinct
+// rate-limit count. It is health evidence, not a retry: Retries stays
+// unchanged, retry disclosures exclude it, and the final error entry already
+// owns the failure classification for every other status.
+func stampCommittedErrorStatus(rec *metrics.Record, upstreamStatus int) {
+	rec.StatusCode = http.StatusOK
+	if upstreamStatus != http.StatusTooManyRequests {
+		return
+	}
+	rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
+		StatusCode: upstreamStatus,
+		InBand:     true,
+		At:         time.Now(),
+	})
+}
+
 // relayNonCompletionStatus relays a non-completion status verbatim with the
 // upstream headers. It is the one writer for 202/204/205 on the native and
 // non-streaming translated paths, so neither translation nor completion
@@ -269,7 +289,7 @@ func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWr
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 			// The pacer's kept-alive status line is the success 200; the
 			// record must describe the status the client actually saw.
-			rec.StatusCode = http.StatusOK
+			stampCommittedErrorStatus(rec, resp.StatusCode)
 			rec.ErrorType, rec.ErrorMsg = typ, msg
 			if werr := writeProtocolStreamError(w, rec, inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 				markClientGone(rec)

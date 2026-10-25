@@ -15,12 +15,13 @@ function recordIsError(r) {
     // A structured error on a 499 is a genuine provider failure.
     if (s === 499 && r.error_type) return true;
     // Flow events: only an absorbed 5xx from an earlier attempt makes one a
-    // genuine failure.
-    return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
+    // genuine failure. An in-band entry is the status a committed 200 hid,
+    // already owned by the final error entry, so it is not absorbed evidence.
+    return (r.attempts || []).some(a => !a.in_band && (a.status_code || 0) >= 500);
   }
   if (r.error_type) return true;
   if (s >= 400) return true;
-  return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
+  return (r.attempts || []).some(a => !a.in_band && (a.status_code || 0) >= 500);
 }
 
 // ---------- explorer: entity-type visual registry ----------
@@ -320,7 +321,10 @@ function forEachErrorEntry(r, visit) {
   }
   // Absorbed retry attempts: only genuine failures (a 5xx, or a structured
   // error that isn't a rate limit). A 429 attempt is flow control, excluded.
+  // An in-band entry is the hidden status of the final failure, already
+  // visited above, so it never adds a second entry.
   for (const a of (r.attempts || [])) {
+    if (a.in_band) continue;
     const as = a.status_code || 0;
     if (as === 429) continue; // flow control
     const t = a.error_type || (as ? 'http_' + as : 'transport');

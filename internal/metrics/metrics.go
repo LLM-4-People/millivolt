@@ -40,6 +40,14 @@ type RetryAttempt struct {
 	RetryAfterMs int       `json:"retry_after_ms,omitempty"`
 	At           time.Time `json:"at"`
 
+	// InBand marks an upstream response whose status line the client could not
+	// receive because a keepalive had already committed the success 200. It is
+	// not a retry: Retries is not incremented, retry disclosures exclude it,
+	// and it never adds a second error entry. It exists so the health
+	// predicates stay tied to the real upstream HTTP status, including the
+	// distinct 429 rate-limit count.
+	InBand bool `json:"in_band,omitempty"`
+
 	// Upstream-response metadata, the attempt-log twin of the record's
 	// ProviderRequestID/ProviderServer/ProviderModel/ProcessingMs/
 	// RateLimitRemaining/RateLimitLimit/ResponseHeaders fields
@@ -149,7 +157,9 @@ type Record struct {
 	RateLimited bool  `json:"rate_limited,omitempty"` // scheduler wait or 429/503 pacing; HasRateLimit owns the exact 429 predicate
 	// Attempts records each transparently-retried upstream response (the ones
 	// the client never saw) so the proxy logs the full history, not just the
-	// final outcome. Bounded by max_retries.
+	// final outcome, plus at most one in-band entry for an upstream 429 whose
+	// status line a committed 200 could not relay. Bounded by max_retries plus
+	// that one entry.
 	Attempts []RetryAttempt `json:"attempts,omitempty"`
 
 	// Derived fields populated at record time for the dashboard/storage.
@@ -468,10 +478,11 @@ func (r *Record) IsError() bool {
 	return absorbedServerFailure(r.Attempts)
 }
 
-// HasRateLimit reports whether this request received HTTP 429, either as its
-// final response or a retried attempt. It counts an affected request once,
-// not its attempts. RateLimited is broader scheduler metadata (queue waits
-// and 503 pacing) and intentionally does not define this observer metric.
+// HasRateLimit reports whether this request received HTTP 429, as its final
+// response, a retried attempt, or an in-band entry whose committed 200 kept
+// the status line from the client. It counts an affected request once, not its
+// attempts. RateLimited is broader scheduler metadata (queue waits and 503
+// pacing) and intentionally does not define this observer metric.
 func (r *Record) HasRateLimit() bool {
 	if r.StatusCode == 429 {
 		return true

@@ -12,8 +12,9 @@ package metrics
 // like its 200 twin; a genuine failure
 // counts whether it is the final outcome OR an absorbed retry attempt the
 // client never saw; a rate limit reaches the metric from the final status or
-// any attempt, never from RateLimited alone (queue waits and 503 pacing set
-// that flag too).
+// any attempt, including an in-band entry whose committed 200 hid the upstream
+// status, never from RateLimited alone (queue waits and 503 pacing set that
+// flag too).
 type isErrorRow struct {
 	name        string
 	rec         Record
@@ -46,4 +47,5 @@ var isErrorCorpus = []isErrorRow{
 	{"cancel after429", Record{StatusCode: 499, Attempts: []RetryAttempt{{StatusCode: 429}}}, false, true},
 	{"final 499 with in-band error", Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, ErrorType: "api_error", ErrorCode: "internal_error"}, true, false},
 	{"final 499 with in-band rate limit error", Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, ErrorType: "rate_limit_error"}, true, false},
+	{"committed 200 with an in-band 429", Record{StatusCode: 200, ErrorType: "rate_limit_error", Attempts: []RetryAttempt{{StatusCode: 429, InBand: true}}}, true, true},
 }

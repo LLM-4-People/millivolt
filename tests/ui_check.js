@@ -1342,6 +1342,40 @@ async function main() {
   }
 
 
+  // ---- test 7h: in-band upstream entries are health evidence, not retries ----
+  // A committed keepalive 200 can hide an upstream 429; the record keeps it as
+  // an in_band attempt entry so the health predicates see the real status. No
+  // retry disclosure may present it as an absorbed retry.
+  {
+    const atts = [
+      { status_code: 502, error_type: 'bad_gateway', error_msg: 'upstream overloaded',
+        at: new Date(1700000104500).toISOString() },
+      { status_code: 429, error_type: 'rate_limit_error', error_msg: 'slow down', in_band: true,
+        at: new Date(1700000104800).toISOString() },
+    ];
+    fire('end', { record: { ...mkRec('att-inband', 200, 1700000104000),
+      error_type: 'rate_limit_error', error_msg: 'slow down', retries: 1, attempts: atts }, in_flight: 0 });
+    await sleep(20);
+    const row = d.querySelector('#tbl-requests tr.exp-row[data-id="att-inband"]:not(.retry-sub)');
+    const toggle = row && row.querySelector('.retry-toggle');
+    check('an in-band entry does not inflate the retry badge',
+      !!toggle && toggle.textContent.includes('1') && !toggle.textContent.includes('2'));
+    w.openDrawer('att-inband');
+    const links = [...d.querySelectorAll('.attempt-link[data-open-req]')];
+    check('the drawer retry list has one link at the original index',
+      links.length === 1 && links[0].dataset.attempt === '0');
+    const retrySection = [...d.querySelectorAll('#drawer-body .detail-section')]
+      .find(s => s.querySelector('h4')?.textContent.startsWith('Retry attempts'));
+    check('the drawer retry section lists only the real retry',
+      !!retrySection && retrySection.querySelectorAll('.attempt-link').length === 1);
+    w.closeDrawer();
+    const toggleAgain = d.querySelector('#tbl-requests tr.exp-row[data-id="att-inband"]:not(.retry-sub) .retry-toggle');
+    if (toggleAgain) toggleAgain.click();
+    const subs = [...d.querySelectorAll('tr.retry-sub[data-retry-of="att-inband"]')];
+    check('the log expands one retry sub-row with its original attempt index',
+      subs.length === 1 && subs[0].dataset.attempt === '0' && subs[0].hidden === false);
+  }
+
   // ---- test 8: Logs menu (filter menu + export URL) ----
   const logsMenu = d.getElementById('logs-menu');
   check('logs menu starts hidden', logsMenu && logsMenu.hidden);

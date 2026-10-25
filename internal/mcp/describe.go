@@ -572,7 +572,9 @@ var predicates = PredicateDoc{
 	RateLimited: `(status_code = 429 OR EXISTS (SELECT 1 FROM json_each(requests.attempts) WHERE json_extract(value, '$.status_code') = 429))`,
 	Note: "err_final counts distinct requests through is_error; rate_limit_requests counts distinct requests through rate_limited. " +
 		"A 429 alone is NOT an error: it is flow control. An absorbed 5xx in attempts IS an error even when a retry recovered. " +
-		"A 499 is a client abort unless error_type is set, which means the upstream had already failed in band.",
+		"A 499 is a client abort unless error_type is set, which means the upstream had already failed in band. " +
+		"An in-band attempt entry records an upstream status a committed 200 could not relay; its 429 still counts as rate-limited, " +
+		"and the same request may also count as an error through its final error_type.",
 }
 
 // The column reference above is curated rather than generated: it states the
