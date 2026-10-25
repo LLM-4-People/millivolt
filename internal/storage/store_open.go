@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
@@ -332,15 +331,9 @@ func databaseFileNeedsNarrowing(info os.FileInfo) bool {
 	return info.Mode().Perm() != 0o600
 }
 
-// databaseFileOwner names the owning uid/gid for a permission failure. The
-// syscall stat shape is available on the supported Linux deployment; an
-// unknown shape still produces a useful message.
-func databaseFileOwner(info os.FileInfo) string {
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		return fmt.Sprintf("uid %d/gid %d", stat.Uid, stat.Gid)
-	}
-	return "an unknown owner"
-}
+// unknownDatabaseFileOwner is the owner spelling for a platform that exposes no
+// numeric file ownership. databaseFileOwner owns the platform-specific detail.
+const unknownDatabaseFileOwner = "an unknown owner"
 
 func databaseFilePermissionError(path string, info os.FileInfo, err error) error {
 	return fmt.Errorf("database file %s is owned by %s with mode %04o; the runtime must own the database or the file must be pre-set to 0600: %w",
