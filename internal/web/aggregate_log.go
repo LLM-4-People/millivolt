@@ -48,19 +48,21 @@ func writeJSON(w http.ResponseWriter, v any) {
 		// The response is already streaming; nothing to repair.
 		_ = err
 	}
-	if buf.Cap() > jsonBufferRetain {
-		return
-	}
 	releaseJSONBuffer(buf)
 }
 
 // releaseJSONBuffer clears the pooled encoder scratch before returning it.
 // Reset only shortens the slice; the backing array keeps the previous
 // dashboard JSON, including request previews and filter values, until the next
-// encode happens to overwrite it or the pool entry is collected. The retained
-// capacity is bounded by jsonBufferRetain, and clearing it costs one pass over
-// a buffer this request just wrote.
+// encode happens to overwrite it or the pool entry is collected. Clearing it
+// costs one pass over a buffer this request just wrote. The retention bound
+// lives here so both the success and encode-error paths agree: an oversized
+// buffer is dropped instead of pinned in the pool, and the clear never scans
+// more than jsonBufferRetain bytes.
 func releaseJSONBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > jsonBufferRetain {
+		return
+	}
 	buf.Reset()
 	scratch := buf.Bytes()
 	clear(scratch[:cap(scratch)])
