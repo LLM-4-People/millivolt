@@ -208,7 +208,8 @@ func TestProjectionLabelSidecarGuard(t *testing.T) {
 	if projected.labels != nil {
 		t.Fatal("projected row retained the live label sidecar")
 	}
-	p, err := buildProjection([]contrib{fromRecord(rec, nil)}, storage.ProjectionCursor{}, 1)
+	ringRow := fromRecord(rec, nil)
+	p, err := buildProjection([]contrib{ringRow}, labelTuples([]contrib{ringRow}), storage.ProjectionCursor{}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,11 +250,13 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 
 				base = footprintHeap()
 				var incoming []contrib
+				var incomingLabels []contribLabels
 				if _, _, err := s.StreamProjection(context.Background(), rowColumns,
 					storage.ProjectionCursor{}, func(rows *sql.Rows) error {
-						c, err := scanContrib(rows, nil)
+						c, labels, err := scanContrib(rows, nil)
 						if err == nil {
 							incoming = append(incoming, c)
+							incomingLabels = append(incomingLabels, labels)
 						}
 						return err
 					}); err != nil {
@@ -267,7 +270,7 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 				for i := range incoming {
 					c := &incoming[i]
 					c.rowIndex = uint32(i + 1)
-					p.dimensions.intern(c)
+					p.dimensions.internLabels(c, incomingLabels[i])
 					if c.id != "" {
 						p.ids[c.id] = struct{}{}
 					}
