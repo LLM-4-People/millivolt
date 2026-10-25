@@ -75,6 +75,32 @@ can lose records; this is not a tamper-proof, complete compliance audit log.
 Do not rely on the dashboard as the sole security or billing record. See
 [operations and limitations](docs/operations.md#storage-and-accounting).
 
+## Code scanning
+
+GitHub code scanning (CodeQL) reports on pull requests. Alerts are triaged
+against the [deployment boundary](#deployment-boundary), not dismissed for
+convenience. The current categories and their trust-boundary evidence:
+
+- Operator-only read-only SQL (`internal/storage/query_admin.go`). The query
+  console sits behind the operator gate, accepts one SELECT, and enforces
+  execution time, row, column and result-byte limits. The operator is already
+  trusted with the database, so this is not an unauthenticated SQL surface.
+- JSON, SSE and gzip response writers. These encode and flush the proxy's own
+  output to an authenticated operator; framing and compression state are
+  bounded by the response-size guard, and no writer is reachable before the
+  operator gate.
+- Bounded allocations (`cmd/proxy/mcp.go`, `internal/sse/frames.go`). The
+  flagged sizes come from configured MCP/transport limits or the negotiated
+  frame bound, and input is rejected at that bound before the sized allocation.
+  They are not attacker-controlled unbounded sizes.
+
+Two alerts were true positives and are fixed: the operator session cookie now
+sets `Secure` when the request arrived over TLS or through an https-forwarding
+ingress, and integer configuration values are range-checked against the
+platform's `int` width before conversion. Dismissing or resolving a
+code-scanning alert is a maintainer action in the GitHub security UI; this note
+records triage rationale and does not dismiss any alert automatically.
+
 ## Reporting a vulnerability
 
 Do not publish credentials, private request content, or actionable exploit
