@@ -15,9 +15,10 @@ module.exports = async function regressionsC(H) {
       if (w.settingsIsOpen()) w.closeSettings(true);
       w.openSettings();
       await settleUntil(() => w.settingsIsOpen() && sheet.classList.contains('open'));
-      await sleep(20);
       const prompt = w.askOperatorToken();
-      await sleep(0);
+      await settleUntil(() => !w.settingsIsOpen() && !sheet.classList.contains('open') &&
+        !veil.classList.contains('open') && settingsBtn.getAttribute('aria-pressed') === 'false' &&
+        !d.getElementById('operator-dialog').hidden);
       check('an operator prompt preempts open Settings without a stale veil or pressed trigger',
         !w.settingsIsOpen() && !sheet.classList.contains('open') && !veil.classList.contains('open') &&
         settingsBtn.getAttribute('aria-pressed') === 'false' &&
@@ -137,7 +138,7 @@ module.exports = async function regressionsC(H) {
       await loaded(hiddenDom);
       const hw = hiddenDom.window;
       const hd = hw.document;
-      await sleep(300);
+      await sleep(300); // negative proof: hidden-at-load timers must stay unarmed for the window
       check('a page loaded hidden keeps its clock and poll timers unarmed',
         hw.eval('_wasHidden === true && _clockTimer === null && _dashTickTimer === null'));
       check('a hidden-at-load page completes only its initial paint fetches',
@@ -145,7 +146,9 @@ module.exports = async function regressionsC(H) {
       const bootBefore = hiddenBoot;
       hidden = false;
       hd.dispatchEvent(new hw.Event('visibilitychange'));
-      await sleep(80);
+      await settleUntil(() =>
+        hw.eval('_wasHidden === false && _clockTimer !== null && _dashTickTimer !== null') &&
+        hiddenBoot > bootBefore);
       check('the visible transition arms both timers and refreshes the page',
         hw.eval('_wasHidden === false && _clockTimer !== null && _dashTickTimer !== null') &&
         hiddenBoot > bootBefore);

@@ -1,7 +1,7 @@
 // test 10a-cap: the durable archive is ascending oldest-to-newest, so
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function archivePages(H) {
-  const {BIG, check, d, fire, mkRec, rows, settleUntil, sleep, w} = H;
+  const {BIG, check, d, fire, mkRec, rows, settleUntil, w} = H;
   const state = H.state;
 
   // ---- test 10a-cap: the durable archive is ascending oldest-to-newest, so
@@ -154,7 +154,9 @@ module.exports = async function archivePages(H) {
   const origConfirm = w.confirm;
   w.confirm = m => { confirmText = String(m); return true; };
   await w.purgeAll();
-  await sleep(30);
+  await settleUntil(() =>
+    state.bootURL.includes('/metrics/bootstrap') && rows().length === 0 &&
+    d.getElementById('settings-count').textContent === 'all metrics history deleted');
   w.confirm = origConfirm;
   w.fetch = origPurge;
   check('the settings purge POSTs the purge endpoint', purgePOST === true);
@@ -173,7 +175,7 @@ module.exports = async function archivePages(H) {
     records: BIG.map((r, i) => ({ ...r, __seq: i + 1 })),
     counters: { in_flight: 0, total_requests: 80, total_errors: 0 } };
   w.eval("fetchBootstrap('full')");
-  await sleep(30);
+  await settleUntil(() => rows().length === 60);
   check('post-purge resync restores the fresh snapshot', rows().length === 60);
   // 10b's wrapper records ANY bootstrap URL, so the page's 5s tick stays
   // stopped through the whole purge-resync window: a tick resume landing
@@ -219,17 +221,18 @@ module.exports = async function archivePages(H) {
   let gateResolve = null;
   state.logPageGate = new Promise(res => { gateResolve = res; });
   w.navigateTo([{ dim: 'provider', id: 'other.example' }]); // resetLogWindow → fetch fires, held by the gate
-  await sleep(50);
+  await settleUntil(() => state.lastLogURL.includes('f=provider%3Aother.example'));
   state.logPage = { records: [{ ...mkRec('other1', 200, 1599999980000), provider: 'other.example' }], more: false, cursor_ms: 1599999980000 };
   gateResolve(); // both held pages resolve - only the current scope's may land
-  await sleep(50);
+  await settleUntil(() => rows().length === 1 && rows()[0].dataset.id === 'other1' &&
+    w.eval('logArchive.length') === 1);
   check('stale in-flight page is dropped after a scope change',
     rows().length === 1 && rows()[0].dataset.id === 'other1' && w.eval('logArchive.length') === 1);
   state.logPageGate = null;
   // Restore the tall-box stubs (test 10's geometry) before leaving the suite.
   Object.defineProperty(state.box, 'scrollHeight', { configurable: true, get() { return 4000; } });
   w.navigateTo([]);
-  await sleep(50);
+  await settleUntil(() => rows().length === 60);
   check('clearing the scope restores the unfiltered window', rows().length === 60);
 
   // ---- test 10c-bis: per-view history rows ----

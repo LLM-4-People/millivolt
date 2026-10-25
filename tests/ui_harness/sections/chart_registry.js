@@ -1,7 +1,7 @@
 // test 12: chart preset registry - ids unique, dropdown follows
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function chartRegistry(H) {
-  const {check, d, fire, mkRec, observerFixture, rows, sleep, w} = H;
+  const {check, d, fire, mkRec, observerFixture, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
   // ---- test 12: chart preset registry - ids unique, dropdown follows ----
@@ -21,19 +21,18 @@ module.exports = async function chartRegistry(H) {
                 { ...mkRec('mix3', 200, 1700000202000), __seq: 3 }],
       counters: { in_flight: 0, total_requests: 3, total_errors: 1 } };
     w.eval("fetchBootstrap('full')");
-    await sleep(20);
+    await settleUntil(() => w.eval('derive(lastData).scopedRecs.length') === 3);
     w.eval("filters.status = ''");
     const allN = w.eval('derive(lastData).scopedRecs.length');
     const fstatus = d.getElementById('f-status');
     fstatus.value = '500';
     fstatus.dispatchEvent(new w.Event('change'));
-    await sleep(20);
-    const errN = w.eval('derive(lastData).scopedRecs.length');
-    check('derive cache invalidates on a filter change', allN === 3 && errN === 1 &&
-      rows().every(tr => tr.dataset.id === 'mix2'));
+    check('derive cache invalidates on a filter change', await settleUntil(() => allN === 3 &&
+      w.eval('derive(lastData).scopedRecs.length') === 1 &&
+      rows().every(tr => tr.dataset.id === 'mix2')));
     fstatus.value = '';
     fstatus.dispatchEvent(new w.Event('change'));
-    await sleep(20);
+    await settleUntil(() => w.eval('derive(lastData).scopedRecs.length') === 3);
     w.fetch = origF;
   }
 
@@ -48,15 +47,14 @@ module.exports = async function chartRegistry(H) {
     const fstatus = d.getElementById('f-status');
     fstatus.value = '500';
     fstatus.dispatchEvent(new w.Event('change'));
-    await sleep(20);
-    const filtered = w.eval('derive(lastData).scopedRecs');
     check('a filtered derive returns its own array with exactly the matching records',
-      w.eval('derive(lastData).scopedRecs !== lastData.records') &&
-      filtered.length === 1 && filtered[0].id === 'mix2' &&
-      filtered.every(r => r.status_code === 500));
+      await settleUntil(() => w.eval('derive(lastData).scopedRecs !== lastData.records') &&
+        w.eval('derive(lastData).scopedRecs.length') === 1 &&
+        w.eval('derive(lastData).scopedRecs[0].id') === 'mix2' &&
+        w.eval('derive(lastData).scopedRecs.every(r => r.status_code === 500)')));
     fstatus.value = '';
     fstatus.dispatchEvent(new w.Event('change'));
-    await sleep(20);
+    await settleUntil(() => w.eval('derive(lastData).scopedRecs.length') === 3);
 
     // The incremental painter consumes the alias directly (it slices before
     // reversing); the unfiltered window keeps the ring's arrival order.
@@ -89,7 +87,7 @@ module.exports = async function chartRegistry(H) {
   // An idle SSE connection sends cursor/counter metadata after the HTML seed.
   // It must not invalidate the shared derivation or schedule another render.
   {
-    await sleep(30);
+    await settleUntil(() => w.eval('!!lastData'));
     const originalSchedule = w.scheduleRenderLive;
     let scheduled = 0;
     w.scheduleRenderLive = () => { scheduled++; };
@@ -116,7 +114,7 @@ module.exports = async function chartRegistry(H) {
       w.eval('lastData.records.some(r => r.id === "seed-pending" && r.live)'));
     w.scheduleRenderLive = originalSchedule;
     fire('end', { record: mkRec('seed-pending', 200), in_flight: counters.in_flight || 0 });
-    await sleep(20);
+    await settleUntil(() => !w.eval('lastData.records.some(r => r.id === "seed-pending" && r.live)'));
   }
 
   // ---- test 12c: overlapping bootstraps resolve by ISSUE order - a stale
@@ -140,9 +138,10 @@ module.exports = async function chartRegistry(H) {
     w.eval("fetchBootstrap('resume')"); // issued first, resolves LAST
     w.eval("fetchBootstrap('resume')"); // issued second, resolves first
     resB();
-    await sleep(10);
-    check('fresh bootstrap applies', w.eval('kpiAgg && kpiAgg.requests') === 222);
+    check('fresh bootstrap applies',
+      await settleUntil(() => w.eval('kpiAgg && kpiAgg.requests') === 222));
     resA();
+    // Negative proof: the late stale response must not overwrite 222.
     await sleep(10);
     check('stale bootstrap response is superseded', w.eval('kpiAgg && kpiAgg.requests') === 222);
     w.fetch = origSup;

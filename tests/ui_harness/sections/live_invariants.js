@@ -10,16 +10,16 @@ module.exports = async function liveInvariants(H) {
   {
     fire('begin', { record: { ...mkRec('pendX', 0, 1700000300000), attempts: [] }, in_flight: 1 });
     fire('update', { record: { ...mkRec('pendX', 0, 1700000300000), attempts: [{ status: 503 }, { status: 502 }] }, in_flight: 1 });
-    await sleep(20);
     const attN = () => w.eval("(lastData.records.find(r => r.id === 'pendX')?.attempts || []).length");
+    await settleUntil(() => attN() === 2);
     w.eval("upsertPendingRec({ id: 'pendX', status_code: 0, live: true, attempts: [{ status: 503 }] }, _pendingRevision - 1)"); // stale tick snapshot
     check('stale pending snapshot never regresses retry progress', attN() === 2);
     w.eval("upsertPendingRec({ id: 'pendX', status_code: 0, live: true, attempts: [{ status: 503 }, { status: 502 }, { status: 500 }] }, _pendingRevision + 1)"); // newer
     check('newer pending snapshot refreshes retry progress', attN() === 3);
     fire('end', { record: { ...mkRec('pendX', 200, 1700000300000), attempts: [{ status: 503 }, { status: 502 }, { status: 500 }] }, in_flight: 0 });
-    await sleep(20);
     check('pending row finalizes after the badge checks',
-      !!rows().find(tr => tr.dataset.id === 'pendX') && w.eval("lastData.records.find(r => r.id === 'pendX').live") === false);
+      await settleUntil(() => !!rows().find(tr => tr.dataset.id === 'pendX') &&
+        w.eval("lastData.records.find(r => r.id === 'pendX').live") === false));
   }
 
   // ---- test 12e: O(1) upsert - _recIdx map is maintained on insert/update ----
@@ -30,15 +30,14 @@ module.exports = async function liveInvariants(H) {
                 { ...mkRec('idx2', 200, 1700000401000), __seq: 2 }],
       counters: { in_flight: 0, total_requests: 2, total_errors: 0 } };
     w.eval("fetchBootstrap('full')");
-    await sleep(20);
     const has = id => w.eval("_recIdx.has('" + id + "')");
     const get = id => w.eval("_recIdx.get('" + id + "')");
+    await settleUntil(() => has('idx1') && has('idx2'));
     check('_recIdx is populated after full snapshot', has('idx1') && has('idx2'));
     check('_recIdx indexes are correct', get('idx1') === 0 && get('idx2') === 1);
     // Insert a new record via SSE
     fire('record', { ...mkRec('idx3', 200, 1700000402000) });
-    await sleep(20);
-    check('_recIdx grows on new record insert', has('idx3'));
+    check('_recIdx grows on new record insert', await settleUntil(() => has('idx3')));
     // Replay an existing record - should NOT bump _rev (skip-bump-on-replay)
     const revBefore = w.eval('lastData._rev');
     fire('record', { ...mkRec('idx1', 200, 1700000400000) }); // replay
@@ -59,10 +58,10 @@ module.exports = async function liveInvariants(H) {
     // A real update (pending → finalized) MUST rebuild
     w.eval('window.__reqRowCalls = 0');
     fire('begin', { record: { ...mkRec('idx4', 0, 1700000403000), attempts: [] }, in_flight: 1 });
-    await sleep(20);
+    await settleUntil(() => w.eval("logHTML.get('idx4')?.rec?.live") === true);
     const liveBefore = w.eval("logHTML.get('idx4')?.rec?.live");
     fire('end', { record: { ...mkRec('idx4', 200, 1700000403000), attempts: [] }, in_flight: 0 });
-    await sleep(20);
+    await settleUntil(() => w.eval("logHTML.get('idx4')?.rec?.live") === false);
     const liveAfter = w.eval("logHTML.get('idx4')?.rec?.live");
     check('row-identity cache rebuilds on pending→finalized transition',
       liveBefore === true && liveAfter === false && w.eval('window.__reqRowCalls') > 0);
@@ -124,7 +123,7 @@ module.exports = async function liveInvariants(H) {
     // Simulate visible
     Object.defineProperty(w.document, 'hidden', { value: false, configurable: true });
     w.eval('document.dispatchEvent(new Event("visibilitychange"))');
-    await sleep(20);
+    await settleUntil(() => w.eval('typeof _clockTimer === "number" && _clockTimer !== null'));
     const clockRestarted = w.eval('typeof _clockTimer === "number" && _clockTimer !== null');
     check('clock timer restarts on visible', clockRestarted);
     const tickRestarted = w.eval('typeof _dashTickTimer === "number" && _dashTickTimer !== null');
@@ -146,9 +145,8 @@ module.exports = async function liveInvariants(H) {
       w.eval('EXPLORER_LIVE_REFRESH_MS >= 1000'));
     Object.defineProperty(w.document, 'hidden', { value: false, configurable: true });
     w.eval('d3.dispatchEvent(new Event("visibilitychange"))'.replace('d3', 'document'));
-    await sleep(20);
     check('returning to view refreshes a live-status explorer immediately',
-      w.eval('window.__xpRefreshCount === 1'));
+      await settleUntil(() => w.eval('window.__xpRefreshCount === 1')));
     w.eval('scheduleExplorerLiveRefresh()');
     await sleep(1100);
     check('visible tab keeps the throttled live-status refresh',
@@ -171,14 +169,14 @@ module.exports = async function liveInvariants(H) {
       return el ? el.querySelector('.val').textContent.trim() : null;
     };
     fire('begin', { record: { ...mkRec('gauge1', 0, 1700000500000), attempts: [] }, in_flight: 1 });
-    await sleep(20);
-    check('begin paints the In-flight tile live (new pending row)', flightVal() === '1');
+    check('begin paints the In-flight tile live (new pending row)',
+      await settleUntil(() => flightVal() === '1'));
     fire('record', { ...mkRec('gauge1', 200, 1700000500000) }, '9');
-    await sleep(20);
+    await settleUntil(() => w.eval("logHTML.get('gauge1')?.rec?.live") === false);
     check('ring record finalizes the row; the tile keeps the pre-end gauge', flightVal() === '1');
     const revBeforeEnd = w.eval('lastData._rev');
     fire('end', { record: { ...mkRec('gauge1', 200, 1700000500000) }, in_flight: 0 });
-    await sleep(20);
+    await settleUntil(() => flightVal() === '0');
     check('end event corrects the In-flight tile with no further event', flightVal() === '0');
     check('the end-event counters write bumps the derivation', w.eval('lastData._rev') > revBeforeEnd);
     const revStable = w.eval('lastData._rev');
@@ -204,17 +202,18 @@ module.exports = async function liveInvariants(H) {
       dim: 'provider', total: 1000, error_total: 0, rail: {}, groups: [], scope: {matches, errors: 0},
     })});
     w.navigateTo([{dim: 'provider', id: 'scope-a.example'}]);
-    await sleep(20);
+    await settleUntil(() => pending.length === 1);
     w.fetchExplorer();
     check('same-scope explorer requests dedupe while the first response is pending', pending.length === 1);
     check('unresolved filtered footer never substitutes ring counts or another scope', d.getElementById('f-scope').textContent.startsWith('… of '));
     w.navigateTo([{dim: 'provider', id: 'scope-b.example'}]);
-    await sleep(20);
-    check('new scope starts immediately and cancels the old explorer scan', pending.length === 2 && pending[0].signal.aborted);
+    check('new scope starts immediately and cancels the old explorer scan',
+      await settleUntil(() => pending.length === 2 && pending[0].signal.aborted));
     reply(pending[1], 7);
-    await sleep(20);
-    check('footer uses full-scope counts from explorer, not cross-filter gallery totals', d.getElementById('f-scope').textContent.startsWith('7 of '));
+    check('footer uses full-scope counts from explorer, not cross-filter gallery totals',
+      await settleUntil(() => d.getElementById('f-scope').textContent.startsWith('7 of ')));
     reply(pending[0], 999);
+    // Negative proof: a stale response must not overwrite the current footer.
     await sleep(10);
     check('a stale explorer response cannot overwrite current footer counts', d.getElementById('f-scope').textContent.startsWith('7 of '));
     w.fetchExplorer('invalidate');
@@ -222,8 +221,8 @@ module.exports = async function liveInvariants(H) {
     check('forced same-scope refresh supersedes by issue order', pending.length === 4 && pending[2].signal.aborted);
     reply(pending[3], 8);
     reply(pending[2], 999);
-    await sleep(20);
-    check('latest forced refresh wins without a separate footer history scan', scopeFetches === 0 && d.getElementById('f-scope').textContent.startsWith('8 of '));
+    check('latest forced refresh wins without a separate footer history scan',
+      await settleUntil(() => scopeFetches === 0 && d.getElementById('f-scope').textContent.startsWith('8 of ')));
     const previousExplorer = w.eval('explorerAgg');
     w.fetchExplorer('invalidate');
     d.getElementById('f-status').value = 'streaming';
@@ -231,19 +230,20 @@ module.exports = async function liveInvariants(H) {
     check('status selections immediately supersede old scans without a debounce delay', pending.length === 6 && pending[4].signal.aborted);
     check('live Requests status filters refresh explorer/footer regardless of breakdown dimension', w.explorerWantsLiveStatus());
     reply(pending[4], 999);
+    // Negative proof: an old status response must not paint under the new one.
     await sleep(10);
     check('an old status response cannot paint under the new selection',
       w.eval('explorerAgg') === null && w.eval('explorerAgg') !== previousExplorer &&
       d.getElementById('f-scope').textContent.startsWith('… of '));
     reply(pending[5], 0);
-    await sleep(10);
-    check('zero live matches is a real full-scope count', d.getElementById('f-scope').textContent.startsWith('0 of '));
+    check('zero live matches is a real full-scope count',
+      await settleUntil(() => d.getElementById('f-scope').textContent.startsWith('0 of ')));
     w.fetch = originalFetch;
     d.getElementById('f-status').value = '';
     w.doFilter();
     w.navigateTo([]);
-    await sleep(20);
-    check('unfiltered footer reads global KPI immediately', !d.getElementById('f-scope').textContent.includes('…'));
+    check('unfiltered footer reads global KPI immediately',
+      await settleUntil(() => !d.getElementById('f-scope').textContent.includes('…')));
   }
 
   // ---- test 12i-bis: a failed explorer scan for a new scope must not leave
@@ -311,7 +311,7 @@ module.exports = async function liveInvariants(H) {
       failB = false;
       w.fetch = originalFetch;
       w.navigateTo([]);
-      await sleep(20);
+      await settleUntil(() => !d.getElementById('f-scope').textContent.includes('…'));
     }
   }
 
@@ -365,7 +365,7 @@ module.exports = async function liveInvariants(H) {
       try { fire('end', {record: mkRec('rail-focus1', 200, 1700000600000), in_flight: 0}); } catch (e) {}
       w.eval('if (_xpLiveTimer) { clearTimeout(_xpLiveTimer); _xpLiveTimer = null; }');
       w.navigateTo([]);
-      await sleep(20);
+      await settleUntil(() => !d.getElementById('f-scope').textContent.includes('…'));
     }
   }
 
@@ -439,7 +439,7 @@ module.exports = async function liveInvariants(H) {
     state.box.scrollTop = 137;
     w.eval('logLimit = 2');
     w.openDrawer('nav-a1');
-    await sleep(20);
+    await settleUntil(() => d.getElementById('drawer').classList.contains('open'));
 
     const filtersBefore = w.eval('explorerFilters()');
     const derFBefore = w.eval('_derFS');
@@ -535,12 +535,11 @@ module.exports = async function liveInvariants(H) {
         resetLogWindow: calls.resetLogWindow };
       fstatus.value = '500';
       fstatus.dispatchEvent(new w.Event('change'));
-      await sleep(20);
       check('a status change still runs the full path and resets the log',
-        calls.renderAll === beforeStatus.renderAll + 1 &&
-        calls.fetchChart === beforeStatus.fetchChart + 1 &&
-        calls.resetLogWindow === beforeStatus.resetLogWindow + 1 &&
-        w.eval('logArchive.length') === 0);
+        await settleUntil(() => calls.renderAll === beforeStatus.renderAll + 1 &&
+          calls.fetchChart === beforeStatus.fetchChart + 1 &&
+          calls.resetLogWindow === beforeStatus.resetLogWindow + 1 &&
+          w.eval('logArchive.length') === 0));
       check('a status change invalidates the memoized filter-set identity',
         w.eval('explorerFilters()') !== statusFiltersBefore);
 
@@ -570,8 +569,7 @@ module.exports = async function liveInvariants(H) {
       w.closeDrawer();
     }
     w.navigateTo([]);
-    await sleep(20);
     check('the by-only suite restores the unfiltered log window',
-      w.eval('logArchive.length') === 0 && rows().length === 3);
+      await settleUntil(() => w.eval('logArchive.length') === 0 && rows().length === 3));
   }
 };

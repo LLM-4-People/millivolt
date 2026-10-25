@@ -1,7 +1,7 @@
 // operator unlock: one answered dialog covers every in-flight 401
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function operatorUnlock(H) {
-  const {TEST_DASHBOARD_VERSION, assembleHTML, check, d, dashboardDOM, loaded, modelFixture, observerFixture, pageOptions, sleep, w} = H;
+  const {TEST_DASHBOARD_VERSION, assembleHTML, check, d, dashboardDOM, loaded, modelFixture, observerFixture, pageOptions, settleUntil, w} = H;
   const state = H.state;
 
   // ---- operator unlock: one answered dialog covers every in-flight 401
@@ -27,8 +27,12 @@ module.exports = async function operatorUnlock(H) {
       d.getElementById('operator-dialog-input').value = value;
       d.getElementById('operator-dialog-form').dispatchEvent(new w.Event('submit', {cancelable: true}));
     };
+    const dialogOpen = () => {
+      const dialog = d.getElementById('operator-dialog');
+      return !!dialog && !dialog.hidden;
+    };
     try {
-      await sleep(30);
+      await settleUntil(() => w.eval('!!lastData'));
       // Freeze the page's own timers so only test-driven calls hit fetch.
       w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearInterval(_clockTimer); _clockTimer = null;');
       w.eval('storeOperatorCredential("")');
@@ -60,10 +64,10 @@ module.exports = async function operatorUnlock(H) {
       // The unlock: bootstrap's 401 opens the dialog; the chart scan stays in
       // flight and its 401 lands only after the credential was stored.
       const boot = w.operatorFetch('/metrics/bootstrap');
-      await sleep(5);
+      await settleUntil(() => dialogOpen() && w.eval('operatorPrompt !== null'));
       chartGate = [];
       const chart = w.operatorFetch('/metrics/agg/chart?window=60m');
-      await sleep(5);
+      await settleUntil(() => chartPending !== null);
       check('a 401 opens the operator dialog once',
         !d.getElementById('operator-dialog').hidden && modalOpens === 1 && w.eval('operatorPrompt !== null'));
       submitDialog('op-token-correct');
@@ -86,14 +90,14 @@ module.exports = async function operatorUnlock(H) {
       // stored while it pends, so it is the silent retry that presents (and
       // gets rejected for) the wrong value.
       bootGate = [];
+      const staleBefore = bootPending;
       const stale = w.operatorFetch('/metrics/bootstrap'); // in flight presenting the phase-1 credential
-      await sleep(5);
+      await settleUntil(() => bootPending !== staleBefore);
       w.eval('storeOperatorCredential("op-token-wrong")'); // stored while pending
       bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
-      await sleep(5);
       check('a rejected silent retry drops the stored credential and shows the notice',
-        w.eval('operatorCredential') === '' && !d.getElementById('operator-dialog').hidden &&
-        d.querySelector('.operator-dialog-note').textContent.includes('token was rejected'));
+        await settleUntil(() => w.eval('operatorCredential') === '' && dialogOpen() &&
+          d.querySelector('.operator-dialog-note').textContent.includes('token was rejected')));
       d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
       check('cancel after a rejected silent retry returns the 401 with nothing stored',
         (await stale).status === 401 && w.eval('operatorCredential') === '' && w.eval('operatorRejected === false'));
@@ -102,17 +106,18 @@ module.exports = async function operatorUnlock(H) {
       // (another caller's successful unlock) must wipe only the token it
       // presented - a 401 indicts the presented value, never the current one.
       bootGate = [];
+      const racedBefore = bootPending;
       const raced = w.operatorFetch('/metrics/bootstrap'); // in flight with no credential
-      await sleep(5);
+      await settleUntil(() => bootPending !== racedBefore);
       w.eval('storeOperatorCredential("op-token-wrong")'); // the silent retry will present this
       bootGate = [];                                       // gate the silent retry itself
+      const racedRetryBefore = bootPending;
       bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
-      await sleep(5);
+      await settleUntil(() => bootPending !== racedRetryBefore);
       w.eval('storeOperatorCredential("op-token-correct")'); // a newer unlock lands while it flies
       bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
-      await sleep(5);
       check('a late rejection does not wipe a newer stored credential',
-        w.eval('operatorCredential') === 'op-token-correct' && !d.getElementById('operator-dialog').hidden);
+        await settleUntil(() => w.eval('operatorCredential') === 'op-token-correct' && dialogOpen()));
       d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
       check('cancel keeps the newer credential',
         (await raced).status === 401 && w.eval('operatorCredential') === 'op-token-correct');
@@ -121,15 +126,15 @@ module.exports = async function operatorUnlock(H) {
       // older token must not wipe a newer one stored while it flew.
       w.eval('storeOperatorCredential("")');
       const gen = w.operatorFetch('/metrics/bootstrap'); // 401 -> dialog
-      await sleep(5);
+      await settleUntil(() => w.eval('operatorPrompt !== null'));
       bootGate = [];                                     // gate the upcoming post-prompt retry
+      const genRetryBefore = bootPending;
       submitDialog('op-token-wrong');                    // stores W, dispatches the retry
-      await sleep(5);
+      await settleUntil(() => bootPending !== genRetryBefore);
       w.eval('storeOperatorCredential("op-token-correct")'); // a newer generation's unlock
       bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
-      await sleep(5);
       check('a rejected post-prompt retry does not wipe a newer stored credential',
-        w.eval('operatorCredential') === 'op-token-correct' && w.eval('operatorRejected === true'));
+        await settleUntil(() => w.eval('operatorCredential') === 'op-token-correct' && w.eval('operatorRejected === true')));
       check('the raced post-prompt caller returns its 401', (await gen).status === 401);
 
       // The dialog presents the entered value VERBATIM (the server never
@@ -137,7 +142,7 @@ module.exports = async function operatorUnlock(H) {
       w.eval('storeOperatorCredential("")');
       const padded = ' padded-token ';
       const paddedCall = w.operatorFetch('/metrics/bootstrap'); // 401 (no credential) -> dialog
-      await sleep(5);
+      await settleUntil(() => w.eval('operatorPrompt !== null'));
       const savedPadFetch = w.fetch;
       w.fetch = (url, options) => {
         const auth = options && options.headers ? (options.headers.Authorization || '') : '';
@@ -155,24 +160,23 @@ module.exports = async function operatorUnlock(H) {
       // re-ask that reads as "nothing happened".
       w.eval('storeOperatorCredential("")');
       const wrong = w.operatorFetch('/metrics/bootstrap');
-      await sleep(5);
+      await settleUntil(() => w.eval('operatorPrompt !== null'));
       submitDialog('op-token-wrong');
       const wrongResult = await wrong;
       check('a wrong entry clears the credential and returns the 401',
         wrongResult.status === 401 && w.eval('operatorCredential') === '');
       const retry = w.operatorFetch('/metrics/bootstrap');
-      await sleep(5);
       const note = d.querySelector('.operator-dialog-note');
       check('the re-prompt after a rejection shows the failure notice',
-        !d.getElementById('operator-dialog').hidden && note.hasAttribute('data-err') &&
-        note.textContent.includes('token was rejected'));
+        await settleUntil(() => dialogOpen() && note.hasAttribute('data-err') &&
+          note.textContent.includes('token was rejected')));
       submitDialog('op-token-correct');
       check('the corrected entry unlocks', (await retry).status === 200);
       w.eval('storeOperatorCredential("")');
       const fresh = w.operatorFetch('/metrics/bootstrap');
-      await sleep(5);
       check('a fresh prompt drops the rejection notice',
-        !note.hasAttribute('data-err') && note.textContent.includes('This dashboard is protected'));
+        await settleUntil(() => !note.hasAttribute('data-err') &&
+          note.textContent.includes('This dashboard is protected')));
       d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
       check('cancel returns the original 401 without storing anything',
         (await fresh).status === 401 && w.eval('operatorCredential') === '');
@@ -181,9 +185,9 @@ module.exports = async function operatorUnlock(H) {
       const opensBefore = modalOpens;
       const a = w.operatorFetch('/metrics/bootstrap');
       const b = w.operatorFetch('/admin/pause');
-      await sleep(5);
       check('concurrent 401s share one dialog and one entry',
-        !d.getElementById('operator-dialog').hidden && modalOpens === opensBefore + 1);
+        await settleUntil(() => dialogOpen() &&
+          modalOpens === opensBefore + 1));
       submitDialog('op-token-correct');
       check('one entry resolves every joined caller with the credential',
         (await a).status === 200 && (await b).status === 200 && modalOpens === opensBefore + 1);
@@ -223,7 +227,7 @@ module.exports = async function operatorUnlock(H) {
       d.dispatchEvent(new w.Event('visibilitychange'));
     };
     try {
-      await sleep(30);
+      await settleUntil(() => w.eval('!!lastData'));
       w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearInterval(_clockTimer); _clockTimer = null;');
       w.fetch = () => new Promise(() => {}); // ticks stay pending; only state is asserted
       w.eval('armDashboardTicks()');
@@ -236,50 +240,45 @@ module.exports = async function operatorUnlock(H) {
       // Opt-in: hidden keeps the tick and holds the freeze-exemption lock.
       w.applyDashValues({dash_background_refresh: true});
       setHidden(true);
-      await sleep(5); // the lock stub grants in a microtask
       check('background refresh keeps the tick running while hidden and holds the lock',
-        w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 1 && w.eval('_bgLockRelease !== null'));
+        await settleUntil(() => w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 1 &&
+          w.eval('_bgLockRelease !== null')));
       setHidden(false);
-      await sleep(5);
       check('returning to view releases the lock and re-arms the tick',
-        w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer !== null') &&
-        w.__lockRequests[0].released === true);
+        await settleUntil(() => w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer !== null') &&
+          w.__lockRequests[0].released === true));
       // Hot-reloaded toggle-off releases the hold and stops the tick even
       // while still hidden.
       setHidden(true);
-      await sleep(5);
+      await settleUntil(() => w.__lockRequests.length === 2);
       w.applyDashValues({dash_background_refresh: false});
-      await sleep(5); // the stub marks released on promise settlement
       check('a hot-reloaded toggle-off releases the lock and the tick while hidden',
-        w.__lockRequests.length === 2 && w.__lockRequests[1].released === true &&
-        w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer === null'));
+        await settleUntil(() => w.__lockRequests.length === 2 && w.__lockRequests[1].released === true &&
+          w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer === null')));
 
       // A grant landing for a superseded hold (hide/show cycled while the
       // grant was pending) must self-release, not steal the live claim.
       setHidden(false);
-      await sleep(5);
+      await settleUntil(() => w.eval('_dashTickTimer !== null'));
       w.applyDashValues({dash_background_refresh: true}); // visible: no auto-activation
       setHidden(true);   // request #3, grant pending
       setHidden(false);  // release: no live claim yet, no-op
       setHidden(true);   // request #4
-      await sleep(5);    // both grants land
       check('a grant for a superseded hold self-releases without stealing the live claim',
-        w.__lockRequests.length === 4 && w.__lockRequests[2].released === true &&
-        w.__lockRequests[3].released === false && w.eval('_bgLockRelease !== null'));
+        await settleUntil(() => w.__lockRequests.length === 4 && w.__lockRequests[2].released === true &&
+          w.__lockRequests[3].released === false && w.eval('_bgLockRelease !== null')));
       setHidden(false);
-      await sleep(5);
       check('the live claim releases on return to view',
-        w.eval('_bgLockRelease === null') && w.__lockRequests[3].released === true &&
-        w.eval('_dashTickTimer !== null'));
+        await settleUntil(() => w.eval('_bgLockRelease === null') && w.__lockRequests[3].released === true &&
+          w.eval('_dashTickTimer !== null')));
 
       // A grant landing after its hold was released (no newer hold taken)
       // must self-release too: it must never hold the lock while visible.
       setHidden(true);   // request #5, grant pending
       setHidden(false);  // release with no live claim: still invalidates the pending grant
-      await sleep(5);
       check('a grant landing after release self-releases instead of holding while visible',
-        w.__lockRequests.length === 5 && w.__lockRequests[4].released === true &&
-        w.eval('_bgLockRelease === null'));
+        await settleUntil(() => w.__lockRequests.length === 5 && w.__lockRequests[4].released === true &&
+          w.eval('_bgLockRelease === null')));
 
       // A cadence change in a payload that lands while hidden with
       // background refresh off must not re-arm the tick: payload paths stay
@@ -294,10 +293,9 @@ module.exports = async function operatorUnlock(H) {
       // out-of-band config change) arms the tick and takes the hold with no
       // visibilitychange transition.
       w.applyDashValues({dash_background_refresh: true});
-      await sleep(5); // the lock stub grants in a microtask
       check('a hot-reloaded toggle-on while hidden takes the lock and arms the tick',
-        w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 6 &&
-        w.eval('_bgLockRelease !== null'));
+        await settleUntil(() => w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 6 &&
+          w.eval('_bgLockRelease !== null')));
       // With the opt-in on, the same cadence change re-arms the tick. Stop
       // it first so a non-null timer proves the flag-on arm ran: phase 2's
       // activation arm would otherwise satisfy this vacuously.

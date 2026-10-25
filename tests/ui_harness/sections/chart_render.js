@@ -1,7 +1,7 @@
 // test 11b: Cost preset renderer - cost is the lone bar on the arcsinh
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function chartRender(H) {
-  const {BUCKET_MS, CHART_FROM, check, d, mkChart, sleep, w} = H;
+  const {BUCKET_MS, CHART_FROM, check, d, mkChart, settleUntil, w} = H;
   const state = H.state;
 
   // ---- test 11b: Cost preset renderer - cost is the lone bar on the arcsinh
@@ -234,9 +234,8 @@ module.exports = async function chartRender(H) {
         savedView().preset === 'latency' &&
         chartFetchURLs().length === fetchesBeforeWindow + 1 &&
         chartFetchURLs().at(-1).includes('window=15'));
-    await sleep(30);
     check('setChartWindow applies the fetched window payload',
-      w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms);
+      await settleUntil(() => w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms));
     const fetchesBeforeReject = chartFetchURLs().length;
     w.setChartWindow('bogus');
     check('setChartWindow rejects unlisted windows without persisting or fetching',
@@ -275,9 +274,8 @@ module.exports = async function chartRender(H) {
         savedView().preset === 'latency' &&
         chartFetchURLs().length === fetchesBeforeWindowWiring + 1 &&
         chartFetchURLs().at(-1).includes('window=60'));
-    await sleep(30);
     check('the window dropdown wiring applies the fetched window payload',
-      w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms);
+      await settleUntil(() => w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms));
     const presetSelect = d.getElementById('chart-preset');
     const fetchesBeforePresetWiring = chartFetchURLs().length;
     // The no-refetch conjunct below is otherwise masked by the chart request

@@ -1,7 +1,7 @@
 // W16 mirror pins: the Go<->JS pairs the mutation rounds proved unguarded
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function w16Mirrors(H) {
-  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, path, rows, sleep} = H;
+  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, path, rows, settleUntil} = H;
   const state = H.state;
 
   // ---- W16 mirror pins: the Go<->JS pairs the mutation rounds proved unguarded ----
@@ -68,7 +68,7 @@ module.exports = async function w16Mirrors(H) {
     const sw = isolated.window, sd = sw.document;
     try {
       await loaded(isolated);
-      await sleep(60);
+      await settleUntil(() => sw.eval('!!lastData'));
 
       // recordIsError mirrors metrics.Record.IsError. The 24 rows mirror the
       // semantics of tests/_go/internal/metrics/iserror_corpus.go (the Go
@@ -379,15 +379,14 @@ module.exports = async function w16Mirrors(H) {
       // the capture-header tint on the key span, empty values denied, and
       // truncated bodies labeled.
       sw.openDrawer('dbg-drawer');
-      await sleep(30);
       const dbg = sd.getElementById('drawer-debug');
       const dbgRow = k => [...dbg.querySelectorAll('.detail-kv')].find(r => r.querySelector('.k') && r.querySelector('.k').textContent === k);
       check('the drawer renders the capture identity and timing rows',
-        !!dbgRow('session') && dbgRow('session').querySelector('.v').textContent === 'first' &&
-        !!dbgRow('client') && dbgRow('client').querySelector('.v').textContent === 'c' &&
-        !!dbgRow('stream') && dbgRow('stream').querySelector('.v').textContent === 'yes' &&
-        !!dbgRow('duration') && dbgRow('duration').querySelector('.v').textContent === '1s' &&
-        !!dbgRow('queue wait') && dbgRow('queue wait').querySelector('.v').textContent === '10ms');
+        await settleUntil(() => !!dbgRow('session') && dbgRow('session').querySelector('.v').textContent === 'first' &&
+          !!dbgRow('client') && dbgRow('client').querySelector('.v').textContent === 'c' &&
+          !!dbgRow('stream') && dbgRow('stream').querySelector('.v').textContent === 'yes' &&
+          !!dbgRow('duration') && dbgRow('duration').querySelector('.v').textContent === '1s' &&
+          !!dbgRow('queue wait') && dbgRow('queue wait').querySelector('.v').textContent === '10ms'));
       const headerSection = [...dbg.querySelectorAll('.detail-section')]
         .find(s => s.querySelector('h4') && s.querySelector('h4').textContent === 'Request headers');
       const authRow = headerSection && [...headerSection.querySelectorAll('.detail-kv')]
@@ -417,7 +416,10 @@ module.exports = async function w16Mirrors(H) {
         sw.URL.createObjectURL = () => 'blob:w16-dl';
         sw.URL.revokeObjectURL = href => dlTape.push('revoke:' + href);
         dbgBtn.click();
-        await sleep(30);
+        await settleUntil(() => sw.__dlFetches.length === 1 &&
+          dlTape.some(el => el && el.tagName === 'A' &&
+            el.getAttribute('download') === 'millivolt-debug-20260914-000000.json.gz') &&
+          dlTape.includes('revoke:blob:w16-dl'));
         check('clicking download fetches the capture artifact through the operator gate',
           sw.__dlFetches.length === 1 &&
           sw.__dlFetches[0].u === '/admin/debug/capture?id=dbg-drawer&download=1' &&
@@ -428,13 +430,17 @@ module.exports = async function w16Mirrors(H) {
           dlTape.includes('revoke:blob:w16-dl'));
         sw.__dlResponse = { ok: true, blob: async () => new sw.Blob(['gz']), headers: { get: () => null } };
         dbgBtn.click();
-        await sleep(30);
+        await settleUntil(() => dlTape.some(el => el && el.tagName === 'A' &&
+          el.getAttribute('download') === 'millivolt-debug.json.gz'));
         check('a missing Content-Disposition falls back to the designed artifact name',
           dlTape.filter(el => el && el.tagName === 'A')
             .some(a => a.getAttribute('download') === 'millivolt-debug.json.gz'));
         sw.__dlResponse = { ok: false, status: 502, headers: { get: () => null } };
         dbgBtn.click();
-        await sleep(30);
+        await settleUntil(() => {
+          const status = sd.getElementById('drawer-debug-status');
+          return !!status && status.textContent === 'debug capture download failed';
+        });
         check('a failed capture download surfaces the designed failure message in the section',
           sd.getElementById('drawer-debug-status').textContent === 'debug capture download failed');
       }
