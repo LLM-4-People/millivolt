@@ -1762,7 +1762,12 @@ type anthropicWireResponse struct {
 	StopReason   string               `json:"stop_reason"`
 	StopSequence string               `json:"stop_sequence"`
 	StopDetails  json.RawMessage      `json:"stop_details"`
-	Usage        anthropicWireUsage   `json:"usage"`
+	// Container and Diagnostics are required nullable response members with
+	// no cross-protocol equivalent. Keep them raw so a non-null source value
+	// can be reported instead of silently dropped.
+	Container   json.RawMessage    `json:"container"`
+	Diagnostics json.RawMessage    `json:"diagnostics"`
+	Usage       anthropicWireUsage `json:"usage"`
 }
 
 type anthropicWireUsage struct {
@@ -1776,8 +1781,14 @@ type anthropicWireUsage struct {
 	// ServiceTier and Speed describe the serving tier of this usage. They
 	// exist only on the response side; the request spells the tier through
 	// service_tier/speed as well.
-	ServiceTier         string `json:"service_tier"`
-	Speed               string `json:"speed"`
+	ServiceTier string `json:"service_tier"`
+	Speed       string `json:"speed"`
+	// CacheCreation, InferenceGeo and ServerToolUse are required nullable
+	// members with no canonical usage equivalent. They stay raw so a non-null
+	// provider value can be reported as dropped.
+	CacheCreation       json.RawMessage `json:"cache_creation"`
+	InferenceGeo        json.RawMessage `json:"inference_geo"`
+	ServerToolUse       json.RawMessage `json:"server_tool_use"`
 	OutputTokensDetails *struct {
 		ThinkingTokens jsonnum.Int64 `json:"thinking_tokens"`
 	} `json:"output_tokens_details"`
@@ -1875,7 +1886,22 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 		resp.Warnings.Add(ir.WarningDropped, "stop_details",
 			"the cross-protocol terminal has no stop-details equivalent")
 	}
+	warnAnthropicResponseOnly(in.Container, "container", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Diagnostics, "diagnostics", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Usage.CacheCreation, "usage.cache_creation", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Usage.InferenceGeo, "usage.inference_geo", &resp.Warnings)
+	warnAnthropicResponseOnly(in.Usage.ServerToolUse, "usage.server_tool_use", &resp.Warnings)
 	return resp, nil
+}
+
+// warnAnthropicResponseOnly reports one non-null Anthropic response member
+// that has no Chat or Responses representation. Absent and explicit null are
+// the schema's normal empty spellings, not a loss.
+func warnAnthropicResponseOnly(raw json.RawMessage, field string, warns *ir.Warnings) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return
+	}
+	warns.Add(ir.WarningDropped, field, "Anthropic response member has no cross-protocol equivalent")
 }
 
 func anthropicUsageToIR(u anthropicWireUsage) (ir.Usage, error) {
