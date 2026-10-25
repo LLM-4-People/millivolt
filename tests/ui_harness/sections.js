@@ -14,4 +14,8 @@ module.exports = [
   require('./sections/chart_e2e'),
   require('./sections/restart_providers'),
   require('./sections/mcp_category'),
+  require('./sections/request_overrides'),
+  require('./sections/subconversations'),
+  require('./sections/settings_dirty'),
+  require('./sections/chart_registry'),
 ];
