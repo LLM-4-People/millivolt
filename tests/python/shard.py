@@ -106,6 +106,22 @@ class RaceScopeTests(unittest.TestCase):
         self.assertEqual(len(tasks), 1)
         self.assertFalse(tasks[0].race)
 
+    def test_cmd_proxy_transport_and_watcher_tests_are_race_selected(self):
+        names = [
+            "TestInProcessTransportEnforcesTheRequestDeadline",
+            "TestInProcessTransportEnforcesTheConfiguredBound",
+            "TestInProcessTransportNormalCallReturnsPromptly",
+            "TestInProcessTransportOversizedBodyKeepsTheClientError",
+            "TestRestartProgressStopsAfterDependencyPanic",
+            "TestMCPHTTPEndpointAuthAndInProcessDispatch",
+            "TestOperatorNamespaceLookAlikesNeverReachInference",
+            "TestMetricsPprofRoutesServeOnlyThroughTheOperatorGate",
+            "TestDeadlineHandlerSlowProgressingBodyCompletes",
+        ]
+        race, plain = race_scope.select(MODULE + "/cmd/proxy", names)
+        self.assertEqual(race, names)
+        self.assertEqual(plain, [])
+
     def test_all_race_escalates_every_test(self):
         names = ["TestRequestMetadata", "TestStreamPump"]
         race, plain = race_scope.select(PROXY, names, all_race=True)

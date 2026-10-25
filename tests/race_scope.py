@@ -72,6 +72,17 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "*TryReload*",
         "*ReloadPublishes*",
         "*ReloadStatus*",
+        # In-process HTTP dispatch owns a handler goroutine, a deadline
+        # transport and a bounded recorder; the restart progress watcher
+        # publishes from its ticker; the real operator mux and pprof listener
+        # serve concurrent requests; the deadline handler owns body-read
+        # timers. These named areas exercise those production primitives.
+        "*InProcessTransport*",
+        "*MCPHTTPEndpoint*",
+        "*RestartProgress*",
+        "*OperatorNamespace*",
+        "*MetricsPprofRoutes*",
+        "*DeadlineHandler*",
     ),
     # The stress client owns worker goroutines and atomics; the whole package
     # is small and is serialized by the fixed-port lock.
