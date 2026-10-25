@@ -111,3 +111,80 @@ func TestProxyQueryHeaderKeepsQueryData(t *testing.T) {
 		t.Fatalf("upstream query = %q, want a=1&b=2", got)
 	}
 }
+
+// TestEscapedKnownRouteIsNotRetargeted is the round 12 D1 regression: route
+// ownership is decided on the escaped spelling, so an encoded separator or
+// character cannot make an unknown path look like a known endpoint.
+func TestEscapedKnownRouteIsNotRetargeted(t *testing.T) {
+	const chatBody = `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+
+	t.Run("escaped chat path is forwarded unchanged", func(t *testing.T) {
+		up, s := targetServer(t)
+		w := proxyRequest(t, s, "/v1%2Fchat%2Fcompletions", "openai", chatBody)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if got := up.lastEscapedPath(); got != "/v1%2Fchat%2Fcompletions" {
+			t.Fatalf("upstream escaped path = %q, want the client spelling", got)
+		}
+	})
+
+	t.Run("escaped models path is relayed, not served", func(t *testing.T) {
+		up, s := targetServer(t)
+		r := httptest.NewRequest(http.MethodGet, "http://proxy.example/v1%2Fmodels", nil)
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+		r.Header.Set("X-Proxy-Format", "openai")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if up.calls.Load() != 1 {
+			t.Fatalf("upstream calls = %d, want 1", up.calls.Load())
+		}
+		if got := up.lastEscapedPath(); got != "/v1%2Fmodels" {
+			t.Fatalf("upstream escaped path = %q, want the client spelling, not the discovery route", got)
+		}
+	})
+
+	t.Run("encoded character in a known route is preserved", func(t *testing.T) {
+		up, s := targetServer(t)
+		w := proxyRequest(t, s, "/%76%31/chat/completions", "openai", chatBody)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if got := up.lastEscapedPath(); got != "/%76%31/chat/completions" {
+			t.Fatalf("upstream escaped path = %q, want the client spelling", got)
+		}
+	})
+
+	t.Run("canonical chat path control", func(t *testing.T) {
+		up, s := targetServer(t)
+		w := proxyRequest(t, s, "/v1/chat/completions", "openai", chatBody)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if got := up.lastEscapedPath(); got != "/v1/chat/completions" {
+			t.Fatalf("upstream escaped path = %q, want /v1/chat/completions", got)
+		}
+	})
+
+	t.Run("canonical models path control", func(t *testing.T) {
+		up, s := targetServer(t)
+		r := httptest.NewRequest(http.MethodGet, "http://proxy.example/v1/models", nil)
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if up.calls.Load() != 1 {
+			t.Fatalf("upstream calls = %d, want the discovery fetch", up.calls.Load())
+		}
+		if got := up.lastEscapedPath(); got != "/v1/models" {
+			t.Fatalf("upstream escaped path = %q, want /v1/models", got)
+		}
+	})
+}

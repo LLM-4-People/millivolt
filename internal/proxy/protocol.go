@@ -19,6 +19,15 @@ import (
 // is the existing X-Proxy-Format selector. Translation runs only when both are
 // known and differ, so a same-protocol request stays byte-transparent.
 
+// routePath returns the request path in its escaped spelling. Route ownership
+// is decided on this spelling: URL.Path decodes %2F and %76, so an encoded
+// spelling of a known route would otherwise read as the route itself and could
+// retarget the upstream or hijack model discovery. The escaped spelling is also
+// what buildUpstreamRequest forwards.
+func routePath(r *http.Request) string {
+	return r.URL.EscapedPath()
+}
+
 // inboundProtocol resolves the client's wire protocol. An empty result means
 // the path is not a known inference endpoint and the request is relayed
 // verbatim. On an invalid override the path-derived protocol is returned with
@@ -33,10 +42,10 @@ func inboundProtocol(r *http.Request) (ir.Protocol, error) {
 		case "anthropic":
 			return ir.Anthropic, nil
 		default:
-			return pathProtocol(r.URL.Path), fmt.Errorf("unsupported %s %q", hdrInFormat, clientEcho(v))
+			return pathProtocol(routePath(r)), fmt.Errorf("unsupported %s %q", hdrInFormat, clientEcho(v))
 		}
 	}
-	return pathProtocol(r.URL.Path), nil
+	return pathProtocol(routePath(r)), nil
 }
 
 // isModelsRequest reports whether the request targets the OpenAI-compatible
@@ -44,7 +53,8 @@ func inboundProtocol(r *http.Request) (ir.Protocol, error) {
 // X-Proxy-In-Format (the inference client-wire override) does not change its
 // envelope.
 func isModelsRequest(r *http.Request) bool {
-	return r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models")
+	path := routePath(r)
+	return r.Method == http.MethodGet && (path == "/v1/models" || path == "/models")
 }
 
 // envelopeProtocol returns the protocol an early error sink must render for

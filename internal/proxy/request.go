@@ -896,7 +896,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		}
 		t.translate = false
 	}
-	if t.inbound != "" && t.outbound != "" && t.path == "" && (t.translate || pathProtocol(r.URL.Path) != "") {
+	if t.inbound != "" && t.outbound != "" && t.path == "" && (t.translate || pathProtocol(routePath(r)) != "") {
 		// A translated request reaches the target protocol's own endpoint: the
 		// client's path names the inbound protocol, so forwarding it verbatim
 		// would address the wrong wire. A same-protocol request on one of the

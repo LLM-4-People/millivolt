@@ -38,7 +38,10 @@ translated. A translated request addresses the outbound protocol's canonical
 endpoint (`/v1/chat/completions`, `/v1/responses` or `/v1/messages`) instead of
 forwarding the client's path, unless `X-Proxy-Path` overrides that endpoint. A same-protocol request on one of those three
 endpoints normalizes to the same canonical spelling, while one on any other path
-keeps the path the client chose.
+keeps the path the client chose. The path is matched in its escaped spelling, so
+an encoded spelling of a known route (for example `/v1%2Fchat%2Fcompletions` or
+`/v1%2Fmodels`) is an unknown path: it is relayed unchanged and is never
+normalized, translated or treated as model discovery.
 
 Forwarding a body is not the same as understanding every field in it. The normal
 relay does not rewrite an unfamiliar JSON shape just to observe it, but usage,
