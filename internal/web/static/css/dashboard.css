@@ -1334,7 +1334,14 @@
      below a 14px image (`|-` not `| /name`). */
   .ent { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; line-height: 1; min-width: 0; vertical-align: middle; }
   .ent-ic { color: var(--ent); font-size: 11px; line-height: 1; flex-shrink: 0; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; text-align: center; }
-  .ent-fav { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; }
+  /* A provider favicon can be a dark plate (OpenDesign's is near-black), which
+     all but disappears against a dark surface on its own. The 1px padding and
+     its text-derived hairline ring give every icon a visible tile edge without
+     changing the 14px layout box, so the band above still holds. The ring is a
+     --text mix, not a fixed color, so it inverts with the mode and survives
+     every palette. It sits inside the box because a parent clip (td and
+     .req-model both set overflow: hidden) would cut an outer outline. */
+  .ent-fav { width: 14px; height: 14px; padding: 1px; box-sizing: border-box; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent); }
   .ent-lb { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; height: 14px; display: inline-flex; align-items: center; }
   a.ent:hover .ent-lb { color: var(--ent); }
   /* entityPivot: an entityBadge wrapped in a navigable link. */
