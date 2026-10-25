@@ -327,7 +327,8 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		restart = appendRestartRequired(restart, "db_path")
 	}
 	// ok is the operator action plane's shared success marker (the dashboard
-	// trusts the HTTP status; the restore tests pin it, tests/_go/cmd/proxy/backup.go).
+	// trusts the HTTP status; the restore tests pin it,
+	// tests/_go/cmd/proxy/backup_restore_stage.go).
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "restart_required": restart})
 }
@@ -962,7 +963,8 @@ func restoreInspectLiveConfig(path string) (*config.Config, error) {
 
 func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive) {
 	// ok is the operator action plane's shared success marker (the dashboard
-	// trusts the HTTP status; the inspect tests pin it, tests/_go/cmd/proxy/backup.go).
+	// trusts the HTTP status; the inspect tests pin it,
+	// tests/_go/cmd/proxy/backup_inspect.go).
 	out := map[string]any{
 		"ok":      true,
 		"created": arch.Created.UTC().Format(time.RFC3339),
