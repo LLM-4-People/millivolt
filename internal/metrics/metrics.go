@@ -299,11 +299,17 @@ type Record struct {
 	ReqResponseFormat string `json:"req_response_format,omitempty"` // text / json_object / json_schema
 	ReqSeed           *int64 `json:"req_seed,omitempty"`
 	ReqParallelTools  *bool  `json:"req_parallel_tools,omitempty"`
-	ReqLogitBias      int    `json:"req_logit_bias,omitempty"`    // number of biased token ids
-	ReqTopLogprobs    *int   `json:"req_top_logprobs,omitempty"`  // top-logprobs count requested
-	ReqServiceTier    string `json:"req_service_tier,omitempty"`  // auto / flex / priority ...
-	ReqThinking       bool   `json:"req_thinking,omitempty"`      // anthropic extended-thinking requested
-	ReqMetadataKeys   int    `json:"req_metadata_keys,omitempty"` // number of metadata entries
+	ReqLogitBias      int    `json:"req_logit_bias,omitempty"`   // number of biased token ids
+	ReqTopLogprobs    *int   `json:"req_top_logprobs,omitempty"` // top-logprobs count requested
+	// ReqServiceTier carries the client's literal service_tier when present,
+	// otherwise its speed value (auto / flex / priority / fast ...). It is the
+	// request's own spelling before any translation: the codec's auto+fast to
+	// fast mapping applies only to a translated target body, and duplicating it
+	// here would make a native request disagree with the bytes the upstream
+	// received.
+	ReqServiceTier  string `json:"req_service_tier,omitempty"`
+	ReqThinking     bool   `json:"req_thinking,omitempty"`      // anthropic extended-thinking requested
+	ReqMetadataKeys int    `json:"req_metadata_keys,omitempty"` // number of metadata entries
 	// ReqReasoningEffort / ReqVerbosity are OpenAI request-config tokens
 	// (reasoning_effort, or reasoning.effort; verbosity). Shape only.
 	ReqReasoningEffort string `json:"req_reasoning_effort,omitempty"`

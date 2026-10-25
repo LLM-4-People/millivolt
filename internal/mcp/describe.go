@@ -473,7 +473,7 @@ var tableDocs = []TableDoc{
 			{Name: "req_top_logprobs", Type: "INTEGER", Meaning: "requested top_logprobs; req_param_presence distinguishes unset from an explicit 0"},
 			{Name: "req_logprobs", Type: "INTEGER", Meaning: "whether logprobs were requested"},
 			{Name: "req_response_format", Type: "TEXT", Meaning: "requested response format, for example json_object"},
-			{Name: "req_service_tier", Type: "TEXT", Meaning: "requested service tier"},
+			{Name: "req_service_tier", Type: "TEXT", Meaning: "client's literal requested service tier when present, otherwise its speed value; pre-translation, so a native body and its record agree"},
 			{Name: "req_thinking", Type: "INTEGER", Meaning: "whether a reasoning/thinking budget was requested"},
 			{Name: "req_reasoning_effort", Type: "TEXT", Meaning: "requested reasoning effort level"},
 			{Name: "req_verbosity", Type: "TEXT", Meaning: "requested verbosity level"},
