@@ -21,4 +21,9 @@ module.exports = [
   require('./sections/operator_menus'),
   require('./sections/settings_search'),
   require('./sections/live_invariants'),
+  require('./sections/reload_paths'),
+  require('./sections/restart_bootstrap'),
+  require('./sections/purge_lifecycle'),
+  require('./sections/delegated_actions'),
+  require('./sections/operator_unlock'),
 ];
