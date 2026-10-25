@@ -3,12 +3,25 @@ package storage
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+)
+
+const (
+	// The reclamation contract is a file-layout property, not a scale test:
+	// six superseded composites must leave a material share of the file.
+	// Four thousand rows keep the before/after ratio far from the 25%
+	// threshold while seeding in a fraction of the old production corpus.
+	// The snapshot cutoffs are fractions of this corpus so every read path
+	// still sees rows on both sides of each cursor.
+	reclaimCorpusRows = 4_000
+	reclaimCursorRow  = reclaimCorpusRows / 2
+	reclaimBeforeRow  = reclaimCorpusRows * 3 / 4
 )
 
 // reclaimSnapshot captures the durable read paths whose results must survive
@@ -21,9 +34,12 @@ type reclaimSnapshot struct {
 	exports    map[string]string
 }
 
-func captureReclaimSnapshot(t *testing.T, s *Store) reclaimSnapshot {
+func captureReclaimSnapshot(t *testing.T, s *Store, cursorRow, beforeRow int) reclaimSnapshot {
 	t.Helper()
-	cursor := &LogCursor{StartMs: queryBeforeFixtureStartMs + 10_000, ID: "row-010000"}
+	cursor := &LogCursor{
+		StartMs: queryBeforeFixtureStartMs + int64(cursorRow),
+		ID:      fmt.Sprintf("row-%06d", cursorRow),
+	}
 	fields := []struct {
 		field LogField
 		value string
@@ -51,7 +67,7 @@ func captureReclaimSnapshot(t *testing.T, s *Store) reclaimSnapshot {
 			snapshot.records = append(snapshot.records, records...)
 		}
 	}
-	beforeMs := int64(queryBeforeFixtureStartMs + 15_000)
+	beforeMs := int64(queryBeforeFixtureStartMs + int64(beforeRow))
 	for name, filter := range map[string]PurgeFilter{
 		"provider":            {Provider: "provider-03"},
 		"model":               {Model: "model-03"},
@@ -74,6 +90,20 @@ func captureReclaimSnapshot(t *testing.T, s *Store) reclaimSnapshot {
 	return snapshot
 }
 
+// seedReclaimCorpus owns the reclaim fixture shape: a legacy-shaped request
+// corpus plus the snapshot every durable read path must preserve across the
+// migration. Tests that only assert file layout still get the full read-path
+// snapshot because the migration must never trade disk for different bytes.
+func seedReclaimCorpus(t *testing.T, s *Store) reclaimSnapshot {
+	t.Helper()
+	seedQueryBeforeRows(t, s, reclaimCorpusRows, 10, 10)
+	snapshot := captureReclaimSnapshot(t, s, reclaimCursorRow, reclaimBeforeRow)
+	if got := snapshot.counts["all"]; got != reclaimCorpusRows {
+		t.Fatalf("fixture rows = %d, want %d", got, reclaimCorpusRows)
+	}
+	return snapshot
+}
+
 func sqlitePragmaInt(t *testing.T, db *sql.DB, name string) int {
 	t.Helper()
 	var value int
@@ -89,17 +119,17 @@ func sqlitePragmaInt(t *testing.T, db *sql.DB, name string) int {
 // every read path returns identical bytes, the freelist is empty and both page
 // count and file size shrink. A second open must not vacuum again, which is
 // proved by planting a non-empty freelist and observing that it survives.
+//
+// This is a file-layout contract, not a Go memory-model test: it starts no
+// goroutines and shares no mutable state, so the plain pass observes everything
+// it asserts. Its canonical race classification belongs to tests/race_scope.py.
 func TestMigrateReclaimsFreedIndexPagesOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reclaim.db")
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedQueryBeforeRows(t, s, 20_000, 10, 10)
-	want := captureReclaimSnapshot(t, s)
-	if want.counts["all"] != 20_000 {
-		t.Fatalf("fixture rows = %d, want 20000", want.counts["all"])
-	}
+	want := seedReclaimCorpus(t, s)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +159,7 @@ func TestMigrateReclaimsFreedIndexPagesOnce(t *testing.T) {
 		t.Fatalf("open legacy database: %v", err)
 	}
 	assertRequestLogIndexOwnership(t, s.rdb)
-	if got := captureReclaimSnapshot(t, s); !reflect.DeepEqual(got, want) {
+	if got := captureReclaimSnapshot(t, s, reclaimCursorRow, reclaimBeforeRow); !reflect.DeepEqual(got, want) {
 		t.Fatalf("query, purge-preview or export results changed across reclaim")
 	}
 	if got := sqlitePragmaInt(t, s.rdb, "freelist_count"); got != 0 {
@@ -156,6 +186,20 @@ func TestMigrateReclaimsFreedIndexPagesOnce(t *testing.T) {
 		t.Fatalf("journal_size_limit after reclaim = %d, want 67108864", got)
 	}
 	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// VACUUM's write-ahead log entries may be at most a few hundred pages on
+	// this smaller corpus, below SQLite's automatic checkpoint threshold. A
+	// checkpoint materializes the vacuumed page count in the database file,
+	// which is the disk effect this assertion owns.
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(t.Context(), "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	afterInfo, err := os.Stat(path)
