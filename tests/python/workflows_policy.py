@@ -126,6 +126,28 @@ def check_workflow_files(errors: list[str]) -> None:
                 errors.append("workflows self-check: dropping Pages build read must fail")
 
 
+# CANCEL_EXPRESSION is the exact top-level policy: only superseded PR and
+# testing runs are cancelled. Main, tag and merged-PR release runs always
+# finish. Pinning the whole normalized expression rejects an appended branch
+# that a substring check accepted.
+CANCEL_EXPRESSION = ("(github.event_name == 'pull_request' && github.event.action != 'closed') || "
+                     "github.ref == 'refs/heads/testing'")
+
+
+def cancel_expression_errors(concurrency) -> list[str]:
+    """Return the top-level cancellation violations for one concurrency block."""
+    if not isinstance(concurrency, dict) or "cancel-in-progress" not in concurrency:
+        return ["check.yml: top-level concurrency must declare cancel-in-progress"]
+    value = str(concurrency.get("cancel-in-progress", "")).strip()
+    if value.startswith("${{") and value.endswith("}}"):
+        value = value[3:-2]
+    normalized = " ".join(value.split())
+    if normalized != CANCEL_EXPRESSION:
+        return ["check.yml: top-level cancel-in-progress must be exactly ${{ "
+                + CANCEL_EXPRESSION + " }}; got " + repr(normalized)]
+    return []
+
+
 def check_triggers(checks: dict, errors: list[str]) -> None:
     on = trigger(checks) or {}
     push = on.get("push") or {}
@@ -149,11 +171,14 @@ def check_triggers(checks: dict, errors: list[str]) -> None:
         if path not in ignored:
             errors.append(f"check.yml: docs/site path is missing from paths-ignore: {path}")
     concurrency = checks.get("concurrency") or {}
-    cancel = str(concurrency.get("cancel-in-progress", ""))
-    if "pull_request" not in cancel or "refs/heads/testing" not in cancel:
-        errors.append("check.yml: cancel-in-progress must be limited to PRs and testing")
-    if "github.event.action != 'closed'" not in cancel:
-        errors.append("check.yml: a merged-PR release run must not be cancelled")
+    errors.extend(cancel_expression_errors(concurrency))
+    # Mutation self-check: appending a main or tag branch kept every old
+    # substring true, so a release could be cancelled by the next push.
+    for branch in ("|| github.ref == 'refs/heads/main'",
+                   "|| startsWith(github.ref, 'refs/tags/')"):
+        mutated = {"cancel-in-progress": "${{ " + CANCEL_EXPRESSION + " " + branch + " }}"}
+        if not cancel_expression_errors(mutated):
+            errors.append(f"workflows self-check: appending {branch} to cancel-in-progress must fail")
 
 
 def check_docs_site(checks: dict, errors: list[str]) -> None:
