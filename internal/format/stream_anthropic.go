@@ -609,6 +609,11 @@ type AnthropicStreamEncoder struct {
 	finishSent bool
 	usage      ir.Usage
 	doneSent   bool
+	// refusalSeen and toolSeen record the content that owns the Anthropic
+	// terminal when the canonical finish reason maps to end_turn. A refusal
+	// wins when both appear.
+	refusalSeen bool
+	toolSeen    bool
 }
 
 // NewAnthropicStreamEncoder builds an encoder over one client response writer.
@@ -692,6 +697,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			initial := ev.Block.Text
 			if ev.Block.Type == ir.BlockRefusal {
 				initial = ev.Block.Refusal
+				if initial != "" {
+					e.refusalSeen = true
+				}
 			}
 			if initial != "" {
 				return e.emitTextDelta(ev.Index, initial)
@@ -709,6 +717,7 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			if err := validateAnthropicToolCall(tc); err != nil {
 				return err
 			}
+			e.toolSeen = true
 			e.open[ev.Index] = true
 			if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
 				e.blockArgs[ev.Index] = tc.Arguments
@@ -762,6 +771,9 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		}
 		switch {
 		case ev.Delta.Text != "":
+			if e.blockTypes[ev.Index] == ir.BlockRefusal {
+				e.refusalSeen = true
+			}
 			return e.emitTextDelta(ev.Index, ev.Delta.Text)
 		case ev.Delta.Reasoning != "":
 			return e.emitReasoningDelta(ev.Index, ev.Delta.Reasoning)
@@ -802,14 +814,17 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			}
 			e.usage = *ev.Usage
 		}
-		stopReason := "end_turn"
+		reason := ir.FinishStop
 		var stopSequence any
 		if ev.Finish != nil {
-			stopReason = anthropicStopReason(ev.Finish.Reason)
+			reason = ev.Finish.Reason
 			if ev.Finish.StopSequence != "" {
 				stopSequence = ev.Finish.StopSequence
 			}
 		}
+		// A stream has no warning channel, so the content-derived terminal is
+		// reported only through stop_reason itself.
+		stopReason, _ := anthropicContentTerminal(reason, e.refusalSeen, e.toolSeen)
 		e.finishSent = true
 		return e.emit("message_delta", map[string]any{
 			"type":  "message_delta",
@@ -819,9 +834,10 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 	case ir.EventDone:
 		if !e.finishSent {
 			e.finishSent = true
+			stopReason, _ := anthropicContentTerminal(ir.FinishStop, e.refusalSeen, e.toolSeen)
 			if err := e.emit("message_delta", map[string]any{
 				"type":  "message_delta",
-				"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
+				"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
 				"usage": anthropicDeltaUsage(e.usage),
 			}); err != nil {
 				return err

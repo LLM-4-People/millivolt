@@ -107,6 +107,11 @@ target cannot consume them:
   finish reason maps to `response.incomplete` for Responses and to a clean
   `message_delta` with `end_turn` for Anthropic; both are accepted limits with
   no reproduced client failure.
+- An Anthropic target derives its terminal from content when the canonical
+  reason maps to `end_turn`: a non-empty refusal becomes `refusal`, a tool call
+  becomes `tool_use`, and a refusal wins when both appear. The non-streaming
+  response reports the approximation in `X-Proxy-Warnings`; a stream has no
+  warning channel.
 - A canonical output block with no Responses content part, such as a file or
   audio block carried from Anthropic, is dropped from the output with one
   `output.<type>` warning. Text around the dropped block is preserved.

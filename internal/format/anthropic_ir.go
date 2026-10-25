@@ -1847,13 +1847,19 @@ func EncodeAnthropicResponse(resp *ir.Response) ([]byte, error) {
 	blocks := encodeAnthropicBlocks(encodeAnthropicResponseBlocks(resp.Blocks, &resp.Warnings), ir.RoleAssistant, &resp.Warnings)
 	serviceTier, speed, tierWarns := anthropicResponseUsageTier(resp.ServiceTier)
 	resp.Warnings = append(resp.Warnings, tierWarns...)
+	stopReason, terminalApproximated := anthropicContentTerminal(
+		resp.Finish, hasRefusalBlock(resp.Blocks), hasToolCallBlock(resp.Blocks))
+	if terminalApproximated {
+		resp.Warnings.Add(ir.WarningApproximated, "stop_reason",
+			fmt.Sprintf("finish reason %q is represented as Anthropic stop reason %q", string(resp.Finish), stopReason))
+	}
 	out := map[string]any{
 		"id":            resp.ID,
 		"type":          "message",
 		"role":          "assistant",
 		"model":         resp.Model,
 		"content":       blocks,
-		"stop_reason":   anthropicStopReason(resp.Finish),
+		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"stop_details":  nil,
 		"container":     nil,
@@ -1948,6 +1954,50 @@ func encodeAnthropicResponseBlocks(blocks []ir.Block, warns *ir.Warnings) []ir.B
 		filtered = append(filtered, b)
 	}
 	return filtered
+}
+
+// hasRefusalBlock reports whether the response content carries a refusal the
+// Anthropic encoder represents. An empty refusal is dropped as invalid
+// content, so it does not imply a refusal terminal.
+func hasRefusalBlock(blocks []ir.Block) bool {
+	for _, b := range blocks {
+		if b.Type == ir.BlockRefusal && b.Refusal != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasToolCallBlock reports whether the response content carries a representable
+// tool call.
+func hasToolCallBlock(blocks []ir.Block) bool {
+	for _, b := range blocks {
+		if b.Type == ir.BlockToolCall && b.ToolCall != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicContentTerminal derives the Anthropic stop reason from the response
+// content when the mapped reason is end_turn. Anthropic defines refusal and
+// tool_use as distinct terminals and clients branch on the field: a tool call
+// under end_turn is never executed, and a refusal under end_turn reads as a
+// normal answer. A refusal wins when both appear. The bool reports that the
+// stored reason was approximated, for the non-stream warning channel; a
+// streaming response has no header to report it in.
+func anthropicContentTerminal(finish ir.FinishReason, refusal, toolCall bool) (string, bool) {
+	reason := anthropicStopReason(finish)
+	if reason != "end_turn" {
+		return reason, false
+	}
+	if refusal {
+		return "refusal", true
+	}
+	if toolCall {
+		return "tool_use", true
+	}
+	return reason, false
 }
 
 func anthropicStopReason(r ir.FinishReason) string {
