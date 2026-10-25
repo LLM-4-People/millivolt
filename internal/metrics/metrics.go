@@ -21,10 +21,14 @@ type Usage struct {
 	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
-// RetryAttempt is one transparently-absorbed upstream response - a 429 or 5xx
-// the proxy retried before returning a final answer to the client. It carries
-// the status and the provider's error detail so the proxy's audit log shows
-// every failure even though the client only ever saw the successful outcome.
+// RetryAttempt is normally one transparently-absorbed upstream response - a
+// 429 or 5xx the proxy retried before returning a final answer to the client.
+// An InBand entry is the exception: an upstream 429 whose status line a
+// committed keepalive 200 could not relay, retained so the health predicates
+// see the real upstream status. Either way it carries the status and the
+// provider's error detail so the proxy's audit log shows every upstream
+// failure even though the client saw only the successful status or an in-band
+// replacement.
 //
 // The upstream-response metadata fields mirror the record's final-response
 // capture exactly (same names, same meaning, same JSON tags): every attempt,
