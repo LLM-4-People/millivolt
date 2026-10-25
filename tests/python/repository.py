@@ -310,7 +310,7 @@ class RepositoryChecks(unittest.TestCase):
         """Corpus canaries: the regions the regex-blind lexer lost to quote
         desync must be scanned. fillSettingsLive is the first region the
         settings_backup.js backup-download regex shadows; reqIdentityText
-        (log_rows.js) and fillDrawerDebug (log.js) are the request-log
+        (log_rows.js) and fillDrawerDebug (log_debug.js) are the request-log
         canaries."""
         settings = (check.ROOT / "internal/web/static/js/settings_backup.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(settings)
@@ -324,7 +324,7 @@ class RepositoryChecks(unittest.TestCase):
         sep = log_rows.index(" · ", expr)
         self.assertTrue(any(s <= sep and sep + 3 <= e for s, e in spans),
                         "reqIdentityText template body is not scanned")
-        log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")
+        log = (check.ROOT / "internal/web/static/js/log_debug.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(log)
         for needle in ("<h4>Request body", "<h4>Response body"):
             start = log.index(needle)
