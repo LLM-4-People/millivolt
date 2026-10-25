@@ -304,10 +304,8 @@ func TestStaticCompressionKeepsSourceIdentity(t *testing.T) {
 
 type staticBenchmarkWriter struct{ header http.Header }
 
-func (w staticBenchmarkWriter) Header() http.Header { return w.header }
-
-func (w staticBenchmarkWriter) WriteHeader(int) {}
-
+func (w staticBenchmarkWriter) Header() http.Header         { return w.header }
+func (w staticBenchmarkWriter) WriteHeader(int)             {}
 func (w staticBenchmarkWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // Fixed vendored bytes keep the delivery benchmark comparable while app JS
