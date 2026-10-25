@@ -1302,6 +1302,21 @@ func TestErrorEntriesSemantics(t *testing.T) {
 			t.Fatalf("ents[%d].typ = %q, want %q (%v)", i, ents[i].typ, wantType, ents)
 		}
 	}
+	// An in-band attempt entry exists for the health predicates, not for error
+	// disclosure: the final error_type already owns the failure, so it never
+	// adds a duplicate entry. The synthetic in-band 5xx shape makes removing
+	// the InBand guard fail here rather than pass through the 429 status skip.
+	r = &metrics.Record{StatusCode: 200, ErrorType: "server_error", Start: time.Now(),
+		Attempts: []metrics.RetryAttempt{
+			{StatusCode: 502, ErrorType: "upstream"},
+			{StatusCode: 429, InBand: true},
+			{StatusCode: 500, InBand: true},
+		}}
+	ents = errorEntries(r)
+	if len(ents) != 2 || ents[0].absorbed || ents[0].typ != "server_error" ||
+		!ents[1].absorbed || ents[1].typ != "upstream" {
+		t.Fatalf("in-band entries added an error disclosure → %v", ents)
+	}
 	// 5xx final status.
 	r = &metrics.Record{StatusCode: 500, Start: time.Now()}
 	ents = errorEntries(r)

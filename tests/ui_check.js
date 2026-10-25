@@ -9607,7 +9607,9 @@ async function main() {
       // in-band error does (the client aborted around a real failure), an
       // in-band provider error on a 200 does, and
       // absorbed attempts keep genuine failures (5xx, typed, 4xx) while
-      // skipping flow control and bare non-failures. errorKey mirrors the Go
+      // skipping flow control and bare non-failures. In-band attempt entries
+      // are health evidence, never a second disclosure for the final failure,
+      // including the synthetic in-band 5xx shape. errorKey mirrors the Go
       // type|code|msg identity the explorer error dimension filters by.
       const entsRec = {
         status_code: 200, error_code: '', error_msg: '',
@@ -9617,6 +9619,8 @@ async function main() {
           {status_code: 0, error_type: 'dial_failed'},
           {status_code: 401},
           {status_code: 302},
+          {status_code: 429, in_band: true},
+          {status_code: 500, in_band: true},
         ],
         start: '2026-09-14T00:00:00Z',
       };
