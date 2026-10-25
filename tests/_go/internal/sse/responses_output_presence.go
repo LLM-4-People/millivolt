@@ -5,8 +5,6 @@ package sse
 // the empty-completion failure.
 
 import (
-	"bytes"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -133,37 +131,54 @@ func TestResponsesReasoningEchoIsNotPresence(t *testing.T) {
 	}
 }
 
-// prettyDataLines formats one pretty-printed JSON document as SSE data lines
-// followed by the event boundary.
-func prettyDataLines(t *testing.T, compact string) []string {
-	t.Helper()
-	var indented bytes.Buffer
-	if err := json.Indent(&indented, []byte(compact), "", "  "); err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(indented.String(), "\n")
-	for i := range lines {
-		lines[i] = "data: " + lines[i]
+// prettyDataLines formats one hand-written pretty-printed JSON document as SSE
+// data lines followed by the event boundary.
+func prettyDataLines(payload string) []string {
+	lines := strings.Split(payload, "\n")
+	for i, line := range lines {
+		if line == "" {
+			continue
+		}
+		lines[i] = "data: " + line
 	}
 	return append(lines, "")
 }
 
+// prettyReasoningEchoStream is the official reasoning echo in a pretty-printed
+// envelope. The echo object stays compact on one data line: the generic
+// reasoning scan is per-line, so splitting the object would hide the bug this
+// fixture must expose.
+const prettyReasoningEchoStream = `{
+  "type": "response.created",
+  "response": {
+    "id": "r1",
+    "status": "in_progress",
+    "reasoning": {"effort": null, "summary": null}
+  }
+}
+
+{
+  "type": "response.completed",
+  "response": {
+    "id": "r1",
+    "status": "completed",
+    "reasoning": {"effort": null, "summary": null},
+    "output": []
+  }
+}`
+
 // TestResponsesReasoningEchoPrettyPrintedSeeded pins F1 on the production
 // shape: the relay seeds both analyzers with SetWire before any frame arrives,
-// and a pretty-printed official echo must still record no output presence. If
-// the wire seed is removed, the multi-line document is not recognized and the
-// echo is counted as TTFT, reasoning and a chunk.
+// and a pretty-printed official echo must still record no output presence.
+// Without the F1 guard the compact echo line reaches keys.reasoningStart; if
+// the production seed is removed, the per-line type is empty and the same scan
+// records the echo as reasoning, TTFT and a chunk.
 func TestResponsesReasoningEchoPrettyPrintedSeeded(t *testing.T) {
 	var a Analyzer
 	a.SetWire(ir.Responses)
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	for _, payload := range []string{
-		`{"type":"response.created","response":{"id":"r1","status":"in_progress","reasoning":{"effort":null,"summary":null}}}`,
-		`{"type":"response.completed","response":{"id":"r1","status":"completed","reasoning":{"effort":null,"summary":null},"output":[]}}`,
-	} {
-		for _, line := range prettyDataLines(t, payload) {
-			a.Feed([]byte(line), now)
-		}
+	for _, line := range prettyDataLines(prettyReasoningEchoStream) {
+		a.Feed([]byte(line), now)
 	}
 	var rec metrics.Record
 	a.Fill(&rec)
