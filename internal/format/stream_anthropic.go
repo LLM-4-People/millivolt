@@ -564,7 +564,10 @@ func anthropicStreamBlock(b anthropicWireBlock) (ir.Block, bool) {
 		return ir.Block{Type: ir.BlockText, Text: b.Text}, true
 	case "tool_use":
 		args := b.Input
-		if len(args) == 0 || string(args) == "null" {
+		// Every empty spelling is the same value. One canonical "{}" keeps the
+		// target from prefixing a later delta with "{ }" or announcing an
+		// empty object the client must parse differently.
+		if emptyToolInputObject(args) {
 			args = json.RawMessage(`{}`)
 		}
 		return ir.Block{Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{

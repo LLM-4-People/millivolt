@@ -50,10 +50,11 @@ data: {"type":"message_stop"}
 
 func TestAnthropicStreamToolInputShapes(t *testing.T) {
 	cases := []struct {
-		name   string
-		input  string
-		deltas []string
-		want   string
+		name         string
+		input        string
+		deltas       []string
+		want         string
+		wantByTarget map[ir.Protocol]string
 	}{
 		{
 			name:  "start only",
@@ -82,7 +83,11 @@ func TestAnthropicStreamToolInputShapes(t *testing.T) {
 			name:   "whitespace empty start with empty delta",
 			input:  `{ }`,
 			deltas: []string{``},
-			want:   `{ }`,
+			want:   `{}`,
+			// The Anthropic encoder always announces input {} at
+			// content_block_start, so its canonical empty value is that start
+			// payload and no input_json_delta follows.
+			wantByTarget: map[ir.Protocol]string{ir.Anthropic: ""},
 		},
 		{
 			name:   "non-empty start with empty delta",
@@ -113,12 +118,91 @@ data: {"type":"message_stop"}
 					if err := TranslateStreamBetween(target, ir.Anthropic, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
 						t.Fatalf("TranslateStreamBetween: %v", err)
 					}
+					want := tc.want
+					if targetWant, ok := tc.wantByTarget[target]; ok {
+						want = targetWant
+					}
 					calls := streamedToolCalls(t, target, buf.String())
-					if len(calls) != 1 || calls[0].name != "lookup" || calls[0].args.String() != tc.want {
-						t.Fatalf("calls = %+v, want lookup/%s: %s", calls, tc.want, buf.String())
+					if len(calls) != 1 || calls[0].name != "lookup" || calls[0].args.String() != want {
+						t.Fatalf("calls = %+v, want lookup/%s: %s", calls, want, buf.String())
 					}
 				})
 			}
 		})
+	}
+}
+
+// TestAnthropicWhitespaceToolInputCanonical is the round 12 C3 regression:
+// every empty tool-input spelling is the same value, so a start of "{ }" must
+// not prefix a later delta with those characters on the target wires.
+func TestAnthropicWhitespaceToolInputCanonical(t *testing.T) {
+	source := strings.Replace(anthropicStreamStart, "%s", `{ }`, 1) + `event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":1}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	var out strings.Builder
+	if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &out, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	wire := out.String()
+	if strings.Contains(wire, "{ }") {
+		t.Fatalf("target wire kept the whitespace spelling: %s", wire)
+	}
+	var doneArgs, itemArgs, terminalArgs string
+	for _, frame := range parseWireFrames(t, wire) {
+		switch frame.event {
+		case "response.function_call_arguments.done":
+			doneArgs, _ = frame.data["arguments"].(string)
+		case "response.output_item.done":
+			item, _ := frame.data["item"].(map[string]any)
+			itemArgs, _ = item["arguments"].(string)
+		case "response.completed":
+			response, _ := frame.data["response"].(map[string]any)
+			output, _ := response["output"].([]any)
+			for _, raw := range output {
+				item, _ := raw.(map[string]any)
+				if item["type"] == "function_call" {
+					terminalArgs, _ = item["arguments"].(string)
+				}
+			}
+		}
+	}
+	for name, got := range map[string]string{"arguments.done": doneArgs, "output_item.done": itemArgs, "completed": terminalArgs} {
+		if got != `{"a":1}` {
+			t.Fatalf("%s arguments = %q, want {\"a\":1}: %s", name, got, wire)
+		}
+	}
+
+	// An empty delta leaves the Anthropic start input as the one canonical
+	// empty object and emits no input_json_delta.
+	empty := strings.Replace(anthropicStreamStart, "%s", `{ }`, 1) + `event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":1}}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	var emptyOut strings.Builder
+	if err := TranslateStreamBetween(ir.Anthropic, ir.Anthropic, &emptyOut, strings.NewReader(empty), nil, nil, StreamOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	emptyWire := emptyOut.String()
+	if !strings.Contains(emptyWire, `"input":{}`) {
+		t.Fatalf("Anthropic start input is not the canonical empty object: %s", emptyWire)
+	}
+	if strings.Contains(emptyWire, `"input_json_delta"`) {
+		t.Fatalf("empty tool input emitted a delta: %s", emptyWire)
 	}
 }
