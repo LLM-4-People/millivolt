@@ -10,4 +10,8 @@ module.exports = [
   require('./sections/archive_pages'),
   require('./sections/archive_scale'),
   require('./sections/chart_buckets'),
+  require('./sections/chart_render'),
+  require('./sections/chart_e2e'),
+  require('./sections/restart_providers'),
+  require('./sections/mcp_category'),
 ];
