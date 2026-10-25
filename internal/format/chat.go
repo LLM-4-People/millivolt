@@ -73,15 +73,20 @@ type chatWireRequest struct {
 }
 
 type chatWireMessage struct {
-	Role             string               `json:"role"`
-	Content          json.RawMessage      `json:"content"`
-	Name             string               `json:"name"`
-	ToolCalls        []chatWireToolCall   `json:"tool_calls"`
-	ToolCallID       string               `json:"tool_call_id"`
-	Refusal          *string              `json:"refusal"`
-	FunctionCall     json.RawMessage      `json:"function_call"`
-	ReasoningContent string               `json:"reasoning_content"`
-	Reasoning        string               `json:"reasoning"`
+	Role             string             `json:"role"`
+	Content          json.RawMessage    `json:"content"`
+	Name             string             `json:"name"`
+	ToolCalls        []chatWireToolCall `json:"tool_calls"`
+	ToolCallID       string             `json:"tool_call_id"`
+	Refusal          *string            `json:"refusal"`
+	FunctionCall     json.RawMessage    `json:"function_call"`
+	ReasoningContent string             `json:"reasoning_content"`
+	Reasoning        string             `json:"reasoning"`
+	// ReasoningText and ReasoningDetails are provider-specific Chat
+	// compatibility spellings. Only the explicit plain-text member is
+	// representable; structured details are reported as dropped.
+	ReasoningText    string               `json:"reasoning_text"`
+	ReasoningDetails json.RawMessage      `json:"reasoning_details"`
 	Annotations      []chatWireAnnotation `json:"annotations"`
 	// Audio replays a prior assistant audio output. The canonical model has
 	// no audio-output identity, so a present value is reported.
@@ -627,12 +632,15 @@ func decodeChatMessages(in []chatWireMessage, ids *requestToolIDs) ([]ir.Message
 
 // reasoningText returns the provider's hidden chain-of-thought spelling.
 // reasoning_content is the Chat-compatible convention; some gateways use
-// reasoning instead.
+// reasoning instead, and a compatibility fallback accepts reasoning_text.
 func (m chatWireMessage) reasoningText() string {
 	if m.ReasoningContent != "" {
 		return m.ReasoningContent
 	}
-	return m.Reasoning
+	if m.Reasoning != "" {
+		return m.Reasoning
+	}
+	return m.ReasoningText
 }
 
 // rawPresent reports whether a JSON field was supplied with a non-null value.
@@ -1967,6 +1975,13 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		blocks = append([]ir.Block{{
 			Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
 		}}, blocks...)
+	}
+	if rawPresent(choice.Message.ReasoningDetails) {
+		// Structured detail items are provider-specific and no documented
+		// Chat field can carry them. Never synthesize reasoning text from
+		// their members; report the loss instead.
+		warns.AddOnce(ir.WarningDropped, "reasoning_details",
+			"structured reasoning details have no canonical text representation")
 	}
 	if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
 		blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *choice.Message.Refusal})
