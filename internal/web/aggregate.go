@@ -528,8 +528,13 @@ func (a *AggAPI) acquireRing() (*ringScratch, []*metrics.Record) {
 
 // releaseRing returns a scratch acquired by acquireRing. view must be the
 // slice acquireRing returned, not a filter of it: the scratch is reused from
-// its capacity, and the original backing array is the owner.
+// its capacity, and the original backing array is the owner. Every usable slot
+// is cleared first: after Buffer.Reset or RemoveWhere the ring no longer
+// references those records, so a pooled pointer would pin each record and its
+// strings until the scratch is reused or collected. Clearing one million slots
+// costs about 0.2 ms, against a fold that copies the same million pointers.
 func releaseRing(buf *ringScratch, view []*metrics.Record) {
+	clear(view[:cap(view)])
 	*buf = view[:0]
 	ringScratchPool.Put(buf)
 }

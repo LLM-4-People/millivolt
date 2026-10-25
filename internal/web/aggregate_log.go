@@ -37,8 +37,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 	enc.SetEscapeHTML(false)
 	err := enc.Encode(v)
 	if err != nil {
-		buf.Reset()
-		jsonBufferPool.Put(buf)
+		releaseJSONBuffer(buf)
 		log.Printf("agg encode: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(adminjson.ErrorBody("aggregate cannot be represented"))
@@ -52,7 +51,19 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if buf.Cap() > jsonBufferRetain {
 		return
 	}
+	releaseJSONBuffer(buf)
+}
+
+// releaseJSONBuffer clears the pooled encoder scratch before returning it.
+// Reset only shortens the slice; the backing array keeps the previous
+// dashboard JSON, including request previews and filter values, until the next
+// encode happens to overwrite it or the pool entry is collected. The retained
+// capacity is bounded by jsonBufferRetain, and clearing it costs one pass over
+// a buffer this request just wrote.
+func releaseJSONBuffer(buf *bytes.Buffer) {
 	buf.Reset()
+	scratch := buf.Bytes()
+	clear(scratch[:cap(scratch)])
 	jsonBufferPool.Put(buf)
 }
 
