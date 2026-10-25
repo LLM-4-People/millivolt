@@ -16,6 +16,7 @@ import (
 func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, policy responsesToolArgumentPolicy) ([]terminalEmission, error) {
 	var pending []terminalEmission
 	claimedTools := map[string]bool{}
+	clear(d.terminalItemClaims)
 	for i, item := range output {
 		typ := item.Type
 		if typ == "" && item.Role != "" {
@@ -112,7 +113,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				pending = append(pending, emission)
 			}
 		case "message":
-			if err := d.applyMessageContent(item, i, &pending); err != nil {
+			if err := d.applyMessageContent(item, i, &pending, true); err != nil {
 				return nil, err
 			}
 		case "reasoning":
@@ -146,7 +147,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 // arrived in output_item.done or in the terminal document. Open blocks receive
 // only the missing bytes; parts that never reached the target wire are queued
 // after every streamed block closes.
-func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, outputIndex int, pending *[]terminalEmission) error {
+func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, outputIndex int, pending *[]terminalEmission, claim bool) error {
 	if err := checkNativeIdentity("message id", item.ID); err != nil {
 		return err
 	}
@@ -154,7 +155,7 @@ func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, out
 	if err != nil {
 		return err
 	}
-	itemKey := d.terminalContentItemKey(item.ID, outputIndex)
+	itemKey := d.terminalContentItemKey(item.ID, outputIndex, claim)
 	var channels []partChannel
 	grouped := map[partChannel][]channelPart{}
 	for order, part := range parts {

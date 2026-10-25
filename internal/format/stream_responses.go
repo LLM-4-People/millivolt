@@ -168,6 +168,11 @@ type ResponsesStreamDecoder struct {
 	// An empty value marks an id used by more than one announcement of that
 	// kind, where identity alone cannot choose.
 	itemKeyByKindID map[string]string
+	// terminalItemClaims maps an announced message key to the terminal output
+	// position that first claimed it during the current terminal walk. A
+	// second terminal-only sibling that reuses the same provider id cannot
+	// borrow the first sibling's key and must be synthesized instead.
+	terminalItemClaims map[string]int
 	// reasoningKeys names the announced key of every reasoning item.
 	// itemBlock and keyByOutput are kind-agnostic position caches, so a
 	// reasoning event must consult this set before routing its bytes onto an
@@ -247,6 +252,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		partBlockByKey:       map[string]int{},
 		keyByOutput:          map[int]string{},
 		itemKeyByKindID:      map[string]string{},
+		terminalItemClaims:   map[string]int{},
 		reasoningKeys:        map[string]bool{},
 		keyByPart:            map[[2]int]string{},
 		terminalPendingByKey: map[string]int{},
@@ -947,7 +953,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			} else if sse.ResponsesToolCallItem(typ) {
 				d.sawToolCall = true
 			} else if typ == "message" {
-				if err := d.applyMessageContent(item, outputIndex, &d.terminalPending); err != nil {
+				if err := d.applyMessageContent(item, outputIndex, &d.terminalPending, false); err != nil {
 					return nil, err
 				}
 				// Some providers skip content_part.done; close any part block

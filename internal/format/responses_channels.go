@@ -307,25 +307,44 @@ func (d *ResponsesStreamDecoder) hasEmittedContent(itemKey string) bool {
 	return false
 }
 
+// claimTerminalItem reserves one announced message key for a terminal output
+// position. A second terminal-only sibling with the same provider id gets a
+// different position and synthesizes its own block instead of reusing the
+// first sibling's identity.
+func (d *ResponsesStreamDecoder) claimTerminalItem(key string, outputIndex int) bool {
+	if claimed, ok := d.terminalItemClaims[key]; ok && claimed != outputIndex {
+		return false
+	}
+	d.terminalItemClaims[key] = outputIndex
+	return true
+}
+
 // terminalContentItemKey resolves the aggregate item identity of a terminal
 // content item. The item id is stable across renumbering, so a unique
 // announced message identity wins over the terminal array position; when one
 // side has no id, the announced output position identifies the same logical
-// item.
-func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int) string {
+// item. A terminal scan claims the chosen identity: two terminal-only siblings
+// that repeat one announced id cannot both resolve to the first sibling's key.
+func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int, claim bool) string {
 	primary := streamItemKey(itemID, outputIndex)
 	if d.hasEmittedContent(primary) {
-		return primary
+		if !claim || d.claimTerminalItem(primary, outputIndex) {
+			return primary
+		}
 	}
 	announcedID := d.itemIDByOutput[outputIndex]
 	if itemID == "" || announcedID == "" || announcedID == itemID {
 		positional := streamItemKey(announcedID, outputIndex)
 		if d.hasEmittedContent(positional) {
-			return positional
+			if !claim || d.claimTerminalItem(positional, outputIndex) {
+				return positional
+			}
 		}
 	}
 	if announced, ok := d.announcedItemKey(itemKindMessage, itemID); ok {
-		return announced
+		if !claim || d.claimTerminalItem(announced, outputIndex) {
+			return announced
+		}
 	}
 	return primary
 }
