@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 )
 
@@ -260,4 +261,117 @@ func (s *Store) CountDebugSession(ctx context.Context, sessionID string) (int64,
 		`SELECT COUNT(*) FROM request_debug WHERE session_id = ? AND (expires_at = 0 OR expires_at > ?)`,
 		sessionID, time.Now().UnixMilli()).Scan(&n)
 	return n, err
+}
+
+// rowQuerier is the one-row read surface shared by sidecar byte accounting on
+// a raw pool, a transaction or a held connection.
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// debugByteTotalHook is a test seam (production nil). It can force the
+// compute-only sidecar read to fail so merge's commit-blocking accounting path
+// stays testable without a fault-injection driver.
+var debugByteTotalHook func() error
+
+// debugByteTotal is the compute-only sidecar read on the caller's
+// transaction/connection. It never publishes the counter: a transaction's
+// uncommitted state may still roll back, so only its committer may adjust the
+// counter afterwards.
+func debugByteTotal(ctx context.Context, q rowQuerier) (int64, error) {
+	if debugByteTotalHook != nil {
+		if err := debugByteTotalHook(); err != nil {
+			return 0, err
+		}
+	}
+	var n int64
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n)
+	return n, err
+}
+
+// installDebugBytes publishes a committed sidecar byte total. Callers must
+// establish that the backing transaction (if any) committed: publishing an
+// in-transaction total before commit lets a rollback silently bypass the cap.
+func (s *Store) installDebugBytes(n int64) {
+	s.debugMu.Lock()
+	s.debugBytes, s.debugSeeded = n, true
+	s.debugMu.Unlock()
+}
+
+// debugAfterCommitHook is a test seam (production nil). It runs after a
+// maintenance transaction commits and before its sidecar delta is published,
+// widening the exact window a concurrent capture must not lose.
+var debugAfterCommitHook func()
+
+// commitDebugDelta commits a maintenance transaction and applies its net
+// sidecar byte delta while holding debugMu. Holding the lock across commit
+// keeps a concurrent SaveDebugCapture (which needs the same writer connection)
+// from incrementing the counter between the committed state and its
+// publication, so the absolute publish bug becomes an exact delta applied to
+// the current value. When the counter is unseeded the delta is deliberately
+// dropped: the next save reseeds from durable rows and enforces the cap.
+func (s *Store) commitDebugDelta(tx *sql.Tx, delta int64) error {
+	s.debugMu.Lock()
+	defer s.debugMu.Unlock()
+	if err := tx.Commit(); err != nil {
+		// A COMMIT error leaves the outcome uncertain. Never keep enforcing
+		// the old absolute counter: the next save reseeds from durable rows.
+		s.debugSeeded = false
+		return err
+	}
+	if debugAfterCommitHook != nil {
+		debugAfterCommitHook()
+	}
+	if s.debugSeeded {
+		s.debugBytes = max(0, s.debugBytes+delta)
+	}
+	return nil
+}
+
+// seedDebugBytes initializes the sidecar byte counter from durable rows. The
+// writer connection is free at Open; a failure leaves it unseeded so
+// SaveDebugCapture retries before enforcing the cap.
+func (s *Store) seedDebugBytes(ctx context.Context) error {
+	n, err := debugByteTotal(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	s.installDebugBytes(n)
+	return nil
+}
+
+// expireDebugCapturesIfDue runs the expired-sidecar sweep from the writer
+// goroutine at a bounded cadence. Expired rows are already invisible to reads;
+// without the sweep their bytes stay on disk until the next restart. A sweep
+// stopped at its per-tick bound keeps the pending flag set so the next tick
+// continues immediately instead of waiting a full interval.
+func (s *Store) expireDebugCapturesIfDue() {
+	now := time.Now()
+	if !s.debugExpirePending.Load() && !s.lastDebugExpire.IsZero() && now.Sub(s.lastDebugExpire) < debugExpireInterval {
+		return
+	}
+	s.sweepDebugCaptures(now)
+}
+
+// continueDebugExpire drains the next bounded increment when the previous
+// sweep stopped at its per-tick limit. The writer's dedicated ticker calls it
+// even when the configured flush cadence is long.
+func (s *Store) continueDebugExpire() {
+	if !s.debugExpirePending.Load() {
+		return
+	}
+	s.sweepDebugCaptures(time.Now())
+}
+
+// sweepDebugCaptures runs exactly one bounded sweep on the writer goroutine and
+// records whether another increment remains.
+func (s *Store) sweepDebugCaptures(now time.Time) {
+	s.lastDebugExpire = now
+	ctx, cancel := s.withQueryTimeout(context.Background())
+	defer cancel()
+	_, more, err := s.expireDebugCaptures(ctx, now.UnixMilli(), debugExpireBatchesPerSweep)
+	s.debugExpirePending.Store(err == nil && more)
+	if err != nil && ctx.Err() == nil {
+		log.Printf("storage: expire debug captures: %v", err)
+	}
 }
