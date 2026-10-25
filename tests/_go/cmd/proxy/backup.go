@@ -810,6 +810,27 @@ func TestRestoreInspectMixedArchiveWithoutStore(t *testing.T) {
 	assertNoRestoreStaging(t, temp)
 }
 
+// TestStorelessInspectDocsMatchTheWire pins the user-visible store-less
+// preview contract to the route and restore prose: presence and decoded size
+// are reported, the member is not inspectable and has no request span, and a
+// database-selecting apply fails closed before staging.
+func TestStorelessInspectDocsMatchTheWire(t *testing.T) {
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "operations.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(strings.Fields(string(doc)), " ")
+	for _, want := range []string{
+		"A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason.",
+		"a restore that selects the database member without a store fails closed before staging",
+		"Without a live store it reports `present:true`, the decoded `bytes`, `inspectable:false` and the reason, and produces no request span.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("docs/operations.md is missing the store-less contract %q", want)
+		}
+	}
+}
+
 func defaultConfigYAMLForRestore(t *testing.T) []byte {
 	t.Helper()
 	var yaml bytes.Buffer

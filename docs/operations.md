@@ -562,28 +562,34 @@ size or cannot be read fails the encode before an archive is emitted.
 
 Restore streams the upload through the `backup_max_bytes` ceiling into one
 private staging file and decodes it with the same header, zstd, SHA-256 and
-member-framing checks. The database member is written straight into a private
-file on the live database's volume instead of being materialized on the heap;
-config bytes stay buffered within the same 16 MiB config-document bound
+member-framing checks. When a live store can stage it, the database member is
+written straight into a private file on the live database's volume instead of
+being materialized on the heap; a restore that selects the database member
+without a store fails closed before staging, and a member the request did not
+select is stream-discarded after its framing checks. Config bytes stay
+buffered within the same 16 MiB config-document bound
 `Config.Validate` enforces on the canonical rendered YAML, so a config that
 validates can never exceed what an archive may retain. A config member that
 declares a larger size is rejected before its bytes are copied, and encoding
 refuses to emit one, so an older archive whose config member exceeds that bound
 fails restore. The bound covers only the config member; the database member
 stays streamed under the payload ceiling. It validates that hash, the
-zstd frame, config `Validate()`, and `PRAGMA integrity_check` before applying
-anything. Decode refuses an uncompressed payload larger than the Schema maximum
-for `backup_max_bytes`, so a small compressed file cannot expand without bound.
-Download lists how many live settings differ from default and how many stored
-requests would be packed. Picking a file first inspects the archive: created
-time, size, request span, and each config key as default vs modified vs the
-live file. Inspect loads the live file through the same strict, bounded reader
-used by config reload and restore, not the boot repair path: an unknown nested
-field, an extra YAML document, a non-regular file, or a file above the 16 MiB
-document bound fails the inspect instead of comparing against a repaired or
-partial view. Inspect validates and
-counts the decoded database file in place and computes its overlap with the
-live store without writing another copy.
+zstd frame, member framing and config `Validate()` before applying anything,
+and a selected database member additionally passes `PRAGMA integrity_check`
+before it is staged. Decode refuses an uncompressed payload larger than the
+Schema maximum for `backup_max_bytes`, so a small compressed file cannot expand
+without bound. Download lists how many live settings differ from default and how
+many stored requests would be packed. Picking a file first inspects the
+archive: created time, size, member sizes, each config key as default vs
+modified vs the live file, and the database request span when a live store can
+stage the member. Inspect loads the live file through the same strict, bounded
+reader used by config reload and restore, not the boot repair path: an unknown
+nested field, an extra YAML document, a non-regular file, or a file above the
+16 MiB document bound fails the inspect instead of comparing against a repaired
+or partial view. Inspect decodes and counts the database member in place and
+computes its overlap with the live store without writing another copy. Without a
+live store it reports `present:true`, the decoded `bytes`, `inspectable:false`
+and the reason, and produces no request span.
 Config **replace** loads and validates the backup, writes canonical YAML, and
 preserves CLI-overridden `listen` and `db_path`. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values
@@ -796,7 +802,7 @@ both.
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
 | `GET /admin/backup` | Download the self-checked `.mvb` Settings backup archive of config and/or database members. `?config=1` and `?database=1` select members, defaulting to both when no key is given; an explicit empty selection is an error. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
-| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, database request span) without applying anything. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
+| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, and the database request span when a live store stages the member) without applying anything. A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
 | `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
