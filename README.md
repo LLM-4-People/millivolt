@@ -116,8 +116,8 @@ an authorized redacted history snapshot; identifiers are replaced.
 
 ## Dashboard overview
 
-Global totals, scoped explorer cards, timelines, and the request log share one
-selected scope. See the [visual guide](docs/dashboard.md) for focused captures
+Global totals stay global; explorer cards, timelines, and the request log share
+one selected scope. See the [visual guide](docs/dashboard.md) for focused captures
 of tokens, speed and latency, cost, providers, models, conversations, and
 Settings.
 
