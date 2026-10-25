@@ -291,24 +291,40 @@ func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
 	return false
 }
 
+// hasEmittedContent reports whether a message item already emitted text or
+// refusal bytes. Reasoning summary and content parts can share the aggregate
+// item key after a renumber, so a message terminal must not treat reasoning
+// coverage as its own.
+func (d *ResponsesStreamDecoder) hasEmittedContent(itemKey string) bool {
+	for key := range d.ownerParts[itemKey] {
+		if d.emittedText[key] == nil {
+			continue
+		}
+		if channel := d.partKind[key]; channel == partChannelText || channel == partChannelRefusal {
+			return true
+		}
+	}
+	return false
+}
+
 // terminalContentItemKey resolves the aggregate item identity of a terminal
 // content item. The item id is stable across renumbering, so a unique
-// announced identity wins over the terminal array position; when one side has
-// no id, the announced output position identifies the same logical item. Only
-// a key that owns emitted parts can reconcile the terminal copy.
+// announced message identity wins over the terminal array position; when one
+// side has no id, the announced output position identifies the same logical
+// item.
 func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int) string {
 	primary := streamItemKey(itemID, outputIndex)
-	if d.hasEmittedParts(primary) {
+	if d.hasEmittedContent(primary) {
 		return primary
 	}
 	announcedID := d.itemIDByOutput[outputIndex]
 	if itemID == "" || announcedID == "" || announcedID == itemID {
 		positional := streamItemKey(announcedID, outputIndex)
-		if d.hasEmittedParts(positional) {
+		if d.hasEmittedContent(positional) {
 			return positional
 		}
 	}
-	if announced, ok := d.announcedItemKey(itemID); ok && d.hasEmittedParts(announced) {
+	if announced, ok := d.announcedItemKey(itemKindMessage, itemID); ok {
 		return announced
 	}
 	return primary

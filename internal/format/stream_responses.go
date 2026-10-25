@@ -163,10 +163,11 @@ type ResponsesStreamDecoder struct {
 	itemBlockByKey   map[string]int
 	partBlockByKey   map[string]int
 	keyByOutput      map[int]string
-	// itemKeyByID maps a stable item id to its announced positional key for a
-	// terminal document that renumbers items. An empty value marks an id used
-	// by more than one announcement, where identity alone cannot choose.
-	itemKeyByID map[string]string
+	// itemKeyByKindID maps one item kind and stable provider id to its
+	// announced positional key for a terminal document that renumbers items.
+	// An empty value marks an id used by more than one announcement of that
+	// kind, where identity alone cannot choose.
+	itemKeyByKindID map[string]string
 	// reasoningKeys names the announced key of every reasoning item.
 	// itemBlock and keyByOutput are kind-agnostic position caches, so a
 	// reasoning event must consult this set before routing its bytes onto an
@@ -245,7 +246,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		itemBlockByKey:       map[string]int{},
 		partBlockByKey:       map[string]int{},
 		keyByOutput:          map[int]string{},
-		itemKeyByID:          map[string]string{},
+		itemKeyByKindID:      map[string]string{},
 		reasoningKeys:        map[string]bool{},
 		keyByPart:            map[[2]int]string{},
 		terminalPendingByKey: map[string]int{},
@@ -440,7 +441,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.keyByOutput[outputIndex] = key
 				d.reasoningKeys[key] = true
 				d.itemIDByOutput[outputIndex] = item.ID
-				d.registerItemIdentity(item.ID, key)
+				d.registerItemIdentity(itemKindReasoning, item.ID, key)
 				// An announced reasoning item opens its target block now so
 				// summary/content deltas have a stable index. A provider that
 				// announces an empty item, closes it, then delivers every
@@ -467,6 +468,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 						return nil, err
 					}
 					d.setPartOwner(partKey, key)
+					d.partKind[partKey] = partChannelReasoning
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
 					if err := d.setEmittedText(partKey, part.Text); err != nil {
 						return nil, err
@@ -483,7 +485,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.itemIDByOutput[outputIndex] = item.ID
-				d.registerItemIdentity(item.ID, streamItemKey(item.ID, outputIndex))
+				d.registerItemIdentity(itemKindMessage, item.ID, streamItemKey(item.ID, outputIndex))
 			default:
 				// A provider-specific item has no cross-protocol equivalent.
 				// Streaming cannot report the loss (the status line is already
@@ -534,7 +536,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.keyByPart[pos] = key
 			d.partPosition[key] = pos
 			d.itemIDByOutput[outputIndex] = itemID
-			d.registerItemIdentity(itemID, itemKey)
+			identityKind := itemKindMessage
+			if block.Type == ir.BlockReasoning {
+				identityKind = itemKindReasoning
+			}
+			d.registerItemIdentity(identityKind, itemID, itemKey)
 			d.setPartOwner(key, itemKey)
 			d.partKind[key] = partChannelForBlock(block.Type)
 			start := ""

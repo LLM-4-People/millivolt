@@ -231,16 +231,16 @@ func (e *terminalEmission) materialize() {
 // the item id (or one side has none).
 func (d *ResponsesStreamDecoder) terminalAnnouncedItemKey(outputIndex int, itemID string) (string, bool) {
 	key := reasoningItemKey(itemID, outputIndex)
-	if _, ok := d.itemBlockByKey[key]; ok {
+	if _, ok := d.itemBlockByKey[key]; ok && d.reasoningKeys[key] {
 		return key, true
 	}
-	if announced, ok := d.announcedItemKey(itemID); ok {
-		if _, exists := d.itemBlockByKey[announced]; exists {
+	if announced, ok := d.announcedItemKey(itemKindReasoning, itemID); ok {
+		if _, exists := d.itemBlockByKey[announced]; exists && d.reasoningKeys[announced] {
 			return announced, true
 		}
 	}
 	fallback, ok := d.keyByOutput[outputIndex]
-	if !ok {
+	if !ok || !d.reasoningKeys[fallback] {
 		return key, false
 	}
 	announcedID := d.itemIDByOutput[outputIndex]

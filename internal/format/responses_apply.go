@@ -229,6 +229,7 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 		// without this assignment looks uncovered to the terminal copy and is
 		// emitted a second time.
 		d.setPartOwner(part.key, key)
+		d.partKind[part.key] = partChannelReasoning
 		before := d.emittedValue(part.key)
 		d.appendReasoningValue(item, key, part.value, pending)
 		if err := d.setEmittedText(part.key, before+part.value); err != nil {

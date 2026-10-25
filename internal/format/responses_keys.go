@@ -205,35 +205,47 @@ func (d *ResponsesStreamDecoder) announcePart(key string) (bool, error) {
 	return true, nil
 }
 
+// Item identity kinds. A provider may reuse one id across a message, a
+// reasoning item and a function call; the terminal document and the
+// announcement index must scope that id by kind so one item cannot clear or
+// borrow another's identity.
+const (
+	itemKindMessage   = "message"
+	itemKindReasoning = "reasoning"
+)
+
 // itemIdentityKey names one provider item id in the announced identity index.
-func itemIdentityKey(itemID string) string {
-	return "id:" + itemID
+// The kind is part of the key, not a lookup filter: two kinds that share an id
+// keep separate entries instead of clearing each other.
+func itemIdentityKey(kind, itemID string) string {
+	return kind + ":id:" + itemID
 }
 
-// registerItemIdentity records the announced position-qualified key for an item
-// id so a terminal document that renumbers items still finds the block. A
-// second, different key for the same id clears the entry: the id is then
-// ambiguous and terminal matching must use the wire position.
-func (d *ResponsesStreamDecoder) registerItemIdentity(itemID, key string) {
+// registerItemIdentity records the announced position-qualified key for one
+// item kind and id so a terminal document that renumbers items still finds the
+// block. A second, different key for the same kind and id clears the entry:
+// the id is then ambiguous within that kind and terminal matching must use the
+// wire position.
+func (d *ResponsesStreamDecoder) registerItemIdentity(kind, itemID, key string) {
 	if itemID == "" {
 		return
 	}
-	identity := itemIdentityKey(itemID)
-	if existing, ok := d.itemKeyByID[identity]; ok {
+	identity := itemIdentityKey(kind, itemID)
+	if existing, ok := d.itemKeyByKindID[identity]; ok {
 		if existing != key {
-			d.itemKeyByID[identity] = ""
+			d.itemKeyByKindID[identity] = ""
 		}
 		return
 	}
-	d.itemKeyByID[identity] = key
+	d.itemKeyByKindID[identity] = key
 }
 
-// announcedItemKey returns the unique announced key for an item id.
-func (d *ResponsesStreamDecoder) announcedItemKey(itemID string) (string, bool) {
+// announcedItemKey returns the unique announced key for one item kind and id.
+func (d *ResponsesStreamDecoder) announcedItemKey(kind, itemID string) (string, bool) {
 	if itemID == "" {
 		return "", false
 	}
-	key, ok := d.itemKeyByID[itemIdentityKey(itemID)]
+	key, ok := d.itemKeyByKindID[itemIdentityKey(kind, itemID)]
 	if !ok || key == "" {
 		return "", false
 	}
