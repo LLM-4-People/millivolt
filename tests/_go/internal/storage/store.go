@@ -36,7 +36,7 @@ var testOpts = func() Options {
 }()
 
 func TestDataVersionTracksAllCommittedWriters(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "versions.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +152,7 @@ func TestDataVersionConnectionAndCancellation(t *testing.T) {
 // RebuildTotals serialized through the writer goroutine, a rebuild racing
 // account() permanently dropped commits that landed mid-scan.
 func TestPurgeRebuildNeverLosesConcurrentCommits(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "test.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +211,7 @@ func countRows(t *testing.T, s *Store) int64 {
 }
 
 func TestStoreRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "test.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func recordReopenLoadOne(t *testing.T, s *Store, path string, rec *metrics.Recor
 // round-trip through LoadRecent - including JSON-encoded tool names and the
 // pointer request params.
 func TestAllFieldsSurviveRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "full.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -524,7 +524,7 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 // TestNilPointersStayNil verifies that unset (nil) pointer params round-trip
 // as nil, so the dashboard JSON (omitempty) keeps the pre-restart shape.
 func TestNilPointersStayNil(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nil.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1039,7 +1039,7 @@ func TestStoreNeverBlocksOnOverflow(t *testing.T) {
 }
 
 func TestHandleQueryRejectsNonSelect(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "q.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1092,7 +1092,7 @@ func TestHandleQueryRejectsNonSelect(t *testing.T) {
 // the invalid-query 400 (not the missing-q wording a dropped pair self-heals
 // into), and a repeated q is denied, never first-wins.
 func TestHandleQueryStrictQuery(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "strict-q.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1127,7 +1127,7 @@ func TestHandleQueryStrictQuery(t *testing.T) {
 }
 
 func TestRecordAfterCloseDoesNotPanic(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "c.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1141,7 +1141,7 @@ func TestRecordAfterCloseDoesNotPanic(t *testing.T) {
 }
 
 func TestClientIdentitySurvivesRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "client.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1171,7 +1171,7 @@ func TestClientIdentitySurvivesRestart(t *testing.T) {
 }
 
 func TestAttemptsSurviveRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "att.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1202,7 +1202,7 @@ func TestAttemptsSurviveRestart(t *testing.T) {
 }
 
 func TestConversationIDSurvivesRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "conv.db")
+	path := testDatabase(t)
 	s, _ := Open(path, testOpts)
 	rec := &metrics.Record{ID: "cv1", Provider: "alpha.example", Model: "model-a", KeyHash: "k",
 		StatusCode: 200, Start: time.Now(), ConversationID: "c-abc123def4"}
@@ -1213,7 +1213,7 @@ func TestConversationIDSurvivesRestart(t *testing.T) {
 }
 
 func TestDurationPreservedAcrossRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "dur.db")
+	path := testDatabase(t)
 	s, _ := Open(path, testOpts)
 	start := time.Now()
 	rec := &metrics.Record{ID: "d1", Provider: "p", Model: "m", KeyHash: "k",
@@ -1245,7 +1245,7 @@ func TestDurationPreservedAcrossRestart(t *testing.T) {
 // somehow passed validateQuery still fails. Regression test for the modernc
 // driver ignoring "path?mode=ro" without the "file:" URI scheme.
 func TestReadPoolIsReadOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ro.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1265,7 +1265,7 @@ func TestReadPoolIsReadOnly(t *testing.T) {
 // closed (the batch drops and is counted), so busy_timeout can never mask a
 // permanently stuck writer.
 func TestBusyTimeoutAbsorbsConcurrentWriter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "busy.db")
+	path := testDatabase(t)
 	// Bootstrap the file the way the draining parent leaves it (schema + WAL).
 	boot, err := Open(path, testOpts)
 	if err != nil {
@@ -1438,7 +1438,7 @@ func TestValidateQueryDeniesAttach(t *testing.T) {
 }
 
 func TestPurgeEmptiesStore(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "purge.db")
+	path := testDatabase(t)
 	s, _ := Open(path, testOpts)
 	for _, id := range []string{"p1", "p2", "p3"} {
 		r := &metrics.Record{ID: id, Provider: "p", Model: "m", KeyHash: "k", StatusCode: 200, Start: time.Now()}
@@ -1529,7 +1529,7 @@ func seedPurgeStore(t *testing.T, s *Store) {
 // filter must error and delete nothing, so a malformed filter can never
 // silently become a full wipe.
 func TestClearEmptyFilterRejected(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "purge-empty.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1593,7 +1593,7 @@ func TestClearFiltersRows(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "purge-filter.db")
+			path := testDatabase(t)
 			s, err := Open(path, testOpts)
 			if err != nil {
 				t.Fatal(err)
@@ -1634,7 +1634,7 @@ func TestClearFiltersRows(t *testing.T) {
 // the same result set, so the live ring and the database can never disagree
 // about what a filter deletes.
 func TestPurgeFilterMatchRecordParity(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "purge-parity.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1679,7 +1679,7 @@ func TestPurgeFilterMatchRecordParity(t *testing.T) {
 // preview and the download itself share this code path), and the output is a
 // valid JSON array of complete records.
 func TestExportWhereFiltersAndStreams(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "export.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1760,7 +1760,7 @@ func TestExportWhereFiltersAndStreams(t *testing.T) {
 }
 
 func TestQueryBeforeNewestFirstExclusive(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "qbefore.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1882,7 +1882,7 @@ func min(a, b int) int {
 // is a no-op (config Validate rejects those - this is the last-chance deny).
 // Labels are neutral fixtures; the mechanism is provider-agnostic.
 func TestRenameProvidersMergesHistory(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "alias.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -1939,7 +1939,7 @@ func TestRenameProvidersMergesHistory(t *testing.T) {
 // reports failure. Dropping the trigger then proves the same pairs still apply
 // together.
 func TestRenameProvidersIsAtomicAcrossAliases(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "alias-atomic.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)

@@ -3,7 +3,6 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -33,7 +32,7 @@ func seedTotalsRows(t *testing.T, s *Store) {
 // transaction as the rows, and any out-of-band request mutation advances the
 // projection epoch, forcing a rebuild instead of serving a stale claim.
 func TestPersistedTotalsSurviveReopenAndDetectExternalMutation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "totals.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +88,7 @@ func TestPersistedTotalsSurviveReopenAndDetectExternalMutation(t *testing.T) {
 // document is zeroed in the delete transaction, so a reopen never scans (or
 // resurrects) pre-purge aggregates.
 func TestFullPurgePersistsZeroTotals(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "purge-totals.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +136,7 @@ func rawInsertRequest(t *testing.T, db *sql.DB, id string, startedAt time.Time) 
 // unchanged, so the persisted document must also record high_rowid or a stale
 // aggregate is accepted at boot.
 func TestTotalsReloadDetectsExternalAppend(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "totals-append.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)

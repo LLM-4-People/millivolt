@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +10,7 @@ import (
 )
 
 func TestMetaRoundTripAndDistinctClients(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meta.db")
+	path := testDatabase(t)
 	s, err := Open(path, testOpts)
 	if err != nil {
 		t.Fatal(err)
