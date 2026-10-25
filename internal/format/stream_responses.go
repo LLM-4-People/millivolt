@@ -2791,6 +2791,10 @@ type responsesItemState struct {
 	refusal      strings.Builder
 	partOpen     bool
 	summaryOpen  bool
+	// status records the lifecycle status the item reached when it closed:
+	// completed for a normal close and incomplete for an aborted one. It stays
+	// empty while the item is still open.
+	status string
 }
 
 // NewResponsesStreamEncoder builds an encoder over one client response writer.
@@ -3045,11 +3049,7 @@ func (e *ResponsesStreamEncoder) finishResponse() error {
 	if e.failed != nil {
 		status = "failed"
 	}
-	itemStatus := "completed"
-	if status != "completed" {
-		itemStatus = "incomplete"
-	}
-	if err := e.flushPendingDone(itemStatus); err != nil {
+	if err := e.flushPendingDone(); err != nil {
 		return err
 	}
 	response, err := e.responseObject(status, incompleteReason, e.outputItems(status))
@@ -3073,10 +3073,6 @@ func (e *ResponsesStreamEncoder) responseObject(status, incompleteReason string,
 }
 
 func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
-	messageStatus := "completed"
-	if status != "completed" {
-		messageStatus = "incomplete"
-	}
 	var out []map[string]any
 	for _, idx := range e.order {
 		item := e.items[idx]
@@ -3088,9 +3084,19 @@ func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
 		if e.failed != nil && e.open[idx] {
 			continue
 		}
+		// Each item owns the status it reached when it closed. Only an item
+		// still open at a non-completed terminal inherits the terminal status;
+		// an item that closed normally stays completed.
+		itemStatus := item.status
+		if itemStatus == "" {
+			itemStatus = "completed"
+			if status != "completed" {
+				itemStatus = "incomplete"
+			}
+		}
 		switch item.kind {
 		case "message":
-			out = append(out, messageItemJSON(item, messageStatus))
+			out = append(out, messageItemJSON(item, itemStatus))
 		case "function_call":
 			args := item.args.String()
 			if args == "" {
@@ -3098,10 +3104,10 @@ func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
 			}
 			out = append(out, map[string]any{
 				"type": "function_call", "id": item.id, "call_id": item.callID,
-				"name": item.name, "arguments": args, "status": "completed",
+				"name": item.name, "arguments": args, "status": itemStatus,
 			})
 		case "reasoning":
-			out = append(out, reasoningItem(item, item.reasoning.String()))
+			out = append(out, reasoningItem(item, item.reasoning.String(), itemStatus))
 		}
 	}
 	return out
@@ -3124,25 +3130,30 @@ func messageItemJSON(item *responsesItemState, status string) map[string]any {
 }
 
 // deferMessageDone holds a closed message item's final output_item.done until
-// the next item starts or the terminal status is known. A preceding deferred
-// item is flushed as completed first, so event order and the item count stay
-// unchanged.
+// the next item starts or the stream ends. A preceding deferred item is
+// flushed with its own close status first, so event order and the item count
+// stay unchanged.
 func (e *ResponsesStreamEncoder) deferMessageDone(item *responsesItemState) error {
-	if err := e.flushPendingDone("completed"); err != nil {
+	if err := e.flushPendingDone(); err != nil {
 		return err
 	}
 	e.pendingDone = item
 	return nil
 }
 
-// flushPendingDone emits the deferred message done frame with the supplied
-// status.
-func (e *ResponsesStreamEncoder) flushPendingDone(status string) error {
+// flushPendingDone emits the deferred message done frame with the status the
+// item reached when it closed. A deferred item is always a normal close, so
+// the terminal envelope cannot rewrite it.
+func (e *ResponsesStreamEncoder) flushPendingDone() error {
 	item := e.pendingDone
 	if item == nil {
 		return nil
 	}
 	e.pendingDone = nil
+	status := item.status
+	if status == "" {
+		status = "completed"
+	}
 	return e.emit("response.output_item.done", map[string]any{
 		"type": "response.output_item.done", "sequence_number": e.nextSeq(),
 		"output_index": item.outputIndex, "item": messageItemJSON(item, status),
@@ -3152,6 +3163,7 @@ func (e *ResponsesStreamEncoder) flushPendingDone(status string) error {
 // closeItem emits the normal completion frames for one open Responses item.
 // The caller removes the item from the open set only after every frame lands.
 func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
+	item.status = "completed"
 	switch item.kind {
 	case "message":
 		if item.partType == "refusal" {
@@ -3206,7 +3218,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 			"output_index": item.outputIndex,
 			"item": map[string]any{
 				"type": "function_call", "id": item.id, "call_id": item.callID,
-				"name": item.name, "arguments": args, "status": "completed",
+				"name": item.name, "arguments": args, "status": item.status,
 			},
 		})
 	case "reasoning":
@@ -3231,7 +3243,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 		return e.emit("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
 			"output_index": item.outputIndex,
-			"item":         reasoningItem(item, text),
+			"item":         reasoningItem(item, text, item.status),
 		})
 	}
 	return nil
@@ -3243,6 +3255,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 // reasoning. Abort leaves an open function call for the proxy error frame, so
 // this helper has no function-call shape.
 func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
+	item.status = "incomplete"
 	switch item.kind {
 	case "message":
 		if item.partOpen {
@@ -3271,7 +3284,7 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 			item.summaryOpen = false
 		}
 	}
-	closed := map[string]any{"type": item.kind, "id": item.id, "status": "incomplete"}
+	closed := map[string]any{"type": item.kind, "id": item.id, "status": item.status}
 	switch item.kind {
 	case "message":
 		closed["role"] = "assistant"
@@ -3293,7 +3306,7 @@ func (e *ResponsesStreamEncoder) abortItem(item *responsesItemState) error {
 // arguments {}, an executable empty call; the proxy error frame terminates the
 // stream instead.
 func (e *ResponsesStreamEncoder) Abort() error {
-	if err := e.flushPendingDone("incomplete"); err != nil {
+	if err := e.flushPendingDone(); err != nil {
 		return err
 	}
 	for _, idx := range e.order {
@@ -3320,16 +3333,17 @@ func (e *ResponsesStreamEncoder) Abort() error {
 	return nil
 }
 
-// reasoningItem renders one completed Responses reasoning item. An opaque
-// encrypted artifact the source provided (Anthropic redacted_thinking or a
-// Responses encrypted reasoning item) is preserved where the target accepts it.
-func reasoningItem(item *responsesItemState, text string) map[string]any {
+// reasoningItem renders one Responses reasoning item with its close status. An
+// opaque encrypted artifact the source provided (Anthropic redacted_thinking
+// or a Responses encrypted reasoning item) is preserved where the target
+// accepts it.
+func reasoningItem(item *responsesItemState, text, status string) map[string]any {
 	summary := []any{}
 	if text != "" {
 		summary = []any{map[string]any{"type": "summary_text", "text": text}}
 	}
 	out := map[string]any{
-		"type": "reasoning", "id": item.id, "status": "completed", "summary": summary,
+		"type": "reasoning", "id": item.id, "status": status, "summary": summary,
 	}
 	if item.encrypted != "" {
 		out["encrypted_content"] = item.encrypted
@@ -3343,7 +3357,7 @@ func reasoningItem(item *responsesItemState, text string) map[string]any {
 // document within ResponsesStreamFrameMaxBytes even when the source opens
 // thousands of empty items.
 func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*responsesItemState, error) {
-	if err := e.flushPendingDone("completed"); err != nil {
+	if err := e.flushPendingDone(); err != nil {
 		return nil, err
 	}
 	if e.items[index] != nil {

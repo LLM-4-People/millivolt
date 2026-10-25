@@ -995,7 +995,7 @@ func encodeResponsesInput(req *ir.Request) []map[string]any {
 					if b.CacheControl != nil {
 						req.Warnings.Add(ir.WarningDropped, "cache_control", "Responses has no cache breakpoints")
 					}
-					out = append(out, encodeResponsesFunctionCall(b.ToolCall))
+					out = append(out, encodeResponsesFunctionCall(b.ToolCall, ""))
 				case ir.BlockText, ir.BlockRefusal:
 					textBlocks = append(textBlocks, b)
 				default:
@@ -1186,14 +1186,20 @@ func encodeResponsesReasoning(r *ir.Reasoning, warns *ir.Warnings) map[string]an
 	return item
 }
 
-func encodeResponsesFunctionCall(c *ir.ToolCall) map[string]any {
+// encodeResponsesFunctionCall renders one function-call item. A response
+// output item carries its lifecycle status; a request-history item omits it.
+func encodeResponsesFunctionCall(c *ir.ToolCall, status string) map[string]any {
 	args := c.Arguments
 	if len(args) == 0 {
 		args = json.RawMessage(`{}`)
 	}
-	return map[string]any{
+	item := map[string]any{
 		"type": "function_call", "call_id": c.ID, "name": c.Name, "arguments": string(args),
 	}
+	if status != "" {
+		item["status"] = status
+	}
+	return item
 }
 
 func encodeResponsesTools(in []ir.Tool, warns *ir.Warnings) []map[string]any {
@@ -1799,7 +1805,7 @@ func encodeResponsesOutput(blocks []ir.Block, status string, warns *ir.Warnings)
 			textBlocks = append(textBlocks, b)
 		case ir.BlockToolCall:
 			flushText()
-			out = append(out, encodeResponsesFunctionCall(b.ToolCall))
+			out = append(out, encodeResponsesFunctionCall(b.ToolCall, "completed"))
 		case ir.BlockReasoning:
 			flushText()
 			out = append(out, encodeResponsesReasoning(b.Reasoning, warns))

@@ -377,13 +377,17 @@ target does not emit citations or annotations; non-streaming responses do carry
 url citations. A citation stream event is a separate feature, not a silent
 claim of streaming parity.
 
-A non-streaming translated Responses message item always carries
-`status: "completed"`. The response-level `status` owns lifecycle and can be
-`incomplete` or `failed` even when individual items completed; a truncated
-tool turn is reported there, not by rewriting an item's status. In a
-translated stream, `response.output_item.added` carries `status:
-"in_progress"` and the closing `response.output_item.done` carries
-`"completed"`; the terminal response status still owns the turn lifecycle.
+A non-streaming translated Responses message item carries
+`status: "incomplete"` when the response-level status is not `completed`, and
+`status: "completed"` otherwise. Function-call items always carry
+`status: "completed"` because every emitted call has validated arguments. The
+response-level `status` still owns the turn lifecycle. In a translated stream,
+`response.output_item.added` carries `status: "in_progress"` and each
+`response.output_item.done` carries the status at which that item closed:
+`"completed"` for a normal close and `"incomplete"` for an aborted item. The
+terminal response output preserves those per-item statuses; only an item still
+open at an incomplete or failed terminal is rendered `incomplete`, and a failed
+terminal omits an open call whose arguments were never validated.
 
 Parallel tool calls translated to Anthropic open their indexed content blocks
 concurrently (for example start 0, start 1, delta 0, delta 1, stop 0, stop 1).
