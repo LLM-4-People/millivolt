@@ -583,11 +583,6 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// The done payload is the authoritative full part value. Emit it
 			// only when no delta carried bytes; repeating streamed text would
 			// duplicate the answer.
-			if key := d.keyByOutput[outputIndex]; key != "" && !d.reasoningKeys[key] {
-				// The output position is announced as a tool or message item;
-				// its block is not a reasoning channel.
-				continue
-			}
 			pos := [2]int{outputIndex, contentIndex}
 			itemID := d.itemIDByOutput[outputIndex]
 			key, ok := d.keyByPart[pos]
@@ -717,6 +712,11 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// identity exactly like the done fallback and emit on the open
 			// reasoning item block when the part block was never seeded.
 			if ev.Delta == "" {
+				continue
+			}
+			if key := d.keyByOutput[outputIndex]; key != "" && !d.reasoningKeys[key] {
+				// The output position is announced as a tool or message item;
+				// its block is not a reasoning channel.
 				continue
 			}
 			pos := [2]int{outputIndex, contentIndex}

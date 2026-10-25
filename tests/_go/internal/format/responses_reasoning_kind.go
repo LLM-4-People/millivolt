@@ -61,6 +61,20 @@ data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_
 		})
 	}
 
+	t.Run("reasoning text at a tool index", func(t *testing.T) {
+		source := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"in_progress\"}}\n\n" +
+			"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"f\",\"arguments\":\"\"}}\n\n" +
+			"event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"think\"}\n\n" +
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"f\",\"arguments\":\"{}\",\"status\":\"completed\"}]}}\n\n"
+		out, err := translateStreamSource(t, ir.Responses, ir.Anthropic, source)
+		if err != nil {
+			t.Fatalf("stream failed: %v", err)
+		}
+		if strings.Contains(out, `"thinking_delta"`) {
+			t.Fatalf("reasoning_text landed on an item that is not reasoning: %s", out)
+		}
+	})
+
 	t.Run("valid reasoning item still streams", func(t *testing.T) {
 		source := reasoningKindSource(
 			`{"type":"reasoning","id":"rs_1","summary":[]}`,
