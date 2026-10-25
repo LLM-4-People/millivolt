@@ -160,19 +160,17 @@ func TestRequestStopArrayAllocationBound(t *testing.T) {
 	const entries = 4_000_000
 	raw := amplificationStopBody(entries)
 	var parseErr error
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			var rec metrics.Record
-			parseErr = parseLLMRequest(raw, &rec, false)
-			if parseErr == nil {
-				b.Fatalf("%d-entry stop array was accepted", entries)
-			}
+	alloc, _ := allocStats(func() {
+		var rec metrics.Record
+		parseErr = parseLLMRequest(raw, &rec, false)
+		if parseErr == nil {
+			t.Fatalf("%d-entry stop array was accepted", entries)
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+	if alloc > 4<<20 {
 		t.Fatalf("%d-byte %d-entry stop array allocated %d bytes/op, want the bounded preflight", len(raw), entries, alloc)
 	}
-	t.Logf("stop over-bound: input=%d entries=%d alloc=%d", len(raw), entries, res.AllocedBytesPerOp())
+	t.Logf("stop over-bound: input=%d entries=%d alloc=%d", len(raw), entries, alloc)
 }
 
 func TestRequestTopLevelMemberBound(t *testing.T) {
@@ -214,19 +212,17 @@ func TestRequestTopLevelMemberAllocationBound(t *testing.T) {
 	const members = 1_000_000
 	raw := []byte(amplificationChatBody(amplificationMembers(0, members)))
 	var parseErr error
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			var rec metrics.Record
-			parseErr = parseLLMRequest(raw, &rec, false)
-			if parseErr == nil {
-				b.Fatalf("%d-key body was accepted", members)
-			}
+	alloc, _ := allocStats(func() {
+		var rec metrics.Record
+		parseErr = parseLLMRequest(raw, &rec, false)
+		if parseErr == nil {
+			t.Fatalf("%d-key body was accepted", members)
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > 8<<20 {
+	if alloc > 8<<20 {
 		t.Fatalf("%d-byte %d-key body allocated %d bytes/op, want the bounded lexical preflight", len(raw), members, alloc)
 	}
-	t.Logf("top-level member over-bound: input=%d members=%d alloc=%d", len(raw), members, res.AllocedBytesPerOp())
+	t.Logf("top-level member over-bound: input=%d members=%d alloc=%d", len(raw), members, alloc)
 }
 
 // TestRequestEscapedTopLevelKeyDecodesOnce pins the single decode per member.
@@ -403,20 +399,18 @@ func TestRequestAggregateContentPartsAllocationBound(t *testing.T) {
 	const messages = 2_554
 	raw := amplificationAggregateBody(messages, metrics.ContentPartMax)
 	var parseErr error
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			var rec metrics.Record
-			parseErr = parseLLMRequest(raw, &rec, false)
-			if parseErr == nil {
-				b.Fatalf("%d-message aggregate body was accepted", messages)
-			}
+	alloc, _ := allocStats(func() {
+		var rec metrics.Record
+		parseErr = parseLLMRequest(raw, &rec, false)
+		if parseErr == nil {
+			t.Fatalf("%d-message aggregate body was accepted", messages)
 		}
 	})
-	if alloc := res.AllocedBytesPerOp(); alloc > 8<<20 {
+	if alloc > 8<<20 {
 		t.Fatalf("%d-byte %d-message aggregate body allocated %d bytes/op, want the aggregate preflight", len(raw), messages, alloc)
 	}
 	t.Logf("aggregate content over-bound: input=%d messages=%d parts=%d alloc=%d",
-		len(raw), messages, messages*metrics.ContentPartMax, res.AllocedBytesPerOp())
+		len(raw), messages, messages*metrics.ContentPartMax, alloc)
 }
 
 // duplicateContentBody renders one message whose object repeats the content
@@ -556,12 +550,10 @@ func TestRequestStopCountDoesNotMaterialize(t *testing.T) {
 	raw := []byte(`{"model":"m","stop_sequences":` + amplificationArray(entries, `"xxx"`) + `}`)
 	var parseErr error
 	var gotStop int
-	res := testing.Benchmark(func(b *testing.B) {
-		for b.Loop() {
-			var rec metrics.Record
-			parseErr = parseLLMRequest(raw, &rec, false)
-			gotStop = rec.ReqStop
-		}
+	alloc, _ := allocStats(func() {
+		var rec metrics.Record
+		parseErr = parseLLMRequest(raw, &rec, false)
+		gotStop = rec.ReqStop
 	})
 	if parseErr != nil {
 		t.Fatalf("parseLLMRequest error = %v", parseErr)
@@ -569,10 +561,10 @@ func TestRequestStopCountDoesNotMaterialize(t *testing.T) {
 	if gotStop != entries {
 		t.Fatalf("ReqStop = %d, want %d", gotStop, entries)
 	}
-	if alloc := res.AllocedBytesPerOp(); alloc > 256<<10 {
+	if alloc > 256<<10 {
 		t.Fatalf("%d-entry stop_sequences allocated %d bytes/op, want lexical counting", entries, alloc)
 	}
-	t.Logf("stop_sequences accepted: input=%d entries=%d alloc=%d", len(raw), entries, res.AllocedBytesPerOp())
+	t.Logf("stop_sequences accepted: input=%d entries=%d alloc=%d", len(raw), entries, alloc)
 }
 
 func TestRequestModalitiesBound(t *testing.T) {
