@@ -53,7 +53,11 @@ name: Checks and images
 # - Every release path uses the same idempotency key, the version tag. The
 #   merged-PR event, a delivered main push, and a manual tag push can all
 #   arrive for one revision; the release concurrency group serializes them and
-#   the first tag wins.
+#   the first tag wins. That non-cancelling group is the atomicity owner for
+#   the check-then-create tag guard, so the workflow test pins it. A version
+#   tag that already points at HEAD is checked for its GitHub release: an
+#   existing release skips, while a missing release fails with a repair
+#   instruction instead of reporting a successful re-run.
 
 on:
   push:
@@ -962,6 +966,11 @@ jobs:
         needs.required.outputs.merged_docs_only != 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # The release idempotency guard is a check-then-create over the version tag.
+    # This non-cancelling group is the atomicity owner: release runs are
+    # serialized, so the first run creates the tag and release while the next
+    # run sees the tag guard and skips. It must never cancel an in-flight
+    # publish, or two runs could pass the check before either creates the tag.
     concurrency:
       group: release
       cancel-in-progress: false
@@ -1000,6 +1009,8 @@ jobs:
           cache-dependency-path: go.sum
       - name: Cut the next version
         id: cut
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           skip=false
@@ -1011,9 +1022,20 @@ jobs:
           else
             file_version="$(tr -d '\r\n' < VERSION)"
             if git rev-parse -q --verify "refs/tags/v$file_version" >/dev/null; then
+              tagged_revision="$(git rev-list -n1 "v$file_version")"
+              if [ "$tagged_revision" = "$(git rev-parse HEAD)" ]; then
+                # A tag at HEAD is the idempotency key. A missing release means
+                # a previous publish failed after the tag became public; this
+                # job must not report success for an unrepaired release, move
+                # the tag or republish images.
+                if ! gh release view "v$file_version" >/dev/null 2>&1; then
+                  echo "::error::VERSION v$file_version is tagged at HEAD but its GitHub release is missing. A previous publish failed after tagging. Verify the image and tag, then create the release from the existing tag (gh release create v$file_version --verify-tag --generate-notes). This job does not move the tag or republish images."
+                  exit 1
+                fi
+              fi
               # Dependabot security merges reach main without a VERSION bump.
               # They stay unreleased until the next versioned promotion.
-              echo "VERSION v$file_version is already tagged; no release is needed."
+              echo "VERSION v$file_version is already tagged at $tagged_revision; no release is needed."
               skip=true
             else
               # A promotion PR owns the version bump. Tag its merge commit

@@ -253,7 +253,7 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 				var incomingLabels []contribLabels
 				if _, _, err := s.StreamProjection(context.Background(), rowColumns,
 					storage.ProjectionCursor{}, func(rows *sql.Rows) error {
-						c, labels, err := scanContrib(rows, nil)
+						c, labels, err := scanContrib(rows)
 						if err == nil {
 							incoming = append(incoming, c)
 							incomingLabels = append(incomingLabels, labels)

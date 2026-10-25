@@ -218,11 +218,23 @@ func (d *ResponsesStreamDecoder) setPartOwner(partKey, owner string) {
 	d.ownerParts[owner][partKey] = struct{}{}
 }
 
+// ownerPartsFor returns the part keys indexed under one logical item. The
+// production lookup is one map read; the optional test hook reports how many
+// owners this lookup visited so a full emittedText scan cannot pass as the
+// owner-index shape.
+func (d *ResponsesStreamDecoder) ownerPartsFor(itemKey string) map[string]struct{} {
+	parts := d.ownerParts[itemKey]
+	if d.testOwnerVisits != nil {
+		d.testOwnerVisits(len(parts))
+	}
+	return parts
+}
+
 // emittedContentParts returns the non-empty streamed bytes for one item and
 // content channel, ordered by the part index the client saw.
 func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel partChannel) []channelPart {
 	var out []channelPart
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		builder := d.emittedText[key]
 		if builder == nil {
 			continue
@@ -257,7 +269,7 @@ func isSummaryPartKey(key string) bool {
 // reasoning item, ordered by summary index.
 func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
 	var out []channelPart
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		if !isSummaryPartKey(key) {
 			continue
 		}
@@ -283,7 +295,7 @@ func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPa
 // target wire. A terminal item that was announced with only empty parts still
 // needs the announced identity, so this only gates the aggregate owner key.
 func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
-	for key := range d.ownerParts[itemKey] {
+	for key := range d.ownerPartsFor(itemKey) {
 		if d.emittedText[key] != nil {
 			return true
 		}
@@ -291,19 +303,59 @@ func (d *ResponsesStreamDecoder) hasEmittedParts(itemKey string) bool {
 	return false
 }
 
+// hasEmittedContent reports whether a message item already emitted text or
+// refusal bytes. Reasoning summary and content parts can share the aggregate
+// item key after a renumber, so a message terminal must not treat reasoning
+// coverage as its own.
+func (d *ResponsesStreamDecoder) hasEmittedContent(itemKey string) bool {
+	for key := range d.ownerPartsFor(itemKey) {
+		if d.emittedText[key] == nil {
+			continue
+		}
+		if channel := d.partKind[key]; channel == partChannelText || channel == partChannelRefusal {
+			return true
+		}
+	}
+	return false
+}
+
+// claimTerminalItem reserves one announced message key for a terminal output
+// position. A second terminal-only sibling with the same provider id gets a
+// different position and synthesizes its own block instead of reusing the
+// first sibling's identity.
+func (d *ResponsesStreamDecoder) claimTerminalItem(key string, outputIndex int) bool {
+	if claimed, ok := d.terminalItemClaims[key]; ok && claimed != outputIndex {
+		return false
+	}
+	d.terminalItemClaims[key] = outputIndex
+	return true
+}
+
 // terminalContentItemKey resolves the aggregate item identity of a terminal
-// content item. The item id is stable across renumbering; when one side has no
-// id, the announced output position identifies the same logical item.
-func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int) string {
+// content item. The item id is stable across renumbering, so a unique
+// announced message identity wins over the terminal array position; when one
+// side has no id, the announced output position identifies the same logical
+// item. A terminal scan claims the chosen identity: two terminal-only siblings
+// that repeat one announced id cannot both resolve to the first sibling's key.
+func (d *ResponsesStreamDecoder) terminalContentItemKey(itemID string, outputIndex int, claim bool) string {
 	primary := streamItemKey(itemID, outputIndex)
-	if d.hasEmittedParts(primary) {
-		return primary
+	if d.hasEmittedContent(primary) {
+		if !claim || d.claimTerminalItem(primary, outputIndex) {
+			return primary
+		}
 	}
 	announcedID := d.itemIDByOutput[outputIndex]
 	if itemID == "" || announcedID == "" || announcedID == itemID {
 		positional := streamItemKey(announcedID, outputIndex)
-		if d.hasEmittedParts(positional) {
-			return positional
+		if d.hasEmittedContent(positional) {
+			if !claim || d.claimTerminalItem(positional, outputIndex) {
+				return positional
+			}
+		}
+	}
+	if announced, ok := d.announcedItemKey(itemKindMessage, itemID); ok {
+		if !claim || d.claimTerminalItem(announced, outputIndex) {
+			return announced
 		}
 	}
 	return primary

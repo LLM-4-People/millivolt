@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -89,6 +91,76 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if row["ttft_ms"] != int64(100) {
 		t.Errorf("ttft_ms = %v", row["ttft_ms"])
+	}
+}
+
+// TestStoreDatabaseFilesStayPrivate pins the on-disk privacy boundary: the
+// live database and every WAL/SHM/journal sidecar SQLite creates must be
+// owner-only. A fresh SQLite file otherwise inherits the process umask
+// (typically 0644), exposing request bodies elsewhere on the host, while the
+// staged snapshots the store admits are already 0600.
+func TestStoreDatabaseFilesStayPrivate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private.db")
+	assertPrivate := func(name string) {
+		t.Helper()
+		info, err := os.Stat(name)
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s permissions = %04o, want 0600", name, got)
+		}
+	}
+	assertSidecars := func() {
+		t.Helper()
+		for _, suffix := range snapshotSidecarSuffixes {
+			if _, err := os.Stat(path + suffix); err == nil {
+				assertPrivate(path + suffix)
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("stat %s: %v", path+suffix, err)
+			}
+		}
+	}
+
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPrivate(path)
+	s.Record(&metrics.Record{ID: "private-1", StatusCode: 200, Start: time.Now()})
+	if err := s.Flush(); err != nil {
+		s.Close()
+		t.Fatalf("flush: %v", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err != nil {
+			s.Close()
+			t.Fatalf("expected %s sidecar after flush: %v", suffix, err)
+		}
+	}
+	assertSidecars()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// An installation created before this guard has a 0644 main file; opening
+	// it must narrow the file before SQLite can serve any query.
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPrivate(path)
+	s.Record(&metrics.Record{ID: "private-2", StatusCode: 200, Start: time.Now()})
+	if err := s.Flush(); err != nil {
+		s.Close()
+		t.Fatalf("flush after reopen: %v", err)
+	}
+	assertSidecars()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

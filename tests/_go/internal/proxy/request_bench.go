@@ -64,6 +64,36 @@ func (w *benchmarkResponseSink) WriteHeader(status int)      { w.status = status
 func (w *benchmarkResponseSink) Write(p []byte) (int, error) { w.bytes += len(p); return len(p), nil }
 func (w *benchmarkResponseSink) Flush()                      {}
 
+// proxyRequestFixture builds the in-process proxy and its canned upstream for
+// the ServeHTTP cost benchmark and its allocation ceiling.
+func proxyRequestFixture(input, frames int) (*Server, string, string) {
+	cfg := config.Default()
+	s := New(cfg, metrics.NewBuffer(cfg.HistorySize))
+	payload := benchmarkRequestBody(input)
+	response := strings.Repeat("data: {\"choices\":[{\"delta\":{\"content\":\"hello world \"}}]}\n\n", frames) +
+		fmt.Sprintf("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":%d,\"total_tokens\":%d}}\n\ndata: [DONE]\n\n", frames, frames+100)
+	s.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
+	})})
+	return s, payload, response
+}
+
+// serveProxyBenchmarkRequest drives one request through the real ServeHTTP and
+// fails on a status or body-length mismatch.
+func serveProxyBenchmarkRequest(b *testing.B, s *Server, payload, response string) {
+	b.Helper()
+	r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer fixture-secret")
+	r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
+	w := &benchmarkResponseSink{header: make(http.Header)}
+	s.ServeHTTP(w, r)
+	if w.status != http.StatusOK || w.bytes != len(response) {
+		b.Fatalf("status=%d bytes=%d want=%d", w.status, w.bytes, len(response))
+	}
+}
+
 // BenchmarkProxyRequest includes parsing, SSE analysis/relay, and bounded ring
 // accounting, but no upstream network or provider inference time.
 func BenchmarkProxyRequest(b *testing.B) {
@@ -77,26 +107,10 @@ func BenchmarkProxyRequest(b *testing.B) {
 		{"prompt1KiB_stream1000", 1024, 1000},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
-			cfg := config.Default()
-			s := New(cfg, metrics.NewBuffer(cfg.HistorySize))
-			payload := benchmarkRequestBody(tc.input)
-			response := strings.Repeat("data: {\"choices\":[{\"delta\":{\"content\":\"hello world \"}}]}\n\n", tc.frames) +
-				fmt.Sprintf("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":%d,\"total_tokens\":%d}}\n\ndata: [DONE]\n\n", tc.frames, tc.frames+100)
-			s.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}},
-					Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
-			})})
+			s, payload, response := proxyRequestFixture(tc.input, tc.frames)
 			b.ReportAllocs()
 			for b.Loop() {
-				r := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
-				r.Header.Set("Content-Type", "application/json")
-				r.Header.Set("Authorization", "Bearer fixture-secret")
-				r.Header.Set("X-Proxy-Base-URL", "http://fixture.example")
-				w := &benchmarkResponseSink{header: make(http.Header)}
-				s.ServeHTTP(w, r)
-				if w.status != http.StatusOK || w.bytes != len(response) {
-					b.Fatalf("status=%d bytes=%d want=%d", w.status, w.bytes, len(response))
-				}
+				serveProxyBenchmarkRequest(b, s, payload, response)
 			}
 		})
 	}

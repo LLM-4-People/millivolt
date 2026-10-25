@@ -145,6 +145,90 @@ func TestPrivate(t *testing.T) {
             with self.subTest(document=invalid), self.assertRaises((RuntimeError, ValueError)):
                 runner.package_parity(self.mapping, invalid)
 
+    def test_package_parity_accepts_race_files_only_with_race_listing(self):
+        race = self.tests / "race_on.go"
+        race.write_text("//go:build race\n\npackage fixture\n", encoding="utf-8")
+        mapping = dict(self.mapping)
+        mapping[str(self.root / "race_on_test.go")] = str(race)
+        plain = json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go"],
+            "IgnoredGoFiles": ["race_on_test.go"],
+        })
+        raced = json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go", "race_on_test.go"],
+        })
+        # The default listing alone cannot distinguish a deliberate race gate
+        # from any other tag that silently excludes the test.
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(mapping, plain)
+        runner.package_parity(mapping, plain, raced)
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(mapping, plain, json.dumps({
+                "Dir": str(self.root), "TestGoFiles": ["value_test.go"],
+            }))
+        # A race listing does not launder a different non-platform tag.
+        integration = self.tests / "integration.go"
+        integration.write_text("//go:build integration\n\npackage fixture\n", encoding="utf-8")
+        mapping[str(self.root / "integration_test.go")] = str(integration)
+        ignored = json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go"],
+            "IgnoredGoFiles": ["race_on_test.go", "integration_test.go"],
+        })
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(mapping, ignored, raced)
+
+    def test_package_parity_rejects_race_gated_test_functions(self):
+        helper_on = self.tests / "helper_on.go"
+        helper_on.write_text("//go:build race\n\npackage fixture\n\nconst raceOnlyHelper = true\n",
+                             encoding="utf-8")
+        helper_off = self.tests / "helper_off.go"
+        helper_off.write_text("//go:build !race\n\npackage fixture\n\nconst raceOnlyHelper = false\n",
+                              encoding="utf-8")
+        mapping = dict(self.mapping)
+        mapping[str(self.root / "helper_on_test.go")] = str(helper_on)
+        mapping[str(self.root / "helper_off_test.go")] = str(helper_off)
+        # The current tree's shape: race-tagged constants with no test
+        # functions are helpers, not tests that a listing can silently drop.
+        runner.package_parity(mapping, json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go", "helper_off_test.go"],
+            "IgnoredGoFiles": ["helper_on_test.go"],
+        }), json.dumps({
+            "Dir": str(self.root),
+            "TestGoFiles": ["value_test.go", "helper_on_test.go"],
+            "IgnoredGoFiles": ["helper_off_test.go"],
+        }))
+        # A race-gated file that declares a test can be listed by one pass and
+        # skipped by the other, so it is rejected even when the race listing
+        # discovers it.
+        cases = (
+            ("race_only.go", "//go:build race\n\npackage fixture\n\nimport \"testing\"\n\nfunc TestRaceOnly(t *testing.T) {}\n",
+             ("value_test.go",), ("race_only_test.go",), ("value_test.go", "race_only_test.go")),
+            ("no_race.go", "//go:build !race\n\npackage fixture\n\nimport \"testing\"\n\nfunc TestNoRaceOnly(t *testing.T) {}\n",
+             ("value_test.go", "no_race_test.go"), (), ("value_test.go",)),
+            ("either.go", "//go:build integration || race\n\npackage fixture\n\nimport \"testing\"\n\nfunc TestEither(t *testing.T) {}\n",
+             ("value_test.go",), ("either_test.go",), ("value_test.go", "either_test.go")),
+        )
+        for name, content, plain_tests, plain_ignored, race_tests in cases:
+            with self.subTest(name=name):
+                path = self.tests / name
+                path.write_text(content, encoding="utf-8")
+                virtual = self.root / (name[:-len(".go")] + "_test.go")
+                case_mapping = dict(self.mapping)
+                case_mapping[str(virtual)] = str(path)
+                with self.assertRaisesRegex(RuntimeError, "race-gated"):
+                    runner.package_parity(case_mapping, json.dumps({
+                        "Dir": str(self.root),
+                        "TestGoFiles": list(plain_tests),
+                        "IgnoredGoFiles": list(plain_ignored),
+                    }), json.dumps({
+                        "Dir": str(self.root),
+                        "TestGoFiles": list(race_tests),
+                    }))
+
     def test_command_ownership_exit_status_and_cleanup(self):
         paths = []
 

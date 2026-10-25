@@ -1,5 +1,6 @@
 """Unit contracts for the parallel Go test sharder and its race scope."""
 
+import re
 import tempfile
 import threading
 import unittest
@@ -37,6 +38,7 @@ class ShardTests(unittest.TestCase):
             tasks = shard.tasks_for_package(package, ["TestA", "TestB", "TestC"])
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0].names, ("TestA", "TestB", "TestC"))
+            self.assertIn("^(?:TestA|TestB|TestC)$", tasks[0].command("/tmp/serial.test"))
 
     def test_fixed_port_package_keeps_one_task_per_pass(self):
         names = ["TestReloadPublishesNewConfig", "TestPlainHandler"]
@@ -44,6 +46,9 @@ class ShardTests(unittest.TestCase):
         self.assertEqual(len(tasks), 2)
         self.assertEqual({task.shards for task in tasks}, {1})
         self.assertEqual({task.race for task in tasks}, {True, False})
+        for task in tasks:
+            command = task.command("/tmp/serial.test")
+            self.assertIn("^(?:" + "|".join(task.names) + ")$", command)
 
     def test_small_packages_do_not_create_empty_shards(self):
         tasks = shard.tasks_for_package(
@@ -65,6 +70,19 @@ class ShardTests(unittest.TestCase):
         self.assertIn("-test.count=1", command)
         self.assertIn("-test.benchtime=200ms", command)
         self.assertIn("^(?:TestA|TestB)$", command)
+
+    def test_single_shard_task_runs_only_its_assigned_names(self):
+        task = shard.Task("example.invalid/pkg", ("TestAlpha", "TestBeta"), 0, 1)
+        command = task.command("/tmp/example.test")
+        pattern = command[command.index("-test.run") + 1]
+        self.assertEqual(pattern, "^(?:TestAlpha|TestBeta)$")
+        self.assertIsNotNone(shard.re.fullmatch(pattern, "TestAlpha"))
+        self.assertIsNone(shard.re.fullmatch(pattern, "TestAlphaSibling"))
+
+    def test_run_pattern_escapes_regex_metacharacters(self):
+        task = shard.Task("example.invalid/pkg", ("TestA.1", "TestB[2]"), 0, 1)
+        pattern = task.command("/tmp/example.test")[4]
+        self.assertEqual(pattern, r"^(?:TestA\.1|TestB\[2\])$")
 
 
 class RaceScopeTests(unittest.TestCase):
@@ -88,6 +106,37 @@ class RaceScopeTests(unittest.TestCase):
         tasks = shard.tasks_for_package(ROOT_PACKAGE, names)
         self.assertEqual(len(tasks), 1)
         self.assertFalse(tasks[0].race)
+
+    def test_cmd_proxy_transport_and_watcher_tests_are_race_selected(self):
+        names = [
+            "TestInProcessTransportEnforcesTheRequestDeadline",
+            "TestInProcessTransportEnforcesTheConfiguredBound",
+            "TestInProcessTransportNormalCallReturnsPromptly",
+            "TestInProcessTransportOversizedBodyKeepsTheClientError",
+            "TestRestartProgressStopsAfterDependencyPanic",
+            "TestMCPHTTPEndpointAuthAndInProcessDispatch",
+            "TestOperatorNamespaceLookAlikesNeverReachInference",
+            "TestMetricsPprofRoutesServeOnlyThroughTheOperatorGate",
+            "TestDeadlineHandlerSlowProgressingBodyCompletes",
+        ]
+        race, plain = race_scope.select(MODULE + "/cmd/proxy", names)
+        self.assertEqual(race, names)
+        self.assertEqual(plain, [])
+
+    def test_proxy_byte_ceiling_is_not_race_selected(self):
+        # The 37,000 B allocation ceiling is meaningful only without race
+        # shadow memory, so the test must stay in the plain pass. The name is
+        # derived from the owning file: a rename that matches a proxy race
+        # selector (for example *Stream*) fails here instead of silently
+        # moving the byte guard into the race pass, where it is not asserted.
+        source = (shard.ROOT / "tests/_go/internal/proxy/request_ceiling.go").read_text(
+            encoding="utf-8")
+        names = re.findall(r"^func (Test[A-Za-z0-9_]+)\(", source, re.MULTILINE)
+        self.assertEqual(len(names), 1, "request_ceiling.go must own exactly one test")
+        race, plain = race_scope.select(PROXY, names)
+        self.assertEqual(race, [],
+                         f"{names[0]} is race-selected, so its plain-only byte ceiling never runs")
+        self.assertEqual(plain, names)
 
     def test_all_race_escalates_every_test(self):
         names = ["TestRequestMetadata", "TestStreamPump"]
@@ -129,6 +178,60 @@ class RaceScopeTests(unittest.TestCase):
                 {PROXY: directory}, {PROXY: ["TestStreamPump"]},
                 selectors={PROXY: ("*Stream*",)})
         self.assertEqual(failures, [])
+
+    def test_comment_and_literal_tokens_are_not_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "pkg.go").write_text(
+                "package fixture\n\n"
+                "// A future sync.Mutex, sync.WaitGroup and chan live here.\n"
+                "/* sync.Once in a block comment. */\n"
+                'var label = "sync.Pool and sync.Map"\n'
+                "var raw = `go work() and atomic.Int64`\n"
+                "var symbol = 'g'\n",
+                encoding="utf-8")
+            self.assertEqual(race_scope.primitive_evidence(Path(directory)), {})
+
+    def test_modern_sync_channel_and_go_statements_are_evidence(self):
+        cases = {
+            "waitgroup": "var wg sync.WaitGroup",
+            "once": "var once sync.Once",
+            "once value": "var onceValue = sync.OnceValue(func() int { return 1 })",
+            "once func": "var onceFunc = sync.OnceFunc(func() {})",
+            "once values": "var onceValues = sync.OnceValues(func() (int, error) { return 1, nil })",
+            "cond": "var cond *sync.Cond",
+            "map": "var table sync.Map",
+            "pool": "var pool sync.Pool",
+            "channel": "var events chan int",
+            "go statement": "func f() { go work() }",
+        }
+        for label, declaration in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                Path(directory, "pkg.go").write_text(
+                    'package fixture\n\nimport "sync"\n\n' + declaration + "\n",
+                    encoding="utf-8")
+                self.assertTrue(race_scope.primitive_evidence(Path(directory)))
+
+    def test_aliased_sync_and_atomic_imports_are_evidence(self):
+        cases = {
+            "aliased sync Mutex": ('import s "sync"', "var _ s.Mutex"),
+            "aliased sync OnceValue": ('import s "sync"',
+                                       "var _ = s.OnceValue(func() int { return 1 })"),
+            "aliased atomic Int64": ('import a "sync/atomic"', "var _ a.Int64"),
+        }
+        for label, (import_line, declaration) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                Path(directory, "pkg.go").write_text(
+                    "package fixture\n\n" + import_line + "\n\n" + declaration + "\n",
+                    encoding="utf-8")
+                self.assertTrue(race_scope.primitive_evidence(Path(directory)), label)
+        # A commented import is prose, not an alias declaration, and the use
+        # must appear in code rather than a comment or literal.
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "pkg.go").write_text(
+                'package fixture\n\n// import s "sync"\n\nvar label = "s.Mutex"\n'
+                "/* var state s.Mutex */\n",
+                encoding="utf-8")
+            self.assertEqual(race_scope.primitive_evidence(Path(directory)), {})
 
     def test_selector_must_match_a_listed_test(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -254,14 +357,22 @@ class DiscoveryTests(unittest.TestCase):
 class ParityHandshakeTests(unittest.TestCase):
     """The build handshake must describe exactly the overlay parity proved."""
 
-    mapping = {"/src/pkg/value_test.go": "/src/tests/_go/pkg/value.go"}
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="millivolt-parity-")
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        self.first = root / "value.go"
+        self.first.write_text("package fixture\n", encoding="utf-8")
+        self.second = root / "extra.go"
+        self.second.write_text("package fixture\n", encoding="utf-8")
+        self.mapping = {"/src/pkg/value_test.go": str(self.first)}
 
     def test_digest_is_stable_for_the_same_proof(self):
         self.assertEqual(go.overlay_digest(self.mapping, {}),
                          go.overlay_digest(dict(self.mapping), {}))
 
     def test_digest_changes_with_the_overlay(self):
-        extra = {**self.mapping, "/src/pkg/extra_test.go": "/src/tests/_go/pkg/extra.go"}
+        extra = {**self.mapping, "/src/pkg/extra_test.go": str(self.second)}
         self.assertNotEqual(go.overlay_digest(self.mapping, {}),
                             go.overlay_digest(extra, {}))
 
@@ -270,6 +381,15 @@ class ParityHandshakeTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(go.overlay_digest(self.mapping, {}),
                                     go.overlay_digest(self.mapping, {name: "fixture"}))
+
+    def test_digest_changes_with_backing_file_content(self):
+        # A content-only build-constraint edit changes which tests Go lists,
+        # but the path map and environment stay identical. The parity digest
+        # must cover the bytes, or a stale handshake skips verification and an
+        # assigned -test.run exits 0 without running the now-missing test.
+        before = go.overlay_digest(self.mapping, {})
+        self.first.write_text("//go:build integration\n\npackage fixture\n", encoding="utf-8")
+        self.assertNotEqual(go.overlay_digest(self.mapping, {}), before)
 
 
 if __name__ == "__main__":

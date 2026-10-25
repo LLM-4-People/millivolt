@@ -50,6 +50,8 @@ import (
 // Strict (cross-site navigation never carries it), and its HMAC is derived
 // from the operator token so a container restart with the same credential
 // keeps the session. Rotating the token invalidates outstanding cookies.
+// Secure is transport-derived (TLS or an ingress-forwarded https scheme)
+// because the built-in listener is plain HTTP.
 const (
 	sessionCookieName = "millivolt-operator"
 	sessionCookieTTL  = 12 * time.Hour
@@ -216,7 +218,35 @@ func (g *operatorGate) sessionMAC(expires int64, nonce []byte) []byte {
 	return mac.Sum(nil)
 }
 
-func (g *operatorGate) mintSessionCookie() (*http.Cookie, error) {
+// sessionCookieSecure derives the external scheme from the request. A direct
+// TLS connection is authoritative; behind an ingress that terminates TLS, the
+// first X-Forwarded-Proto token names the client scheme. Plain HTTP (the
+// default listener, including loopback development) keeps Secure false so the
+// browser still stores the cookie.
+func sessionCookieSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
+// sessionCookie is the one owner of every session-cookie attribute, so the
+// minting paths and their tests cannot drift. Secure follows the request
+// transport; the remaining attributes are fixed policy.
+func sessionCookie(r *http.Request, value string) *http.Cookie {
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(sessionCookieTTL.Seconds()),
+		HttpOnly: true,
+		Secure:   sessionCookieSecure(r),
+		SameSite: http.SameSiteStrictMode,
+	}
+}
+
+func (g *operatorGate) mintSessionCookie(r *http.Request) (*http.Cookie, error) {
 	expires := time.Now().Add(sessionCookieTTL).Unix()
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
@@ -225,14 +255,7 @@ func (g *operatorGate) mintSessionCookie() (*http.Cookie, error) {
 	value := "v1." + strconv.FormatInt(expires, 10) + "." +
 		base64.RawURLEncoding.EncodeToString(nonce) + "." +
 		base64.RawURLEncoding.EncodeToString(g.sessionMAC(expires, nonce))
-	return &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    value,
-		Path:     "/",
-		MaxAge:   int(sessionCookieTTL.Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	}, nil
+	return sessionCookie(r, value), nil
 }
 
 // validSession verifies the cookie: known version, unexpired, signed.
@@ -383,8 +406,8 @@ func (l *authLimiter) success(ip string) {
 // identical in shape.
 func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler {
 	sameOrigin := http.NewCrossOriginProtection().Handler(next)
-	mint := func(w http.ResponseWriter) {
-		cookie, err := gate.mintSessionCookie()
+	mint := func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := gate.mintSessionCookie(r)
 		if err != nil {
 			// Log-only: the cookie is a convenience re-mint beside an
 			// already-authenticated response; a side-effect failure must
@@ -445,7 +468,7 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 				// there would leave a full dashboard credential in an MCP
 				// client's cookie jar for a response that can never use it.
 				// The endpoint's own transport headers are left untouched.
-				mint(w)
+				mint(w, r)
 			}
 			sameOrigin.ServeHTTP(w, r)
 			return
@@ -559,7 +582,7 @@ func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Requ
 	if presented && g.valid(credential) {
 		g.limiter.success(ip)
 		w.Header().Set("Cache-Control", "no-store")
-		cookie, err := g.mintSessionCookie()
+		cookie, err := g.mintSessionCookie(r)
 		if err != nil {
 			// The handshake's whole purpose is the cookie: without it the
 			// 303/204 would loop the operator back to the login page with

@@ -259,6 +259,9 @@ func DecodeResponse(p ir.Protocol, body []byte) (*ir.Response, error) {
 
 // EncodeResponse encodes the canonical response for one inbound protocol.
 func EncodeResponse(p ir.Protocol, resp *ir.Response) ([]byte, error) {
+	if err := validateResponseToolIDs(resp); err != nil {
+		return nil, err
+	}
 	switch p {
 	case ir.Chat:
 		return EncodeChatResponse(resp)

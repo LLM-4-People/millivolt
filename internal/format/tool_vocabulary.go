@@ -119,6 +119,27 @@ func reserveToolID(seen map[string]struct{}, id string) error {
 	return nil
 }
 
+// validateResponseToolIDs enforces the same target-correlation contract on a
+// non-streaming response that reserveToolID enforces while streaming: two
+// tool-call blocks sharing one id make the client's tool result ambiguous.
+// The validator lives at the shared encode boundary so every target protocol
+// and every caller of EncodeResponse inherits it.
+func validateResponseToolIDs(resp *ir.Response) error {
+	if resp == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(resp.Blocks))
+	for _, block := range resp.Blocks {
+		if block.Type != ir.BlockToolCall || block.ToolCall == nil {
+			continue
+		}
+		if err := reserveToolID(seen, block.ToolCall.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // validateChatToolVocabulary enforces the Chat target's name class on every
 // declared tool, a named tool choice, and every history tool call. Chat tool
 // ids are not pattern-constrained, so only the name is checked.

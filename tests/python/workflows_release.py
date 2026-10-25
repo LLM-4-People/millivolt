@@ -63,6 +63,24 @@ def publish_guard_errors(publish_if: str, publish_testing_if: str) -> list[str]:
     return errors
 
 
+def publish_concurrency_errors(concurrency) -> list[str]:
+    """The release group owns check-then-create atomicity for the version tag.
+
+    A cancelling group (or a missing flag) could start a second publish while
+    the first is between its tag guard and its release create, so both could
+    pass the check and publish. The release job must serialize without
+    cancellation.
+    """
+    if not isinstance(concurrency, dict):
+        return ["check.yml: publish must declare its release concurrency group"]
+    errors = []
+    if concurrency.get("group") != "release":
+        errors.append("check.yml: publish concurrency group must be release")
+    if concurrency.get("cancel-in-progress") is not False:
+        errors.append("check.yml: publish concurrency must set cancel-in-progress: false")
+    return errors
+
+
 MAIN_REF_NAMES = {"main", "refs/heads/main"}
 # `git` may carry options before the subcommand, including a value-taking
 # `-c key=value` or `-C path`. Stop at a command separator so a later `push`
@@ -136,6 +154,17 @@ def check_release(checks: dict, errors: list[str]) -> None:
     for needle in publish_testing_missing:
         errors.append(f"check.yml: publish-testing guard is missing {needle}")
     errors.extend(publish_guard_errors(publish_if, publish_testing_if))
+    errors.extend(publish_concurrency_errors(publish.get("concurrency")))
+    # Mutation proofs: a cancelling group, a renamed group and a missing flag
+    # must all fail, so the atomicity owner cannot silently drift.
+    for label, concurrency in (
+        ("a cancelling release group", {"group": "release", "cancel-in-progress": True}),
+        ("a renamed release group", {"group": "publish", "cancel-in-progress": False}),
+        ("a missing cancel flag", {"group": "release"}),
+        ("a missing concurrency block", None),
+    ):
+        if not publish_concurrency_errors(concurrency):
+            errors.append(f"workflows self-check: {label} must fail")
     # Mutation proofs: dropping any one event, repository or ref condition from
     # either publication guard must be caught, not masked by the others, and an
     # extra `||` ref must fail the exact normalized contract.
@@ -188,10 +217,25 @@ def check_release(checks: dict, errors: list[str]) -> None:
     if image.get("with", {}).get("provenance") != "mode=max":
         errors.append("check.yml: release image must include max provenance")
     cut = next((step for step in steps(publish) if step.get("name") == "Cut the next version"), {})
-    if "git push" in str(cut.get("run", "")):
+    cut_run = str(cut.get("run", ""))
+    if "git push" in cut_run:
         errors.append("check.yml: the cut step must not push before the image exists")
-    if "git commit" in str(cut.get("run", "")):
+    if "git commit" in cut_run:
         errors.append("check.yml: the release workflow must not create version commits")
+    if "GH_TOKEN" not in (cut.get("env") or {}):
+        errors.append("check.yml: the cut step must read the GitHub release with GH_TOKEN")
+    release_guard = (
+        'tagged_revision="$(git rev-list -n1 "v$file_version")"',
+        'gh release view "v$file_version"',
+        "GitHub release is missing",
+        "does not move the tag or republish images",
+        "exit 1",
+    )
+    for needle in missing_needles(cut_run, release_guard):
+        errors.append(f"check.yml: cut step is missing the missing-release guard {needle}")
+    for needle in release_guard:
+        if not missing_needles(cut_run.replace(needle, ""), release_guard):
+            errors.append(f"workflows self-check: removing the missing-release guard {needle} must fail")
     tag_push = steps(publish)[tag_push_index] if tag_push_index >= 0 else {}
     tag_push_run = str(tag_push.get("run", ""))
     if '"v$RELEASE_VERSION"' not in tag_push_run:

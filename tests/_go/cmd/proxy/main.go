@@ -110,8 +110,8 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		bearer.Header.Set("Authorization", "Bearer "+token)
 		h.ServeHTTP(w, bearer)
 		set := w.Result().Cookies()
-		if len(set) != 1 || set[0].Name != sessionCookieName || !set[0].HttpOnly || set[0].SameSite != http.SameSiteStrictMode || set[0].Path != "/" {
-			t.Fatalf("bearer success did not mint a strict HttpOnly session cookie: %+v", set)
+		if len(set) != 1 || set[0].Name != sessionCookieName || !set[0].HttpOnly || set[0].Secure || set[0].SameSite != http.SameSiteStrictMode || set[0].Path != "/" {
+			t.Fatalf("bearer success did not mint a strict HttpOnly session cookie over plain HTTP: %+v", set)
 		}
 		// The MCP namespace is Bearer-only, so an admitted /mcp request mints
 		// no session cookie: a client's cookie jar must not gain a dashboard
@@ -1040,5 +1040,57 @@ func TestNewHTTPServerContract(t *testing.T) {
 	cancel()
 	if err := srvCtx.Err(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("srvCtx.Err() = %v, want Canceled through the server's base context", err)
+	}
+}
+
+// TestOperatorSessionCookieSecureFlag pins the transport-derived Secure
+// attribute: the listener itself is plain HTTP, so loopback development keeps
+// working without Secure, while a TLS request or an ingress that terminates
+// TLS and sets X-Forwarded-Proto: https gets the flag. The gate mints the
+// cookie on every authenticated request, which is the path asserted here.
+func TestOperatorSessionCookieSecureFlag(t *testing.T) {
+	const token = "operator-fixture-credential"
+	cases := []struct {
+		name      string
+		target    string
+		forwarded string
+		secure    bool
+	}{
+		{"plain loopback http", "http://127.0.0.1:8081/", "", false},
+		{"tls request", "https://proxy.example/", "", true},
+		{"forwarded https", "http://proxy.example/", "https", true},
+		{"forwarded https folded", "http://proxy.example/", " HTTPS ", true},
+		{"forwarded first token https", "http://proxy.example/", "https, http", true},
+		{"forwarded http", "http://proxy.example/", "http, https", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newOperatorGate(token)
+			h := protectOperatorRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}), gate)
+			r := httptest.NewRequest(http.MethodGet, tc.target+"metrics/bootstrap", nil)
+			r.Header.Set("Authorization", "Bearer "+token)
+			if tc.forwarded != "" {
+				r.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusNoContent {
+				t.Fatalf("status = %d, want 204", w.Code)
+			}
+			cookies := w.Result().Cookies()
+			if len(cookies) != 1 {
+				t.Fatalf("cookies = %d, want 1", len(cookies))
+			}
+			cookie := cookies[0]
+			if cookie.Secure != tc.secure {
+				t.Fatalf("Secure = %v, want %v", cookie.Secure, tc.secure)
+			}
+			if cookie.Name != sessionCookieName || !cookie.HttpOnly ||
+				cookie.SameSite != http.SameSiteStrictMode || cookie.Path != "/" {
+				t.Fatalf("session cookie lost a canonical attribute: %+v", cookie)
+			}
+		})
 	}
 }

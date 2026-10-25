@@ -732,6 +732,29 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("dashboard and inference share the operator boundary", landing)
         self.assertNotIn("dashboard and the inference listener", landing)
 
+    def test_dashboard_copy_keeps_global_totals_global(self):
+        # The KPI band stays global while explorer cards, timelines and the
+        # request log follow the selected scope. Both first-read surfaces must
+        # say so; the earlier wording claimed every surface shared one scope.
+        readme = re.sub(r"\s+", " ", self.read("README.md")).lower()
+        landing = re.sub(r"\s+", " ", self.read("site-src/templates/landing.html")).lower()
+        dashboard = re.sub(r"\s+", " ", self.read("docs/dashboard.md")).lower()
+        self.assertIn("the kpi band remains global", dashboard)
+        for label, surface in (("README.md", readme), ("landing.html", landing)):
+            self.assertIn("global totals stay global", surface, label)
+            self.assertIn("share one selected scope", surface, label)
+            self.assertNotIn("global totals, scoped explorer cards, timelines, and the request "
+                             "log share one selected scope", surface, label)
+
+    def test_canonical_tls_ingress_sets_forwarded_proto(self):
+        nginx = self.read("deploy/nginx.conf")
+        self.assertIn("proxy_set_header X-Forwarded-Proto $scheme;", nginx)
+        self.assertNotIn("$http_x_forwarded_proto", nginx.lower())
+        reverse = self.read("docs/reverse-proxy.md")
+        self.assertIn("X-Forwarded-Proto", reverse)
+        operations = self.read("docs/operations.md")
+        self.assertIn("X-Forwarded-Proto", operations)
+
     def test_adapters_pin_round8_contracts(self):
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
         for phrase in (

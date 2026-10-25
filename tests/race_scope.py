@@ -22,23 +22,51 @@ race coverage without maintaining a second list.
 from __future__ import annotations
 
 import fnmatch
+import re
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 MODULE = "github.com/LLM-4-People/millivolt"
 
-# The production tokens that prove a package owns concurrency primitives. The
-# audit scans non-test Go sources in the package directory. Any package with a
-# hit must declare a race selector, unless AUDIT_EXEMPTIONS documents why the
-# primitive cannot be exercised concurrently by a test.
-PRIMITIVE_TOKENS = (
-    "go func(",
-    ".Go(func",
-    "errgroup.",
-    "sync.Mutex",
-    "sync.RWMutex",
-    "atomic.",
+# The production constructs that prove a package owns concurrency primitives.
+# The audit lexes non-test Go sources in the package directory, blanking
+# comments and string/rune literal bodies first, so prose and data can never
+# fake evidence. Any package with a hit must declare a race selector, unless
+# AUDIT_EXEMPTIONS documents why the primitive cannot be exercised
+# concurrently by a test.
+SYNC_MEMBERS: tuple[tuple[str, str], ...] = (
+    ("sync.Mutex", r"Mutex"),
+    ("sync.RWMutex", r"RWMutex"),
+    ("sync.WaitGroup", r"WaitGroup"),
+    # OnceFunc, OnceValue and OnceValues synchronize one initialization the
+    # same way Once does, and share its evidence label.
+    ("sync.Once*", r"Once(?:Func|Value|Values)?"),
+    ("sync.Cond", r"Cond"),
+    ("sync.Map", r"Map"),
+    ("sync.Pool", r"Pool"),
 )
+
+PRIMITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("go statement", re.compile(r"\bgo\s+\S")),
+    ("chan", re.compile(r"\bchan\b")),
+    (".Go(func", re.compile(r"\.Go\(func")),
+    ("errgroup.", re.compile(r"\berrgroup\.")),
+) + tuple(
+    (label, re.compile(r"\bsync\." + member + r"\b"))
+    for label, member in SYNC_MEMBERS
+) + (
+    ("atomic.", re.compile(r"\batomic\.")),
+)
+
+# Import declarations, read from the source text because the lexer blanks
+# string bodies. A commented or raw-string "import" can only register an alias;
+# evidence still requires the alias to be used in lexed code, where comments
+# and literals are blank.
+_IMPORT_BLOCK = re.compile(r"(?ms)^\s*import\s*\((.*?)^\s*\)")
+_IMPORT_SINGLE = re.compile(
+    r'(?m)^\s*import\s+(?:([A-Za-z_][A-Za-z0-9_]*|\.|_)\s+)?"([^"]+)"')
+_IMPORT_SPEC = re.compile(
+    r'(?m)^\s*(?:([A-Za-z_][A-Za-z0-9_]*|\.|_)\s+)?"([^"]+)"')
 
 # Package import path -> test-name patterns that run under -race. Everything
 # else in the package runs plain. Keep each entry tied to the production
@@ -63,6 +91,17 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "*TryReload*",
         "*ReloadPublishes*",
         "*ReloadStatus*",
+        # In-process HTTP dispatch owns a handler goroutine, a deadline
+        # transport and a bounded recorder; the restart progress watcher
+        # publishes from its ticker; the real operator mux and pprof listener
+        # serve concurrent requests; the deadline handler owns body-read
+        # timers. These named areas exercise those production primitives.
+        "*InProcessTransport*",
+        "*MCPHTTPEndpoint*",
+        "*RestartProgress*",
+        "*OperatorNamespace*",
+        "*MetricsPprofRoutes*",
+        "*DeadlineHandler*",
     ),
     # The stress client owns worker goroutines and atomics; the whole package
     # is small and is serialized by the fixed-port lock.
@@ -216,8 +255,79 @@ def select(package: str, names: Sequence[str], *, all_race: bool = False
     return race, plain
 
 
+def _strip_comments_and_literals(text: str) -> str:
+    """Blank comment and string/rune literal bodies, preserving newlines.
+
+    Lexing in one pass means a ``//`` inside a string is data, not a comment,
+    and a quote inside a comment cannot start a literal. Newlines survive so
+    multi-line comments and raw strings keep their line shape.
+    """
+    blanked: list[str] = []
+    index = 0
+    length = len(text)
+
+    def blank(start: int, end: int) -> str:
+        return "".join("\n" if char == "\n" else " " for char in text[start:end])
+
+    while index < length:
+        char = text[index]
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            end = length if end < 0 else end
+            blanked.append(blank(index, end))
+            index = end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            end = length if end < 0 else end + 2
+            blanked.append(blank(index, end))
+            index = end
+        elif char in {'"', "'"}:
+            end = index + 1
+            while end < length:
+                if text[end] == "\\":
+                    end += 2
+                    continue
+                if text[end] == char:
+                    end += 1
+                    break
+                end += 1
+            end = min(end, length)
+            blanked.append(blank(index, end))
+            index = end
+        elif char == "`":
+            end = text.find("`", index + 1)
+            end = length if end < 0 else end + 1
+            blanked.append(blank(index, end))
+            index = end
+        else:
+            blanked.append(char)
+            index += 1
+    return "".join(blanked)
+
+
+def _concurrency_aliases(text: str) -> dict[str, str]:
+    """Return non-default aliases for sync and sync/atomic in one source file."""
+    specs: list[tuple[str, str]] = []
+    for block in _IMPORT_BLOCK.finditer(text):
+        specs.extend(_IMPORT_SPEC.findall(block.group(1)))
+    specs.extend(_IMPORT_SINGLE.findall(text))
+    aliases: dict[str, str] = {}
+    for alias, path in specs:
+        if alias in {".", "_"}:
+            continue
+        if path == "sync":
+            name = alias or "sync"
+            if name != "sync":
+                aliases[name] = "sync"
+        elif path == "sync/atomic":
+            name = alias or "atomic"
+            if name != "atomic":
+                aliases[name] = "atomic"
+    return aliases
+
+
 def primitive_evidence(directory: Path) -> dict[str, int]:
-    """Count production concurrency tokens in a package directory."""
+    """Count production concurrency constructs in a package directory."""
     evidence: dict[str, int] = {}
     for source in sorted(directory.glob("*.go")):
         if source.name.endswith("_test.go"):
@@ -226,10 +336,22 @@ def primitive_evidence(directory: Path) -> dict[str, int]:
             text = source.read_text(encoding="utf-8")
         except OSError as error:
             raise RuntimeError(f"cannot scan production source {source}") from error
-        for token in PRIMITIVE_TOKENS:
-            count = text.count(token)
+        code = _strip_comments_and_literals(text)
+        for label, pattern in PRIMITIVE_PATTERNS:
+            count = len(pattern.findall(code))
             if count:
-                evidence[token] = evidence.get(token, 0) + count
+                evidence[label] = evidence.get(label, 0) + count
+        for alias, package in _concurrency_aliases(text).items():
+            if package == "atomic":
+                count = len(re.findall(r"\b" + re.escape(alias) + r"\.", code))
+                if count:
+                    evidence["atomic."] = evidence.get("atomic.", 0) + count
+                continue
+            for label, member in SYNC_MEMBERS:
+                count = len(re.findall(
+                    r"\b" + re.escape(alias) + r"\." + member + r"\b", code))
+                if count:
+                    evidence[label] = evidence.get(label, 0) + count
     return evidence
 
 

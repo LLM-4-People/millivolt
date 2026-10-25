@@ -235,11 +235,14 @@ type target struct {
 // tlsPossible reports whether an upstream send to this target can ever run a
 // TLS handshake. resolveTarget accepts only http and https, and the client
 // never follows a redirect (preserveUpstreamRedirect), so the base URL's
-// scheme is the whole answer. The httptrace handshake hooks are installed only
-// when this is true: a plaintext attempt could never fire them, and an absent
-// hook renders exactly like a hook that never fired ("not observed").
+// scheme is the whole answer. url.Parse lowercases the scheme, so the check is
+// case-insensitive: a client may spell HTTPS:// and still reach the TLS
+// transport. The httptrace handshake hooks are installed only when this is
+// true: a plaintext attempt could never fire them, and an absent hook renders
+// exactly like a hook that never fired ("not observed").
 func (t *target) tlsPossible() bool {
-	return strings.HasPrefix(t.baseURL, "https://")
+	const https = "https://"
+	return len(t.baseURL) >= len(https) && strings.EqualFold(t.baseURL[:len(https)], https)
 }
 
 // wire is the upstream response protocol. X-Proxy-Format selects an explicit

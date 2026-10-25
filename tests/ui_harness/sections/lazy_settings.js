@@ -82,6 +82,57 @@ module.exports = async function lazySettings(H) {
       check('a later settings open uses the loaded module exactly once', opened === 1);
     } finally { cancelled.dom.window.close(); }
 
+    // Escape during the load must cancel the pending open. The sheet is still
+    // hidden, so the old Escape handler skipped it entirely and the loader
+    // opened the sheet as soon as the module resolved.
+    const chainShell = async () => {
+      const appended = [];
+      const dom = dashboardDOM(assembleHTML(undefined, { includeSettings: false }), {
+        ...pageOptions,
+        beforeParse(win) {
+          pageOptions.beforeParse(win);
+          const append = win.HTMLHeadElement.prototype.appendChild;
+          win.HTMLHeadElement.prototype.appendChild = function (node) {
+            if (node && node.tagName === 'SCRIPT' &&
+                String(node.getAttribute('src') || '').includes('/dash/js/settings')) {
+              appended.push(node);
+              return node;
+            }
+            return append.call(this, node);
+          };
+        },
+      });
+      await loaded(dom);
+      return { dom, sw: dom.window, sd: dom.window.document, appended };
+    };
+
+    const chained = await chainShell();
+    try {
+      let opened = 0;
+      chained.sw.toggleSettings({ stopPropagation() {} });
+      chained.appended[0].onload();
+      await sleep(0);
+      const total = chained.sw.eval('SETTINGS_MODULES.length');
+      check('the lazy settings loader advances through the real module chain',
+        total > 1 && chained.appended.length === 2);
+      chained.sd.dispatchEvent(new chained.sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      while (chained.appended.length > 0) {
+        const script = chained.appended[chained.appended.length - 1];
+        const index = chained.appended.length;
+        if (index === total) {
+          chained.sw.settingsModule = { open() { opened++; }, close() {} };
+        }
+        script.onload();
+        await sleep(0);
+        if (index === total) break;
+      }
+      check('the chain delivered every settings module exactly once',
+        chained.appended.length === total);
+      check('Escape during the settings chain cancels the pending open', opened === 0);
+      chained.sw.toggleSettings({ stopPropagation() {} });
+      check('a settings open after the cancelled chain uses the loaded module', opened === 1);
+    } finally { chained.dom.window.close(); }
+
     // The chart metrics picker renders at first paint and shares its chevron
     // with the settings provider cards. It must not depend on settings.js.
     {

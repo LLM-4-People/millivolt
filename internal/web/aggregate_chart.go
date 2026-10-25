@@ -323,53 +323,6 @@ func windowParam(q url.Values) (int, bool) {
 	return int(n), true
 }
 
-// minStartScoped returns the oldest start among IN-SCOPE history (store +
-// ring), or now when nothing matches yet (a degenerate one-bucket All
-// chart). The unscoped durable minimum is maintained on projection updates;
-// scoped minima read the same decoded contributions and canonical predicate
-// as the chart fold, never a separate SQL matcher or full-history decode.
-func minStartScoped(ctx context.Context, a *AggAPI, mcz *modelCanonizer, fs []scopeFilter, statusCode string, fallback int64) (int64, error) {
-	min := fallback
-	upd := func(c *contrib) {
-		if scopedMatch(c, statusCode, fs) && c.start < min {
-			min = c.start
-		}
-	}
-	scratch, ring := a.ringSnapshot(0)
-	defer releaseRing(scratch, ring)
-	err := a.withProjection(ctx, func(p *projectionData) error {
-		if p != nil {
-			fs = bindScope(fs, p, mcz)
-			if len(fs) == 0 && statusCode == "" {
-				if p.hasStart && p.minStart < min {
-					min = p.minStart
-				}
-			} else {
-				for i := range p.rows {
-					if err := checkFoldContext(ctx, i); err != nil {
-						return err
-					}
-					upd(&p.rows[i])
-				}
-			}
-		}
-		for i, r := range ring {
-			if err := checkFoldContext(ctx, i); err != nil {
-				return err
-			}
-			if p != nil {
-				if _, duplicate := p.ids[r.ID]; duplicate {
-					continue
-				}
-			}
-			c := fromRecord(r, mcz)
-			upd(&c)
-		}
-		return ctx.Err()
-	})
-	return min, err
-}
-
 // streamAllChart computes the All-window scoped minimum and folds the chart
 // under ONE ring snapshot and ONE projection lease. Splitting them let a row
 // committed between the two leases contribute an older start than the one the

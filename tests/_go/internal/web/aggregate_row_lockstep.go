@@ -50,7 +50,7 @@ func TestRowColumnsScanContribLockstep(t *testing.T) {
 	var decoded []contrib
 	var labels contribLabels
 	if _, _, err := s.StreamProjection(t.Context(), rowColumns, storage.ProjectionCursor{}, func(rows *sql.Rows) error {
-		c, l, err := scanContrib(rows, nil) // raw spelling; the canonizer is not under test
+		c, l, err := scanContrib(rows) // raw spelling; the canonizer is not under test
 		if err != nil {
 			return err
 		}

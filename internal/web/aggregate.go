@@ -196,7 +196,7 @@ func (a *AggAPI) queryCtx(r *http.Request) (context.Context, context.CancelFunc)
 // contribLabels owns the six single-valued dimension labels while a
 // contribution is still live. Durable rows never build this sidecar: the scan
 // returns the tuple by value for the one interning step (internLabels), so a
-// projected row never pays 112 bytes of garbage for labels the projection
+// projected row never pays 96 bytes of garbage for labels the projection
 // dictionaries are about to own. Projected rows resolve labels from
 // dimensionIDs instead; retaining six string headers on every durable row
 // duplicated bytes the dictionaries already own.
@@ -383,7 +383,7 @@ const rowColumns = `id, started_at, status_code, error_type, error_code, error_m
 // into the projection dictionaries immediately, so building a live labels
 // sidecar here would allocate one 96-byte header per durable row only for the
 // intern step to drop it. The label tuple travels by value instead.
-func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, contribLabels, error) {
+func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 	var c contrib
 	var labels contribLabels
 	var startedAt, status, ttft int64
@@ -397,7 +397,7 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, contribLabels, e
 		&c.tools, &c.cost, &ttft, &gen, &toolNamesJSON, &c.dec); err != nil {
 		return c, labels, err
 	}
-	labels.model = mcz.model(model)
+	labels.model = model
 	c.start = startedAt
 	c.status = int(status)
 	c.ttft = ttft
@@ -494,6 +494,34 @@ type ringScratch []*metrics.Record
 // win, never a correctness dependency.
 var ringScratchPool = sync.Pool{New: func() any { return new(ringScratch) }}
 
+// ringIDScratch is the ring-sized id slice used only to ask the durable store
+// which records are still unwritten. It is pooled separately from the record
+// pointers because the store call consumes strings, not records; a fresh
+// []string per read was about 16 MB at the one-million-slot ceiling.
+type ringIDScratch []string
+
+var ringIDPool = sync.Pool{New: func() any { return new(ringIDScratch) }}
+
+func acquireRingIDs(size int) *ringIDScratch {
+	ids := ringIDPool.Get().(*ringIDScratch)
+	if cap(*ids) < size {
+		*ids = make([]string, size)
+	} else {
+		*ids = (*ids)[:size]
+	}
+	return ids
+}
+
+// releaseRingIDs returns the store-probe scratch. The full usable capacity is
+// cleared for the same reason as the record scratch: after a purge or a skip
+// the ring may no longer reference those records, and a retained string header
+// would pin the id bytes (16 MB of headers at the one-million-slot ceiling).
+func releaseRingIDs(ids *ringIDScratch) {
+	clear((*ids)[:cap(*ids)])
+	*ids = (*ids)[:0]
+	ringIDPool.Put(ids)
+}
+
 // acquireRing copies the ring into a pooled scratch, oldest to newest. The
 // view aliases the scratch until releaseRing, so it must not outlive the read
 // that holds it; both readers (the KPI fold and ringSnapshot) release it with a
@@ -505,8 +533,13 @@ func (a *AggAPI) acquireRing() (*ringScratch, []*metrics.Record) {
 
 // releaseRing returns a scratch acquired by acquireRing. view must be the
 // slice acquireRing returned, not a filter of it: the scratch is reused from
-// its capacity, and the original backing array is the owner.
+// its capacity, and the original backing array is the owner. Every usable slot
+// is cleared first: after Buffer.Reset or RemoveWhere the ring no longer
+// references those records, so a pooled pointer would pin each record and its
+// strings until the scratch is reused or collected. Clearing one million slots
+// costs about 0.2 ms, against a fold that copies the same million pointers.
 func releaseRing(buf *ringScratch, view []*metrics.Record) {
+	clear(view[:cap(view)])
 	*buf = view[:0]
 	ringScratchPool.Put(buf)
 }
@@ -515,7 +548,9 @@ func releaseRing(buf *ringScratch, view []*metrics.Record) {
 // a borrowed scratch view, oldest to newest. The caller must hand the scratch
 // back with releaseRing(scratch, view) once it has finished reading the view
 // (a defer at the caller is the intended shape): the view aliases the pooled
-// buffer, and filtering happens inside it, so a read allocates nothing.
+// buffer, and filtering happens inside it, so a steady-state read allocates
+// nothing. When a durable store is attached, its written-id probe uses a
+// separate pooled scratch instead of a fresh ring-sized []string.
 //
 // Filter BEFORE the durable snapshot: commits arriving afterward are still
 // deduped by its exact ID set, while already-written rows that were deleted
@@ -535,11 +570,12 @@ func (a *AggAPI) ringSnapshot(since int64) (*ringScratch, []*metrics.Record) {
 	if a.store == nil || len(out) == 0 {
 		return scratch, out
 	}
-	ids := make([]string, len(out))
+	ids := acquireRingIDs(len(out))
+	defer releaseRingIDs(ids)
 	for i, r := range out {
-		ids[i] = r.ID
+		(*ids)[i] = r.ID
 	}
-	unwritten := a.store.FilterUnwritten(ids)
+	unwritten := a.store.FilterUnwritten(*ids)
 	if len(unwritten) == len(out) {
 		return scratch, out
 	}

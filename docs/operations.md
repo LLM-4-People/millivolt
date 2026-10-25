@@ -397,9 +397,14 @@ These bundle semantics apply to images built from this revision. Existing releas
 images are not changed by a main-branch update; consult the documentation at the
 selected release tag for older images.
 
-Existing volumes and host bind mounts must permit the runtime UID to read/write
-their contents. Bind mounts hide bundled files: supply a config yourself when
-using one, or intentionally accept the application's missing-file defaults.
+Existing volumes and host bind mounts must be owned by the runtime UID, or the
+database file must already be mode `0600`. Read/write permission alone is not
+sufficient: startup narrows a broader database mode to `0600` and fails closed
+when it cannot, naming the file path, owner and current mode. A foreign-owned
+`0600` database is left unchanged; a broader foreign-owned file must be pre-set
+to `0600` or chown'd to `65532:65532`.
+Bind mounts hide bundled files: supply a config yourself when using one, or
+intentionally accept the application's missing-file defaults.
 Use private directory permissions and mode `0600` for a supplied config; with
 rootless Docker or user namespaces, account for the host UID mapping. Do not
 make sensitive directories world-writable to work around ownership failures.
@@ -532,7 +537,8 @@ names or bind mounts, which can point the new project at existing data.
 ```
 
 Keep the tar streams intact and retain `--archive` on restore: the private config
-must remain readable/writable by runtime UID/GID `65532:65532`, with mode `0600`.
+must remain owned by runtime UID/GID `65532:65532` with mode `0600`; the restored
+database is subject to the same ownership and mode check at boot.
 Check Settings and retained history on the new private port before redirecting
 clients. Save the printed project name and deployment inputs for later commands;
 the example bypasses automatic `.env` loading during recovery.
@@ -574,9 +580,11 @@ declares a larger size is rejected before its bytes are copied, and encoding
 refuses to emit one, so an older archive whose config member exceeds that bound
 fails restore. The bound covers only the config member; the database member
 stays streamed under the payload ceiling. It validates that hash, the
-zstd frame, member framing and config `Validate()` before applying anything,
-and a selected database member additionally passes `PRAGMA integrity_check`
-before it is staged. Decode refuses an uncompressed payload larger than the
+zstd frame, member framing and config `Validate()` before applying anything.
+A selected database member is decoded into its private staging file first,
+then must pass `PRAGMA integrity_check`; only that checked file is published
+as the pending snapshot, which restore then preflights for admission before
+the config member is written. Decode refuses an uncompressed payload larger than the
 Schema maximum for `backup_max_bytes`, so a small compressed file cannot expand
 without bound. Download lists how many live settings differ from default and how
 many stored requests would be packed. Picking a file first inspects the
@@ -686,7 +694,11 @@ publishes the image; a delivered code-bearing main push is an idempotent
 fallback. It never pushes `main`. Dependabot security pull requests are the
 only other exception and normally do not cut a release by themselves; an
 untagged pending `VERSION` can publish. A manually pushed `v*` tag ships exactly
-as tagged. The full maintainer checklist lives in
+as tagged. If the version tag already points at the released commit but its
+GitHub release is missing, the publish job fails closed with a repair
+instruction instead of reporting a successful re-run. Repair the existing tag's
+release after verifying the image; the job never moves a tag or republishes
+images. The full maintainer checklist lives in
 [Contributing](../CONTRIBUTING.md#branch-workflow).
 
 `go run ./cmd/proxy -version` (or `/millivolt -version` in the image) prints
@@ -889,9 +901,11 @@ caller forwards the credential on the endpoint's internal calls. The cookie is
 HttpOnly (script never reads it), SameSite Strict, scoped to 12 hours, and
 signed with a key derived from the operator token, so a container restart with
 the same credential keeps the session. Rotating the token invalidates outstanding
-cookies. The cookie deliberately carries no `Secure` flag:
-millivolt's listener is plain HTTP, and the documented TLS deployments
-terminate at the ingress, where the remaining loopback hop is trusted-local.
+cookies. The cookie carries `Secure` only when the request arrived over TLS or
+the first `X-Forwarded-Proto` token is `https` (the documented TLS deployments
+terminate at the ingress, and the canonical NGINX sample overwrites that header
+with `$scheme`), so a loopback plain-HTTP dashboard keeps working
+while a TLS presentation gets the flag.
 Do not expose the listener over plaintext networks anyway. The login page
 served for unauthenticated dashboard visits exchanges the entered value for
 that cookie through `POST /session` and works without JavaScript; API

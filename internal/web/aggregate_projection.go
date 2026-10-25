@@ -277,7 +277,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		var incomingLabels []contribLabels
 		scanned := 0
 		next, full, err := projectionStream(ctx, store, budget, base.cursor, func(rows *sql.Rows) error {
-			c, labels, err := scanContrib(rows, nil) // raw spelling; query rules apply later
+			c, labels, err := scanContrib(rows) // raw spelling; query rules apply later
 			if err != nil {
 				return err
 			}

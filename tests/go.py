@@ -184,6 +184,23 @@ def _constraint_tags(node):
     return _constraint_tags(node[1]) | _constraint_tags(node[2])
 
 
+def _race_constrained(content):
+    """True when any build constraint on the file mentions the race tag."""
+    try:
+        constraints = _build_constraints(content)
+    except ValueError:
+        return False
+    return any("race" in _constraint_tags(constraint) for constraint in constraints)
+
+
+# Go recognizes a test, benchmark, fuzz target or example by its top-level
+# function name. Race-gated files may only carry helpers, so this predicate
+# deliberately errs on the side of rejecting a name that begins with one of
+# those prefixes.
+_TEST_FUNCTION = re.compile(
+    r"(?m)^func\s+(?:Test|Benchmark|Fuzz|Example)[A-Za-z0-9_]*\s*\(")
+
+
 def _constraint_matches(node, tags):
     if node[0] == "tag":
         return node[1] in tags
@@ -226,14 +243,14 @@ def platform_constraint_only(name, content):
     return False
 
 
-def ignored_test_source(replacements, package_dir, name):
-    """Read an ignored test from its real file, following the overlay map."""
+def test_source(replacements, package_dir, name):
+    """Read a discovered test from its real file, following the overlay map."""
     path = str(Path(package_dir) / name)
     source = replacements.get(path, path)
     try:
         return Path(source).read_text(encoding="utf-8")
     except OSError as error:
-        raise RuntimeError("cannot inspect ignored Go test: " + path) from error
+        raise RuntimeError("cannot inspect Go test: " + path) from error
 
 
 def discover(root):
@@ -277,10 +294,32 @@ def overlay(root):
         yield path, replacements
 
 
+def _backing_digest(path):
+    """Hash one overlay backing file's bytes.
+
+    A content-only edit can change Go's file selection (adding a //go:build
+    constraint) while the path map and environment stay identical, so a
+    digest over paths alone certifies a selection that no longer exists.
+    """
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise RuntimeError("cannot hash Go test backing file: " + str(path)) from error
+
+
 def overlay_digest(replacements, environment):
-    """Fingerprint an overlay and the Go file-selection environment."""
+    """Fingerprint an overlay's paths, backing bytes and selection environment.
+
+    The handshake reuses one parity listing only while every input to that
+    listing is unchanged: which virtual path maps to which backing file, what
+    those files contain (their build constraints select tests), and the Go
+    file-selection environment.
+    """
     digest = hashlib.sha256()
     digest.update(json.dumps(replacements, sort_keys=True).encode("utf-8"))
+    for virtual in sorted(replacements):
+        digest.update(b"\0" + virtual.encode("utf-8") + b"\0"
+                      + _backing_digest(replacements[virtual]).encode("ascii"))
     for name in PARITY_ENVIRONMENT:
         digest.update(b"\0" + name.encode("ascii") + b"="
                       + environment.get(name, "").encode("utf-8"))
@@ -293,22 +332,49 @@ def parity_digest(root=ROOT, environment=None):
     return overlay_digest(discover(Path(root)), environment)
 
 
-def package_parity(replacements, document):
-    """Every physical test must appear in Go's native package discovery.
-
-    IgnoredGoFiles is accepted only when the filename suffix and the file's own
-    build constraints together make this a genuine GOOS/GOARCH exclusion. A
-    platform-suffixed file behind ``//go:build integration`` is still a silent
-    skip, so it is a hard error. No second package registry or fixed test count
-    can silently drift from Go.
-    """
+def _packages(document):
+    """Yield package metadata from a ``go list -json`` stream."""
     decoder = json.JSONDecoder()
-    found = set()
     document = document.lstrip()
     while document:
         package, end = decoder.raw_decode(document)
         require(isinstance(package, dict) and isinstance(package.get("Dir"), str),
                 "invalid Go package metadata")
+        yield package
+        document = document[end:].lstrip()
+
+
+def _listed_tests(document, fields):
+    """Return the native test paths the named package fields list."""
+    paths = set()
+    for package in _packages(document):
+        for field in fields:
+            names = package.get(field, [])
+            require(isinstance(names, list), "invalid Go test file metadata")
+            for name in names:
+                require(isinstance(name, str), "invalid Go test filename")
+                if name.endswith("_test.go"):
+                    paths.add(str(Path(package["Dir"]) / name))
+    return paths
+
+
+def package_parity(replacements, document, race_document=None):
+    """Every physical test must appear in Go's native package discovery.
+
+    IgnoredGoFiles is accepted when the filename suffix and the file's own
+    build constraints together make this a genuine GOOS/GOARCH exclusion. A
+    race-gated file is accepted only when a second listing taken with the race
+    tag discovers the same path, and only as a helper: a race-tagged file that
+    declares a Test, Benchmark, Fuzz or Example function is rejected because
+    one pass can list it while the other's binary silently excludes it. A
+    platform-suffixed file behind ``//go:build integration`` is still a silent
+    skip, and every other non-platform tag stays a hard error. No second
+    package registry or fixed test count can silently drift from Go.
+    """
+    alternate = None if race_document is None else _listed_tests(
+        race_document, ("TestGoFiles", "XTestGoFiles"))
+    found = set()
+    for package in _packages(document):
         for field in ("TestGoFiles", "XTestGoFiles", "IgnoredGoFiles"):
             names = package.get(field, [])
             require(isinstance(names, list), "invalid Go test file metadata")
@@ -317,14 +383,20 @@ def package_parity(replacements, document):
                 if name.endswith("_test.go"):
                     path = str(Path(package["Dir"]) / name)
                     if field == "IgnoredGoFiles":
-                        require(platform_test_name(name),
+                        platform = platform_test_name(name)
+                        if platform:
+                            content = test_source(replacements, package["Dir"], name)
+                            platform = platform_constraint_only(name, content)
+                        require(platform or (alternate is not None and path in alternate),
                                 "Go ignored a test for a non-platform reason, so it never runs: " + path)
-                        content = ignored_test_source(replacements, package["Dir"], name)
-                        require(platform_constraint_only(name, content),
-                                "Go ignored a test for a non-platform reason, so it never runs: " + path)
+                    if path in replacements:
+                        content = test_source(replacements, package["Dir"], name)
+                        require(not (_race_constrained(content)
+                                     and _TEST_FUNCTION.search(content)),
+                                "Go test " + path + " is race-gated and defines a test function, "
+                                "so one pass can silently skip it; race-tagged files may be helpers only")
                     require(path not in found, "Go discovered a duplicate test: " + path)
                     found.add(path)
-        document = document[end:].lstrip()
     require(found == set(replacements),
             "Go test discovery differs from physical tests: " + repr(sorted(found ^ set(replacements))))
 
@@ -359,7 +431,17 @@ def run(arguments, root=ROOT):
         def verify():
             result = go_command(["list", flag, "-mod=readonly", "-json", "./..."], root, env, capture=True)
             require(result.returncode == 0, "Go package discovery failed: " + result.stderr.strip())
-            package_parity(replacements, result.stdout)
+            # A race-gated test is ignored by the default build. Prove it is a
+            # deliberate selection by discovering it again with the race tag;
+            # package_parity still rejects every other non-platform tag.
+            race_document = None
+            if _listed_tests(result.stdout, ("IgnoredGoFiles",)):
+                raced = go_command(["list", flag, "-mod=readonly", "-tags=race", "-json", "./..."],
+                                   root, env, capture=True)
+                require(raced.returncode == 0,
+                        "Go race package discovery failed: " + raced.stderr.strip())
+                race_document = raced.stdout
+            package_parity(replacements, result.stdout, race_document)
 
         # Tidy can introduce a new test-only dependency; validate its package
         # graph after a successful update, not before the dependency exists.

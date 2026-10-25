@@ -422,8 +422,11 @@ func TestTotalsNumericAdmission(t *testing.T) {
 }
 
 // TestChartFoldAllocationBounded is the WS7 budget probe: accumulation at the
-// fold must not trade the removed validation for per-row allocation. The
-// ceiling carries 20% headroom over the measured post-change figure.
+// fold must not trade the removed validation for per-row allocation. Measured
+// 29 allocs and 28,880 bytes; the 35 ceiling is just over 20% headroom. The
+// allocation count is the per-row guard: one added allocation per row fails it
+// by 10,000. The 128 KiB byte ceiling leaves about 102 KiB, so a one-off 80 KiB
+// scratch passes by design; it bounds gross scratch, not per-row work.
 func TestChartFoldAllocationBounded(t *testing.T) {
 	now := int64(1_700_000_000_000)
 	const rows = 10000
@@ -445,12 +448,13 @@ func TestChartFoldAllocationBounded(t *testing.T) {
 		f.freezeOrder()
 		_ = f.payload(now)
 	})
-	// Measured 2026-10-25 on the c2b tree: 28 allocs. Ranked-set growth and the
+	// Measured 2026-10-25 on the c2b tree: 29 allocs. Ranked-set growth and the
 	// payload dominate; the numeric fold must stay allocation-free.
-	if allocs > 34 {
-		t.Fatalf("chart fold allocs = %.0f, budget 34", allocs)
+	if allocs > 35 {
+		t.Fatalf("chart fold allocs = %.0f, budget 35", allocs)
 	}
 	if bytes > 128*1024 {
 		t.Fatalf("chart fold bytes = %d, budget %d", bytes, 128*1024)
 	}
+	t.Logf("chart fold: %.0f allocs, %d bytes", allocs, bytes)
 }

@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -153,6 +154,80 @@ func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
 	}
 }
 
+// TestRingSnapshotAllocationCeiling pins the pooled borrow at the 250k-slot
+// probe size. ringSnapshot copies and filters the whole ring, and the invariant
+// is zero allocations: the borrowed scratch must be reused rather than
+// replaced. The byte figure is race-instrumented (-race shadow memory inflates
+// it), so it is logged for diagnosis, not asserted. A local
+// make([]*metrics.Record, 0, 64) would grow to the ring size on every read
+// (about 2 MB here) instead of reusing the released scratch, allocating on
+// every read and failing the zero-allocation ceiling.
+func TestRingSnapshotAllocationCeiling(t *testing.T) {
+	if raceInstrumented {
+		// sync.Pool.Put drops one in four items when the race detector is
+		// enabled (src/sync/pool.go), so a pool-backed read cannot assert a
+		// zero-allocation steady state under -race. The plain pass owns this
+		// ceiling; race coverage of the aggregate lives in the other tests.
+		t.Skip("race builds drop one in four sync.Pool puts by design")
+	}
+	const slots = 250_000
+	buf := metrics.NewBuffer(slots)
+	const distinct = 256
+	records := make([]*metrics.Record, distinct)
+	for i := range records {
+		records[i] = &metrics.Record{
+			ID:         fmt.Sprintf("ring-slot-%d", i),
+			StatusCode: 200,
+			Start:      time.UnixMilli(1_800_000_000_000 + int64(i)),
+		}
+	}
+	for i := 0; i < slots; i++ {
+		buf.Record(records[i%distinct])
+	}
+	api := NewAggAPI(buf, nil, time.Second)
+	// sync.Pool drops its buffers at every GC, so a cycle during the measured
+	// loop would turn steady-state reuse into a GC-timing lottery under -race.
+	// Disable automatic collection for the benchmark and restore it before the
+	// test returns; testing.Benchmark still forces a GC before each run, and
+	// the loop re-warms after that boundary. Any allocation in ringSnapshot
+	// itself still counts.
+	previousGC := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(previousGC)
+	// Warm the package pool with the exact ring-sized scratch.
+	scratch, view := api.ringSnapshot(0)
+	if len(view) != slots {
+		t.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
+	}
+	releaseRing(scratch, view)
+	result := testing.Benchmark(func(b *testing.B) {
+		// runN calls runtime.GC before this function, which can clear the
+		// package pool. Re-warm after that boundary so the measured loop
+		// starts from the reuse steady state rather than a cold miss.
+		scratch, view := api.ringSnapshot(0)
+		if len(view) != slots {
+			b.Fatalf("warm ringSnapshot = %d records, want %d", len(view), slots)
+		}
+		releaseRing(scratch, view)
+		b.ReportAllocs()
+		for b.Loop() {
+			scratch, view := api.ringSnapshot(0)
+			if len(view) != slots {
+				b.Fatalf("ringSnapshot = %d records, want %d", len(view), slots)
+			}
+			releaseRing(scratch, view)
+		}
+	})
+	bytes, allocs := result.AllocedBytesPerOp(), result.AllocsPerOp()
+	t.Logf("ringSnapshot = %d B/op %d allocs/op (%d allocations over N=%d)",
+		bytes, allocs, result.MemAllocs, result.N)
+	// AllocsPerOp is integer MemAllocs/N, so a single allocation every few
+	// hundred reads still rounds to zero. Assert the total instead: the
+	// measured loop must not allocate at all.
+	if result.MemAllocs != 0 {
+		t.Fatalf("ringSnapshot = %d total allocations over %d reads, want 0", result.MemAllocs, result.N)
+	}
+}
+
 // TestSnapshotIntoAllocationCeiling is the WS5a budget: a retained scratch
 // makes a ring snapshot allocation-free. At the one-million-record ceiling the
 // displaced copy was 8,005,296 B per KPI fold (BenchmarkKPI/records_1000000);
@@ -255,4 +330,49 @@ func TestKPIFoldReusesRingScratch(t *testing.T) {
 		t.Errorf("repeated cold KPI fold at %d slots = %d B/op, want <= 65536 (ring-sized scratch reallocated per fold)", slots, got)
 	}
 	t.Logf("repeated cold KPI fold at %d slots: %d B/op %d allocs/op", slots, res.AllocedBytesPerOp(), res.AllocsPerOp())
+}
+
+// TestKPIFoldReleasesRetainedScratchRecords pins the ownership boundary of the
+// retained scratch: the memo keeps the backing array for reuse but must not
+// keep any record pointer after a fold. Buffer.Reset retires the ring's own
+// references, so a scratch that still held them would pin every record and its
+// strings for the life of the process.
+func TestKPIFoldReleasesRetainedScratchRecords(t *testing.T) {
+	buf := metrics.NewBuffer(16)
+	seed := func(count int) {
+		for i := 0; i < count; i++ {
+			buf.Record(&metrics.Record{
+				ID:         fmt.Sprintf("scratch-%d-%d", count, i),
+				Provider:   "fixture.example",
+				Model:      "fixture-model",
+				Start:      time.UnixMilli(1_800_000_000_000 + int64(i)),
+				StatusCode: 200,
+			})
+		}
+	}
+
+	api := NewAggAPI(buf, nil, time.Second)
+	seed(6)
+	_ = api.kpi()
+	retained := cap(api.kpiMemo.ring)
+	if retained < 6 {
+		t.Fatalf("KPI scratch capacity = %d, want >= 6", retained)
+	}
+	for index, record := range api.kpiMemo.ring[:retained] {
+		if record != nil {
+			t.Fatalf("after fold, retained KPI scratch slot %d still pins %q", index, record.ID)
+		}
+	}
+
+	buf.Reset()
+	seed(2)
+	_ = api.kpi()
+	if got := cap(api.kpiMemo.ring); got != retained {
+		t.Fatalf("KPI scratch capacity after reset = %d, want retained %d", got, retained)
+	}
+	for index, record := range api.kpiMemo.ring[:retained] {
+		if record != nil {
+			t.Fatalf("after reset and fold, retained KPI scratch slot %d still pins %q", index, record.ID)
+		}
+	}
 }

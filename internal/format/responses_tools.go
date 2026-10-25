@@ -18,11 +18,16 @@ type announcedToolCall struct {
 	name string
 }
 
-// resolveToolCallKey maps an alternate identity spelling to the announced
-// call's canonical key.
-func (d *ResponsesStreamDecoder) resolveToolCallKey(key string) string {
-	if canonical, ok := d.toolAliases[key]; ok {
-		return canonical
+// resolveToolCallKey maps a terminal function call to the announced call's
+// canonical position-qualified key. The identity spelling wins over the wire
+// position, so a terminal array that renumbers items still reaches the block;
+// position is the fallback only when the identity is absent or ambiguous.
+func (d *ResponsesStreamDecoder) resolveToolCallKey(callID, itemID string, outputIndex int) string {
+	key := functionCallKey(callID, itemID, outputIndex)
+	if identity := functionCallIdentityKey(callID, itemID); identity != "" {
+		if canonical, ok := d.toolAliases[identity]; ok && canonical != "" {
+			return canonical
+		}
 	}
 	return key
 }

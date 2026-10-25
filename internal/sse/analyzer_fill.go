@@ -6,8 +6,6 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-// Fill populates rec with the analyzer's accumulated state. Call after the
-// stream has ended.
 // retainToolName records one distinct tool name in first-seen order. The
 // retained list and its dedupe set are bounded by RetainedToolNamesMax, so a
 // hostile stream cannot grow either; every wire family feeds this owner.
@@ -26,6 +24,8 @@ func (a *Analyzer) retainToolName(name string) {
 	a.toolNames = append(a.toolNames, name)
 }
 
+// Fill populates rec with the analyzer's accumulated state. Call after the
+// stream has ended.
 func (a *Analyzer) Fill(rec *metrics.Record) {
 	// Flush a trailing event that ended at EOF without its blank-line
 	// terminator (a stream can close right after the last data: line). This

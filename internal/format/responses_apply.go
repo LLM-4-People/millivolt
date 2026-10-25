@@ -16,6 +16,7 @@ import (
 func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireItem, policy responsesToolArgumentPolicy) ([]terminalEmission, error) {
 	var pending []terminalEmission
 	claimedTools := map[string]bool{}
+	clear(d.terminalItemClaims)
 	for i, item := range output {
 		typ := item.Type
 		if typ == "" && item.Role != "" {
@@ -31,7 +32,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				// are independent.
 				continue
 			}
-			key := d.resolveToolCallKey(functionCallKey(item.CallID, item.ID, i))
+			key := d.resolveToolCallKey(item.CallID, item.ID, i)
 			idx, ok := d.itemBlockByKey[key]
 			if d.announcedToolKeys[key] && !d.openToolKeys[key] && d.closedToolCallRepeat(key, item) {
 				// This terminal entry repeats an announced call whose block
@@ -98,12 +99,21 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			d.sawToolCall = true
 			if ok {
 				if err := reserveToolID(d.toolIDs, emission.block.ToolCall.ID); err != nil {
-					return nil, err
+					if policy == responsesToolArgumentsComplete {
+						// A completed terminal claims success for both calls, so
+						// a shared target id is a translation failure.
+						return nil, err
+					}
+					// A failed, incomplete or cancelled terminal owns the
+					// provider outcome. Keep the first terminal-only call and
+					// drop the duplicate rather than replacing that outcome
+					// with a translator error.
+					continue
 				}
 				pending = append(pending, emission)
 			}
 		case "message":
-			if err := d.applyMessageContent(item, i, &pending); err != nil {
+			if err := d.applyMessageContent(item, i, &pending, true); err != nil {
 				return nil, err
 			}
 		case "reasoning":
@@ -137,7 +147,7 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 // arrived in output_item.done or in the terminal document. Open blocks receive
 // only the missing bytes; parts that never reached the target wire are queued
 // after every streamed block closes.
-func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, outputIndex int, pending *[]terminalEmission) error {
+func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, outputIndex int, pending *[]terminalEmission, claim bool) error {
 	if err := checkNativeIdentity("message id", item.ID); err != nil {
 		return err
 	}
@@ -145,7 +155,7 @@ func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, out
 	if err != nil {
 		return err
 	}
-	itemKey := d.terminalContentItemKey(item.ID, outputIndex)
+	itemKey := d.terminalContentItemKey(item.ID, outputIndex, claim)
 	var channels []partChannel
 	grouped := map[partChannel][]channelPart{}
 	for order, part := range parts {
@@ -154,7 +164,7 @@ func (d *ResponsesStreamDecoder) applyMessageContent(item responsesWireItem, out
 			channels = append(channels, channel)
 		}
 		grouped[channel] = append(grouped[channel], channelPart{
-			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			key:     d.terminalPartKey(itemKey, item.ID, outputIndex, part.contentIndex),
 			index:   part.contentIndex,
 			value:   part.delta.Text,
 			channel: channel,
@@ -229,6 +239,7 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 		// without this assignment looks uncovered to the terminal copy and is
 		// emitted a second time.
 		d.setPartOwner(part.key, key)
+		d.partKind[part.key] = partChannelReasoning
 		before := d.emittedValue(part.key)
 		d.appendReasoningValue(item, key, part.value, pending)
 		if err := d.setEmittedText(part.key, before+part.value); err != nil {
@@ -245,7 +256,7 @@ func (d *ResponsesStreamDecoder) applyReasoningContent(item responsesWireItem, k
 			continue
 		}
 		contentTerminal = append(contentTerminal, channelPart{
-			key:     d.terminalPartKey(item.ID, outputIndex, part.contentIndex),
+			key:     d.terminalPartKey(key, item.ID, outputIndex, part.contentIndex),
 			index:   part.contentIndex,
 			value:   part.delta.Text,
 			channel: partChannelReasoning,
@@ -298,10 +309,11 @@ func (d *ResponsesStreamDecoder) terminalToolCallAnnounced(key string, outputInd
 }
 
 // terminalPartKey resolves the announcement identity of one terminal content
-// part. The content index is the part identity; the output position is used
-// only when both sides agree on the item id (or one side has none).
-func (d *ResponsesStreamDecoder) terminalPartKey(itemID string, outputIndex, contentIndex int) string {
-	key := contentPartKey(itemID, outputIndex, contentIndex)
+// part. The item key already accounts for terminal renumbering; the content
+// index is the part identity. The positional fallback is used only when both
+// sides agree on the item id (or one side has none).
+func (d *ResponsesStreamDecoder) terminalPartKey(itemKey, itemID string, outputIndex, contentIndex int) string {
+	key := contentPartKey(itemKey, contentIndex)
 	if d.announcedParts[key] {
 		return key
 	}

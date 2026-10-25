@@ -110,6 +110,18 @@ function closeSettings(force) {
   if (b) b.setAttribute('aria-pressed', 'false');
 }
 
+// cancelSettingsOpen consumes an Escape aimed at Settings: it closes an open
+// sheet through the real owner, or clears a pending open while the lazy modules
+// are still loading. The second case matters because the sheet stays hidden
+// until the module resolves; without it the loader's want-open check opened the
+// sheet after the keypress.
+function cancelSettingsOpen() {
+  if (settingsIsOpen()) { closeSettings(); return true; }
+  if (!settingsWantOpen) return false;
+  settingsWantOpen = false;
+  return true;
+}
+
 // toggleSettings loads the module once, then opens the sheet through its
 // owner. A load failure leaves the sheet closed and surfaces the shared
 // status copy plus a console error.
@@ -123,8 +135,9 @@ function toggleSettings(e) {
   settingsLoading = true;
   loadSettingsModule().then(mod => {
     settingsLoading = false;
-    // A close (or another header menu) while the module was loading cancels
-    // the pending open; reopening while loading keeps the intent true.
+    // A close, Escape or another header menu while the module was loading
+    // cancels the pending open; reopening while loading keeps the intent
+    // true.
     if (settingsWantOpen && !settingsIsOpen()) mod.open();
   }, () => {
     settingsLoading = false;
