@@ -196,7 +196,7 @@ func (a *AggAPI) queryCtx(r *http.Request) (context.Context, context.CancelFunc)
 // contribLabels owns the six single-valued dimension labels while a
 // contribution is still live. Durable rows never build this sidecar: the scan
 // returns the tuple by value for the one interning step (internLabels), so a
-// projected row never pays 112 bytes of garbage for labels the projection
+// projected row never pays 96 bytes of garbage for labels the projection
 // dictionaries are about to own. Projected rows resolve labels from
 // dimensionIDs instead; retaining six string headers on every durable row
 // duplicated bytes the dictionaries already own.
