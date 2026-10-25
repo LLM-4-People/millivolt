@@ -735,15 +735,18 @@ func (a *Analyzer) recordPresence(hasContent, hasReasoning, hasToolCall, hasTool
 // extractCost runs the cost-key scan over a raw JSON document (the chunk
 // root or the bare usage object). Returns (0, false) when the bytes are
 // absent or unparseable - "no cost reported", never a fabricated number.
+//
+// The generic decode belongs to metrics.ExtractCost, not to this caller: that
+// owner gates the decode behind the zero-allocation cost-key scan
+// (metrics.hasCostKey), including the \u escape fallback, so a document that
+// cannot carry a cost is never decoded at all. Decoding here first would pay
+// the whole-document materialization the gate exists to avoid, on every usage
+// chunk of every stream.
 func (a *Analyzer) extractCost(raw []byte) (float64, bool) {
 	if len(raw) == 0 {
 		return 0, false
 	}
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
-		return 0, false
-	}
-	return metrics.ExtractCostFromValue(v, a.CostKeys)
+	return metrics.ExtractCost(raw, a.CostKeys)
 }
 
 // flushEvent parses the accumulated multi-line event buffer for an in-band
