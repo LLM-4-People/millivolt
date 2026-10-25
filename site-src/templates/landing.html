@@ -1,9 +1,9 @@
 <main id="main">
   <section class="hero wrap">
     <div class="hero-copy">
-      <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>self-hosted · openai-compatible · MIT</p>
+      <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>self-hosted · cross-protocol · MIT</p>
       <h1>See every AI request.<br>Keep your own routing.</h1>
-      <p class="lead">A self-hosted, OpenAI-compatible proxy with a live dashboard, SQLite history, and controls to pause, limit, or debug traffic. Request metadata, timing, tokens, cost, and outcomes; body capture is opt-in.</p>
+      <p class="lead">A self-hosted, cross-protocol inference proxy with a live dashboard, SQLite history, and controls to pause, limit, or debug traffic. OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients can target any configured upstream. Request metadata, timing, tokens, cost, and outcomes; body capture is opt-in.</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="#quickstart">Run it locally</a>
         <a class="btn btn-ghost" href="docs/dashboard.html">Tour the dashboard</a>
@@ -18,17 +18,17 @@
       </div>
       <div class="signal-map">
         <div class="signal-column">
-          <span class="entity-label">clients</span>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#56b4e9" aria-hidden="true"></span>apps</div>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#009e73" aria-hidden="true"></span>agents</div>
-          <div class="entity-chip"><span class="entity-line" style="--entity:#e69f00" aria-hidden="true"></span>IDE</div>
+          <span class="entity-label">client protocols</span>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#56b4e9" aria-hidden="true"></span>chat</div>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#009e73" aria-hidden="true"></span>responses</div>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#e69f00" aria-hidden="true"></span>messages</div>
         </div>
         <div class="signal-arrow" aria-hidden="true"></div>
         <div class="signal-core">
           <img src="assets/mark.svg" alt="" width="64" height="64">
           <strong>millivolt</strong>
-          <span>route · observe · control</span>
-          <small>openai-compatible API</small>
+          <span>translate · route</span>
+          <small>any configured upstream</small>
         </div>
         <div class="signal-arrow" aria-hidden="true"></div>
         <div class="signal-column">
@@ -42,7 +42,7 @@
         <span>SQLite / in-memory</span>
         <span>metadata and metrics</span>
       </div>
-      <figcaption class="sr-only">Clients send OpenAI-compatible requests to millivolt. millivolt routes them to upstream APIs and records request metadata and metrics in SQLite or an in-memory ring.</figcaption>
+      <figcaption class="sr-only">Chat Completions, Responses, and Anthropic Messages clients send requests to millivolt. millivolt translates them for the configured upstream and records request metadata and metrics in SQLite or an in-memory ring.</figcaption>
     </figure>
   </section>
 
@@ -178,7 +178,7 @@ docker compose up -d</code></pre>
     </div>
     <div class="connect" id="connect-a-client">
       <h3>Connect a client.</h3>
-      <p>Point an OpenAI-compatible client at <code>http://127.0.0.1:8080/v1</code>. Send your upstream base URL in <code>X-Proxy-Base-URL</code>, your upstream key in <code>Authorization</code>, and an optional label in <code>X-Proxy-Client</code>. The proxy does not register providers or keys.</p>
+      <p>Point an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages client at <code>http://127.0.0.1:8080/v1</code>. Send your upstream base URL in <code>X-Proxy-Base-URL</code>, your upstream key in <code>Authorization</code>, and an optional label in <code>X-Proxy-Client</code>. The proxy does not register providers or keys.</p>
       <p><a class="text-link" href="docs/protocol.html">Protocol and client integration</a> · <a class="text-link" href="docs/adapters.html">Adapters and compatibility</a></p>
     </div>
   </section>
@@ -202,7 +202,7 @@ docker compose up -d</code></pre>
           <span class="mono-label">one Go service</span>
           <div class="arch-service-grid">
             <div><strong>routing</strong><span>per-request upstream URL, credentials, and path</span></div>
-            <div><strong>adapters</strong><span>OpenAI-compatible, Anthropic Messages, Cursor Connect</span></div>
+            <div><strong>adapters</strong><span>Chat Completions, Responses, Anthropic Messages, Cursor Connect</span></div>
             <div><strong>dashboard</strong><span>embedded assets, live SSE, retained views</span></div>
             <div><strong>operator API</strong><span>MCP tools and scoped controls</span></div>
           </div>
