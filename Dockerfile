@@ -17,7 +17,7 @@ RUN mkdir -p /out/data /out/config && \
       -ldflags="-s -X $(go list -m).revisionOverride=$REVISION" -o /out/millivolt ./cmd/proxy && \
     go run -mod=readonly ./scripts/licenses -target "$TARGETOS/$TARGETARCH" -out /out/licenses
 
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:516757106de35205efb70b91ba03f6f1298424a0678c603255cf2852a7000087
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 COPY --from=build /out/millivolt /millivolt
 COPY --from=build /out/licenses /usr/share/licenses/millivolt
 COPY --from=build --chown=65532:65532 /out/data/ /data/
