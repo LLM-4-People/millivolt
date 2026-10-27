@@ -3,6 +3,7 @@ package scheduler
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // maxSchedulerGroups bounds distinct per-provider+key groups retained at once.
@@ -16,18 +17,21 @@ const maxSchedulerGroups = 100_000
 // providerIndex is the scheduler's provider-scoped group index. The attributed
 // groups form a doubly linked list guarded by mu; eviction unlinks one group in
 // O(1), and a provider drain snapshots only groups whose queue is non-empty.
-// queued counts
-// the indexed groups whose queue currently holds at least one live waiter. A
-// provider drain reads it under Scheduler.mu as a witness that returns before
-// walking (and locking) an idle provider's groups. Each group stores a pointer
-// to this counter at its first attribution and adjusts it from the single
-// queue-transition owner under the group's own mutex, so maintaining the count
-// never needs Scheduler.mu.
+// cursor is the group a fair provider drain starts from next: queuedSnapshot
+// rotates its result to begin there, and drainProvider advances it after a pass
+// that served work, so repeated drains do not favor the first-attributed key.
+// queued counts the indexed groups whose queue currently holds at least one
+// live waiter. A provider drain reads it under Scheduler.mu as a witness that
+// returns before walking (and locking) an idle provider's groups. Each group
+// stores a pointer to this counter at its first attribution and adjusts it from
+// the single queue-transition owner under the group's own mutex, so maintaining
+// the count never needs Scheduler.mu.
 type providerIndex struct {
 	mu     sync.Mutex
 	head   *group
 	tail   *group
 	live   int
+	cursor *group // next fair-drain start; nil = list head. Guarded by mu.
 	queued atomic.Int64
 }
 
@@ -65,20 +69,85 @@ func (idx *providerIndex) unlinkLocked(g *group) {
 	}
 	g.providerPrev, g.providerNext = nil, nil
 	g.providerListed = false
+	if idx.cursor == g {
+		// An idle group chosen as the next rotation start is going away. Begin
+		// again at the head; it cannot hold queued work, so no turn is lost.
+		idx.cursor = nil
+	}
 	idx.live--
 }
 
 // queuedSnapshot returns the groups whose lock-free witness says a live waiter
-// is queued. It allocates only for those groups, so a provider with many idle
-// keys does not pay an allocation per drain.
+// is queued, rotated so the fair drain starts at idx.cursor. It allocates only
+// for those groups, so a provider with many idle keys does not pay an
+// allocation per drain. The cursor itself is advanced by drainProvider after a
+// pass that actually granted work (advanceCursor), never by a no-op drain: a
+// release fires both the gate wake and the group drain, and advancing on the
+// redundant second call would rotate past the key that was just served and
+// restore the old first-key bias. A cursor whose group was evicted or has
+// emptied falls back to the next queued group after its list position, so
+// rotation continues across idle gaps. Callers must not hold idx.mu.
 func (idx *providerIndex) queuedSnapshot() []*group {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	var out []*group
+	cursor := idx.cursor
+	passed := cursor == nil
+	found := cursor == nil
+	var after, before []*group
 	for g := idx.head; g != nil; g = g.providerNext {
-		if g.hasQueued.Load() {
-			out = append(out, g)
+		if !passed {
+			if g != cursor {
+				continue
+			}
+			passed, found = true, true
 		}
+		if g.hasQueued.Load() {
+			after = append(after, g)
+		}
+	}
+	if cursor != nil && found {
+		// Queued groups before the cursor follow it in the circular order.
+		for g := idx.head; g != nil && g != cursor; g = g.providerNext {
+			if g.hasQueued.Load() {
+				before = append(before, g)
+			}
+		}
+	} else if !found {
+		// The cursor was evicted or detached. Rebuild in list order; the next
+		// successful drain resumes rotation from whatever this one serves.
+		after = after[:0]
+		for g := idx.head; g != nil; g = g.providerNext {
+			if g.hasQueued.Load() {
+				after = append(after, g)
+			}
+		}
+	}
+	return append(after, before...)
+}
+
+// advanceCursor starts the next fair drain after the last group this snapshot
+// served. served indexes the same snapshot the caller walked; the next group in
+// rotation wraps to the snapshot start. Only a drain that granted work calls
+// this, so empty or fully blocked drains leave the rotation untouched.
+func (idx *providerIndex) advanceCursor(groups []*group, served int) {
+	if len(groups) == 0 || served < 0 || served >= len(groups) {
+		return
+	}
+	next := groups[(served+1)%len(groups)]
+	idx.mu.Lock()
+	idx.cursor = next
+	idx.mu.Unlock()
+}
+
+// snapshotAll returns every attributed group, queued or idle, in list order.
+// Policy changes use it to reset ramp epochs without walking the whole
+// scheduler map; the caller must not hold idx.mu.
+func (idx *providerIndex) snapshotAll() []*group {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	out := make([]*group, 0, idx.live)
+	for g := idx.head; g != nil; g = g.providerNext {
+		out = append(out, g)
 	}
 	return out
 }
@@ -101,7 +170,7 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 		g = &group{sched: s, key: key, maxConcurrent: maxConcurrent, sendKick: make(chan struct{})}
 		g.pacer.fn = func() {
 			g.kickSend()
-			g.drain()
+			g.drainAdmission()
 		}
 		s.adoptPacingLocked(g)
 		s.groups[key] = g
@@ -120,11 +189,12 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 
 // attributeProviderLocked links g into the provider index on its first
 // non-empty attribution. The caller must hold s.mu. Provider identity is
-// written here and nowhere else, under the same lock as the index link, so a
-// concurrent drain either sees the group in the index or observes the group
-// before this Acquire's admission attempt (see drainProvider's lost-wake
-// argument). Internal group lookups (Trip/FailSend/WaitSend/BackoffFor) never
-// attribute a provider; only an AcquireWith with hooks.Provider does.
+// written here and nowhere else, under s.mu (and under g.mu for admission and
+// observer readers), so a concurrent drain either sees the group in the index
+// or observes the group before this Acquire's admission attempt (see
+// drainProvider's lost-wake argument). Internal group lookups
+// (Trip/FailSend/WaitSend/BackoffFor) never attribute a provider; only an
+// AcquireWith with hooks.Provider does.
 //
 // The group also adopts the index's queued-group counter here, under g.mu (the
 // established s.mu -> g.mu order). A group can already hold waiters when it is
@@ -136,7 +206,6 @@ func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 	if provider == "" || g.provider != "" {
 		return
 	}
-	g.provider = provider
 	idx := s.providerGroups[provider]
 	if idx == nil {
 		idx = &providerIndex{}
@@ -144,6 +213,10 @@ func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 	}
 	g.providerIdx = idx
 	g.mu.Lock()
+	// provider is read by admit/drain under g.mu, and attribution can race a
+	// concurrent drain or ListThrottles for an already-listed group; publish
+	// it under the group lock together with its counter pointer.
+	g.provider = provider
 	g.providerQueued = &idx.queued
 	if g.hasQueued.Load() {
 		idx.queued.Add(1)
@@ -202,11 +275,18 @@ func (s *Scheduler) markGroupBusyLocked(g *group) {
 	s.idleMu.Unlock()
 }
 
-// markGroupIdleLocked appends g when its last live slot or waiter is gone.
-// Callers hold g.mu.
+// markGroupIdleLocked appends g when its last live slot or waiter is gone and
+// stamps the fully-idle instant the anti-burst ramp uses to decide whether the
+// next first grant starts a new epoch. The stamp exists only while an epoch is
+// live, so an inert or disabled policy adds no state to the group. A group
+// with a remaining backlog is never idle, so a ramp epoch survives a busy
+// drain. Callers hold g.mu.
 func (s *Scheduler) markGroupIdleLocked(g *group) {
 	if g.retired || g.inFlight != 0 || g.queued != 0 {
 		return
+	}
+	if !g.rampStart.IsZero() && g.idleSince.IsZero() {
+		g.idleSince = time.Now()
 	}
 	s.idleMu.Lock()
 	s.idlePushLocked(g)

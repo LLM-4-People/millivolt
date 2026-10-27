@@ -42,9 +42,12 @@ type Options struct {
 // Scheduler manages ordered queues per group key.
 //
 // Lock order: s.mu -> g.mu, s.mu -> idleMu, s.mu -> providerIndex.mu,
-// s.mu -> pacingLRU.mu, and g.mu -> idleMu. A path holding idleMu,
-// providerIndex.mu or pacingLRU.mu never waits for s.mu or g.mu, and
-// drainProvider releases providerIndex.mu before touching a group.
+// s.mu -> pacingLRU.mu, g.mu -> idleMu, and g.mu -> providerGate.mu for the
+// policy read and tryAdmit. throttleMu -> providerGate.mu while a policy is
+// installed; a ramp reset that walks groups runs only after throttleMu is
+// released. A path holding idleMu, providerIndex.mu or pacingLRU.mu never waits
+// for s.mu or g.mu, and drainProvider releases providerIndex.mu before touching
+// a group.
 type Scheduler struct {
 	mu     sync.Mutex // guards opts, groups, groupCap, providerGroups and group retirement
 	opts   Options
@@ -168,9 +171,30 @@ func (s *Scheduler) snapshotGroups() []*group {
 	return groups
 }
 
+// drainAll re-checks every group: unattributed groups drain locally, and each
+// attributed provider with queued work drains once through the fair
+// round-robin walk. Grouping the snapshot avoids one provider walk per group
+// and never calls drainProvider("") recursively.
 func (s *Scheduler) drainAll() {
+	providers := make(map[string]struct{})
+	var local []*group
 	for _, g := range s.snapshotGroups() {
+		g.mu.Lock()
+		provider, queued := g.provider, g.queued
+		g.mu.Unlock()
+		if provider == "" {
+			local = append(local, g)
+			continue
+		}
+		if queued > 0 {
+			providers[provider] = struct{}{}
+		}
+	}
+	for _, g := range local {
 		g.drain()
+	}
+	for provider := range providers {
+		s.drainProvider(provider)
 	}
 }
 

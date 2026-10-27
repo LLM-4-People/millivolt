@@ -70,10 +70,22 @@ func TestCancelledGrantedWaiterUsesOriginalGate(t *testing.T) {
 		provider := "provider.example"
 		limit := Throttle{Provider: provider, Limit: Limit{Concurrency: 1, Tokens: 100, TokWindow: time.Hour}}
 		s.SetThrottle(limit)
+		// Attribute the group through a real Acquire so it is linked into the
+		// provider index; a provider-attributed group must be visible to the
+		// fair provider drain, and the fixture then installs one granted but
+		// unconsumed waiter directly.
+		setup, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider})
+		if err != nil {
+			t.Fatal(err)
+		}
+		setup(0)
 		g := s.groupFor("group", 0)
-		g.provider = provider
 		w := &waiter{ch: make(chan struct{}, 1), ctx: context.Background(), provider: provider, estTokens: 40}
+		g.mu.Lock()
 		g.queue = []*waiter{w}
+		g.queued = 1
+		g.syncQueueLocked()
+		g.mu.Unlock()
 		g.drain() // grant sent, but the caller has not consumed it
 		s.SetThrottle(Throttle{Provider: provider})
 		s.SetThrottle(limit)

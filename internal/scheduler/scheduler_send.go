@@ -248,7 +248,7 @@ func (s *Scheduler) EndSend(key string, keepSerial bool) {
 	}
 	g.kickSendLocked()
 	g.mu.Unlock()
-	g.drain()
+	g.drainAdmission()
 }
 
 // FailSend records that this request's final outcome was a retryable
@@ -276,7 +276,7 @@ func (s *Scheduler) FailSend(key string, own bool) {
 	g.tripped = true
 	g.kickSendLocked()
 	g.mu.Unlock()
-	g.drain()
+	g.drainAdmission()
 }
 
 func (g *group) kickC() <-chan struct{} {

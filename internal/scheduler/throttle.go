@@ -17,15 +17,26 @@ const (
 	TokensUnavailable int64 = -1
 )
 
-// Limit is the three per-provider caps. Zero on a dimension means that
-// dimension is off (unlimited). A Limit with every dimension zero is
-// inactive - SetThrottle then drops the provider from the map.
+// Limit is the three per-provider caps plus the optional per-key anti-burst
+// ramp. Zero on a cap dimension means that dimension is off (unlimited). A
+// Limit with every cap dimension zero is inactive - SetThrottle then drops the
+// provider from the map; the ramp fields alone never activate a provider.
+//
+// AntiBurst makes every provider+key group independently grow its concurrency
+// from one up to Concurrency instead of allowing a fresh key to fill the whole
+// provider allowance at once. It is off when false, and inert unless
+// Concurrency >= 2 and RampDuration > 0. RampDuration is the time one group
+// needs to reach the configured Concurrency target; zero = off. Both fields
+// are policy, not live occupancy: Concurrency always stays the configured
+// target, so persistence and the dashboard never observe a mid-ramp value.
 type Limit struct {
-	Concurrency int           // in-flight requests across every key; 0 = off
-	Requests    int64         // max requests per ReqWindow; 0 = off
-	ReqWindow   time.Duration // window for Requests; ignored when Requests == 0
-	Tokens      int64         // max tokens per TokWindow; 0 = off
-	TokWindow   time.Duration // window for Tokens; ignored when Tokens == 0
+	Concurrency  int           // in-flight requests across every key; 0 = off
+	Requests     int64         // max requests per ReqWindow; 0 = off
+	ReqWindow    time.Duration // window for Requests; ignored when Requests == 0
+	Tokens       int64         // max tokens per TokWindow; 0 = off
+	TokWindow    time.Duration // window for Tokens; ignored when Tokens == 0
+	AntiBurst    bool          // per-key concurrency ramp; false = off
+	RampDuration time.Duration // time to reach Concurrency on a new key; 0 = off
 }
 
 // Active reports whether any dimension is on. Deny-by-default: a zero
@@ -314,6 +325,12 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 		s.throttleMu.Unlock()
 		return false
 	}
+	// A ramp shape change invalidates every group's epoch: the target and the
+	// slope are different, so an old epoch would grant the wrong allowance.
+	// Token/request-only edits keep the ramp untouched.
+	rampChanged := cur.Limit.Concurrency != t.Limit.Concurrency ||
+		cur.Limit.AntiBurst != t.Limit.AntiBurst ||
+		cur.Limit.RampDuration != t.Limit.RampDuration
 	if g != nil {
 		g.wake.stop()
 	}
@@ -323,6 +340,9 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 		delete(s.gates, provider)
 		s.publishGatesLocked()
 		s.throttleMu.Unlock()
+		if rampChanged {
+			s.resetProviderRamps(provider)
+		}
 		s.kickThrottles()
 		return true
 	}
@@ -349,6 +369,9 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 	g.resetBuckets(t.Limit, now)
 	g.mu.Unlock()
 	s.throttleMu.Unlock()
+	if rampChanged {
+		s.resetProviderRamps(provider)
+	}
 	s.kickThrottles()
 	return true
 }
@@ -407,7 +430,9 @@ func (s *Scheduler) throttleQueued() map[string]int {
 }
 
 // RestoreThrottles replaces the whole set (startup from SQLite). Does not
-// kick waiters - there are none yet at attach time.
+// kick waiters - there are none yet at attach time. Ramp epochs are reset
+// after installation: at startup no group exists yet, and a live restore in a
+// test or reload must not continue an epoch owned by the previous policy.
 func (s *Scheduler) RestoreThrottles(ts []Throttle) {
 	s.throttleMu.Lock()
 	for _, g := range s.gates {
@@ -430,6 +455,44 @@ func (s *Scheduler) RestoreThrottles(ts []Throttle) {
 	}
 	s.publishGatesLocked()
 	s.throttleMu.Unlock()
+	s.resetAllRamps()
+}
+
+// resetProviderRamps clears the ramp epoch of every group attributed to
+// provider. It runs after the policy lock is released and before the caller
+// kicks the throttles, so no group mutex is taken under throttleMu or a gate
+// mutex. The index pointer stays valid after the scheduler lock is released;
+// eviction unlinks groups but never frees the index while it is in use.
+func (s *Scheduler) resetProviderRamps(provider string) {
+	s.mu.Lock()
+	idx := s.providerGroups[provider]
+	s.mu.Unlock()
+	if idx == nil {
+		return
+	}
+	resetRamps(idx.snapshotAll())
+}
+
+// resetAllRamps clears every attributed group's ramp epoch. RestoreThrottles
+// replaces the entire policy set, so no installed epoch survives it.
+func (s *Scheduler) resetAllRamps() {
+	s.mu.Lock()
+	idxs := make([]*providerIndex, 0, len(s.providerGroups))
+	for _, idx := range s.providerGroups {
+		idxs = append(idxs, idx)
+	}
+	s.mu.Unlock()
+	for _, idx := range idxs {
+		resetRamps(idx.snapshotAll())
+	}
+}
+
+func resetRamps(groups []*group) {
+	for _, g := range groups {
+		g.mu.Lock()
+		g.resetRampLocked()
+		g.mu.Unlock()
+	}
 }
 
 // maxProviderGates bounds header-driven provider caps. Configured providers
@@ -528,7 +591,16 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 // delay a provider release beyond the short walk, and no allocation scales
 // with a provider's idle group count. Preserving the s.mu -> g.mu order every
 // other path uses: no path takes g.mu and then waits for s.mu; the index lock
-// is released before any g.drain.
+// is released before any group drain.
+//
+// Admission is round-robin across the queued groups, not group-by-group to
+// exhaustion. The snapshot starts at the index's rotating cursor, and each
+// pass grants at most one waiter per group before wrapping. A single freed
+// provider slot therefore goes to the next queued group instead of forever to
+// the group whose key was attributed first, and repeated drains that serve
+// work start at a different group. A capped key returns zero grants for its
+// turn without consuming another group's grant; held and cancelled waiters
+// keep their FIFO place without consuming the one-grant budget.
 //
 // A release cannot lose a wake to a group created concurrently with it: the
 // new group is linked, its provider published and its counter pointer
@@ -538,11 +610,12 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 // their releases run after the link, so one of them drains the group; a
 // blocked token/request bucket also arms a provider timer that re-runs this
 // drain after the link. A waiter that enqueues after this drain's counter
-// check is covered by its own post-enqueue g.drain when capacity was released,
-// or by the later release that observes the counter the enqueue transition set
-// (see acquire's g.drain call after enqueue). The enqueue transition and the
-// counter move under the same g.mu owner, so a group cannot be counted while
-// empty or omitted while a live waiter waits.
+// check is covered by its own post-enqueue fair drain when capacity was
+// released, or by the later release that observes the counter the enqueue
+// transition set. The enqueue transition and the counter move under the same
+// g.mu owner, so a group cannot be counted while empty or omitted while a live
+// waiter waits. A group that enqueues during a pass is admitted by its own
+// enqueue drain; this walk deliberately never rescans the provider globally.
 //
 // Eviction cannot remove a group whose queue holds a live waiter, so a
 // non-zero witness keeps every relevant group linked across this snapshot.
@@ -563,11 +636,36 @@ func (s *Scheduler) drainProvider(provider string) {
 		return
 	}
 	s.mu.Unlock()
-	for _, g := range idx.queuedSnapshot() {
-		if !g.hasQueued.Load() {
-			continue
+	groups := idx.queuedSnapshot()
+	if len(groups) == 0 {
+		return
+	}
+	// Passes repeat only while they make progress. A pass that grants nothing
+	// means every queued group is blocked by its own cap, its ramp allowance,
+	// the provider gate, a hold, or an empty/cancelled head; another pass
+	// would observe the same state. New enqueues own their enqueue drain.
+	served := -1
+	for {
+		granted := 0
+		last := -1
+		for i, g := range groups {
+			if !g.hasQueued.Load() {
+				continue
+			}
+			if g.drainLimited(1) > 0 {
+				granted++
+				last = i
+			}
 		}
-		g.drain()
+		if granted == 0 {
+			break
+		}
+		served = last
+	}
+	if served >= 0 {
+		// Rotate only after real service, so the gate wake's redundant second
+		// drain cannot undo the advance.
+		idx.advanceCursor(groups, served)
 	}
 }
 
