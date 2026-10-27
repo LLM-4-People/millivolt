@@ -378,17 +378,13 @@ func (g *group) release() {
 // on a per-key predicate before any provider refusal. Marking ahead of the
 // drain is required: a release that frees a provider slot must find this group,
 // while a peer parked on pacing/hold/cap stays out of the fast path's witness.
-// A group whose own pacing window or per-key cap already holds it back is not
-// marked, because no provider release or bucket refill can serve it until its
-// own timer or release fires; publishing it would leave a mark latched on a
-// saturated provider, where no drain can run to withdraw it.
+// markGateWaitingLocked owns the publication predicate, so a group whose own
+// pacing window or per-key cap holds it back cannot enter the fair set at all.
 func (g *group) drainAdmission() {
 	g.mu.Lock()
 	provider := g.provider
 	if provider != "" {
-		if g.queued > 0 && g.admissionWindowOpenLocked(time.Now()) {
-			g.markGateWaitingLocked()
-		}
+		g.markGateWaitingLocked()
 		g.mu.Unlock()
 		g.sched.drainProvider(provider)
 		return
@@ -410,12 +406,21 @@ func (g *group) admissionWindowOpenLocked(now time.Time) bool {
 	return !now.Before(g.nextAllowedAt)
 }
 
-// markGateWaitingLocked publishes g into its provider's fair-waiting set.
-// Callers hold g.mu; the index lock nests inside it, and no path may take the
-// reverse order. A group without a provider index (unattributed) has no shared
-// gate to wait on, so the call is a no-op.
+// markGateWaitingLocked publishes g into its provider's fair-waiting set when
+// the group can actually use the shared gate now: it has a live waiter and its
+// own pacing window and per-key cap are both open. Every caller holds g.mu, so
+// the check and the publication are one atomic transition. A closed group must
+// stay out of the set because no provider release or bucket refill can serve it
+// until its own timer or release fires; publishing it would latch a mark on a
+// saturated provider, where no drain runs to withdraw it. The index lock nests
+// inside g.mu, and no path may take the reverse order. A group without a
+// provider index (unattributed) has no shared gate to wait on, so the call is a
+// no-op.
 func (g *group) markGateWaitingLocked() {
 	if g.providerIdx == nil || g.gateWaiting.Load() {
+		return
+	}
+	if g.queued == 0 || !g.admissionWindowOpenLocked(time.Now()) {
 		return
 	}
 	g.providerIdx.markFairLocked(g)

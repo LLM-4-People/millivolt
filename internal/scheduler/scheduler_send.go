@@ -67,6 +67,13 @@ func (g *group) armPacingLaterLocked(d time.Duration) {
 		if until.After(g.nextAllowedAt) {
 			g.nextAllowedAt = until
 			g.pacer.arm(until, false)
+			// A fair-waiting mark reserves a turn through the shared provider
+			// gate. Once this group's own pacing window closes, a freed
+			// provider slot cannot serve it, so withdraw the mark now instead
+			// of leaving it latched until an unrelated drain happens to visit
+			// this group. The pacer re-marks the group when the window opens
+			// again and waiters remain.
+			g.clearGateWaitingLocked()
 		}
 	}
 }
