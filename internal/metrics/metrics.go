@@ -138,8 +138,10 @@ type Record struct {
 	// operator hold. Never persisted (the store insert list omits it).
 	Paused bool `json:"paused,omitempty"`
 
-	// Throttled is a live-only flag: the request is queued on a provider
-	// concurrency / requests-per-window / tokens-per-window cap. Never persisted.
+	// Throttled is a live-only flag: the scheduler is parking this request
+	// instead of sending - the admission queue (concurrency / pacing /
+	// requests-per-window / tokens-per-window / hold) or the send gate
+	// (retry pacing, probe serialization). Never persisted.
 	Throttled bool `json:"throttled,omitempty"`
 
 	// UsageInvalid is a live-only accounting flag: the provider reported usage

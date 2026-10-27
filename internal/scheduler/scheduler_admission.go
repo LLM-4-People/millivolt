@@ -47,6 +47,7 @@ type group struct {
 	requestBackoff time.Duration // consecutive failed requests (FailSend)
 	tripped        bool          // a request is retrying; siblings must WaitSend
 	probing        bool          // the retrying request holds the send token
+	sendWaiters    int           // callers parked in WaitSend's send gate
 	sendKick       chan struct{} // closed and replaced when the send gate changes
 	pacer          wakeTimer     // one shared pacing wakeup, not one per waiter
 	queue          []*waiter     // live waiters; cancelled entries are nil tombstones
@@ -77,12 +78,18 @@ type waiter struct {
 }
 
 // WaiterHooks is optional Acquire context: which client/provider this caller
-// is, and live-dashboard callbacks when the operator hold starts or lifts.
+// is, and live-dashboard callbacks when the caller starts or stops waiting.
+// A request is queued whenever the scheduler parks it instead of letting it
+// send: the admission queue (concurrency cap, pacing window, provider cap,
+// operator hold) or WaitSend's send gate (retry pacing, probe serialization).
 // OnWait signals a known wait outside scheduler locks: once per Acquire
 // enqueue, and once when WaitSend enters an operator hold. It may commit SSE
 // headers; it never fires for a fast Acquire or an already-full queue.
 // OnHold/OnUnhold are lifecycle-only: non-blocking, no I/O or scheduler re-entry.
-// OnThrottle / OnUnthrottle bookend provider-cap waits. Release owns usage.
+// OnThrottle / OnUnthrottle bookend every queued wait - admission queue or send
+// gate - so a parked request never reads as actively sending. They are
+// lifecycle-only too: non-blocking, no I/O or scheduler re-entry. Release owns
+// usage.
 type WaiterHooks struct {
 	Client       string
 	Provider     string
@@ -186,6 +193,19 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	if hooks.OnWait != nil {
 		hooks.OnWait()
 	}
+	// The request is queued from this enqueue until drain grants it. Publish
+	// that state once for the whole wait: every reason (concurrency cap,
+	// pacing window, provider cap, operator hold) parks here, and only the
+	// grant or the caller's exit ends it. The adjacent defer owns the lift on
+	// every return path.
+	defer func() {
+		if hooks.OnUnthrottle != nil {
+			hooks.OnUnthrottle()
+		}
+	}()
+	if hooks.OnThrottle != nil {
+		hooks.OnThrottle()
+	}
 	// Re-check after OnWait: a stale enqueue-time snapshot can fire OnHold
 	// after the operator already lifted the hold during the SSE write.
 	if h := g.sched.matchingHold(w.client, w.provider); h != nil {
@@ -200,13 +220,6 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	if opts.MaxWait > 0 {
 		deadline = w.enqueued.Add(opts.MaxWait)
 	}
-
-	throttling := false
-	defer func() {
-		if throttling && hooks.OnUnthrottle != nil {
-			hooks.OnUnthrottle()
-		}
-	}()
 
 	for {
 		// Snapshot kick before the hold predicate. Select evaluates channel
@@ -269,19 +282,6 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		}
 		// Hold just lifted (Until or kick) - grant ourselves if the group is idle.
 		g.drain()
-
-		blocked := g.sched.throttleBlocked(w.provider, w.estTokens)
-		if blocked && !throttling {
-			throttling = true
-			if hooks.OnThrottle != nil {
-				hooks.OnThrottle()
-			}
-		} else if !blocked && throttling {
-			throttling = false
-			if hooks.OnUnthrottle != nil {
-				hooks.OnUnthrottle()
-			}
-		}
 
 		var maxWait *time.Timer
 		var maxWaitC <-chan time.Time

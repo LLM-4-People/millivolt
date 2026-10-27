@@ -967,7 +967,12 @@ Limits applies to a provider across all clients and keys, independently of the
 per-key concurrency/queue settings. Choose concurrency, requests per window and
 tokens per window, then Apply; Clear removes that provider policy. The menu
 shows whether a policy came from the UI or a request header, together with
-available budget and in-flight/queued state. Header semantics are in
+available budget and in-flight/queued state. Queued counts every request the
+scheduler parks for that provider - admission waits and send-gate waits behind
+a 429/5xx pacing window alike - not only work blocked by the configured cap.
+Send-gate waits are paced by the provider's retry hint and the retry budget;
+`max_queue_size` and `max_queue_wait` bound only the admission FIFO.
+Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
@@ -1242,6 +1247,17 @@ the timeline and request log; selecting a card adds a filter and entity links
 pivot within that shared route. Browser back/forward restores hash-based scopes.
 Chart preset, range, percentile and series visibility persist in browser storage.
 These saved views are local browser state, not shared server settings.
+
+The In-flight tile separates work that is sending from work the scheduler is
+parking. Its summary names the two totals that fit the narrowest tile - active
+and queued - and the composition rail under the value splits every live state
+(sending, pending, operator-paused, throttled) by color; hovering the rail, or
+focusing it with assistive technology, reads the exact per-state counts. A
+queued request is one the proxy has not sent upstream yet: it can be waiting in
+the admission queue (per-key concurrency, pacing, a provider cap or an operator
+hold) or in the retry send gate behind a 429/5xx pacing window. The request
+table marks the same state with the `throttled` pill, and the status selector
+can filter on it.
 
 Explorer dimensions are Providers, Models, Client, Conversations, Tools, Time,
 Status, Errors and Keys. Their meanings are server-owned: model grouping and

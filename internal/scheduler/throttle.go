@@ -196,8 +196,7 @@ func (g *providerGate) resetBuckets(l Limit, now time.Time) {
 // (0 when the concurrency cap blocks: that waits for a release, not a
 // timer). The caller must hold g.mu: the bucket refills it performs are
 // the same mutations an admitting caller then relies on. tryAdmit applies
-// its reservation only after this returns false; throttleBlocked only
-// tests.
+// its reservation only after this returns false.
 func (g *providerGate) blocked(est int64) (bool, time.Duration) {
 	if !g.throttle.Limit.Active() {
 		return false, 0
@@ -386,6 +385,10 @@ func (s *Scheduler) ListThrottles() []ThrottleInfo {
 	return out
 }
 
+// throttleQueued counts, per provider, every request the scheduler parks for
+// that provider: admission waiters plus send-gate waiters. A 429 pacing
+// window parks both populations, so "queued" in the limits menu means work
+// waiting on the provider, not only work waiting on a configured cap.
 func (s *Scheduler) throttleQueued() map[string]int {
 	out := map[string]int{}
 	for _, g := range s.snapshotGroups() {
@@ -394,6 +397,9 @@ func (s *Scheduler) throttleQueued() map[string]int {
 			if w.provider != "" {
 				out[w.provider]++
 			}
+		}
+		if g.provider != "" {
+			out[g.provider] += g.sendWaiters
 		}
 		g.mu.Unlock()
 	}
@@ -464,17 +470,6 @@ func (s *Scheduler) tryAdmit(provider string, est int64) (ok bool, lease admissi
 		return true, admission{}, 0
 	}
 	return g.tryAdmit(est)
-}
-
-func (s *Scheduler) throttleBlocked(provider string, est int64) bool {
-	g := s.gate(provider)
-	if g == nil {
-		return false
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	blocked, _ := g.blocked(est)
-	return blocked
 }
 
 // finish settles and frees the gate captured at admission, never a fresh

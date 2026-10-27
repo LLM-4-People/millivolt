@@ -735,7 +735,9 @@ func (s *Server) PauseSnapshot() map[string]any {
 		"known_providers":    nullSlice(s.pause.providers.list()),
 		"until":              rfc3339OrNil(soonest),
 		"default_max_queued": s.defaultPauseCap(),
-		"queued":             st.Queued,
+		// Every request the scheduler is parking: admission waiters plus
+		// send-gate waiters (429/5xx retry pacing, probe serialization).
+		"queued": st.Queued + st.SendWaiters,
 	}
 }
 

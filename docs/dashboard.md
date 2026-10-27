@@ -39,6 +39,16 @@ A window with fewer than four plotted points paints a waiting message instead
 of the chart: one to three buckets are too few to read a trend, and the totals
 strip still tells the story until a fourth point arrives.
 
+The **In-flight** KPI tile separates sending work from parked work. Its summary
+names two totals that fit the narrowest tile - active and queued - and the
+composition rail under the value splits every live state by color: sending,
+pending, operator-paused and throttled. Hover the rail, or focus it with
+assistive technology, for the exact per-state counts. Queued covers both the
+admission queue (per-key concurrency, pacing, provider caps, operator holds) and
+the retry send gate, so a provider's 429 pacing window shows its parked
+requests as queued instead of as idle streams. The request table's `throttled`
+pill marks the same state per row.
+
 ### Overview
 
 **Overview** is the summary: it carries no plot at all. The tiles are the

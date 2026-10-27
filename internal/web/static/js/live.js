@@ -287,6 +287,17 @@ let _kpiHtml = '';
 let _kpiHtmlKey = '';
 let _statusHtml = '';
 let _statusHtmlKey = '';
+// FLIGHT_RAIL_ORDER is the in-flight composition rail's display order and
+// segment class: sending states first, parked states last, so a queued tail
+// reads as one contiguous block. The vocabulary itself stays
+// LIVE_STATUS_FILTERS; this is presentation order only.
+const FLIGHT_RAIL_ORDER = [
+  { name: 'streaming', cls: 'fm-streaming' },
+  { name: 'pending', cls: 'fm-pending' },
+  { name: 'paused', cls: 'fm-paused' },
+  { name: 'throttled', cls: 'fm-throttled' },
+];
+
 function derive(data) {
   const fs = explorerFilters(); // memoized on (hash, status) - identity is the scope key
   const rev = data._rev || 0;
@@ -330,11 +341,41 @@ function derive(data) {
   // in-flight tile stays event-live via the counters stream.
   const a = kpiNow();
   const inFlight = ctr.in_flight || 0;
-  const flightBits = [];
-  for (const name of Object.keys(LIVE_STATUS_FILTERS)) {
-    if (liveBuckets[name]) flightBits.push(liveBuckets[name] + ' ' + name);
+  // Live composition. "active" requests are sending now; "queued" ones are
+  // parked by the scheduler (429/5xx retry pacing, probe serialization,
+  // provider caps, operator holds). The status names are too wide for a
+  // 140px tile, so the summary keeps only those two totals - each short
+  // enough to survive the narrowest track - and the rail carries the exact
+  // per-state split with its hover/aria label.
+  const activeLive = liveBuckets.streaming + liveBuckets.pending;
+  const queuedLive = liveBuckets.throttled + liveBuckets.paused;
+  let flightLeft = '', flightRight = '', flightRightCls = '';
+  if (queuedLive) {
+    if (activeLive) flightLeft = fmt(activeLive) + ' active';
+    flightRight = fmt(queuedLive) + ' queued';
+    flightRightCls = liveBuckets.throttled ? 'q-throttled' : 'q-paused';
+  } else if (activeLive) {
+    flightLeft = fmt(activeLive) + ' ' +
+      (liveBuckets.streaming && liveBuckets.pending ? 'active'
+        : liveBuckets.streaming ? 'streaming' : 'pending');
+  } else {
+    flightLeft = 'active streams';
   }
-  const flightSub = flightBits.length ? flightBits.join(' · ') : 'active streams';
+  const flightParts = [];
+  for (const name of Object.keys(LIVE_STATUS_FILTERS)) {
+    if (liveBuckets[name]) flightParts.push(liveBuckets[name] + ' ' + name);
+  }
+  const flightTitle = flightParts.length ? flightParts.join(' · ') : 'no in-flight requests';
+  // One segment per non-zero state; flex shares keep it proportional while
+  // min-width keeps a single parked request visible in a busy stream.
+  let flightSegs = '';
+  for (const seg of FLIGHT_RAIL_ORDER) {
+    if (liveBuckets[seg.name]) {
+      flightSegs += `<i class="fm-seg ${seg.cls}" style="flex:${liveBuckets[seg.name]}"></i>`;
+    }
+  }
+  const flightMix = `<div class="flight-mix" role="img" aria-label="${escapeHtml(flightTitle)}" title="${escapeHtml(flightTitle)}">${flightSegs}</div>`;
+  const flightKey = FLIGHT_RAIL_ORDER.map(s => liveBuckets[s.name]).join(',');
   const totalCost = a.cost || 0;
   const cacheTotal = a.cache_read_tokens || 0;
   const inTotal = a.input_tokens || 0;
@@ -350,12 +391,12 @@ function derive(data) {
 
   const kpiKey = [a.requests, a.errors, a.cost, a.input_tokens, a.output_tokens,
     a.cache_read_tokens, a.reasoning_tokens, a.avg_ttft_ms, a.avg_tps,
-    a.cost_per_req, a.cost_per_mtok, inFlight, flightSub].join('|');
+    a.cost_per_req, a.cost_per_mtok, inFlight, flightKey].join('|');
   let kpiHtml = _kpiHtml;
   if (_kpiHtmlKey !== kpiKey) {
     kpiHtml = `
     <div class="kpi"><h2>Requests</h2><div class="val">${vt(fmt(a.requests))}</div><div class="sub2">all tracked</div></div>
-    <div class="kpi ${inFlight ? 'k-err' : ''}"><h2>In-flight</h2><div class="val">${vt(fmt(inFlight))}</div><div class="sub2">${flightSub}</div></div>
+    <div class="kpi k-flight ${inFlight ? 'k-err' : ''}"><h2>In-flight</h2><div class="val">${vt(fmt(inFlight))}</div><div class="sub2 flight-sub"><span>${flightLeft}</span>${flightRight ? `<span class="${flightRightCls}">${flightRight}</span>` : ''}</div>${flightMix}</div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">${vt(fmtMoney(totalCost), 'est USD · ' + fmtMoney(totalCost))}</div><div class="sub2">${costPerReq != null ? vt('~' + fmtMoney(costPerReq) + '/req') : '-'}</div></div>
     <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">${costPerMtok != null ? vt(fmtMoney(costPerMtok)) + '<span class="unit">/Mtok</span>' : '-'}</div><div class="sub2">${costPerMtok != null ? vt('priced in+out', 'blended over cost-reporting requests only') : '-'}</div></div>
     <div class="kpi"><h2>Tokens in/out</h2><div class="val val-duo">${vt(fmt(inTotal), fmtFull(inTotal))}<span class="unit">/</span>${vt(fmt(outTotal), fmtFull(outTotal))}</div><div class="sub2">${reasonTotal > 0 ? vt('reasoning ' + fmt(reasonTotal) + ' tok', 'reasoning ' + fmtFull(reasonTotal) + ' tok') : 'no reasoning'}</div></div>

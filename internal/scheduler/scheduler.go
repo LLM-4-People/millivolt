@@ -128,10 +128,18 @@ func (s *Scheduler) UpdateOptions(opts Options) {
 type Stats struct {
 	Paused   bool `json:"paused"`
 	InFlight int  `json:"in_flight"`
-	Queued   int  `json:"queued"`
+	// Queued counts admission waiters: requests in the bounded per-group FIFO
+	// that have not been granted a slot yet.
+	Queued int `json:"queued"`
+	// SendWaiters counts requests already holding an in-flight slot but parked
+	// in WaitSend's send gate (retry pacing, probe serialization). A 429
+	// pacing window parks both populations, so operator-facing totals add
+	// them; keeping them separate preserves the queue bound's own meaning.
+	SendWaiters int `json:"send_waiters"`
 }
 
-// Stats sums in-flight slots and queued waiters across every group.
+// Stats sums in-flight slots, admission waiters and send-gate waiters across
+// every group.
 func (s *Scheduler) Stats() Stats {
 	st := Stats{Paused: s.Paused()}
 	s.mu.Lock()
@@ -140,6 +148,7 @@ func (s *Scheduler) Stats() Stats {
 		g.mu.Lock()
 		st.InFlight += g.inFlight
 		st.Queued += g.queued
+		st.SendWaiters += g.sendWaiters
 		g.mu.Unlock()
 	}
 	return st

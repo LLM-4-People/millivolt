@@ -84,6 +84,29 @@ func waitKickOrDone(ctx context.Context, kick, sendKick <-chan struct{}) error {
 	return nil
 }
 
+// parkSendLocked counts this WaitSend call as one live send-gate waiter. It
+// reports the call's first park - the only transition that publishes the
+// queued edge - so a loop that re-parks never double counts or re-fires.
+// Callers hold g.mu.
+func (g *group) parkSendLocked(parked bool) bool {
+	if parked {
+		return false
+	}
+	g.sendWaiters++
+	return true
+}
+
+// announceSendWait publishes the queued edge for a caller parked in the send
+// gate: the live row reads as queued until the gate opens. It deliberately
+// does not start the SSE pacer - a send-gate wait must not write a keepalive
+// frame ahead of the upstream body, which would change the bytes a client
+// receives on a retried stream. Called outside every scheduler lock.
+func announceSendWait(hooks WaiterHooks) {
+	if hooks.OnThrottle != nil {
+		hooks.OnThrottle()
+	}
+}
+
 // WaitSend blocks until this caller may hit upstream. honorHold parks on an
 // operator pause (retries - a new send). First-attempt callers pass false so
 // an already-acquired in-flight request still finishes. own is the token
@@ -91,10 +114,27 @@ func waitKickOrDone(ctx context.Context, kick, sendKick <-chan struct{}) error {
 // EndSend. The bool is the token to pass back in (true if this caller now
 // owns the retry). nextAllowedAt is absolute wall clock - pause does not
 // reset it; after unpause the remaining time is waited.
+//
+// Every parked caller is counted in the group's sendWaiters and publishes one
+// queued edge (OnThrottle) until it owns the gate or gives up, so a 429 pacing
+// window is visible as queued work instead of an idle "streaming" row. The
+// token owner parks the same way while it waits out its own Retry-After
+// window; it is not sending during that time either.
 func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks, honorHold, own bool) (bool, error) {
 	g := s.groupFor(key, 0)
 	holding := false
+	parked := false
 	defer func() {
+		if parked {
+			g.mu.Lock()
+			if g.sendWaiters > 0 {
+				g.sendWaiters--
+			}
+			g.mu.Unlock()
+			if hooks.OnUnthrottle != nil {
+				hooks.OnUnthrottle()
+			}
+		}
 		if holding && hooks.OnUnhold != nil {
 			hooks.OnUnhold()
 		}
@@ -158,8 +198,16 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 
 		g.mu.Lock()
 		now := time.Now()
-		if now.Before(g.nextAllowedAt) {
+		// One park site for both send-gate waits: the pacing window and the
+		// sibling waiting for the owner's probe token. An owner ignores
+		// probing and sends as soon as its own window opens.
+		if now.Before(g.nextAllowedAt) || (!own && g.tripped && g.probing) {
+			first := g.parkSendLocked(parked)
+			parked = true
 			g.mu.Unlock()
+			if first {
+				announceSendWait(hooks)
+			}
 			if err := waitKickOrDone(ctx, kick, sendKick); err != nil {
 				return own, err
 			}
@@ -168,13 +216,6 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 		if own || !g.tripped {
 			g.mu.Unlock()
 			return own, nil
-		}
-		if g.probing {
-			g.mu.Unlock()
-			if err := waitKickOrDone(ctx, kick, sendKick); err != nil {
-				return own, err
-			}
-			continue
 		}
 		g.probing = true
 		g.mu.Unlock()

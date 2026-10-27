@@ -125,6 +125,16 @@ Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 
+Queue visibility has one owner across both park points: the bounded admission
+FIFO and `WaitSend`'s send gate. Every parked request publishes the live queued
+edge (`Throttled`) for the whole wait and clears it on the grant. `Stats`
+reports send-gate waiters separately (`SendWaiters`) and the operator snapshots
+add them to the global and per-provider queue totals, so a 429 pacing window
+reads as queued work rather than idle streams; a retrying owner waiting out its
+own Retry-After hint is queued for the same reason. Send-gate waits stay
+separate from the admission queue bound so `max_queue_size` keeps its own
+meaning.
+
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and
 exclusive recovery permits. Provider activation requires all models with

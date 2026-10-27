@@ -216,8 +216,8 @@ func TestThrottleOnThrottleHook(t *testing.T) {
 	// fixed window was long enough for the hook to run.
 	waitFor(t, throttled.Load, "OnThrottle to fire while blocked")
 	// Clearing the cap is the observable lift: kickThrottles (pauseMu, never
-	// holdCountMu) wakes the parked waiter and its wait loop re-checks
-	// throttleBlocked → OnUnthrottle must fire before the grant returns.
+	// holdCountMu) wakes the parked waiter and its deferred OnUnthrottle fires
+	// when the grant returns.
 	s.SetThrottle(Throttle{Provider: "p"})
 	waitFor(t, func() bool { return !throttled.Load() }, "OnUnthrottle to fire after the cap clear")
 	select {
@@ -1121,5 +1121,49 @@ func TestProviderDrainConcurrentGroupCreation(t *testing.T) {
 	}
 	if st := s.Stats(); st.InFlight != 0 || st.Queued != 0 {
 		t.Fatalf("concurrent drain left occupancy behind: %+v", st)
+	}
+}
+
+// The Limits menu's per-provider queued count covers send-gate waiters too:
+// a 429 pacing window parks requests that already hold an in-flight slot, and
+// those must not disappear from the operator's queue depth.
+func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
+	s := New(Options{})
+	ctx := context.Background()
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Requests: 100, ReqWindow: time.Minute}})
+	// Attribute the group to the provider the way production does: every send
+	// gate caller first acquires its admission slot.
+	release, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release(0)
+	if !s.Trip("p|k", time.Minute) {
+		t.Fatal("expected to own the send token")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.WaitSend(ctx, "p|k", WaiterHooks{Provider: "p"}, false, true)
+		done <- err
+	}()
+	waitFor(t, func() bool { return s.Stats().SendWaiters == 1 }, "send-gate waiter")
+
+	infos := s.ListThrottles()
+	if len(infos) != 1 || infos[0].Provider != "p" || infos[0].Queued != 1 {
+		t.Fatalf("ListThrottles = %+v, want p with queued 1", infos)
+	}
+
+	s.EndSend("p|k", false)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send-gate waiter stuck after EndSend")
+	}
+	if st := s.Stats(); st.SendWaiters != 0 {
+		t.Fatalf("send waiters = %d after the gate opened, want 0", st.SendWaiters)
 	}
 }

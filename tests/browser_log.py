@@ -198,3 +198,51 @@ async def log_checks(page, results):
         await page.evaluate("""() => document.querySelectorAll(
             'tr[data-id="retry-hover-fixture"], tr[data-retry-of="retry-hover-fixture"]')
             .forEach(row => row.remove())""")
+
+    # The In-flight tile must never clip its queued summary at the narrowest
+    # track. Its two ends stay short (active / queued) while the composition
+    # rail carries the exact per-state split and its hover title.
+    await page.set_viewport_size({'width': 1440, 'height': 1000})
+    flight_mix = await page.evaluate("""async () => {
+        const frames = () => new Promise(r =>
+            requestAnimationFrame(() => requestAnimationFrame(r)));
+        const host = document.getElementById('kpis');
+        const savedHtml = host.innerHTML;
+        const savedKpi = _kpiHtml, savedKey = _kpiHtmlKey;
+        const live = [
+            { id: 'kpi-flight-1', live: true, stream: true },
+            { id: 'kpi-flight-2', live: true, stream: true },
+            { id: 'kpi-flight-3', live: true, stream: true, paused: true },
+            { id: 'kpi-flight-4', live: true, throttled: true },
+        ];
+        try {
+            host.innerHTML = derive({ records: live, counters: { in_flight: 4 },
+                _rev: 424242 }).kpiHtml;
+            await frames();
+            const tile = [...host.querySelectorAll('.kpi')]
+                .find(k => (k.querySelector('h2') || {}).textContent === 'In-flight');
+            const sub = tile.querySelector('.flight-sub');
+            const spans = [...sub.querySelectorAll('span')].filter(s => s.textContent);
+            const rail = tile.querySelector('.flight-mix');
+            return {
+                texts: spans.map(s => s.textContent),
+                clipped: spans.filter(s => s.scrollWidth > s.clientWidth + 1)
+                    .map(s => s.textContent),
+                segments: [...rail.querySelectorAll('.fm-seg')].map(e => e.className),
+                title: rail.getAttribute('title'),
+                railWidth: rail.getBoundingClientRect().width,
+                subWidth: sub.getBoundingClientRect().width,
+            };
+        } finally {
+            host.innerHTML = savedHtml;
+            _kpiHtml = savedKpi;
+            _kpiHtmlKey = savedKey;
+        }
+    }""")
+    require(flight_mix['texts'] == ['2 active', '2 queued'], flight_mix)
+    require(not flight_mix['clipped'], flight_mix)
+    require(flight_mix['segments'] == ['fm-seg fm-streaming', 'fm-seg fm-paused',
+                                       'fm-seg fm-throttled'], flight_mix)
+    require(flight_mix['title'] == '2 streaming · 1 paused · 1 throttled', flight_mix)
+    require(abs(flight_mix['railWidth'] - flight_mix['subWidth']) <= 1, flight_mix)
+    results.append({'flight_mix': flight_mix})
