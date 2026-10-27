@@ -455,6 +455,53 @@ func TestStreamProviderErrorOnEmptyStreamRetried(t *testing.T) {
 	}
 }
 
+// TestStreamEngineOverloadedWrappedAsInvalidRequestRetried: a gateway that
+// labels a transient capacity failure as invalid_request_error but names the
+// real condition in the code (engine_overloaded, "Model busy, retry later")
+// is retried through the normal in-band rescue gate. The generic client-fault
+// wrapper must not suppress a specific transient capacity code, and the client
+// never sees the provider's error frame.
+func TestStreamEngineOverloadedWrappedAsInvalidRequestRetried(t *testing.T) {
+	var calls atomic.Int32
+	errChunk := `data: {"error":{"message":"Model busy, retry later","type":"invalid_request_error","code":"engine_overloaded"}}` + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(errChunk))
+			return
+		}
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if strings.Contains(got, "engine_overloaded") || strings.Contains(got, "invalid_request_error") {
+		t.Fatalf("the wrapped capacity error must be dropped before the wire: %s", got)
+	}
+	if got != "\n"+freshAnswerFrames {
+		t.Fatalf("the fresh attempt's frames must relay verbatim behind the event close: %q", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (one re-send)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 || len(rec.Attempts) != 1 {
+		t.Fatalf("recovered record: retries=%d attempts=%d isError=%v", rec.Retries, len(rec.Attempts), rec.IsError())
+	}
+	at := rec.Attempts[0]
+	if at.ErrorType != "invalid_request_error" || at.ErrorCode != "engine_overloaded" ||
+		at.ErrorMsg != "Model busy, retry later" {
+		t.Fatalf("absorbed attempt must carry the provider's envelope: %+v", at)
+	}
+}
+
 // TestStreamOperatorErrorClassExtensionRetried: the retryable_error_classes
 // setting extends the built-in vocabulary - a gateway reporting a transient
 // failure under a custom spelling is rescued exactly like a built-in class,

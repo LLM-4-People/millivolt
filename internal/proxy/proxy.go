@@ -124,6 +124,17 @@ func isNonRetryableQuotaErr(typ, code string) bool {
 	return metrics.IsNonRetryableQuotaErr(typ, code)
 }
 
+// retryableErrorClass is one entry in the built-in in-band retry vocabulary.
+// retryable authorizes a transparent re-send when the class matches the
+// envelope's type or code. overridesInvalidRequest additionally lets a
+// specific code authorize a re-send when the type is the generic
+// invalid_request_error wrapper; it never overrides authentication,
+// permission, not-found or too-large types.
+type retryableErrorClass struct {
+	retryable               bool
+	overridesInvalidRequest bool
+}
+
 // retryableUpstreamErrorClasses are the BUILT-IN in-band error type/code
 // strings that denote a TRANSIENT server-availability failure: the classes the
 // OpenAI API documents as retryable (500 server_error "retry your request",
@@ -139,17 +150,22 @@ func isNonRetryableQuotaErr(typ, code string) bool {
 // rate_limit_error is flow control with no in-band Retry-After (the scheduler
 // owns pacing), nonRetryableRequestClasses and the durable quota/billing
 // classes (metrics.IsNonRetryableQuotaErr) are
-// permanent, and an unknown type fails closed to verbatim relay.
-var retryableUpstreamErrorClasses = map[string]bool{
-	"server_error":              true, // OpenAI 500
-	"service_unavailable":       true, // OpenAI 503 type spelling
-	"service_unavailable_error": true, // OpenAI 503 type (current docs)
-	"server_is_overloaded":      true, // OpenAI 503 code
-	"api_error":                 true, // Anthropic 500 "unexpected error"
-	"internal_error":            true, // gateway spelling (OpenRouter and others)
-	"internal_server_error":     true, // gateway spelling
-	"overloaded_error":          true, // Anthropic 529
-	"timeout_error":             true, // Anthropic 540
+// permanent, and an unknown type fails closed to verbatim relay. A capacity
+// code may override the generic invalid_request_error wrapper when the
+// provider names the transient condition in the code.
+var retryableUpstreamErrorClasses = map[string]retryableErrorClass{
+	"server_error":              {retryable: true}, // OpenAI 500
+	"service_unavailable":       {retryable: true}, // OpenAI 503 type spelling
+	"service_unavailable_error": {retryable: true}, // OpenAI 503 type (current docs)
+	"server_is_overloaded":      {retryable: true}, // OpenAI 503 code
+	"api_error":                 {retryable: true}, // Anthropic 500 "unexpected error"
+	"internal_error":            {retryable: true}, // gateway spelling (OpenRouter and others)
+	"internal_server_error":     {retryable: true}, // gateway spelling
+	"overloaded_error":          {retryable: true}, // Anthropic 529
+	"timeout_error":             {retryable: true}, // Anthropic 540
+	// Gateway/vLLM capacity code sometimes wrapped in invalid_request_error;
+	// the message and code name a transient overload, not a malformed request.
+	"engine_overloaded": {retryable: true, overridesInvalidRequest: true},
 }
 
 // nonRetryableRequestClasses are the documented client-fault error types: the
@@ -157,9 +173,12 @@ var retryableUpstreamErrorClasses = map[string]bool{
 // large), so a re-send produces the identical failure. They deny even when a
 // co-occurring code string resembles a server class - the type is the
 // authoritative class field, and a provider mixing them is ambiguous, not
-// retryable. Unknown types deny by falling through (fail closed); only this
-// documented vocabulary needs an explicit deny because it is the one set that
-// could plausibly co-occur with a server-class code.
+// retryable. The one exception is the generic invalid_request_error wrapper:
+// a code explicitly marked overridesInvalidRequest names a capacity condition
+// that the wrapper obscures. Authentication, permission, not-found and
+// too-large types stay final. Unknown types deny by falling through (fail
+// closed); only this documented vocabulary needs an explicit deny because it
+// is the one set that could plausibly co-occur with a server-class code.
 var nonRetryableRequestClasses = map[string]bool{
 	"invalid_request_error": true,
 	"authentication_error":  true,
@@ -181,7 +200,11 @@ var nonRetryableRequestClasses = map[string]bool{
 //  3. a documented client-fault type (nonRetryableRequestClasses) is final
 //     against the built-in vocabulary even when its code strings resemble a
 //     server class - the type is the authoritative class field, and a
-//     provider mixing them is ambiguous, not retryable;
+//     provider mixing them is ambiguous, not retryable. The generic
+//     invalid_request_error wrapper is the exception: a code explicitly
+//     marked overridesInvalidRequest (engine_overloaded) names a capacity
+//     condition, while authentication, permission, not-found and too-large
+//     types stay final;
 //  4. the built-in retryableUpstreamErrorClasses vocabulary (the OpenAI
 //     retry semantics) matches the type or the code.
 //
@@ -197,9 +220,12 @@ func (s *Server) retryableUpstreamErrorClass(typ, code string) bool {
 		}
 	}
 	if nonRetryableRequestClasses[typ] {
-		return false
+		if typ != "invalid_request_error" {
+			return false
+		}
+		return retryableUpstreamErrorClasses[code].overridesInvalidRequest
 	}
-	return retryableUpstreamErrorClasses[typ] || retryableUpstreamErrorClasses[code]
+	return retryableUpstreamErrorClasses[typ].retryable || retryableUpstreamErrorClasses[code].retryable
 }
 
 // target is the resolved upstream destination for one request.
