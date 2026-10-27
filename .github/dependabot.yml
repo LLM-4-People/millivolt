@@ -62,6 +62,13 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Playwright 1.64.x declares pyee<15,>=13. Dependabot's pyee 15 update
+      # cannot be installed alongside the pinned Playwright, so keep this rule
+      # until a Playwright release raises its pyee upper bound.
+      - dependency-name: pyee
+        versions:
+          - ">=15"
 
   - package-ecosystem: github-actions
     directory: /
