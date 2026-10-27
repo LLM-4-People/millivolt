@@ -60,6 +60,7 @@ module.exports = async function delegatedActions(H) {
       model_canon: baseCanon, storage: {enabled: true, dropped: 3}, storm:stormFixture,
     });
     const streams = [], requests = [];
+    const adminBodies = [];
     let adminReply, adminCalls = 0, chartReply;
     const isolated = dashboardDOM(assembleHTML(state), {...pageOptions, beforeParse(win) {
       pageOptions.beforeParse(win);
@@ -67,7 +68,7 @@ module.exports = async function delegatedActions(H) {
       win.fetch = (url, options) => {
         if (String(url).includes('/metrics/bootstrap')) return new Promise(resolve => requests.push(resolve));
         if (String(url).includes('/metrics/agg/chart') && chartReply) return chartReply;
-        if (String(url).startsWith('/admin/') && options?.method === 'POST' && adminReply) {adminCalls++; return adminReply;}
+        if (String(url).startsWith('/admin/') && options?.method === 'POST' && adminReply) {adminCalls++; adminBodies.push(options.body); return adminReply;}
         return fallback(url, options);
       };
       win.EventSource = function(url) {
@@ -294,13 +295,18 @@ module.exports = async function delegatedActions(H) {
       check('successful Debug warnings remain visible and late pre-mutation state cannot restore the session',
         sw.eval('debugState.sessions.length') === 0 && !sd.getElementById('debug-menu').hidden && sd.getElementById('debug-count').textContent.includes('not persisted'));
 
-      const hostile = "label');window.__operatorXSS=1;//";
-      sw.applyThrottleState({ok:true,active:true,known_providers:[hostile],throttles:[{provider:hostile,requests:2,request_window:'2m'}]});
+      const hostile = 'x'.repeat(227) + "');window.__operatorXSS=1;//";
+      sw.applyThrottleState({ok:true,active:true,known_providers:[hostile],throttles:[{provider:hostile,requests:2,request_window:'2m',anti_burst:true,ramp_duration:'10s'}]});
       sw.toggleLimitsMenu({stopPropagation(){}});
       sd.querySelector('#lim-holds [data-operator]').click();
       check('provider actions are inert delegated data, including quotes and script text',
         !sw.__operatorXSS && sd.getElementById('lim-provider').value === hostile && !sd.querySelector('#lim-holds [onclick]'));
       check('Limits custom duration survives edit and refresh', sd.getElementById('lim-reqw').value === '2m');
+      check('a 255-byte provider keeps its stored anti-burst controls exact and inert',
+        hostile.length === 255 && sd.getElementById('lim-antiburst').checked &&
+        sd.getElementById('lim-ramp').value === '10s' &&
+        sd.getElementById('lim-count').textContent === 'anti-burst 10s' &&
+        !sw.__operatorXSS);
       for (const [value,want] of [['1e3',1000],['1.5',NaN],['-1',NaN],['',0]]) {
         sd.getElementById('lim-conc').value=value;
         check('Limits whole-number parsing: '+JSON.stringify(value), Object.is(sw.limitNum('lim-conc'),want));
@@ -326,6 +332,58 @@ module.exports = async function delegatedActions(H) {
         !sd.getElementById('lim-count').dataset.err &&
           sd.getElementById('lim-count').textContent === 'set in UI · in-flight 1 · queued 2 · 5/20 req' &&
           errLine.includes('limit write failed'));
+
+      // The anti-burst pair rides the same full-form Apply: a stored ramp
+      // survives with its flag off, an active cap sends both fields, and an
+      // empty cap form clears them so no on-ramp follows a zero limit.
+      {
+        const policyState = policy => ({ok:true,active:true,known_providers:['provider-a'],
+          throttles:[{provider:'provider-a',source:'ui',concurrency:2,requests:3,request_window:'2m',
+            tokens:0,token_window:'',...policy}]});
+        const anti = sd.getElementById('lim-antiburst');
+        const ramp = sd.getElementById('lim-ramp');
+        sw.applyThrottleState(policyState({anti_burst:false,ramp_duration:'10s'}));
+        sw.syncLimitsMenuState();
+        sw.onLimitProviderChange();
+        check('editing a provider keeps a stored ramp selected while its flag is off',
+          !anti.checked && ramp.value === '10s' &&
+          sd.getElementById('lim-conc').value === '2' &&
+          sd.getElementById('lim-req').value === '3' &&
+          sd.getElementById('lim-reqw').value === '2m');
+        anti.checked = true;
+        ramp.value = '30s';
+        let releaseApply;
+        adminReply = new Promise(resolve => { releaseApply = resolve; });
+        const applyIndex = adminBodies.length;
+        const applying = sw.applyLimitsMenu();
+        check('the Limits busy gate disables both anti-burst controls and Apply',
+          adminBodies.length === applyIndex + 1 && anti.disabled && ramp.disabled &&
+          sd.getElementById('btn-limits-apply').disabled);
+        releaseApply({ok:true,json:async()=>policyState({anti_burst:true,ramp_duration:'30s'})});
+        await applying;
+        check('Limits Apply sends the exact active-cap body with its anti-burst policy',
+          JSON.stringify(JSON.parse(adminBodies[applyIndex])) === JSON.stringify({
+            provider:'provider-a', concurrency:2, requests:3, request_window:'2m',
+            tokens:0, token_window:'', anti_burst:true, ramp_duration:'30s',
+          }));
+        check('the confirmed anti-burst policy repaints both controls and the count line',
+          anti.checked && ramp.value === '30s' &&
+          sd.getElementById('lim-count').textContent === 'set in UI · anti-burst 30s');
+        sw.applyThrottleState(policyState({anti_burst:true,ramp_duration:'30s'}));
+        sw.onLimitProviderChange();
+        for (const id of ['lim-conc','lim-req','lim-tok']) sd.getElementById(id).value = '0';
+        anti.checked = true;
+        ramp.value = '30s';
+        adminReply = Promise.resolve({ok:true,json:async()=>({
+          ok:true,active:false,known_providers:['provider-a'],throttles:[]})});
+        const clearIndex = adminBodies.length;
+        await sw.applyLimitsMenu();
+        check('an empty cap form clears anti-burst instead of sending an on-ramp',
+          JSON.stringify(JSON.parse(adminBodies[clearIndex])) === JSON.stringify({
+            provider:'provider-a', concurrency:0, requests:0, request_window:'',
+            tokens:0, token_window:'', anti_burst:false, ramp_duration:'',
+          }));
+      }
 
       const draft=sd.createElement('div');
       const rules=[{mode:'pattern',from:' x ',to:' y '},{mode:'exact',from:' padded ',to:' kept ',disabled:true},{mode:'lower',from:' parked ',to:' value ',disabled:true}];

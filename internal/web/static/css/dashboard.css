@@ -286,6 +286,7 @@
   .clear-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .clear-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .clear-opts select, .clear-opts input { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
+  #limits-menu .clear-opts input[type="checkbox"] { width: 14px; height: 14px; padding: 0; margin: 2px 0 0; }
   .clear-menu-ft { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
   .clear-count { display: block; font-size: 11px; color: var(--warn); min-height: 15px; margin-bottom: 8px; }
   /* Shared action row: the scoped action anchors LEFT, the "everything/all"

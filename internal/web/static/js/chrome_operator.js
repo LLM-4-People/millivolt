@@ -294,6 +294,7 @@ let _pauseMenuSig = '';
 let _debugMenuSig = '';
 let _limitsMenuSig = '';
 let _limitsProviderSig = '';
+let _limitsPolicySig = '';
 function applyPauseState(st, revision = operatorState.pause.revision) {
   if (!acceptOperator('pause', st, revision)) return;
   const sig = JSON.stringify(st);

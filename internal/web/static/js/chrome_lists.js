@@ -438,8 +438,23 @@ const LIMIT_WINDOWS = [
 // The fallback window when a limit carries none (fillLimitWindows' default
 // and the apply body's missing-select fallback): '1m', named once.
 const LIMIT_WINDOW_DEFAULT = '1m';
+// LIMIT_RAMPS is the single owner of the anti-burst ramp dropdown: the off
+// pair plus the same curated window vocabulary the capped limits use.
+const LIMIT_RAMPS = [['', 'off']].concat(LIMIT_WINDOWS);
 function fillLimitWindows(sel, value) {
   fillSelectPairs(sel, LIMIT_WINDOWS, value || LIMIT_WINDOW_DEFAULT);
+}
+function fillLimitPolicy(force = false) {
+  const name = $('lim-provider') ? $('lim-provider').value : '';
+  const t = limitByProvider(name);
+  const anti = !!(t && t.anti_burst);
+  const ramp = (t && t.ramp_duration) || '';
+  const sig = JSON.stringify([name, anti, ramp]);
+  if (!force && sig === _limitsPolicySig) return;
+  _limitsPolicySig = sig;
+  const box = $('lim-antiburst');
+  if (box) box.checked = anti;
+  fillSelectPairs($('lim-ramp'), LIMIT_RAMPS, ramp);
 }
 
 function syncLimitsMenuState() {
@@ -455,6 +470,7 @@ function syncLimitsMenuState() {
     sel.innerHTML = empty + known.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
     if (keep && known.includes(keep)) sel.value = keep;
   }
+  fillLimitPolicy();
   updateLimitCount();
   renderLimitHolds();
   updateLimitsApplyEnabled();
@@ -470,9 +486,15 @@ function onLimitProviderChange() {
   if (tok) tok.value = t && t.tokens ? String(t.tokens) : '';
   fillLimitWindows($('lim-reqw'), t && t.request_window);
   fillLimitWindows($('lim-tokw'), t && t.token_window);
+  fillLimitPolicy(true);
   operatorCountClear('throttle');
   updateLimitCount();
   updateLimitsApplyEnabled();
+}
+
+function limitPolicyBits(t) {
+  if (!t || !t.anti_burst) return [];
+  return ['anti-burst' + (t.ramp_duration ? ' ' + t.ramp_duration : '')];
 }
 
 function updateLimitCount() {
@@ -483,6 +505,7 @@ function updateLimitCount() {
   if (t) {
     const bits = [];
     if (t.source) bits.push(t.source === 'header' ? 'set by header' + (t.updated_by ? ' · ' + t.updated_by : '') : 'set in UI');
+    bits.push(...limitPolicyBits(t));
     if (t.in_flight) bits.push('in-flight ' + t.in_flight);
     if (t.queued) bits.push('queued ' + t.queued);
     if (t.requests && t.requests_capacity) bits.push(Math.max(0, Math.round(t.requests_remaining)) + '/' + Math.round(t.requests_capacity) + ' req');
@@ -515,6 +538,11 @@ function applyLimitsMenu() {
   const req = limitNum('lim-req');
   const tok = limitNum('lim-tok');
   if ([conc, req, tok].some(Number.isNaN)) { operatorError('throttle', 'limits must be non-negative whole numbers'); return; }
+  const anti = $('lim-antiburst');
+  const ramp = $('lim-ramp');
+  // A ramp only shapes an active cap: an explicit on-ramp with every cap at
+  // zero is a server-side 400, so the form's empty state clears the policy.
+  const live = conc > 0 || req > 0 || tok > 0;
   const body = {
     provider,
     concurrency: conc,
@@ -522,6 +550,8 @@ function applyLimitsMenu() {
     request_window: req > 0 ? ($('lim-reqw') ? $('lim-reqw').value : LIMIT_WINDOW_DEFAULT) : '',
     tokens: tok,
     token_window: tok > 0 ? ($('lim-tokw') ? $('lim-tokw').value : LIMIT_WINDOW_DEFAULT) : '',
+    anti_burst: live && !!(anti && anti.checked),
+    ramp_duration: live && ramp ? ramp.value : '',
   };
   return mutateOperator('throttle', body);
 }
@@ -537,6 +567,7 @@ function limitHoldLabel(t) {
   if (t.concurrency) bits.push('×' + t.concurrency);
   if (t.requests) bits.push(t.requests + '/' + (t.request_window || ''));
   if (t.tokens) bits.push(fmt(t.tokens) + ' tok/' + (t.token_window || ''));
+  bits.push(...limitPolicyBits(t));
   return (t.provider || '') + ' · ' + bits.join(' · ');
 }
 
@@ -578,6 +609,7 @@ function limitsMenuStructuralSig() {
   const rows = (throttleState.throttles || []).map(t => [
     t.provider || '', Number(t.concurrency) || 0, Number(t.requests) || 0,
     t.request_window || '', Number(t.tokens) || 0, t.token_window || '',
+    !!(t.anti_burst), t.ramp_duration || '',
     t.source || '', t.updated_by || '',
   ]);
   return JSON.stringify([rows, throttleState[KNOWN_PROVIDERS_KEY] || []]);
