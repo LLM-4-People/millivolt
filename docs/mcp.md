@@ -132,7 +132,7 @@ semantics below, correct SQL is guesswork.
 | `audit_capture_get` | Read one capture document by request record id. |
 | `operator_state` | Pause, limits, quota/storm and restart status in one call. |
 | `set_pause` | Create, edit or resume pause holds. |
-| `set_throttle` | Set or clear one provider's budgets. |
+| `set_throttle` | Set, merge or clear one provider's caps, including the optional anti-burst pair. |
 | `resume_quota` | Close one provider's open retry-mode quota gate. |
 | `set_config` | Revision-checked partial configuration patch. |
 | `config_get` | The live configuration document: values, running overrides (the keys the process pins outside the file, which `set_config` strips), the canonical usage and model metadata field names, defaults, per-key schema, restart-required set and the revision a patch must echo. |
@@ -145,6 +145,12 @@ an arbitrary path: nothing reaches the proxy's transparent inference
 catch-all, and no restore-adjacent route is exposed. The HTTP endpoint
 dispatches those same calls in process to the proxy's own gated handler, so
 they never leave the process and the gate re-validates the forwarded Bearer.
+
+`set_throttle` takes `provider` and any of `concurrency`,
+`requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and
+`ramp_duration`; omitted dimensions keep their value, and `clear: true` drops
+the whole policy. The proxy owns the duration grammar and band and refuses an
+explicit on-ramp without an active limit.
 
 ### Filters
 

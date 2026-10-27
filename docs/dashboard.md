@@ -253,11 +253,17 @@ headers are redacted. No debug session was enabled for this screenshot.
 
 ### Limits
 
-Limits sets provider-wide request, token and concurrency budgets. These limits
-are distinct from key-scoped scheduling and upstream rate-limit observations.
-The menu shows the selected provider's configured controls and active policies.
+Limits sets provider-wide request, token and concurrency budgets, plus an
+opt-in anti-burst ramp that grows each provider+key group's allowance from one
+to the concurrency target. These limits are distinct from key-scoped scheduling
+and upstream rate-limit observations. The menu shows the selected provider's
+configured controls and active policies, including the anti-burst checkbox and
+ramp select, and its count line names the policy source and adds an anti-burst
+hint when the ramp is enabled.
 
 ![Limits menu with provider-wide request, token and concurrency controls](images/menus/limits.png)
+
+(The static capture predates the anti-burst controls.)
 
 ### Logs
 

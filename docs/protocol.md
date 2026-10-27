@@ -115,8 +115,13 @@ whitespace-only value arrives empty and is treated as absent, while a padded
 numeric value is read as its trimmed spelling. `0`, `off`, `none` or
 `unlimited` clear a `X-Proxy-Limit-*` policy.
 Windows accept Go durations from 1 second through 24 hours, plus `1d`.
-Malformed limit values reject the request without applying any of its limit
-headers. The Limits menu shows the policy and its source. Rates use continuously
+Anti-burst and its ramp duration are operator API policy (`/admin/throttle`, the
+dashboard and MCP), not header-driven; a header update changes only the three
+caps and preserves the stored pair. The ramp is inert unless `anti_burst` is
+true, the concurrency target is at least 2 and `ramp_duration` is above 0, and
+its duration uses that same window grammar. Malformed limit values reject the
+request without applying any of its limit headers. The Limits menu shows the
+policy and its source. Rates use continuously
 refilled budgets, not strict fixed-window quotas; see
 [Pause and Limits](operations.md#pause-and-limits) for charging and burst behavior.
 
