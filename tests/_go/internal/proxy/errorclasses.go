@@ -9,10 +9,12 @@ import (
 
 // TestRetryableUpstreamErrorClass pins the one precedence chain that decides
 // whether an in-band provider error authorizes a transparent re-send: quota
-// deny > operator extension > client-fault deny (against the built-ins) >
-// built-in retryable vocabulary > fail closed. Every rule the streaming and
-// non-streaming rescue sites rely on has a row here, so a vocabulary or
-// precedence regression reddens this table before it can reach the relay.
+// deny > operator extension > client-fault deny (against the built-ins, with
+// the generic invalid_request_error wrapper yielding to an explicitly marked
+// capacity code) > built-in retryable vocabulary > fail closed. Every rule the
+// streaming and non-streaming rescue sites rely on has a row here, so a
+// vocabulary or precedence regression reddens this table before it can reach
+// the relay.
 func TestRetryableUpstreamErrorClass(t *testing.T) {
 	newServer := func(ext ...string) *Server {
 		cfg := config.Default()
@@ -39,6 +41,10 @@ func TestRetryableUpstreamErrorClass(t *testing.T) {
 		{name: "in-band rate limit is flow control", typ: "rate_limit_error", want: false, why: "no in-band Retry-After exists; the scheduler owns pacing"},
 		{name: "client-fault type", typ: "invalid_request_error", want: false, why: "the request itself is wrong; a re-send repeats it"},
 		{name: "client-fault type with a server-shaped code", typ: "invalid_request_error", code: "internal_error", want: false, why: "the type is the authoritative class field"},
+		{name: "client-fault type with a permanent code", typ: "invalid_request_error", code: "bad_request", want: false, why: "an unknown code fails closed under the wrapper"},
+		{name: "engine overload wrapped as invalid request", typ: "invalid_request_error", code: "engine_overloaded", want: true, why: "the capacity code overrides the generic wrapper"},
+		{name: "engine overload as a type", typ: "engine_overloaded", want: true, why: "built-in capacity class"},
+		{name: "engine overload under a credential type", typ: "permission_error", code: "engine_overloaded", want: false, why: "credential and permission classes stay final"},
 		{name: "permission type", typ: "permission_error", want: false, why: "client fault"},
 		{name: "quota type", typ: "insufficient_quota", code: "internal_error", want: false, why: "quota deny outranks every server-shaped code"},
 		{name: "quota code", typ: "weird_gateway", code: "exceeded_current_quota_error", want: false, why: "quota deny outranks the unknown type"},

@@ -300,9 +300,13 @@ frames, and the relay surfaces the non-SSE body as a truncated-stream error
 rather than translating it. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
 relayed: the error classes the OpenAI API documents as retryable (500
-`server_error`, the 503 overloaded/unavailable family, request timeouts, and
-the equivalent Anthropic/gateway spellings) are dropped before the wire and
-the request re-sent, so the client never sees the failure. The
+`server_error`, the 503 overloaded/unavailable family, request timeouts, the
+equivalent Anthropic/gateway spellings, and the `engine_overloaded` capacity
+code) are dropped before the wire and the request re-sent, so the client never
+sees the failure. A specific capacity code overrides the generic
+`invalid_request_error` wrapper, because the code names a transient overload
+rather than a malformed request; authentication, permission, not-found and
+too-large types stay final. The
 `retryable_error_classes` setting extends that vocabulary with operator-supplied
 type or code strings for gateway-specific spellings (durable quota/billing
 classes are rejected at load); rate limits in-band

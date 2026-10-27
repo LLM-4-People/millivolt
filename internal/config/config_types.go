@@ -216,11 +216,13 @@ type Config struct {
 
 	// RetryableErrorClasses extends the built-in retryable in-band error
 	// vocabulary (OpenAI server_error / service_unavailable family,
-	// api_error, overloaded_error, timeout_error and the common gateway
-	// spellings) with operator-supplied type or code strings: a gateway that
-	// reports a transient failure under a custom spelling can be re-sent
-	// without a code change. Matched case-insensitively against the parsed
-	// error envelope's type and code fields, never message text. The list is
+	// api_error, overloaded_error, timeout_error, engine_overloaded and the
+	// common gateway spellings) with operator-supplied type or code strings:
+	// a gateway that reports a transient failure under a custom spelling can
+	// be re-sent without a code change. The built-in engine_overloaded
+	// capacity code also overrides the generic invalid_request_error
+	// wrapper. Matched case-insensitively against the parsed error
+	// envelope's type and code fields, never message text. The list is
 	// authoritative over the documented client-fault types (a gateway that
 	// mislabels a transient failure as invalid_request_error can be opted
 	// back in); only durable quota/billing classes are absolutely excluded -
