@@ -160,7 +160,7 @@ function liveStatusCell(r) {
     return `<span class="pill paused" data-edit-pause title="held by operator pause - click to edit the hold">paused</span>` + debugBadge(r);
   }
   if (sc === 'throttled') {
-    return `<span class="pill throttled" data-edit-limit title="queued on a provider limit - click to edit">throttled</span>` + debugBadge(r);
+    return `<span class="pill throttled" data-edit-limit title="queued by the proxy - not yet sent upstream; click to edit provider limits">throttled</span>` + debugBadge(r);
   }
   const title = sc === 'streaming' ? 'request in flight - streaming' : 'request in flight - pending';
   return `<span class="pill live" title="${title}">${sc}</span>` + debugBadge(r);

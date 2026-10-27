@@ -90,7 +90,9 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 		}
 	})
 	provider := "provider.example"
-	initial := scheduler.Throttle{Provider: provider, Limit: scheduler.Limit{Concurrency: 3}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: time.Now().Add(-time.Hour)}
+	// Seed the anti-burst pair so every header merge below must carry it: an
+	// unchanged header is a whole-policy no-op only if both fields survive.
+	initial := scheduler.Throttle{Provider: provider, Limit: scheduler.Limit{Concurrency: 3, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: time.Now().Add(-time.Hour)}
 	p.applyThrottle(initial)
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	r.Header.Set(hdrLimitConcurrency, "3")
@@ -227,7 +229,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		var wg sync.WaitGroup
 		wg.Go(func() {
 			<-start
-			if rr := postThrottle(t, p, `{"provider":"provider.example","concurrency":3}`); rr.Code != http.StatusOK {
+			if rr := postThrottle(t, p, `{"provider":"provider.example","concurrency":3,"anti_burst":true,"ramp_duration":"10s"}`); rr.Code != http.StatusOK {
 				t.Errorf("UI patch: %d %s", rr.Code, rr.Body.String())
 			}
 		})
@@ -241,7 +243,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		})
 		close(start)
 		wg.Wait()
-		want := scheduler.Limit{Concurrency: 3, Tokens: 100, TokWindow: time.Minute}
+		want := scheduler.Limit{Concurrency: 3, Tokens: 100, TokWindow: time.Minute, AntiBurst: true, RampDuration: 10 * time.Second}
 		if got := schedThrottleFor(p.scheduler, provider).Limit; got != want {
 			t.Fatalf("UI/header merge lost a dimension: %+v", got)
 		}
@@ -253,6 +255,9 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		before, saves := schedThrottleFor(p.scheduler, provider), store.saveCount()
 		if before.Limit.Tokens != 100 || before.Limit.TokWindow != 2*time.Minute {
 			t.Fatal("window-only patch lost the current count")
+		}
+		if !before.Limit.AntiBurst || before.Limit.RampDuration != 10*time.Second {
+			t.Fatalf("window-only patch lost the anti-burst pair: %+v", before.Limit)
 		}
 		if rr := postThrottle(t, p, `{"provider":"provider.example","concurrency":8,"tokens":-1}`); rr.Code != http.StatusBadRequest {
 			t.Fatalf("invalid UI patch status = %d", rr.Code)
@@ -452,7 +457,7 @@ func TestThrottleHeaderMissingWindowRejected(t *testing.T) {
 
 func TestThrottlePOSTAndClear(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	rr := postThrottle(t, p, `{"provider":"alpha.example","concurrency":4,"requests":30,"request_window":"1m","tokens":90000,"token_window":"1m"}`)
+	rr := postThrottle(t, p, `{"provider":"alpha.example","concurrency":4,"requests":30,"request_window":"1m","tokens":90000,"token_window":"1m","anti_burst":true,"ramp_duration":"10s"}`)
 	if rr.Code != 200 {
 		t.Fatalf("status = %d body %s", rr.Code, rr.Body.Bytes())
 	}
@@ -460,10 +465,14 @@ func TestThrottlePOSTAndClear(t *testing.T) {
 	if th.Limit.Concurrency != 4 || th.Limit.Requests != 30 || th.Limit.Tokens != 90000 {
 		t.Fatalf("limit = %+v", th.Limit)
 	}
+	if !th.Limit.AntiBurst || th.Limit.RampDuration != 10*time.Second {
+		t.Fatalf("ramp = %+v", th.Limit)
+	}
 	if th.Source != "ui" || th.UpdatedBy != "dashboard" {
 		t.Fatalf("source = %s by %s", th.Source, th.UpdatedBy)
 	}
 
+	// Clearing one cap leaves the policy active, so the ramp stays installed.
 	rr = postThrottle(t, p, `{"provider":"alpha.example","concurrency":0}`)
 	if rr.Code != 200 {
 		t.Fatalf("clear conc status = %d", rr.Code)
@@ -472,6 +481,9 @@ func TestThrottlePOSTAndClear(t *testing.T) {
 	if th.Limit.Concurrency != 0 || th.Limit.Requests != 30 {
 		t.Fatalf("merge = %+v", th.Limit)
 	}
+	if !th.Limit.AntiBurst || th.Limit.RampDuration != 10*time.Second {
+		t.Fatalf("clearing concurrency dropped the ramp: %+v", th.Limit)
+	}
 
 	rr = postThrottle(t, p, `{"provider":"alpha.example","clear":true}`)
 	if rr.Code != 200 {
@@ -479,6 +491,9 @@ func TestThrottlePOSTAndClear(t *testing.T) {
 	}
 	if schedThrottleFor(p.scheduler, "alpha.example").Limit.Active() {
 		t.Fatal("clear left a cap")
+	}
+	if th := schedThrottleFor(p.scheduler, "alpha.example").Limit; th.AntiBurst || th.RampDuration != 0 {
+		t.Fatalf("clear left a ramp: %+v", th)
 	}
 }
 
@@ -492,6 +507,14 @@ func TestThrottlePOSTDenyByDefault(t *testing.T) {
 	}
 	if postThrottle(t, p, `{"provider":"x","concurrency":-1}`).Code != 400 {
 		t.Fatal("negative concurrency")
+	}
+	// The ramp pair never activates a provider by itself, so enabling it on a
+	// fresh name is refused instead of answering 200 for a dropped policy.
+	if postThrottle(t, p, `{"provider":"x","anti_burst":true}`).Code != 400 {
+		t.Fatal("anti-burst without a cap")
+	}
+	if postThrottle(t, p, `{"provider":"x","ramp_duration":"10s"}`).Code != 400 {
+		t.Fatal("ramp duration without a cap")
 	}
 }
 
@@ -520,6 +543,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	policies := []scheduler.Throttle{
 		{Provider: "alpha.example", Limit: scheduler.Limit{Requests: 30, ReqWindow: time.Minute}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
 		{Provider: "busy.example", Limit: scheduler.Limit{Concurrency: 1}, Source: scheduler.ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
+		{Provider: "ramp.example", Limit: scheduler.Limit{Concurrency: 4, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(90 * time.Second)},
 		{Provider: "zulu.example", Limit: scheduler.Limit{Tokens: 9000, TokWindow: time.Hour}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
 	}
 	for _, th := range policies {
@@ -768,10 +792,10 @@ func TestThrottleSnapshotMatchesGET(t *testing.T) {
 		t.Fatalf("GET body %s != ThrottleSnapshot %s", get.Body.String(), snap)
 	}
 
-	// A set cap shows up in both surfaces.
+	// A set cap shows up in both surfaces, ramp fields included.
 	setp := httptest.NewRecorder()
 	p.HandleThrottle(setp, httptest.NewRequest(http.MethodPost, "/admin/throttle",
-		strings.NewReader(`{"provider":"alpha.example","concurrency":2}`)))
+		strings.NewReader(`{"provider":"alpha.example","concurrency":2,"anti_burst":true,"ramp_duration":"10s"}`)))
 	if setp.Code != 200 {
 		t.Fatalf("POST set throttle → %d body %s", setp.Code, setp.Body.String())
 	}
@@ -787,6 +811,10 @@ func TestThrottleSnapshotMatchesGET(t *testing.T) {
 	throttles, ok := st["throttles"].([]any)
 	if !ok || len(throttles) != 1 {
 		t.Fatalf("throttles = %v, want 1", st["throttles"])
+	}
+	row, _ := throttles[0].(map[string]any)
+	if row["anti_burst"] != true || row["ramp_duration"] != "10s" {
+		t.Fatalf("GET row ramp = %+v", row)
 	}
 }
 
@@ -807,6 +835,13 @@ func TestMCPThrottleSchemaMirrorsTheProxyBands(t *testing.T) {
 		{"Tokens", "0 to " + strconv.FormatInt(maxLimitTokens, 10)},
 		{"RequestWindow", windowBand},
 		{"TokenWindow", windowBand},
+		// The anti-burst ramp reuses the window band, and the flag's inertness
+		// is the proxy's own rule (scheduler.Limit.rampActive): a schema that
+		// promised a ramp without those two conditions would tell a model its
+		// change takes effect when the scheduler ignores it.
+		{"RampDuration", windowBand},
+		{"AntiBurst", "off by default"},
+		{"AntiBurst", "inert unless concurrency is at least 2"},
 	} {
 		field, ok := reflect.TypeOf(mcp.SetThrottleInput{}).FieldByName(tc.field)
 		if !ok {

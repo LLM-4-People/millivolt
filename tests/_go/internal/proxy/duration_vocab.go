@@ -450,10 +450,13 @@ func TestPauseDebugMenuDurationsAreServerAccepted(t *testing.T) {
 }
 
 // TestLimitWindowMenuTokensAreServerAccepted parses every LIMIT_WINDOWS
-// token through the limits owner; a menu window outside the server's
-// accepted range reddens.
+// token through the limits owner and every LIMIT_RAMPS token through
+// parseRampDuration; LIMIT_RAMPS must keep deriving its ramp vocabulary from
+// LIMIT_WINDOWS, so a menu window outside the server's accepted range (or a
+// ramp token that is not an off spelling or an accepted window) reddens.
 func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
-	toks := menuDurationTokens(t, menuDeclStatement(t, chromeMenuSource(t, "chrome_lists.js"), "LIMIT_WINDOWS"))
+	js := chromeMenuSource(t, "chrome_lists.js")
+	toks := menuDurationTokens(t, menuDeclStatement(t, js, "LIMIT_WINDOWS"))
 	if len(toks) == 0 {
 		t.Fatal("LIMIT_WINDOWS offers no tokens")
 	}
@@ -473,6 +476,29 @@ func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
 		if _, err := parseLimitWindow(tok); err == nil {
 			t.Errorf("parseLimitWindow(%q) accepted, want rejected (outside the window range)", tok)
 		}
+	}
+
+	rampStmt := menuDeclStatement(t, js, "LIMIT_RAMPS")
+	if !strings.Contains(rampStmt, "LIMIT_WINDOWS") {
+		t.Fatalf("LIMIT_RAMPS no longer derives from LIMIT_WINDOWS; give any own token its own acceptance rows: %s", rampStmt)
+	}
+	rampToks := menuDurationTokens(t, rampStmt)
+	off := false
+	for _, tok := range rampToks {
+		if tok == "" {
+			off = true
+		}
+		d, err := parseRampDuration(tok)
+		if err != nil {
+			t.Errorf("parseRampDuration(%q): %v, want the Limits ramp menu token accepted", tok, err)
+			continue
+		}
+		if d != 0 && (d < minLimitWindow || d > maxLimitWindow) {
+			t.Errorf("parseRampDuration(%q) = %v, outside the accepted range", tok, d)
+		}
+	}
+	if !off {
+		t.Errorf("LIMIT_RAMPS offers no empty off token: %v", rampToks)
 	}
 }
 

@@ -32,6 +32,8 @@ func (t *proxyServerTransport) RoundTrip(req *http.Request) (*http.Response, err
 		t.p.HandleDebug(rec, req)
 	case "/admin/pause":
 		t.p.HandlePause(rec, req)
+	case throttlePath:
+		t.p.HandleThrottle(rec, req)
 	case "/metrics/bootstrap":
 		rec.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(rec, `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":true},"records":[]}`)

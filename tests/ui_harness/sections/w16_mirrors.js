@@ -205,6 +205,9 @@ module.exports = async function w16Mirrors(H) {
           ['1s', '1 second'], ['10s', '10 seconds'], ['30s', '30 seconds'],
           ['1m', '1 minute'], ['5m', '5 minutes'], ['15m', '15 minutes'],
           ['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours']]));
+      check('LIMIT_RAMPS derives from LIMIT_WINDOWS behind its off pair',
+        JSON.stringify(sw.eval('LIMIT_RAMPS')) ===
+        JSON.stringify(sw.eval('[["", "off"]].concat(LIMIT_WINDOWS)')));
       check('FILTER_AGES offers canonical Go duration spellings',
         JSON.stringify(sw.eval('FILTER_AGES')) === JSON.stringify([
           ['', '-'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
@@ -213,6 +216,11 @@ module.exports = async function w16Mirrors(H) {
         JSON.stringify([...sd.getElementById('pf-dur').options].map(o => o.value)) ===
         JSON.stringify(['', '15m', '1h', '6h', '12h', '24h']));
       sw.togglePauseMenu({stopPropagation() {}});
+      sw.toggleLimitsMenu({stopPropagation() {}});
+      check('the limits menu renders the off-plus-window ramp token set',
+        JSON.stringify([...sd.getElementById('lim-ramp').options].map(o => o.value)) ===
+        JSON.stringify(['', '1s', '10s', '30s', '1m', '5m', '15m', '1h', '6h', '24h']));
+      sw.toggleLimitsMenu({stopPropagation() {}});
 
       // holdMatchesRecord mirrors scheduler holdSnap.matches on the scope
       // half (scheduler/hold.go); chrome_settings.js holdLive owns the expiry half

@@ -14,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
@@ -22,7 +25,8 @@ import (
 func TestOperatorStateReadsFourSurfaces(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, pausePath, `{"ok":true,"paused":true,"holds":[{"id":"h1","all":true,"queued":2}],"known_clients":[],"known_providers":[]}`)
-	proxy.json(http.MethodGet, throttlePath, `{"ok":true,"active":true,"throttles":[{"provider":"local","concurrency":2}],"known_providers":["local","other"]}`)
+	proxy.json(http.MethodGet, throttlePath, `{"ok":true,"active":true,"throttles":[{"provider":"local","concurrency":2,`+
+		`"anti_burst":true,"ramp_duration":"10s"}],"known_providers":["local","other"]}`)
 	proxy.json(http.MethodGet, quotaPath, `{"enabled":true,"banner_enabled":true,"storms":[`+
 		`{"provider":"local","model":"m","scope":"provider","state":"parked","quota":true,"error_percent":1}]}`)
 	proxy.json(http.MethodGet, "/admin/restart", `{"ok":true,"phase":"idle","available":true}`)
@@ -35,6 +39,16 @@ func TestOperatorStateReadsFourSurfaces(t *testing.T) {
 	if out.Pause["paused"] != true || out.Throttle["active"] != true ||
 		out.Quota["enabled"] != true || out.Restart["available"] != true {
 		t.Fatalf("operator state = %+v", out)
+	}
+	// The throttle document is passed through whole, so the anti-burst pair a
+	// caller set must be visible here rather than dropped by a narrower decode.
+	rows, _ := out.Throttle["throttles"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("throttle rows = %v", out.Throttle["throttles"])
+	}
+	row, _ := rows[0].(map[string]any)
+	if row["anti_burst"] != true || row["ramp_duration"] != "10s" {
+		t.Fatalf("the full throttle row must survive the operator-state read: %+v", row)
 	}
 	if len(out.Problems) != 0 {
 		t.Fatalf("no surface failed: %v", out.Problems)
@@ -150,7 +164,10 @@ func TestSetPauseValidation(t *testing.T) {
 	}
 }
 
-// TestSetThrottleBodyShapeAndClear pins the merge semantics and the clear.
+// TestSetThrottleBodyShapeAndClear pins the merge semantics, the anti-burst
+// pair and the clear. A nil optional field must be absent from the body so the
+// proxy keeps that dimension, and clear must send neither field even when the
+// caller names them, because it drops the whole policy.
 func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
@@ -168,7 +185,9 @@ func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 	if body["provider"] != "local" || body["concurrency"].(float64) != 4 {
 		t.Fatalf("throttle body = %v", body)
 	}
-	for _, absent := range []string{"requests", "tokens", "request_window", "token_window", "clear"} {
+	for _, absent := range []string{
+		"requests", "tokens", "request_window", "token_window", "clear", "anti_burst", "ramp_duration",
+	} {
 		if _, present := body[absent]; present {
 			t.Fatalf("an omitted dimension must be omitted so it keeps its value: %v", body)
 		}
@@ -176,13 +195,40 @@ func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 	if len(out.KnownProviders) != 2 || !strings.Contains(out.Note, "not strict fixed-window") {
 		t.Fatalf("throttle output = %+v", out)
 	}
+	if !strings.Contains(out.Note, "anti_burst") {
+		t.Fatalf("the note must not promise stricter enforcement than the ramp gives: %q", out.Note)
+	}
 
-	if _, err := service.setThrottle(ctx, SetThrottleInput{Provider: "local", Clear: true}); err != nil {
+	// A supplied anti-burst pair reaches the proxy under its own wire names.
+	ramp := "5m"
+	if _, err := service.setThrottle(ctx, SetThrottleInput{
+		Provider: "local", Concurrency: &concurrency, AntiBurst: throttleBoolPtr(true), RampDuration: &ramp,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	cleared := decodeBody(t, proxy.requestsFor(http.MethodPost, throttlePath)[1])
+	ramped := decodeBody(t, proxy.requestsFor(http.MethodPost, throttlePath)[1])
+	if ramped["anti_burst"] != true || ramped["ramp_duration"] != "5m" {
+		t.Fatalf("the anti-burst pair must reach the proxy: %v", ramped)
+	}
+	if _, present := ramped["clear"]; present {
+		t.Fatalf("a merge must not carry clear: %v", ramped)
+	}
+
+	// clear drops the whole policy, so naming the pair alongside it changes
+	// nothing: the body stays provider plus clear.
+	if _, err := service.setThrottle(ctx, SetThrottleInput{
+		Provider: "local", Clear: true, AntiBurst: throttleBoolPtr(true), RampDuration: &ramp,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cleared := decodeBody(t, proxy.requestsFor(http.MethodPost, throttlePath)[2])
 	if cleared["clear"] != true || len(cleared) != 2 {
 		t.Fatalf("clear body = %v", cleared)
+	}
+	for _, absent := range []string{"anti_burst", "ramp_duration"} {
+		if _, present := cleared[absent]; present {
+			t.Fatalf("clear drops the policy, so it must not send %q: %v", absent, cleared)
+		}
 	}
 
 	for _, in := range []SetThrottleInput{
@@ -235,8 +281,11 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 			`token_window: provider "local" has no token count yet, so a window alone would set nothing; send tokens too`,
 		},
 		{
+			// anti_burst and ramp_duration are dimensions too, so the refusal
+			// names them: a caller whose body named only one of the pair must
+			// not be told the tool has no such field.
 			"a body that names no dimension", SetThrottleInput{Provider: "local"},
-			"send concurrency, requests or tokens: a body that names no dimension sets nothing",
+			"send concurrency, requests, tokens, anti_burst or ramp_duration: a body that names no dimension sets nothing",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,6 +327,124 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 	}
 }
 
+// newThrottleProxyService wires a service to a real proxy with no attached
+// store: a throttle policy is applied in memory, which is all these tests read.
+func newThrottleProxyService(t *testing.T) (*Service, *proxy.Server) {
+	t.Helper()
+	p := proxy.New(config.Default(), metrics.Noop{})
+	t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
+	service, err := NewServiceWithTransport(InProcessOrigin, testToken, defaultTestLimits(),
+		&proxyServerTransport{p: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, p
+}
+
+// throttlePolicyRow returns the proxy's active policy for one provider, failing
+// when no policy is stored. It reads the same document GET /admin/throttle
+// serves, so a field the proxy kept but did not publish also fails here.
+func throttlePolicyRow(t *testing.T, p *proxy.Server, provider string) map[string]any {
+	t.Helper()
+	rows, _ := p.ThrottleSnapshot()["throttles"].([]map[string]any)
+	for _, row := range rows {
+		if row["provider"] == provider {
+			return row
+		}
+	}
+	t.Fatalf("no throttle policy for %q: %+v", provider, p.ThrottleSnapshot())
+	return nil
+}
+
+// TestSetThrottleAntiBurstReachesTheProxy sends the ramp through a real MCP call
+// and asserts the proxy applied it, not merely that the tool emitted the right
+// JSON: the scheduler is what enforces the ramp.
+func TestSetThrottleAntiBurstReachesTheProxy(t *testing.T) {
+	service, p := newThrottleProxyService(t)
+	session := connect(t, service)
+
+	out := structured(t, call(t, session, "set_throttle", map[string]any{
+		"provider": "local", "concurrency": 4, "anti_burst": true, "ramp_duration": "10s",
+	}))
+	state, _ := out["state"].(map[string]any)
+	if state["active"] != true {
+		t.Fatalf("the tool must report the applied state: %+v", out)
+	}
+	row := throttlePolicyRow(t, p, "local")
+	if row["concurrency"] != 4 || row["anti_burst"] != true || row["ramp_duration"] != "10s" {
+		t.Fatalf("the proxy did not apply the anti-burst policy: %+v", row)
+	}
+}
+
+// TestSetThrottleClearDropsTheAntiBurstPair pins that clear removes the whole
+// policy, ramp included: the provider then has no active row at all.
+func TestSetThrottleClearDropsTheAntiBurstPair(t *testing.T) {
+	service, p := newThrottleProxyService(t)
+	session := connect(t, service)
+	structured(t, call(t, session, "set_throttle", map[string]any{
+		"provider": "local", "concurrency": 4, "anti_burst": true, "ramp_duration": "10s",
+	}))
+	if row := throttlePolicyRow(t, p, "local"); row["anti_burst"] != true {
+		t.Fatalf("the pair must be stored before the clear: %+v", row)
+	}
+
+	structured(t, call(t, session, "set_throttle", map[string]any{"provider": "local", "clear": true}))
+	snapshot := p.ThrottleSnapshot()
+	if rows, _ := snapshot["throttles"].([]map[string]any); len(rows) != 0 {
+		t.Fatalf("clear must drop the whole policy: %+v", rows)
+	}
+	if snapshot["active"] != false {
+		t.Fatalf("a cleared provider has no active policy: %+v", snapshot)
+	}
+}
+
+// TestSetThrottleRampValidationStaysWithTheProxy pins the ownership: the ramp
+// grammar, its band and the active-limit rule are enforced by the proxy
+// (internal/proxy/throttle.go), so the tool forwards the value and surfaces the
+// proxy's own 400 rather than keeping a second duration vocabulary. A refused
+// change leaves the stored policy exactly as it was.
+func TestSetThrottleRampValidationStaysWithTheProxy(t *testing.T) {
+	service, p := newThrottleProxyService(t)
+	session := connect(t, service)
+	structured(t, call(t, session, "set_throttle", map[string]any{
+		"provider": "local", "concurrency": 4, "anti_burst": true, "ramp_duration": "10s",
+	}))
+
+	belowBand := call(t, session, "set_throttle", map[string]any{
+		"provider": "local", "concurrency": 4, "ramp_duration": "500ms",
+	})
+	if !belowBand.IsError {
+		t.Fatalf("a ramp duration below the proxy band must be refused: %s", textOf(t, belowBand))
+	}
+	if message := textOf(t, belowBand); !strings.Contains(message, "400") ||
+		!strings.Contains(message, "invalid ramp_duration") {
+		t.Fatalf("the refusal must be the proxy's own 400: %q", message)
+	}
+	row := throttlePolicyRow(t, p, "local")
+	if row["anti_burst"] != true || row["ramp_duration"] != "10s" {
+		t.Fatalf("a refused change must leave the policy unchanged: %+v", row)
+	}
+
+	// A ramp-only body on a provider with no cap: the proxy refuses an explicit
+	// on-ramp because an inactive limit would store nothing. The tool does not
+	// mirror that rule, so the same 400 comes back.
+	rampService, rampProxy := newThrottleProxyService(t)
+	rampSession := connect(t, rampService)
+	rampOnly := call(t, rampSession, "set_throttle", map[string]any{
+		"provider": "local", "ramp_duration": "10s",
+	})
+	if !rampOnly.IsError {
+		t.Fatalf("a ramp with no active limit must be refused: %s", textOf(t, rampOnly))
+	}
+	if message := textOf(t, rampOnly); !strings.Contains(message, "400") ||
+		!strings.Contains(message, "anti_burst and ramp_duration require an active provider limit") {
+		t.Fatalf("the refusal must be the proxy's active-limit 400: %q", message)
+	}
+	if snapshot := rampProxy.ThrottleSnapshot(); snapshot["active"] != false {
+		t.Fatalf("a refused ramp must not create a policy: %+v", snapshot)
+	}
+}
+
 // TestSetThrottleDescriptionStatesThePinnedBands pins the model-visible
 // set_throttle description and the published input schema to independent
 // literals. The description used to be compared against text derived from the
@@ -299,6 +466,13 @@ func TestSetThrottleDescriptionStatesThePinnedBands(t *testing.T) {
 		{"tokens", "0 to 1000000000000", "tokens per window (0..1000000000000)"},
 		{"request_window", "1s to 24h", "A window is 1s to 24h"},
 		{"token_window", "1s to 24h", "A window is 1s to 24h"},
+		// The anti-burst ramp reuses the window band, so its schema and the
+		// description must state that band too. The flag's own two conditions
+		// are wording, not a numeric band: off by default, and inert below a
+		// concurrency target of 2 or without a ramp duration.
+		{"anti_burst", "off by default", "anti_burst is off by default"},
+		{"anti_burst", "inert unless concurrency is at least 2", "it is inert unless concurrency is at least 2 and ramp_duration is greater than 0"},
+		{"ramp_duration", "1s to 24h", "ramp_duration uses the same 1s to 24h grammar"},
 	}
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(t.Context(), nil)
@@ -363,6 +537,10 @@ func TestSetThrottleSchemaTagsStateThePinnedBands(t *testing.T) {
 		{"Tokens", fmt.Sprintf("0 to %d", maxLimitTokens)},
 		{"RequestWindow", window},
 		{"TokenWindow", window},
+		// The ramp duration reuses the window band; the proxy derives it from
+		// the same min/maxLimitWindow constants, so a band change must fail here
+		// rather than leave the tool describing a range the proxy refuses.
+		{"RampDuration", window},
 	} {
 		field, ok := reflect.TypeOf(SetThrottleInput{}).FieldByName(tc.field)
 		if !ok {
@@ -1257,3 +1435,5 @@ func TestPurgePreviewOutput(t *testing.T) {
 func throttleIntPtr(value int) *int { return &value }
 
 func throttleInt64Ptr(value int64) *int64 { return &value }
+
+func throttleBoolPtr(value bool) *bool { return &value }

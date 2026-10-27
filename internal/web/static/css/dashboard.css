@@ -286,6 +286,7 @@
   .clear-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .clear-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .clear-opts select, .clear-opts input { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
+  #limits-menu .clear-opts input[type="checkbox"] { width: 14px; height: 14px; padding: 0; margin: 2px 0 0; }
   .clear-menu-ft { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
   .clear-count { display: block; font-size: 11px; color: var(--warn); min-height: 15px; margin-bottom: 8px; }
   /* Shared action row: the scoped action anchors LEFT, the "everything/all"
@@ -439,6 +440,26 @@
   .kpi .val-duo { font-size: 17px; letter-spacing: -.02em; }
   .kpi .val .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .kpi .sub2 { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* In-flight tile: the value plus a two-ended summary survive the narrowest
+     track, and the composition rail carries the exact per-state split. The
+     rail is absolute inside the tile's bottom padding, so it adds no height
+     and the first payload cannot push the band. Segment colors reuse the log
+     status pills: accent sending, accent2 throttled, warn paused, muted
+     pending. */
+  .kpi .flight-sub { display: flex; justify-content: space-between; gap: 8px; }
+  .kpi .flight-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .kpi .flight-sub .q-throttled { color: var(--accent2); }
+  .kpi .flight-sub .q-paused { color: var(--warn); }
+  .kpi .flight-mix {
+    position: absolute; left: 17px; right: 15px; bottom: 8px; height: 4px;
+    display: flex; border-radius: 2px; overflow: hidden;
+    background: color-mix(in srgb, var(--text) 7%, transparent);
+  }
+  .kpi .flight-mix .fm-seg { display: block; min-width: 2px; }
+  .kpi .flight-mix .fm-streaming { background: var(--accent); }
+  .kpi .flight-mix .fm-throttled { background: var(--accent2); }
+  .kpi .flight-mix .fm-paused { background: var(--warn); }
+  .kpi .flight-mix .fm-pending { background: var(--muted); }
 
   /* The pair under the explorer: in the scrolling page the timeline card
      and the requests log stack vertically, full-width, one below another -
@@ -1549,6 +1570,7 @@
     main { padding: 14px 10px; }
     .kpis { margin-bottom: 14px; }
     .kpi { padding: 10px 11px 12px 13px; }
+    .kpi .flight-mix { left: 13px; right: 11px; bottom: 6px; }
     section.card, #explorer { margin-bottom: 14px; }
     .card { padding: 12px 12px; }
     .xp-body { gap: 10px; }

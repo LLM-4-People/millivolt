@@ -105,13 +105,21 @@ active requests. Admission is provider+key scoped, with provider-wide token,
 request and concurrency limits layered at the same grant owner. Acquisition
 release settles exactly once. The provider gate and token-bucket epoch captured
 at admission keep clearing/replacing a cap from charging another generation's
-reservation. A provider-to-groups index in `Scheduler` records each group on
-its first attributed acquire and counts the indexed groups with a live queue.
-A provider release reads that counter and the provider's slice header under the
-scheduler mutex, releases it, returns without touching any group when the
-counter is zero, and otherwise skips groups whose per-group queued witness is
-false before draining the rest. Unrelated groups are neither scanned nor
-locked.
+reservation. A provider-to-groups index in `Scheduler` keeps each group's slot
+in a fair-waiting set: a group joins when its queued head was refused by the
+shared provider gate (concurrency or the request/token bucket), not when it is
+parked on its own pacing window, hold, anti-burst ramp or per-key cap. A release
+settles the gate, then drains that set once in rotating one-grant-per-group
+passes, starting after the last group served, so one key cannot take the whole
+provider allowance while peers wait; the drain stops as soon as a grant refills
+a saturated provider concurrency cap. The lock-free fair count is the fast path's precise
+witness: an unrelated key admits immediately while peers wait on their own
+predicates, and a group that stops on one of those predicates leaves the set. An
+anti-burst epoch starts a group at allowance 1 and raises it by
+`floor((concurrency-1) * elapsed / ramp_duration)`, clamped to the target; a
+fully idle period of at least the ramp duration resets the epoch on the next
+grant, a shorter gap continues it, and changing the flag, duration or target
+resets every epoch.
 
 [tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider exchanges
 from response policy. Exchange adapters return credential data only; the shared
@@ -124,6 +132,16 @@ Retries, provider hints, hold waits and per-send deadlines have distinct owners.
 Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
+
+Queue visibility has one owner across both park points: the bounded admission
+FIFO and `WaitSend`'s send gate. Every parked request publishes the live queued
+edge (`Throttled`) for the whole wait and clears it on the grant. `Stats`
+reports send-gate waiters separately (`SendWaiters`) and the operator snapshots
+add them to the global and per-provider queue totals, so a 429 pacing window
+reads as queued work rather than idle streams; a retrying owner waiting out its
+own Retry-After hint is queued for the same reason. Send-gate waits stay
+separate from the admission queue bound so `max_queue_size` keeps its own
+meaning.
 
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and

@@ -257,6 +257,59 @@ module.exports = async function operatorMenus(H) {
       w.hideHdrMenu('pause-menu');
     }
 
+    // Anti-burst policy: the checkbox and ramp select are form controls owned
+    // by the selected provider, but occupancy-only polls must leave an
+    // unapplied edit alone. A structural policy change (including a header
+    // update) repaints both controls and the count line.
+    {
+      const policyFixture = (policy, counts = [1, 0, 19]) => ({
+        ok: true, active: true, known_providers: ['provider-a'],
+        throttles: [{
+          provider: 'provider-a', source: 'ui', concurrency: 2,
+          requests: 10, request_window: '1m', tokens: 0, token_window: '',
+          in_flight: counts[0], queued: counts[1], requests_remaining: counts[2],
+          requests_capacity: 20, tokens_remaining: 0, tokens_capacity: 0,
+          ...policy,
+        }],
+      });
+      d.getElementById('limits-menu').hidden = false;
+      w.syncLimitsMenuState();
+      const antiBox = d.getElementById('lim-antiburst');
+      const rampSel = d.getElementById('lim-ramp');
+      check('the Limits anti-burst controls default off',
+        antiBox.type === 'checkbox' && !antiBox.checked && rampSel.value === '');
+      w.applyThrottleState(policyFixture({anti_burst: true, ramp_duration: '10s'}));
+      check('a stored anti-burst policy fills the checkbox and ramp select',
+        antiBox.checked === true && rampSel.value === '10s');
+      check('the Limits count places the anti-burst policy after its source and before occupancy',
+        d.getElementById('lim-count').textContent ===
+          'set in UI · anti-burst 10s · in-flight 1 · 19/20 req');
+      antiBox.checked = false;
+      const rampOff = rampSel.options[0];
+      w.applyThrottleState(policyFixture({anti_burst: true, ramp_duration: '10s'}, [4, 3, 15]));
+      check('an occupancy-only poll keeps the ramp options and an unapplied anti-burst edit',
+        d.getElementById('lim-ramp') === rampSel && rampSel.options[0] === rampOff &&
+        rampSel.value === '10s' && antiBox.checked === false);
+      w.applyThrottleState(policyFixture({
+        anti_burst: false, ramp_duration: '30s', source: 'header', updated_by: 'edge',
+      }));
+      check('a header policy change repaints the controls through the structural signature',
+        antiBox.checked === false && rampSel.value === '30s' &&
+        d.querySelector('#lim-holds .lim-src').textContent === 'header' &&
+        d.getElementById('lim-count').textContent === 'set by header · edge · in-flight 1 · 19/20 req');
+      w.applyThrottleState(policyFixture({anti_burst: true, ramp_duration: '45s'}));
+      const customs = () => [...rampSel.options].filter(o => o.dataset.pairCustom === '1');
+      check('an unknown stored ramp duration becomes one preserved custom option',
+        customs().length === 1 && customs()[0].value === '45s' && rampSel.value === '45s');
+      w.applyThrottleState(policyFixture({anti_burst: true, ramp_duration: '10s'}));
+      check('returning to a curated ramp removes the custom option',
+        customs().length === 0 && rampSel.value === '10s');
+      w.applyThrottleState({ok: true, active: false, throttles: [], known_providers: []});
+      w.syncLimitsMenuState();
+      check('clearing the provider policy resets both anti-burst controls',
+        !antiBox.checked && rampSel.value === '');
+    }
+
     // Structural changes still render exact content: session/hold rows add
     // and remove, and vocabulary names enter and leave the checklist.
     {

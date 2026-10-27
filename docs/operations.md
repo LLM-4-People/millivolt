@@ -813,7 +813,7 @@ both.
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
-| `GET/POST /admin/throttle` | Inspect/provider-limit updates; POST requires provider. Supplied limits merge; `clear:true` removes policy. |
+| `GET/POST /admin/throttle` | Inspect/provider-limit updates. POST requires provider and accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge; `clear:true` removes policy. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
@@ -964,23 +964,53 @@ place or resumed individually, while Resume all clears all holds. Overlapping
 scopes are rejected instead of silently replacing a different hold.
 
 Limits applies to a provider across all clients and keys, independently of the
-per-key concurrency/queue settings. Choose concurrency, requests per window and
-tokens per window, then Apply; Clear removes that provider policy. The menu
-shows whether a policy came from the UI or a request header, together with
-available budget and in-flight/queued state. Header semantics are in
+per-key concurrency/queue settings. Choose concurrency, requests per window,
+tokens per window and the optional anti-burst ramp, then Apply; Clear removes
+that provider policy. The menu shows whether a policy came from the UI or a
+request header, together with available budget and in-flight/queued state.
+Queued counts every request the scheduler parks for that provider - admission
+waits and send-gate waits behind a 429/5xx pacing window alike - not only work
+blocked by the configured cap. Send-gate waits are paced by the provider's retry
+hint and the retry budget; `max_queue_size` and `max_queue_wait` bound only the
+admission FIFO. Provider admission is fair across keys: a release or refill
+rotates across the groups actually waiting on the shared provider gate
+(concurrency or the request/token bucket), granting one request per group per
+pass. A group parked only on its own pacing window, hold, anti-burst ramp or
+per-key cap is outside that fair set and does not delay another key's fast
+path. A release settles the gate and drains once, and the drain stops as soon as
+a grant refills a saturated provider concurrency cap. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
+
+Anti-burst is opt-in and scoped to each provider+key group. With `anti_burst`
+enabled and a concurrency target of at least 2, a group starts at one
+concurrent request and gains allowance linearly until it reaches the provider's
+`concurrency` target after `ramp_duration`. It is inert unless all three are
+set: the flag, a target of at least 2, and a duration above zero.
+`ramp_duration` accepts the same 1s..24h window grammar as request and token
+windows, including `1d`; empty, `0` or `0s` turns it off. Requests beyond the
+current allowance stay in the existing per-key FIFO. A fully idle group whose
+idle period reaches `ramp_duration` starts a new epoch on its next grant, while a
+shorter idle gap continues the existing one. Enabling the ramp while a group
+already has in-flight work anchors its epoch at the current occupancy, so
+running streams are not stalled. Changing the flag, duration or concurrency
+target resets every group's epoch. Header updates change only the three cap
+dimensions and preserve the stored anti-burst pair. Clearing the last active cap
+drops the whole provider policy, ramp included. The Limits menu carries the
+checkbox and ramp select; Apply sends both, and a form whose caps are all zero
+sends the pair off rather than an invalid on-ramp.
 
 Operator limit edits persist synchronously and report a warning when the store
 rejects the write. Header-driven limit changes apply in memory immediately and
 are persisted by one coalescing background writer: a burst of changes becomes
 the latest whole-policy document, with bounded retry and backoff after a store
-failure. A crash can therefore lose the most recent header-driven changes, and
-a failed save never rejects inference. Graceful shutdown and restart flush the
-latest policy before storage closes or the restarted process opens the
-database. Provider labels are capped at 255 bytes and the persisted throttle
-document at 8 MiB; normal provider labels derived from base URLs remain below
-both bounds.
+failure. That document also carries the anti-burst pair, and one written before
+those fields restores them off. A crash can therefore lose the most recent
+header-driven changes, and a failed save never rejects inference. Graceful
+shutdown and restart flush the latest policy before storage closes or the
+restarted process opens the database. Provider labels are capped at 255 bytes
+and the persisted throttle document at 8 MiB; normal provider labels derived
+from base URLs remain below both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
@@ -1242,6 +1272,17 @@ the timeline and request log; selecting a card adds a filter and entity links
 pivot within that shared route. Browser back/forward restores hash-based scopes.
 Chart preset, range, percentile and series visibility persist in browser storage.
 These saved views are local browser state, not shared server settings.
+
+The In-flight tile separates work that is sending from work the scheduler is
+parking. Its summary names the two totals that fit the narrowest tile - active
+and queued - and the composition rail under the value splits every live state
+(sending, pending, operator-paused, throttled) by color; hovering the rail, or
+focusing it with assistive technology, reads the exact per-state counts. A
+queued request is one the proxy has not sent upstream yet: it can be waiting in
+the admission queue (per-key concurrency, pacing, a provider cap or an operator
+hold) or in the retry send gate behind a 429/5xx pacing window. The request
+table marks the same state with the `throttled` pill, and the status selector
+can filter on it.
 
 Explorer dimensions are Providers, Models, Client, Conversations, Tools, Time,
 Status, Errors and Keys. Their meanings are server-owned: model grouping and

@@ -42,9 +42,14 @@ type Options struct {
 // Scheduler manages ordered queues per group key.
 //
 // Lock order: s.mu -> g.mu, s.mu -> idleMu, s.mu -> providerIndex.mu,
-// s.mu -> pacingLRU.mu, and g.mu -> idleMu. A path holding idleMu,
-// providerIndex.mu or pacingLRU.mu never waits for s.mu or g.mu, and
-// drainProvider releases providerIndex.mu before touching a group.
+// s.mu -> pacingLRU.mu, g.mu -> idleMu, g.mu -> providerGate.mu for the policy
+// read and tryAdmit, and g.mu -> providerIndex.mu when a group is marked or
+// unmarked in its provider's fair-waiting set. throttleMu -> providerGate.mu
+// while a policy is installed; a ramp reset that walks groups runs only after
+// throttleMu is released. A path holding idleMu, providerIndex.mu or
+// pacingLRU.mu never waits for s.mu or g.mu: drainProvider releases
+// providerIndex.mu before touching a group, and fair-set marking is only ever
+// taken with g.mu already held (never the reverse).
 type Scheduler struct {
 	mu     sync.Mutex // guards opts, groups, groupCap, providerGroups and group retirement
 	opts   Options
@@ -128,10 +133,18 @@ func (s *Scheduler) UpdateOptions(opts Options) {
 type Stats struct {
 	Paused   bool `json:"paused"`
 	InFlight int  `json:"in_flight"`
-	Queued   int  `json:"queued"`
+	// Queued counts admission waiters: requests in the bounded per-group FIFO
+	// that have not been granted a slot yet.
+	Queued int `json:"queued"`
+	// SendWaiters counts requests already holding an in-flight slot but parked
+	// in WaitSend's send gate (retry pacing, probe serialization). A 429
+	// pacing window parks both populations, so operator-facing totals add
+	// them; keeping them separate preserves the queue bound's own meaning.
+	SendWaiters int `json:"send_waiters"`
 }
 
-// Stats sums in-flight slots and queued waiters across every group.
+// Stats sums in-flight slots, admission waiters and send-gate waiters across
+// every group.
 func (s *Scheduler) Stats() Stats {
 	st := Stats{Paused: s.Paused()}
 	s.mu.Lock()
@@ -140,6 +153,7 @@ func (s *Scheduler) Stats() Stats {
 		g.mu.Lock()
 		st.InFlight += g.inFlight
 		st.Queued += g.queued
+		st.SendWaiters += g.sendWaiters
 		g.mu.Unlock()
 	}
 	return st
@@ -159,9 +173,37 @@ func (s *Scheduler) snapshotGroups() []*group {
 	return groups
 }
 
+// drainAll re-checks every group: unattributed groups drain locally, and each
+// attributed provider with queued work drains once through the fair
+// round-robin walk. Grouping the snapshot avoids one provider walk per group
+// and never calls drainProvider("") recursively. A policy edge (hold lift or
+// addition, throttle change, ramp reset) can unblock a key without proving
+// which predicate was blocking it, so every group with a live waiter is marked
+// for this drain; the fair walk withdraws the marks of keys that still stop on
+// a per-key predicate.
 func (s *Scheduler) drainAll() {
+	providers := make(map[string]struct{})
+	var local []*group
 	for _, g := range s.snapshotGroups() {
+		g.mu.Lock()
+		provider, queued := g.provider, g.queued
+		if provider != "" && queued > 0 {
+			g.markGateWaitingLocked()
+		}
+		g.mu.Unlock()
+		if provider == "" {
+			local = append(local, g)
+			continue
+		}
+		if queued > 0 {
+			providers[provider] = struct{}{}
+		}
+	}
+	for _, g := range local {
 		g.drain()
+	}
+	for provider := range providers {
+		s.drainProvider(provider)
 	}
 }
 

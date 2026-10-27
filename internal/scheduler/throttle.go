@@ -17,15 +17,26 @@ const (
 	TokensUnavailable int64 = -1
 )
 
-// Limit is the three per-provider caps. Zero on a dimension means that
-// dimension is off (unlimited). A Limit with every dimension zero is
-// inactive - SetThrottle then drops the provider from the map.
+// Limit is the three per-provider caps plus the optional per-key anti-burst
+// ramp. Zero on a cap dimension means that dimension is off (unlimited). A
+// Limit with every cap dimension zero is inactive - SetThrottle then drops the
+// provider from the map; the ramp fields alone never activate a provider.
+//
+// AntiBurst makes every provider+key group independently grow its concurrency
+// from one up to Concurrency instead of allowing a fresh key to fill the whole
+// provider allowance at once. It is off when false, and inert unless
+// Concurrency >= 2 and RampDuration > 0. RampDuration is the time one group
+// needs to reach the configured Concurrency target; zero = off. Both fields
+// are policy, not live occupancy: Concurrency always stays the configured
+// target, so persistence and the dashboard never observe a mid-ramp value.
 type Limit struct {
-	Concurrency int           // in-flight requests across every key; 0 = off
-	Requests    int64         // max requests per ReqWindow; 0 = off
-	ReqWindow   time.Duration // window for Requests; ignored when Requests == 0
-	Tokens      int64         // max tokens per TokWindow; 0 = off
-	TokWindow   time.Duration // window for Tokens; ignored when Tokens == 0
+	Concurrency  int           // in-flight requests across every key; 0 = off
+	Requests     int64         // max requests per ReqWindow; 0 = off
+	ReqWindow    time.Duration // window for Requests; ignored when Requests == 0
+	Tokens       int64         // max tokens per TokWindow; 0 = off
+	TokWindow    time.Duration // window for Tokens; ignored when Tokens == 0
+	AntiBurst    bool          // per-key concurrency ramp; false = off
+	RampDuration time.Duration // time to reach Concurrency on a new key; 0 = off
 }
 
 // Active reports whether any dimension is on. Deny-by-default: a zero
@@ -34,6 +45,14 @@ func (l Limit) Active() bool {
 	return l.Concurrency > 0 ||
 		(l.Requests > 0 && l.ReqWindow > 0) ||
 		(l.Tokens > 0 && l.TokWindow > 0)
+}
+
+// rampActive reports whether the per-key anti-burst ramp is enabled by this
+// limit: the flag is set and both dimensions can ramp. A zero or one
+// concurrency target makes the ramp indistinguishable from the ordinary
+// provider cap, and a zero duration leaves no slope.
+func (l Limit) rampActive() bool {
+	return l.AntiBurst && l.Concurrency >= 2 && l.RampDuration > 0
 }
 
 func (l Limit) normalized() Limit {
@@ -196,8 +215,7 @@ func (g *providerGate) resetBuckets(l Limit, now time.Time) {
 // (0 when the concurrency cap blocks: that waits for a release, not a
 // timer). The caller must hold g.mu: the bucket refills it performs are
 // the same mutations an admitting caller then relies on. tryAdmit applies
-// its reservation only after this returns false; throttleBlocked only
-// tests.
+// its reservation only after this returns false.
 func (g *providerGate) blocked(est int64) (bool, time.Duration) {
 	if !g.throttle.Limit.Active() {
 		return false, 0
@@ -315,6 +333,12 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 		s.throttleMu.Unlock()
 		return false
 	}
+	// A ramp shape change invalidates every group's epoch: the target and the
+	// slope are different, so an old epoch would grant the wrong allowance.
+	// Token/request-only edits keep the ramp untouched.
+	rampChanged := cur.Limit.Concurrency != t.Limit.Concurrency ||
+		cur.Limit.AntiBurst != t.Limit.AntiBurst ||
+		cur.Limit.RampDuration != t.Limit.RampDuration
 	if g != nil {
 		g.wake.stop()
 	}
@@ -324,6 +348,9 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 		delete(s.gates, provider)
 		s.publishGatesLocked()
 		s.throttleMu.Unlock()
+		if rampChanged {
+			s.resetProviderRamps(provider)
+		}
 		s.kickThrottles()
 		return true
 	}
@@ -350,6 +377,9 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 	g.resetBuckets(t.Limit, now)
 	g.mu.Unlock()
 	s.throttleMu.Unlock()
+	if rampChanged {
+		s.resetProviderRamps(provider)
+	}
 	s.kickThrottles()
 	return true
 }
@@ -386,6 +416,10 @@ func (s *Scheduler) ListThrottles() []ThrottleInfo {
 	return out
 }
 
+// throttleQueued counts, per provider, every request the scheduler parks for
+// that provider: admission waiters plus send-gate waiters. A 429 pacing
+// window parks both populations, so "queued" in the limits menu means work
+// waiting on the provider, not only work waiting on a configured cap.
 func (s *Scheduler) throttleQueued() map[string]int {
 	out := map[string]int{}
 	for _, g := range s.snapshotGroups() {
@@ -395,13 +429,18 @@ func (s *Scheduler) throttleQueued() map[string]int {
 				out[w.provider]++
 			}
 		}
+		if g.provider != "" {
+			out[g.provider] += g.sendWaiters
+		}
 		g.mu.Unlock()
 	}
 	return out
 }
 
 // RestoreThrottles replaces the whole set (startup from SQLite). Does not
-// kick waiters - there are none yet at attach time.
+// kick waiters - there are none yet at attach time. Ramp epochs are reset
+// after installation: at startup no group exists yet, and a live restore in a
+// test or reload must not continue an epoch owned by the previous policy.
 func (s *Scheduler) RestoreThrottles(ts []Throttle) {
 	s.throttleMu.Lock()
 	for _, g := range s.gates {
@@ -424,6 +463,44 @@ func (s *Scheduler) RestoreThrottles(ts []Throttle) {
 	}
 	s.publishGatesLocked()
 	s.throttleMu.Unlock()
+	s.resetAllRamps()
+}
+
+// resetProviderRamps clears the ramp epoch of every group attributed to
+// provider. It runs after the policy lock is released and before the caller
+// kicks the throttles, so no group mutex is taken under throttleMu or a gate
+// mutex. The index pointer stays valid after the scheduler lock is released;
+// eviction unlinks groups but never frees the index while it is in use.
+func (s *Scheduler) resetProviderRamps(provider string) {
+	s.mu.Lock()
+	idx := s.providerGroups[provider]
+	s.mu.Unlock()
+	if idx == nil {
+		return
+	}
+	resetRamps(idx.snapshotAll())
+}
+
+// resetAllRamps clears every attributed group's ramp epoch. RestoreThrottles
+// replaces the entire policy set, so no installed epoch survives it.
+func (s *Scheduler) resetAllRamps() {
+	s.mu.Lock()
+	idxs := make([]*providerIndex, 0, len(s.providerGroups))
+	for _, idx := range s.providerGroups {
+		idxs = append(idxs, idx)
+	}
+	s.mu.Unlock()
+	for _, idx := range idxs {
+		resetRamps(idx.snapshotAll())
+	}
+}
+
+func resetRamps(groups []*group) {
+	for _, g := range groups {
+		g.mu.Lock()
+		g.resetRampLocked()
+		g.mu.Unlock()
+	}
 }
 
 // maxProviderGates bounds header-driven provider caps. Configured providers
@@ -432,7 +509,7 @@ const maxProviderGates = 4096
 
 func (s *Scheduler) newProviderGate(provider string) *providerGate {
 	g := &providerGate{}
-	g.wake.fn = func() { s.drainProvider(provider) }
+	g.wake.fn = func() { s.drainProviderWake(provider) }
 	return g
 }
 
@@ -466,24 +543,35 @@ func (s *Scheduler) tryAdmit(provider string, est int64) (ok bool, lease admissi
 	return g.tryAdmit(est)
 }
 
-func (s *Scheduler) throttleBlocked(provider string, est int64) bool {
+// providerConcurrencyFull reports whether provider's gate has no free
+// concurrency slot left. It reads occupancy under the gate lock only: a drain
+// that cannot admit anyone must not walk its fair set, and a bucket refill (the
+// one gate mutation an occupancy read could trigger) belongs to admission, not
+// to a capacity query. A nil gate, or a limit without a concurrency dimension,
+// has no cap to saturate.
+func (s *Scheduler) providerConcurrencyFull(provider string) bool {
 	g := s.gate(provider)
 	if g == nil {
 		return false
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	blocked, _ := g.blocked(est)
-	return blocked
+	limit := g.throttle.Limit
+	return limit.Concurrency > 0 && g.inFlight >= limit.Concurrency
 }
 
-// finish settles and frees the gate captured at admission, never a fresh
-// provider-name lookup. A cleared/reinstalled limit has a different owner;
-// traffic admitted without a gate cannot charge a subsequently installed cap.
-// Token enable/disable starts a new epoch even when concurrency keeps the gate;
-// old reservations cannot debit/refund that new bucket. Enabled resizes retain
-// their epoch so outstanding usage still reconciles against the same debt.
-func (a admission) finish(actual int64) {
+// settle reconciles the gate captured at admission, never a fresh
+// provider-name lookup, and does not drain: the caller owns exactly one drain
+// after it has also released the group's slot. Settling first keeps reserved
+// tokens, the token bucket and gate in-flight occupancy authoritative before a
+// queued waiter can consume the freed capacity. A cleared/reinstalled limit has
+// a different owner; traffic admitted without a gate cannot charge a
+// subsequently installed cap. Token enable/disable starts a new epoch even when
+// concurrency keeps the gate; old reservations cannot debit/refund that new
+// bucket. Enabled resizes retain their epoch so outstanding usage still
+// reconciles against the same debt. A nil gate is a no-op and the caller still
+// drains the group once.
+func (a admission) settle(actual int64) {
 	g := a.gate
 	if g == nil {
 		return
@@ -507,7 +595,6 @@ func (a admission) finish(actual int64) {
 		g.inFlight--
 	}
 	g.mu.Unlock()
-	g.wake.fn() // shared provider drain, outside the gate lock
 }
 
 func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
@@ -525,32 +612,53 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 	g.mu.Unlock()
 }
 
-// drainProvider wakes only the groups attributed to provider. It reads the
-// provider index's queued-group counter under mu, releases mu before touching
-// any group, and returns immediately when the counter says no indexed group
-// holds a live waiter. Otherwise it snapshots only groups whose lock-free
-// witness is true under the index mutex, so idle groups neither allocate nor
-// delay a provider release beyond the short walk, and no allocation scales
-// with a provider's idle group count. Preserving the s.mu -> g.mu order every
+// drainProvider wakes only the groups that wait on provider's shared gate. It
+// reads the index's lock-free fair-waiting count under mu, releases mu before
+// touching any group, and returns immediately when no group is marked. The
+// snapshot copies only fair-waiting groups, so a release allocates and walks
+// work that the shared gate actually refused instead of every queued key: a
+// peer parked on its own pacing window, hold, anti-burst ramp or per-key cap is
+// not in this set and costs nothing. Preserving the s.mu -> g.mu order every
 // other path uses: no path takes g.mu and then waits for s.mu; the index lock
-// is released before any g.drain.
+// is released before any group drain, and marking takes g.mu -> providerIndex.mu
+// only.
+//
+// Admission is round-robin across the fair-waiting groups, not group-by-group
+// to exhaustion. The snapshot starts after the group the last productive pass
+// served, and each pass grants at most one waiter per group before wrapping. A
+// single freed provider slot therefore goes to the next waiting group instead
+// of forever to the group whose key was attributed first. A group that stops on
+// a per-key predicate withdraws its mark during the pass and is skipped by the
+// remaining passes; a group still refused by the gate keeps its mark. Held and
+// cancelled waiters keep their FIFO place without consuming the one-grant
+// budget.
+//
+// The walk is bounded by the provider's concurrency cap, not by the backlog. A
+// cap that is already full before the pass cannot grant anyone, so the drain
+// returns without taking a single group mutex. Once a grant refills the cap the
+// whole drain stops and the cursor moves past the granting group, because the
+// remaining fair-waiting keys would only be refused: their marks stay for the
+// release or bucket refill that opens the next slot. A provider without a
+// concurrency cap keeps walking until a pass grants nothing, and a drain with
+// several free slots keeps granting across the set until the last one is
+// refilled.
 //
 // A release cannot lose a wake to a group created concurrently with it: the
-// new group is linked, its provider published and its counter pointer
-// installed under mu before its Acquire attempts admission or enqueues. A drain
-// that misses it therefore ran before that admission attempt. If the attempt
-// then blocks, its in-flight slot holders were admitted before the block and
-// their releases run after the link, so one of them drains the group; a
-// blocked token/request bucket also arms a provider timer that re-runs this
-// drain after the link. A waiter that enqueues after this drain's counter
-// check is covered by its own post-enqueue g.drain when capacity was released,
-// or by the later release that observes the counter the enqueue transition set
-// (see acquire's g.drain call after enqueue). The enqueue transition and the
-// counter move under the same g.mu owner, so a group cannot be counted while
-// empty or omitted while a live waiter waits.
+// new group is linked, its provider and index pointers published under mu
+// before its Acquire attempts admission or enqueues, and a refused admission
+// marks it under g.mu. A drain that misses it therefore ran before that
+// admission attempt; if the attempt then blocks, either its own enqueue drain
+// runs after the mark, its in-flight slot holders release later, or a
+// token/request bucket arms the provider timer that re-runs this drain. A
+// waiter that enqueues after this drain's count check is covered by its own
+// post-enqueue fair drain (which marks it first) or by the later release that
+// observes the count the mark published. Marking publishes the flag and the
+// count under g.mu + providerIndex.mu before the caller drains, so the fast
+// path either observes the peer in the count or ran before the mark existed; a
+// cleared group cannot retain a positive count.
 //
-// Eviction cannot remove a group whose queue holds a live waiter, so a
-// non-zero witness keeps every relevant group linked across this snapshot.
+// Eviction cannot remove a group whose queue holds a live waiter, so a marked
+// group stays linked across this snapshot.
 //
 // Empty provider identity has no gate of its own (gate("") is nil); callers
 // that do reach here with an empty provider keep the previous full-drain
@@ -563,17 +671,112 @@ func (s *Scheduler) drainProvider(provider string) {
 	}
 	s.mu.Lock()
 	idx := s.providerGroups[provider]
-	if idx == nil || idx.queued.Load() == 0 {
+	if idx == nil || idx.fairCount.Load() == 0 {
 		s.mu.Unlock()
 		return
 	}
 	s.mu.Unlock()
-	for _, g := range idx.queuedSnapshot() {
+	// No admission can fit while the cap is full, so the fair set is walked
+	// only when a slot is free. A release settles its own admission before
+	// calling here, so the drain that hands its freed slot on is never skipped;
+	// a drain that is skipped leaves every mark in place for that next release
+	// or for the bucket timer.
+	if s.providerConcurrencyFull(provider) {
+		return
+	}
+	groups := idx.fairSnapshot()
+	if len(groups) == 0 {
+		return
+	}
+	// Passes repeat only while they make progress and the cap still has room. A
+	// pass that grants nothing means every fair-waiting group is blocked by the
+	// provider gate or by its own cap, ramp or hold; another pass would observe
+	// the same state. A grant that refills the concurrency cap ends the whole
+	// drain. New enqueues own their enqueue drain.
+	served := -1
+	for {
+		granted := 0
+		last := -1
+		full := false
+		for i, g := range groups {
+			if !g.gateWaiting.Load() || !g.hasQueued.Load() {
+				continue
+			}
+			if g.drainLimited(1) > 0 {
+				granted++
+				last = i
+				if s.providerConcurrencyFull(provider) {
+					// The freed slot is reassigned. Every remaining fair
+					// waiter needs a concurrency slot too, so this pass cannot
+					// admit another one: stop here, keep their marks, and let
+					// the cursor start the next drain after this group.
+					served = i
+					full = true
+					break
+				}
+			}
+		}
+		if full || granted == 0 {
+			break
+		}
+		served = last
+	}
+	if served >= 0 {
+		// Rotate only after real service, so a drain that only withdrew stale
+		// marks cannot bias the next start.
+		idx.advanceFair(groups[served])
+	}
+}
+
+// drainProviderWake is the shared provider timer's wake. A bucket refill or an
+// anti-burst step is not tied to one group, so it cannot prove which queued key
+// it unblocks. A ramp-blocked group is deliberately absent from the fair set
+// (the ramp is per-key, and its presence must not suppress another key's fast
+// path), so before draining, every queued group is optimistically marked for
+// this one pass; the drain withdraws every mark that still stops on a per-key
+// predicate. Providers without a ramp keep relying on their already-marked
+// gate waiters.
+func (s *Scheduler) drainProviderWake(provider string) {
+	if s.providerRamps(provider) {
+		s.markQueuedProviderGroups(provider)
+	}
+	s.drainProvider(provider)
+}
+
+// markQueuedProviderGroups marks every group of provider that holds a live
+// waiter, for one fair drain. It snapshots the list before taking any group
+// mutex, so the providerIndex lock is never held while waiting for g.mu.
+func (s *Scheduler) markQueuedProviderGroups(provider string) {
+	s.mu.Lock()
+	idx := s.providerGroups[provider]
+	s.mu.Unlock()
+	if idx == nil || idx.queued.Load() == 0 {
+		return
+	}
+	for _, g := range idx.snapshotAll() {
 		if !g.hasQueued.Load() {
 			continue
 		}
-		g.drain()
+		g.mu.Lock()
+		if g.queued > 0 {
+			g.markGateWaitingLocked()
+		}
+		g.mu.Unlock()
 	}
+}
+
+// providerRamps reports whether provider currently has an active anti-burst
+// ramp, the only timer wake that can unblock a group deliberately left out of
+// the fair set. The gate comes from the atomic policy snapshot, so this never
+// takes throttleMu.
+func (s *Scheduler) providerRamps(provider string) bool {
+	gate := s.gate(provider)
+	if gate == nil {
+		return false
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.throttle.Limit.rampActive()
 }
 
 func (s *Scheduler) kickThrottles() {
@@ -594,7 +797,10 @@ func (g *group) slotRelease(a admission) Release {
 	var once sync.Once
 	return func(actual int64) {
 		once.Do(func() {
-			a.finish(actual)
+			// Settle the gate before freeing the group slot: the drain that
+			// release() runs then observes correct token and concurrency
+			// accounting, and it is the only drain for this release.
+			a.settle(actual)
 			g.release()
 		})
 	}

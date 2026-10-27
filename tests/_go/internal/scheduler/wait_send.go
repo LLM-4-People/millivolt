@@ -99,10 +99,10 @@ func TestWaitSendHalfOpenOneThenUnblock(t *testing.T) {
 	go sib(b)
 	go sib(c)
 	go sib(d)
-	// A sibling parked inside WaitSend has no observable state (it selects on
-	// the group's kick channels); the fixed window lets all three reach the
-	// parked select before the negative check below.
-	time.Sleep(20 * time.Millisecond)
+	// Parked siblings are observable: Stats.Queued counts the send gate.
+	// Waiting on that counter proves all three reached the parked select
+	// before the negative check below.
+	waitFor(t, func() bool { return s.Stats().SendWaiters == 3 }, "siblings to park in WaitSend")
 	if through.Load() != 0 {
 		t.Fatal("siblings sent while owner is retrying")
 	}
@@ -294,10 +294,9 @@ func TestWaitSendCancelDoesNotReleaseOwner(t *testing.T) {
 		_, err := s.WaitSend(ctx, "k", WaiterHooks{}, false, false)
 		done <- err
 	}()
-	// A sibling parked inside WaitSend has no observable state (it selects on
-	// the group's kick channels); the fixed window lets it reach the parked
-	// select before the cancel, so cancel truly hits a parked sibling.
-	time.Sleep(20 * time.Millisecond)
+	// Parked siblings are observable through Stats.SendWaiters; wait on that
+	// instead of a fixed window so the cancel truly hits the parked select.
+	waitFor(t, func() bool { return s.Stats().SendWaiters == 1 }, "sibling to park in WaitSend")
 	cancel()
 	select {
 	case err := <-done:
@@ -313,10 +312,11 @@ func TestWaitSendCancelDoesNotReleaseOwner(t *testing.T) {
 		_, _ = s.WaitSend(context.Background(), "k", WaiterHooks{}, false, false)
 		close(sib)
 	}()
+	waitFor(t, func() bool { return s.Stats().SendWaiters == 1 }, "second sibling to park")
 	select {
 	case <-sib:
 		t.Fatal("cancelled sibling released the owner token")
-	case <-time.After(40 * time.Millisecond):
+	default:
 	}
 	s.EndSend("k", true)
 	select {
@@ -525,5 +525,103 @@ func TestFailSendSiblingKeepsOwnerAttemptBackoff(t *testing.T) {
 	g.mu.Unlock()
 	if !probing {
 		t.Fatal("sibling FailSend must not release owner probing")
+	}
+}
+
+// A sibling parked by a retry must be visible as queued work: the live hooks
+// fire once, the group's send-gate counter (and Stats.Queued) reports it, and
+// both clear exactly when the gate opens. Before this, WaitSend parking had no
+// observable state at all, so the dashboard showed a 429-paced request as an
+// active stream.
+func TestWaitSendParkPublishesQueuedEdge(t *testing.T) {
+	s := New(Options{})
+	ctx := context.Background()
+	if !s.Trip("k", time.Minute) {
+		t.Fatal("expected to own")
+	}
+
+	var waits, queued, unqueued atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.WaitSend(ctx, "k", WaiterHooks{
+			OnWait:       func() { waits.Add(1) },
+			OnThrottle:   func() { queued.Add(1) },
+			OnUnthrottle: func() { unqueued.Add(1) },
+		}, false, false)
+		done <- err
+	}()
+
+	waitFor(t, func() bool { return queued.Load() == 1 }, "send-gate queued edge")
+	if waits.Load() != 0 {
+		t.Fatalf("OnWait fired %d times; a send-gate park must not start the SSE pacer", waits.Load())
+	}
+	if got := s.Stats().SendWaiters; got != 1 {
+		t.Fatalf("Stats.SendWaiters = %d while parked in WaitSend, want 1", got)
+	}
+
+	s.EndSend("k", true) // one probe: the parked sibling takes the token
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sibling stuck after EndSend")
+	}
+	waitFor(t, func() bool { return unqueued.Load() == 1 }, "send-gate unqueue edge")
+	if got := s.Stats().SendWaiters; got != 0 {
+		t.Fatalf("Stats.SendWaiters = %d after the gate opened, want 0", got)
+	}
+}
+
+// Every admission-queue park publishes the queued edge, not only a provider
+// cap: a plain per-key concurrency wait is also queued work.
+func TestAcquireQueuePublishesQueuedEdge(t *testing.T) {
+	s := New(Options{})
+	ctx := context.Background()
+	first, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	queued := make(chan struct{}, 1)
+	unqueued := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		second, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{
+			OnThrottle:   func() { queued <- struct{}{} },
+			OnUnthrottle: func() { unqueued <- struct{}{} },
+		})
+		if err == nil {
+			second(0)
+		}
+		done <- err
+	}()
+
+	select {
+	case <-queued:
+	case <-time.After(time.Second):
+		t.Fatal("admission queue never published its queued edge")
+	}
+	if got := s.Stats().Queued; got != 1 {
+		t.Fatalf("Stats.Queued = %d while parked in the admission queue, want 1", got)
+	}
+
+	first(0) // frees the slot; drain grants the waiter
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiter stuck after the slot was released")
+	}
+	select {
+	case <-unqueued:
+	case <-time.After(time.Second):
+		t.Fatal("admission queue never published its unqueue edge")
+	}
+	if got := s.Stats().Queued; got != 0 {
+		t.Fatalf("Stats.Queued = %d after the grant, want 0", got)
 	}
 }

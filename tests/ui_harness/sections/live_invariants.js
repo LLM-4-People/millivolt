@@ -186,6 +186,37 @@ module.exports = async function liveInvariants(H) {
     w.eval('armDashboardTicks()');
   }
 
+  // ---- test 12i-bis: a request the scheduler parks reads as queued in the
+  // In-flight tile, not as an active stream, and the composition rail names
+  // the exact state without relying on a status word fitting the tile width.
+  {
+    w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
+    const flightTile = () => [...d.querySelectorAll('#kpis .kpi')]
+      .find(k => (k.querySelector('h2') || {}).textContent === 'In-flight');
+    const flightSub = () => (flightTile()?.querySelector('.flight-sub')?.textContent || '')
+      .replace(/\s+/g, ' ').trim();
+    const flightSegs = () => [...(flightTile()?.querySelectorAll('.flight-mix .fm-seg') || [])]
+      .map(el => [...el.classList].find(c => c !== 'fm-seg' && c.startsWith('fm-')));
+    const flightTitle = () => flightTile()?.querySelector('.flight-mix')?.getAttribute('title');
+
+    fire('begin', { record: { ...mkRec('flightq1', 0, 1700000600000), throttled: true, attempts: [] }, in_flight: 1 });
+    check('a parked request paints queued, not streaming',
+      await settleUntil(() => flightSub() === '1 queued'));
+    check('the In-flight rail carries the throttled segment',
+      flightSegs().join(',') === 'fm-throttled');
+    check('the In-flight rail label names the exact state',
+      flightTitle() === '1 throttled');
+
+    fire('update', { record: { ...mkRec('flightq1', 0, 1700000600000), throttled: false, attempts: [] }, in_flight: 1 });
+    check('the queued segment clears when the request starts sending',
+      await settleUntil(() => flightSub() === '1 streaming' && flightSegs().join(',') === 'fm-streaming'));
+
+    fire('end', { record: { ...mkRec('flightq1', 200, 1700000600000) }, in_flight: 0 });
+    check('the In-flight tile returns to its idle summary',
+      await settleUntil(() => flightSub() === 'active streams' && flightSegs().length === 0));
+    w.eval('armDashboardTicks()');
+  }
+
   // Chart/explorer share the request gate; a new scope never waits behind
   // old work, and the footer consumes the explorer's FULL-scope totals.
   {

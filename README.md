@@ -143,10 +143,11 @@ explains timing, scope, and missing measurements.
 ### Act before the retry storm.
 
 Pause new sends and retries by client, provider, or all traffic. Set
-provider-wide concurrency, request-rate, and token-rate limits. Capture scoped
-debug bodies, export exactly the records you filtered, and turn on error-storm
-protection with recovery probes. These are operator actions, not per-user
-permissions.
+provider-wide concurrency, request-rate, and token-rate limits, plus an opt-in
+anti-burst ramp that eases a new provider+key group up to the concurrency
+target. Capture scoped debug bodies, export exactly the records you filtered,
+and turn on error-storm protection with recovery probes. These are operator
+actions, not per-user permissions.
 
 Read [operator workflows](docs/operations.md#operator-and-data-routes) before
 changing state. The shared operator token protects the dashboard and operator

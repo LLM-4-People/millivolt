@@ -216,8 +216,8 @@ func TestThrottleOnThrottleHook(t *testing.T) {
 	// fixed window was long enough for the hook to run.
 	waitFor(t, throttled.Load, "OnThrottle to fire while blocked")
 	// Clearing the cap is the observable lift: kickThrottles (pauseMu, never
-	// holdCountMu) wakes the parked waiter and its wait loop re-checks
-	// throttleBlocked → OnUnthrottle must fire before the grant returns.
+	// holdCountMu) wakes the parked waiter and its deferred OnUnthrottle fires
+	// when the grant returns.
 	s.SetThrottle(Throttle{Provider: "p"})
 	waitFor(t, func() bool { return !throttled.Load() }, "OnUnthrottle to fire after the cap clear")
 	select {
@@ -680,17 +680,34 @@ func TestProviderIndexAttributesGroupLearnedAfterCreation(t *testing.T) {
 }
 
 // TestProviderDrainReleasesSchedulerLockBeforeGroup pins the lock order
-// documented on drainProvider. With a group mutex held, a provider drain must
-// still let another actor take the scheduler mutex; holding s.mu while blocked
-// on g.mu would deadlock against paths that take s.mu -> g.mu.
+// documented on drainProvider. With a fair-waiting group's mutex held, a
+// provider drain must still release the scheduler and provider-index locks
+// before waiting: either lock held across g.mu would stall paths that take
+// s.mu -> g.mu or g.mu -> providerIndex.mu.
 func TestProviderDrainReleasesSchedulerLockBeforeGroup(t *testing.T) {
 	s := New(Options{})
 	provider := "lock.example"
-	release, err := s.AcquireWith(context.Background(), provider+"|k", 0, WaiterHooks{Provider: provider})
+	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
 	if err != nil {
 		t.Fatal(err)
 	}
-	release(0)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if _, err := s.AcquireWith(ctx, provider+"|k", 0, WaiterHooks{Provider: provider}); err != context.Canceled {
+			t.Errorf("fair waiter = %v", err)
+		}
+	})
+	waitFor(t, func() bool { return providerGateWaiters(s, provider) == 1 }, "the fair-waiting group")
+	s.mu.Lock()
+	idx := s.providerGroups[provider]
+	s.mu.Unlock()
+	if idx == nil {
+		t.Fatal("provider index missing")
+	}
+
 	g := s.groupFor(provider+"|k", 0)
 	g.mu.Lock()
 	drained := make(chan struct{})
@@ -700,14 +717,21 @@ func TestProviderDrainReleasesSchedulerLockBeforeGroup(t *testing.T) {
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if s.mu.TryLock() {
+		sFree := s.mu.TryLock()
+		if sFree {
 			s.mu.Unlock()
+		}
+		idxFree := idx.mu.TryLock()
+		if idxFree {
+			idx.mu.Unlock()
+		}
+		if sFree && idxFree {
 			break
 		}
 		if time.Now().After(deadline) {
 			g.mu.Unlock()
 			<-drained
-			t.Fatal("provider drain held the scheduler mutex while waiting for a group lock")
+			t.Fatalf("provider drain held scheduler/index lock while waiting for a group lock: scheduler free=%v index free=%v", sFree, idxFree)
 		}
 		runtime.Gosched()
 	}
@@ -716,6 +740,12 @@ func TestProviderDrainReleasesSchedulerLockBeforeGroup(t *testing.T) {
 	case <-drained:
 	case <-time.After(time.Second):
 		t.Fatal("provider drain did not finish after the group lock was released")
+	}
+	cancel()
+	wg.Wait()
+	holder(0)
+	if st := s.Stats(); st.InFlight != 0 || st.Queued != 0 {
+		t.Fatalf("lock-order test leaked occupancy: %+v", st)
 	}
 }
 
@@ -1121,5 +1151,49 @@ func TestProviderDrainConcurrentGroupCreation(t *testing.T) {
 	}
 	if st := s.Stats(); st.InFlight != 0 || st.Queued != 0 {
 		t.Fatalf("concurrent drain left occupancy behind: %+v", st)
+	}
+}
+
+// The Limits menu's per-provider queued count covers send-gate waiters too:
+// a 429 pacing window parks requests that already hold an in-flight slot, and
+// those must not disappear from the operator's queue depth.
+func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
+	s := New(Options{})
+	ctx := context.Background()
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Requests: 100, ReqWindow: time.Minute}})
+	// Attribute the group to the provider the way production does: every send
+	// gate caller first acquires its admission slot.
+	release, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release(0)
+	if !s.Trip("p|k", time.Minute) {
+		t.Fatal("expected to own the send token")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.WaitSend(ctx, "p|k", WaiterHooks{Provider: "p"}, false, true)
+		done <- err
+	}()
+	waitFor(t, func() bool { return s.Stats().SendWaiters == 1 }, "send-gate waiter")
+
+	infos := s.ListThrottles()
+	if len(infos) != 1 || infos[0].Provider != "p" || infos[0].Queued != 1 {
+		t.Fatalf("ListThrottles = %+v, want p with queued 1", infos)
+	}
+
+	s.EndSend("p|k", false)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("send-gate waiter stuck after EndSend")
+	}
+	if st := s.Stats(); st.SendWaiters != 0 {
+		t.Fatalf("send waiters = %d after the gate opened, want 0", st.SendWaiters)
 	}
 }
