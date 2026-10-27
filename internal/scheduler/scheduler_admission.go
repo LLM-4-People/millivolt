@@ -24,9 +24,9 @@ type group struct {
 	provider string
 	// providerIdx is the attributed index (nil until attribution). Attribution
 	// publishes it under both Scheduler.mu and the group mutex: fair-set
-	// marking reads it under g.mu, eviction clears it under Scheduler.mu after
-	// retiring the group. providerPrev/providerNext/providerListed are the
-	// index list links, guarded by providerIdx.mu.
+	// marking reads it under g.mu, and eviction clears it under both locks
+	// after retiring the group. providerPrev/providerNext/providerListed are
+	// the index list links, guarded by providerIdx.mu.
 	providerIdx    *providerIndex
 	providerPrev   *group
 	providerNext   *group
