@@ -3,5 +3,5 @@
 # Chromium is installed by this Playwright version's own installer.
 playwright==1.64.1
 greenlet==3.5.6
-pyee==13.0.1
+pyee==15.0.0
 typing_extensions==4.16.0
