@@ -22,9 +22,11 @@ type group struct {
 	// switch providers. An empty group can still be created by the internal
 	// lookup paths; its first non-empty AcquireWith attributes it.
 	provider string
-	// providerIdx is the attributed index (nil until attribution), guarded by
-	// Scheduler.mu. providerPrev/providerNext/providerListed are the index
-	// list links, guarded by providerIdx.mu.
+	// providerIdx is the attributed index (nil until attribution). Attribution
+	// publishes it under both Scheduler.mu and the group mutex: fair-set
+	// marking reads it under g.mu, eviction clears it under Scheduler.mu after
+	// retiring the group. providerPrev/providerNext/providerListed are the
+	// index list links, guarded by providerIdx.mu.
 	providerIdx    *providerIndex
 	providerPrev   *group
 	providerNext   *group
@@ -60,6 +62,17 @@ type group struct {
 	// queue's empty/non-empty transition - syncQueueLocked is the sole owner.
 	hasQueued      atomic.Bool
 	providerQueued *atomic.Int64
+	// gateWaiting is true while this group belongs to its provider index's
+	// fair-waiting set: its queued head was refused by the shared provider
+	// gate rather than by a per-key predicate. providerFair is that index's
+	// lock-free fair-waiting count, installed at attribution under mu. The
+	// fast path admits only when the count is zero, so a peer parked on
+	// pacing, a hold, the anti-burst ramp or a per-key cap never blocks it.
+	// fairIndex is this group's slot in the index's fair slice, guarded by
+	// providerIdx.mu. All three are published together under mu.
+	gateWaiting  atomic.Bool
+	providerFair *atomic.Int64
+	fairIndex    int
 	// rampStart anchors this group's anti-burst epoch: allowance grows from 1
 	// toward the provider's configured Concurrency as time passes. Zero means
 	// no epoch yet. idleSince stamps the moment the group became fully idle
@@ -154,21 +167,24 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	}
 	// Provider attribution happened under s.mu in AcquireWith before this
 	// call, so the group is already visible to provider-scoped drains.
-	// Fast path: queue empty, no other key of this provider queued, capacity
-	// available, past pacing window, not held, provider throttle and anti-burst
-	// allowance admit. A non-zero provider queued-group witness means another
-	// key is waiting for the same provider allowance; a fresh key must enqueue
-	// and take its turn in the fair drain instead of jumping that work.
-	// tryAdmit consumes RPM/TPM/concurrency - only call it when every other
-	// predicate already passed.
+	// Fast path: queue empty, no other key of this provider waiting on the
+	// shared gate, capacity available, past pacing window, not held, provider
+	// throttle and anti-burst allowance admit. A non-zero provider fair-waiting
+	// count means another key was refused the same provider gate and needs this
+	// drain's turn; a fresh key must enqueue and take its turn instead of
+	// jumping that work. A peer parked only on its own pacing window, hold,
+	// ramp or per-key cap is not in that set: it cannot use either a free
+	// provider slot or a provider bucket token, so it must not suppress this
+	// fast path. tryAdmit consumes RPM/TPM/concurrency - only call it when
+	// every other predicate already passed.
 	now := time.Now()
-	providerQueueIdle := g.providerQueued == nil || g.providerQueued.Load() == 0
+	providerFairIdle := g.providerFair == nil || g.providerFair.Load() == 0
 	if g.queued == 0 &&
-		providerQueueIdle &&
+		providerFairIdle &&
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!now.Before(g.nextAllowedAt) &&
 		g.sched.matchingHold(hooks.Client, hooks.Provider) == nil {
-		ok, lease, wait := g.admitLocked(now, hooks.Provider, hooks.EstTokens)
+		ok, lease, wait, _ := g.admitLocked(now, hooks.Provider, hooks.EstTokens)
 		if ok {
 			g.inFlight++
 			g.sched.markGroupBusyLocked(g)
@@ -339,8 +355,10 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 }
 
 // release frees a slot and grants the next queued waiter through the owning
-// provider's fair drain. Keeping release local made a busy key refill itself
-// ahead of other keys waiting on the same provider allowance.
+// provider's fair drain. The caller has already settled the released
+// acquisition's gate usage, so token accounting is current before this drain
+// admits anyone. Keeping release local made a busy key refill itself ahead of
+// other keys waiting on the same provider allowance.
 func (g *group) release() {
 	g.mu.Lock()
 	if g.inFlight > 0 {
@@ -354,16 +372,63 @@ func (g *group) release() {
 // drainAdmission runs a local admission re-check through the group's provider
 // when the group is attributed, and locally otherwise. Reading provider under
 // g.mu keeps attribution's publication race-free; the drain itself runs with
-// no scheduler, throttle or group lock held.
+// no scheduler, throttle or group lock held. A local trigger cannot cheaply
+// prove which predicate blocked a queued waiter, so it optimistically marks the
+// group for this one fair drain; the drain clears the mark again when it stops
+// on a per-key predicate before any provider refusal. Marking ahead of the
+// drain is required: a release that frees a provider slot must find this group,
+// while a peer parked on pacing/hold/cap stays out of the fast path's witness.
+// A group whose own pacing window or per-key cap already holds it back is not
+// marked, because no provider release or bucket refill can serve it until its
+// own timer or release fires; publishing it would leave a mark latched on a
+// saturated provider, where no drain can run to withdraw it.
 func (g *group) drainAdmission() {
 	g.mu.Lock()
 	provider := g.provider
-	g.mu.Unlock()
 	if provider != "" {
+		if g.queued > 0 && g.admissionWindowOpenLocked(time.Now()) {
+			g.markGateWaitingLocked()
+		}
+		g.mu.Unlock()
 		g.sched.drainProvider(provider)
 		return
 	}
+	g.mu.Unlock()
 	g.drain()
+}
+
+// admissionWindowOpenLocked reports whether the group's own pacing window and
+// per-key concurrency cap would let a queued head reach the shared provider
+// gate now. A group held back by either predicate cannot use a provider slot
+// or bucket token until its own timer or release fires. The anti-burst ramp is
+// deliberately not consulted here: admitLocked may anchor an epoch and still
+// admit, so a mark decision must stay permissive. Callers hold g.mu.
+func (g *group) admissionWindowOpenLocked(now time.Time) bool {
+	if g.maxConcurrent != 0 && g.inFlight >= g.maxConcurrent {
+		return false
+	}
+	return !now.Before(g.nextAllowedAt)
+}
+
+// markGateWaitingLocked publishes g into its provider's fair-waiting set.
+// Callers hold g.mu; the index lock nests inside it, and no path may take the
+// reverse order. A group without a provider index (unattributed) has no shared
+// gate to wait on, so the call is a no-op.
+func (g *group) markGateWaitingLocked() {
+	if g.providerIdx == nil || g.gateWaiting.Load() {
+		return
+	}
+	g.providerIdx.markFairLocked(g)
+}
+
+// clearGateWaitingLocked withdraws g from its provider's fair-waiting set.
+// Callers hold g.mu. The lock-free fast path observes the count drop
+// immediately; the slice tombstone is compacted by the next snapshot.
+func (g *group) clearGateWaitingLocked() {
+	if g.providerIdx == nil || !g.gateWaiting.Load() {
+		return
+	}
+	g.providerIdx.clearFairLocked(g)
 }
 
 // drain is the unlimited local form of drainLimited, retained for unattributed
@@ -388,7 +453,7 @@ func (g *group) rampPolicy() (target int, duration time.Duration, enabled bool) 
 	gate.mu.Lock()
 	limit := gate.throttle.Limit
 	gate.mu.Unlock()
-	if !limit.AntiBurst || limit.Concurrency < 2 || limit.RampDuration <= 0 {
+	if !limit.rampActive() {
 		return 0, 0, false
 	}
 	return limit.Concurrency, limit.RampDuration, true
@@ -518,29 +583,42 @@ func (g *group) armRampStepLocked(now time.Time) {
 // gate. Callers hold g.mu and have already checked the group's own
 // maxConcurrent, pacing window and hold predicate. A disabled policy clears
 // stale ramp state. A ramp-blocked call arms the next step and reports no
-// wait: the caller stops its FIFO pass until that wake. A failed provider
-// admission never starts a fresh epoch; only a successful grant does, while
-// the mid-flight anchor reflects occupancy that already exists.
-func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok bool, lease admission, wait time.Duration) {
+// wait: the caller stops its FIFO pass until that wake. gateBlocked reports
+// that tryAdmit was reached and refused, which is the only case that publishes
+// the group into the provider's fair-waiting set; a queued waiter is still
+// refused while the gate stays full, so the mark survives further passes. A
+// fast-path call with no queued waiter marks nothing: its enqueue drain owns
+// that transition. A failed provider admission never starts a fresh epoch;
+// only a successful grant does, while the mid-flight anchor reflects
+// occupancy that already exists.
+func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok bool, lease admission, wait time.Duration, gateBlocked bool) {
 	target, duration, enabled := g.rampPolicy()
 	if !enabled {
 		if !g.rampStart.IsZero() || !g.idleSince.IsZero() {
 			g.resetRampLocked()
 		}
-		return g.sched.tryAdmit(provider, estTokens)
+		ok, lease, wait = g.sched.tryAdmit(provider, estTokens)
+		if !ok && g.queued > 0 {
+			g.markGateWaitingLocked()
+			gateBlocked = true
+		}
+		return ok, lease, wait, gateBlocked
 	}
 	g.anchorRampLocked(now, target, duration)
 	if g.inFlight >= g.rampAllowanceLocked(now, target, duration) {
 		if next := g.nextRampStepLocked(now, target, duration); !next.IsZero() {
 			g.sched.armThrottleDrain(g.provider, time.Until(next))
 		}
-		return false, admission{}, 0
+		return false, admission{}, 0, false
 	}
 	ok, lease, wait = g.sched.tryAdmit(provider, estTokens)
 	if ok {
 		g.startRampLocked(now, duration)
+	} else if g.queued > 0 {
+		g.markGateWaitingLocked()
+		gateBlocked = true
 	}
-	return ok, lease, wait
+	return ok, lease, wait, gateBlocked
 }
 
 // drainLimited grants Acquire slots to the next un-held waiters while capacity,
@@ -551,16 +629,28 @@ func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok
 // budget. It does not consult tripped/probing - WaitSend is the send gate.
 // Granting a slot while half-open is required so that waiter can become the
 // next probe. matchingHold is lock-free (atomic policy pointer).
+//
+// Fair-set ownership: a provider refusal marks the group and keeps it marked
+// across passes; a stop on pacing, the per-key cap, a hold-only remainder or
+// the anti-burst ramp withdraws it, because another key's release or a
+// provider timer cannot relieve those predicates. A pass stopped only by its
+// one-grant budget keeps the mark so the next fair pass can use free provider
+// capacity for the same key.
 func (g *group) drainLimited(budget int) int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
 	read, kept := 0, 0
 	granted := 0
-	for read < len(g.queue) &&
-		(budget <= 0 || granted < budget) &&
-		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
-		!now.Before(g.nextAllowedAt) {
+	refused, budgetStop := false, false
+	for read < len(g.queue) {
+		if budget > 0 && granted >= budget {
+			budgetStop = true
+			break
+		}
+		if (g.maxConcurrent != 0 && g.inFlight >= g.maxConcurrent) || now.Before(g.nextAllowedAt) {
+			break
+		}
 		w := g.queue[read]
 		if w == nil {
 			// removeWaiter tombstoned a cancelled waiter; drop it in the one
@@ -583,8 +673,9 @@ func (g *group) drainLimited(budget int) int {
 			read++
 			continue
 		}
-		ok, lease, wait := g.admitLocked(now, w.provider, w.estTokens)
+		ok, lease, wait, gateBlocked := g.admitLocked(now, w.provider, w.estTokens)
 		if !ok {
+			refused = gateBlocked
 			if wait > 0 {
 				g.sched.armThrottleDrain(w.provider, wait)
 			}
@@ -620,6 +711,13 @@ func (g *group) drainLimited(budget int) int {
 		// the remaining FIFO does not wait for an unrelated release.
 		g.armRampStepLocked(now)
 	}
+	if !refused && !budgetStop {
+		// The pass ended without a provider refusal and without a fair turn cut
+		// short by the budget: whatever remains is held, cancelled, paced, over
+		// the per-key cap or ramp-blocked, none of which the shared gate can
+		// relieve. Withdraw the mark so this key stops taking fair-drain turns.
+		g.clearGateWaitingLocked()
+	}
 	return granted
 }
 
@@ -639,16 +737,20 @@ func (g *group) compactLocked() {
 }
 
 // syncQueueLocked is the sole owner of the queue empty/non-empty witness and
-// its provider counter transition. Callers hold g.mu after mutating g.queued
-// (enqueue, drain grant, removeWaiter tombstone); queue compaction only drops
-// nil tombstones and never changes that live count, so it needs no separate
+// its provider counters. Callers hold g.mu after mutating g.queued (enqueue,
+// drain grant, removeWaiter tombstone); queue compaction only drops nil
+// tombstones and never changes that live count, so it needs no separate
 // transition. No queue reset/close path exists today; a future one must route
 // through this same transition. hasQueued mirrors queued > 0 for lock-free
 // drainProvider skips, and providerQueued moves exactly on the edge, so the
 // per-provider count can never go negative or stay positive with an empty
-// queue.
+// queue. An empty queue also withdraws the group's fair-waiting mark: no
+// waiter remains that the shared gate could refuse.
 func (g *group) syncQueueLocked() {
 	nonEmpty := g.queued > 0
+	if !nonEmpty {
+		g.clearGateWaitingLocked()
+	}
 	if g.hasQueued.Load() == nonEmpty {
 		return
 	}
@@ -681,7 +783,11 @@ func (g *group) removeWaiter(w *waiter) {
 	}
 	if !found {
 		// The waiter was already granted a slot (popped + signaled) but cancelled
-		// before reading the channel. Release that phantom slot.
+		// before reading the channel. Settle the gate before releasing the
+		// phantom group slot so its reserved tokens and in-flight occupancy are
+		// reconciled before any drain can admit a replacement; the caller below
+		// owns the single drain.
+		w.admission.settle(0)
 		if g.inFlight > 0 {
 			g.inFlight--
 		}
@@ -695,9 +801,6 @@ func (g *group) removeWaiter(w *waiter) {
 	g.sched.markGroupIdleLocked(g)
 	g.mu.Unlock()
 	w.dropHold(g.sched)
-	if !found {
-		w.admission.finish(0)
-	}
 	// Removing a throttled head can expose a smaller reservation that fits now.
 	// A non-head removal cannot change which waiter drain reaches first, and its
 	// tombstone is compacted on the next drain; skipping the synchronous pass

@@ -16,23 +16,31 @@ const maxSchedulerGroups = 100_000
 
 // providerIndex is the scheduler's provider-scoped group index. The attributed
 // groups form a doubly linked list guarded by mu; eviction unlinks one group in
-// O(1), and a provider drain snapshots only groups whose queue is non-empty.
-// cursor is the group a fair provider drain starts from next: queuedSnapshot
-// rotates its result to begin there, and drainProvider advances it after a pass
-// that served work, so repeated drains do not favor the first-attributed key.
+// O(1). fair is the provider's fair-waiting set: groups with at least one live
+// waiter that the shared provider gate (concurrency or request/token bucket)
+// refused, and that therefore need the fair drain's next turn. A group's
+// gateWaiting flag is the membership authority; unmarking leaves a nil
+// tombstone that the next snapshot, or the dead-entry threshold, compacts away.
+// fairCount is the lock-free witness: a new key may take the fast path only
+// when it is zero, so a peer parked on its own pacing window, hold, anti-burst
+// ramp or per-key cap never suppresses an unrelated key's grant. cursor is the
+// group a productive drain served last; fairSnapshot starts after it, so
+// repeated drains do not favor the first-attributed key.
+//
 // queued counts the indexed groups whose queue currently holds at least one
-// live waiter. A provider drain reads it under Scheduler.mu as a witness that
-// returns before walking (and locking) an idle provider's groups. Each group
-// stores a pointer to this counter at its first attribution and adjusts it from
-// the single queue-transition owner under the group's own mutex, so maintaining
-// the count never needs Scheduler.mu.
+// live waiter. It is the provider's total queued-group accounting (a strict
+// superset of the fair set) and moves from the single queue-transition owner
+// under the group's own mutex, so maintaining it never needs Scheduler.mu.
 type providerIndex struct {
-	mu     sync.Mutex
-	head   *group
-	tail   *group
-	live   int
-	cursor *group // next fair-drain start; nil = list head. Guarded by mu.
-	queued atomic.Int64
+	mu        sync.Mutex
+	head      *group
+	tail      *group
+	live      int
+	fair      []*group // fair-waiting groups plus nil tombstones; guarded by mu
+	fairDead  int      // tombstone count in fair; guarded by mu
+	cursor    *group   // last group served by a productive drain; nil = snapshot head
+	fairCount atomic.Int64
+	queued    atomic.Int64
 }
 
 // linkLocked appends g at the provider's tail. Callers hold idx.mu.
@@ -70,78 +78,117 @@ func (idx *providerIndex) unlinkLocked(g *group) {
 	g.providerPrev, g.providerNext = nil, nil
 	g.providerListed = false
 	if idx.cursor == g {
-		// An idle group chosen as the next rotation start is going away. Begin
-		// again at the head; it cannot hold queued work, so no turn is lost.
+		// The last group served by a productive drain is going away. The next
+		// snapshot starts at the slice head; eviction only removes idle groups,
+		// so a group with no queued waiter had no fair turn left to lose.
 		idx.cursor = nil
 	}
 	idx.live--
 }
 
-// queuedSnapshot returns the groups whose lock-free witness says a live waiter
-// is queued, rotated so the fair drain starts at idx.cursor. It allocates only
-// for those groups, so a provider with many idle keys does not pay an
-// allocation per drain. The cursor itself is advanced by drainProvider after a
-// pass that actually granted work (advanceCursor), never by a no-op drain: a
-// release fires both the gate wake and the group drain, and advancing on the
-// redundant second call would rotate past the key that was just served and
-// restore the old first-key bias. A cursor whose group was evicted or has
-// emptied falls back to the next queued group after its list position, so
-// rotation continues across idle gaps. Callers must not hold idx.mu.
-func (idx *providerIndex) queuedSnapshot() []*group {
+// markFairLocked adds g to the provider's fair-waiting set. Callers hold g.mu
+// and must have verified gateWaiting is false, so the counter can never count a
+// group twice; the index lock nests inside g.mu, never the reverse. The fast
+// path reads fairCount without taking either lock.
+func (idx *providerIndex) markFairLocked(g *group) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	cursor := idx.cursor
-	passed := cursor == nil
-	found := cursor == nil
-	var after, before []*group
-	for g := idx.head; g != nil; g = g.providerNext {
-		if !passed {
-			if g != cursor {
-				continue
-			}
-			passed, found = true, true
-		}
-		if g.hasQueued.Load() {
-			after = append(after, g)
-		}
-	}
-	if cursor != nil && found {
-		// Queued groups before the cursor follow it in the circular order.
-		for g := idx.head; g != nil && g != cursor; g = g.providerNext {
-			if g.hasQueued.Load() {
-				before = append(before, g)
-			}
-		}
-	} else if !found {
-		// The cursor was evicted or detached. Rebuild in list order; the next
-		// successful drain resumes rotation from whatever this one serves.
-		after = after[:0]
-		for g := idx.head; g != nil; g = g.providerNext {
-			if g.hasQueued.Load() {
-				after = append(after, g)
-			}
-		}
-	}
-	return append(after, before...)
+	g.gateWaiting.Store(true)
+	g.fairIndex = len(idx.fair)
+	idx.fair = append(idx.fair, g)
+	idx.fairCount.Add(1)
 }
 
-// advanceCursor starts the next fair drain after the last group this snapshot
-// served. served indexes the same snapshot the caller walked; the next group in
-// rotation wraps to the snapshot start. Only a drain that granted work calls
-// this, so empty or fully blocked drains leave the rotation untouched.
-func (idx *providerIndex) advanceCursor(groups []*group, served int) {
-	if len(groups) == 0 || served < 0 || served >= len(groups) {
+// clearFairLocked removes g from the provider's fair-waiting set and compacts
+// tombstones once they reach half the slice, so an unmarked set releases its
+// entries instead of retaining every group that ever waited. Callers hold g.mu.
+func (idx *providerIndex) clearFairLocked(g *group) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	if !g.gateWaiting.Load() {
 		return
 	}
-	next := groups[(served+1)%len(groups)]
+	g.gateWaiting.Store(false)
+	idx.fairCount.Add(-1)
+	if g.fairIndex >= 0 && g.fairIndex < len(idx.fair) && idx.fair[g.fairIndex] == g {
+		idx.fair[g.fairIndex] = nil
+		idx.fairDead++
+	}
+	if idx.fairDead > 0 && idx.fairDead >= len(idx.fair)/2 {
+		idx.compactFairLocked()
+	}
+}
+
+// compactFairLocked drops tombstoned entries and restores every live member's
+// slice index. Callers hold idx.mu; index writes are guarded by that lock.
+func (idx *providerIndex) compactFairLocked() {
+	live := idx.fair[:0]
+	for _, g := range idx.fair {
+		if g == nil {
+			continue
+		}
+		g.fairIndex = len(live)
+		live = append(live, g)
+	}
+	clear(idx.fair[len(live):])
+	idx.fair = live
+	idx.fairDead = 0
+}
+
+// fairSnapshot returns the fair-waiting groups, rotated so the next drain
+// starts after the group the last productive pass served. Only a group whose
+// queued head the shared gate refused enters this set, so a release allocates
+// and walks work that actually waits on that gate instead of every queued key.
+// Tombstones are compacted here; callers must not hold idx.mu, and the group
+// mutexes are only taken later by drainProvider after this snapshot is
+// complete.
+func (idx *providerIndex) fairSnapshot() []*group {
 	idx.mu.Lock()
-	idx.cursor = next
+	defer idx.mu.Unlock()
+	if idx.fairDead > 0 {
+		idx.compactFairLocked()
+	}
+	n := len(idx.fair)
+	if n == 0 {
+		idx.cursor = nil
+		return nil
+	}
+	start := 0
+	found := idx.cursor == nil
+	if idx.cursor != nil {
+		for i, g := range idx.fair {
+			if g == idx.cursor {
+				start = (i + 1) % n
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		// The last served group emptied or was detached; begin at the slice
+		// head instead of leaving a stale anchor behind.
+		idx.cursor = nil
+	}
+	out := make([]*group, 0, n)
+	out = append(out, idx.fair[start:]...)
+	out = append(out, idx.fair[:start]...)
+	return out
+}
+
+// advanceFair publishes the last group a productive drain served. The next
+// snapshot begins after it, so successive drains rotate through the fair set
+// instead of favoring the first-attributed key. A drain that granted nothing
+// never calls this.
+func (idx *providerIndex) advanceFair(last *group) {
+	idx.mu.Lock()
+	idx.cursor = last
 	idx.mu.Unlock()
 }
 
 // snapshotAll returns every attributed group, queued or idle, in list order.
-// Policy changes use it to reset ramp epochs without walking the whole
-// scheduler map; the caller must not hold idx.mu.
+// Policy changes use it to reset ramp epochs, and the anti-burst timer wake
+// uses it to re-mark queued keys for one drain; the caller must not hold
+// idx.mu.
 func (idx *providerIndex) snapshotAll() []*group {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -196,12 +243,12 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 // (Trip/FailSend/WaitSend/BackoffFor) never attribute a provider; only an
 // AcquireWith with hooks.Provider does.
 //
-// The group also adopts the index's queued-group counter here, under g.mu (the
-// established s.mu -> g.mu order). A group can already hold waiters when it is
-// first attributed - an empty-provider Acquire can queue it behind an operator
-// hold first - so count a pre-existing non-empty queue exactly once: its
-// enqueue transition ran while providerQueued was nil, and every later
-// transition is owned by syncQueueLocked.
+// The group also adopts the index's queued-group counter and fair-waiting
+// counter here, under g.mu (the established s.mu -> g.mu order). A group can
+// already hold waiters when it is first attributed - an empty-provider Acquire
+// can queue it behind an operator hold first - so count a pre-existing
+// non-empty queue exactly once: its enqueue transition ran while providerQueued
+// was nil, and every later transition is owned by syncQueueLocked.
 func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 	if provider == "" || g.provider != "" {
 		return
@@ -211,13 +258,14 @@ func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 		idx = &providerIndex{}
 		s.providerGroups[provider] = idx
 	}
-	g.providerIdx = idx
 	g.mu.Lock()
 	// provider is read by admit/drain under g.mu, and attribution can race a
 	// concurrent drain or ListThrottles for an already-listed group; publish
-	// it under the group lock together with its counter pointer.
+	// it under the group lock together with its index and counter pointers.
 	g.provider = provider
+	g.providerIdx = idx
 	g.providerQueued = &idx.queued
+	g.providerFair = &idx.fairCount
 	if g.hasQueued.Load() {
 		idx.queued.Add(1)
 	}
@@ -334,6 +382,10 @@ func (s *Scheduler) evictIdleGroupLocked(g *group) bool {
 		return false
 	}
 	g.retired = true
+	// A retired group is idle by construction (queued == 0 already cleared its
+	// fair mark through syncQueueLocked); clear defensively so a stale mark can
+	// never keep an evicted group in the provider's fair set.
+	g.clearGateWaitingLocked()
 	// The group pacer's timer closure retains g; stop it so eviction cannot
 	// leave one timer per evicted group alive for the pacing window.
 	g.pacer.stop()
@@ -371,6 +423,7 @@ func (s *Scheduler) detachProviderLocked(g *group) {
 		return
 	}
 	g.providerIdx = nil
+	g.providerFair = nil
 	idx.mu.Lock()
 	idx.unlinkLocked(g)
 	empty := idx.live == 0

@@ -42,12 +42,14 @@ type Options struct {
 // Scheduler manages ordered queues per group key.
 //
 // Lock order: s.mu -> g.mu, s.mu -> idleMu, s.mu -> providerIndex.mu,
-// s.mu -> pacingLRU.mu, g.mu -> idleMu, and g.mu -> providerGate.mu for the
-// policy read and tryAdmit. throttleMu -> providerGate.mu while a policy is
-// installed; a ramp reset that walks groups runs only after throttleMu is
-// released. A path holding idleMu, providerIndex.mu or pacingLRU.mu never waits
-// for s.mu or g.mu, and drainProvider releases providerIndex.mu before touching
-// a group.
+// s.mu -> pacingLRU.mu, g.mu -> idleMu, g.mu -> providerGate.mu for the policy
+// read and tryAdmit, and g.mu -> providerIndex.mu when a group is marked or
+// unmarked in its provider's fair-waiting set. throttleMu -> providerGate.mu
+// while a policy is installed; a ramp reset that walks groups runs only after
+// throttleMu is released. A path holding idleMu, providerIndex.mu or
+// pacingLRU.mu never waits for s.mu or g.mu: drainProvider releases
+// providerIndex.mu before touching a group, and fair-set marking is only ever
+// taken with g.mu already held (never the reverse).
 type Scheduler struct {
 	mu     sync.Mutex // guards opts, groups, groupCap, providerGroups and group retirement
 	opts   Options
@@ -174,13 +176,20 @@ func (s *Scheduler) snapshotGroups() []*group {
 // drainAll re-checks every group: unattributed groups drain locally, and each
 // attributed provider with queued work drains once through the fair
 // round-robin walk. Grouping the snapshot avoids one provider walk per group
-// and never calls drainProvider("") recursively.
+// and never calls drainProvider("") recursively. A policy edge (hold lift or
+// addition, throttle change, ramp reset) can unblock a key without proving
+// which predicate was blocking it, so every group with a live waiter is marked
+// for this drain; the fair walk withdraws the marks of keys that still stop on
+// a per-key predicate.
 func (s *Scheduler) drainAll() {
 	providers := make(map[string]struct{})
 	var local []*group
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		provider, queued := g.provider, g.queued
+		if provider != "" && queued > 0 {
+			g.markGateWaitingLocked()
+		}
 		g.mu.Unlock()
 		if provider == "" {
 			local = append(local, g)
