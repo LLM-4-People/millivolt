@@ -835,6 +835,13 @@ func TestMCPThrottleSchemaMirrorsTheProxyBands(t *testing.T) {
 		{"Tokens", "0 to " + strconv.FormatInt(maxLimitTokens, 10)},
 		{"RequestWindow", windowBand},
 		{"TokenWindow", windowBand},
+		// The anti-burst ramp reuses the window band, and the flag's inertness
+		// is the proxy's own rule (scheduler.Limit.rampActive): a schema that
+		// promised a ramp without those two conditions would tell a model its
+		// change takes effect when the scheduler ignores it.
+		{"RampDuration", windowBand},
+		{"AntiBurst", "off by default"},
+		{"AntiBurst", "inert unless concurrency is at least 2"},
 	} {
 		field, ok := reflect.TypeOf(mcp.SetThrottleInput{}).FieldByName(tc.field)
 		if !ok {

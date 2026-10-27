@@ -232,15 +232,20 @@ func describePauseScope(in SetPauseInput) string {
 	return scope
 }
 
-// SetThrottleInput sets or clears one provider's limits.
+// SetThrottleInput sets, merges or clears one provider's limits: the three cap
+// dimensions plus the optional anti-burst ramp. Every optional field is a
+// pointer (or, for a window, present only when non-empty), so an omitted
+// property preserves the current policy instead of zeroing it.
 type SetThrottleInput struct {
-	Provider      string `json:"provider" jsonschema:"the provider these limits apply to, across all clients and keys; must already be a known provider name"`
-	Clear         bool   `json:"clear,omitempty" jsonschema:"remove this provider's policy entirely"`
-	Concurrency   *int   `json:"concurrency,omitempty" jsonschema:"simultaneous in-flight requests, 0 to 100000; 0 disables the dimension"`
-	Requests      *int64 `json:"requests,omitempty" jsonschema:"requests per window, 0 to 1000000000; 0 disables the dimension"`
-	RequestWindow string `json:"request_window,omitempty" jsonschema:"window for the request budget, 1s to 24h, for example 1m or 2h; required when a count is set and the provider has no window yet"`
-	Tokens        *int64 `json:"tokens,omitempty" jsonschema:"tokens per window, 0 to 1000000000000; 0 disables the dimension"`
-	TokenWindow   string `json:"token_window,omitempty" jsonschema:"window for the token budget, 1s to 24h, for example 1m or 2h; required when a count is set and the provider has no window yet"`
+	Provider      string  `json:"provider" jsonschema:"the provider these limits apply to, across all clients and keys; must already be a known provider name"`
+	Clear         bool    `json:"clear,omitempty" jsonschema:"remove this provider's policy entirely"`
+	Concurrency   *int    `json:"concurrency,omitempty" jsonschema:"simultaneous in-flight requests, 0 to 100000; 0 disables the dimension"`
+	Requests      *int64  `json:"requests,omitempty" jsonschema:"requests per window, 0 to 1000000000; 0 disables the dimension"`
+	RequestWindow string  `json:"request_window,omitempty" jsonschema:"window for the request budget, 1s to 24h, for example 1m or 2h; required when a count is set and the provider has no window yet"`
+	Tokens        *int64  `json:"tokens,omitempty" jsonschema:"tokens per window, 0 to 1000000000000; 0 disables the dimension"`
+	TokenWindow   string  `json:"token_window,omitempty" jsonschema:"window for the token budget, 1s to 24h, for example 1m or 2h; required when a count is set and the provider has no window yet"`
+	AntiBurst     *bool   `json:"anti_burst,omitempty" jsonschema:"ramp every provider+key group's concurrency from 1 up to the concurrency target; off by default, and inert unless concurrency is at least 2 and ramp_duration is greater than 0"`
+	RampDuration  *string `json:"ramp_duration,omitempty" jsonschema:"time each provider+key group takes to reach the concurrency target, 1s to 24h, for example 10s or 5m; empty or 0s turns the ramp off"`
 }
 
 // SetThrottleOutput is the resulting limits state.
@@ -252,12 +257,14 @@ type SetThrottleOutput struct {
 }
 
 // throttleNote states the enforcement semantics honestly.
-const throttleNote = "these are provider-wide budgets that permit bursts and oversized requests; they are not strict fixed-window quota enforcement"
+const throttleNote = "these are provider-wide budgets that permit bursts and oversized requests; they are not strict fixed-window quota enforcement, " +
+	"and anti_burst only ramps a fresh provider+key group up to the concurrency target rather than capping bursts outright"
 
 // The bands the proxy enforces on a provider limit (internal/proxy/throttle.go
 // maxLimit* and min/maxLimitWindow). Applying them here turns a typo into a
 // readable message instead of a 400, and stops a request the proxy would refuse
-// after it was already assembled.
+// after it was already assembled. The anti-burst ramp reuses the window band;
+// its grammar and that band stay owned by the proxy.
 const (
 	maxLimitConcurrency = 100_000
 	maxLimitRequests    = 1_000_000_000
@@ -277,12 +284,17 @@ var setThrottleDescription = fmt.Sprintf("Set one provider's budgets across all 
 	"A window is %s to %dh, and it is REQUIRED whenever a count is set and the provider has no window yet. "+
 	"A window-only change (no count) is accepted only when that dimension already has a stored count; "+
 	"when nothing would be set it is refused here rather than returning a silent 200. "+
+	"anti_burst is off by default: it ramps each provider+key group's concurrency from 1 up to the configured "+
+	"concurrency over ramp_duration, and it is inert unless concurrency is at least 2 and ramp_duration is "+
+	"greater than 0. ramp_duration uses the same %s to %dh grammar as a window; empty or 0s turns the ramp off. "+
+	"An explicit on-ramp needs an active limit, which the proxy enforces and reports as a 400. "+
 	"The provider is checked against the proxy's known-provider vocabulary, because writing a limit for an "+
 	"unknown one would add that name to the proxy's vocabulary permanently, and the known names are offered "+
 	"instead. That check FAILS OPEN: when the vocabulary cannot be read or is empty, an unknown name is "+
 	"accepted rather than refusing every name. These budgets permit bursts and oversized requests; they are "+
 	"not strict fixed-window quota enforcement.",
-	maxLimitConcurrency, maxLimitRequests, maxLimitTokens, minLimitWindow, int(maxLimitWindow/time.Hour))
+	maxLimitConcurrency, maxLimitRequests, maxLimitTokens, minLimitWindow, int(maxLimitWindow/time.Hour),
+	minLimitWindow, int(maxLimitWindow/time.Hour))
 
 // throttleWindow parses a limit window the way the proxy's parseLimitWindow
 // does: a Go duration, or an N/1d/2d form it converts to 24-hour units, then the
@@ -359,14 +371,27 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 			}
 			body["token_window"] = in.TokenWindow
 		}
+		// The ramp duration's grammar, its 1s..24h band and the rule that an
+		// explicit on-ramp needs an active limit belong to the proxy
+		// (internal/proxy/throttle.go parseRampDuration and HandleThrottle). The
+		// value is forwarded verbatim and a 400 comes back through the ordinary
+		// error path; re-deriving the off spellings or the band here would be a
+		// second duration vocabulary that can disagree with the one enforcing it.
+		if in.AntiBurst != nil {
+			body["anti_burst"] = *in.AntiBurst
+		}
+		if in.RampDuration != nil {
+			body["ramp_duration"] = *in.RampDuration
+		}
 		// The proxy MERGES a supplied window into the provider's existing
 		// policy, so a window-only body is a real change when that dimension
 		// already has a count. It sets nothing only when the dimension has no
 		// count yet, and the proxy still answers 200, which reads as a
 		// successful change. Refuse exactly that case, mirroring the merge.
 		windowOnly = (in.RequestWindow != "" && in.Requests == nil) || (in.TokenWindow != "" && in.Tokens == nil)
-		if in.Concurrency == nil && in.Requests == nil && in.Tokens == nil && !windowOnly {
-			return nil, fmt.Errorf("send concurrency, requests or tokens: a body that names no dimension sets nothing")
+		if in.Concurrency == nil && in.Requests == nil && in.Tokens == nil &&
+			in.AntiBurst == nil && in.RampDuration == nil && !windowOnly {
+			return nil, fmt.Errorf("send concurrency, requests, tokens, anti_burst or ramp_duration: a body that names no dimension sets nothing")
 		}
 	}
 	// The known-provider guard runs BEFORE the window-only stored-count read.
