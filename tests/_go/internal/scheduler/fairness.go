@@ -617,6 +617,17 @@ func TestFairDrainClearsPerKeyBlockedMark(t *testing.T) {
 		grantsA := make(chan Release, 2)
 		grantsB := make(chan Release, 2)
 		var wg sync.WaitGroup
+		// A failing assertion must release every waiter before synctest tears
+		// the bubble down; otherwise the first failure is buried under a
+		// deadlock panic. Release is idempotent, so the normal-path cleanup
+		// below can repeat it.
+		defer func() {
+			cancelA()
+			for _, release := range holders {
+				release(0)
+			}
+			wg.Wait()
+		}()
 		launch := func(key string, acqCtx context.Context, out chan<- Release) {
 			wg.Go(func() {
 				release, err := s.AcquireWith(acqCtx, key, 0, hooks)
@@ -645,6 +656,9 @@ func TestFairDrainClearsPerKeyBlockedMark(t *testing.T) {
 		// blocked while still marked.
 		if !s.Trip(provider+"|a", time.Hour) {
 			t.Fatal("trip did not claim the send token")
+		}
+		if groupGateWaiting(s, provider+"|a") {
+			t.Fatal("trip left the paced key in the fair-waiting set")
 		}
 		// Two more provider slots open at once: only B can use them.
 		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 5}})

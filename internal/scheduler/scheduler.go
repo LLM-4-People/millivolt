@@ -178,9 +178,10 @@ func (s *Scheduler) snapshotGroups() []*group {
 // round-robin walk. Grouping the snapshot avoids one provider walk per group
 // and never calls drainProvider("") recursively. A policy edge (hold lift or
 // addition, throttle change, ramp reset) can unblock a key without proving
-// which predicate was blocking it, so every group with a live waiter is marked
-// for this drain; the fair walk withdraws the marks of keys that still stop on
-// a per-key predicate.
+// which predicate was blocking it, so every group with a live waiter whose own
+// admission window is open is marked for this drain; markGateWaitingLocked
+// owns that predicate, and the fair walk withdraws the marks of keys that still
+// stop on a per-key predicate.
 func (s *Scheduler) drainAll() {
 	providers := make(map[string]struct{})
 	var local []*group

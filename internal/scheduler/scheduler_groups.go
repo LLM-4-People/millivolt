@@ -418,12 +418,20 @@ func (s *Scheduler) evictIdleGroupLocked(g *group) bool {
 // that has no live groups left, so a client rotating providers cannot retain
 // one empty entry per provider. Callers hold s.mu.
 func (s *Scheduler) detachProviderLocked(g *group) {
+	// Attribution publishes these pointers under g.mu, and the fair-set
+	// mark/clear paths read them under g.mu. A release from the last in-flight
+	// slot can enter drainAdmission after eviction re-checked idleness but
+	// before this detach, so the clear must take the same lock; Scheduler.mu
+	// alone does not order it against those readers.
+	g.mu.Lock()
 	idx := g.providerIdx
 	if idx == nil {
+		g.mu.Unlock()
 		return
 	}
 	g.providerIdx = nil
 	g.providerFair = nil
+	g.mu.Unlock()
 	idx.mu.Lock()
 	idx.unlinkLocked(g)
 	empty := idx.live == 0
