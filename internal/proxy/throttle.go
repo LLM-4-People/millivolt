@@ -30,7 +30,9 @@ const (
 // Safety guardrails on a header/UI-supplied cap. Not user-tunable: they
 // bound a hostile or typo'd value so it cannot stall the provider forever
 // or overflow the token bucket. Window is 1s..24h (same ceiling as
-// scheduler.MaxRetryHint - a daily quota window).
+// scheduler.MaxRetryHint - a daily quota window). The anti-burst ramp
+// duration reuses that same band, so both share one grammar and one range
+// check.
 const (
 	maxLimitConcurrency = 100_000
 	maxLimitRequests    = 1_000_000_000
@@ -47,11 +49,12 @@ const (
 // already refuses a new header-created gate past 4096 entries; combined with
 // this label bound it also bounds the persisted document.
 //
-// throttlePersistDocMaxBytes is a final safety net. With 4096 labels of 255
-// bytes at JSON's worst-case six-byte escape per byte, plus per-entry fields,
-// the document stays below 8 MiB. A document at the cap is a bug, not normal
-// operator state, so refusing it keeps the dirty generation retrying rather
-// than writing an unbounded blob.
+// throttlePersistDocMaxBytes is a final safety net. The gate count is bounded
+// at 4096 and a provider label at 255 bytes; with every per-entry field at its
+// own maximum and label bytes that need no JSON escaping, one document stays
+// well under this cap, and the anti-burst pair adds at most 56 bytes per entry.
+// A document at the cap is a bug, not normal operator state, so refusing it
+// keeps the dirty generation retrying rather than writing an unbounded blob.
 const (
 	throttleProviderLabelMaxBytes = 255
 	throttlePersistDocMaxBytes    = 8 << 20
@@ -67,15 +70,17 @@ type throttlePersist interface {
 }
 
 type persistedThrottle struct {
-	Provider    string    `json:"provider"`
-	Concurrency int       `json:"concurrency,omitempty"`
-	Requests    int64     `json:"requests,omitempty"`
-	ReqWindow   string    `json:"request_window,omitempty"`
-	Tokens      int64     `json:"tokens,omitempty"`
-	TokWindow   string    `json:"token_window,omitempty"`
-	Source      string    `json:"source,omitempty"`
-	UpdatedBy   string    `json:"updated_by,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	Provider     string    `json:"provider"`
+	Concurrency  int       `json:"concurrency,omitempty"`
+	Requests     int64     `json:"requests,omitempty"`
+	ReqWindow    string    `json:"request_window,omitempty"`
+	Tokens       int64     `json:"tokens,omitempty"`
+	TokWindow    string    `json:"token_window,omitempty"`
+	AntiBurst    bool      `json:"anti_burst,omitempty"`
+	RampDuration string    `json:"ramp_duration,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	UpdatedBy    string    `json:"updated_by,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at,omitempty"`
 }
 
 type persistedThrottleDoc struct {
@@ -196,7 +201,12 @@ func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
 	if err := validateThrottleProvider(it.Provider); err != nil {
 		return scheduler.Throttle{}, err
 	}
-	lim := scheduler.Limit{Concurrency: it.Concurrency, Requests: it.Requests, Tokens: it.Tokens}
+	lim := scheduler.Limit{
+		Concurrency: it.Concurrency,
+		Requests:    it.Requests,
+		Tokens:      it.Tokens,
+		AntiBurst:   it.AntiBurst,
+	}
 	if it.Requests > 0 {
 		d, err := parseLimitWindow(it.ReqWindow)
 		if err != nil {
@@ -210,6 +220,13 @@ func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
 			return scheduler.Throttle{}, err
 		}
 		lim.TokWindow = d
+	}
+	if it.RampDuration != "" {
+		d, err := parseRampDuration(it.RampDuration)
+		if err != nil {
+			return scheduler.Throttle{}, err
+		}
+		lim.RampDuration = d
 	}
 	if err := validateLimit(lim); err != nil {
 		return scheduler.Throttle{}, err
@@ -229,6 +246,7 @@ func throttleToPersisted(t scheduler.Throttle) persistedThrottle {
 		Concurrency: t.Limit.Concurrency,
 		Requests:    t.Limit.Requests,
 		Tokens:      t.Limit.Tokens,
+		AntiBurst:   t.Limit.AntiBurst,
 		Source:      t.Source,
 		UpdatedBy:   t.UpdatedBy,
 		UpdatedAt:   t.UpdatedAt,
@@ -238,6 +256,9 @@ func throttleToPersisted(t scheduler.Throttle) persistedThrottle {
 	}
 	if t.Limit.TokWindow > 0 {
 		it.TokWindow = config.FormatDuration(t.Limit.TokWindow)
+	}
+	if t.Limit.RampDuration > 0 {
+		it.RampDuration = config.FormatDuration(t.Limit.RampDuration)
 	}
 	return it
 }
@@ -629,6 +650,11 @@ func validateLimit(l scheduler.Limit) error {
 			return fmt.Errorf("token window must be %s..%s", config.FormatDuration(minLimitWindow), config.FormatDuration(maxLimitWindow))
 		}
 	}
+	if l.RampDuration != 0 {
+		if l.RampDuration < minLimitWindow || l.RampDuration > maxLimitWindow {
+			return fmt.Errorf("ramp duration must be 0s or %s..%s", config.FormatDuration(minLimitWindow), config.FormatDuration(maxLimitWindow))
+		}
+	}
 	return nil
 }
 
@@ -703,6 +729,17 @@ func parseLimitWindow(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("window out of range")
 	}
 	return d, nil
+}
+
+// parseRampDuration parses the anti-burst ramp duration. The empty string and
+// the two zero spellings mean "off"; every other value reuses parseLimitWindow,
+// so the duration grammar and the 1s..24h band stay single-owned.
+func parseRampDuration(s string) (time.Duration, error) {
+	switch strings.TrimSpace(s) {
+	case "", "0", "0s":
+		return 0, nil
+	}
+	return parseLimitWindow(s)
 }
 
 // estimateTokens is the Acquire-time reservation: prompt chars/4 plus
@@ -781,19 +818,22 @@ func localErrorType(t string) bool {
 // set a limit on a seen provider. POST requires {"provider"} (deny by
 // default). clear:true drops the cap. Otherwise any supplied dimension
 // merges; omitted dimensions keep their current value; 0 / empty window
-// turns that dimension off.
+// turns that dimension off. The anti-burst flag and ramp duration must land
+// on a policy that stays active, since an inactive limit stores nothing.
 func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 	if !s.operatorStateGet(w, r, s.ThrottleSnapshot) {
 		return
 	}
 	var body struct {
-		Provider    string  `json:"provider"`
-		Clear       bool    `json:"clear"`
-		Concurrency *int    `json:"concurrency"`
-		Requests    *int64  `json:"requests"`
-		ReqWindow   *string `json:"request_window"`
-		Tokens      *int64  `json:"tokens"`
-		TokWindow   *string `json:"token_window"`
+		Provider     string  `json:"provider"`
+		Clear        bool    `json:"clear"`
+		Concurrency  *int    `json:"concurrency"`
+		Requests     *int64  `json:"requests"`
+		ReqWindow    *string `json:"request_window"`
+		Tokens       *int64  `json:"tokens"`
+		TokWindow    *string `json:"token_window"`
+		AntiBurst    *bool   `json:"anti_burst"`
+		RampDuration *string `json:"ramp_duration"`
 	}
 	if err := adminjson.Decode(w, r, &body); err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
@@ -815,8 +855,10 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Concurrency == nil && body.Requests == nil && body.Tokens == nil &&
-		body.ReqWindow == nil && body.TokWindow == nil {
-		adminjson.WriteError(w, http.StatusBadRequest, "concurrency, requests, or tokens required")
+		body.ReqWindow == nil && body.TokWindow == nil &&
+		body.AntiBurst == nil && body.RampDuration == nil {
+		adminjson.WriteError(w, http.StatusBadRequest,
+			"concurrency, requests, tokens, anti_burst, or ramp_duration required")
 		return
 	}
 	var next scheduler.Limit
@@ -894,6 +936,27 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 				next.TokWindow = win
 			}
 		}
+		if body.AntiBurst != nil {
+			next.AntiBurst = *body.AntiBurst
+		}
+		if body.RampDuration != nil {
+			d, err := parseRampDuration(*body.RampDuration)
+			if err != nil {
+				updateErr = fmt.Errorf("invalid ramp_duration")
+				return cur
+			}
+			next.RampDuration = d
+		}
+		// A ramp only shapes an active cap: the scheduler drops an inactive
+		// limit, so accepting one here would answer 200 while storing nothing.
+		// Only an explicit on-ramp is refused, so false / empty / 0s can still
+		// ride along with the clear of the last cap.
+		rampOn := (body.AntiBurst != nil && *body.AntiBurst) ||
+			(body.RampDuration != nil && next.RampDuration > 0)
+		if !next.Active() && rampOn {
+			updateErr = fmt.Errorf("anti_burst and ramp_duration require an active provider limit")
+			return cur
+		}
 		if err := validateLimit(next); err != nil {
 			updateErr = err
 			return cur
@@ -909,9 +972,10 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, updateErr.Error())
 		return
 	}
-	log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s)", provider,
+	log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s burst=%t ramp=%s)", provider,
 		next.Concurrency, next.Requests, config.FormatDuration(next.ReqWindow),
-		next.Tokens, config.FormatDuration(next.TokWindow))
+		next.Tokens, config.FormatDuration(next.TokWindow),
+		next.AntiBurst, config.FormatDuration(next.RampDuration))
 	writeOperatorState(w, s.ThrottleSnapshot(), persistErr)
 }
 
@@ -929,6 +993,8 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 			"request_window":     durationOrEmpty(inf.Limit.ReqWindow),
 			"tokens":             inf.Limit.Tokens,
 			"token_window":       durationOrEmpty(inf.Limit.TokWindow),
+			"anti_burst":         inf.Limit.AntiBurst,
+			"ramp_duration":      durationOrEmpty(inf.Limit.RampDuration),
 			"source":             inf.Source,
 			"updated_by":         inf.UpdatedBy,
 			"in_flight":          inf.InFlight,
