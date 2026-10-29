@@ -297,4 +297,14 @@ module.exports = async function drawerRedesign(H) {
     body.innerHTML === '' &&
     w.eval('detailCollapsed.size') === 0 &&
     w.eval('detailCodeState.size') === 0);
+
+  const oldInnerWidth = w.innerWidth;
+  Object.defineProperty(w, 'innerWidth', {configurable: true, value: 1000});
+  Object.defineProperty(d.documentElement, 'clientWidth', {configurable: true, value: 985});
+  w.openDrawer('redesign');
+  check('opening the drawer reserves the measured scrollbar gutter',
+    d.documentElement.style.getPropertyValue('--drawer-gutter') === '15px');
+  w.closeDrawer();
+  Object.defineProperty(w, 'innerWidth', {configurable: true, value: oldInnerWidth});
+  delete d.documentElement.clientWidth;
 };
