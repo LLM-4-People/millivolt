@@ -56,6 +56,7 @@ try {
      Do not strip the license header in vendor/uplot.js. -->
 <script defer src="/dash/vendor/uplot.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/core.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/feedback.js?v=__DASHBOARD_VERSION__"></script>
 <!-- The chrome modules initialize in this order: chrome_lists.js owns the
      duration vocabulary chrome_menus.js FILTER_AGES reads, and the pause
      menu sync owners chrome_operator.js operatorState captures; the
@@ -74,6 +75,7 @@ try {
      later dashboard modules call. Keep this the only ordered list. -->
 <script defer src="/dash/js/log_archive.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log_rows.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/log_detail.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log_debug.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log_drawer.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/log.js?v=__DASHBOARD_VERSION__"></script>
@@ -425,10 +427,11 @@ try {
   <div class="drawer-hd">
     <h3 id="drawer-title">request</h3>
     <div class="nav-btns">
-      <button class="btn" onclick="drawerNav(-1)" title="previous (newer)">‹</button>
-      <button class="btn" onclick="drawerNav(1)" title="next (older)">›</button>
+      <button class="btn" type="button" onclick="drawerNav(-1)" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
+      <button class="btn" type="button" onclick="drawerNav(1)" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
     </div>
-    <button class="btn" onclick="closeDrawer()">✕ esc</button>
+    <button class="btn drawer-tool" type="button" onclick="drawerCopyRecord()" aria-label="copy request JSON" title="copy request JSON" data-focus-key="copy-record">JSON</button>
+    <button class="btn" type="button" onclick="closeDrawer()" aria-label="close request detail (escape)" title="close (escape)" data-focus-key="close">✕<span class="d-key">esc</span></button>
   </div>
   <div class="drawer-body" id="drawer-body"></div>
 </aside>
@@ -442,6 +445,7 @@ try {
   </span>
 </footer>
 <div id="client-tip" hidden aria-hidden="true"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script id="dashboard-bootstrap" type="application/json">__DASHBOARD_BOOTSTRAP__</script>
 </body>

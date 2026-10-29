@@ -1,26 +1,27 @@
-// Request-log debug capture: the drawer's debug section, its header and
-// download affordance, the capture fetch that fills it, and the delegated
-// download listener. log_drawer.js owns the drawer lifecycle that shows it.
+// Request-log debug capture: the drawer's Debug section, its download
+// affordance, the capture fetch that fills it, and the delegated download
+// listener. log_detail.js owns the rows, sections and long-text block;
+// log_drawer.js owns the drawer lifecycle that shows it.
 
-// debugKV is the one debug key-value row builder. An empty value renders
-// no row (deny by default); callers pass v pre-escaped, k is escaped here.
-// color optionally tints the key span (capture headers use --accent2).
-function debugKV(k, v, color) {
-  if (v == null || v === '') return '';
-  return `<div class="detail-kv"><span class="k"${color ? ` style="color:${color}"` : ''}>${escapeHtml(k)}</span><span class="v">${v}</span></div>`;
-}
-
-function debugHeaderRows(list) {
-  if (!Array.isArray(list) || !list.length) return '';
-  return list.map(h => debugKV(h.name || '', escapeHtml(h.value || ''), 'var(--accent2)')).join('');
-}
-
-// debugSectionHead renders the debug section header: the title, the
-// download affordance and the message line. formatDetail's first paint and
-// fillDrawerDebug's rewrite both render through it, so the button survives
-// the capture render.
+// debugSectionHead renders the Debug heading row: the title, the download
+// action and the message line. The first paint and fillDrawerDebug's rewrite
+// both use it, so the button survives the capture render.
 function debugSectionHead(id) {
-  return `<h4>Debug <button type="button" class="btn" id="drawer-debug-download" data-id="${escapeHtml(id)}" aria-label="download debug capture" title="download debug capture">⬇</button> <span id="drawer-debug-status" style="color:var(--err)"></span></h4>`;
+  return `<div class="detail-sec-hd"><h4>Debug</h4><div class="detail-sec-actions">` +
+    `<button type="button" class="copy-btn" id="drawer-debug-download" data-id="${escapeHtml(id)}" aria-label="download debug capture" title="download debug capture">⬇</button>` +
+    `<span id="drawer-debug-status"></span></div></div>`;
+}
+
+// debugHeaderRows maps a captured [{name,value}] list onto the shared header
+// row owner, keeping the accent key tint and denying empty values.
+function debugHeaderRows(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((h, i) => detailTextRow(h && h.name, h && h.value, {
+    keyTone: 'var(--accent2)',
+    copy: true,
+    copyLabel: (h && h.name) || 'header',
+    focus: 'dbg-hdr:' + detailSlug((h && h.name) || 'header') + ':' + i,
+  })).filter(Boolean);
 }
 
 // runDebugCaptureDownload serves the drawer's Download button: the capture
@@ -54,38 +55,42 @@ function fillDrawerDebug(id) {
       const req = d.request || {};
       const resp = d.response || {};
       const bits = [];
-      bits.push(sec('Identity', [
-        debugKV('session', escapeHtml(d.debug_session_id)),
-        debugKV('client', escapeHtml(ident.client)),
-        debugKV('provider', escapeHtml(ident.provider)),
-        debugKV('model', escapeHtml(ident.model)),
-        debugKV('path', escapeHtml(ident.path)),
-        debugKV('stream', ident.stream ? 'yes' : 'no'),
-        debugKV('expires', escapeHtml(d.expires_at)),
-      ]));
-      bits.push(sec('Timing', [
-        debugKV('start', escapeHtml(timing.start)),
-        debugKV('duration', timing.duration_ms != null ? fmtDur(timing.duration_ms) : ''),
-        debugKV('ttft', fmtTTFT(timing.ttft_ms)),
-        debugKV('queue wait', timing.queue_wait_ms ? fmtDur(timing.queue_wait_ms) : ''),
-      ]));
-      bits.push(sec('Request', [
-        debugKV('url', escapeHtml(req.url)),
-        debugKV('status', outcome.status_code != null ? String(outcome.status_code) : ''),
-        debugKV('finish', escapeHtml(outcome.finish_reason)),
-      ]));
+      bits.push(detailSection('Identity', [
+        detailTextRow('session', d.debug_session_id, {copy: true}),
+        detailTextRow('client', ident.client),
+        detailTextRow('provider', ident.provider),
+        detailTextRow('model', ident.model, {copy: true}),
+        detailTextRow('path', ident.path, {copy: true}),
+        detailTextRow('stream', ident.stream ? 'yes' : 'no'),
+        detailTextRow('expires', d.expires_at),
+      ], {key: 'dbg-identity'}));
+      bits.push(detailSection('Timing', [
+        detailTextRow('start', timing.start),
+        detailTextRow('duration', timing.duration_ms != null ? fmtDur(timing.duration_ms) : ''),
+        detailTextRow('ttft', fmtTTFT(timing.ttft_ms)),
+        detailTextRow('queue wait', timing.queue_wait_ms ? fmtDur(timing.queue_wait_ms) : ''),
+      ], {key: 'dbg-timing'}));
+      bits.push(detailSection('Request', [
+        detailTextRow('url', req.url, {copy: true}),
+        detailTextRow('status', outcome.status_code != null ? String(outcome.status_code) : ''),
+        detailTextRow('finish', outcome.finish_reason),
+      ], {key: 'dbg-request'}));
       if (req.body && req.body.raw) {
-        bits.push(`<div class="detail-section"><h4>Request body${req.body.truncated ? ' (truncated)' : ''}</h4><div class="preview-box">${escapeHtml(req.body.raw)}</div></div>`);
+        bits.push(detailCodeSection('Request body' + (req.body.truncated ? ' (truncated)' : ''), req.body.raw,
+          {key: 'dbg-req-body', focus: 'dbg-req-body'}));
       }
       if (resp.body && resp.body.raw) {
-        bits.push(`<div class="detail-section"><h4>Response body${resp.body.truncated ? ' (truncated)' : ''}</h4><div class="preview-box">${escapeHtml(resp.body.raw)}</div></div>`);
+        bits.push(detailCodeSection('Response body' + (resp.body.truncated ? ' (truncated)' : ''), resp.body.raw,
+          {key: 'dbg-resp-body', focus: 'dbg-resp-body'}));
       }
-      const rh = debugHeaderRows(req.headers);
-      if (rh) bits.push(`<div class="detail-section"><h4>Request headers</h4>${rh}</div>`);
-      const sh = debugHeaderRows(resp.headers);
-      if (sh) bits.push(`<div class="detail-section"><h4>Response headers</h4>${sh}</div>`);
+      bits.push(detailSection('Request headers', debugHeaderRows(req.headers), {key: 'dbg-req-headers'}));
+      bits.push(detailSection('Response headers', debugHeaderRows(resp.headers), {key: 'dbg-resp-headers'}));
       const host = $('drawer-debug');
-      if (host) host.innerHTML = debugSectionHead(id) + bits.filter(Boolean).join('');
+      if (host) {
+        const focusToken = captureFocus(host, detailFocusKey);
+        host.innerHTML = debugSectionHead(id) + `<div class="detail-sec-body">${bits.filter(Boolean).join('')}</div>`;
+        if (focusToken) restoreFocus(focusToken);
+      }
     })
     .catch(() => { box.textContent = 'capture unavailable'; });
 }

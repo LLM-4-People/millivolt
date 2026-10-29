@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 from .browser_chart import chart_checks, focus_checks
+from .browser_drawer import drawer_checks
 from .browser_fixture import BODY, BODY_429, BODY_HEAD, BODY_TAIL, DEV_DIR, Upstream
 from .browser_log import log_checks
 from .browser_storm import storm_checks as run_storm_checks
@@ -165,6 +166,7 @@ async def check(base, screenshot):
 
                 await focus_checks(page, results)
                 await log_checks(page, results)
+                await drawer_checks(page, results)
 
                 await theme_checks(page, browser, base, errors, results, browser_route)
 

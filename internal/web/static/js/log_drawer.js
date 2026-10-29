@@ -1,6 +1,8 @@
-// Request-log detail drawer: the key/value detail sections, the record and
-// absorbed-attempt views, the drawer lifecycle and the retry-attempt link
-// navigation. log.js owns the log rows and state pills that open it.
+// Request-log detail drawer: the record and absorbed-attempt composition, the
+// hero summary, the error banner, the drawer lifecycle and the retry-attempt
+// navigation. log_detail.js owns the row/section/code primitives; log_debug.js
+// owns the capture section; log.js owns the log rows and state pills that open
+// the drawer.
 
 // Move the .expanding highlight in place (the class itself is owned by
 // renderRequests; this avoids a full table re-render on drawer nav).
@@ -10,34 +12,81 @@ function highlightRow() {
   });
 }
 
-// kv builds one key/value row; renders falsy-but-meaningful values (0, false)
-// while skipping null/undefined/empty-string so the drawer shows every captured
-// field without noise.
-function kv(k, v, color) {
-  if (v === null || v === undefined || v === '') return '';
-  const c = color ? ` style="color:${color}"` : '';
-  return `<div class="detail-kv"><span class="k">${k}</span><span class="v"${c}>${v}</span></div>`;
-}
-const kvBool = (k, v) => (v === null || v === undefined) ? '' : kv(k, v ? 'true' : 'false');
-const fmtT = t => {
-  if (!t) return '';
-  const d = new Date(t);
-  return (isNaN(d) || d.getTime() < 86400000) ? '' : d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
-};
-// sec wraps a set of kv rows into a titled detail-drawer section, dropping the
-// section entirely when every row is empty.
-const sec = (title, rows) => (rows && rows.filter(Boolean).length) ? `<div class="detail-section"><h4>${title}</h4>${rows.join('')}</div>` : '';
+const ALERT_ICON = '<svg class="d-alert-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8 15 14H1L8 1.8Z"/><path d="M8 6v3.6M8 11.7v.1"/></svg>';
 
-// detailHeaderRows renders a captured response-header map as sorted key/value
-// rows - the record's own section and the attempt view share the one pattern
-// (multi-value headers get one row per value).
-function detailHeaderRows(headers) {
-  if (!headers || !Object.keys(headers).length) return '';
-  const hrows = [];
-  Object.entries(headers).sort().forEach(([k, vs]) => {
-    vs.forEach(v => hrows.push(`<div class="detail-kv"><span class="k" style="color:var(--accent2)">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`));
-  });
-  return hrows.join('');
+// detailNum renders a compact count only when the field was captured. An
+// explicit zero stays a row; an absent value does not fabricate one.
+const detailNum = (key, value, opts) => (value === null || value === undefined) ? null : detailTextRow(key, fmt(value), opts);
+const detailDurRow = (key, value, opts) => (!value || !isFinite(value)) ? null : detailTextRow(key, fmtDur(value), opts);
+const detailMsRow = (key, value) => (value ? detailTextRow(key, value + ' ms') : null);
+const detailStampRow = (key, value, opts) => detailTextRow(key, fmtStamp(value), opts);
+
+function detailStat(label, value, tone) {
+  return `<span class="d-stat"><span class="d-stat-k">${escapeHtml(label)}</span>` +
+    `<span class="d-stat-v"${tone ? ` style="color:${tone}"` : ''}>${escapeHtml(value)}</span></span>`;
+}
+
+// detailHero is the drawer's summary readout: what ran, where it ran and the
+// few numbers an operator scans first. The full field inventory follows in
+// sections, so the hero never hides a captured value.
+function detailHero(r) {
+  const status = r.live ? liveStatusCell(r)
+    : (r.status_code !== null && r.status_code !== undefined ? finalizedStatusPill(r) : '');
+  const method = r.method ? `<span class="d-method">${escapeHtml(r.method)}</span>` : '';
+  const path = String(r.path || '');
+  const pathHTML = path ? `<span class="d-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>` : '';
+  const pathCopy = path ? copyButton(path, 'path', 'hero-path') : '';
+  const ident = [];
+  if (r.client) ident.push(entityBadge('client', r.client, null, r));
+  if (r.provider) ident.push(entityBadge('provider', r.provider));
+  const rawModel = String(r.model || '').trim();
+  if (rawModel) {
+    const canon = canonicalModel(rawModel);
+    ident.push(`<span class="d-model">${escapeHtml(rawModel)}</span>` +
+      (canon && canon !== rawModel ? ` <span class="d-canon">→ ${escapeHtml(canon)}</span>` : '') +
+      copyButton(rawModel, 'model', 'hero-model'));
+  }
+  const stats = [];
+  if (r.duration_ms !== null && r.duration_ms !== undefined) stats.push(detailStat('duration', fmtDur(r.duration_ms)));
+  if (r.ttft_ms) stats.push(detailStat('ttft', fmtTTFT(r.ttft_ms)));
+  if (r.usage && r.usage.total_tokens !== null && r.usage.total_tokens !== undefined) {
+    stats.push(detailStat('tokens', fmt(r.usage.total_tokens)));
+  }
+  if (r.gen_tps) stats.push(detailStat('speed', r.gen_tps.toFixed(1) + ' tok/s'));
+  if (r.cost) stats.push(detailStat('cost', fmtMoney(r.cost), 'var(--warn)'));
+  if (r.retries) stats.push(detailStat('retries', String(r.retries), 'var(--warn)'));
+  if (!status && !method && !pathHTML && !ident.length && !stats.length) return '';
+  const pathRow = pathHTML ? `<span class="d-path-row">${pathHTML}${pathCopy}</span>` : '';
+  return `<div class="d-hero">` +
+    `<div class="d-hero-top">${status}${method}${pathRow}</div>` +
+    (ident.length ? `<div class="d-hero-ident">${ident.join('<span class="d-sep" aria-hidden="true">·</span>')}</div>` : '') +
+    (stats.length ? `<div class="d-stats">${stats.join('')}</div>` : '') +
+    `</div>`;
+}
+
+// detailErrorAlert surfaces the final failure above the field inventory: type,
+// code and message are distinct facts, and the copy action carries the whole
+// block for a provider-side report. It is a plain group, not a live region, so
+// a live repaint never re-announces the same failure.
+function detailErrorAlert(r) {
+  const type = String(r.error_type || '');
+  const code = String(r.error_code || (r.status_code || '') || '');
+  const message = String(r.error_msg || '');
+  if (!type && !code && !message) return '';
+  const status = r.status_code ? String(r.status_code) : '';
+  const text = [
+    type ? 'type: ' + type : '',
+    code ? 'code: ' + code : '',
+    message ? 'message: ' + message : '',
+  ].filter(Boolean).join('\n');
+  const title = (!r.status_code || r.status_code >= 400) ? 'request failed' : 'upstream error';
+  return `<div class="d-alert" role="group" aria-label="error">` +
+    `<div class="d-alert-hd">${ALERT_ICON}<span class="d-alert-title">${title}</span>` +
+    (status ? `<span class="pill err">${escapeHtml(status)}</span>` : '') +
+    (type ? `<span class="d-alert-type">${escapeHtml(type)}</span>` : '') +
+    (code && code !== status ? `<span class="d-alert-code">code ${escapeHtml(code)}</span>` : '') +
+    copyButton(text, 'error detail', 'alert-copy') + `</div>` +
+    (message ? `<div class="d-alert-msg">${escapeHtml(message)}</div>` : '') + `</div>`;
 }
 
 // formatDetail renders every captured field for a record, grouped into
@@ -46,193 +95,223 @@ function detailHeaderRows(headers) {
 // bounded preview).
 function formatDetail(r) {
   const S = [];
+  S.push(detailHero(r));
+  S.push(detailErrorAlert(r));
 
-  S.push(sec('Request', [
-    kv('id', `<span style="color:var(--muted)">${escapeHtml(r.id)}</span>`),
-    kv('status', r.live ? liveStatusCell(r) : finalizedStatusPill(r)),
-    kv('started', fmtT(r.start)),
-    kv('ended', fmtT(r.end)),
-    kv('duration', r.duration_ms != null ? fmtDur(r.duration_ms) : ''),
-    kv('request bytes', r.request_bytes),
-    kv('response bytes', r.response_bytes),
-  ]));
+  S.push(detailSection('Request', [
+    detailTextRow('id', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
+    detailStampRow('started', r.start, {copy: true}),
+    detailStampRow('ended', r.end, {copy: true}),
+    detailBytesRow('request bytes', r.request_bytes),
+    detailBytesRow('response bytes', r.response_bytes),
+  ], {key: 'request'}));
 
-  S.push(sec('Client', [
-    kv('client', entityBadge('client', r.client, null, r)),
-    kv('ip', escapeHtml(r.client_ip)),
-    kv('lang / runtime', escapeHtml(r.client_lang)),
-    kv('sdk', escapeHtml(r.client_meta && r.client_meta.pkg_ver)),
-    kv('runtime', escapeHtml([r.client_meta && r.client_meta.runtime, r.client_meta && r.client_meta.runtime_ver].filter(Boolean).join(' '))),
-    kv('os', escapeHtml([r.client_meta && r.client_meta.os, r.client_meta && r.client_meta.arch].filter(Boolean).join(' '))),
-    kv('user-agent', escapeHtml(r.user_agent)),
-    kv('format', escapeHtml(r.client_meta && r.client_meta.format)),
-    kv('timeout', r.client_meta && r.client_meta.timeout_ms ? fmtDur(r.client_meta.timeout_ms) : ''),
-    kv('max concurrency', r.client_meta && r.client_meta.max_concurrency),
-    kv('method', r.method),
-    kv('path', escapeHtml(r.path)),
-    kv('key hash', r.key_hash ? `<span style="color:var(--muted)">${escapeHtml(shortId('key', r.key_hash))}</span>` : ''),
-    kvBool('client disconnected', r.client_disconnected),
-  ]));
+  const runtime = [r.client_meta && r.client_meta.runtime, r.client_meta && r.client_meta.runtime_ver].filter(Boolean).join(' ');
+  const os = [r.client_meta && r.client_meta.os, r.client_meta && r.client_meta.arch].filter(Boolean).join(' ');
+  const shortKey = r.key_hash ? shortId('key', r.key_hash) : '';
+  S.push(detailSection('Client', [
+    r.client ? detailHtmlRow('client', entityBadge('client', r.client, null, r), clientLabel(r.client), {copy: true}) : null,
+    detailTextRow('ip', r.client_ip, {copy: true}),
+    detailTextRow('lang / runtime', r.client_lang),
+    detailTextRow('sdk', r.client_meta && r.client_meta.pkg_ver),
+    detailTextRow('runtime', runtime),
+    detailTextRow('os', os),
+    detailTextRow('user-agent', r.user_agent, {copy: true}),
+    detailTextRow('format', r.client_meta && r.client_meta.format),
+    detailTextRow('timeout', r.client_meta && r.client_meta.timeout_ms ? fmtDur(r.client_meta.timeout_ms) : ''),
+    detailTextRow('max concurrency', r.client_meta && r.client_meta.max_concurrency),
+    detailTextRow('key hash', shortKey, {tone: 'var(--muted)', copy: shortKey || null}),
+    detailBoolRow('client disconnected', r.client_disconnected),
+  ], {key: 'client'}));
 
-  S.push(sec('Provider', [
-    kv('provider', entityBadge('provider', r.provider) + ` <span style="color:var(--muted)">${escapeHtml(r.provider)}</span>`),
-    kv('model (upstream)', escapeHtml(r.provider_model)),
-    kv('request id', escapeHtml(r.provider_request_id)),
-    kv('server', escapeHtml(r.provider_server)),
-    kv('processing', r.processing_ms ? r.processing_ms + ' ms' : ''),
-  ]));
+  S.push(detailSection('Provider', [
+    r.provider ? detailHtmlRow('provider',
+      entityBadge('provider', r.provider) + ` <span style="color:var(--muted)">${escapeHtml(r.provider)}</span>`,
+      r.provider, {copy: true}) : null,
+    detailTextRow('model (upstream)', r.provider_model, {copy: true}),
+    detailTextRow('request id', r.provider_request_id, {copy: true}),
+    detailTextRow('server', r.provider_server, {copy: true}),
+    detailMsRow('processing', r.processing_ms),
+  ], {key: 'provider'}));
 
   // The full non-content request shape.
-  S.push(sec('Parameters', [
-    kv('model', escapeHtml(String(r.model || '')) +
-      (String(r.model || '').trim() && canonicalModel(r.model) !== String(r.model).trim()
-        ? ` <span style="color:var(--muted)">→ groups as ${escapeHtml(canonicalModel(r.model))}</span>`
-        : '')),
-    kvBool('stream', r.stream),
-    kv('max_tokens', r.req_max_tokens),
-    kv('temperature', r.req_temperature),
-    kv('top_p', r.req_top_p),
-    kv('n', r.req_n),
-    kv('presence_penalty', r.req_presence_pen),
-    kv('frequency_penalty', r.req_frequency_pen),
-    kv('seed', r.req_seed),
-    kv('stop sequences', r.req_stop),
-    kvBool('logprobs', r.req_logprobs),
-    kv('top_logprobs', r.req_top_logprobs),
-    kv('logit_bias', r.req_logit_bias ? r.req_logit_bias + ' ids' : ''),
-    kv('response_format', escapeHtml(r.req_response_format)),
-    kv('service_tier', escapeHtml(r.req_service_tier)),
-    kv('reasoning_effort', escapeHtml(r.req_reasoning_effort)),
-    kv('verbosity', escapeHtml(r.req_verbosity)),
-    kvBool('parallel_tool_calls', r.req_parallel_tools),
+  const modelRaw = String(r.model || '').trim();
+  const modelCanon = modelRaw ? canonicalModel(modelRaw) : '';
+  S.push(detailSection('Parameters', [
+    detailHtmlRow('model', escapeHtml(modelRaw) +
+      (modelCanon && modelCanon !== modelRaw ? ` <span style="color:var(--muted)">→ groups as ${escapeHtml(modelCanon)}</span>` : ''),
+      modelRaw, {copy: modelRaw || null}),
+    detailBoolRow('stream', r.stream),
+    detailNum('max_tokens', r.req_max_tokens),
+    detailTextRow('temperature', r.req_temperature),
+    detailTextRow('top_p', r.req_top_p),
+    detailNum('n', r.req_n),
+    detailTextRow('presence_penalty', r.req_presence_pen),
+    detailTextRow('frequency_penalty', r.req_frequency_pen),
+    detailNum('seed', r.req_seed),
+    detailTextRow('stop sequences', r.req_stop),
+    detailBoolRow('logprobs', r.req_logprobs),
+    detailNum('top_logprobs', r.req_top_logprobs),
+    detailTextRow('logit_bias', r.req_logit_bias ? r.req_logit_bias + ' ids' : ''),
+    detailTextRow('response_format', r.req_response_format, {copy: r.req_response_format || null}),
+    detailTextRow('service_tier', r.req_service_tier),
+    detailTextRow('reasoning_effort', r.req_reasoning_effort),
+    detailTextRow('verbosity', r.req_verbosity),
+    detailBoolRow('parallel_tool_calls', r.req_parallel_tools),
     // "thinking" reflects reality: the request flag, or (if unset) whether the
     // response actually produced reasoning tokens - some models reason without
     // an explicit thinking parameter (always-on, or reasoning_effort).
-    r.req_thinking != null ? kv('thinking', r.req_thinking ? 'true' : 'false')
-      : (r.usage?.reasoning_tokens ? kv('thinking', 'yes (not requested)', 'var(--warn)') : ''),
-    kv('tools defined', r.req_tools_count),
-    kv('tool_choice', escapeHtml(r.req_tool_choice)),
-    kvBool('stream_options', r.req_stream_opts),
-    kv('metadata', r.req_metadata_keys ? r.req_metadata_keys + ' keys' : ''),
-  ]));
+    r.req_thinking != null ? detailTextRow('thinking', r.req_thinking ? 'true' : 'false')
+      : (r.usage && r.usage.reasoning_tokens ? detailTextRow('thinking', 'yes (not requested)', {tone: 'var(--warn)'}) : null),
+    detailNum('tools defined', r.req_tools_count),
+    detailTextRow('tool_choice', r.req_tool_choice, {copy: r.req_tool_choice || null}),
+    detailBoolRow('stream_options', r.req_stream_opts),
+    detailTextRow('metadata', r.req_metadata_keys ? r.req_metadata_keys + ' keys' : ''),
+  ], {key: 'parameters'}));
 
-  S.push(sec('Conversation', [
-    kv('user turns', r.turns_user),
-    kv('assistant turns', r.turns_assistant),
-    kv('tool turns', r.turns_tool),
-    kv('responding to', escapeHtml(r.last_turn_role)),
-    (r.chars_system || r.chars_user || r.chars_assistant || r.chars_tool)
-      ? kv('prompt size', 'sys ' + fmt(r.chars_system || 0) + ' · user ' + fmt(r.chars_user || 0) + ' · asst ' + fmt(r.chars_assistant || 0) + ' · tool ' + fmt(r.chars_tool || 0)) : '',
-    (r.images || r.attachments)
-      ? kv('content parts', (r.images ? r.images + ' image' + (r.images > 1 ? 's' : '') : '') + (r.images && r.attachments ? ', ' : '') + (r.attachments ? r.attachments + ' attachment' + (r.attachments > 1 ? 's' : '') : '')) : '',
-  ]));
+  const promptSize = (r.chars_system || r.chars_user || r.chars_assistant || r.chars_tool)
+    ? 'sys ' + fmt(r.chars_system || 0) + ' · user ' + fmt(r.chars_user || 0) +
+      ' · asst ' + fmt(r.chars_assistant || 0) + ' · tool ' + fmt(r.chars_tool || 0)
+    : '';
+  const contentParts = (r.images || r.attachments)
+    ? (r.images ? r.images + ' image' + (r.images > 1 ? 's' : '') : '') +
+      (r.images && r.attachments ? ', ' : '') +
+      (r.attachments ? r.attachments + ' attachment' + (r.attachments > 1 ? 's' : '') : '')
+    : '';
+  S.push(detailSection('Conversation', [
+    detailNum('user turns', r.turns_user),
+    detailNum('assistant turns', r.turns_assistant),
+    detailNum('tool turns', r.turns_tool),
+    detailTextRow('responding to', r.last_turn_role),
+    detailTextRow('prompt size', promptSize),
+    detailTextRow('content parts', contentParts),
+  ], {key: 'conversation'}));
 
-  if (r.prompt_preview) S.push(`<div class="detail-section"><h4>Prompt</h4><div class="preview-box">${escapeHtml(r.prompt_preview)}</div></div>`);
-  if (r.response_preview) S.push(`<div class="detail-section"><h4>Response</h4><div class="preview-box">${escapeHtml(r.response_preview)}</div></div>`);
+  S.push(detailCodeSection('Prompt', r.prompt_preview, {focus: 'prompt'}));
+  S.push(detailCodeSection('Response', r.response_preview, {focus: 'response'}));
 
-  S.push(sec('Tokens', [
-    kv('input', fmt(r.usage?.input_tokens)),
-    kv('output', fmt(r.usage?.output_tokens)),
-    kv('total', fmt(r.usage?.total_tokens)),
-    kv('reasoning', r.usage?.reasoning_tokens ? fmt(r.usage.reasoning_tokens) : '', 'var(--warn)'),
-    kv('answer', r.answer_tokens ? fmt(r.answer_tokens) : ''),
-    kv('cache read', r.usage?.cache_read_tokens ? fmt(r.usage.cache_read_tokens) : '', 'var(--accent2)'),
-    kv('cache write', r.usage?.cache_write_tokens ? fmt(r.usage.cache_write_tokens) : '', 'var(--accent2)'),
-  ]));
+  const cacheHit = (r.usage && r.usage.input_tokens > 0 && r.usage.cache_read_tokens)
+    ? pct2(r.usage.cache_read_tokens, r.usage.input_tokens) : '';
+  S.push(detailSection('Tokens', [
+    detailNum('input', r.usage && r.usage.input_tokens),
+    detailNum('output', r.usage && r.usage.output_tokens),
+    detailNum('total', r.usage && r.usage.total_tokens),
+    r.usage && r.usage.reasoning_tokens ? detailTextRow('reasoning', fmt(r.usage.reasoning_tokens), {tone: 'var(--warn)'}) : null,
+    r.answer_tokens ? detailTextRow('answer', fmt(r.answer_tokens)) : null,
+    r.usage && r.usage.cache_read_tokens ? detailTextRow('cache read', fmt(r.usage.cache_read_tokens), {tone: 'var(--accent2)'}) : null,
+    r.usage && r.usage.cache_write_tokens ? detailTextRow('cache write', fmt(r.usage.cache_write_tokens), {tone: 'var(--accent2)'}) : null,
+    detailTextRow('cache hit', cacheHit, {tone: 'var(--accent2)'}),
+  ], {key: 'tokens'}));
 
-  S.push(sec('Performance', [
-    kv('ttft', fmtTTFT(r.ttft_ms)),
-    kv('tps', r.gen_tps ? r.gen_tps.toFixed(1) + ' tok/s' : ''),
-    kv('first token', fmtT(r.first_token_at)),
-    kv('last token', fmtT(r.last_token_at)),
-    kv('first thinking', fmtT(r.first_reasoning_at)),
-    kv('first answer', fmtT(r.first_answer_at)),
-    kv('chunks', r.chunks),
-    kv('finish', escapeHtml(r.finish_reason)),
-    kv('cost', r.cost ? fmtMoney(r.cost) : '', 'var(--warn)'),
+  S.push(detailSection('Performance', [
+    detailTextRow('ttft', fmtTTFT(r.ttft_ms)),
+    detailTextRow('tps', r.gen_tps ? r.gen_tps.toFixed(1) + ' tok/s' : ''),
+    detailStampRow('first token', r.first_token_at),
+    detailStampRow('last token', r.last_token_at),
+    detailStampRow('first thinking', r.first_reasoning_at),
+    detailStampRow('first answer', r.first_answer_at),
+    detailNum('chunks', r.chunks),
+    detailTextRow('finish', r.finish_reason),
+    detailTextRow('cost', r.cost ? fmtMoney(r.cost) : '', {tone: 'var(--warn)'}),
     // The adopted attempt's transport decomposition (httptrace): plain
     // integer milliseconds where 0/absent means the hook never fired (pooled
     // connection, plaintext upstream) so the row hides; the pool-hit fact
     // renders through kvBool, so a stored false still shows like every
     // other record flag.
-    kv('upstream ttfb', r.upstream_ttfb_ms ? r.upstream_ttfb_ms + ' ms' : ''),
-    kv('upstream connect', r.upstream_connect_ms ? r.upstream_connect_ms + ' ms' : ''),
-    kv('upstream tls', r.upstream_tls_ms ? r.upstream_tls_ms + ' ms' : ''),
-    kvBool('reused connection', r.upstream_conn_reused),
-  ]));
+    detailMsRow('upstream ttfb', r.upstream_ttfb_ms),
+    detailMsRow('upstream connect', r.upstream_connect_ms),
+    detailMsRow('upstream tls', r.upstream_tls_ms),
+    detailBoolRow('reused connection', r.upstream_conn_reused),
+  ], {key: 'performance'}));
 
   if (r.tool_calls || (r.tool_names && r.tool_names.length)) {
-    S.push(sec('Tools', [
-      kv('calls', r.tool_calls, 'var(--cyan)'),
-      kv('names', (r.tool_names||[]).map(escapeHtml).join(', '), 'var(--cyan)'),
-    ]));
+    S.push(detailSection('Tools', [
+      detailNum('calls', r.tool_calls, {tone: 'var(--cyan)'}),
+      detailTextRow('names', (r.tool_names || []).join(', '), {tone: 'var(--cyan)'}),
+    ], {key: 'tools'}));
   }
 
-  S.push(sec('Rate limit / queue', [
-    kv('remaining', r.rate_limit_remaining),
-    kv('limit', r.rate_limit_limit),
-    kv('retry-after', r.retry_after_ms ? fmtDur(r.retry_after_ms) : '', 'var(--warn)'),
-    kv('queue wait', r.queue_wait_ms ? fmtDur(r.queue_wait_ms) : '', 'var(--warn)'),
-    kv('retries', r.retries, r.retries ? 'var(--warn)' : ''),
-    kvBool('rate limited', r.rate_limited),
-  ]));
+  S.push(detailSection('Rate limit / queue', [
+    detailNum('remaining', r.rate_limit_remaining),
+    detailNum('limit', r.rate_limit_limit),
+    detailDurRow('retry-after', r.retry_after_ms, {tone: 'var(--warn)'}),
+    detailDurRow('queue wait', r.queue_wait_ms, {tone: 'var(--warn)'}),
+    detailNum('retries', r.retries, {tone: r.retries ? 'var(--warn)' : ''}),
+    detailBoolRow('rate limited', r.rate_limited),
+  ], {key: 'rate-limit'}));
 
   // Absorbed retry attempts: the upstream errors the client never saw. Show
   // each transparently-retried response (status + provider error detail) in
   // order, before the final outcome.
   const retryEntries = retryAttempts(r);
   if (retryEntries.length) {
-    const items = retryEntries.map(({ a, index: i }, pos) => {
+    const copyLines = [];
+    const items = retryEntries.map(({a, index: i}, pos) => {
       // Transport failures have no HTTP status (0); the shared attemptPill
       // shows the transport pill instead of a meaningless "0".
       const isTransport = !a.status_code;
       const pill = attemptPill(a);
-      const when = fmtT(a.at);
+      const when = fmtStamp(a.at);
       // Type, code and message are distinct fields - show each on its own so a
       // code is never conflated with a message (a 502 is not always the same).
       // Skip the type text when it merely repeats the transport pill (a transport
       // failure's error_type is "transport" - showing it again reads as
       // "transport · transport").
       const parts = [];
-      if (a.error_type && !(isTransport && a.error_type === 'transport')) parts.push(`<span style="color:var(--warn)">${escapeHtml(a.error_type)}</span>`);
+      if (a.error_type && !(isTransport && a.error_type === 'transport')) {
+        parts.push(`<span style="color:var(--warn)">${escapeHtml(a.error_type)}</span>`);
+      }
       if (a.error_code) parts.push(`<span style="color:var(--muted)">code ${escapeHtml(a.error_code)}</span>`);
       if (a.error_msg) parts.push(escapeHtml(a.error_msg));
-      const detail = parts.length ? parts.join(' · ') : '<span style="color:var(--muted)">no error body</span>';
-      const ra = a.retry_after_ms ? ` <span style="color:var(--muted)">· retry-after ${fmtDur(a.retry_after_ms)}</span>` : '';
+      const detail = parts.length ? parts.join(' · ') : '<span class="d-muted">no error body</span>';
+      const plainParts = [];
+      if (a.error_type && !(isTransport && a.error_type === 'transport')) plainParts.push(a.error_type);
+      if (a.error_code) plainParts.push('code ' + a.error_code);
+      if (a.error_msg) plainParts.push(a.error_msg);
+      const extras = [];
+      if (a.retry_after_ms) extras.push(`retry-after ${fmtDur(a.retry_after_ms)}`);
       // Each attempt stores the same upstream metadata as the final
       // response; the provider request id is the matching key between a
       // provider-side failure report and the exact absorbed attempt.
-      const rid = a.provider_request_id ? ` <span style="color:var(--muted)">· req ${escapeHtml(a.provider_request_id)}</span>` : '';
+      if (a.provider_request_id) extras.push(`req ${escapeHtml(a.provider_request_id)}`);
+      copyLines.push(`#${pos + 1} ${when} ${a.status_code || 'transport'} ` +
+        `${plainParts.length ? plainParts.join(' · ') : 'no error body'}` +
+        `${a.retry_after_ms ? ' · retry-after ' + fmtDur(a.retry_after_ms) : ''}` +
+        `${a.provider_request_id ? ' · req ' + a.provider_request_id : ''}`);
       // Each attempt belongs to this same request id; data-attempt names its
       // index, so clicking opens THAT attempt in the drawer (the parent
       // request stays selected and highlighted).
-      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" data-attempt="${i}" role="button" tabindex="0" title="open this request"><span class="k">#${pos+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}${rid}</span></div>`;
+      return `<div class="attempt-link" data-open-req="${escapeHtml(r.id)}" data-attempt="${i}" role="button" tabindex="0" data-focus-key="attempt:${i}" title="open attempt ${pos + 1}">` +
+        `<span class="attempt-ord">#${pos + 1}</span>` +
+        `<span class="attempt-main">` +
+        `<span class="attempt-head">${pill}${when ? `<span class="attempt-when">${escapeHtml(when)}</span>` : ''}</span>` +
+        `<span class="attempt-detail">${detail}</span>` +
+        (extras.length ? `<span class="attempt-extra">${extras.join(' · ')}</span>` : '') +
+        `</span>` +
+        `<span class="attempt-open" aria-hidden="true">›</span></div>`;
     }).join('');
-    S.push(`<div class="detail-section"><h4>Retry attempts (absorbed, transparent to client)</h4>${items}</div>`);
+    S.push(detailSection('Retry attempts (absorbed, transparent to client)', [], {
+      key: 'retries', body: items, copyText: copyLines.join('\n'), navLabel: 'Retries',
+    }));
   }
 
-  if (r.error_type || r.error_msg || r.error_code) {
-    S.push(`<div class="detail-section"><h4>Error</h4>` +
-      kv('type', escapeHtml(r.error_type) || '-', 'var(--err)') +
-      // code: provider's structured error.code, else the HTTP status.
-      kv('code', escapeHtml(r.error_code || (r.status_code ? String(r.status_code) : '')) || '-', 'var(--err)') +
-      kv('message', escapeHtml(r.error_msg) || '-') + `</div>`);
-  }
-
-  const hrows = detailHeaderRows(r.response_headers);
+  const headerRows = detailHeaderRows(r.response_headers);
   // upstream gzip renders with the wire facts: the transport strips
   // Content-Encoding/Content-Length when it auto-decompresses, so the header
   // map alone cannot show the response was compressed on the wire.
-  if (hrows || r.upstream_gzip) {
-    S.push(`<div class="detail-section"><h4>Response headers</h4>` +
-      kvBool('upstream gzip', r.upstream_gzip) + hrows + `</div>`);
+  const gzipRow = detailBoolRow('upstream gzip', r.upstream_gzip);
+  if (headerRows.length || gzipRow) {
+    S.push(detailSection('Response headers', [gzipRow, ...headerRows], {key: 'headers'}));
   }
 
   if (r.debug) {
-    S.push(`<div class="detail-section" id="drawer-debug">` + debugSectionHead(r.id) + `<div class="preview-box" id="drawer-debug-body">loading capture…</div></div>`);
+    S.push(`<section class="detail-section" id="drawer-debug" data-title="Debug">` +
+      debugSectionHead(r.id) +
+      `<div class="detail-sec-body"><div class="preview-box" id="drawer-debug-body">loading capture…</div></div>` +
+      `</section>`);
   }
 
-  return S.join('');
+  return S.filter(Boolean).join('');
 }
 
 // formatAttemptDetail renders ONE absorbed attempt in the drawer: the
@@ -245,33 +324,33 @@ function formatAttemptDetail(r, i) {
   const a = r.attempts[i];
   const isTransport = !a.status_code;
   const S = [];
-  S.push(sec('Attempt', [
-    kv('request', `<span style="color:var(--muted)">${escapeHtml(r.id)}</span>`),
-    kv('attempt', retryOrdinal(r, i) + ' of ' + retryAttempts(r).length),
-    kv('status', attemptPill(a)),
-    kv('when', fmtT(a.at)),
+  S.push(detailSection('Attempt', [
+    detailTextRow('request', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
+    detailTextRow('attempt', retryOrdinal(r, i) + ' of ' + retryAttempts(r).length),
+    detailHtmlRow('status', attemptPill(a), a.status_code ? String(a.status_code) : 'transport'),
+    detailStampRow('when', a.at, {copy: true}),
     // Type, code and message are distinct fields - one row each, like the
     // record's Error section. Skip the type text when it merely repeats the
     // transport pill (the retry-list convention).
     a.error_type && !(isTransport && a.error_type === 'transport')
-      ? kv('type', escapeHtml(a.error_type), 'var(--err)') : '',
-    a.error_code ? kv('code', escapeHtml(a.error_code), 'var(--err)') : '',
-    a.error_msg ? kv('message', escapeHtml(a.error_msg), 'var(--err)') : '',
-    kv('retry-after', a.retry_after_ms ? fmtDur(a.retry_after_ms) : '', 'var(--warn)'),
-  ]));
-  S.push(sec('Provider', [
-    kv('request id', escapeHtml(a.provider_request_id)),
-    kv('server', escapeHtml(a.provider_server)),
-    kv('model (upstream)', escapeHtml(a.provider_model)),
-    kv('processing', a.processing_ms ? a.processing_ms + ' ms' : ''),
-  ]));
-  S.push(sec('Rate limit', [
-    kv('remaining', a.rate_limit_remaining),
-    kv('limit', a.rate_limit_limit),
-  ]));
-  const hrows = detailHeaderRows(a.response_headers);
-  if (hrows) S.push(`<div class="detail-section"><h4>Response headers</h4>${hrows}</div>`);
-  return S.join('');
+      ? detailTextRow('type', a.error_type, {tone: 'var(--err)'}) : null,
+    a.error_code ? detailTextRow('code', a.error_code, {tone: 'var(--err)'}) : null,
+    a.error_msg ? detailTextRow('message', a.error_msg, {tone: 'var(--err)'}) : null,
+    detailDurRow('retry-after', a.retry_after_ms, {tone: 'var(--warn)'}),
+  ], {key: 'attempt'}));
+  S.push(detailSection('Provider', [
+    detailTextRow('request id', a.provider_request_id, {copy: true}),
+    detailTextRow('server', a.provider_server, {copy: true}),
+    detailTextRow('model (upstream)', a.provider_model, {copy: true}),
+    detailMsRow('processing', a.processing_ms),
+  ], {key: 'attempt-provider'}));
+  S.push(detailSection('Rate limit', [
+    detailNum('remaining', a.rate_limit_remaining),
+    detailNum('limit', a.rate_limit_limit),
+  ], {key: 'attempt-rate-limit'}));
+  const headerRows = detailHeaderRows(a.response_headers);
+  if (headerRows.length) S.push(detailSection('Response headers', headerRows, {key: 'attempt-headers'}));
+  return S.filter(Boolean).join('');
 }
 
 // ---------- detail drawer ----------
@@ -293,6 +372,7 @@ function drawerShow(id, attempt) {
   openModal($('drawer'), {returnSelector, onPreempt: closeDrawer});
   $('drawer').classList.add('open');
   $('drawer-veil').classList.add('open');
+  document.documentElement.classList.add('drawer-open');
   highlightRow();
 }
 function openDrawer(id) { drawerShow(id, null); }
@@ -337,6 +417,8 @@ function closeDrawer() {
   _drawerRenderKey = null;
   if ($('drawer')) { $('drawer').classList.remove('open'); closeModal($('drawer')); }
   $('drawer-veil')?.classList.remove('open');
+  document.documentElement.classList.remove('drawer-open');
+  detailCollapsed.clear();
   // Release the previous request's rendered detail and debug capture: the
   // hidden drawer otherwise retained request/response bodies for the life of
   // the tab. The next open re-renders from its record.
@@ -369,8 +451,12 @@ function renderDrawer() {
   const a = drawerAttempt != null && Array.isArray(r.attempts) ? r.attempts[drawerAttempt] : null;
   if (drawerAttempt != null && !a) drawerAttempt = null;
   const body = $('drawer-body');
+  const root = $('drawer');
   const renderKey = String(drawerId) + '\u0000' + String(drawerAttempt);
   const scroll = body && _drawerRenderKey === renderKey ? body.scrollTop : 0;
+  // A live repaint replaces every row, so capture focus inside the drawer
+  // before the rewrite and put it back on the equivalent control after.
+  const focusToken = root ? captureFocus(root, detailFocusKey) : null;
   const base = reqIdentityText(r);
   if (a) {
     // The title carries the attempt identity: index, real status (transport
@@ -379,16 +465,32 @@ function renderDrawer() {
     const status = a.status_code ? String(a.status_code) : 'transport';
     const ident = ` · attempt ${retryOrdinal(r, drawerAttempt)} of ${retryAttempts(r).length} · ${status}`
       + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
-    $('drawer-title').innerHTML = `<button type="button" class="btn" id="drawer-back" onclick="drawerBackToRequest()" title="back to request">‹ request</button> ${escapeHtml(base + ident)}`;
+    $('drawer-title').innerHTML = `<button type="button" class="btn drawer-back" id="drawer-back" onclick="drawerBackToRequest()" title="back to request" data-focus-key="drawer-back">‹ request</button>` +
+      `<span class="d-title-text" title="${escapeHtml(base + ident)}">${escapeHtml(base + ident)}</span>`;
     body.innerHTML = formatAttemptDetail(r, drawerAttempt);
   } else {
-    $('drawer-title').innerHTML = escapeHtml(base);
+    $('drawer-title').innerHTML = `<span class="d-title-text" title="${escapeHtml(base)}">${escapeHtml(base)}</span>`;
     body.innerHTML = formatDetail(r);
-    if (r.debug) fillDrawerDebug(r.id);
   }
+  detailWireNav();
   body.scrollTop = scroll;
+  if (focusToken) restoreFocus(focusToken);
   _drawerRecord = r;
   _drawerRenderKey = renderKey;
+  if (!a && r.debug) fillDrawerDebug(r.id);
+}
+
+// drawerCopyRecord copies the selected record (or the selected absorbed
+// attempt) as indented JSON. It reads the live record, never a captured one.
+function drawerCopyRecord() {
+  const r = recordById(drawerId);
+  if (!r) return;
+  const a = drawerAttempt != null && Array.isArray(r.attempts) ? r.attempts[drawerAttempt] : null;
+  const payload = a ? {request_id: r.id, attempt_index: drawerAttempt, attempt: a} : r;
+  let text = '';
+  try { text = JSON.stringify(payload, null, 2); } catch (e) { text = ''; }
+  if (!text) { toast('copy failed', 'err'); return; }
+  copyText(text).then(ok => toast(ok ? 'copied request JSON' : 'copy failed', ok ? '' : 'err'));
 }
 
 // Absorbed retry attempts in the drawer are clickable: a link carrying an
@@ -400,6 +502,8 @@ function openAttemptLink(el) {
   else openDrawer(el.dataset.openReq);
 }
 $('drawer-body').addEventListener('click', e => {
+  const jump = e.target.closest('[data-jump]');
+  if (jump) { e.preventDefault(); detailJump(jump.dataset.jump); return; }
   const el = e.target.closest('.attempt-link[data-open-req]');
   if (el) openAttemptLink(el);
 });

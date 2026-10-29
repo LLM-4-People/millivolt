@@ -22,6 +22,16 @@ module.exports = async function chartBuckets(H) {
   check('compact counts keep the shared 1000K to 1M rollover',
     w.eval('fmt(999999) === "1M" && fmt(999500) === "999.5K" && fmt(999) === "999"'));
   check('unknown money stays unknown', w.eval('fmtMoney(null) === "-" && fmtMoney(NaN) === "-" && fmtMoney(Infinity) === "-"'));
+  // Byte sizes walk one decimal KB/MB/GB ladder; exact counts stay below 1 KB
+  // and the exact integer remains the copy payload.
+  const byteCases = [
+    [0, '0 B'], [999, '999 B'], [1000, '1 KB'], [1234, '1.23 KB'],
+    [5678, '5.68 KB'], [999999, '1 MB'], [1500000, '1.5 MB'], [1e12, '1 TB'],
+  ];
+  check('byte sizes use the shared decimal KB/MB/GB ladder',
+    byteCases.every(([value, want]) => w.eval(`fmtBytes(${value})`) === want));
+  check('unknown byte sizes stay unknown',
+    w.eval('fmtBytes(null) === "-" && fmtBytes(NaN) === "-" && fmtBytes(Infinity) === "-"'));
   check('request log uses cents', w.reqRow({ ...mkRec('cents'), cost: 0.25 }).includes('25¢'));
   check('absent ttft is a placeholder, not 0ms', (() => {
     const row = w.reqRow({ ...mkRec('no-ttft'), ttft_ms: 0 });
@@ -46,17 +56,19 @@ module.exports = async function chartBuckets(H) {
       !plain.includes('<span class="k">chunks</span>') &&
       !plain.includes('<span class="k">first thinking</span>');
   })());
-  // The drawer's wire-size pair renders in the Request section as plain
-  // integers (no bytes formatter exists in the JS; the chunks row set the
-  // precedent), and the transport's auto-decompress fact renders beside the
-  // response headers - the one place it can show, since the transport strips
-  // Content-Encoding/Content-Length when it decodes gzip. None of the three
-  // rows renders when the record carries no value.
+  // The drawer's wire-size pair renders through fmtBytes (the human-readable
+  // size keeps the exact integer as its hover title and copy payload), and the
+  // transport's auto-decompress fact renders beside the response headers - the
+  // one place it can show, since the transport strips Content-Encoding and
+  // Content-Length when it decodes gzip. None of the rows renders when the
+  // record carries no value.
   check('the drawer renders request/response bytes and the upstream gzip fact', (() => {
     const wire = w.formatDetail({ ...mkRec('wire'), request_bytes: 1234, response_bytes: 5678, upstream_gzip: true });
     const plain = w.formatDetail({ ...mkRec('wire-plain') });
-    return wire.includes('<span class="k">request bytes</span><span class="v">1234</span>') &&
-      wire.includes('<span class="k">response bytes</span><span class="v">5678</span>') &&
+    const bytesRow = (key, exact, shown) => new RegExp(
+      `<span class="k">${key}</span><span class="v"><span class="vt" title="${exact} bytes">${shown}</span></span>`).test(wire);
+    return bytesRow('request bytes', '1,234', '1.23 KB') &&
+      bytesRow('response bytes', '5,678', '5.68 KB') &&
       wire.includes('<span class="k">upstream gzip</span><span class="v">true</span>') &&
       wire.includes('<h4>Response headers</h4>') &&
       !plain.includes('<span class="k">request bytes</span>') &&

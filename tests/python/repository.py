@@ -326,7 +326,10 @@ class RepositoryChecks(unittest.TestCase):
                         "reqIdentityText template body is not scanned")
         log_debug = (check.ROOT / "internal/web/static/js/log_debug.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(log_debug)
-        for needle in ("<h4>Request body", "<h4>Response body"):
+        # fillDrawerDebug's capture rewrite is the request-log canary: its
+        # body shell and the header's status slot must both sit inside a
+        # scanned template body, after the header builder's quoted strings.
+        for needle in ('<div class="detail-sec-body">', '<span id="drawer-debug-status">'):
             start = log_debug.index(needle)
             self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
                             "fillDrawerDebug template body is not scanned: " + needle)

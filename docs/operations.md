@@ -1192,7 +1192,10 @@ literally while JSON control escapes remain.
 The drawer's Debug section also carries a Download button. It fetches the same
 capture with `download=1` and saves a gzip artifact named
 `millivolt-debug-<captured_at>.json.gz`, using the record id in the name when
-the capture does not carry a readable `captured_at`.
+the capture does not carry a readable `captured_at`. Captured request and
+response bodies render through the same bounded code surface as record
+previews, with wrap, copy and expand controls; the Download button remains the
+whole-capture path.
 
 `capture_body_preview` is a different opt-in feature: it retains short prompt/
 response previews in the normal record without starting a Debug session. The
@@ -1320,18 +1323,31 @@ Retry disclosure opens absorbed attempts under the original request, not another
 inference record. Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
-The drawer presents available facts in sections: request identity/status/times;
+The inspector presents available facts in cards: request identity/status/times;
 client/runtime and provider metadata; captured model and parameters; conversation
 turns and content-size counts; input/output/cache/reasoning tokens; performance,
 cost and finish state; tool names/calls; queue/rate-limit information; retries,
-errors and retained headers. Recognized parameters include sampling and output
-limits, stop/logprob controls, reasoning/verbosity, response format, tool choice
-and streaming flags. Explicit zero/false parameters remain distinct from absent
-ones. Ordinary HTTP relay metadata does not infer missing parameter defaults.
-Adapters differ: Anthropic metadata comes from the translated body, including
-its configured output-limit default, and Cursor stores the base model ID rather
-than its fused spelling. See [adapters](adapters.md) before treating these fields
-as an exact representation of the caller's original request.
+errors and retained headers. A summary readout carries the status, route,
+identity and first numbers, and a final upstream failure renders as an error
+alert above the cards. Card headers collapse, and a sticky strip jumps between
+the rendered cards.
+
+Copy actions cover the values that matter (identifiers, paths, models, headers,
+error detail and captured bodies), each card and the header's JSON action. One
+clipboard path reports success or denial in a polite status line. Long captured
+bodies use a bounded code surface with line count, wrap, copy and expand
+controls; a long single line scrolls inside that surface instead of widening
+the inspector. Narrow viewports get the full-width inspector with keys stacked
+above values and touch-sized copy and close targets.
+
+Recognized parameters include sampling and output limits, stop/logprob controls,
+reasoning/verbosity, response format, tool choice and streaming flags. Explicit
+zero/false parameters remain distinct from absent ones. Ordinary HTTP relay
+metadata does not infer missing parameter defaults. Adapters differ: Anthropic
+metadata comes from the translated body, including its configured output-limit
+default, and Cursor stores the base model ID rather than its fused spelling. See
+[adapters](adapters.md) before treating these fields as an exact representation
+of the caller's original request.
 
 Opening ordinary details does not fetch private request content. Prompt/response
 previews appear only if captured, and Debug sidecars use their separate opt-in
