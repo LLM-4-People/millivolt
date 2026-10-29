@@ -1197,3 +1197,36 @@ func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
 		t.Fatalf("send waiters = %d after the gate opened, want 0", st.SendWaiters)
 	}
 }
+
+// TestThrottleQueuedSkipsCancelledTombstones pins nil-safety in
+// throttleQueued: a cancelled non-head waiter stays in a long queue as a nil
+// tombstone until the next drain compacts it, and the dashboard's throttle
+// listing must skip that slot instead of dereferencing it.
+func TestThrottleQueuedSkipsCancelledTombstones(t *testing.T) {
+	s := New(Options{})
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	g := s.groupFor("p|k", 1)
+	waiters := make([]*waiter, 16)
+	for i := range waiters {
+		waiters[i] = &waiter{ch: make(chan struct{}, 1), ctx: context.Background(), provider: "p"}
+	}
+	g.mu.Lock()
+	g.queue = append([]*waiter(nil), waiters...)
+	g.queued = len(waiters)
+	g.mu.Unlock()
+
+	// Sixteen slots and one cancellation sit below the compaction threshold,
+	// so removeWaiter leaves a nil tombstone in place until the next drain.
+	g.removeWaiter(waiters[1])
+	g.mu.Lock()
+	retained := len(g.queue) == len(waiters) && g.queue[1] == nil && g.queued == len(waiters)-1
+	g.mu.Unlock()
+	if !retained {
+		t.Fatal("test setup did not retain a nil tombstone")
+	}
+
+	infos := s.ListThrottles()
+	if len(infos) != 1 || infos[0].Provider != "p" || infos[0].Queued != len(waiters)-1 {
+		t.Fatalf("ListThrottles = %+v, want p with queued %d", infos, len(waiters)-1)
+	}
+}

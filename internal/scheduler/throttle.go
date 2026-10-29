@@ -425,6 +425,11 @@ func (s *Scheduler) throttleQueued() map[string]int {
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		for _, w := range g.queue {
+			if w == nil {
+				// Cancelled waiters stay as nil tombstones until drain's
+				// compaction pass; they hold no provider attribution.
+				continue
+			}
 			if w.provider != "" {
 				out[w.provider]++
 			}
