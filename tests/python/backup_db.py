@@ -273,6 +273,34 @@ class BackupTest(unittest.TestCase):
                 connection.close()
                 self.source.unlink()
 
+    def test_retired_source_columns_are_validated_then_dropped(self):
+        # A local history may still carry overall_tps from the pre-gen_tps
+        # schema. It is a known REAL column, never copied, and the served copy
+        # carries exactly the current schema.
+        connection = self.source_db()
+        connection.execute('ALTER TABLE requests ADD COLUMN overall_tps REAL NOT NULL DEFAULT 0')
+        connection.commit()
+        connection.execute('INSERT INTO requests (' + ','.join(self.columns) + ') VALUES (' +
+                           ','.join('?' for _ in self.columns) + ')',
+                           [self.record()[name] for name in self.columns])
+        connection.commit()
+        self.assertEqual(self.copy()['records'], 1)
+        with closing(sqlite3.connect(self.destination)) as served:
+            served_columns = [row[1] for row in served.execute('PRAGMA table_xinfo(requests)')]
+            self.assertEqual(set(served_columns), set(subject.FIELD_TYPES))
+            self.assertNotIn('overall_tps', served_columns)
+
+    def test_unknown_retired_column_type_fails_closed(self):
+        connection = self.source_db()
+        connection.execute('ALTER TABLE requests ADD COLUMN overall_tps TEXT')
+        connection.commit()
+        connection.execute('INSERT INTO requests (' + ','.join(self.columns) + ') VALUES (' +
+                           ','.join('?' for _ in self.columns) + ')',
+                           [self.record()[name] for name in self.columns])
+        connection.commit()
+        with self.assertRaisesRegex(ValueError, 'unrecognized column types'):
+            self.copy()
+
     def test_migration_ancestor_sources_derive_the_zero_backfill(self):
         # An operator's local history can predate the latest migration
         # columns: store_schema.go appends each with INTEGER NOT NULL DEFAULT 0, so

@@ -59,6 +59,12 @@ FIELD_TYPES = {**dict.fromkeys(INTEGER_FIELDS, 'INTEGER'),
                **dict.fromkeys(EMPTY_FIELDS, 'TEXT'),
                **dict.fromkeys(('id', 'key_hash', 'attempts', 'tool_names'), 'TEXT'),
                'debug': 'INTEGER'}
+# Columns a historical local database may still carry after the current store
+# stopped writing them. They are validated by name and type, then dropped from
+# the derived copy: no retired value is ever published or reintroduced into the
+# served schema. overall_tps was replaced by the single gen_tps/TTFT metric in
+# commit f27887c; a local history may predate that migration.
+RETIRED_FIELDS = {'overall_tps': 'REAL'}
 # The migration columns internal/storage appends with INTEGER NOT NULL
 # DEFAULT 0, in the migration's own order (store_schema.go's needed map). A docs
 # source may predate them: an operator's local history database is a
@@ -140,21 +146,25 @@ def _readonly(path):
     return connection
 
 
-def _table_columns(connection, table, types, primary_key, lineage=frozenset()):
+def _table_columns(connection, table, types, primary_key, lineage=frozenset(), retired=None):
     # table is an internal policy name, never source-provided SQL. xinfo also
     # includes generated/hidden columns, which table_info would silently omit.
     # lineage names the migration columns (with zero defaults) a SOURCE table
     # may legitimately lack; the derive backfills them itself, so the source
-    # may have fewer columns than the current schema. Destinations always
-    # carry the full set and verify with an empty lineage.
+    # may have fewer columns than the current schema. retired names known
+    # historical columns a SOURCE may carry; they are validated and dropped,
+    # never returned. Destinations always carry the full current set and
+    # verify with empty lineage/retired maps.
+    retired = retired or {}
+    known = {**types, **retired}
     info = connection.execute('PRAGMA table_xinfo(' + table + ')').fetchall()
     columns = [row[1] for row in info]
     missing = set(types) - set(columns)
-    require(set(columns) <= set(types) and missing <= lineage, 'unrecognized table columns')
-    require(all(row[2].upper() == types[row[1]] and row[6] == 0 for row in info),
+    require(set(columns) <= set(known) and missing <= lineage, 'unrecognized table columns')
+    require(all(row[2].upper() == known[row[1]] and row[6] == 0 for row in info),
             'unrecognized column types or generated data')
     require([row[1] for row in info if row[5]] == [primary_key], 'unexpected table primary key')
-    return columns
+    return [name for name in columns if name in types]
 
 
 def _columns(connection):
@@ -172,7 +182,7 @@ def _source_columns(connection):
     require(connection.execute("SELECT type FROM sqlite_schema WHERE name='requests'").fetchone() == ('table',),
             'request data must be a table')
     return _table_columns(connection, 'requests', FIELD_TYPES, 'id',
-                          lineage=frozenset(MIGRATION_ZERO_COLUMNS))
+                          lineage=frozenset(MIGRATION_ZERO_COLUMNS), retired=RETIRED_FIELDS)
 
 
 def _json(value):
