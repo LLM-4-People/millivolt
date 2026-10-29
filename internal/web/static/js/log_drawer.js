@@ -40,9 +40,11 @@ function detailHero(r) {
       copyButton(rawModel, 'model', 'hero-model'));
   }
   const stats = [];
-  if (r.duration_ms !== null && r.duration_ms !== undefined) stats.push(detailStat('duration', fmtDur(r.duration_ms)));
+  // A live record starts at zero before its first observation; only a real
+  // elapsed duration or token count earns a hero reading.
+  if (r.duration_ms) stats.push(detailStat('duration', fmtDur(r.duration_ms)));
   if (r.ttft_ms) stats.push(detailStat('ttft', fmtTTFT(r.ttft_ms)));
-  if (r.usage && r.usage.total_tokens !== null && r.usage.total_tokens !== undefined) {
+  if (r.usage && r.usage.total_tokens) {
     stats.push(detailStat('tokens', fmt(r.usage.total_tokens)));
   }
   if (r.gen_tps) stats.push(detailStat('speed', r.gen_tps.toFixed(1) + ' tok/s'));

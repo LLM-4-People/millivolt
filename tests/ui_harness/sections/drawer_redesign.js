@@ -57,6 +57,13 @@ module.exports = async function drawerRedesign(H) {
     body.querySelector('.d-alert').textContent.includes('code dial_timeout') &&
     body.querySelector('.d-alert-msg').textContent.includes('connection refused'));
 
+  const liveHero = w.formatDetail({id: 'live-zero', live: true, status_code: null,
+    duration_ms: 0, ttft_ms: 0, usage: {total_tokens: 0}});
+  const liveHeroRoot = d.createElement('div');
+  liveHeroRoot.innerHTML = liveHero;
+  check('in-flight zero placeholders do not fabricate hero readings',
+    !liveHeroRoot.querySelector('.d-stats'));
+
   const cleanDetail = w.formatDetail({...mkRec('clean-200'), status_code: 200});
   const limitedDetail = w.formatDetail({...mkRec('limited-429'), status_code: 429});
   const inBandDetail = w.formatDetail({...mkRec('inband-200'), status_code: 200,
