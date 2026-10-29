@@ -84,10 +84,19 @@ async def browser_route(route, base, errors):
             else:
                 await route.fulfill(response=response)
         finally:
-            await response.dispose()
+            try:
+                await response.dispose()
+            except Exception:
+                # The page/context can close while a route is still settling;
+                # the fetched response is already gone with it.
+                pass
     except Exception as error:
         errors.append('browser resource failed: ' + str(error))
-        await route.abort()
+        try:
+            await route.abort()
+        except Exception:
+            # Teardown may have already handled the route with the page.
+            pass
 
 
 async def check(base, screenshot):
