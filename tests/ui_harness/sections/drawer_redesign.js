@@ -104,6 +104,19 @@ module.exports = async function drawerRedesign(H) {
   check('a finalized zero duration stays in the request card',
     zeroDuration.includes('<span class="k">duration</span><span class="v"><span class="vt" title="0 ms">0ms</span></span>'));
 
+  const rowFocusKey = html => {
+    const root = d.createElement('div');
+    root.innerHTML = html;
+    const bytes = [...root.querySelectorAll('.detail-kv')]
+      .find(r => r.querySelector('.k')?.textContent === 'request bytes');
+    return bytes?.querySelector('.copy-btn')?.dataset.focusKey;
+  };
+  const liveKeys = w.formatDetail({...mkRec('key-live'), live: true, request_bytes: 1234});
+  const finalKeys = w.formatDetail({...mkRec('key-final'), request_bytes: 1234, duration_ms: 0});
+  check('field focus keys do not depend on row position',
+    rowFocusKey(liveKeys) === 'row:request:request-bytes' &&
+    rowFocusKey(liveKeys) === rowFocusKey(finalKeys));
+
   const hostile = w.formatDetail({
     id: 'hostile', status_code: 200, method: 'POST',
     path: '/x/<img src=x onerror=alert(1)>',
@@ -261,7 +274,7 @@ module.exports = async function drawerRedesign(H) {
   if (focusRow) focusRow.focus();
   w.renderDrawer();
   check('a live repaint restores focus to the same field copy control',
-    !!d.activeElement && d.activeElement.dataset.focusKey === 'row:request:id:0');
+    !!d.activeElement && d.activeElement.dataset.focusKey === 'row:request:id');
 
   try {
     Object.defineProperty(w.navigator, 'clipboard', {

@@ -120,13 +120,21 @@ function detailSection(title, rows, opts = {}) {
   const key = opts.key || detailSlug(title);
   const id = opts.id || ('d-sec-' + key);
   const visible = (rows || []).filter(row => row && row.v !== '');
-  // Row copies get a stable focus key even when the caller did not name one,
-  // so a live repaint can return focus to the same value.
+  // Row copies get a stable focus key even when the caller did not name one.
+  // The key is section + field, never the visible-list position: a conditional
+  // row appearing above must not rename the control the user is focused on.
+  const seen = new Map();
   const body = opts.body != null ? String(opts.body)
-    : visible.map((row, i) => detailRowHTML({
-      ...row,
-      focus: row.focus || `row:${key}:${detailSlug(row.k)}:${i}`,
-    })).join('');
+    : visible.map(row => {
+      if (row.focus) return detailRowHTML(row);
+      const slug = detailSlug(row.k);
+      const ordinal = (seen.get(slug) || 0) + 1;
+      seen.set(slug, ordinal);
+      return detailRowHTML({
+        ...row,
+        focus: ordinal === 1 ? `row:${key}:${slug}` : `row:${key}:${slug}:${ordinal}`,
+      });
+    }).join('');
   if (!body) return '';
   const collapsed = detailCollapsed.has(key);
   // A string copy payload is the exact fact behind a formatted display (bytes,

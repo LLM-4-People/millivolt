@@ -481,7 +481,29 @@ module.exports = async function w16Mirrors(H) {
       });
       check('focus inside the debug capture survives a live repaint',
         !!sd.activeElement &&
-        sd.activeElement.dataset.focusKey === 'row:dbg-identity:session:0');
+        sd.activeElement.dataset.focusKey === 'row:dbg-identity:session');
+
+      const realOperatorJson = sw.operatorJson;
+      let staleReject = null;
+      let captureCalls = 0;
+      sw.operatorJson = () => {
+        captureCalls++;
+        if (captureCalls === 1) {
+          return new Promise((_, reject) => { staleReject = reject; });
+        }
+        return Promise.resolve(captureDoc);
+      };
+      sw.renderDrawer();
+      sw.renderDrawer();
+      await settleUntil(() => captureCalls === 2 &&
+        !!sd.getElementById('drawer-debug')?.querySelector('.detail-kv'));
+      staleReject(new Error('stale capture'));
+      await new Promise(r => setTimeout(r, 0));
+      check('a stale debug rejection cannot overwrite the newer capture',
+        captureCalls === 2 &&
+        !!sd.getElementById('drawer-debug')?.querySelector('.detail-kv') &&
+        !sd.getElementById('drawer-debug').textContent.includes('capture unavailable'));
+      sw.operatorJson = realOperatorJson;
       sw.closeDrawer();
 
       // triggerDownload's anchor contract: href/download set, appended,
