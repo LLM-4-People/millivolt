@@ -174,7 +174,7 @@ function detailCodeBlock(text, opts = {}) {
   const nowrap = saved ? saved.nowrap : false;
   const label = opts.label || 'text';
   const meta = `${lines} line${lines === 1 ? '' : 's'}${opts.truncated ? ' · truncated' : ''}`;
-  const bodyId = 'd-code-' + detailSlug(focus);
+  const bodyId = detailSlug(focus);
   const wrap = `<button type="button" class="mini-btn" data-code-wrap aria-pressed="${nowrap ? 'false' : 'true'}" aria-label="wrap lines" title="toggle line wrap" data-focus-key="${escapeHtml(focus)}:wrap">wrap</button>`;
   const copy = copyButton(raw, label, focus + ':copy');
   const toggle = long ? `<button type="button" class="mini-btn" data-code-toggle aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="${bodyId}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" data-focus-key="${escapeHtml(focus)}:toggle">${collapsed ? 'expand' : 'collapse'}</button>` : '';

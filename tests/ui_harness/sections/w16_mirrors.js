@@ -408,6 +408,9 @@ module.exports = async function w16Mirrors(H) {
         dbg.textContent.includes('Request body (truncated)') &&
         dbg.textContent.includes('Response body') &&
         !!dbg.querySelector('.preview-box'));
+      const dbgIds = [...dbg.querySelectorAll('[id]')].map(el => el.id);
+      check('the debug capture card has unique element ids',
+        new Set(dbgIds).size === dbgIds.length);
       const dbgToggle = dbg.querySelector('[data-section-toggle]');
       check('the debug capture card collapses through the shared section owner',
         !!dbgToggle && dbgToggle.getAttribute('aria-expanded') === 'true');

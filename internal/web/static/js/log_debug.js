@@ -20,7 +20,7 @@ function debugSection(id) {
     id: 'drawer-debug',
     copy: false,
     headExtra: debugSectionActions(id),
-    body: `<div class="preview-box" id="drawer-debug-body">loading capture…</div>`,
+    body: `<div class="preview-box">loading capture…</div>`,
   });
 }
 
