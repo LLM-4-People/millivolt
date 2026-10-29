@@ -56,7 +56,7 @@ function detailBoolRow(key, value, opts = {}) {
 // detailBytesRow formats a wire byte count and keeps the exact integer as the
 // copy payload.
 const detailBytesRow = (key, value) => {
-  if (value === null || value === undefined) return null;
+  if (value === null || value === undefined || value === '') return null;
   return detailHtmlRow(key, vt(fmtBytes(value), fmtFull(value) + ' bytes'), fmtBytes(value),
     {copy: String(value), copyLabel: key + ' (exact bytes)'});
 };
@@ -64,7 +64,7 @@ const detailBytesRow = (key, value) => {
 // detailNum renders an exact captured count with grouping. The compact hero is
 // the only place a captured count is abbreviated; a section card keeps the full
 // value and its exact copy payload.
-const detailNum = (key, value, opts = {}) => (value === null || value === undefined) ? null
+const detailNum = (key, value, opts = {}) => (value === null || value === undefined || value === '') ? null
   : detailTextRow(key, fmtFull(value), {
     copy: String(value), copyLabel: key + ' (exact)', ...opts,
   });

@@ -14,6 +14,9 @@ module.exports = async function drawerRedesign(H) {
     model: 'family/model-2026-10-29', path: longPath, method: 'POST',
     duration_ms: 3210, ttft_ms: 640, request_bytes: 2048, response_bytes: 4096,
     req_max_tokens: 4096, req_seed: 1234567890, req_tools_count: 1234,
+    usage: {input_tokens: 1200, output_tokens: 480, total_tokens: 1680,
+      reasoning_tokens: 96, cache_read_tokens: 640},
+    chars_system: 1820, chars_user: 9420,
     upstream_gzip: true, key_hash: 'khash12345678', client_ip: '127.0.0.1',
     user_agent: longAgent,
     error_type: 'upstream_unreachable', error_code: 'dial_timeout',
@@ -127,7 +130,11 @@ module.exports = async function drawerRedesign(H) {
     row('max_tokens')?.querySelector('.v').textContent === '4,096' &&
     row('max_tokens')?.querySelector('.copy-btn').dataset.copy === '4096' &&
     row('seed')?.querySelector('.v').textContent === '1,234,567,890' &&
-    row('tools defined')?.querySelector('.v').textContent === '1,234');
+    row('tools defined')?.querySelector('.v').textContent === '1,234' &&
+    row('reasoning')?.querySelector('.v').textContent === '96' &&
+    row('cache read')?.querySelector('.v').textContent === '640' &&
+    row('cache read')?.querySelector('.copy-btn').dataset.copy === '640' &&
+    row('prompt size')?.querySelector('.v').textContent.includes('sys 1,820'));
 
   check('the long prompt is a collapsed code surface with wrap and expand controls',
     !!section('Prompt')?.querySelector('.detail-code.collapsed') &&

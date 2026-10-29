@@ -170,8 +170,8 @@ function formatDetail(r) {
   ], {key: 'parameters'}));
 
   const promptSize = (r.chars_system || r.chars_user || r.chars_assistant || r.chars_tool)
-    ? 'sys ' + fmt(r.chars_system || 0) + ' · user ' + fmt(r.chars_user || 0) +
-      ' · asst ' + fmt(r.chars_assistant || 0) + ' · tool ' + fmt(r.chars_tool || 0)
+    ? 'sys ' + fmtFull(r.chars_system || 0) + ' · user ' + fmtFull(r.chars_user || 0) +
+      ' · asst ' + fmtFull(r.chars_assistant || 0) + ' · tool ' + fmtFull(r.chars_tool || 0)
     : '';
   const contentParts = (r.images || r.attachments)
     ? (r.images ? r.images + ' image' + (r.images > 1 ? 's' : '') : '') +
@@ -196,10 +196,10 @@ function formatDetail(r) {
     detailNum('input', r.usage && r.usage.input_tokens),
     detailNum('output', r.usage && r.usage.output_tokens),
     detailNum('total', r.usage && r.usage.total_tokens),
-    r.usage && r.usage.reasoning_tokens ? detailTextRow('reasoning', fmt(r.usage.reasoning_tokens), {tone: 'var(--warn)'}) : null,
-    r.answer_tokens ? detailTextRow('answer', fmt(r.answer_tokens)) : null,
-    r.usage && r.usage.cache_read_tokens ? detailTextRow('cache read', fmt(r.usage.cache_read_tokens), {tone: 'var(--accent2)'}) : null,
-    r.usage && r.usage.cache_write_tokens ? detailTextRow('cache write', fmt(r.usage.cache_write_tokens), {tone: 'var(--accent2)'}) : null,
+    r.usage && r.usage.reasoning_tokens ? detailNum('reasoning', r.usage.reasoning_tokens, {tone: 'var(--warn)'}) : null,
+    r.answer_tokens ? detailNum('answer', r.answer_tokens) : null,
+    r.usage && r.usage.cache_read_tokens ? detailNum('cache read', r.usage.cache_read_tokens, {tone: 'var(--accent2)'}) : null,
+    r.usage && r.usage.cache_write_tokens ? detailNum('cache write', r.usage.cache_write_tokens, {tone: 'var(--accent2)'}) : null,
     detailTextRow('cache hit', cacheHit, {tone: 'var(--accent2)'}),
   ], {key: 'tokens'}));
 
