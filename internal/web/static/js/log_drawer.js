@@ -413,6 +413,7 @@ function closeDrawer() {
   $('drawer-veil')?.classList.remove('open');
   document.documentElement.classList.remove('drawer-open');
   detailCollapsed.clear();
+  detailCodeState.clear();
   // Release the previous request's rendered detail and debug capture: the
   // hidden drawer otherwise retained request/response bodies for the life of
   // the tab. The next open re-renders from its record.

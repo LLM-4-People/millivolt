@@ -153,6 +153,11 @@ function detailHeaderRows(headers) {
   return rows.filter(Boolean);
 }
 
+// detailCodeState keeps each block's wrap and expand choice across a live
+// repaint. It is keyed by the stable block focus (prompt, response, debug
+// request/response) and cleared with the drawer.
+const detailCodeState = new Map();
+
 // detailCodeBlock renders bounded long text as a scrollable code surface with
 // a size/line readout, a wrap toggle, a copy action and an expand/collapse
 // control for long bodies. It keeps the .preview-box class every existing
@@ -162,17 +167,20 @@ function detailCodeBlock(text, opts = {}) {
   if (!raw) return '';
   const lines = raw.split('\n').length;
   const long = raw.length > 1400 || lines > 16;
-  const collapsed = long && opts.collapsed !== false;
   const focus = 'code:' + (opts.focus || detailSlug(opts.label || 'body'));
+  const saved = detailCodeState.get(focus);
+  const collapsed = long && (saved ? saved.collapsed : opts.collapsed !== false);
+  const nowrap = saved ? saved.nowrap : false;
   const label = opts.label || 'text';
   const meta = `${lines} line${lines === 1 ? '' : 's'}${opts.truncated ? ' · truncated' : ''}`;
-  const wrap = `<button type="button" class="mini-btn" data-code-wrap aria-pressed="true" aria-label="wrap lines" title="toggle line wrap" data-focus-key="${focus}:wrap">wrap</button>`;
+  const bodyId = 'd-code-' + detailSlug(focus);
+  const wrap = `<button type="button" class="mini-btn" data-code-wrap aria-pressed="${nowrap ? 'false' : 'true'}" aria-label="wrap lines" title="toggle line wrap" data-focus-key="${escapeHtml(focus)}:wrap">wrap</button>`;
   const copy = copyButton(raw, label, focus + ':copy');
-  const toggle = long ? `<button type="button" class="mini-btn" data-code-toggle aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" data-focus-key="${focus}:toggle">${collapsed ? 'expand' : 'collapse'}</button>` : '';
-  return `<div class="detail-code${collapsed ? ' collapsed' : ''}" data-code data-code-label="${escapeHtml(label)}">` +
+  const toggle = long ? `<button type="button" class="mini-btn" data-code-toggle aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="${bodyId}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" data-focus-key="${escapeHtml(focus)}:toggle">${collapsed ? 'expand' : 'collapse'}</button>` : '';
+  return `<div class="detail-code${collapsed ? ' collapsed' : ''}${nowrap ? ' nowrap' : ''}" data-code data-code-label="${escapeHtml(label)}" data-code-focus="${escapeHtml(focus)}">` +
     `<div class="detail-code-bar"><span class="detail-code-meta">${escapeHtml(meta)}</span>` +
     `<span class="detail-code-actions">${wrap}${copy}${toggle}</span></div>` +
-    `<pre class="preview-box" tabindex="0" data-focus-key="${focus}:body">${escapeHtml(raw)}</pre></div>`;
+    `<pre class="preview-box" id="${bodyId}" tabindex="0" data-focus-key="${escapeHtml(focus)}:body">${escapeHtml(raw)}</pre></div>`;
 }
 
 // detailCodeSection is the body section wrapper for a captured preview. The
@@ -242,7 +250,11 @@ document.addEventListener('click', e => {
     codeToggle.textContent = collapsed ? 'expand' : 'collapse';
     codeToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     const label = block.dataset.codeLabel || 'text';
-    codeToggle.setAttribute('aria-label', (collapsed ? 'expand ' : 'collapse ') + label);
+    const verb = collapsed ? 'expand ' : 'collapse ';
+    codeToggle.setAttribute('aria-label', verb + label);
+    codeToggle.title = verb + label;
+    const key = block.dataset.codeFocus;
+    detailCodeState.set(key, {...detailCodeState.get(key), collapsed});
     return;
   }
   const wrap = e.target.closest('[data-code-wrap]');
@@ -251,5 +263,7 @@ document.addEventListener('click', e => {
     if (!block) return;
     const wrapped = !block.classList.toggle('nowrap');
     wrap.setAttribute('aria-pressed', wrapped ? 'true' : 'false');
+    const key = block.dataset.codeFocus;
+    detailCodeState.set(key, {...detailCodeState.get(key), nowrap: !wrapped});
   }
 });

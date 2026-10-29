@@ -99,6 +99,14 @@ module.exports = async function drawerRedesign(H) {
     section('Prompt').querySelector('.detail-code').classList.contains('nowrap') &&
     wrap.getAttribute('aria-pressed') === 'false');
 
+  w.renderDrawer();
+  const repaintedCode = section('Prompt').querySelector('.detail-code');
+  check('expanded and unwrapped code choices survive a live repaint',
+    !repaintedCode.classList.contains('collapsed') &&
+    repaintedCode.classList.contains('nowrap') &&
+    repaintedCode.querySelector('[data-code-toggle]').getAttribute('aria-expanded') === 'true' &&
+    repaintedCode.querySelector('[data-code-wrap]').getAttribute('aria-pressed') === 'false');
+
   const params = section('Parameters');
   const paramsToggle = params.querySelector('[data-section-toggle]');
   paramsToggle.click();
@@ -190,8 +198,10 @@ module.exports = async function drawerRedesign(H) {
   const callsBefore = clipboardCalls;
   check('the clipboard stub was exercised by the earlier copies', callsBefore >= 4);
   w.closeDrawer();
-  check('closing the inspector clears the page scroll lock and collapse state',
+  check('closing the inspector clears the page scroll lock and persisted card state',
     !d.documentElement.classList.contains('drawer-open') &&
     !section('Parameters') &&
-    body.innerHTML === '');
+    body.innerHTML === '' &&
+    w.eval('detailCollapsed.size') === 0 &&
+    w.eval('detailCodeState.size') === 0);
 };
