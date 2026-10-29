@@ -207,6 +207,18 @@ module.exports = async function drawerRedesign(H) {
   await settleUntil(() => { try { return JSON.parse(copied).id === 'redesign'; } catch (e) { return false; } });
   check('copy request JSON carries the live record', JSON.parse(copied).id === 'redesign');
 
+  w.openDrawerAttempt('redesign', 0);
+  const attemptCopy = d.querySelector('#drawer [data-focus-key="copy-record"]');
+  check('attempt mode labels its JSON copy as the attempt',
+    attemptCopy?.getAttribute('aria-label') === 'copy attempt JSON');
+  attemptCopy?.click();
+  await settleUntil(() => { try { return JSON.parse(copied).attempt_index === 0; } catch (e) { return false; } });
+  await settleUntil(() => d.getElementById('toast').textContent === 'copied attempt JSON');
+  check('attempt JSON copy carries the attempt wrapper and reports it',
+    JSON.parse(copied).request_id === 'redesign' &&
+    d.getElementById('toast').textContent === 'copied attempt JSON');
+  w.openDrawer('redesign');
+
   const focusHost = body.querySelector('[data-focus-key="hero-path"]');
   if (focusHost) focusHost.focus();
   w.renderDrawer();

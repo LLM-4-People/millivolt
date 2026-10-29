@@ -453,6 +453,12 @@ function renderDrawer() {
   const root = $('drawer');
   const renderKey = String(drawerId) + '\u0000' + String(drawerAttempt);
   const scroll = body && _drawerRenderKey === renderKey ? body.scrollTop : 0;
+  const copyBtn = root && root.querySelector('[data-focus-key="copy-record"]');
+  if (copyBtn) {
+    const label = a ? 'copy attempt JSON' : 'copy request JSON';
+    copyBtn.setAttribute('aria-label', label);
+    copyBtn.title = label;
+  }
   // A live repaint replaces every row, so capture focus inside the drawer
   // before the rewrite and put it back on the equivalent control after.
   const focusToken = root ? captureFocus(root, detailFocusKey) : null;
@@ -489,7 +495,8 @@ function drawerCopyRecord() {
   let text = '';
   try { text = JSON.stringify(payload, null, 2); } catch (e) { text = ''; }
   if (!text) { toast('copy failed', 'err'); return; }
-  copyText(text).then(ok => toast(ok ? 'copied request JSON' : 'copy failed', ok ? '' : 'err'));
+  const label = a ? 'copied attempt JSON' : 'copied request JSON';
+  copyText(text).then(ok => toast(ok ? label : 'copy failed', ok ? '' : 'err'));
 }
 
 // Absorbed retry attempts in the drawer are clickable: a link carrying an
