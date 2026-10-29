@@ -240,8 +240,14 @@ module.exports = async function drawerRedesign(H) {
   const fallbackBtn = body.querySelector('[data-focus-key="hero-path"]');
   fallbackBtn.focus();
   Object.defineProperty(w.navigator, 'clipboard', {configurable: true, value: undefined});
-  Object.defineProperty(d, 'execCommand', {configurable: true, value: () => true});
+  Object.defineProperty(d, 'execCommand', {configurable: true, value: () => {
+    const area = d.querySelector('textarea[data-copy-fallback]');
+    w.__fallbackParent = area && area.parentElement.id;
+    return true;
+  }});
   const fallbackOk = await w.copyText('insecure-context copy');
+  check('the insecure-context copy runs inside the active modal',
+    fallbackOk && w.__fallbackParent === 'drawer');
   check('the insecure-context copy returns focus to its trigger',
     fallbackOk && d.activeElement === fallbackBtn);
 

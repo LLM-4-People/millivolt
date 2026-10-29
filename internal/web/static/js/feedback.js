@@ -55,12 +55,17 @@ async function copyText(text) {
     area = document.createElement('textarea');
     area.value = value;
     area.setAttribute('readonly', '');
+    area.setAttribute('data-copy-fallback', '');
     area.style.position = 'fixed';
     area.style.top = '-1000px';
     area.style.opacity = '0';
     // iOS zooms the viewport when a focused field is below 16px.
     area.style.fontSize = '16px';
-    document.body.appendChild(area);
+    // The modal focus trap redirects any focus outside the active dialog, so
+    // the fallback field must live inside it or execCommand copies nothing.
+    const host = typeof activeModal !== 'undefined' && activeModal && activeModal.isConnected
+      ? activeModal : document.body;
+    host.appendChild(area);
     usedFallback = true;
     area.select();
     area.setSelectionRange(0, value.length);
