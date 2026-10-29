@@ -146,17 +146,19 @@ async def drawer_checks(page, results):
         const value = row.querySelector('.v').getBoundingClientRect();
         const copy = row.querySelector('.copy-btn');
         const copyRect = copy ? copy.getBoundingClientRect() : null;
-        const close = document.getElementById('drawer').querySelector('.drawer-hd .btn:last-child').getBoundingClientRect();
+        const closeBtn = document.querySelector('#drawer [data-focus-key="close"]');
+        const close = closeBtn.getBoundingClientRect();
         return {width: drawer.width, viewport: innerWidth, height: drawer.height,
           keyTop: key.top, keyHeight: key.height, valueTop: value.top,
           copy: copyRect ? {w: copyRect.width, h: copyRect.height} : null,
-          close: {w: close.width, h: close.height},
+          close: {w: close.width, h: close.height, label: closeBtn.getAttribute('aria-label')},
           bodyScroll: body.scrollWidth, bodyClient: body.clientWidth};
       }""")
     require(abs(mobile['width'] - mobile['viewport']) <= 1, mobile)
     require(mobile['valueTop'] >= mobile['keyTop'] + mobile['keyHeight'] - 1, mobile)
     require(mobile['copy'] and mobile['copy']['w'] >= 32 and mobile['copy']['h'] >= 32, mobile)
-    require(mobile['close']['w'] >= 38 and mobile['close']['h'] >= 38, mobile)
+    require(mobile['close']['w'] >= 38 and mobile['close']['h'] >= 38 and
+            mobile['close']['label'].startswith('close request detail'), mobile)
     require(mobile['bodyScroll'] <= mobile['bodyClient'] + 1, mobile)
 
     await page.evaluate("""() => {

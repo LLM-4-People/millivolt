@@ -1970,7 +1970,7 @@
     .drawer-hd { padding: 8px 9px 9px; gap: 5px; }
     .drawer-hd h3 { font-size: 11px; }
     .drawer-hd .nav-btns .btn { width: 38px; height: 38px; }
-    .drawer-hd .btn { min-height: 38px; }
+    .drawer-hd .btn { min-width: 38px; min-height: 38px; }
     .drawer-hd .drawer-tool { padding: 5px 8px; }
     .d-key { display: none; }
     .drawer-body { padding: 10px 10px calc(24px + env(safe-area-inset-bottom, 0px)); }
