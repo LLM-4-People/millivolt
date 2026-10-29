@@ -64,8 +64,9 @@ module.exports = async function drawerRedesign(H) {
     duration_ms: 0, ttft_ms: 0, usage: {total_tokens: 0}});
   const liveHeroRoot = d.createElement('div');
   liveHeroRoot.innerHTML = liveHero;
-  check('in-flight zero placeholders do not fabricate hero readings',
-    !liveHeroRoot.querySelector('.d-stats'));
+  check('in-flight zero placeholders do not fabricate hero or duration readings',
+    !liveHeroRoot.querySelector('.d-stats') &&
+    ![...liveHeroRoot.querySelectorAll('.k')].some(k => k.textContent === 'duration'));
 
   const cleanDetail = w.formatDetail({...mkRec('clean-200'), status_code: 200});
   const limitedDetail = w.formatDetail({...mkRec('limited-429'), status_code: 429});

@@ -101,7 +101,9 @@ function formatDetail(r) {
     detailTextRow('id', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
     detailStampRow('started', r.start),
     detailStampRow('ended', r.end),
-    detailDurRow('duration', r.duration_ms),
+    // Duration is assigned at finalization; a pending record's zero is not an
+    // observation, so the row waits while the hero already omits it.
+    r.live ? null : detailDurRow('duration', r.duration_ms),
     detailBytesRow('request bytes', r.request_bytes),
     detailBytesRow('response bytes', r.response_bytes),
   ], {key: 'request'}));
