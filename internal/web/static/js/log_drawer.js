@@ -359,6 +359,13 @@ function drawerShow(id, attempt) {
   renderDrawer();
   if (!drawerId) return;
   openModal($('drawer'), {returnSelector, onPreempt: closeDrawer});
+  // Locking the page scrollbar widens the viewport by its gutter; reserve that
+  // width on the body so the page behind the inspector does not jump. A nav
+  // within the open drawer must not re-measure the already-hidden gutter.
+  if (!$('drawer').classList.contains('open')) {
+    const gutter = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+    document.documentElement.style.setProperty('--drawer-gutter', gutter + 'px');
+  }
   $('drawer').classList.add('open');
   $('drawer-veil').classList.add('open');
   document.documentElement.classList.add('drawer-open');
@@ -407,6 +414,7 @@ function closeDrawer() {
   if ($('drawer')) { $('drawer').classList.remove('open'); closeModal($('drawer')); }
   $('drawer-veil')?.classList.remove('open');
   document.documentElement.classList.remove('drawer-open');
+  document.documentElement.style.removeProperty('--drawer-gutter');
   detailCollapsed.clear();
   detailCodeState.clear();
   // Release the previous request's rendered detail and debug capture: the

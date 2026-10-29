@@ -702,6 +702,9 @@
      scrim, so it uses the lightest mode-owned veil. The page behind it is
      locked while the inspector is open; the body itself contains its wheel. */
   html.drawer-open, html.drawer-open body { overflow: hidden; }
+  /* drawerShow reserves the scrollbar gutter it removes, so the page behind
+     the inspector keeps its exact width instead of jumping sideways. */
+  html.drawer-open body { padding-right: var(--drawer-gutter, 0px); }
   /* The rail stays visible for context but is inert while the inspector owns
      the interaction; dim it so it never reads as an active surface. */
   html.drawer-open header { opacity: .6; }

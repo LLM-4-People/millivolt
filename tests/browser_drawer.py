@@ -161,6 +161,27 @@ async def drawer_checks(page, results):
             mobile['close']['label'].startswith('close request detail'), mobile)
     require(mobile['bodyScroll'] <= mobile['bodyClient'] + 1, mobile)
 
+    # Locking a scrolling document removes its scrollbar; the drawer reserves
+    # that gutter so the page behind it does not jump sideways.
+    await page.set_viewport_size({'width': 1280, 'height': 585})
+    await page.wait_for_timeout(120)
+    shift = await page.evaluate("""async () => {
+        closeDrawer();
+        const left = () => document.querySelector('header').getBoundingClientRect().left;
+        const before = left();
+        openDrawer(window.__drawerFixture.id);
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const after = left();
+        // Headless Chromium uses overlay scrollbars (zero gutter), so verify
+        // the reservation rule directly as well as the no-shift outcome.
+        document.documentElement.style.setProperty('--drawer-gutter', '15px');
+        const reserved = getComputedStyle(document.body).paddingRight;
+        closeDrawer();
+        return {before, after, reserved};
+      }""")
+    require(abs(shift['after'] - shift['before']) <= 1, shift)
+    require(shift['reserved'] == '15px', shift)
+
     await page.evaluate("""() => {
         closeDrawer();
         if (window.__drawerFixture) {
@@ -172,4 +193,5 @@ async def drawer_checks(page, results):
       }""")
     await page.set_viewport_size({'width': 1440, 'height': 1000})
     results.append({'drawer_desktop': desktop, 'drawer_copy': copied,
-                    'drawer_expanded': expanded, 'drawer_mobile': mobile})
+                    'drawer_expanded': expanded, 'drawer_mobile': mobile,
+                    'drawer_scroll_lock': shift})
