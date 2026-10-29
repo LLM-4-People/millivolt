@@ -1330,7 +1330,9 @@ cost and finish state; tool names/calls; queue/rate-limit information; retries
 and retained headers. A summary readout carries the status, route, identity and
 first numbers, and a final upstream failure renders as an error alert above the
 cards. Card headers collapse, and a sticky strip jumps between the rendered
-cards.
+cards. A typed rate limit is flow control, not an error: its reason, code and
+message stay in the rate-limit card while the alert stays reserved for a final
+failure.
 
 Copy actions cover the values that matter (identifiers, paths, models, headers,
 error detail and captured bodies), field-list cards and the header's JSON

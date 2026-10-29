@@ -72,7 +72,7 @@ const detailNum = (key, value, opts = {}) => (value === null || value === undefi
 // detailDurRow displays a compact duration while the hover title and copy
 // payload keep the exact millisecond count.
 function detailDurRow(key, value, opts = {}) {
-  if (!value || !isFinite(value)) return null;
+  if (value === null || value === undefined || value === '' || !isFinite(value)) return null;
   return detailHtmlRow(key, vt(fmtDur(value), fmtFull(value) + ' ms'), String(value) + ' ms', {
     copyLabel: key + ' (exact ms)',
     ...opts,

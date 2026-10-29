@@ -76,6 +76,30 @@ module.exports = async function drawerRedesign(H) {
     inBandDetail.includes('stream reset') &&
     !inBandDetail.includes('<span class="pill err">200</span>'));
 
+  const typed429 = w.formatDetail({...mkRec('typed-429'), status_code: 429,
+    error_type: 'rate_limit', error_code: 'queue_full', error_msg: 'queue is full'});
+  const typed429Root = d.createElement('div');
+  typed429Root.innerHTML = typed429;
+  const rateRow = key => [...typed429Root.querySelectorAll('.detail-kv')]
+    .find(r => r.querySelector('.k')?.textContent === key);
+  check('a typed rate limit keeps its reason, code and message in the rate-limit card',
+    !typed429.includes('class="d-alert"') &&
+    rateRow('reason')?.querySelector('.v').textContent === 'rate_limit' &&
+    rateRow('code')?.querySelector('.v').textContent === 'queue_full' &&
+    rateRow('code')?.querySelector('.copy-btn').dataset.copy === 'queue_full' &&
+    rateRow('message')?.querySelector('.v').textContent === 'queue is full');
+
+  const typed499 = w.formatDetail({...mkRec('typed-499'), status_code: 499,
+    error_type: 'upstream_error', error_msg: 'stream reset'});
+  check('a typed client abort banners as an upstream error',
+    typed499.includes('class="d-alert"') &&
+    typed499.includes('upstream error') &&
+    !typed499.includes('request failed'));
+
+  const zeroDuration = w.formatDetail({...mkRec('zero-duration'), duration_ms: 0});
+  check('a finalized zero duration stays in the request card',
+    zeroDuration.includes('<span class="k">duration</span><span class="v"><span class="vt" title="0 ms">0ms</span></span>'));
+
   const hostile = w.formatDetail({
     id: 'hostile', status_code: 200, method: 'POST',
     path: '/x/<img src=x onerror=alert(1)>',

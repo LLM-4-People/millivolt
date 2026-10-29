@@ -75,7 +75,10 @@ function detailErrorAlert(r) {
     code ? 'code: ' + code : '',
     message ? 'message: ' + message : '',
   ].filter(Boolean).join('\n');
-  const title = (!r.status_code || r.status_code >= 400) ? 'request failed' : 'upstream error';
+  // A 2xx or a typed 499 observed the upstream's own failure; every other
+  // banner is the client-visible request failure.
+  const title = (r.status_code && r.status_code < 400) || r.status_code === 499
+    ? 'upstream error' : 'request failed';
   return `<div class="d-alert" role="group" aria-label="error">` +
     `<div class="d-alert-hd">${ALERT_ICON}<span class="d-alert-title">${title}</span>` +
     (status && r.status_code >= 400 ? `<span class="pill err">${escapeHtml(status)}</span>` : '') +
@@ -98,6 +101,7 @@ function formatDetail(r) {
     detailTextRow('id', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
     detailStampRow('started', r.start),
     detailStampRow('ended', r.end),
+    detailDurRow('duration', r.duration_ms),
     detailBytesRow('request bytes', r.request_bytes),
     detailBytesRow('response bytes', r.response_bytes),
   ], {key: 'request'}));
@@ -227,11 +231,18 @@ function formatDetail(r) {
     ], {key: 'tools'}));
   }
 
+  // A typed 429 keeps its structured reason here: a rate limit is flow
+  // control, not the error banner, but its type/code/message must stay visible
+  // and copyable when the proxy recorded one.
+  const limited = r.status_code === 429;
   S.push(detailSection('Rate limit / queue', [
     detailNum('remaining', r.rate_limit_remaining),
     detailNum('limit', r.rate_limit_limit),
     detailDurRow('retry-after', r.retry_after_ms, {tone: 'var(--warn)'}),
     detailDurRow('queue wait', r.queue_wait_ms, {tone: 'var(--warn)'}),
+    limited ? detailTextRow('reason', r.error_type, {copy: true, tone: 'var(--warn)'}) : null,
+    limited ? detailTextRow('code', r.error_code, {copy: true}) : null,
+    limited ? detailTextRow('message', r.error_msg, {copy: true, tone: 'var(--warn)'}) : null,
     detailNum('retries', r.retries, {tone: r.retries ? 'var(--warn)' : ''}),
     detailBoolRow('rate limited', r.rate_limited),
   ], {key: 'rate-limit'}));
