@@ -1326,19 +1326,19 @@ drawer; previous/next controls navigate requests without changing the scope.
 The inspector presents available facts in cards: request identity/status/times;
 client/runtime and provider metadata; captured model and parameters; conversation
 turns and content-size counts; input/output/cache/reasoning tokens; performance,
-cost and finish state; tool names/calls; queue/rate-limit information; retries,
-errors and retained headers. A summary readout carries the status, route,
-identity and first numbers, and a final upstream failure renders as an error
-alert above the cards. Card headers collapse, and a sticky strip jumps between
-the rendered cards.
+cost and finish state; tool names/calls; queue/rate-limit information; retries
+and retained headers. A summary readout carries the status, route, identity and
+first numbers, and a final upstream failure renders as an error alert above the
+cards. Card headers collapse, and a sticky strip jumps between the rendered
+cards.
 
 Copy actions cover the values that matter (identifiers, paths, models, headers,
-error detail and captured bodies), each card and the header's JSON action. One
-clipboard path reports success or denial in a polite status line. Long captured
-bodies use a bounded code surface with line count, wrap, copy and expand
-controls; a long single line scrolls inside that surface instead of widening
-the inspector. Narrow viewports get the full-width inspector with keys stacked
-above values and touch-sized copy and close targets.
+error detail and captured bodies), field-list cards and the header's JSON
+action. One clipboard path reports success or denial in a polite status line.
+Long captured bodies use a bounded code surface with line count, wrap, copy and
+expand controls; a long single line scrolls inside that surface instead of
+widening the inspector. Narrow viewports get the full-width inspector with keys
+stacked above values and touch-sized copy and close targets.
 
 Recognized parameters include sampling and output limits, stop/logprob controls,
 reasoning/verbosity, response format, tool choice and streaming flags. Explicit

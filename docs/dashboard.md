@@ -219,17 +219,18 @@ headers; and the Debug capture when one exists.
 A sticky section strip jumps between the rendered cards. Each card header can
 collapse or expand its section, and that choice survives live updates until the
 inspector closes. Copy actions sit on the values that matter (identifiers,
-paths, models, headers, error detail and captured bodies), on every card, and
-on the header's JSON action for the whole record or the selected attempt. One
-polite status line confirms each copy or reports a denied clipboard write.
+paths, models, headers, error detail and captured bodies), on field-list cards,
+and on the header's JSON action for the whole record or the selected attempt.
+One polite status line confirms each copy or reports a denied clipboard write.
 
 Long values wrap. Captured prompt, response and Debug bodies open in a bounded
 code surface with a line count, wrap toggle, copy action and expand/collapse
 control; a long single line scrolls inside that surface instead of widening the
 inspector. A final upstream failure appears as a bordered alert above the cards
-with its status, type, code, message and copy action. On narrow viewports the
-inspector fills the width, stacks each key above its value, keeps touch-sized
-copy and close targets, and respects the bottom safe area.
+with its type, code, message and copy action, plus the HTTP status when the
+failure was an HTTP response. On narrow viewports the inspector fills the
+width, stacks each key above its value, keeps touch-sized copy and close
+targets, and respects the bottom safe area.
 
 Previous/next controls follow the scoped table order. Explicit zero and false
 parameter values are retained instead of treated as missing.
