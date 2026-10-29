@@ -45,7 +45,7 @@ module.exports = async function chartBuckets(H) {
   })());
   // The drawer's Performance section renders the analyzer's per-stream
   // telemetry beside the timing rows: chunks as a plain integer, first
-  // thinking through the shared clock-time formatter (fmtT output is
+  // thinking through the shared timestamp formatter (detailStampRow output is
   // locale-dependent, so only presence and a rendered value are pinned),
   // and neither row renders when the record carries no value.
   check('the drawer renders chunks and first thinking beside the timing rows', (() => {
@@ -79,7 +79,7 @@ module.exports = async function chartBuckets(H) {
   // The drawer's Performance section renders the adopted attempt's httptrace
   // decomposition beside the timing rows: plain integer milliseconds (the
   // processing-row style, "N ms"), a 0/absent hook value hides its row (0
-  // means "not observed"), and the pool-hit fact renders through kvBool so
+  // means "not observed"), and the pool-hit fact renders through detailBoolRow so
   // an explicit false still shows, exactly like client disconnected.
   check('the drawer renders the upstream attempt timing decomposition', (() => {
     const trace = w.formatDetail({ ...mkRec('h2trace'), upstream_ttfb_ms: 12, upstream_connect_ms: 3, upstream_conn_reused: true });
@@ -95,7 +95,7 @@ module.exports = async function chartBuckets(H) {
       !plain.includes('<span class="k">upstream tls</span>') &&
       !plain.includes('<span class="k">reused connection</span>');
   })());
-  // kvBool's documented contract: a stored false is a rendered "false" row,
+  // detailBoolRow's documented contract: a stored false is a rendered "false" row,
   // never an absent one - pinned for both flags that ride it (the transport
   // pool-hit fact, and the wire-compression fact inside the header section,
   // which needs captured headers to render at all).

@@ -212,7 +212,7 @@ function formatDetail(r) {
     // The adopted attempt's transport decomposition (httptrace): plain
     // integer milliseconds where 0/absent means the hook never fired (pooled
     // connection, plaintext upstream) so the row hides; the pool-hit fact
-    // renders through kvBool, so a stored false still shows like every
+    // renders through detailBoolRow, so a stored false still shows like every
     // other record flag.
     detailMsRow('upstream ttfb', r.upstream_ttfb_ms),
     detailMsRow('upstream connect', r.upstream_connect_ms),
