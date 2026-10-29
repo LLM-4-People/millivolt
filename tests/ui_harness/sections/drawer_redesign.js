@@ -128,6 +128,9 @@ module.exports = async function drawerRedesign(H) {
   paramsToggle.click();
   check('a section card collapses without removing its captured rows',
     params.classList.contains('collapsed') && paramsToggle.getAttribute('aria-expanded') === 'false' &&
+    paramsToggle.getAttribute('aria-controls') === 'd-sec-parameters-body' &&
+    d.getElementById(paramsToggle.getAttribute('aria-controls')) ===
+      params.querySelector('.detail-sec-body') &&
     row('model')?.textContent.includes('family/model-2026-10-29'));
   w.renderDrawer();
   check('collapsed sections survive a live repaint',

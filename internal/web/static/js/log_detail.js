@@ -128,11 +128,12 @@ function detailSection(title, rows, opts = {}) {
   const payload = opts.copyText != null ? String(opts.copyText)
     : visible.map(row => `${row.k}: ${typeof row.copy === 'string' ? row.copy : row.text}`).join('\n');
   const copy = opts.copy === false || !payload ? '' : copyButton(payload, title, 'copy-sec:' + key);
-  const toggle = `<button type="button" class="sec-toggle" data-section-toggle data-section-key="${escapeHtml(key)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" data-focus-key="sec:${escapeHtml(key)}">${SECTION_CHEV}</button>`;
+  const bodyId = id + '-body';
+  const toggle = `<button type="button" class="sec-toggle" data-section-toggle data-section-key="${escapeHtml(key)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="${escapeHtml(bodyId)}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" data-focus-key="sec:${escapeHtml(key)}">${SECTION_CHEV}</button>`;
   return `<section class="detail-section${collapsed ? ' collapsed' : ''}" id="${escapeHtml(id)}" data-title="${escapeHtml(title)}"${opts.navLabel ? ` data-nav="${escapeHtml(opts.navLabel)}"` : ''}>` +
     `<div class="detail-sec-hd" title="${escapeHtml(title)}"><h4>${escapeHtml(title)}</h4><div class="detail-sec-actions">` +
     `${opts.headExtra || ''}${copy}${toggle}</div></div>` +
-    `<div class="detail-sec-body">${body}</div></section>`;
+    `<div class="detail-sec-body" id="${escapeHtml(bodyId)}">${body}</div></section>`;
 }
 
 // detailHeaderRows turns a captured header map (one value per key in the wire
