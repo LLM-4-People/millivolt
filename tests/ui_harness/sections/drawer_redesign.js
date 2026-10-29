@@ -125,9 +125,13 @@ module.exports = async function drawerRedesign(H) {
   check('the sticky jump strip mirrors the rendered sections',
     !!nav && nav.querySelectorAll('.d-jump-btn').length === sectionIds.length &&
     [...nav.querySelectorAll('.d-jump-btn')].every(btn => sectionIds.includes(btn.dataset.jump)));
-  nav.querySelector('.d-jump-btn').click();
-  check('a jump chip cannot throw when a section is already in view',
-    d.getElementById('drawer').classList.contains('open'));
+  const jumpTarget = body.querySelector('.detail-section[data-title="Request"]');
+  jumpTarget.querySelector('[data-section-toggle]').click();
+  nav.querySelector(`[data-jump="${jumpTarget.id}"]`).click();
+  check('a jump chip expands its collapsed target section',
+    d.getElementById('drawer').classList.contains('open') &&
+    !jumpTarget.classList.contains('collapsed') &&
+    jumpTarget.querySelector('[data-section-toggle]').getAttribute('aria-expanded') === 'true');
 
   // The one clipboard path: rows, sections, the error block and the whole
   // record all copy through copyText and report the polite toast.
