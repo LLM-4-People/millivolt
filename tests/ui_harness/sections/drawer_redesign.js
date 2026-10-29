@@ -56,6 +56,18 @@ module.exports = async function drawerRedesign(H) {
     body.querySelector('.d-alert').textContent.includes('code dial_timeout') &&
     body.querySelector('.d-alert-msg').textContent.includes('connection refused'));
 
+  const cleanDetail = w.formatDetail({...mkRec('clean-200'), status_code: 200});
+  const limitedDetail = w.formatDetail({...mkRec('limited-429'), status_code: 429});
+  const inBandDetail = w.formatDetail({...mkRec('inband-200'), status_code: 200,
+    error_type: 'upstream_error', error_msg: 'stream reset'});
+  check('a clean completion and a rate limit alone render no error banner',
+    !cleanDetail.includes('class="d-alert"') && !limitedDetail.includes('class="d-alert"'));
+  check('an in-band upstream error still banners on a 200 without an error pill',
+    inBandDetail.includes('class="d-alert"') &&
+    inBandDetail.includes('upstream error') &&
+    inBandDetail.includes('stream reset') &&
+    !inBandDetail.includes('<span class="pill err">200</span>'));
+
   check('every captured section is a card and the wire sizes are human readable',
     body.querySelectorAll('.detail-section').length >= 9 &&
     row('request bytes')?.querySelector('.v').textContent === '2.05 KB' &&

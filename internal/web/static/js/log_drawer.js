@@ -69,10 +69,11 @@ function detailHero(r) {
 // block for a provider-side report. It is a plain group, not a live region, so
 // a live repaint never re-announces the same failure.
 function detailErrorAlert(r) {
-  const type = String(r.error_type || '');
-  const code = String(r.error_code || (r.status_code || '') || '');
-  const message = String(r.error_msg || '');
-  if (!type && !code && !message) return '';
+  const err = finalErrorEntry(r);
+  if (!err) return '';
+  const type = String(err.type || '');
+  const code = String(err.code || '');
+  const message = String(err.msg || '');
   const status = r.status_code ? String(r.status_code) : '';
   const text = [
     type ? 'type: ' + type : '',
@@ -82,7 +83,7 @@ function detailErrorAlert(r) {
   const title = (!r.status_code || r.status_code >= 400) ? 'request failed' : 'upstream error';
   return `<div class="d-alert" role="group" aria-label="error">` +
     `<div class="d-alert-hd">${ALERT_ICON}<span class="d-alert-title">${title}</span>` +
-    (status ? `<span class="pill err">${escapeHtml(status)}</span>` : '') +
+    (status && r.status_code >= 400 ? `<span class="pill err">${escapeHtml(status)}</span>` : '') +
     (type ? `<span class="d-alert-type">${escapeHtml(type)}</span>` : '') +
     (code && code !== status ? `<span class="d-alert-code">code ${escapeHtml(code)}</span>` : '') +
     copyButton(text, 'error detail', 'alert-copy') + `</div>` +
