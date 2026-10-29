@@ -332,7 +332,7 @@ function formatAttemptDetail(r, i) {
     detailHtmlRow('status', attemptPill(a), a.status_code ? String(a.status_code) : 'transport'),
     detailStampRow('when', a.at),
     // Type, code and message are distinct fields - one row each, like the
-    // record's Error section. Skip the type text when it merely repeats the
+    // record's error banner. Skip the type text when it merely repeats the
     // transport pill (the retry-list convention).
     a.error_type && !(isTransport && a.error_type === 'transport')
       ? detailTextRow('type', a.error_type, {tone: 'var(--err)'}) : null,
