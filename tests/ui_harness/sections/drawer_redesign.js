@@ -69,6 +69,22 @@ module.exports = async function drawerRedesign(H) {
     inBandDetail.includes('stream reset') &&
     !inBandDetail.includes('<span class="pill err">200</span>'));
 
+  const hostile = w.formatDetail({
+    id: 'hostile', status_code: 200, method: 'POST',
+    path: '/x/<img src=x onerror=alert(1)>',
+    client: '<script>alert(1)</script>', provider: '<img src=x onerror=alert(2)>',
+    model: '<script>alert(3)</script>',
+    error_type: '<img src=x onerror=alert(4)>', error_msg: '<script>alert(5)</script>',
+    response_headers: {'x-evil': ['<img src=x onerror=alert(6)>']},
+    prompt_preview: '<script>alert(7)</script>',
+  });
+  const hostileRoot = d.createElement('div');
+  hostileRoot.innerHTML = hostile;
+  check('hostile record fields render as text, never markup',
+    !hostileRoot.querySelector('img,script') &&
+    hostileRoot.textContent.includes('<script>alert(1)</script>') &&
+    hostileRoot.textContent.includes('<img src=x onerror=alert(6)>'));
+
   check('every captured section is a card and the wire sizes are human readable',
     body.querySelectorAll('.detail-section').length >= 9 &&
     row('request bytes')?.querySelector('.v').textContent === '2.05 KB' &&
