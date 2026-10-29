@@ -117,11 +117,17 @@ const SECTION_CHEV = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.
 // an empty section, carries a section copy action, and keeps the collapse
 // toggle outside the h4 so the heading text stays the section's own name.
 function detailSection(title, rows, opts = {}) {
-  const visible = (rows || []).filter(row => row && row.v !== '');
-  const body = opts.body != null ? String(opts.body) : visible.map(detailRowHTML).join('');
-  if (!body) return '';
   const key = opts.key || detailSlug(title);
   const id = opts.id || ('d-sec-' + key);
+  const visible = (rows || []).filter(row => row && row.v !== '');
+  // Row copies get a stable focus key even when the caller did not name one,
+  // so a live repaint can return focus to the same value.
+  const body = opts.body != null ? String(opts.body)
+    : visible.map((row, i) => detailRowHTML({
+      ...row,
+      focus: row.focus || `row:${key}:${detailSlug(row.k)}:${i}`,
+    })).join('');
+  if (!body) return '';
   const collapsed = detailCollapsed.has(key);
   // A string copy payload is the exact fact behind a formatted display (bytes,
   // milliseconds, ISO instants); copy:true rows already carry exact text.

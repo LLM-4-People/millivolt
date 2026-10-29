@@ -3,6 +3,13 @@
 // listener. log_detail.js owns the rows, sections and long-text block;
 // log_drawer.js owns the drawer lifecycle that shows it.
 
+// _debugPendingFocus carries a focus token across the async capture fill: the
+// card is replaced by its placeholder before the body controls exist again.
+let _debugPendingFocus = null;
+// _debugFillToken invalidates a capture fetch whose drawer was repainted or
+// closed before it settled; the id alone cannot distinguish same-record paints.
+let _debugFillToken = 0;
+
 // debugSectionActions renders the Debug card's header extras: the download
 // action and the message line. detailSection owns the title, collapse toggle
 // and card shell, so the header survives fillDrawerDebug's body rewrite.
@@ -58,9 +65,10 @@ function debugDownloadStatus(id, msg) {
 function fillDrawerDebug(id) {
   const host = $('drawer-debug');
   if (!host || !host.querySelector('.detail-sec-body')) return;
+  const fillToken = ++_debugFillToken;
   operatorJson('/admin/debug/capture?id=' + encodeURIComponent(id))
     .then(d => {
-      if (drawerId !== id) return;
+      if (drawerId !== id || fillToken !== _debugFillToken) return;
       const ident = d.identity || {};
       const timing = d.timing || {};
       const outcome = d.outcome || {};
@@ -100,14 +108,24 @@ function fillDrawerDebug(id) {
       const live = $('drawer-debug');
       const body = live && live.querySelector('.detail-sec-body');
       if (!body) return;
-      const focusToken = captureFocus(live, detailFocusKey);
+      const pending = _debugPendingFocus;
+      _debugPendingFocus = null;
+      const current = document.activeElement;
+      // Restore the pre-repaint debug control only if the user has not moved
+      // focus since; otherwise keep whatever control they chose.
+      const focusToken = pending && (!current || current === document.body)
+        ? pending : captureFocus(live, detailFocusKey);
       body.innerHTML = bits.filter(Boolean).join('');
       if (focusToken) restoreFocus(focusToken);
     })
     .catch(() => {
+      if (drawerId !== id || fillToken !== _debugFillToken) return;
+      const pending = _debugPendingFocus;
+      _debugPendingFocus = null;
       const live = $('drawer-debug');
       const body = live && live.querySelector('.detail-sec-body');
       if (body) body.textContent = 'capture unavailable';
+      if (pending) restoreFocus(pending);
     });
 }
 

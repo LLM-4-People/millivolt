@@ -430,6 +430,8 @@ function closeDrawer() {
   document.documentElement.style.removeProperty('--drawer-gutter');
   detailCollapsed.clear();
   detailCodeState.clear();
+  _debugPendingFocus = null;
+  _debugFillToken++;
   // Release the previous request's rendered detail and debug capture: the
   // hidden drawer otherwise retained request/response bodies for the life of
   // the tab. The next open re-renders from its record.
@@ -471,7 +473,11 @@ function renderDrawer() {
     copyBtn.title = label;
   }
   // A live repaint replaces every row, so capture focus inside the drawer
-  // before the rewrite and put it back on the equivalent control after.
+  // before the rewrite and put it back on the equivalent control after. Debug
+  // body controls only exist after the async capture fill, so their token
+  // waits for that fill instead of failing against today's placeholder.
+  const prevFocus = root ? document.activeElement : null;
+  const focusInDebug = !!(prevFocus && root.contains(prevFocus) && prevFocus.closest('#drawer-debug'));
   const focusToken = root ? captureFocus(root, detailFocusKey) : null;
   const base = reqIdentityText(r);
   if (a) {
@@ -490,7 +496,8 @@ function renderDrawer() {
   }
   detailWireNav();
   body.scrollTop = scroll;
-  if (focusToken) restoreFocus(focusToken);
+  if (focusToken && !focusInDebug) restoreFocus(focusToken);
+  _debugPendingFocus = focusInDebug ? focusToken : null;
   _drawerRecord = r;
   _drawerRenderKey = renderKey;
   if (!a && r.debug) fillDrawerDebug(r.id);

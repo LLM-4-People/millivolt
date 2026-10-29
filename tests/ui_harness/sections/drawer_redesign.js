@@ -256,6 +256,12 @@ module.exports = async function drawerRedesign(H) {
   check('a live repaint restores focus to the same copy control',
     !!d.activeElement && d.activeElement.dataset.focusKey === 'hero-path');
 
+  const focusRow = row('id')?.querySelector('.copy-btn');
+  if (focusRow) focusRow.focus();
+  w.renderDrawer();
+  check('a live repaint restores focus to the same field copy control',
+    !!d.activeElement && d.activeElement.dataset.focusKey === 'row:request:id:0');
+
   try {
     Object.defineProperty(w.navigator, 'clipboard', {
       configurable: true,

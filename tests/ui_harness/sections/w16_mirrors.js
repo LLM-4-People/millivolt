@@ -467,6 +467,21 @@ module.exports = async function w16Mirrors(H) {
         check('a failed capture download surfaces the designed failure message in the section',
           sd.getElementById('drawer-debug-status').textContent === 'debug capture download failed');
       }
+      const liveDbg = sd.getElementById('drawer-debug');
+      const sessionRow = [...liveDbg.querySelectorAll('.detail-kv')]
+        .find(r => r.querySelector('.k')?.textContent === 'session');
+      const sessionCopy = sessionRow.querySelector('.copy-btn');
+      sessionCopy.focus();
+      sw.renderDrawer();
+      await settleUntil(() => {
+        const sec = sd.getElementById('drawer-debug');
+        const row = sec && [...sec.querySelectorAll('.detail-kv')]
+          .find(r => r.querySelector('.k')?.textContent === 'session');
+        return !!row && sd.activeElement === row.querySelector('.copy-btn');
+      });
+      check('focus inside the debug capture survives a live repaint',
+        !!sd.activeElement &&
+        sd.activeElement.dataset.focusKey === 'row:dbg-identity:session:0');
       sw.closeDrawer();
 
       // triggerDownload's anchor contract: href/download set, appended,
