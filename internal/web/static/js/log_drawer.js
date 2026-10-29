@@ -298,12 +298,7 @@ function formatDetail(r) {
     S.push(detailSection('Response headers', [gzipRow, ...headerRows], {key: 'headers'}));
   }
 
-  if (r.debug) {
-    S.push(`<section class="detail-section" id="drawer-debug" data-title="Debug">` +
-      debugSectionHead(r.id) +
-      `<div class="detail-sec-body"><div class="preview-box" id="drawer-debug-body">loading capture…</div></div>` +
-      `</section>`);
-  }
+  if (r.debug) S.push(debugSection(r.id));
 
   return S.filter(Boolean).join('');
 }
@@ -419,7 +414,6 @@ function closeDrawer() {
   // the tab. The next open re-renders from its record.
   if ($('drawer-body')) $('drawer-body').innerHTML = '';
   if ($('drawer-title')) $('drawer-title').textContent = '';
-  if ($('drawer-debug')) $('drawer-debug').innerHTML = '';
   highlightRow();
 }
 function drawerNav(dir) {

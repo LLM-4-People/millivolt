@@ -408,6 +408,18 @@ module.exports = async function w16Mirrors(H) {
         dbg.textContent.includes('Request body (truncated)') &&
         dbg.textContent.includes('Response body') &&
         !!dbg.querySelector('.preview-box'));
+      const dbgToggle = dbg.querySelector('[data-section-toggle]');
+      check('the debug capture card collapses through the shared section owner',
+        !!dbgToggle && dbgToggle.getAttribute('aria-expanded') === 'true');
+      if (dbgToggle) {
+        dbgToggle.click();
+        check('the debug capture card keeps its body while collapsed',
+          dbg.classList.contains('collapsed') && dbgToggle.getAttribute('aria-expanded') === 'false' &&
+          dbg.textContent.includes('Request body (truncated)'));
+        dbgToggle.click();
+        check('the debug capture card expands again',
+          !dbg.classList.contains('collapsed') && dbgToggle.getAttribute('aria-expanded') === 'true');
+      }
 
       // The download affordance: the section header button fetches the
       // same capture with download=1 through the operator gate and hands

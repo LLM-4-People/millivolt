@@ -3,13 +3,25 @@
 // listener. log_detail.js owns the rows, sections and long-text block;
 // log_drawer.js owns the drawer lifecycle that shows it.
 
-// debugSectionHead renders the Debug heading row: the title, the download
-// action and the message line. The first paint and fillDrawerDebug's rewrite
-// both use it, so the button survives the capture render.
-function debugSectionHead(id) {
-  return `<div class="detail-sec-hd"><h4>Debug</h4><div class="detail-sec-actions">` +
-    `<button type="button" class="copy-btn" id="drawer-debug-download" data-id="${escapeHtml(id)}" aria-label="download debug capture" title="download debug capture">⬇</button>` +
-    `<span id="drawer-debug-status"></span></div></div>`;
+// debugSectionActions renders the Debug card's header extras: the download
+// action and the message line. detailSection owns the title, collapse toggle
+// and card shell, so the header survives fillDrawerDebug's body rewrite.
+function debugSectionActions(id) {
+  return `<button type="button" class="copy-btn" id="drawer-debug-download" data-id="${escapeHtml(id)}" aria-label="download debug capture" title="download debug capture">⬇</button>` +
+    `<span id="drawer-debug-status"></span>`;
+}
+
+// debugSection renders the Debug card through the shared section owner. Its
+// body starts as the capture placeholder; fillDrawerDebug replaces only that
+// region, leaving the header, download action and collapse state intact.
+function debugSection(id) {
+  return detailSection('Debug', [], {
+    key: 'debug',
+    id: 'drawer-debug',
+    copy: false,
+    headExtra: debugSectionActions(id),
+    body: `<div class="preview-box" id="drawer-debug-body">loading capture…</div>`,
+  });
 }
 
 // debugHeaderRows maps a captured [{name,value}] list onto the shared header
@@ -44,8 +56,8 @@ function debugDownloadStatus(id, msg) {
 }
 
 function fillDrawerDebug(id) {
-  const box = $('drawer-debug-body');
-  if (!box) return;
+  const host = $('drawer-debug');
+  if (!host || !host.querySelector('.detail-sec-body')) return;
   operatorJson('/admin/debug/capture?id=' + encodeURIComponent(id))
     .then(d => {
       if (drawerId !== id) return;
@@ -85,14 +97,18 @@ function fillDrawerDebug(id) {
       }
       bits.push(detailSection('Request headers', debugHeaderRows(req.headers), {key: 'dbg-req-headers'}));
       bits.push(detailSection('Response headers', debugHeaderRows(resp.headers), {key: 'dbg-resp-headers'}));
-      const host = $('drawer-debug');
-      if (host) {
-        const focusToken = captureFocus(host, detailFocusKey);
-        host.innerHTML = debugSectionHead(id) + `<div class="detail-sec-body">${bits.filter(Boolean).join('')}</div>`;
-        if (focusToken) restoreFocus(focusToken);
-      }
+      const live = $('drawer-debug');
+      const body = live && live.querySelector('.detail-sec-body');
+      if (!body) return;
+      const focusToken = captureFocus(live, detailFocusKey);
+      body.innerHTML = bits.filter(Boolean).join('');
+      if (focusToken) restoreFocus(focusToken);
     })
-    .catch(() => { box.textContent = 'capture unavailable'; });
+    .catch(() => {
+      const live = $('drawer-debug');
+      const body = live && live.querySelector('.detail-sec-body');
+      if (body) body.textContent = 'capture unavailable';
+    });
 }
 
 // The debug section's Download button: delegated like the attempt links so
