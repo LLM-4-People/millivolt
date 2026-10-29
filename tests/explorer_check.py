@@ -299,6 +299,7 @@ async def capture_history(args):
                 await ready('model')
                 await capture_image(page, staging / 'requests/details.png', '#drawer')
                 await page.set_viewport_size({'width': 1180, 'height': 600})
+                await page.locator('#drawer-body [data-group-tab="usage"]').click()
                 await page.locator('#drawer-body').evaluate('''body => {
                     const tokens = [...body.querySelectorAll('h4')].find(h => h.textContent === 'Tokens');
                     if (!tokens) throw new Error('request detail has no token section');

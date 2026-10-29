@@ -99,14 +99,18 @@ function formatDetail(r) {
 
   S.push(detailSection('Request', [
     detailTextRow('id', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
+    detailTextRow('time bucket', r.time_bucket ? shortId('time', r.time_bucket) : '', {copy: r.time_bucket || null}),
     detailStampRow('started', r.start),
     detailStampRow('ended', r.end),
     // Duration is assigned at finalization; a pending record's zero is not an
     // observation, so the row waits while the hero already omits it.
     r.live ? null : detailDurRow('duration', r.duration_ms),
+    r.debug_session_id ? detailTextRow('debug session', r.debug_session_id, {copy: true}) : null,
+    r.paused ? detailBoolRow('paused', true) : null,
+    r.throttled ? detailBoolRow('throttled', true) : null,
     detailBytesRow('request bytes', r.request_bytes),
     detailBytesRow('response bytes', r.response_bytes),
-  ], {key: 'request'}));
+  ], {key: 'request', group: 'request'}));
 
   const runtime = [r.client_meta && r.client_meta.runtime, r.client_meta && r.client_meta.runtime_ver].filter(Boolean).join(' ');
   const os = [r.client_meta && r.client_meta.os, r.client_meta && r.client_meta.arch].filter(Boolean).join(' ');
@@ -120,11 +124,12 @@ function formatDetail(r) {
     detailTextRow('os', os),
     detailTextRow('user-agent', r.user_agent, {copy: true}),
     detailTextRow('format', r.client_meta && r.client_meta.format),
-    detailTextRow('timeout', r.client_meta && r.client_meta.timeout_ms ? fmtDur(r.client_meta.timeout_ms) : ''),
+    r.client_meta && r.client_meta.timeout_ms ? detailDurRow('timeout', r.client_meta.timeout_ms) : null,
     detailTextRow('max concurrency', r.client_meta && r.client_meta.max_concurrency),
-    detailTextRow('key hash', shortKey, {tone: 'var(--muted)', copy: shortKey || null}),
+    r.key_hash ? detailHtmlRow('key hash', vt(shortKey, r.key_hash), shortKey,
+      {tone: 'var(--muted)', copy: r.key_hash, copyLabel: 'key hash (full)'}) : null,
     detailBoolRow('client disconnected', r.client_disconnected),
-  ], {key: 'client'}));
+  ], {key: 'client', group: 'request'}));
 
   S.push(detailSection('Provider', [
     r.provider ? detailHtmlRow('provider',
@@ -134,7 +139,7 @@ function formatDetail(r) {
     detailTextRow('request id', r.provider_request_id, {copy: true}),
     detailTextRow('server', r.provider_server, {copy: true}),
     detailMsRow('processing', r.processing_ms),
-  ], {key: 'provider'}));
+  ], {key: 'provider', group: 'request'}));
 
   // The full non-content request shape.
   const modelRaw = String(r.model || '').trim();
@@ -169,7 +174,7 @@ function formatDetail(r) {
     detailTextRow('tool_choice', r.req_tool_choice, {copy: r.req_tool_choice || null}),
     detailBoolRow('stream_options', r.req_stream_opts),
     detailTextRow('metadata', r.req_metadata_keys ? r.req_metadata_keys + ' keys' : ''),
-  ], {key: 'parameters'}));
+  ], {key: 'parameters', group: 'request'}));
 
   const promptSize = (r.chars_system || r.chars_user || r.chars_assistant || r.chars_tool)
     ? 'sys ' + fmtFull(r.chars_system || 0) + ' · user ' + fmtFull(r.chars_user || 0) +
@@ -180,17 +185,23 @@ function formatDetail(r) {
       (r.images && r.attachments ? ', ' : '') +
       (r.attachments ? r.attachments + ' attachment' + (r.attachments > 1 ? 's' : '') : '')
     : '';
+  const conversationRow = (label, id) => id
+    ? detailHtmlRow(label, vt(escapeHtml(shortId('conversation', id)), id), id, {copy: id, copyLabel: label + ' id'})
+    : null;
   S.push(detailSection('Conversation', [
+    conversationRow('conversation', r.conversation_id),
+    conversationRow('parent', r.parent_conversation_id),
     detailNum('user turns', r.turns_user),
     detailNum('assistant turns', r.turns_assistant),
     detailNum('tool turns', r.turns_tool),
     detailTextRow('responding to', r.last_turn_role),
     detailTextRow('prompt size', promptSize),
     detailTextRow('content parts', contentParts),
-  ], {key: 'conversation'}));
+    detailBoolRow('answer content', r.had_answer_content),
+  ], {key: 'conversation', group: 'content'}));
 
-  S.push(detailCodeSection('Prompt', r.prompt_preview, {focus: 'prompt'}));
-  S.push(detailCodeSection('Response', r.response_preview, {focus: 'response'}));
+  S.push(detailCodeSection('Prompt', r.prompt_preview, {focus: 'prompt', group: 'content'}));
+  S.push(detailCodeSection('Response', r.response_preview, {focus: 'response', group: 'content'}));
 
   const cacheHit = (r.usage && r.usage.input_tokens > 0 && r.usage.cache_read_tokens)
     ? pct2(r.usage.cache_read_tokens, r.usage.input_tokens) : '';
@@ -203,11 +214,13 @@ function formatDetail(r) {
     r.usage && r.usage.cache_read_tokens ? detailNum('cache read', r.usage.cache_read_tokens, {tone: 'var(--accent2)'}) : null,
     r.usage && r.usage.cache_write_tokens ? detailNum('cache write', r.usage.cache_write_tokens, {tone: 'var(--accent2)'}) : null,
     detailTextRow('cache hit', cacheHit, {tone: 'var(--accent2)'}),
-  ], {key: 'tokens'}));
+    detailNum('generated', r.gen_tokens, {tone: 'var(--cyan)'}),
+  ], {key: 'tokens', group: 'usage'}));
 
   S.push(detailSection('Performance', [
     detailTextRow('ttft', fmtTTFT(r.ttft_ms)),
     detailTextRow('tps', r.gen_tps ? r.gen_tps.toFixed(1) + ' tok/s' : ''),
+    detailStampRow('final attempt', r.final_attempt_at),
     detailStampRow('first token', r.first_token_at),
     detailStampRow('last token', r.last_token_at),
     detailStampRow('first thinking', r.first_reasoning_at),
@@ -224,13 +237,13 @@ function formatDetail(r) {
     detailMsRow('upstream connect', r.upstream_connect_ms),
     detailMsRow('upstream tls', r.upstream_tls_ms),
     detailBoolRow('reused connection', r.upstream_conn_reused),
-  ], {key: 'performance'}));
+  ], {key: 'performance', group: 'usage'}));
 
   if (r.tool_calls || (r.tool_names && r.tool_names.length)) {
     S.push(detailSection('Tools', [
       detailNum('calls', r.tool_calls, {tone: 'var(--cyan)'}),
       detailTextRow('names', (r.tool_names || []).join(', '), {tone: 'var(--cyan)'}),
-    ], {key: 'tools'}));
+    ], {key: 'tools', group: 'usage'}));
   }
 
   // A typed 429 keeps its structured reason here: a rate limit is flow
@@ -247,7 +260,7 @@ function formatDetail(r) {
     limited ? detailTextRow('message', r.error_msg, {copy: true, tone: 'var(--warn)'}) : null,
     detailNum('retries', r.retries, {tone: r.retries ? 'var(--warn)' : ''}),
     detailBoolRow('rate limited', r.rate_limited),
-  ], {key: 'rate-limit'}));
+  ], {key: 'rate-limit', group: 'diagnostics'}));
 
   // Absorbed retry attempts: the upstream errors the client never saw. Show
   // each transparently-retried response (status + provider error detail) in
@@ -283,10 +296,24 @@ function formatDetail(r) {
       // response; the provider request id is the matching key between a
       // provider-side failure report and the exact absorbed attempt.
       if (a.provider_request_id) extras.push(`req ${escapeHtml(a.provider_request_id)}`);
+      if (a.provider_server) extras.push(`server ${escapeHtml(a.provider_server)}`);
+      if (a.provider_model) extras.push(`model ${escapeHtml(a.provider_model)}`);
+      if (a.processing_ms) extras.push(`processed ${a.processing_ms} ms`);
+      if (a.rate_limit_remaining || a.rate_limit_limit) {
+        extras.push(`rate ${a.rate_limit_remaining}/${a.rate_limit_limit}`);
+      }
+      const headerCount = a.response_headers && typeof a.response_headers === 'object'
+        ? Object.keys(a.response_headers).length : 0;
+      if (headerCount) extras.push(`${headerCount} hdr${headerCount === 1 ? '' : 's'}`);
       copyLines.push(`#${pos + 1} ${when} ${a.status_code || 'transport'} ` +
         `${plainParts.length ? plainParts.join(' · ') : 'no error body'}` +
         `${a.retry_after_ms ? ' · retry-after ' + fmtDur(a.retry_after_ms) : ''}` +
-        `${a.provider_request_id ? ' · req ' + a.provider_request_id : ''}`);
+        `${a.provider_request_id ? ' · req ' + a.provider_request_id : ''}` +
+        `${a.provider_server ? ' · server ' + a.provider_server : ''}` +
+        `${a.provider_model ? ' · model ' + a.provider_model : ''}` +
+        `${a.processing_ms ? ' · processed ' + a.processing_ms + ' ms' : ''}` +
+        `${a.rate_limit_remaining || a.rate_limit_limit ? ' · rate ' + a.rate_limit_remaining + '/' + a.rate_limit_limit : ''}` +
+        `${headerCount ? ' · ' + headerCount + ' headers' : ''}`);
       // Each attempt belongs to this same request id; data-attempt names its
       // index, so clicking opens THAT attempt in the drawer (the parent
       // request stays selected and highlighted).
@@ -300,8 +327,22 @@ function formatDetail(r) {
         `<span class="attempt-open" aria-hidden="true">›</span></div>`;
     }).join('');
     S.push(detailSection('Retry attempts (absorbed, transparent to client)', [], {
-      key: 'retries', body: items, copyText: copyLines.join('\n'), navLabel: 'Retries',
+      key: 'retries', body: items, copyText: copyLines.join('\n'), group: 'diagnostics',
     }));
+  }
+
+  // An in-band entry is not a retry: its upstream status arrived after the
+  // client's 200 was already committed. Keep that hidden response visible.
+  const inBand = (r.attempts || []).find(a => a && a.in_band);
+  if (inBand) {
+    S.push(detailSection('In-band upstream response', [
+      detailHtmlRow('status', attemptPill(inBand),
+        inBand.status_code ? String(inBand.status_code) : 'transport'),
+      detailStampRow('when', inBand.at),
+      inBand.error_type ? detailTextRow('type', inBand.error_type, {tone: 'var(--warn)'}) : null,
+      inBand.error_code ? detailTextRow('code', inBand.error_code) : null,
+      inBand.error_msg ? detailTextRow('message', inBand.error_msg, {tone: 'var(--warn)'}) : null,
+    ], {key: 'in-band', group: 'diagnostics'}));
   }
 
   const headerRows = detailHeaderRows(r.response_headers);
@@ -310,7 +351,7 @@ function formatDetail(r) {
   // map alone cannot show the response was compressed on the wire.
   const gzipRow = detailBoolRow('upstream gzip', r.upstream_gzip);
   if (headerRows.length || gzipRow) {
-    S.push(detailSection('Response headers', [gzipRow, ...headerRows], {key: 'headers'}));
+    S.push(detailSection('Response headers', [gzipRow, ...headerRows], {key: 'headers', group: 'diagnostics'}));
   }
 
   if (r.debug) S.push(debugSection(r.id));
@@ -341,19 +382,19 @@ function formatAttemptDetail(r, i) {
     a.error_code ? detailTextRow('code', a.error_code, {tone: 'var(--err)'}) : null,
     a.error_msg ? detailTextRow('message', a.error_msg, {tone: 'var(--err)'}) : null,
     detailDurRow('retry-after', a.retry_after_ms, {tone: 'var(--warn)'}),
-  ], {key: 'attempt'}));
+  ], {key: 'attempt', group: 'request'}));
   S.push(detailSection('Provider', [
     detailTextRow('request id', a.provider_request_id, {copy: true}),
     detailTextRow('server', a.provider_server, {copy: true}),
     detailTextRow('model (upstream)', a.provider_model, {copy: true}),
     detailMsRow('processing', a.processing_ms),
-  ], {key: 'attempt-provider'}));
+  ], {key: 'attempt-provider', group: 'request'}));
   S.push(detailSection('Rate limit', [
     detailNum('remaining', a.rate_limit_remaining),
     detailNum('limit', a.rate_limit_limit),
-  ], {key: 'attempt-rate-limit'}));
+  ], {key: 'attempt-rate-limit', group: 'diagnostics'}));
   const headerRows = detailHeaderRows(a.response_headers);
-  if (headerRows.length) S.push(detailSection('Response headers', headerRows, {key: 'attempt-headers'}));
+  if (headerRows.length) S.push(detailSection('Response headers', headerRows, {key: 'attempt-headers', group: 'diagnostics'}));
   return S.filter(Boolean).join('');
 }
 
@@ -432,6 +473,7 @@ function closeDrawer() {
   document.documentElement.style.removeProperty('--drawer-gutter');
   detailCollapsed.clear();
   detailCodeState.clear();
+  drawerGroup = 'request';
   _debugPendingFocus = null;
   _debugFillToken++;
   // Release the previous request's rendered detail and debug capture: the
@@ -496,7 +538,7 @@ function renderDrawer() {
     $('drawer-title').innerHTML = `<span class="d-title-text" title="${escapeHtml(base)}">${escapeHtml(base)}</span>`;
     body.innerHTML = formatDetail(r);
   }
-  detailWireNav();
+  detailWireGroups();
   body.scrollTop = scroll;
   if (focusToken && !focusInDebug) restoreFocus(focusToken);
   _debugPendingFocus = focusInDebug ? focusToken : null;
@@ -528,8 +570,6 @@ function openAttemptLink(el) {
   else openDrawer(el.dataset.openReq);
 }
 $('drawer-body').addEventListener('click', e => {
-  const jump = e.target.closest('[data-jump]');
-  if (jump) { e.preventDefault(); detailJump(jump.dataset.jump); return; }
   const el = e.target.closest('.attempt-link[data-open-req]');
   if (el) openAttemptLink(el);
 });

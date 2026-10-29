@@ -25,6 +25,7 @@ function debugSection(id) {
   return detailSection('Debug', [], {
     key: 'debug',
     id: 'drawer-debug',
+    group: 'diagnostics',
     copy: false,
     headExtra: debugSectionActions(id),
     body: `<div class="preview-box">loading capture…</div>`,
@@ -74,27 +75,50 @@ function fillDrawerDebug(id) {
       const outcome = d.outcome || {};
       const req = d.request || {};
       const resp = d.response || {};
+      const usage = d.usage || {};
       const bits = [];
       bits.push(detailSection('Identity', [
         detailTextRow('session', d.debug_session_id, {copy: true}),
+        detailTextRow('schema', d.schema),
+        detailTextRow('captured', d.captured_at),
+        detailTextRow('expires', d.expires_at),
         detailTextRow('client', ident.client),
         detailTextRow('provider', ident.provider),
         detailTextRow('model', ident.model, {copy: true}),
+        detailTextRow('conversation', ident.conversation_id, {copy: true}),
+        detailTextRow('key hash', ident.key_hash, {copy: true}),
+        detailTextRow('method', ident.method),
         detailTextRow('path', ident.path, {copy: true}),
+        detailTextRow('format', ident.format),
         detailTextRow('stream', ident.stream ? 'yes' : 'no'),
-        detailTextRow('expires', d.expires_at),
       ], {key: 'dbg-identity'}));
       bits.push(detailSection('Timing', [
-        detailTextRow('start', timing.start),
-        detailTextRow('duration', timing.duration_ms != null ? fmtDur(timing.duration_ms) : ''),
+        detailStampRow('start', timing.start),
+        detailStampRow('end', timing.end),
+        detailDurRow('duration', timing.duration_ms),
         detailTextRow('ttft', fmtTTFT(timing.ttft_ms)),
-        detailTextRow('queue wait', timing.queue_wait_ms ? fmtDur(timing.queue_wait_ms) : ''),
+        detailDurRow('queue wait', timing.queue_wait_ms),
+        timing.first_answer_ms ? detailDurRow('first answer', timing.first_answer_ms) : null,
       ], {key: 'dbg-timing'}));
       bits.push(detailSection('Request', [
         detailTextRow('url', req.url, {copy: true}),
-        detailTextRow('status', outcome.status_code != null ? String(outcome.status_code) : ''),
+        detailNum('status', outcome.status_code),
         detailTextRow('finish', outcome.finish_reason),
+        outcome.error_type ? detailTextRow('error type', outcome.error_type, {tone: 'var(--warn)'}) : null,
+        outcome.error_code ? detailTextRow('error code', outcome.error_code, {tone: 'var(--warn)'}) : null,
+        outcome.error_msg ? detailTextRow('error message', outcome.error_msg, {tone: 'var(--warn)'}) : null,
+        detailBoolRow('client disconnected', outcome.client_disconnected),
+        detailNum('attempts', Array.isArray(d.attempts) ? d.attempts.length : null),
       ], {key: 'dbg-request'}));
+      bits.push(detailSection('Usage', [
+        detailNum('input', usage.input_tokens),
+        detailNum('output', usage.output_tokens),
+        detailNum('total', usage.total_tokens),
+        detailNum('reasoning', usage.reasoning_tokens),
+        detailNum('cache read', usage.cache_read_tokens),
+        detailNum('cache write', usage.cache_write_tokens),
+        d.cost ? detailTextRow('cost', fmtMoney(d.cost), {tone: 'var(--warn)'}) : null,
+      ], {key: 'dbg-usage'}));
       if (req.body && req.body.raw) {
         bits.push(detailCodeSection('Request body' + (req.body.truncated ? ' (truncated)' : ''), req.body.raw,
           {key: 'dbg-req-body', focus: 'dbg-req-body'}));

@@ -533,7 +533,8 @@ cached.
 Vanilla modules under [static/js](../internal/web/static/js) have distinct owners:
 `core` formatters/shared state, `feedback` the one clipboard and toast path,
 `entities` identities/record labels, `explorer` routing/cards, `chart` uPlot
-plans, `log` window/drawer, `log_detail` detail rows/cards/long-text surfaces,
+plans, `log` window/drawer, `log_detail` detail rows, classified group tabs,
+cards and long-text surfaces,
 `chrome` operator shell, `theme` the surface/palette registry and preview tray,
 `settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
 state. `theme.js` owns

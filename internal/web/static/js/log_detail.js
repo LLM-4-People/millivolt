@@ -144,7 +144,8 @@ function detailSection(title, rows, opts = {}) {
   const copy = opts.copy === false || !payload ? '' : copyButton(payload, title, 'copy-sec:' + key);
   const bodyId = id + '-body';
   const toggle = `<button type="button" class="sec-toggle" data-section-toggle data-section-key="${escapeHtml(key)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="${escapeHtml(bodyId)}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" data-focus-key="sec:${escapeHtml(key)}">${SECTION_CHEV}</button>`;
-  return `<section class="detail-section${collapsed ? ' collapsed' : ''}" id="${escapeHtml(id)}" data-title="${escapeHtml(title)}"${opts.navLabel ? ` data-nav="${escapeHtml(opts.navLabel)}"` : ''}>` +
+  const group = opts.group || 'request';
+  return `<section class="detail-section${collapsed ? ' collapsed' : ''}" id="${escapeHtml(id)}" data-title="${escapeHtml(title)}" data-group="${escapeHtml(group)}">` +
     `<div class="detail-sec-hd" title="${escapeHtml(title)}"><h4>${escapeHtml(title)}</h4><div class="detail-sec-actions">` +
     `${opts.headExtra || ''}${copy}${toggle}</div></div>` +
     `<div class="detail-sec-body" id="${escapeHtml(bodyId)}">${body}</div></section>`;
@@ -205,29 +206,90 @@ function detailCodeSection(title, text, opts = {}) {
   if (!raw) return '';
   return detailSection(title, [], {
     key: opts.key || detailSlug(title),
+    group: opts.group || 'content',
     copy: false,
     body: detailCodeBlock(raw, {label: title, truncated: opts.truncated, focus: opts.focus || detailSlug(title), collapsed: opts.collapsed}),
   });
 }
 
-// detailWireNav builds the sticky section jump strip from the sections that
-// actually rendered. It runs after the drawer body commits, so conditional
-// sections (Prompt, retries, Debug) never leave a dead chip behind.
-function detailWireNav() {
+// DETAIL_GROUPS is the inspector's one classification. Each card names its
+// group, and the sticky strip exposes only groups that actually rendered.
+const DETAIL_GROUPS = [
+  {key: 'request', label: 'Request'},
+  {key: 'content', label: 'Content'},
+  {key: 'usage', label: 'Usage'},
+  {key: 'diagnostics', label: 'Diagnostics'},
+];
+
+// drawerGroup is the active classification for the open drawer. It survives
+// live repaints and request navigation, and resets when the drawer closes.
+let drawerGroup = 'request';
+
+// detailWireGroups wraps the rendered cards into their classified panels and
+// builds the sticky tab strip. It runs after the body commits, so a conditional
+// card (Prompt, retries, Debug) never leaves a dead entry behind.
+function detailWireGroups() {
   const body = $('drawer-body');
   if (!body) return;
-  const old = body.querySelector('.d-jump');
-  if (old) old.remove();
-  const sections = [...body.querySelectorAll('.detail-section[data-title]')];
-  if (sections.length < 3) return;
+  // Only the drawer's own cards are classified; the Debug capture's nested
+  // identity/timing/body cards stay inside the Debug card.
+  const sections = [...body.querySelectorAll('.detail-section[data-title]')]
+    .filter(sec => sec.parentElement === body);
+  if (!sections.length) return;
+  const byGroup = new Map();
+  sections.forEach(sec => {
+    const key = sec.dataset.group || 'request';
+    if (!byGroup.has(key)) byGroup.set(key, []);
+    byGroup.get(key).push(sec);
+  });
+  const ordered = DETAIL_GROUPS.filter(g => byGroup.has(g.key));
+  byGroup.forEach((_, key) => {
+    if (!DETAIL_GROUPS.some(g => g.key === key)) ordered.push({key, label: key});
+  });
+  if (!byGroup.has(drawerGroup)) drawerGroup = ordered[0].key;
+  if (ordered.length < 2) return;
   const nav = document.createElement('nav');
-  nav.className = 'd-jump';
-  nav.setAttribute('aria-label', 'detail sections');
-  nav.innerHTML = sections.map(sec =>
-    `<button type="button" class="d-jump-btn" data-jump="${escapeHtml(sec.id)}" data-focus-key="jump:${escapeHtml(sec.id)}">${escapeHtml(sec.dataset.nav || sec.dataset.title || '')}</button>`
-  ).join('');
-  const first = sections[0];
-  body.insertBefore(nav, first);
+  nav.className = 'd-tabs';
+  nav.setAttribute('role', 'tablist');
+  nav.setAttribute('aria-label', 'detail groups');
+  nav.innerHTML = ordered.map(g => {
+    const active = g.key === drawerGroup;
+    return `<button type="button" class="d-tab" id="d-tab-${escapeHtml(g.key)}" role="tab" aria-selected="${active ? 'true' : 'false'}" aria-controls="d-group-${escapeHtml(g.key)}" tabindex="${active ? '0' : '-1'}" data-group-tab="${escapeHtml(g.key)}" data-focus-key="tab:${escapeHtml(g.key)}">` +
+      `${escapeHtml(g.label)}<span class="d-tab-n" aria-hidden="true">${byGroup.get(g.key).length}</span></button>`;
+  }).join('');
+  body.insertBefore(nav, sections[0]);
+  const panels = document.createDocumentFragment();
+  ordered.forEach(g => {
+    const panel = document.createElement('div');
+    panel.className = 'd-group';
+    panel.id = 'd-group-' + g.key;
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', 'd-tab-' + g.key);
+    panel.hidden = g.key !== drawerGroup;
+    byGroup.get(g.key).forEach(sec => panel.appendChild(sec));
+    panels.appendChild(panel);
+  });
+  nav.after(panels);
+}
+
+// detailSelectGroup reveals one classified panel. A pointer or keyboard
+// switch focuses the tab and leaves the reading position where it was, so a
+// sticky strip swaps cards in place instead of jumping the drawer.
+function detailSelectGroup(key, moveFocus) {
+  const body = $('drawer-body');
+  if (!body) return;
+  const tabs = [...body.querySelectorAll('[data-group-tab]')];
+  const tab = tabs.find(t => t.dataset.groupTab === key);
+  if (!tab) return;
+  drawerGroup = key;
+  tabs.forEach(t => {
+    const active = t === tab;
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+    t.tabIndex = active ? 0 : -1;
+    const panel = document.getElementById(t.getAttribute('aria-controls'));
+    if (panel) panel.hidden = !active;
+  });
+  if (moveFocus) tab.focus();
 }
 
 function detailToggleSection(btn) {
@@ -242,19 +304,9 @@ function detailToggleSection(btn) {
   if (collapsed) detailCollapsed.add(key); else detailCollapsed.delete(key);
 }
 
-function detailJump(id) {
-  const body = $('drawer-body');
-  const sec = id ? document.getElementById(id) : null;
-  if (!body || !sec || !body.contains(sec)) return;
-  if (sec.classList.contains('collapsed')) {
-    const toggle = sec.querySelector('[data-section-toggle]');
-    if (toggle) detailToggleSection(toggle);
-  }
-  if (typeof sec.scrollIntoView === 'function') sec.scrollIntoView({block: 'start'});
-  else if (body) body.scrollTop = sec.offsetTop - 8;
-}
-
 document.addEventListener('click', e => {
+  const tab = e.target.closest('[data-group-tab]');
+  if (tab) { detailSelectGroup(tab.dataset.groupTab, true); return; }
   const toggle = e.target.closest('[data-section-toggle]');
   if (toggle) { detailToggleSection(toggle); return; }
   const codeToggle = e.target.closest('[data-code-toggle]');
@@ -281,4 +333,24 @@ document.addEventListener('click', e => {
     const key = block.dataset.codeFocus;
     detailCodeState.set(key, {...detailCodeState.get(key), nowrap: !wrapped});
   }
+});
+
+// WAI-ARIA tabs: the group strip is one tab stop, and Left/Right/Home/End move
+// selection and focus without leaving the strip.
+document.addEventListener('keydown', e => {
+  const tab = e.target && typeof e.target.closest === 'function'
+    ? e.target.closest('[data-group-tab]') : null;
+  if (!tab) return;
+  const body = $('drawer-body');
+  if (!body) return;
+  const tabs = [...body.querySelectorAll('[data-group-tab]')];
+  const i = tabs.indexOf(tab);
+  let next = null;
+  if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+  else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+  else if (e.key === 'Home') next = tabs[0];
+  else if (e.key === 'End') next = tabs[tabs.length - 1];
+  if (!next) return;
+  e.preventDefault();
+  detailSelectGroup(next.dataset.groupTab, true);
 });

@@ -392,9 +392,13 @@ module.exports = async function w16Mirrors(H) {
       check('the drawer renders the capture identity and timing rows',
         await settleUntil(() => !!dbgRow('session') && dbgRow('session').querySelector('.v').textContent === 'first' &&
           !!dbgRow('client') && dbgRow('client').querySelector('.v').textContent === 'c' &&
+          !!dbgRow('conversation') && dbgRow('conversation').querySelector('.v').textContent === 'cv' &&
+          !!dbgRow('captured') && dbgRow('captured').querySelector('.v').textContent.includes('2026-09-14') &&
           !!dbgRow('stream') && dbgRow('stream').querySelector('.v').textContent === 'yes' &&
           !!dbgRow('duration') && dbgRow('duration').querySelector('.v').textContent === '1s' &&
-          !!dbgRow('queue wait') && dbgRow('queue wait').querySelector('.v').textContent === '10ms'));
+          !!dbgRow('queue wait') && dbgRow('queue wait').querySelector('.v').textContent === '10ms' &&
+          !!dbgRow('first answer') && dbgRow('first answer').querySelector('.v').textContent === '300ms' &&
+          !!dbgRow('input') && dbgRow('input').querySelector('.v').textContent === '10'));
       const headerSection = [...dbg.querySelectorAll('.detail-section')]
         .find(s => s.querySelector('h4') && s.querySelector('h4').textContent === 'Request headers');
       const authRow = headerSection && [...headerSection.querySelectorAll('.detail-kv')]
@@ -467,6 +471,7 @@ module.exports = async function w16Mirrors(H) {
         check('a failed capture download surfaces the designed failure message in the section',
           sd.getElementById('drawer-debug-status').textContent === 'debug capture download failed');
       }
+      sd.querySelector('[data-group-tab="diagnostics"]')?.click();
       const liveDbg = sd.getElementById('drawer-debug');
       const sessionRow = [...liveDbg.querySelectorAll('.detail-kv')]
         .find(r => r.querySelector('.k')?.textContent === 'session');

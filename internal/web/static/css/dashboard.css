@@ -1740,18 +1740,26 @@
   }
 
   /* Sticky section jump strip: the inspector's own miniature rail. */
-  .d-jump {
+  /* Classified card groups: one sticky tab strip, then only the selected
+     group's cards. The tab counts come from the rendered sections, so a
+     conditional card never leaves a stale category behind. */
+  .d-tabs {
     position: sticky; top: -14px; z-index: 3; display: flex; gap: 2px;
-    margin: 0 -4px 10px; padding: 6px 4px; overflow-x: auto; scrollbar-width: none;
+    margin: 0 -4px 10px; padding: 0 4px; overflow-x: auto; scrollbar-width: none;
     background: var(--panel); border-bottom: 1px solid var(--border);
   }
-  .d-jump::-webkit-scrollbar { display: none; }
-  .d-jump-btn {
-    flex: none; background: transparent; border: 1px solid transparent; color: var(--muted);
-    font: 10px/1.4 var(--mono); padding: 5px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+  .d-tabs::-webkit-scrollbar { display: none; }
+  .d-tab {
+    flex: none; background: transparent; border: 0; border-bottom: 2px solid transparent;
+    color: var(--muted); font: 10px/1.4 var(--mono); padding: 8px 8px 7px;
+    cursor: pointer; white-space: nowrap;
   }
-  .d-jump-btn:hover { color: var(--text); border-color: var(--border); background: var(--panel2); }
-  .d-jump-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .d-tab:hover { color: var(--text); }
+  .d-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .d-tab-n { margin-left: 4px; color: var(--muted); font-size: 9px; }
+  .d-tab[aria-selected="true"] .d-tab-n { color: var(--accent); }
+  .d-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .d-group[hidden] { display: none; }
 
   .exp-row { cursor: pointer; }
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
@@ -1994,8 +2002,8 @@
     .sec-toggle { width: 32px; height: 32px; }
     .detail-code-bar { padding: 3px 5px 3px 8px; }
     .mini-btn { min-height: 30px; padding: 3px 8px; }
-    .d-jump { top: -10px; margin: 0 -2px 8px; }
-    .d-jump-btn { min-height: 32px; }
+    .d-tabs { top: -10px; margin: 0 -2px 8px; }
+    .d-tab { min-height: 36px; padding: 8px 6px; font-size: 9.5px; }
     .copy-btn { opacity: .65; }
     .attempt-link { padding: 7px 4px; margin: 0 -4px; }
     .toast { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }

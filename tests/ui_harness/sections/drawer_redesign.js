@@ -14,9 +14,13 @@ module.exports = async function drawerRedesign(H) {
     model: 'family/model-2026-10-29', path: longPath, method: 'POST',
     duration_ms: 3210, ttft_ms: 640, request_bytes: 2048, response_bytes: 4096,
     req_max_tokens: 4096, req_seed: 1234567890, req_tools_count: 1234,
+    tool_calls: 2, tool_names: ['read_file', 'bash'],
+    conversation_id: 'cv-main', parent_conversation_id: 'cv-parent', time_bucket: 'work',
     usage: {input_tokens: 1200, output_tokens: 480, total_tokens: 1680,
       reasoning_tokens: 1234, cache_read_tokens: 2048, cache_write_tokens: 1024},
-    answer_tokens: 1234, chars_system: 1820, chars_user: 9420,
+    answer_tokens: 1234, gen_tokens: 1500, had_answer_content: true,
+    final_attempt_at: new Date(base + 200).toISOString(),
+    chars_system: 1820, chars_user: 9420,
     upstream_gzip: true, key_hash: 'khash12345678', client_ip: '127.0.0.1',
     user_agent: longAgent,
     error_type: 'upstream_unreachable', error_code: 'dial_timeout',
@@ -68,6 +72,11 @@ module.exports = async function drawerRedesign(H) {
     !liveHeroRoot.querySelector('.d-stats') &&
     ![...liveHeroRoot.querySelectorAll('.k')].some(k => k.textContent === 'duration'));
 
+  const pausedDetail = w.formatDetail({...mkRec('paused-live'), live: true, paused: true, throttled: true});
+  check('live pause and throttle flags are explicit rows',
+    pausedDetail.includes('<span class="k">paused</span><span class="v">true</span>') &&
+    pausedDetail.includes('<span class="k">throttled</span><span class="v">true</span>'));
+
   const cleanDetail = w.formatDetail({...mkRec('clean-200'), status_code: 200});
   const limitedDetail = w.formatDetail({...mkRec('limited-429'), status_code: 429});
   const inBandDetail = w.formatDetail({...mkRec('inband-200'), status_code: 200,
@@ -99,6 +108,14 @@ module.exports = async function drawerRedesign(H) {
     typed499.includes('class="d-alert"') &&
     typed499.includes('upstream error') &&
     !typed499.includes('request failed'));
+
+  const hiddenUpstreamDetail = w.formatDetail({...mkRec('in-band-entry'), attempts: [
+    {in_band: true, status_code: 429, error_type: 'rate_limit', error_msg: 'quota exceeded',
+      at: new Date(base + 50).toISOString()},
+  ]});
+  check('an in-band upstream response is disclosed in diagnostics',
+    hiddenUpstreamDetail.includes('<h4>In-band upstream response</h4>') &&
+    hiddenUpstreamDetail.includes('rate_limit') && hiddenUpstreamDetail.includes('quota exceeded'));
 
   const zeroDuration = w.formatDetail({...mkRec('zero-duration'), duration_ms: 0});
   check('a finalized zero duration stays in the request card',
@@ -153,6 +170,21 @@ module.exports = async function drawerRedesign(H) {
     row('cache write')?.querySelector('.v').textContent === '1,024' &&
     row('prompt size')?.querySelector('.v').textContent.includes('sys 1,820'));
 
+  check('correlation, bucket, generation and attempt-anchor facts stay visible',
+    row('conversation')?.querySelector('.v').textContent === 'cv-main' &&
+    row('conversation')?.querySelector('.copy-btn').dataset.copy === 'cv-main' &&
+    row('parent')?.querySelector('.v').textContent === 'cv-parent' &&
+    row('time bucket')?.querySelector('.v').textContent === 'work 08–16' &&
+    row('time bucket')?.querySelector('.copy-btn').dataset.copy === 'work' &&
+    row('generated')?.querySelector('.v').textContent === '1,500' &&
+    row('answer content')?.querySelector('.v').textContent === 'true' &&
+    row('final attempt')?.querySelector('.copy-btn').dataset.copy === rec.final_attempt_at);
+
+  const debugSessionDetail = w.formatDetail({id: 'debug-session-row', debug_session_id: 'dbg-session'});
+  check('the record debug session is visible even before the capture loads',
+    debugSessionDetail.includes('<span class="k">debug session</span>') &&
+    debugSessionDetail.includes('dbg-session'));
+
   check('the long prompt is a collapsed code surface with wrap and expand controls',
     !!section('Prompt')?.querySelector('.detail-code.collapsed') &&
     !!section('Prompt')?.querySelector('[data-code-wrap]') &&
@@ -194,18 +226,39 @@ module.exports = async function drawerRedesign(H) {
   check('expanding restores the section body',
     !section('Parameters').classList.contains('collapsed'));
 
-  const nav = body.querySelector('.d-jump');
-  const sectionIds = [...body.querySelectorAll('.detail-section[data-title]')].map(s => s.id);
-  check('the sticky jump strip mirrors the rendered sections',
-    !!nav && nav.querySelectorAll('.d-jump-btn').length === sectionIds.length &&
-    [...nav.querySelectorAll('.d-jump-btn')].every(btn => sectionIds.includes(btn.dataset.jump)));
-  const jumpTarget = body.querySelector('.detail-section[data-title="Request"]');
-  jumpTarget.querySelector('[data-section-toggle]').click();
-  nav.querySelector(`[data-jump="${jumpTarget.id}"]`).click();
-  check('a jump chip expands its collapsed target section',
-    d.getElementById('drawer').classList.contains('open') &&
-    !jumpTarget.classList.contains('collapsed') &&
-    jumpTarget.querySelector('[data-section-toggle]').getAttribute('aria-expanded') === 'true');
+  const tab = key => body.querySelector(`[data-group-tab="${key}"]`);
+  const panel = key => d.getElementById('d-group-' + key);
+  const groupSections = key => panel(key)?.querySelectorAll('.detail-section').length || 0;
+  check('the top strip classifies cards into four groups',
+    [...body.querySelectorAll('[data-group-tab]')].map(t => t.dataset.groupTab).join(',') ===
+      'request,content,usage,diagnostics' &&
+    tab('request')?.getAttribute('aria-selected') === 'true' &&
+    !panel('request').hidden && panel('content').hidden &&
+    panel('usage').hidden && panel('diagnostics').hidden);
+  check('tab counts mirror every rendered card',
+    groupSections('request') + groupSections('content') +
+      groupSections('usage') + groupSections('diagnostics') ===
+      body.querySelectorAll('.detail-section').length &&
+    tab('request').querySelector('.d-tab-n').textContent === String(groupSections('request')));
+
+  tab('usage').click();
+  check('selecting a group reveals only its cards',
+    tab('usage').getAttribute('aria-selected') === 'true' &&
+    !panel('usage').hidden && panel('request').hidden &&
+    panel('usage').querySelectorAll('.detail-section').length === 3);
+  tab('usage').focus();
+  tab('usage').dispatchEvent(new w.KeyboardEvent('keydown', {key: 'ArrowRight', bubbles: true}));
+  check('arrow keys move between classified groups',
+    tab('diagnostics').getAttribute('aria-selected') === 'true' &&
+    !panel('diagnostics').hidden && d.activeElement === tab('diagnostics'));
+  w.renderDrawer();
+  check('the active classification survives a live repaint',
+    body.querySelector('[data-group-tab="diagnostics"]').getAttribute('aria-selected') === 'true' &&
+    !d.getElementById('d-group-diagnostics').hidden &&
+    d.activeElement?.dataset.focusKey === 'tab:diagnostics');
+  body.querySelector('[data-group-tab="request"]').click();
+  check('switching back restores the request cards',
+    !panel('request').hidden && panel('diagnostics').hidden);
 
   // The one clipboard path: rows, sections, the error block and the whole
   // record all copy through copyText and report the polite toast.
@@ -313,7 +366,8 @@ module.exports = async function drawerRedesign(H) {
     !section('Parameters') &&
     body.innerHTML === '' &&
     w.eval('detailCollapsed.size') === 0 &&
-    w.eval('detailCodeState.size') === 0);
+    w.eval('detailCodeState.size') === 0 &&
+    w.eval('drawerGroup') === 'request');
 
   const oldInnerWidth = w.innerWidth;
   Object.defineProperty(w, 'innerWidth', {configurable: true, value: 1000});

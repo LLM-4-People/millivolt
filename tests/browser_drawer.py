@@ -62,24 +62,23 @@ async def drawer_checks(page, results):
         const rect = drawer.getBoundingClientRect();
         const path = document.querySelector('.d-path');
         const pathRect = path.getBoundingClientRect();
-        const code = document.querySelector('#d-sec-prompt .detail-code');
-        const pre = code.querySelector('.preview-box');
         const copy = document.querySelector('#d-sec-request .detail-kv .copy-btn');
         return {
           width: rect.width, bodyScroll: body.scrollWidth, bodyClient: body.clientWidth,
           pathHeight: pathRect.height, pathLine: parseFloat(getComputedStyle(path).lineHeight),
-          promptCollapsed: code.classList.contains('collapsed'),
-          promptHeight: pre.getBoundingClientRect().height,
           copyOpacity: copy ? getComputedStyle(copy).opacity : null,
           sections: document.querySelectorAll('#drawer-body .detail-section').length,
+          tabs: [...document.querySelectorAll('[data-group-tab]')].map(t => t.dataset.groupTab),
+          activeGroup: document.querySelector('[data-group-tab][aria-selected="true"]')?.dataset.groupTab,
           hero: !!document.querySelector('.d-hero'),
           alert: document.querySelector('.d-alert')?.textContent || '',
         };
       }""")
     require(desktop['width'] <= 640.5 and desktop['hero'], desktop)
+    require(desktop['tabs'] == ['request', 'content', 'usage', 'diagnostics'] and
+            desktop['activeGroup'] == 'request', desktop)
     require(desktop['bodyScroll'] <= desktop['bodyClient'] + 1, desktop)
     require(desktop['pathHeight'] > desktop['pathLine'] * 1.5, desktop)
-    require(desktop['promptCollapsed'] and desktop['promptHeight'] <= 170, desktop)
     require(desktop['copyOpacity'] == '0', desktop)
     require('request failed' in desktop['alert'] and 'dial_timeout' in desktop['alert'], desktop)
 
@@ -117,25 +116,31 @@ async def drawer_checks(page, results):
     require('id: drawer-browser-fixture' in copied['section'], copied)
     require(copied['toast'] == 'copied Request', copied)
 
+    # The prompt lives under Content; switch the classified strip before
+    # measuring it.
+    await page.evaluate("""() => document.querySelector('[data-group-tab="content"]').click()""")
     # Expand the prompt and switch off wrapping: the blocked long line must
     # become horizontally scrollable rather than widen the drawer.
     expanded = await page.evaluate("""() => {
         const code = document.querySelector('#d-sec-prompt .detail-code');
-        code.querySelector('[data-code-toggle]').click();
         const pre = code.querySelector('.preview-box');
+        const collapsedHeight = pre.getBoundingClientRect().height;
+        code.querySelector('[data-code-toggle]').click();
         const height = pre.getBoundingClientRect().height;
         code.querySelector('[data-code-wrap]').click();
         const nowrap = code.classList.contains('nowrap');
-        return {height, nowrap, scrollWidth: pre.scrollWidth, clientWidth: pre.clientWidth,
+        return {collapsedHeight, height, nowrap,
+          scrollWidth: pre.scrollWidth, clientWidth: pre.clientWidth,
           bodyScroll: document.getElementById('drawer-body').scrollWidth,
           bodyClient: document.getElementById('drawer-body').clientWidth};
       }""")
-    require(expanded['height'] > 170 and expanded['nowrap'], expanded)
+    require(expanded['collapsedHeight'] <= 170 and expanded['height'] > 170 and expanded['nowrap'], expanded)
     require(expanded['scrollWidth'] > expanded['clientWidth'], expanded)
     require(expanded['bodyScroll'] <= expanded['bodyClient'] + 1, expanded)
 
     # Mobile: the inspector owns the viewport, rows stack and the close/copy
-    # targets stay reachable.
+    # targets stay reachable. Return to Request for the row-geometry check.
+    await page.evaluate("""() => document.querySelector('[data-group-tab="request"]').click()""")
     await page.set_viewport_size({'width': 390, 'height': 844})
     await page.wait_for_timeout(120)
     mobile = await page.evaluate("""() => {
@@ -152,9 +157,13 @@ async def drawer_checks(page, results):
           keyTop: key.top, keyHeight: key.height, valueTop: value.top,
           copy: copyRect ? {w: copyRect.width, h: copyRect.height} : null,
           close: {w: close.width, h: close.height, label: closeBtn.getAttribute('aria-label')},
+          tabs: [...document.querySelectorAll('[data-group-tab]')].map(t => t.dataset.groupTab),
+          activeGroup: document.querySelector('[data-group-tab][aria-selected="true"]')?.dataset.groupTab,
           bodyScroll: body.scrollWidth, bodyClient: body.clientWidth};
       }""")
     require(abs(mobile['width'] - mobile['viewport']) <= 1, mobile)
+    require(mobile['tabs'] == ['request', 'content', 'usage', 'diagnostics'] and
+            mobile['activeGroup'] == 'request', mobile)
     require(mobile['valueTop'] >= mobile['keyTop'] + mobile['keyHeight'] - 1, mobile)
     require(mobile['copy'] and mobile['copy']['w'] >= 32 and mobile['copy']['h'] >= 32, mobile)
     require(mobile['close']['w'] >= 38 and mobile['close']['h'] >= 38 and

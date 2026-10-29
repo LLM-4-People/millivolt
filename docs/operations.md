@@ -1195,7 +1195,9 @@ capture with `download=1` and saves a gzip artifact named
 the capture does not carry a readable `captured_at`. Captured request and
 response bodies render through the same bounded code surface as record
 previews, with wrap, copy and expand controls; the Download button remains the
-whole-capture path.
+whole-capture path. The capture cards also surface its schema and captured-at
+time, conversation and key correlation, first-answer timing, usage, cost and
+attempt count.
 
 `capture_body_preview` is a different opt-in feature: it retains short prompt/
 response previews in the normal record without starting a Debug session. The
@@ -1323,16 +1325,22 @@ Retry disclosure opens absorbed attempts under the original request, not another
 inference record. Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
-The inspector presents available facts in cards: request identity/status/times;
-client/runtime and provider metadata; captured model and parameters; conversation
-turns and content-size counts; input/output/cache/reasoning tokens; performance,
-cost and finish state; tool names/calls; queue/rate-limit information; retries
-and retained headers. A summary readout carries the status, route, identity and
-first numbers, and a final upstream failure renders as an error alert above the
-cards. Card headers collapse, and a sticky strip jumps between the rendered
-cards. A typed rate limit is flow control, not an error: its reason, code and
-message stay in the rate-limit card while the alert stays reserved for a final
-failure.
+The inspector presents available facts in four classified groups. Request covers
+identity/status/times, time bucket, wire sizes, client/runtime, provider metadata,
+model and captured parameters. Content covers conversation and parent ids, turn
+and size composition, and prompt/response previews. Usage covers token splits,
+generated tokens, timing, throughput, cost, transport decomposition and tools.
+Diagnostics covers queue/rate limits, retries, in-band upstream responses,
+retained headers and Debug. A summary readout carries the status, route, identity
+and first numbers, and a final upstream failure renders as an error alert above
+the groups. Only the selected group is shown; card headers collapse, and the
+active group and collapse choices survive live updates.
+
+A typed rate limit is flow control, not an error: its reason, code and message
+stay in the rate-limit card while the alert stays reserved for a final failure.
+An in-band upstream response that arrived after a committed success is disclosed
+in Diagnostics rather than counted as a retry. Live pause and throttle state
+appear as explicit rows while a request is in flight.
 
 Copy actions cover the values that matter (identifiers, paths, models, headers,
 error detail and captured bodies), field-list cards and the header's JSON
