@@ -14,13 +14,6 @@ function highlightRow() {
 
 const ALERT_ICON = '<svg class="d-alert-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8 15 14H1L8 1.8Z"/><path d="M8 6v3.6M8 11.7v.1"/></svg>';
 
-// detailNum renders a compact count only when the field was captured. An
-// explicit zero stays a row; an absent value does not fabricate one.
-const detailNum = (key, value, opts) => (value === null || value === undefined) ? null : detailTextRow(key, fmt(value), opts);
-const detailDurRow = (key, value, opts) => (!value || !isFinite(value)) ? null : detailTextRow(key, fmtDur(value), opts);
-const detailMsRow = (key, value) => (value ? detailTextRow(key, value + ' ms') : null);
-const detailStampRow = (key, value, opts) => detailTextRow(key, fmtStamp(value), opts);
-
 function detailStat(label, value, tone) {
   return `<span class="d-stat"><span class="d-stat-k">${escapeHtml(label)}</span>` +
     `<span class="d-stat-v"${tone ? ` style="color:${tone}"` : ''}>${escapeHtml(value)}</span></span>`;
@@ -101,8 +94,8 @@ function formatDetail(r) {
 
   S.push(detailSection('Request', [
     detailTextRow('id', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
-    detailStampRow('started', r.start, {copy: true}),
-    detailStampRow('ended', r.end, {copy: true}),
+    detailStampRow('started', r.start),
+    detailStampRow('ended', r.end),
     detailBytesRow('request bytes', r.request_bytes),
     detailBytesRow('response bytes', r.response_bytes),
   ], {key: 'request'}));
@@ -329,7 +322,7 @@ function formatAttemptDetail(r, i) {
     detailTextRow('request', r.id, {tone: 'var(--muted)', copy: true, copyLabel: 'request id'}),
     detailTextRow('attempt', retryOrdinal(r, i) + ' of ' + retryAttempts(r).length),
     detailHtmlRow('status', attemptPill(a), a.status_code ? String(a.status_code) : 'transport'),
-    detailStampRow('when', a.at, {copy: true}),
+    detailStampRow('when', a.at),
     // Type, code and message are distinct fields - one row each, like the
     // record's Error section. Skip the type text when it merely repeats the
     // transport pill (the retry-list convention).

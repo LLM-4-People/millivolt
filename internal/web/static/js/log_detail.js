@@ -61,6 +61,42 @@ const detailBytesRow = (key, value) => {
     {copy: String(value), copyLabel: key + ' (exact bytes)'});
 };
 
+// detailNum renders an exact captured count with grouping. The compact hero is
+// the only place a captured count is abbreviated; a section card keeps the full
+// value and its exact copy payload.
+const detailNum = (key, value, opts = {}) => (value === null || value === undefined) ? null
+  : detailTextRow(key, fmtFull(value), {
+    copy: String(value), copyLabel: key + ' (exact)', ...opts,
+  });
+
+// detailDurRow displays a compact duration while the hover title and copy
+// payload keep the exact millisecond count.
+function detailDurRow(key, value, opts = {}) {
+  if (!value || !isFinite(value)) return null;
+  return detailHtmlRow(key, vt(fmtDur(value), fmtFull(value) + ' ms'), String(value) + ' ms', {
+    copyLabel: key + ' (exact ms)',
+    ...opts,
+    copy: opts.copy === false ? false : String(value) + ' ms',
+  });
+}
+
+// detailMsRow renders an exact integer millisecond observation.
+const detailMsRow = (key, value) => value
+  ? detailTextRow(key, value + ' ms', {copy: String(value) + ' ms', copyLabel: key + ' (exact ms)'})
+  : null;
+
+// detailStampRow renders local time with milliseconds; the copy payload keeps
+// the captured ISO instant so a correlation never depends on the display zone.
+function detailStampRow(key, value, opts = {}) {
+  const display = fmtStamp(value);
+  if (!display) return null;
+  return detailHtmlRow(key, display, display, {
+    copyLabel: key + ' (ISO 8601)',
+    ...opts,
+    copy: opts.copy === false ? false : String(value),
+  });
+}
+
 function detailRowHTML(row) {
   if (!row || row.v === '') return '';
   const kStyle = row.keyTone ? ` style="color:${row.keyTone}"` : '';
@@ -87,8 +123,10 @@ function detailSection(title, rows, opts = {}) {
   const key = opts.key || detailSlug(title);
   const id = opts.id || ('d-sec-' + key);
   const collapsed = detailCollapsed.has(key);
+  // A string copy payload is the exact fact behind a formatted display (bytes,
+  // milliseconds, ISO instants); copy:true rows already carry exact text.
   const payload = opts.copyText != null ? String(opts.copyText)
-    : visible.map(row => `${row.k}: ${row.text}`).join('\n');
+    : visible.map(row => `${row.k}: ${typeof row.copy === 'string' ? row.copy : row.text}`).join('\n');
   const copy = opts.copy === false || !payload ? '' : copyButton(payload, title, 'copy-sec:' + key);
   const toggle = `<button type="button" class="sec-toggle" data-section-toggle data-section-key="${escapeHtml(key)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" data-focus-key="sec:${escapeHtml(key)}">${SECTION_CHEV}</button>`;
   return `<section class="detail-section${collapsed ? ' collapsed' : ''}" id="${escapeHtml(id)}" data-title="${escapeHtml(title)}"${opts.navLabel ? ` data-nav="${escapeHtml(opts.navLabel)}"` : ''}>` +

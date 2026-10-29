@@ -13,6 +13,7 @@ module.exports = async function drawerRedesign(H) {
     provider: 'provider.example', client: 'client-long/1.2.3',
     model: 'family/model-2026-10-29', path: longPath, method: 'POST',
     duration_ms: 3210, ttft_ms: 640, request_bytes: 2048, response_bytes: 4096,
+    req_max_tokens: 4096, req_seed: 1234567890, req_tools_count: 1234,
     upstream_gzip: true, key_hash: 'khash12345678', client_ip: '127.0.0.1',
     user_agent: longAgent,
     error_type: 'upstream_unreachable', error_code: 'dial_timeout',
@@ -75,6 +76,12 @@ module.exports = async function drawerRedesign(H) {
     row('user-agent')?.querySelector('.v').textContent === longAgent &&
     row('key hash')?.querySelector('.v').textContent.includes('khash'));
 
+  check('section cards keep exact captured counts and their exact copy payloads',
+    row('max_tokens')?.querySelector('.v').textContent === '4,096' &&
+    row('max_tokens')?.querySelector('.copy-btn').dataset.copy === '4096' &&
+    row('seed')?.querySelector('.v').textContent === '1,234,567,890' &&
+    row('tools defined')?.querySelector('.v').textContent === '1,234');
+
   check('the long prompt is a collapsed code surface with wrap and expand controls',
     !!section('Prompt')?.querySelector('.detail-code.collapsed') &&
     !!section('Prompt')?.querySelector('[data-code-wrap]') &&
@@ -134,10 +141,10 @@ module.exports = async function drawerRedesign(H) {
 
   const requestCopy = section('Request')?.querySelector('.detail-sec-actions .copy-btn');
   if (requestCopy) requestCopy.click();
-  await settleUntil(() => copied.includes('request bytes: 2.05 KB'));
-  check('a section copy carries every row as plain key: value text',
-    copied.includes('id: redesign') && copied.includes('request bytes: 2.05 KB') &&
-    copied.includes('response bytes: 4.1 KB'));
+  await settleUntil(() => copied.includes('request bytes: 2048'));
+  check('a section copy carries every row with its exact value',
+    copied.includes('id: redesign') && copied.includes('request bytes: 2048') &&
+    copied.includes('response bytes: 4096') && copied.includes('started: ' + rec.start));
 
   const headerCopy = section('Response headers')?.querySelector('.detail-kv .copy-btn');
   if (headerCopy) headerCopy.click();
