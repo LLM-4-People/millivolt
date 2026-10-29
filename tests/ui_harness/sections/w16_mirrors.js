@@ -392,9 +392,13 @@ module.exports = async function w16Mirrors(H) {
       check('the drawer renders the capture identity and timing rows',
         await settleUntil(() => !!dbgRow('session') && dbgRow('session').querySelector('.v').textContent === 'first' &&
           !!dbgRow('client') && dbgRow('client').querySelector('.v').textContent === 'c' &&
+          !!dbgRow('conversation') && dbgRow('conversation').querySelector('.v').textContent === 'cv' &&
+          !!dbgRow('captured') && dbgRow('captured').querySelector('.v').textContent.includes('2026-09-14') &&
           !!dbgRow('stream') && dbgRow('stream').querySelector('.v').textContent === 'yes' &&
           !!dbgRow('duration') && dbgRow('duration').querySelector('.v').textContent === '1s' &&
-          !!dbgRow('queue wait') && dbgRow('queue wait').querySelector('.v').textContent === '10ms'));
+          !!dbgRow('queue wait') && dbgRow('queue wait').querySelector('.v').textContent === '10ms' &&
+          !!dbgRow('first answer') && dbgRow('first answer').querySelector('.v').textContent === '300ms' &&
+          !!dbgRow('input') && dbgRow('input').querySelector('.v').textContent === '10'));
       const headerSection = [...dbg.querySelectorAll('.detail-section')]
         .find(s => s.querySelector('h4') && s.querySelector('h4').textContent === 'Request headers');
       const authRow = headerSection && [...headerSection.querySelectorAll('.detail-kv')]
@@ -408,6 +412,21 @@ module.exports = async function w16Mirrors(H) {
         dbg.textContent.includes('Request body (truncated)') &&
         dbg.textContent.includes('Response body') &&
         !!dbg.querySelector('.preview-box'));
+      const dbgIds = [...dbg.querySelectorAll('[id]')].map(el => el.id);
+      check('the debug capture card has unique element ids',
+        new Set(dbgIds).size === dbgIds.length);
+      const dbgToggle = dbg.querySelector('[data-section-toggle]');
+      check('the debug capture card collapses through the shared section owner',
+        !!dbgToggle && dbgToggle.getAttribute('aria-expanded') === 'true');
+      if (dbgToggle) {
+        dbgToggle.click();
+        check('the debug capture card keeps its body while collapsed',
+          dbg.classList.contains('collapsed') && dbgToggle.getAttribute('aria-expanded') === 'false' &&
+          dbg.textContent.includes('Request body (truncated)'));
+        dbgToggle.click();
+        check('the debug capture card expands again',
+          !dbg.classList.contains('collapsed') && dbgToggle.getAttribute('aria-expanded') === 'true');
+      }
 
       // The download affordance: the section header button fetches the
       // same capture with download=1 through the operator gate and hands
@@ -452,6 +471,44 @@ module.exports = async function w16Mirrors(H) {
         check('a failed capture download surfaces the designed failure message in the section',
           sd.getElementById('drawer-debug-status').textContent === 'debug capture download failed');
       }
+      sd.querySelector('[data-group-tab="diagnostics"]')?.click();
+      const liveDbg = sd.getElementById('drawer-debug');
+      const sessionRow = [...liveDbg.querySelectorAll('.detail-kv')]
+        .find(r => r.querySelector('.k')?.textContent === 'session');
+      const sessionCopy = sessionRow.querySelector('.copy-btn');
+      sessionCopy.focus();
+      sw.renderDrawer();
+      await settleUntil(() => {
+        const sec = sd.getElementById('drawer-debug');
+        const row = sec && [...sec.querySelectorAll('.detail-kv')]
+          .find(r => r.querySelector('.k')?.textContent === 'session');
+        return !!row && sd.activeElement === row.querySelector('.copy-btn');
+      });
+      check('focus inside the debug capture survives a live repaint',
+        !!sd.activeElement &&
+        sd.activeElement.dataset.focusKey === 'row:dbg-identity:session');
+
+      const realOperatorJson = sw.operatorJson;
+      let staleReject = null;
+      let captureCalls = 0;
+      sw.operatorJson = () => {
+        captureCalls++;
+        if (captureCalls === 1) {
+          return new Promise((_, reject) => { staleReject = reject; });
+        }
+        return Promise.resolve(captureDoc);
+      };
+      sw.renderDrawer();
+      sw.renderDrawer();
+      await settleUntil(() => captureCalls === 2 &&
+        !!sd.getElementById('drawer-debug')?.querySelector('.detail-kv'));
+      staleReject(new Error('stale capture'));
+      await new Promise(r => setTimeout(r, 0));
+      check('a stale debug rejection cannot overwrite the newer capture',
+        captureCalls === 2 &&
+        !!sd.getElementById('drawer-debug')?.querySelector('.detail-kv') &&
+        !sd.getElementById('drawer-debug').textContent.includes('capture unavailable'));
+      sw.operatorJson = realOperatorJson;
       sw.closeDrawer();
 
       // triggerDownload's anchor contract: href/download set, appended,

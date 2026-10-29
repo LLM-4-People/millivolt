@@ -1192,7 +1192,12 @@ literally while JSON control escapes remain.
 The drawer's Debug section also carries a Download button. It fetches the same
 capture with `download=1` and saves a gzip artifact named
 `millivolt-debug-<captured_at>.json.gz`, using the record id in the name when
-the capture does not carry a readable `captured_at`.
+the capture does not carry a readable `captured_at`. Captured request and
+response bodies render through the same bounded code surface as record
+previews, with wrap, copy and expand controls; the Download button remains the
+whole-capture path. The capture cards also surface its schema and captured-at
+time, conversation and key correlation, first-answer timing, usage, cost and
+attempt count.
 
 `capture_body_preview` is a different opt-in feature: it retains short prompt/
 response previews in the normal record without starting a Debug session. The
@@ -1320,18 +1325,39 @@ Retry disclosure opens absorbed attempts under the original request, not another
 inference record. Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
-The drawer presents available facts in sections: request identity/status/times;
-client/runtime and provider metadata; captured model and parameters; conversation
-turns and content-size counts; input/output/cache/reasoning tokens; performance,
-cost and finish state; tool names/calls; queue/rate-limit information; retries,
-errors and retained headers. Recognized parameters include sampling and output
-limits, stop/logprob controls, reasoning/verbosity, response format, tool choice
-and streaming flags. Explicit zero/false parameters remain distinct from absent
-ones. Ordinary HTTP relay metadata does not infer missing parameter defaults.
-Adapters differ: Anthropic metadata comes from the translated body, including
-its configured output-limit default, and Cursor stores the base model ID rather
-than its fused spelling. See [adapters](adapters.md) before treating these fields
-as an exact representation of the caller's original request.
+The inspector presents available facts in four classified groups. Request covers
+identity/status/times, time bucket, wire sizes, client/runtime, provider metadata,
+model and captured parameters. Content covers conversation and parent ids, turn
+and size composition, and prompt/response previews. Usage covers token splits,
+generated tokens, timing, throughput, cost, transport decomposition and tools.
+Diagnostics covers queue/rate limits, retries, in-band upstream responses,
+retained headers and Debug. A summary readout carries the status, route, identity
+and first numbers, and a final upstream failure renders as an error alert above
+the groups. Only the selected group is shown; card headers collapse, and the
+active group and collapse choices survive live updates.
+
+A typed rate limit is flow control, not an error: its reason, code and message
+stay in the rate-limit card while the alert stays reserved for a final failure.
+An in-band upstream response that arrived after a committed success is disclosed
+in Diagnostics rather than counted as a retry. Live pause and throttle state
+appear as explicit rows while a request is in flight.
+
+Copy actions cover the values that matter (identifiers, paths, models, headers,
+error detail and captured bodies), field-list cards and the header's JSON
+action. One clipboard path reports success or denial in a polite status line.
+Long captured bodies use a bounded code surface with line count, wrap, copy and
+expand controls; a long single line scrolls inside that surface instead of
+widening the inspector. Narrow viewports get the full-width inspector with keys
+stacked above values and touch-sized copy and close targets.
+
+Recognized parameters include sampling and output limits, stop/logprob controls,
+reasoning/verbosity, response format, tool choice and streaming flags. Explicit
+zero/false parameters remain distinct from absent ones. Ordinary HTTP relay
+metadata does not infer missing parameter defaults. Adapters differ: Anthropic
+metadata comes from the translated body, including its configured output-limit
+default, and Cursor stores the base model ID rather than its fused spelling. See
+[adapters](adapters.md) before treating these fields as an exact representation
+of the caller's original request.
 
 Opening ordinary details does not fetch private request content. Prompt/response
 previews appear only if captured, and Debug sidecars use their separate opt-in

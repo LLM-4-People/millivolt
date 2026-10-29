@@ -248,7 +248,7 @@ func TestSnapshotWireKeysStrict(t *testing.T) {
 // TestRecordTransportFlagsWireExplicitFalse pins the record wire contract for
 // the two boolean transport flags: a stored false must travel to the wire as
 // an explicit false - no omitempty, exactly like stream and
-// client_disconnected - so the dashboard's kvBool rows render a real "false"
+// client_disconnected - so the dashboard's detailBoolRow rows render a real "false"
 // (the jsdom stored-false pins in tests/ui_harness/sections/chart_buckets.js
 // pin that rendered state).
 // omitempty here would make a live record's false unreachable, leaving the

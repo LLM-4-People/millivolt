@@ -304,22 +304,34 @@ function recordTools(r) {
   return r.tool_names;
 }
 
+// finalErrorEntry returns the record's client-visible failure, or null for a
+// clean completion, a rate limit or a plain client close. 429 and a status-less
+// 499 are flow events, not errors. A 499 carrying a structured error_type
+// observed the upstream's own failure (an in-band stream error the client
+// aborted around), exactly like its 200 twin. Genuine failures are a
+// structured error_type, or an error status other than 429/499; the status is
+// only the code fallback once a failure is established. The drawer banner and
+// the error-group enumerator share this one predicate.
+function finalErrorEntry(r) {
+  const finStatus = r.status_code || 0;
+  if (finStatus === 429 || (finStatus === 499 && !r.error_type)) return null;
+  if (!r.error_type && finStatus < 400) return null;
+  return {
+    type: r.error_type || 'http_' + finStatus,
+    code: r.error_code || (finStatus ? String(finStatus) : ''),
+    msg: r.error_msg,
+    at: r.start,
+  };
+}
+
 // recordErrorEntries is the single canonical enumerator of a record's error
 // entries: the final (client-visible) failure plus each absorbed retry attempt.
 // forEachErrorEntry is its visitor form so a match can walk the same entries
-// without allocating one object per entry; both share this predicate owner.
+// without allocating one object per entry; both share the final-failure
+// predicate above.
 function forEachErrorEntry(r, visit) {
-  // Final (client-visible) failure - 429 (rate limit) and a plain 499 (local
-  // client closed the connection) are flow events, not errors, so they
-  // produce no error-group entry. A 499 carrying a structured error_type
-  // observed the upstream's own failure (an in-band stream error the client
-  // aborted around): it produces one exactly like its 200 twin. Genuine
-  // failures: a structured error_type, or an error status other than 429/499.
-  const finStatus = r.status_code || 0;
-  if (finStatus !== 429 && !(finStatus === 499 && !r.error_type) && (r.error_type || finStatus >= 400)) {
-    const code = r.error_code || (finStatus ? String(finStatus) : '');
-    visit(r.error_type || 'http_' + finStatus, code, r.error_msg, false, r.start);
-  }
+  const final = finalErrorEntry(r);
+  if (final) visit(final.type, final.code, final.msg, false, final.at);
   // Absorbed retry attempts: only genuine failures (a 5xx, or a structured
   // error that isn't a rate limit). A 429 attempt is flow control, excluded.
   // An in-band entry is the hidden status of the final failure, already

@@ -207,24 +207,59 @@ paging operate on the current scope.
 
 ### Request details
 
-Click a row or its detail button to open the drawer. Identity, upstream model,
-captured parameter values and conversation shape stay attached to that request.
-Previous/next controls follow the scoped table order. Explicit zero and false
-parameter values are retained instead of treated as missing.
+Click a row or its detail button to open the inspector. The header keeps the
+request identity and the previous/next controls. The summary below it shows the
+live or final status, method and path, client, provider and model, plus
+duration, TTFT, tokens, speed, cost and retries when captured. The full field
+inventory is classified into four sticky groups, each with the number of cards
+it contains:
 
-![Request drawer showing pseudonymous identity and recorded request parameters](images/requests/details.png)
+- Request: identity, time bucket, request and response sizes, client/runtime,
+  provider metadata, and captured model and parameters.
+- Content: conversation and parent ids, turn and size composition, prompt and
+  response previews.
+- Usage: input, output, reasoning, answer, cache and generated tokens; timing,
+  throughput, cost, transport decomposition, and tools.
+- Diagnostics: queue and rate limits, absorbed retries, in-band upstream
+  responses, response headers, and the Debug capture when one exists.
+
+Only the selected group is shown; its cards behave like the previous single
+page. Each card header can collapse or expand its section, and both the active
+group and collapse choices survive live updates until the inspector closes.
+Copy actions sit on the values that matter (identifiers, conversation ids,
+paths, models, headers, error detail and captured bodies), on field-list cards,
+and on the header's JSON action for the whole record or the selected attempt.
+One polite status line confirms each copy or reports a denied clipboard write.
+
+Long values wrap. Captured prompt, response and Debug bodies open in a bounded
+code surface with a line count, wrap toggle, copy action and expand/collapse
+control; a long single line scrolls inside that surface instead of widening the
+inspector. A final upstream failure appears as a bordered alert above the cards
+with its type, code, message and copy action, plus the HTTP status when the
+failure was an HTTP response. A typed rate limit is flow control, not an error:
+its reason, code and message stay visible in the rate-limit card. On narrow
+viewports the inspector fills the width, stacks each key above its value, keeps
+touch-sized copy and close targets, and respects the bottom safe area.
+
+Previous/next controls follow the scoped table order. Explicit zero and false
+parameter values are retained instead of treated as missing. While a request is
+in flight, pause and throttle state appear as explicit rows.
+
+![Request drawer showing pseudonymous identity, the summary readout and recorded request parameters](images/requests/details.png)
 
 ### Tokens and performance
 
-Scroll the same drawer for token splits, timestamps, throughput, reported cost,
-tool information and queue/rate-limit observations. Absorbed retry attempts
-appear when the selected request has them, each with its status, provider
-error detail and the attempt's own provider request id - the matching key for
-correlating a provider-side failure report with the exact attempt. Clicking an
-absorbed attempt, a retry sub-row in the request table or an entry in the
-drawer's retry list, opens that attempt's own detail view. These captures
-deliberately omit request content and Debug payloads; ordinary opt-in captures
-remain sensitive.
+Open Usage for token splits, cache hit, generated-token composition,
+timestamps, the adopted attempt's send anchor, throughput, reported cost, finish
+state and transport timing. Absorbed retry attempts appear under Diagnostics
+when the selected request has them, each with its status, provider error detail,
+the attempt's own provider request id, and captured upstream server, model,
+processing and rate-limit facts. An in-band upstream response that arrived
+after a committed success is disclosed separately rather than presented as a
+retry. Clicking an absorbed attempt, a retry sub-row in the request table or
+an entry in the drawer's retry list opens that attempt's own detail view. These
+captures deliberately omit request content and Debug payloads; ordinary opt-in
+captures remain sensitive.
 
 ![The same request drawer showing token and performance measurements](images/requests/performance.png)
 

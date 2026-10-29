@@ -300,6 +300,7 @@
     transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
   }
   .btn:hover { color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
+  .btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   /* Danger variants come AFTER .btn so the cascade (equal single-class
      specificity, later wins) always beats the neutral base skin. Weight goes
      with impact: delete-matching = light red tint; the "everything"
@@ -698,28 +699,67 @@
 
   /* ---- detail slide-over drawer ---- */
   /* The drawer sits beside live log rows that must stay readable through the
-     scrim, so it uses the lightest mode-owned veil. */
+     scrim, so it uses the lightest mode-owned veil. The page behind it is
+     locked while the inspector is open; the body itself contains its wheel. */
+  html.drawer-open, html.drawer-open body { overflow: hidden; }
+  /* drawerShow reserves the scrollbar gutter it removes, so the page behind
+     the inspector keeps its exact width instead of jumping sideways. */
+  html.drawer-open body { padding-right: var(--drawer-gutter, 0px); }
+  /* The rail stays visible for context but is inert while the inspector owns
+     the interaction; dim it so it never reads as an active surface. */
+  html.drawer-open header { opacity: .6; }
   .drawer-veil {
     position: fixed; inset: 0; background: var(--veil-soft); opacity: 0; pointer-events: none;
     transition: opacity .18s; z-index: 60;
   }
   .drawer-veil.open { opacity: 1; pointer-events: auto; }
   .drawer {
-    position: fixed; top: calc(var(--rail-h) + var(--rail-tick)); right: 0; bottom: 0; width: 560px; max-width: 92vw;
+    position: fixed; top: calc(var(--rail-h) + var(--rail-tick)); right: 0; bottom: 0;
+    width: min(640px, 100vw); max-width: 94vw;
     background: var(--panel); border-left: 1px solid var(--border2); z-index: 61;
     transform: translateX(100%); transition: transform .2s cubic-bezier(.32,.72,.35,1);
     display: flex; flex-direction: column; box-shadow: -24px 0 60px rgba(var(--shadow-rgb),.5);
   }
   .drawer.open { transform: none; }
   .drawer-hd {
-    display: flex; align-items: center; gap: 10px; padding: 13px 18px;
-    border-bottom: 1px solid var(--border); flex-shrink: 0;
+    display: flex; align-items: center; gap: 7px; padding: 10px 12px 11px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--panel);
+    position: relative; z-index: 2;
   }
-  .drawer-hd h3 { margin: 0; font: 650 12px var(--sans); letter-spacing: .03em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .drawer-hd .nav-btns { display: flex; gap: 4px; }
-  .drawer-body { overflow-y: auto; padding: 14px 18px 28px; font-family: var(--mono); font-size: 11px; flex: 1; }
+  .drawer-hd h3 {
+    margin: 0; font: 650 11.5px var(--sans); letter-spacing: .02em;
+    flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden;
+  }
+  .drawer-hd h3 .d-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .drawer-hd .nav-btns { display: flex; gap: 2px; flex-shrink: 0; }
+  .drawer-hd .nav-btns .btn {
+    width: 28px; height: 28px; padding: 0; display: inline-flex;
+    align-items: center; justify-content: center; font-size: 14px; line-height: 1;
+  }
+  .drawer-hd .btn { padding: 4px 8px; border-radius: 7px; }
+  .drawer-back { flex: none; padding: 3px 7px; font-size: 10px; }
+  .drawer-tool { flex: none; font-size: 9.5px; letter-spacing: .04em; padding: 5px 7px; }
+  .d-key { margin-left: 4px; font-size: 9px; color: var(--muted); }
+  .drawer-body {
+    overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
+    padding: 14px 16px calc(28px + env(safe-area-inset-bottom, 0px));
+    font-family: var(--mono); font-size: 11px; flex: 1; scrollbar-gutter: stable;
+  }
   .drawer-body::-webkit-scrollbar, .st-fields::-webkit-scrollbar { width: 6px; }
   .drawer-body::-webkit-scrollbar-thumb, .st-fields::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* The one polite copy outcome. It sits above every modal surface because a
+     copy can be initiated from the drawer, Settings or a capture view. */
+  .toast {
+    position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    transform: translate(-50%, 10px); z-index: 100; max-width: min(420px, calc(100vw - 24px));
+    padding: 7px 12px; border: 1px solid var(--border2); border-radius: 8px;
+    background: var(--panel); color: var(--text); font: 11px var(--mono);
+    box-shadow: 0 10px 30px rgba(var(--shadow-rgb), .45);
+    opacity: 0; pointer-events: none; transition: opacity .16s ease, transform .16s ease;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast.err { border-color: var(--err); color: var(--err-text); }
 
   /* ---- settings instrument sheet (explorer topology, not a form dump) ---- */
   .st-veil {
@@ -1517,16 +1557,210 @@
     mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
   }
 
-  .detail-section { margin-bottom: 14px; }
-  .detail-section h4 { margin: 0 0 6px; font-size: 10px; color: var(--muted); text-transform: none; letter-spacing: .07em; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
-  .detail-kv { display: grid; grid-template-columns: 180px 1fr; gap: 3px 14px; font-size: 11px; padding: 1px 0; }
-  .detail-kv .k { color: var(--muted); }
-  .detail-kv .v { color: var(--text); word-break: break-word; overflow-wrap: anywhere; }
-  /* Clickable absorbed-retry attempts: a subtle hover so they read as links. */
-  .detail-kv.attempt-link { cursor: pointer; border-radius: 4px; margin: 0 -6px; padding: 1px 6px; }
-  .detail-kv.attempt-link:hover { background: var(--panel2); }
-  .detail-kv.attempt-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .preview-box { background: var(--panel2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 6px 0; color: var(--muted); white-space: pre-wrap; word-break: break-word; font-size: 11px; line-height: 1.4; }
+  /* ---- request inspector: hero, cards, rows and long-text surfaces ---- */
+  /* The hero is the scanner: outcome, route and the four numbers an operator
+     reads before opening a section. Sections remain the full inventory. */
+  .d-hero {
+    position: relative; margin: 0 0 12px; padding: 11px 13px 12px;
+    background: var(--panel2); border: 1px solid var(--border2); border-radius: 10px;
+    overflow: hidden;
+  }
+  .d-hero::before {
+    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
+    background: var(--tick-strip);
+    -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
+  }
+  .d-hero-top { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding-top: 3px; }
+  .d-method {
+    color: var(--accent2); font: 700 9.5px var(--mono); letter-spacing: .05em;
+    border: 1px solid color-mix(in srgb, var(--accent2) 30%, var(--border2));
+    border-radius: 4px; padding: 1px 5px; flex: none;
+  }
+  .d-path-row { display: flex; align-items: flex-start; gap: 3px; flex: 1 1 100%; min-width: 0; }
+  .d-path {
+    flex: 1 1 auto; min-width: 0; color: var(--text); font-size: 11.5px; line-height: 1.45;
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  .d-path-row .copy-btn { flex: none; opacity: .55; margin-top: -3px; }
+  .d-hero-ident .copy-btn { vertical-align: middle; opacity: .55; }
+  .d-hero-ident {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px;
+    margin-top: 8px; color: var(--muted); min-width: 0;
+  }
+  .d-hero-ident .ent { max-width: 100%; }
+  .d-sep { color: var(--border2); }
+  .d-model { color: var(--text); overflow-wrap: anywhere; }
+  .d-canon { color: var(--muted); font-size: 10px; }
+  .d-stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+    gap: 0; margin-top: 10px; border-top: 1px solid var(--border);
+  }
+  .d-stat { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 7px 10px 0; border-left: 1px solid var(--border); }
+  .d-stat:first-child { border-left: 0; padding-left: 0; }
+  .d-stat-k { color: var(--muted); font-size: 9px; letter-spacing: .05em; }
+  .d-stat-v { color: var(--text); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+  /* The final failure reads as one alert, not a buried key/value block. */
+  .d-alert {
+    margin: 0 0 12px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--err) 38%, var(--border));
+    border-top: 2px solid var(--err);
+    background: color-mix(in srgb, var(--err) 7%, var(--panel));
+  }
+  .d-alert-hd { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
+  .d-alert-ico { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--err); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .d-alert-title { color: var(--err-text); font-weight: 650; font-size: 11px; }
+  .d-alert-type { color: var(--text); font-size: 10.5px; border: 1px solid var(--border2); border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
+  .d-alert-code { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+  .d-alert .copy-btn { margin-left: auto; opacity: .65; }
+  .d-alert-msg {
+    margin-top: 8px; padding-top: 8px; border-top: 1px solid color-mix(in srgb, var(--err) 20%, var(--border));
+    color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+    max-height: 220px; overflow: auto; line-height: 1.45;
+  }
+
+  /* Section cards: a compact header with copy/collapse, then the field grid. */
+  .detail-section {
+    margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px;
+    background: color-mix(in srgb, var(--panel2) 48%, transparent);
+    overflow: hidden; scroll-margin-top: 46px;
+  }
+  .detail-sec-hd {
+    display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 11px;
+    background: color-mix(in srgb, var(--panel2) 72%, transparent);
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-section h4 {
+    margin: 0; flex: 1; min-width: 0; font-size: 10px; color: var(--muted);
+    text-transform: none; letter-spacing: .07em; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .detail-sec-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .detail-sec-actions #drawer-debug-status {
+    color: var(--err); font-size: 10px; max-width: 180px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .detail-sec-body { padding: 7px 11px 8px; }
+  .detail-section.collapsed .detail-sec-body { display: none; }
+  .detail-section.collapsed .detail-sec-hd { border-bottom-color: transparent; }
+  .sec-toggle {
+    width: 24px; height: 24px; padding: 0; flex: none; display: inline-flex;
+    align-items: center; justify-content: center; background: transparent;
+    border: 1px solid transparent; border-radius: 5px; color: var(--muted); cursor: pointer;
+  }
+  .sec-toggle svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
+  .detail-section.collapsed .sec-toggle svg { transform: rotate(-90deg); }
+  .sec-toggle:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
+  .sec-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .55; }
+
+  /* Rows stay one grid so every value aligns down the card. The copy action
+     is a third column only when the row actually carries one. */
+  .detail-kv {
+    display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 2px 12px;
+    align-items: start; font-size: 11px; padding: 3px 0;
+    border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  }
+  .detail-kv:first-child { border-top: 0; padding-top: 1px; }
+  .detail-kv:has(> .copy-btn) { grid-template-columns: 148px minmax(0, 1fr) 24px; }
+  .detail-kv .k { color: var(--muted); font-size: 10px; line-height: 1.45; padding-top: 1px; overflow-wrap: anywhere; }
+  .detail-kv .v { color: var(--text); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+  .detail-kv .v .pill, .detail-kv .v .ent { vertical-align: middle; }
+  .detail-kv > .copy-btn { width: 24px; height: 24px; margin-top: -2px; }
+  .detail-kv:hover { background: color-mix(in srgb, var(--text) 2.5%, transparent); border-radius: 6px; }
+  .d-muted { color: var(--muted); }
+
+  /* One copy affordance everywhere; hidden until the row or section is under
+     the pointer or keyboard focus, always available on coarse pointers. */
+  .copy-btn {
+    width: 24px; height: 24px; flex: none; padding: 0; display: inline-flex;
+    align-items: center; justify-content: center; background: transparent;
+    border: 1px solid transparent; border-radius: 5px; color: var(--muted);
+    cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, border-color .12s, background .12s;
+  }
+  .copy-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .copy-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
+  .copy-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
+  .copy-btn.copied { color: var(--ok); opacity: 1; }
+  /* The debug download is a persistent action, not a hover-only copy. */
+  #drawer-debug-download { opacity: .65; }
+  #drawer-debug-download:hover { opacity: 1; }
+  .detail-kv:hover > .copy-btn, .detail-kv:focus-within > .copy-btn,
+  .d-hero:hover .copy-btn, .d-hero:focus-within .copy-btn,
+  .detail-code:hover .copy-btn, .detail-code:focus-within .copy-btn,
+  .detail-sec-hd:hover .copy-btn, .detail-sec-hd:focus-within .copy-btn,
+  .d-alert:hover .copy-btn, .d-alert:focus-within .copy-btn { opacity: .85; }
+
+  /* Absorbed attempts read as a compact timeline; the whole row opens the
+     attempt view, and the provider request id stays the matching key. */
+  .attempt-link {
+    display: grid; grid-template-columns: 28px minmax(0, 1fr) 14px; gap: 2px 8px;
+    align-items: start; padding: 8px 6px; margin: 0 -6px; border-radius: 8px;
+    border-top: 1px solid var(--border); cursor: pointer;
+  }
+  .attempt-link:first-of-type { border-top: 0; }
+  .attempt-ord { grid-column: 1; grid-row: 1; color: var(--muted); font-size: 10px; padding-top: 2px; text-align: right; font-variant-numeric: tabular-nums; }
+  .attempt-main { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .attempt-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+  .attempt-when { color: var(--muted); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+  .attempt-detail {
+    color: var(--text); line-height: 1.45; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  }
+  .attempt-extra { color: var(--muted); font-size: 10px; display: flex; flex-wrap: wrap; gap: 2px 8px; }
+  .attempt-open { grid-column: 3; grid-row: 1; align-self: center; color: var(--muted); font-size: 14px; }
+  .attempt-link:hover { background: var(--panel2); }
+  .attempt-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+
+  /* Long text: one scrollable code surface with its own size line, wrap,
+     copy and expand controls. The fade only exists while collapsed. */
+  .detail-code { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; }
+  .detail-code-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 9px; background: var(--panel2); border-bottom: 1px solid var(--border); }
+  .detail-code-meta { flex: 1; min-width: 0; color: var(--muted); font-size: 9.5px; letter-spacing: .03em; }
+  .detail-code-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .mini-btn {
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    font: 10px var(--mono); padding: 2px 6px; border-radius: 5px; cursor: pointer;
+  }
+  .mini-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
+  .mini-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .detail-code .copy-btn { opacity: .65; }
+  .preview-box {
+    background: var(--panel); border: 0; border-radius: 0; padding: 9px 11px; margin: 0;
+    color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+    font: 11px/1.5 var(--mono); max-height: none; overflow-x: hidden;
+  }
+  .preview-box:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .detail-code.nowrap .preview-box { white-space: pre; overflow-x: auto; overflow-wrap: normal; word-break: normal; }
+  .detail-code.collapsed .preview-box { max-height: 168px; overflow: hidden; position: relative; }
+  .detail-code.collapsed .preview-box::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; pointer-events: none;
+    background: linear-gradient(to top, var(--panel), transparent);
+  }
+
+  /* Sticky section jump strip: the inspector's own miniature rail. */
+  /* Classified card groups: one sticky tab strip, then only the selected
+     group's cards. The tab counts come from the rendered sections, so a
+     conditional card never leaves a stale category behind. */
+  .d-tabs {
+    position: sticky; top: -14px; z-index: 3; display: flex; gap: 2px;
+    margin: 0 -4px 10px; padding: 0 4px; overflow-x: auto; scrollbar-width: none;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .d-tabs::-webkit-scrollbar { display: none; }
+  .d-tab {
+    flex: none; background: transparent; border: 0; border-bottom: 2px solid transparent;
+    color: var(--muted); font: 10px/1.4 var(--mono); padding: 8px 8px 7px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .d-tab:hover { color: var(--text); }
+  .d-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+  .d-tab-n { margin-left: 4px; color: var(--muted); font-size: 9px; }
+  .d-tab[aria-selected="true"] .d-tab-n { color: var(--accent); }
+  .d-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .d-group[hidden] { display: none; }
+
   .exp-row { cursor: pointer; }
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
 
@@ -1735,4 +1969,46 @@
     .theme-mode-field { margin-left: 0; justify-items: stretch; }
     .theme-mode { width: 100%; }
     .theme-hint { display: none; }
+  }
+
+  /* ---- narrow inspector ---- */
+  /* These overrides sit at the end of the sheet: equal-specificity grid and
+     row rules above would otherwise win on source order. */
+  @media (max-width: 720px) {
+    /* Narrow viewports get the whole inspector: no sliver of veil to hit by
+       accident, a stacked key/value rhythm and full-width code surfaces. */
+    .drawer { width: 100vw; max-width: 100vw; border-left: 0; }
+    .drawer-hd { padding: 8px 9px 9px; gap: 5px; }
+    .drawer-hd h3 { font-size: 11px; }
+    .drawer-hd .nav-btns .btn { width: 38px; height: 38px; }
+    .drawer-hd .btn { min-width: 38px; min-height: 38px; }
+    .drawer-hd .drawer-tool { padding: 5px 8px; }
+    .d-key { display: none; }
+    .drawer-body { padding: 10px 10px calc(24px + env(safe-area-inset-bottom, 0px)); }
+    .d-hero { padding: 10px 10px 11px; }
+    .d-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+    .d-stat { padding: 0; border-left: 0; }
+    .d-stat:first-child { padding-left: 0; }
+    .detail-kv, .detail-kv:has(> .copy-btn) {
+      grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding: 6px 0;
+    }
+    .detail-kv .k { grid-column: 1; grid-row: 1; padding-top: 0; font-size: 9.5px; }
+    .detail-kv .v { grid-column: 1; grid-row: 2; }
+    .detail-kv > .copy-btn, .detail-kv:has(> .copy-btn) > .copy-btn {
+      grid-column: 2; grid-row: 1 / span 2; align-self: center; width: 34px; height: 34px; margin: 0;
+    }
+    .detail-sec-hd { padding: 5px 5px 5px 9px; }
+    .detail-sec-body { padding: 5px 9px 8px; }
+    .sec-toggle { width: 32px; height: 32px; }
+    .detail-code-bar { padding: 3px 5px 3px 8px; }
+    .mini-btn { min-height: 30px; padding: 3px 8px; }
+    .d-tabs { top: -10px; margin: 0 -2px 8px; }
+    .d-tab { min-height: 36px; padding: 8px 6px; font-size: 9.5px; }
+    .copy-btn { opacity: .65; }
+    .attempt-link { padding: 7px 4px; margin: 0 -4px; }
+    .toast { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  }
+  @media (hover: none), (pointer: coarse) {
+    .copy-btn { opacity: .65; width: 32px; height: 32px; }
+    .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .7; }
   }

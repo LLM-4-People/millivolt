@@ -39,7 +39,7 @@ const inert = {addEventListener() {}, querySelector() { return null; }, querySel
 const sandbox = {
   console,
   $: () => inert,
-  document: {createElement: () => ({content: null, set innerHTML(v) {}})},
+  document: {addEventListener() {}, createElement: () => ({content: null, set innerHTML(v) {}})},
   ENTITY_TYPES: {
     client: {color: 'client'}, model: {color: 'model'}, tool: {color: 'tool'},
     status: {color: 'status'},

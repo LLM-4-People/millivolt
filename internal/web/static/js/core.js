@@ -71,6 +71,7 @@ function openModal(el, {returnSelector = null, onPreempt = null} = {}) {
   el.removeAttribute('inert');
   modalBackground = [...document.body.children].filter(node =>
     node !== el && node.id !== (el.id === 'drawer' ? 'drawer-veil' : 'settings-veil') &&
+    node.id !== 'toast' &&
     !['SCRIPT', 'STYLE', 'LINK'].includes(node.tagName)).map(node => [node, node.hasAttribute('inert')]);
   for (const [node] of modalBackground) node.setAttribute('inert', '');
   requestAnimationFrame(() => { if (activeModal === el) (modalFocusables(el)[0] || el).focus(); });
@@ -296,6 +297,29 @@ const fmt = n => {
 };
 // fmtFull is the exact grouped form (698479531 → "698,479,531") for tooltips.
 const fmtFull = n => n == null ? '-' : Number(n).toLocaleString();
+// fmtBytes is the single byte-size formatter for captured wire sizes and
+// long-text readouts. Exact below 1 KB, then the decimal KB/MB/GB ladder with
+// at most two decimals (1234 → "1.23 KB"). Exact counts stay recoverable
+// through vt() titles; money keeps its own fmtMoney owner.
+const BYTE_UNITS = [[1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'KB']];
+const fmtBytes = n => {
+  if (n == null || !isFinite(n)) return '-';
+  const neg = n < 0 ? '-' : '';
+  const a = Math.abs(Number(n));
+  if (a < 1e3) return neg + Math.round(a) + ' B';
+  for (let i = 0; i < BYTE_UNITS.length; i++) {
+    const [div, suf] = BYTE_UNITS[i];
+    if (a < div) continue;
+    let v = Math.round((a / div) * 100) / 100;
+    // A rounded 1000 at KB/MB rolls into the next unit (never "1000 KB").
+    if (v >= 1000 && i > 0) {
+      v = Math.round((v / 1000) * 100) / 100;
+      return neg + v + ' ' + BYTE_UNITS[i - 1][1];
+    }
+    return neg + v + ' ' + suf;
+  }
+  return neg + Math.round(a) + ' B';
+};
 // fmtDur is the single duration formatter for every ms value, compact and
 // readable at any scale: ms below 1s, seconds below 1m, then minutes, then
 // hours and days - always with the unit so it never overflows (450 → "450ms",

@@ -153,7 +153,7 @@ function debugBadge(r) {
 // liveStatusCell is the one owner of the in-flight status pill (log row +
 // drawer). Classification is statusClass(); the retry badge stays outside so
 // reqRow can concatenate it - the drawer's status row carries no retry badge,
-// only the debug pill above. Drawer kv uses this helper directly.
+// only the debug pill above. The drawer's status row uses this helper directly.
 function liveStatusCell(r) {
   const sc = statusClass(r);
   if (sc === 'paused') {

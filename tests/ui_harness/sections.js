@@ -31,4 +31,5 @@ module.exports = [
   require('./sections/regressions_a'),
   require('./sections/regressions_b'),
   require('./sections/regressions_c'),
+  require('./sections/drawer_redesign'),
 ];

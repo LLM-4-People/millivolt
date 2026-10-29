@@ -1,0 +1,356 @@
+// Detail-view primitives shared by the request drawer and the debug capture:
+// the one key/value row builder, section shell, header rows, formatted
+// timestamps and the long-text code block with copy, wrap and expand controls.
+// Record and attempt composition stays in log_drawer.js; capture composition
+// stays in log_debug.js.
+
+// detailSlug is the stable id/focus fragment for a section or field.
+const detailSlug = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'section';
+
+// detailFocusKey maps a focused control inside a repainted detail surface to
+// its stable selector. Ids win; generated controls carry data-focus-key.
+function detailFocusKey(el) {
+  if (!el || !el.getAttribute) return null;
+  if (el.id) return '#' + el.id;
+  const key = el.getAttribute('data-focus-key');
+  return key && /^[A-Za-z0-9:_-]+$/.test(key) ? `[data-focus-key="${key}"]` : null;
+}
+
+// fmtStamp renders a captured timestamp in local time with the full date and
+// milliseconds. A missing, invalid or pre-1970 value renders nothing: it was
+// never a real observation.
+function fmtStamp(t) {
+  if (!t) return '';
+  const d = new Date(t);
+  if (isNaN(d) || d.getTime() < 86400000) return '';
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.` +
+    String(d.getMilliseconds()).padStart(3, '0');
+}
+
+// detailTextRow is the one scalar key/value row descriptor. Values render
+// escaped; an explicit copy:true (or a plain payload) adds the copy control,
+// and text always feeds the section-level copy.
+function detailTextRow(key, value, opts = {}) {
+  if (value === null || value === undefined || value === '') return null;
+  const text = String(value);
+  return {k: key, v: escapeHtml(text), text, ...opts};
+}
+
+// detailHtmlRow is the row descriptor for a value already built from shared
+// HTML helpers (status pills, entity badges, linked titles). Callers must pass
+// the plain display text for section copy.
+function detailHtmlRow(key, html, text, opts = {}) {
+  if (html === null || html === undefined || html === '') return null;
+  return {k: key, v: String(html), text: text == null ? '' : String(text), ...opts};
+}
+
+// detailBoolRow keeps the explicit false contract: a stored false is a real
+// observation and renders as "false", never an absent row.
+function detailBoolRow(key, value, opts = {}) {
+  if (value === null || value === undefined) return null;
+  return detailTextRow(key, value ? 'true' : 'false', opts);
+}
+
+// detailBytesRow formats a wire byte count and keeps the exact integer as the
+// copy payload.
+const detailBytesRow = (key, value) => {
+  if (value === null || value === undefined || value === '') return null;
+  return detailHtmlRow(key, vt(fmtBytes(value), fmtFull(value) + ' bytes'), fmtBytes(value),
+    {copy: String(value), copyLabel: key + ' (exact bytes)'});
+};
+
+// detailNum renders an exact captured count with grouping. The compact hero is
+// the only place a captured count is abbreviated; a section card keeps the full
+// value and its exact copy payload.
+const detailNum = (key, value, opts = {}) => (value === null || value === undefined || value === '') ? null
+  : detailTextRow(key, fmtFull(value), {
+    copy: String(value), copyLabel: key + ' (exact)', ...opts,
+  });
+
+// detailDurRow displays a compact duration while the hover title and copy
+// payload keep the exact millisecond count.
+function detailDurRow(key, value, opts = {}) {
+  if (value === null || value === undefined || value === '' || !isFinite(value)) return null;
+  return detailHtmlRow(key, vt(fmtDur(value), fmtFull(value) + ' ms'), String(value) + ' ms', {
+    copyLabel: key + ' (exact ms)',
+    ...opts,
+    copy: opts.copy === false ? false : String(value) + ' ms',
+  });
+}
+
+// detailMsRow renders an exact integer millisecond observation.
+const detailMsRow = (key, value) => value
+  ? detailTextRow(key, value + ' ms', {copy: String(value) + ' ms', copyLabel: key + ' (exact ms)'})
+  : null;
+
+// detailStampRow renders local time with milliseconds; the copy payload keeps
+// the captured ISO instant so a correlation never depends on the display zone.
+function detailStampRow(key, value, opts = {}) {
+  const display = fmtStamp(value);
+  if (!display) return null;
+  return detailHtmlRow(key, display, display, {
+    copyLabel: key + ' (ISO 8601)',
+    ...opts,
+    copy: opts.copy === false ? false : String(value),
+  });
+}
+
+function detailRowHTML(row) {
+  if (!row || row.v === '') return '';
+  const kStyle = row.keyTone ? ` style="color:${row.keyTone}"` : '';
+  const vStyle = row.tone ? ` style="color:${row.tone}"` : '';
+  const payload = row.copy === true ? row.text : row.copy;
+  const copy = payload ? copyButton(payload, row.copyLabel || row.k, row.focus) : '';
+  return `<div class="detail-kv"><span class="k"${kStyle}>${escapeHtml(row.k)}</span>` +
+    `<span class="v"${vStyle}>${row.v}</span>${copy}</div>`;
+}
+
+// detailCollapsed is the shared collapsed-section state for the open drawer.
+// It is cleared when the drawer closes; live repaints re-apply it by key.
+const detailCollapsed = new Set();
+
+const SECTION_CHEV = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>';
+
+// detailSection wraps rows (or a prebuilt body) in one titled card. It drops
+// an empty section, carries a section copy action, and keeps the collapse
+// toggle outside the h4 so the heading text stays the section's own name.
+function detailSection(title, rows, opts = {}) {
+  const key = opts.key || detailSlug(title);
+  const id = opts.id || ('d-sec-' + key);
+  const visible = (rows || []).filter(row => row && row.v !== '');
+  // Row copies get a stable focus key even when the caller did not name one.
+  // The key is section + field, never the visible-list position: a conditional
+  // row appearing above must not rename the control the user is focused on.
+  const seen = new Map();
+  const body = opts.body != null ? String(opts.body)
+    : visible.map(row => {
+      if (row.focus) return detailRowHTML(row);
+      const slug = detailSlug(row.k);
+      const ordinal = (seen.get(slug) || 0) + 1;
+      seen.set(slug, ordinal);
+      return detailRowHTML({
+        ...row,
+        focus: ordinal === 1 ? `row:${key}:${slug}` : `row:${key}:${slug}:${ordinal}`,
+      });
+    }).join('');
+  if (!body) return '';
+  const collapsed = detailCollapsed.has(key);
+  // A string copy payload is the exact fact behind a formatted display (bytes,
+  // milliseconds, ISO instants); copy:true rows already carry exact text.
+  const payload = opts.copyText != null ? String(opts.copyText)
+    : visible.map(row => `${row.k}: ${typeof row.copy === 'string' ? row.copy : row.text}`).join('\n');
+  const copy = opts.copy === false || !payload ? '' : copyButton(payload, title, 'copy-sec:' + key);
+  const bodyId = id + '-body';
+  const toggle = `<button type="button" class="sec-toggle" data-section-toggle data-section-key="${escapeHtml(key)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="${escapeHtml(bodyId)}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(title)}" data-focus-key="sec:${escapeHtml(key)}">${SECTION_CHEV}</button>`;
+  const group = opts.group || 'request';
+  return `<section class="detail-section${collapsed ? ' collapsed' : ''}" id="${escapeHtml(id)}" data-title="${escapeHtml(title)}" data-group="${escapeHtml(group)}">` +
+    `<div class="detail-sec-hd" title="${escapeHtml(title)}"><h4>${escapeHtml(title)}</h4><div class="detail-sec-actions">` +
+    `${opts.headExtra || ''}${copy}${toggle}</div></div>` +
+    `<div class="detail-sec-body" id="${escapeHtml(bodyId)}">${body}</div></section>`;
+}
+
+// detailHeaderRows turns a captured header map (one value per key in the wire
+// model) into sorted copies of the shared row descriptor. Multi-value headers
+// get one row per value and a unique focus key per row.
+function detailHeaderRows(headers) {
+  if (!headers || typeof headers !== 'object') return [];
+  const rows = [];
+  Object.keys(headers).sort().forEach(name => {
+    const values = Array.isArray(headers[name]) ? headers[name] : [headers[name]];
+    values.forEach((value, i) => rows.push(detailTextRow(name, value, {
+      keyTone: 'var(--accent2)',
+      copy: true,
+      copyLabel: name,
+      focus: 'hdr:' + detailSlug(name) + ':' + i,
+    })));
+  });
+  return rows.filter(Boolean);
+}
+
+// detailCodeState keeps each block's wrap and expand choice across a live
+// repaint. It is keyed by the stable block focus (prompt, response, debug
+// request/response) and cleared with the drawer.
+const detailCodeState = new Map();
+
+// detailCodeBlock renders bounded long text as a scrollable code surface with
+// a size/line readout, a wrap toggle, a copy action and an expand/collapse
+// control for long bodies. It keeps the .preview-box class every existing
+// capture reader and test already targets.
+function detailCodeBlock(text, opts = {}) {
+  const raw = String(text ?? '');
+  if (!raw) return '';
+  const lines = raw.split('\n').length;
+  const long = raw.length > 1400 || lines > 16;
+  const focus = 'code:' + (opts.focus || detailSlug(opts.label || 'body'));
+  const saved = detailCodeState.get(focus);
+  const collapsed = long && (saved ? saved.collapsed : opts.collapsed !== false);
+  const nowrap = saved ? saved.nowrap : false;
+  const label = opts.label || 'text';
+  const meta = `${lines} line${lines === 1 ? '' : 's'}${opts.truncated ? ' · truncated' : ''}`;
+  const bodyId = detailSlug(focus);
+  const wrap = `<button type="button" class="mini-btn" data-code-wrap aria-pressed="${nowrap ? 'false' : 'true'}" aria-label="wrap lines" title="toggle line wrap" data-focus-key="${escapeHtml(focus)}:wrap">wrap</button>`;
+  const copy = copyButton(raw, label, focus + ':copy');
+  const toggle = long ? `<button type="button" class="mini-btn" data-code-toggle aria-expanded="${collapsed ? 'false' : 'true'}" aria-controls="${bodyId}" aria-label="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" title="${collapsed ? 'expand' : 'collapse'} ${escapeHtml(label)}" data-focus-key="${escapeHtml(focus)}:toggle">${collapsed ? 'expand' : 'collapse'}</button>` : '';
+  return `<div class="detail-code${collapsed ? ' collapsed' : ''}${nowrap ? ' nowrap' : ''}" data-code data-code-label="${escapeHtml(label)}" data-code-focus="${escapeHtml(focus)}">` +
+    `<div class="detail-code-bar"><span class="detail-code-meta">${escapeHtml(meta)}</span>` +
+    `<span class="detail-code-actions">${wrap}${copy}${toggle}</span></div>` +
+    `<pre class="preview-box" id="${bodyId}" tabindex="0" data-focus-key="${escapeHtml(focus)}:body">${escapeHtml(raw)}</pre></div>`;
+}
+
+// detailCodeSection is the body section wrapper for a captured preview. The
+// code block owns copy/wrap; the section owns collapse.
+function detailCodeSection(title, text, opts = {}) {
+  const raw = String(text ?? '');
+  if (!raw) return '';
+  return detailSection(title, [], {
+    key: opts.key || detailSlug(title),
+    group: opts.group || 'content',
+    copy: false,
+    body: detailCodeBlock(raw, {label: title, truncated: opts.truncated, focus: opts.focus || detailSlug(title), collapsed: opts.collapsed}),
+  });
+}
+
+// DETAIL_GROUPS is the inspector's one classification. Each card names its
+// group, and the sticky strip exposes only groups that actually rendered.
+const DETAIL_GROUPS = [
+  {key: 'request', label: 'Request'},
+  {key: 'content', label: 'Content'},
+  {key: 'usage', label: 'Usage'},
+  {key: 'diagnostics', label: 'Diagnostics'},
+];
+
+// drawerGroup is the active classification for the open drawer. It survives
+// live repaints and request navigation, and resets when the drawer closes.
+let drawerGroup = 'request';
+
+// detailWireGroups wraps the rendered cards into their classified panels and
+// builds the sticky tab strip. It runs after the body commits, so a conditional
+// card (Prompt, retries, Debug) never leaves a dead entry behind.
+function detailWireGroups() {
+  const body = $('drawer-body');
+  if (!body) return;
+  // Only the drawer's own cards are classified; the Debug capture's nested
+  // identity/timing/body cards stay inside the Debug card.
+  const sections = [...body.querySelectorAll('.detail-section[data-title]')]
+    .filter(sec => sec.parentElement === body);
+  if (!sections.length) return;
+  const byGroup = new Map();
+  sections.forEach(sec => {
+    const key = sec.dataset.group || 'request';
+    if (!byGroup.has(key)) byGroup.set(key, []);
+    byGroup.get(key).push(sec);
+  });
+  const ordered = DETAIL_GROUPS.filter(g => byGroup.has(g.key));
+  byGroup.forEach((_, key) => {
+    if (!DETAIL_GROUPS.some(g => g.key === key)) ordered.push({key, label: key});
+  });
+  if (!byGroup.has(drawerGroup)) drawerGroup = ordered[0].key;
+  if (ordered.length < 2) return;
+  const nav = document.createElement('nav');
+  nav.className = 'd-tabs';
+  nav.setAttribute('role', 'tablist');
+  nav.setAttribute('aria-label', 'detail groups');
+  nav.innerHTML = ordered.map(g => {
+    const active = g.key === drawerGroup;
+    return `<button type="button" class="d-tab" id="d-tab-${escapeHtml(g.key)}" role="tab" aria-selected="${active ? 'true' : 'false'}" aria-controls="d-group-${escapeHtml(g.key)}" tabindex="${active ? '0' : '-1'}" data-group-tab="${escapeHtml(g.key)}" data-focus-key="tab:${escapeHtml(g.key)}">` +
+      `${escapeHtml(g.label)}<span class="d-tab-n" aria-hidden="true">${byGroup.get(g.key).length}</span></button>`;
+  }).join('');
+  body.insertBefore(nav, sections[0]);
+  const panels = document.createDocumentFragment();
+  ordered.forEach(g => {
+    const panel = document.createElement('div');
+    panel.className = 'd-group';
+    panel.id = 'd-group-' + g.key;
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', 'd-tab-' + g.key);
+    panel.hidden = g.key !== drawerGroup;
+    byGroup.get(g.key).forEach(sec => panel.appendChild(sec));
+    panels.appendChild(panel);
+  });
+  nav.after(panels);
+}
+
+// detailSelectGroup reveals one classified panel. A pointer or keyboard
+// switch focuses the tab and leaves the reading position where it was, so a
+// sticky strip swaps cards in place instead of jumping the drawer.
+function detailSelectGroup(key, moveFocus) {
+  const body = $('drawer-body');
+  if (!body) return;
+  const tabs = [...body.querySelectorAll('[data-group-tab]')];
+  const tab = tabs.find(t => t.dataset.groupTab === key);
+  if (!tab) return;
+  drawerGroup = key;
+  tabs.forEach(t => {
+    const active = t === tab;
+    t.setAttribute('aria-selected', active ? 'true' : 'false');
+    t.tabIndex = active ? 0 : -1;
+    const panel = document.getElementById(t.getAttribute('aria-controls'));
+    if (panel) panel.hidden = !active;
+  });
+  if (moveFocus) tab.focus();
+}
+
+function detailToggleSection(btn) {
+  const sec = btn && btn.closest('.detail-section');
+  if (!sec) return;
+  const collapsed = sec.classList.toggle('collapsed');
+  const key = btn.dataset.sectionKey || detailSlug(sec.dataset.title);
+  const title = sec.dataset.title || 'section';
+  btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  btn.setAttribute('aria-label', (collapsed ? 'expand ' : 'collapse ') + title);
+  btn.title = (collapsed ? 'expand ' : 'collapse ') + title;
+  if (collapsed) detailCollapsed.add(key); else detailCollapsed.delete(key);
+}
+
+document.addEventListener('click', e => {
+  const tab = e.target.closest('[data-group-tab]');
+  if (tab) { detailSelectGroup(tab.dataset.groupTab, true); return; }
+  const toggle = e.target.closest('[data-section-toggle]');
+  if (toggle) { detailToggleSection(toggle); return; }
+  const codeToggle = e.target.closest('[data-code-toggle]');
+  if (codeToggle) {
+    const block = codeToggle.closest('.detail-code');
+    if (!block) return;
+    const collapsed = block.classList.toggle('collapsed');
+    codeToggle.textContent = collapsed ? 'expand' : 'collapse';
+    codeToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    const label = block.dataset.codeLabel || 'text';
+    const verb = collapsed ? 'expand ' : 'collapse ';
+    codeToggle.setAttribute('aria-label', verb + label);
+    codeToggle.title = verb + label;
+    const key = block.dataset.codeFocus;
+    detailCodeState.set(key, {...detailCodeState.get(key), collapsed});
+    return;
+  }
+  const wrap = e.target.closest('[data-code-wrap]');
+  if (wrap) {
+    const block = wrap.closest('.detail-code');
+    if (!block) return;
+    const wrapped = !block.classList.toggle('nowrap');
+    wrap.setAttribute('aria-pressed', wrapped ? 'true' : 'false');
+    const key = block.dataset.codeFocus;
+    detailCodeState.set(key, {...detailCodeState.get(key), nowrap: !wrapped});
+  }
+});
+
+// WAI-ARIA tabs: the group strip is one tab stop, and Left/Right/Home/End move
+// selection and focus without leaving the strip.
+document.addEventListener('keydown', e => {
+  const tab = e.target && typeof e.target.closest === 'function'
+    ? e.target.closest('[data-group-tab]') : null;
+  if (!tab) return;
+  const body = $('drawer-body');
+  if (!body) return;
+  const tabs = [...body.querySelectorAll('[data-group-tab]')];
+  const i = tabs.indexOf(tab);
+  let next = null;
+  if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+  else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+  else if (e.key === 'Home') next = tabs[0];
+  else if (e.key === 'End') next = tabs[tabs.length - 1];
+  if (!next) return;
+  e.preventDefault();
+  detailSelectGroup(next.dataset.groupTab, true);
+});
