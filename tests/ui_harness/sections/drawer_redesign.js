@@ -218,6 +218,14 @@ module.exports = async function drawerRedesign(H) {
     d.getElementById('toast').textContent === 'copy failed' &&
     d.getElementById('toast').classList.contains('err'));
 
+  const fallbackBtn = body.querySelector('[data-focus-key="hero-path"]');
+  fallbackBtn.focus();
+  Object.defineProperty(w.navigator, 'clipboard', {configurable: true, value: undefined});
+  Object.defineProperty(d, 'execCommand', {configurable: true, value: () => true});
+  const fallbackOk = await w.copyText('insecure-context copy');
+  check('the insecure-context copy returns focus to its trigger',
+    fallbackOk && d.activeElement === fallbackBtn);
+
   const callsBefore = clipboardCalls;
   check('the clipboard stub was exercised by the earlier copies', callsBefore >= 4);
   w.closeDrawer();

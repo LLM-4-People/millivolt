@@ -40,6 +40,7 @@ function toast(message, tone = '') {
 // visible failure message.
 async function copyText(text) {
   const value = String(text ?? '');
+  const returnFocus = document.activeElement;
   try {
     if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
       await navigator.clipboard.writeText(value);
@@ -49,6 +50,7 @@ async function copyText(text) {
     // Permission denial or an insecure context: try the fallback below.
   }
   let area = null;
+  let usedFallback = false;
   try {
     area = document.createElement('textarea');
     area.value = value;
@@ -56,7 +58,10 @@ async function copyText(text) {
     area.style.position = 'fixed';
     area.style.top = '-1000px';
     area.style.opacity = '0';
+    // iOS zooms the viewport when a focused field is below 16px.
+    area.style.fontSize = '16px';
     document.body.appendChild(area);
+    usedFallback = true;
     area.select();
     area.setSelectionRange(0, value.length);
     return !!(typeof document.execCommand === 'function' && document.execCommand('copy'));
@@ -64,6 +69,12 @@ async function copyText(text) {
     return false;
   } finally {
     if (area) area.remove();
+    // Selecting the fallback field moved focus; hand it back to the control
+    // that started the copy so keyboard position never lands on BODY.
+    if (usedFallback && returnFocus && returnFocus !== document.body &&
+        document.contains(returnFocus) && typeof returnFocus.focus === 'function') {
+      returnFocus.focus();
+    }
   }
 }
 
