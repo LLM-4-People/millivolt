@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -659,7 +658,7 @@ func validateLimit(l scheduler.Limit) error {
 	return nil
 }
 
-func parseLimitInt(s string, max int64) (n int64, off bool, err error) {
+func parseLimitInt(s string, max int) (n int, off bool, err error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, false, fmt.Errorf("empty")
@@ -667,11 +666,10 @@ func parseLimitInt(s string, max int64) (n int64, off bool, err error) {
 	if isLimitOff(s) {
 		return 0, true, nil
 	}
-	n, err = strconv.ParseInt(s, 10, 64)
-	// The int-width bound keeps the later int conversion safe on 32-bit
-	// targets; maxLimitConcurrency is much smaller, but keeping both makes
-	// the conversion independent of that policy constant.
-	if err != nil || n <= 0 || n > max || n > math.MaxInt {
+	// Atoi is the int-sized parser, so the header value can never narrow
+	// through a wider temporary on a 32-bit target.
+	n, err = strconv.Atoi(s)
+	if err != nil || n <= 0 || n > max {
 		return 0, false, fmt.Errorf("out of range")
 	}
 	return n, false, nil

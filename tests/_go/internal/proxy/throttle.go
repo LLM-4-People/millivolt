@@ -744,6 +744,39 @@ func TestThrottleLimitHeadersNeverLeakUpstream(t *testing.T) {
 	}
 }
 
+func TestParseLimitInt(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		max     int
+		want    int
+		off     bool
+		wantErr bool
+	}{
+		{name: "count", raw: "3", max: maxLimitConcurrency, want: 3},
+		{name: "trimmed", raw: " 3 ", max: maxLimitConcurrency, want: 3},
+		{name: "at cap", raw: "100000", max: maxLimitConcurrency, want: 100000},
+		{name: "over cap", raw: "100001", max: maxLimitConcurrency, wantErr: true},
+		{name: "platform max", raw: strconv.Itoa(maxInt), max: maxInt, want: maxInt},
+		{name: "off", raw: "off", max: maxLimitConcurrency, off: true},
+		{name: "zero", raw: "0", max: maxLimitConcurrency, off: true},
+		{name: "negative", raw: "-1", max: maxLimitConcurrency, wantErr: true},
+		{name: "empty", raw: "", max: maxLimitConcurrency, wantErr: true},
+		{name: "wide", raw: "9223372036854775808", max: maxLimitConcurrency, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, off, err := parseLimitInt(tc.raw, tc.max)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseLimitInt(%q, %d) error = %v, wantErr %v", tc.raw, tc.max, err, tc.wantErr)
+			}
+			if got != tc.want || off != tc.off {
+				t.Fatalf("parseLimitInt(%q, %d) = %d, %v; want %d, %v", tc.raw, tc.max, got, off, tc.want, tc.off)
+			}
+		})
+	}
+}
+
 func TestParseLimitRate(t *testing.T) {
 	n, w, off, err := parseLimitRate("60/1m", maxLimitRequests)
 	if err != nil || off || n != 60 || w != time.Minute {
