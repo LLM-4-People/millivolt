@@ -58,6 +58,24 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 	if len(rels) == 0 {
 		t.Fatalf("index.html has no %s assets", DashPrefix)
 	}
+	// The dashboard stylesheets are one cascade in link order: later modules
+	// override shell rules at equal specificity, and the max-640 block in
+	// inspector.css is the load-bearing tail. Pin the order here so a manual
+	// reorder cannot silently regress mobile layout.
+	wantStyles := []string{
+		"css/dashboard.css", "css/explorer.css", "css/overlays.css",
+		"css/charts.css", "css/requests.css", "css/inspector.css",
+		"css/themes.css",
+	}
+	var gotStyles []string
+	for _, ref := range rels {
+		if strings.HasPrefix(ref.rel, "css/") {
+			gotStyles = append(gotStyles, ref.rel)
+		}
+	}
+	if strings.Join(gotStyles, ",") != strings.Join(wantStyles, ",") {
+		t.Errorf("dashboard stylesheet order = %v, want %v", gotStyles, wantStyles)
+	}
 	version := dashboardContentVersion()
 	referenced := map[string]bool{}
 	for _, ref := range rels {

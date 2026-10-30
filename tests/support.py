@@ -460,12 +460,12 @@ def js_template_comment_errors(pairs):
 
 
 SPARK_HEIGHT_JS = 'internal/web/static/js/chart.js'
-SPARK_HEIGHT_CSS = 'internal/web/static/css/dashboard.css'
+SPARK_HEIGHT_CSS = 'internal/web/static/css/charts.css'
 
 
 def spark_height_mirror_errors(pairs):
     """chart.js plots each tile's sparkline into an SVG sized by
-    CHART_SPARK_H while dashboard.css boxes .chart-total .spark with a px
+    CHART_SPARK_H while charts.css boxes .chart-total .spark with a px
     height. The two sites must stay equal or the plotted extent no longer
     matches the visible strip."""
     errors = []

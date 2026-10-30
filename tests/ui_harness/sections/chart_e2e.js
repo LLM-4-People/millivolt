@@ -225,7 +225,13 @@ module.exports = async function chartE2e(H) {
   // reduced-motion .pill.live animation reset - must not shadow the
   // top-level declaration the pin reads).
   const firstCSSRule = sel => {
-    const visit = list => { for (const r of list) { if (r.selectorText === sel) return r; if (r.cssRules && r.cssRules.length) { const got = visit(r.cssRules); if (got) return got; } } };
+    const wanted = sel.split(',').map(s => s.trim()).filter(Boolean);
+    const has = r => {
+      if (!r.selectorText) return false;
+      const have = new Set(r.selectorText.split(',').map(s => s.trim()));
+      return wanted.every(s => have.has(s));
+    };
+    const visit = list => { for (const r of list) { if (has(r)) return r; if (r.cssRules && r.cssRules.length) { const got = visit(r.cssRules); if (got) return got; } } };
     for (const sheet of d.styleSheets) { const got = visit(sheet.cssRules); if (got) return got; }
     return null;
   };
@@ -234,10 +240,16 @@ module.exports = async function chartE2e(H) {
   // order wins for the same specificity, so a first-rule read can guard a
   // declaration the browser never uses.
   const lastCSSRule = sel => {
+    const wanted = sel.split(',').map(s => s.trim()).filter(Boolean);
+    const has = r => {
+      if (!r.selectorText) return false;
+      const have = new Set(r.selectorText.split(',').map(s => s.trim()));
+      return wanted.every(s => have.has(s));
+    };
     let found = null;
     const visit = list => {
       for (const r of list) {
-        if (r.selectorText === sel) found = r;
+        if (has(r)) found = r;
         if (r.cssRules && r.cssRules.length) visit(r.cssRules);
       }
     };
@@ -327,7 +339,7 @@ module.exports = async function chartE2e(H) {
   check('the day divider parks exactly on the measured header edge',
     lastCSSRule('tr.day-sep td')?.style.getPropertyValue('top') === '29.5px');
   check('the request log declares a visible focus ring',
-    lastCSSRule('#tbl-requests:focus-visible')?.style.getPropertyValue('outline')?.includes('var(--accent)') === true);
+    lastCSSRule('#tbl-requests:focus-visible')?.style.getPropertyValue('outline')?.includes('var(--focus-outline)') === true);
   // Duplicate-rule mutation: a later rule with the same selector owns the
   // browser's declaration. The pins above must read the last match, not a
   // stale first occurrence.
@@ -338,9 +350,9 @@ module.exports = async function chartE2e(H) {
     d.head.appendChild(style);
     try {
       return firstCSSRule('#tbl-requests:focus-visible')
-          ?.style.getPropertyValue('outline')?.includes('var(--accent)') === true &&
+          ?.style.getPropertyValue('outline')?.includes('var(--focus-outline)') === true &&
         lastCSSRule('#tbl-requests:focus-visible')
-          ?.style.getPropertyValue('outline')?.includes('var(--accent)') === false &&
+          ?.style.getPropertyValue('outline')?.includes('var(--focus-outline)') === false &&
         lastCSSRule('tr.day-sep td')?.style.getPropertyValue('top') === '0px';
     } finally {
       style.remove();

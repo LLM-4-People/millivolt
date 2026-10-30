@@ -48,7 +48,16 @@ const selectionIsSingle = (group, expected) => {
   const root = d.documentElement;
   const themes = [...d.querySelectorAll('.theme-opt')].map(option => option.dataset.themeId);
   const modes = [...d.querySelectorAll('.theme-mode-opt')].map(option => option.dataset.modeId);
-  const dashboardCSS = fs.readFileSync(path.join(STATIC, 'css/dashboard.css'), 'utf8');
+  // The dashboard serves one stylesheet per surface module. The browser sees
+  // their concatenation in link order, so parse the same corpus; themes.css
+  // stays separate because it owns the palette layer.
+  const indexHTML = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+  const dashboardCSS = [...indexHTML.matchAll(
+    /<link\s+rel="stylesheet"\s+href="\/dash\/css\/([^"?]+)[^"]*"/g)]
+    .map(match => match[1])
+    .filter(name => name !== 'themes.css')
+    .map(name => fs.readFileSync(path.join(STATIC, 'css', name), 'utf8'))
+    .join('\n');
   const themeCSS = fs.readFileSync(path.join(STATIC, 'css/themes.css'), 'utf8');
 
   check('the picker offers every palette', themes.length === 8);

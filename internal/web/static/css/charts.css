@@ -1,0 +1,229 @@
+/* Chart card: totals strip, plot, metrics picker and the uPlot cursor
+   override. */
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 16px 18px; overflow: hidden; position: relative;
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent) inset, 0 12px 28px rgba(var(--shadow-rgb),.24);
+  }
+  .card h2 { margin: 0 0 10px; font-size: 11px; font-weight: 650; color: var(--muted); text-transform: none; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
+
+  .chart-wrap { position: relative; height: 210px; width: 100%; }
+  /* Period totals strip pinned above the plot: the VIEWED window's
+     server-computed bucket sums, always visible regardless of hover. An
+     auto-fit grid fills one even row while the tiles fit (empty tracks
+     collapse, so sparse presets stretch like before); denser plotted
+     presets wrap into further rows of the same tile width instead of
+     crushing or overflowing. The 84px floor fits every bounded tile value
+     (compact K/M/B money and counts stay ≤ 8 monospace characters). */
+  .chart-totals {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(84px, 100%), 1fr)); gap: 10px;
+    font-size: 15px; line-height: 1; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text);
+    padding: 2px 0 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border);
+    min-height: 57px; flex-shrink: 0;
+  }
+  /* Fixed tile height: a tile that gains (or never had) a share sub-row
+     reserves the same space, so live data arriving can never re-wrap or
+     resize the strip - and the plot below it never moves. Sparks stay
+     bottom-pinned whatever the tile carries. */
+  .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
+  .chart-totals .tl { color: var(--muted); font-size: 10px; }
+  /* The summary preset: no plot, the tiles ARE the surface. They borrow the
+     KPI band's blended cell language instead of stacking a second box layer
+     inside the card: no per-tile panel, border or radius - cells sit
+     directly on the card's panel separated by the same faint left hairline
+     (first cell open, like the KPI band), and the band closes with the
+     shared graduated-scale tick strip instead of a hard rule. The tiles are
+     plain readouts; the metrics picker at the card head owns what shows
+     (the same dash.chart hidden set the legend uses), hidden metrics leave
+     the band and the auto-fit grid reflows, and the spark keeps each
+      tile's color voice, so cells carry no per-metric leading tick. The
+      tiles wrap into as many whole rows as the selection needs, and the
+      page scrolls past them, so every selected tile always renders at
+      every viewport.
+      Sizing: every tile is ONE fixed height per window. At the full locked
+      height it is 118px (label 10 + value 13 + the tokens tile's two share
+      lines 20 + spark 32 + three 6px gaps + 20px padding = 113, all
+      line-height-1 rows so the number is typeface-independent, with
+      breathing room); the short-locked media queries below lower the cell
+      and spark together so the card still fits the pair. Either way a tile
+      is the same size whatever it carries - spark or no spark, one share
+      line or two - and the no-data skeleton swaps to data without moving the
+      card.
+      The spark is flex-shrink: 0 - it never acts as the overflow shock
+      absorber; an oversized tile must clip visibly (the browser gate
+      catches it), never silently crush the spark. The band sits
+      at its natural rows height - it never stretches to fill the card (the
+      old flex-basis-0 stretch collapsed the strip to a sliver on
+      content-height cards and clipped the sparks) - and the card itself
+      opts out of the pair's column stretch, so the summary never paints a
+      hollow tall card: what you see is what the metrics need. */
+  .traffic-card.tiles-only { align-self: start; }
+  .traffic-card.tiles-only .chart-wrap,
+  .traffic-card.tiles-only .chart-axes,
+  .traffic-card.tiles-only #traffic-legend { display: none; }
+  .traffic-card.tiles-only .chart-totals {
+    position: relative;
+    /* 13px values are the band's fit size: the widest common value - the
+       in/out/cached triple, e.g. "95.21M/392.78K/92.85M" - measures 150px
+       at 13px (173px at the strip's 15px, far past a 3-track row's ~160px
+       cell). With the 8px tile side padding that needs a 166px track, so
+       the floor is 170px and the lock's pair floor (572px card, below)
+       keeps three whole tracks in the timeline card at every locked
+       window. Extreme values ellipsize (the val-pair rule below), never
+       overlap. */
+    grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+    gap: 8px;
+    font-size: 13px;
+    margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
+  }
+  .traffic-card.tiles-only .chart-total {
+    position: relative;
+    justify-content: space-between; gap: 6px; padding: 10px 8px; height: 118px;
+    background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
+  }
+  .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
+  .traffic-card.tiles-only .chart-total:first-child { border-left: 0; }
+  /* The KPI band's idiom, applied to the band tile's value pair: a value
+     wider than its track (extreme token counts) truncates with an ellipsis
+     instead of painting over the neighboring tile - the KPI row above
+     clips the same way, and the tile is a summary: exact figures live in
+     the KPI band and the request drawer. */
+  .traffic-card.tiles-only .chart-total .val-pair { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
+     the tile bottom, so the sparks align across the row whatever sub-rows a
+     tile carries. Sparks belong to the summary tiles alone (the plotted
+     presets' strips carry values, no evolution line). At the full locked
+     height the explicit height matches CHART_SPARK_H exactly so the viewBox
+     draws at 1:1 and the line keeps its stroke weight instead of stretching;
+     the short-locked overrides below scale that same viewBox down with the
+     cell. */
+  .chart-total .spark { display: block; width: 100%; height: 32px; margin-top: auto; }
+  /* Locked short windows: the pair's grid row can be shorter than two 118px
+     tile rows (1366x750 gives 284px, 1366x768 302px). Keep every tile's
+     content - label, value, both share lines and a real spark - inside the
+     card by shortening the fixed cell and the spark, never by clipping the
+     card or letting it spill into the footer. The 1440x1000-class windows
+     keep the full 118px / 32px cells. */
+  @media (min-width: 1200px) and (min-height: 750px) and (max-height: 767px) {
+    .traffic-card.tiles-only .chart-total { height: 92px; gap: 2px; padding: 9px 8px; }
+    .traffic-card.tiles-only .chart-total .spark { height: 22px; }
+  }
+  @media (min-width: 1200px) and (min-height: 768px) and (max-height: 799px) {
+    .traffic-card.tiles-only .chart-total { height: 102px; gap: 3px; padding: 9px 8px; }
+    .traffic-card.tiles-only .chart-total .spark { height: 26px; }
+  }
+  /* Merged in/out pair: one wrapped line whose halves mirror the token
+     bars' colors (input purple, output green) over a thin muted separator -
+     tile and bars read as one story, and the pair fits the narrowest tile
+     like the KPI band's duo. */
+  .chart-totals .val-pair { white-space: nowrap; }
+  .chart-totals .v-in { color: var(--accent2); }
+  .chart-totals .v-out { color: var(--ok); }
+   /* Requests pair: request count in the requests plot's accent, the blended
+      token volume in the token story's cyan. */
+   .chart-totals .v-req { color: var(--accent); }
+   .chart-totals .v-tok { color: var(--cyan); }
+   /* Tokens triple: the in/out halves in the token bars' colors, cached
+      tokens in the cache line's muted tone - the third plot color of the
+      tokens preset. */
+   .chart-totals .v-cache { color: var(--muted); }
+   /* Health pair: errors in the chart's error red, rate-limited requests in
+      the 429 tone - the same two colors as the health lines below. */
+   .chart-totals .v-err { color: var(--err); }
+   .chart-totals .v-rl { color: var(--rl); }
+   /* Timing pair: latency in the latency plot's accent, speed in its green -
+      the same two colors as the latency preset's lines, so the tile halves
+      and the duo sparks below them read as one story. */
+   .chart-totals .v-ttft { color: var(--accent); }
+   .chart-totals .v-tps { color: var(--ok); }
+   .chart-totals .pair-sep { color: var(--muted); padding: 0 1px; }
+   /* Measured shares ride under the value on their own row (block breaks the
+      inline run), so a long suffix can never push a narrow tile sideways. */
+   .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+  .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
+  .chart-scale { font-size: 9px; }
+  .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
+  /* A readable, complete bucket readout on the opposite side of the pointer. */
+  #chart-hover {
+    position: absolute; top: 8px; right: 8px; z-index: 3;
+    background: var(--panel); border: 1px solid var(--border2);
+    box-shadow: 0 6px 20px rgba(var(--shadow-rgb),.3); border-radius: 7px;
+    padding: 10px 12px; font-family: var(--mono); font-size: 11px;
+    color: var(--text); pointer-events: none; max-width: calc(100% - 16px);
+  }
+  .chart-hover-time { color: var(--muted); font-size: 10px; margin-bottom: 7px; }
+  .chart-hover-row { display: flex; justify-content: space-between; gap: 20px; line-height: 1.8; }
+  .chart-controls { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+  .chart-controls select {
+    background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
+    font-size: 11px; padding: 4px 10px; border-radius: 7px; cursor: pointer;
+    font-family: var(--mono); transition: all .15s;
+  }
+  .chart-controls select:hover { color: var(--text); border-color: var(--accent); }
+  .chart-controls select:focus-visible, #traffic-legend button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* The summary metrics picker: the trigger matches the row's select
+     language (panel2 fill, hairline border, hover accent; height pinned to
+     the native select box the row's shared font and padding produce) so the
+     control reads as one of the chart controls, with the registry chevron
+     flipping open. The menu mirrors the provider picker's panel - absolute
+     under the trigger, mono rows - but with no fixed width floor: the
+     provider menu's min-width exists for its input row, and this menu has
+     only rows, so it shrink-wraps its longest entry. Rows carry a
+     fixed-width check slot - checked rows keep the accent check and full
+     text, unchecked rows dim to muted, so the current selection reads at a
+     glance. */
+  .metrics-pick { position: relative; }
+  #chart-metrics-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
+    font: 11px var(--mono); padding: 4px 10px; height: 24px; border-radius: 7px; cursor: pointer;
+    transition: all .15s;
+  }
+  #chart-metrics-btn:hover { color: var(--text); border-color: var(--accent); }
+  #chart-metrics-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #chart-metrics-btn svg { width: 9px; height: 9px; stroke: currentColor; fill: none; stroke-width: 1.5; }
+  #chart-metrics-btn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
+  #chart-metrics-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
+  #chart-metrics-btn .mp-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* Fixed, not absolute: the menu lives in the card head, and the card's
+     overflow: hidden clipped any menu taller than the card's remaining
+     space. Fixed placement escapes every ancestor clip; chart.js's
+     syncMetricsMenuEdge owns the coordinates (right-aligned to the
+     trigger, flipping above it near the window's bottom edge), so this
+     rule positions nothing beyond keeping an unplaced menu offscreen. */
+  .metrics-menu {
+    position: fixed; top: -9999px; right: auto; z-index: 40;
+    padding: 8px; display: flex; flex-direction: column; gap: 2px;
+    background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
+    box-shadow: var(--shadow-menu); font-family: var(--mono);
+  }
+  .metrics-row {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    font: 11px var(--mono); color: var(--text); background: none; border: none;
+    border-radius: 6px; padding: 5px 7px; cursor: pointer;
+  }
+  .metrics-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+  .metrics-row:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+  .metrics-row[aria-checked="false"] { color: var(--muted); }
+  .metrics-row .mp-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
+  .traffic-card .card-hd { flex-wrap: wrap; flex-shrink: 0; justify-content: space-between; }
+  @media (max-width: 480px) {
+    .chart-totals { gap: 8px; }
+    /* The picker trigger is a chart control: it takes the selects' mobile
+       treatment (6px inline padding), drops its count chip (the menu rows
+       carry the state; the aria-label keeps the full truth) and, like the
+       card header above it, lets the row wrap - the narrowest phones get
+       the trigger on its own line instead of an overflow. */
+    .chart-controls select, #chart-metrics-btn { padding-inline: 6px; }
+    .chart-controls { flex-wrap: wrap; }
+    .metrics-pick .mp-count { display: none; }
+  }
+  .card-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .card-hd .htext { margin-left: auto; } /* push trailing hint to the right; controls after it sit at the far right */
+
+  /* uPlot captures literal cursor colors in its vendored stylesheet, where
+     `.u-hz .u-cursor-x` shades the vertical cursor. The uplot and u-hz
+     classes are the same element, so the override targets the overlay child
+     directly and outranks the vendor rule. Cursor-y and the selection box are
+     disabled by chart.js and have no rule here. */
+  .uplot .u-over > .u-cursor-x { border-color: var(--muted); }

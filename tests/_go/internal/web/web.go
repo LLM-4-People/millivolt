@@ -16,6 +16,12 @@ import (
 func TestDashFileAllowlist(t *testing.T) {
 	ok := []string{
 		DashPrefix + "css/dashboard.css",
+		DashPrefix + "css/explorer.css",
+		DashPrefix + "css/overlays.css",
+		DashPrefix + "css/charts.css",
+		DashPrefix + "css/requests.css",
+		DashPrefix + "css/inspector.css",
+		DashPrefix + "css/themes.css",
 		DashPrefix + "vendor/uplot.js",
 		DashPrefix + "js/core.js",
 		DashPrefix + "js/settings.js",
