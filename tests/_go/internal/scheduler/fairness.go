@@ -375,10 +375,10 @@ func TestFairDrainNoStarvation(t *testing.T) {
 	})
 }
 
-// TestFairDrainCancellationDoesNotLeak pins tombstone handling inside a fair
-// pass: the cancelled head of key A is skipped without consuming the pass's
-// one-grant budget, both live keys receive exactly one freed slot, and no
-// phantom slot or queue count survives.
+// TestFairDrainCancellationDoesNotLeak pins cancelled-waiter handling inside a
+// fair pass: the cancelled head of key A is skipped without consuming the
+// pass's one-grant budget, both live keys receive exactly one freed slot, and
+// no phantom slot or queue count survives.
 func TestFairDrainCancellationDoesNotLeak(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
