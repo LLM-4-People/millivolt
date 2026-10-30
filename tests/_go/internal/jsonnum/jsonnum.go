@@ -32,7 +32,6 @@ func TestParseIntegralSpellings(t *testing.T) {
 		{"1000000.000", 1000000},
 		{"10000e2", 1000000},
 		{"-1000000", -1000000},
-		{"1000000000000000000", 1000000000000000000},
 	} {
 		t.Run(tc.literal, func(t *testing.T) {
 			got, err := Parse([]byte(tc.literal))
@@ -272,6 +271,8 @@ func TestParseInt64Bounds(t *testing.T) {
 		{literal: "5e0", want: 5},
 		{literal: "1e3", want: 1000},
 		{literal: "-2", want: -2},
+		{literal: "1000000000000000000", want: 1000000000000000000},
+		{literal: "1e18", want: 1000000000000000000},
 		{literal: "9223372036854775807", want: 9223372036854775807},
 		{literal: "-9223372036854775808", want: -9223372036854775808},
 		{literal: "9223372036854775808", wantErr: ErrOutOfRange},
