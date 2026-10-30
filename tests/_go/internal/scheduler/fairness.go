@@ -16,7 +16,7 @@ func groupQueued(s *Scheduler, key string) int {
 	g := s.groupFor(key, 0)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.queued
+	return g.queue.live
 }
 
 // providerGateWaiters reads a provider's fair-waiting count under the scheduler
@@ -1049,12 +1049,11 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 			for i, key := range keys {
 				g := s.groupFor(key, 0)
 				g.mu.Lock()
-				g.queue = append(g.queue, &waiter{
+				g.queue.push(&waiter{
 					ch:       make(chan struct{}, 1),
 					ctx:      ctx,
 					provider: provider,
 				})
-				g.queued = 1
 				g.syncQueueLocked()
 				g.markGateWaitingLocked()
 				g.mu.Unlock()
@@ -1077,15 +1076,14 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 				// Queue the target's next waiter, then pin the rotation to the
 				// group before its tail slot so the release reaches it first.
 				target.mu.Lock()
-				target.queue = append(target.queue, &waiter{
+				target.queue.push(&waiter{
 					ch:       make(chan struct{}, 1),
 					ctx:      ctx,
 					provider: provider,
 				})
-				target.queued = 1
 				target.syncQueueLocked()
 				target.markGateWaitingLocked()
-				pending := target.queue[len(target.queue)-1]
+				pending := target.queue.tail
 				target.mu.Unlock()
 
 				idx.mu.Lock()
@@ -1109,9 +1107,9 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 			b.StopTimer()
 			for _, g := range backlogGroups {
 				g.mu.Lock()
-				g.queue = nil
-				g.queued = 0
-				g.tombstones = 0
+				for g.queue.head != nil {
+					g.queue.remove(g.queue.head)
+				}
 				g.syncQueueLocked()
 				g.mu.Unlock()
 			}
@@ -1152,12 +1150,11 @@ func BenchmarkThrottledReleasePacedPeers(b *testing.B) {
 				}
 				g := s.groupFor(key, 0)
 				g.mu.Lock()
-				g.queue = append(g.queue, &waiter{
+				g.queue.push(&waiter{
 					ch:       make(chan struct{}, 1),
 					ctx:      context.Background(),
 					provider: provider,
 				})
-				g.queued = 1
 				g.syncQueueLocked()
 				g.mu.Unlock()
 			}

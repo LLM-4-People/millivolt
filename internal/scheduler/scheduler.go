@@ -152,7 +152,7 @@ func (s *Scheduler) Stats() Stats {
 	for _, g := range s.groups {
 		g.mu.Lock()
 		st.InFlight += g.inFlight
-		st.Queued += g.queued
+		st.Queued += g.queue.live
 		st.SendWaiters += g.sendWaiters
 		g.mu.Unlock()
 	}
@@ -187,7 +187,7 @@ func (s *Scheduler) drainAll() {
 	var local []*group
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
-		provider, queued := g.provider, g.queued
+		provider, queued := g.provider, g.queue.live
 		if provider != "" && queued > 0 {
 			g.markGateWaitingLocked()
 		}

@@ -998,9 +998,9 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 			}
 			for _, g := range providerGroupsSnapshot(s, provider) {
 				g.mu.Lock()
-				nonEmpty := g.queued > 0
+				nonEmpty := g.queue.live > 0
 				if g.hasQueued.Load() != nonEmpty {
-					t.Errorf("group witness = %v with queued=%d", g.hasQueued.Load(), g.queued)
+					t.Errorf("group witness = %v with queued=%d", g.hasQueued.Load(), g.queue.live)
 				}
 				g.mu.Unlock()
 			}
@@ -1064,8 +1064,8 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 	}
 	for _, g := range providerGroupsSnapshot(s, provider) {
 		g.mu.Lock()
-		if g.hasQueued.Load() || g.queued != 0 {
-			t.Errorf("drained group retained witness=%v queued=%d", g.hasQueued.Load(), g.queued)
+		if g.hasQueued.Load() || g.queue.live != 0 {
+			t.Errorf("drained group retained witness=%v queued=%d", g.hasQueued.Load(), g.queue.live)
 		}
 		g.mu.Unlock()
 	}
@@ -1198,11 +1198,11 @@ func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
 	}
 }
 
-// TestThrottleQueuedSkipsCancelledTombstones pins nil-safety in
-// throttleQueued: a cancelled non-head waiter stays in a long queue as a nil
-// tombstone until the next drain compacts it, and the dashboard's throttle
-// listing must skip that slot instead of dereferencing it.
-func TestThrottleQueuedSkipsCancelledTombstones(t *testing.T) {
+// TestThrottleQueuedIgnoresCancelledWaiters pins both halves of the queue
+// ownership contract: cancelling a non-head waiter unlinks it immediately, and
+// the dashboard's throttle listing counts only live waiters. The queue has no
+// tombstone representation, so a scan cannot dereference a dead slot.
+func TestThrottleQueuedIgnoresCancelledWaiters(t *testing.T) {
 	s := New(Options{})
 	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
 	g := s.groupFor("p|k", 1)
@@ -1211,18 +1211,20 @@ func TestThrottleQueuedSkipsCancelledTombstones(t *testing.T) {
 		waiters[i] = &waiter{ch: make(chan struct{}, 1), ctx: context.Background(), provider: "p"}
 	}
 	g.mu.Lock()
-	g.queue = append([]*waiter(nil), waiters...)
-	g.queued = len(waiters)
+	for _, w := range waiters {
+		g.queue.push(w)
+	}
 	g.mu.Unlock()
 
-	// Sixteen slots and one cancellation sit below the compaction threshold,
-	// so removeWaiter leaves a nil tombstone in place until the next drain.
 	g.removeWaiter(waiters[1])
 	g.mu.Lock()
-	retained := len(g.queue) == len(waiters) && g.queue[1] == nil && g.queued == len(waiters)-1
+	live, unlinked := g.queue.live, waiters[1].queue == nil && waiters[1].prev == nil && waiters[1].next == nil
 	g.mu.Unlock()
-	if !retained {
-		t.Fatal("test setup did not retain a nil tombstone")
+	if !unlinked {
+		t.Fatal("cancelled waiter retained a queue link")
+	}
+	if live != len(waiters)-1 {
+		t.Fatalf("live queue depth = %d, want %d", live, len(waiters)-1)
 	}
 
 	infos := s.ListThrottles()

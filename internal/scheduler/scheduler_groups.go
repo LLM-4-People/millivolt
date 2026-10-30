@@ -330,7 +330,7 @@ func (s *Scheduler) markGroupBusyLocked(g *group) {
 // with a remaining backlog is never idle, so a ramp epoch survives a busy
 // drain. Callers hold g.mu.
 func (s *Scheduler) markGroupIdleLocked(g *group) {
-	if g.retired || g.inFlight != 0 || g.queued != 0 {
+	if g.retired || g.inFlight != 0 || g.queue.live != 0 {
 		return
 	}
 	if !g.rampStart.IsZero() && g.idleSince.IsZero() {
@@ -377,12 +377,12 @@ func (s *Scheduler) makeGroupRoomLocked() {
 // the retired flag and retries against the map. Callers hold s.mu.
 func (s *Scheduler) evictIdleGroupLocked(g *group) bool {
 	g.mu.Lock()
-	if g.retired || g.inFlight != 0 || g.queued != 0 {
+	if g.retired || g.inFlight != 0 || g.queue.live != 0 {
 		g.mu.Unlock()
 		return false
 	}
 	g.retired = true
-	// A retired group is idle by construction (queued == 0 already cleared its
+	// A retired group is idle by construction (an empty queue already cleared its
 	// fair mark through syncQueueLocked); clear defensively so a stale mark can
 	// never keep an evicted group in the provider's fair set.
 	g.clearGateWaitingLocked()

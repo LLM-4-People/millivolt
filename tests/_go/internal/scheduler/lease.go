@@ -82,8 +82,7 @@ func TestCancelledGrantedWaiterUsesOriginalGate(t *testing.T) {
 		g := s.groupFor("group", 0)
 		w := &waiter{ch: make(chan struct{}, 1), ctx: context.Background(), provider: provider, estTokens: 40}
 		g.mu.Lock()
-		g.queue = []*waiter{w}
-		g.queued = 1
+		g.queue.push(w)
 		g.syncQueueLocked()
 		g.mu.Unlock()
 		g.drain() // grant sent, but the caller has not consumed it

@@ -547,10 +547,7 @@ func (s *Scheduler) seedQueuedHolds() {
 	var fire []seeded
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
-		for _, w := range g.queue {
-			if w == nil {
-				continue
-			}
+		g.queue.forEach(func(w *waiter) {
 			h := s.matchingHold(w.client, w.provider)
 			s.holdCountMu.Lock()
 			if h == nil {
@@ -559,7 +556,7 @@ func (s *Scheduler) seedQueuedHolds() {
 				// (that would nest holdCountMu / fire OnUnhold from seed).
 				s.clearHoldCountLocked(w)
 				s.holdCountMu.Unlock()
-				continue
+				return
 			}
 			s.moveHoldCountLocked(w, h)
 			if !w.holding {
@@ -569,7 +566,7 @@ func (s *Scheduler) seedQueuedHolds() {
 				}
 			}
 			s.holdCountMu.Unlock()
-		}
+		})
 		g.mu.Unlock()
 	}
 	for _, p := range fire {

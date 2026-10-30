@@ -35,7 +35,7 @@ type group struct {
 	// Scheduler.idleMu. idleListed is a lock-free fast-path witness for that
 	// membership; it changes under idleMu. Activity transitions, which hold
 	// g.mu, skip the idle lock when it is false; eviction re-verifies idleness
-	// under g.mu. A listed group is idle (inFlight == 0 and queued == 0).
+	// under g.mu. A listed group is idle (inFlight == 0 and queue empty).
 	idlePrev   *group
 	idleNext   *group
 	idleListed atomic.Bool
@@ -53,10 +53,8 @@ type group struct {
 	sendWaiters    int           // callers parked in WaitSend's send gate
 	sendKick       chan struct{} // closed and replaced when the send gate changes
 	pacer          wakeTimer     // one shared pacing wakeup, not one per waiter
-	queue          []*waiter     // live waiters; cancelled entries are nil tombstones
-	queued         int           // live waiter count (excludes tombstones)
-	tombstones     int           // nil entries awaiting drain's compaction pass
-	// hasQueued mirrors queued > 0 for lock-free drainProvider probes.
+	queue          waiterQueue   // parked Acquire callers, oldest first
+	// hasQueued mirrors queue.live > 0 for lock-free drainProvider probes.
 	// providerQueued is the owning provider index's queued-group counter,
 	// installed at first attribution. Both move together, only under mu, at the
 	// queue's empty/non-empty transition - syncQueueLocked is the sole owner.
@@ -76,7 +74,7 @@ type group struct {
 	// rampStart anchors this group's anti-burst epoch: allowance grows from 1
 	// toward the provider's configured Concurrency as time passes. Zero means
 	// no epoch yet. idleSince stamps the moment the group became fully idle
-	// (inFlight == 0 and queued == 0), so a first grant can tell a short gap
+	// (inFlight == 0 and queue empty), so a first grant can tell a short gap
 	// that continues the epoch from a full RampDuration that resets it. Both
 	// fields are guarded by mu and only meaningful while the provider policy
 	// is enabled.
@@ -98,6 +96,64 @@ type waiter struct {
 	onUnhold  func()
 	estTokens int64
 	admission admission // exact provider/token owners captured at grant
+	queue     *waiterQueue
+	prev      *waiter
+	next      *waiter
+}
+
+// waiterQueue is a group's FIFO of parked Acquire callers. It owns membership
+// and the live count: a cancelled waiter is unlinked in O(1), so there is no
+// tombstone slot a reader could mistake for a live waiter and no compaction
+// pass to defer. Every node reachable from head is a live waiter. The zero
+// value is empty. All access is guarded by the owning group's mu.
+type waiterQueue struct {
+	head *waiter
+	tail *waiter
+	live int
+}
+
+// push appends w at the tail.
+func (q *waiterQueue) push(w *waiter) {
+	w.queue = q
+	w.prev = q.tail
+	w.next = nil
+	if q.tail != nil {
+		q.tail.next = w
+	} else {
+		q.head = w
+	}
+	q.tail = w
+	q.live++
+}
+
+// remove unlinks w and reports whether it was still queued. A waiter granted
+// by drain is unlinked at grant, so a later cancellation sees false and
+// follows the phantom-slot path in removeWaiter.
+func (q *waiterQueue) remove(w *waiter) bool {
+	if w == nil || w.queue != q {
+		return false
+	}
+	if w.prev != nil {
+		w.prev.next = w.next
+	} else {
+		q.head = w.next
+	}
+	if w.next != nil {
+		w.next.prev = w.prev
+	} else {
+		q.tail = w.prev
+	}
+	w.queue, w.prev, w.next = nil, nil, nil
+	q.live--
+	return true
+}
+
+// forEach calls fn for every live waiter in FIFO order. It is the only
+// read-only walk of the queue, so consumers never see a removed waiter.
+func (q *waiterQueue) forEach(fn func(*waiter)) {
+	for w := q.head; w != nil; w = w.next {
+		fn(w)
+	}
 }
 
 // WaiterHooks is optional Acquire context: which client/provider this caller
@@ -179,7 +235,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	// every other predicate already passed.
 	now := time.Now()
 	providerFairIdle := g.providerFair == nil || g.providerFair.Load() == 0
-	if g.queued == 0 &&
+	if g.queue.live == 0 &&
 		providerFairIdle &&
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!now.Before(g.nextAllowedAt) &&
@@ -195,7 +251,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 			g.sched.armThrottleDrain(hooks.Provider, wait)
 		}
 	}
-	if opts.MaxQueueSize > 0 && g.queued >= opts.MaxQueueSize {
+	if opts.MaxQueueSize > 0 && g.queue.live >= opts.MaxQueueSize {
 		g.mu.Unlock()
 		return nil, ErrQueueFull
 	}
@@ -213,8 +269,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 			return nil, ErrQueueFull
 		}
 	}
-	g.queue = append(g.queue, w)
-	g.queued++
+	g.queue.push(w)
 	g.syncQueueLocked()
 	g.sched.markGroupBusyLocked(g)
 	if w.holdID != "" && opts.MaxWait > 0 {
@@ -420,7 +475,7 @@ func (g *group) markGateWaitingLocked() {
 	if g.providerIdx == nil || g.gateWaiting.Load() {
 		return
 	}
-	if g.queued == 0 || !g.admissionWindowOpenLocked(time.Now()) {
+	if g.queue.live == 0 || !g.admissionWindowOpenLocked(time.Now()) {
 		return
 	}
 	g.providerIdx.markFairLocked(g)
@@ -572,7 +627,7 @@ func (g *group) resetRampLocked() {
 // rule. Callers hold g.mu; arming nests g.mu -> providerGate.mu as tryAdmit
 // already does.
 func (g *group) armRampStepLocked(now time.Time) {
-	if g.queued == 0 {
+	if g.queue.live == 0 {
 		return
 	}
 	target, duration, enabled := g.rampPolicy()
@@ -603,7 +658,7 @@ func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok
 			g.resetRampLocked()
 		}
 		ok, lease, wait = g.sched.tryAdmit(provider, estTokens)
-		if !ok && g.queued > 0 {
+		if !ok && g.queue.live > 0 {
 			g.markGateWaitingLocked()
 			gateBlocked = true
 		}
@@ -619,7 +674,7 @@ func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok
 	ok, lease, wait = g.sched.tryAdmit(provider, estTokens)
 	if ok {
 		g.startRampLocked(now, duration)
-	} else if g.queued > 0 {
+	} else if g.queue.live > 0 {
 		g.markGateWaitingLocked()
 		gateBlocked = true
 	}
@@ -645,10 +700,9 @@ func (g *group) drainLimited(budget int) int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
-	read, kept := 0, 0
 	granted := 0
 	refused, budgetStop := false, false
-	for read < len(g.queue) {
+	for w := g.queue.head; w != nil; {
 		if budget > 0 && granted >= budget {
 			budgetStop = true
 			break
@@ -656,26 +710,16 @@ func (g *group) drainLimited(budget int) int {
 		if (g.maxConcurrent != 0 && g.inFlight >= g.maxConcurrent) || now.Before(g.nextAllowedAt) {
 			break
 		}
-		w := g.queue[read]
-		if w == nil {
-			// removeWaiter tombstoned a cancelled waiter; drop it in the one
-			// compaction pass instead of shifting the suffix per cancel.
-			read++
-			continue
-		}
-		// Leave cancelled waiters queued so removeWaiter still finds them.
-		// Dropping here made removeWaiter treat them as a grant and
-		// decrement a live in-flight slot.
+		next := w.next
+		// Leave cancelled waiters queued so their own removeWaiter observes
+		// membership. Dropping here made removeWaiter treat the cancellation
+		// as a grant and decrement a live in-flight slot.
 		if w.ctx != nil && w.ctx.Err() != nil {
-			g.queue[kept] = w
-			kept++
-			read++
+			w = next
 			continue
 		}
 		if g.sched.matchingHold(w.client, w.provider) != nil {
-			g.queue[kept] = w
-			kept++
-			read++
+			w = next
 			continue
 		}
 		ok, lease, wait, gateBlocked := g.admitLocked(now, w.provider, w.estTokens)
@@ -687,8 +731,7 @@ func (g *group) drainLimited(budget int) int {
 			break
 		}
 		w.admission = lease
-		read++
-		g.queued--
+		g.queue.remove(w)
 		g.inFlight++
 		granted++
 		// Non-blocking send: w.ch is buffered (cap 1) so this always succeeds
@@ -698,16 +741,7 @@ func (g *group) drainLimited(budget int) int {
 		case w.ch <- struct{}{}:
 		default:
 		}
-	}
-	// Compact once, preserving held/cancelled waiters and the untouched FIFO
-	// suffix. Removing each grant separately shifted the suffix O(Q²) times.
-	kept += copy(g.queue[kept:], g.queue[read:])
-	clear(g.queue[kept:])
-	g.queue = g.queue[:kept]
-	if g.tombstones > 0 {
-		// The grant loop stops at the first blocked waiter, so tombstones below
-		// it survive the one-pass compaction above.
-		g.compactLocked()
+		w = next
 	}
 	if granted > 0 {
 		g.syncQueueLocked()
@@ -726,33 +760,16 @@ func (g *group) drainLimited(budget int) int {
 	return granted
 }
 
-// compactLocked drops tombstoned waiters in one sweep. removeWaiter tombstones
-// instead of shifting the suffix per cancel, so a mass cancel costs O(Q) in
-// total rather than O(Q²).
-func (g *group) compactLocked() {
-	live := g.queue[:0]
-	for _, w := range g.queue {
-		if w != nil {
-			live = append(live, w)
-		}
-	}
-	clear(g.queue[len(live):])
-	g.queue = live
-	g.tombstones = 0
-}
-
 // syncQueueLocked is the sole owner of the queue empty/non-empty witness and
-// its provider counters. Callers hold g.mu after mutating g.queued (enqueue,
-// drain grant, removeWaiter tombstone); queue compaction only drops nil
-// tombstones and never changes that live count, so it needs no separate
-// transition. No queue reset/close path exists today; a future one must route
-// through this same transition. hasQueued mirrors queued > 0 for lock-free
-// drainProvider skips, and providerQueued moves exactly on the edge, so the
-// per-provider count can never go negative or stay positive with an empty
-// queue. An empty queue also withdraws the group's fair-waiting mark: no
-// waiter remains that the shared gate could refuse.
+// its provider counters. Callers hold g.mu after mutating queue membership
+// (enqueue, drain grant, removeWaiter unlink). No queue reset/close path exists
+// today; a future one must route through this same transition. hasQueued
+// mirrors queue.live > 0 for lock-free drainProvider skips, and providerQueued
+// moves exactly on the edge, so the per-provider count can never go negative or
+// stay positive with an empty queue. An empty queue also withdraws the group's
+// fair-waiting mark: no waiter remains that the shared gate could refuse.
 func (g *group) syncQueueLocked() {
-	nonEmpty := g.queued > 0
+	nonEmpty := g.queue.live > 0
 	if !nonEmpty {
 		g.clearGateWaitingLocked()
 	}
@@ -772,51 +789,30 @@ func (g *group) syncQueueLocked() {
 
 func (g *group) removeWaiter(w *waiter) {
 	g.mu.Lock()
-	found, headRemoved := false, false
-	for i, q := range g.queue {
-		if q == w {
-			// Tombstone instead of slices.Delete: a mass cancel must not shift
-			// the queue suffix once per waiter (O(Q²)); drain's single
-			// compaction pass drops the nil slots immediately below.
-			g.queue[i] = nil
-			g.queued--
-			g.tombstones++
-			found = true
-			headRemoved = i == 0
-			break
-		}
-	}
+	headRemoved := g.queue.head == w
+	found := g.queue.remove(w)
 	if !found {
-		// The waiter was already granted a slot (popped + signaled) but cancelled
-		// before reading the channel. Settle the gate before releasing the
-		// phantom group slot so its reserved tokens and in-flight occupancy are
-		// reconciled before any drain can admit a replacement; the caller below
-		// owns the single drain.
+		headRemoved = false
+		// The waiter was already granted a slot (unlinked + signaled) but
+		// cancelled before reading the channel. Settle the gate before releasing
+		// the phantom group slot so its reserved tokens and in-flight occupancy
+		// are reconciled before any drain can admit a replacement; the caller
+		// below owns the single drain.
 		w.admission.settle(0)
 		if g.inFlight > 0 {
 			g.inFlight--
 		}
-	}
-	// Bound tombstone retention without paying a full shift per cancel. Decide
-	// under the lock: the threshold reads queue state that drain mutates.
-	needCompact := found && !headRemoved && g.tombstones >= max(1, len(g.queue)/8)
-	if found {
+	} else {
 		g.syncQueueLocked()
 	}
 	g.sched.markGroupIdleLocked(g)
 	g.mu.Unlock()
 	w.dropHold(g.sched)
 	// Removing a throttled head can expose a smaller reservation that fits now.
-	// A non-head removal cannot change which waiter drain reaches first, and its
-	// tombstone is compacted on the next drain; skipping the synchronous pass
-	// keeps a mass cancel from re-walking the queue per waiter.
+	// A non-head removal cannot change which waiter drain reaches first, so
+	// skipping the synchronous pass keeps a mass cancel linear in removed
+	// waiters.
 	if headRemoved || !found {
 		g.drainAdmission()
-	} else if needCompact {
-		// compactLocked is idempotent; a concurrent drain may have already done
-		// the sweep between the unlock and this relock.
-		g.mu.Lock()
-		g.compactLocked()
-		g.mu.Unlock()
 	}
 }
