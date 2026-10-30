@@ -88,12 +88,15 @@ def local_target(site: Path, page: Path, url: str) -> tuple[Path | None, str]:
     path = unquote(split.path)
     if not path:
         return None, split.fragment
+    absolute = path.startswith("/")
     base_path = urlsplit(DEFAULT_BASE_URL).path
     if base_path != "/" and path.startswith(base_path):
         path = path[len(base_path):]
     if path.startswith("/"):
         path = path.lstrip("/")
-    target = (site / page.parent / path).resolve()
+        absolute = True
+    base = site if absolute else site / page.parent
+    target = (base / path).resolve()
     if target.is_dir():
         target = target / "index.html"
     return target, split.fragment
