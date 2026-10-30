@@ -495,7 +495,7 @@
      every common value fits its track (the widest, the in/out/cached
      triple at the band's 13px, needs 150px + 16px padding per tile); the
      log keeps the rest. */
-    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); }
+    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
        and let main take what remains - otherwise header + 100vh main overflows
        by exactly the header height. */
@@ -511,7 +511,6 @@
     }
     #explorer .xp-body { flex: 1 1 0; min-height: 0; }
     #explorer .xp-gallery { height: auto; }
-    .grid-pair { flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
     /* The plot is the card's purpose: it keeps a readable floor even when
        the totals strip wraps to two rows, and never collapses to a sliver. */
     .grid-pair .chart-wrap { flex: 1 1 0; min-height: 120px; height: auto; }
@@ -611,8 +610,8 @@
         a scroll that comes to rest NEAR a row still lands on it whole, so
         a row is never left sliced across the fold. */
     scroll-snap-type: y proximity; }
-  .xp-node { scroll-snap-align: start; }
   .xp-node {
+    scroll-snap-align: start;
     display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 7px; align-content: start;
     background: var(--panel2); border: 1px solid var(--border);
     border-radius: 11px; padding: 10px 12px; cursor: pointer; text-align: left; color: var(--text);
@@ -1368,7 +1367,7 @@
   .metrics-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .metrics-row[aria-checked="false"] { color: var(--muted); }
   .metrics-row .mp-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
-  .traffic-card .card-hd { flex-wrap: wrap; flex-shrink: 0; }
+  .traffic-card .card-hd { flex-wrap: wrap; flex-shrink: 0; justify-content: space-between; }
   @media (max-width: 480px) {
     .chart-totals { gap: 8px; }
     /* The picker trigger is a chart control: it takes the selects' mobile
@@ -1428,7 +1427,6 @@
   .share-bar { display: inline-block; width: 56px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
   .share-fill { display: block; height: 100%; border-radius: 3px; }
   .share-pct { color: var(--muted); font-size: 10px; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .traffic-card .card-hd { justify-content: space-between; }
   .traffic-card .card-hd h2 { margin: 0; }
 
   .legend { display: flex; gap: 14px; font-size: 10px; color: var(--muted); font-family: var(--mono); margin-top: 8px; flex-wrap: wrap; justify-content: center; padding: 6px 0 2px; }
