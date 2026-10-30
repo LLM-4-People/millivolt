@@ -83,6 +83,7 @@ NAV_GROUPS = (
             ("Adapters", "docs/adapters.html", "docs/adapters.md"),
             ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
             ("MCP server", "docs/mcp.html", "docs/mcp.md"),
+            ("Security", "security.html", "SECURITY.md"),
         ),
     ),
     (
@@ -97,7 +98,7 @@ NAV_GROUPS = (
         "Project",
         (
             ("Contributing", "contributing.html", "CONTRIBUTING.md"),
-            ("Security", "security.html", "SECURITY.md"),
+            ("Support", "https://github.com/LLM-4-People/millivolt/blob/main/SUPPORT.md", None),
             ("License", "license.html", "LICENSE"),
             ("Third-party notices", "third-party.html", "THIRD_PARTY_NOTICES.md"),
         ),

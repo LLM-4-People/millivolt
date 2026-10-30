@@ -2,19 +2,19 @@
 
 See every AI request. Keep your own routing.
 
-A self-hosted, cross-protocol inference proxy with a live dashboard, SQLite
-history, and controls to pause, limit, or debug traffic. OpenAI Chat
-Completions, OpenAI Responses, and Anthropic Messages clients can target any
-configured upstream. Request metadata, timing, tokens, cost, and outcomes; body
-capture is opt-in.
+A self-hosted, cross-protocol inference proxy for one operator or a small team.
+OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients route
+to any upstream you configure. Request metadata, timing, tokens, cost, and
+outcomes land in SQLite or an in-memory ring; body capture is opt-in. One
+dashboard lets you pause, limit, or debug traffic.
 
-[![Checks and images](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml)
+[![Checks and images](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml?query=branch%3Amain)
 
-[Run it locally](#quickstart) · [Documentation site](https://llm-4-people.github.io/millivolt/) ·
-[Dashboard guide](docs/dashboard.md) · [Documentation](docs/README.md) · [Security](SECURITY.md)
+[Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://llm-4-people.github.io/millivolt/) ·
+[Dashboard guide](docs/dashboard.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
 
-millivolt is pre-1.0. Linux is the supported deployment target. The 0.x series
-can change configuration and API details between releases.
+Pre-1.0 · Linux · MIT · single operator. The 0.x series can change configuration
+and API details between releases.
 
 ## Quickstart
 
@@ -47,6 +47,10 @@ The runtime is non-root with a read-only root filesystem. For bind mounts,
 pre-create directories writable by UID/GID `65532:65532`; see
 [persistent state](docs/operations.md#persistent-state-and-configuration).
 
+The published image is `ghcr.io/llm-4-people/millivolt:main` for amd64 and
+arm64. Version tags and digests are the reproducible choice; see
+[versions and images](docs/operations.md#versions-and-images).
+
 Stop with `docker compose stop`. For image selection, configuration, backups,
 updates, shutdown, or protected ingress, see
 [container operation](docs/operations.md#containers) and the
@@ -65,6 +69,31 @@ go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 ```
 
 For isolated development and checks, see [Contributing](CONTRIBUTING.md).
+
+## How it fits
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600" height="640">
+</picture>
+
+Three client protocols enter one proxy; each request can target a different
+configured upstream. Request metadata and metrics stay in SQLite or an in-memory
+ring, and body capture is opt-in.
+
+## Dashboard overview
+
+Global totals stay global; explorer cards, timelines, and the request log share
+one selected scope. See the [visual guide](docs/dashboard.md) for focused captures
+of tokens, speed and latency, cost, providers, models, conversations, and
+Settings.
+
+![Screenshot of the millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline](docs/images/overview/dashboard.png)
+
+Static capture from an authorized, redacted history snapshot; identifiers are
+replaced. The offline indicator reflects the capture session, not service
+health; see [capture limitations](docs/dashboard.md).
 
 ### Connect a client
 
@@ -102,34 +131,9 @@ exceptions for buffering, retries, SSE keepalives, format translation, and
 configured overrides. This is not an unconditional byte-for-byte or
 exactly-once contract. See [protocol](docs/protocol.md).
 
-## What it looks like
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600" height="640">
-</picture>
-
-The instrument panel is a dense operator surface in either Black or Clear, not
-a marketing dashboard. The product screenshots below are static captures from
-an authorized redacted history snapshot; identifiers are replaced.
-
-## Dashboard overview
-
-Global totals stay global; explorer cards, timelines, and the request log share
-one selected scope. See the [visual guide](docs/dashboard.md) for focused captures
-of tokens, speed and latency, cost, providers, models, conversations, and
-Settings.
-
-![Dashboard showing request charts, usage and a request log](docs/images/overview/dashboard.png)
-
-This capture retains recorded metrics from an authorized history snapshot with
-replaced identifiers. The offline indicator reflects the capture session, not
-service health. The guide explains the capture limitations.
-
 ## What you get
 
-### See the request, not just the total.
+### See the request, not just the total
 
 Watch in-flight requests next to global request, token, and cost totals. Open a
 row for TTFT, throughput, retries, queue wait, token mix, and provider-reported
@@ -140,7 +144,7 @@ error, time, or key without losing the selected filter.
 [Data interpretation](docs/operations.md#dashboard-data-and-request-inspection)
 explains timing, scope, and missing measurements.
 
-### Act before the retry storm.
+### Act before the retry storm
 
 Pause new sends and retries by client, provider, or all traffic. Set
 provider-wide concurrency, request-rate, and token-rate limits, plus an opt-in
@@ -153,7 +157,7 @@ Read [operator workflows](docs/operations.md#operator-and-data-routes) before
 changing state. The shared operator token protects the dashboard and operator
 routes. Inference is transparent and does not use it.
 
-### Keep your routing and your keys.
+### Keep your routing and your keys
 
 Choose the upstream base URL, credentials, authentication header or prefix,
 path, and query on each request. Constrain accepted URL prefixes in
@@ -166,7 +170,7 @@ There is no separate provider registry or API-key vault in the proxy.
 See [routing, timing and discovery](docs/protocol.md) and
 [adapter support and limitations](docs/adapters.md).
 
-### Run one small service.
+### Run one small service
 
 One Go service with embedded dashboard assets and SQLite. The non-root image
 needs no separate database server, frontend runtime, or monitoring stack. The
@@ -197,43 +201,12 @@ It is not a multi-tenant gateway, a billing system, or a compliance audit log.
 
 ## Performance and footprint
 
-The [performance and resource usage](docs/performance.md) page is the single
-source for current image and binary size, idle and loaded footprints,
-fast-response and streaming request throughput and latency, durable writer
-rates, SQLite growth, projection cost, and query/metadata latency. It carries
-the exact revision, host, method, reproduce commands and limitations. Small
-images do not imply fixed RAM or negligible CPU. Active streams, configured
-buffers, stored-history projections, and identity cardinality contribute
-separate costs. Short local bursts are regressions, not deployment guarantees.
+[Performance and resource usage](docs/performance.md) owns current image and
+binary size, idle and loaded footprint, throughput, latency, storage growth,
+query cost, reproduce commands, and caveats. Small images do not imply fixed
+RAM or negligible CPU.
 
-## Contributing and promotion
-
-Work lands on `testing` first. The full check suite and both native container
-smoke tests run on all `testing` pull requests, code-bearing `testing` pushes,
-manually dispatched `testing` gates, and manually pushed `v*` tags; docs and
-site-only `testing` pushes use `docs.yml` instead. They also run on Dependabot's `main` security PRs. An
-ordinary `main` promotion proves the head is the current `testing` tip, main is
-already merged back into `testing`, and that exact commit passed the full gate,
-or that only docs paths changed since the closest gated `testing` commit (the
-proof has no commit-count bound). For a code-bearing head, let the `testing`
-`check.yml` push gate finish before opening or re-running a promotion PR;
-pending runs get a short bounded wait and the proof fails closed while they
-remain pending. A docs/site-only head has no canonical `check.yml` push run of
-its own, so wait for `docs.yml` or only the `required` docs validation.
-`required` does not repeat the suite. `main` is
-promotion-only and protected: open a pull request from `testing`, wait for
-`required`, and merge with a merge commit. A code-bearing promotion bumps
-[VERSION](VERSION) above every release tag; a docs/site-only promotion skips
-that check, validates docs, workflow policy and the site, and does not rebuild
-images. For a code-bearing promotion, the merged-PR release run creates the
-release tag and image; a delivered main push is an idempotent fallback, and a
-manually pushed `v*` tag still ships exactly as tagged. Never push
-`main` or a release tag as part of feature work. See the
-[branch workflow](CONTRIBUTING.md#branch-workflow) for the full checklist and
-[versions and images](docs/operations.md#versions-and-images) for publication
-behavior.
-
-## Configuration and documentation
+## Configuration
 
 [proxy.example.yaml](proxy.example.yaml) is the generated, documented example.
 It includes enabled compatibility profiles without registering provider keys or
@@ -243,13 +216,24 @@ Settings uses that same schema. See [operations](docs/operations.md) for
 overrides, reloads, backups, and restart requirements.
 
 [VERSION](VERSION) owns the application version. See
-[image and release usage](docs/operations.md#versions-and-images) and
-[contribution guidelines](CONTRIBUTING.md) before publishing a change.
+[versions and images](docs/operations.md#versions-and-images) for publication
+and verification behavior.
+
+## Contributing
+
+Work lands on `testing` first. `main` is promotion-only and protected: open a
+pull request from `testing`, wait for the `required` check, and merge with a
+merge commit. See the [branch workflow](CONTRIBUTING.md#branch-workflow) for the
+full checklist, version rules, and promotion proofs. Use [support](SUPPORT.md)
+for usage questions and the private channel in [security](SECURITY.md) for
+vulnerabilities.
+
+## Documentation
 
 - **Start:** [documentation index](docs/README.md), [protocol](docs/protocol.md)
 - **Operate:** [operations](docs/operations.md), [performance](docs/performance.md), [reverse proxy](docs/reverse-proxy.md)
 - **Integrate:** [adapters](docs/adapters.md), [MCP server](docs/mcp.md)
-- **Project:** [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md)
+- **Project:** [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), [support](SUPPORT.md), [security](SECURITY.md)
 
 The application is [MIT licensed](LICENSE). Dependency notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
