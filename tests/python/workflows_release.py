@@ -242,6 +242,36 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: the release workflow must push the verified tag")
     if "skip != 'true'" not in str(tag_push.get("if", "")):
         errors.append("check.yml: the tag push must honor the no-release guard")
+    release_step = steps(publish)[release_index] if release_index >= 0 else {}
+    release_run = str(release_step.get("run", ""))
+    for needle in (
+        "## Highlights",
+        "## Compatibility",
+        "## Upgrade",
+        "docker pull ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}",
+        "<summary>Other changes</summary>",
+        "BuildKit provenance and SBOM",
+    ):
+        if needle not in release_run:
+            errors.append(f"check.yml: release notes are missing {needle}")
+    summary_step = next((step for step in steps(publish)
+                         if step.get("name") == "Summarize the release"), {})
+    summary_run = str(summary_step.get("run", ""))
+    if not summary_step:
+        errors.append("check.yml: publish must summarize the release in the run summary")
+    else:
+        if "always()" not in str(summary_step.get("if", "")):
+            errors.append("check.yml: the release summary must run for both success and skip")
+        for needle in ("No release cut", "releases/tag/v${RELEASE_VERSION}", "GITHUB_STEP_SUMMARY"):
+            if needle not in summary_run:
+                errors.append(f"check.yml: release summary is missing {needle}")
+    meta = next((step for step in steps(publish)
+                 if step.get("name") == "Define image tags and labels"), {})
+    meta_with = meta.get("with") or {}
+    if "org.opencontainers.image.description" not in str(meta_with.get("annotations", "")):
+        errors.append("check.yml: release image must carry a package description annotation")
+    if (meta.get("env") or {}).get("DOCKER_METADATA_ANNOTATIONS_LEVELS") != "index,manifest":
+        errors.append("check.yml: package annotations must target the index and manifest")
     publish_text = (WORKFLOWS / "check.yml").read_text(encoding="utf-8")
     errors.extend(main_push_errors(publish_text))
     for label, line in (

@@ -404,6 +404,17 @@ def check_required_gate(checks: dict, errors: list[str]) -> None:
     gate_if = " ".join(str(required_gate_step.get("if", "")).split())
     gate_run = str(required_gate_step.get("run", ""))
     errors.extend(required_gate_policy_errors(gate_if, gate_run))
+    failure_step = next((step for step in steps(required_job)
+                         if step.get("name") == "Explain the required gate failure"), {})
+    if not failure_step:
+        errors.append("check.yml: required gate must explain a failure")
+    else:
+        if str(failure_step.get("if", "")).strip() != "failure()":
+            errors.append("check.yml: required failure explanation must run only on failure")
+        failure_run = str(failure_step.get("run", ""))
+        for needle in ("### Required gate failed", "GITHUB_STEP_SUMMARY", "::error"):
+            if needle not in failure_run:
+                errors.append(f"check.yml: required failure explanation is missing {needle}")
     if not required_gate_policy_errors(
             gate_if.replace("always() && ", "always() && false && "), gate_run):
         errors.append("workflows self-check: a false required-gate predicate must fail")
