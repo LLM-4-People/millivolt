@@ -6,6 +6,7 @@ import re
 from urllib.parse import unquote, urlsplit
 
 from .support import (ROOT,
+                       SPARK_HEIGHT_CSS,
                        artifact_gzip_choke_point_errors,
                        dead_css_class_errors, duplicate_js_function_errors,
                        git_environment, js_template_comment_errors, palette_mirror_errors,

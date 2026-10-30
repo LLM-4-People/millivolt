@@ -1,3 +1,5 @@
+/* Dashboard palette, base shell, header chrome and KPI band.
+   Linked first; the later modules own one surface each, in link order. */
   :root {
     /* Warm near-black "instrument case" palette - the deliberate inverse of the
        standard blue-slate dashboard (#0d1117 / slate-950). Hue ~70° (warm),
@@ -43,6 +45,8 @@
     --rail-h: calc(56px + env(safe-area-inset-top, 0px));
     --rail-tick: 8px;
     --hdr-btn: 32px;
+    /* The minimum touch target for mobile and coarse-pointer controls. */
+    --tap: 44px;
     /* Graduated-scale tick color (the shell's signature motif), derived
        from the text color so the faint rail tracks it. */
     --tick: color-mix(in srgb, var(--text) 7%, transparent);
@@ -62,6 +66,9 @@
        accent-filled controls. Derived from --accent so theme drifts once. */
     --focus-ring: color-mix(in srgb, var(--accent) 12%, transparent);
     --focus-ring-strong: color-mix(in srgb, var(--accent) var(--halo), transparent);
+    /* The keyboard focus edge. Each wearing rule keeps its own literal
+       outline-offset: the inset/outset is a per-surface decision. */
+    --focus-outline: 1px solid var(--accent);
     /* Shared alpha strengths for the tinted overlays, so a rung of the
        ladder cannot drift surface by surface: the status pills rest at
        --pill-tint and wear --pill-tint-strong once they flag an
@@ -89,6 +96,8 @@
     /* Elevation ink is a mode material, not a per-component literal. Clear
        swaps it for a warm shadow so cards and menus do not read as soot. */
     --shadow-rgb: 0,0,0;
+    /* Floating menu and tooltip elevation, one rung above the card shadow. */
+    --shadow-menu: 0 12px 32px rgba(var(--shadow-rgb),.5);
     /* The cancelled neutral is distinct from both muted copy and status ink. */
     --neutral: #a8a096;
     /* Chart gridline alpha: core.js blends this onto --border2 for the
@@ -107,6 +116,7 @@
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html { color-scheme: dark; accent-color: var(--accent); caret-color: var(--accent); overflow-x: clip; }
   /* Butter-smooth: every interactive surface eases its color/border/background
      changes instead of snapping. Kept off layout properties for perf. */
@@ -150,7 +160,7 @@
      text colors and only marks hover/focus on the wordmark. */
   .brand { display: flex; align-items: center; gap: 11px; color: inherit; text-decoration: none; }
   .brand:hover h1, .brand:focus-visible h1 { color: var(--accent); }
-  .brand:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+  .brand:focus-visible { outline: var(--focus-outline); outline-offset: 3px; border-radius: 6px; }
   /* The mark: a probe trace crossing a graduated scale - the millivolt
      instrument reading the stream. A soft glowing well, no hard gem tile. */
   .brand-logo {
@@ -185,7 +195,7 @@
   @media (max-width: 800px) {
     header { padding: 0 14px; gap: 10px; }
     header .sub { display: none; }
-    #btn-nav { display: inline-flex; margin-left: auto; min-width: 44px; width: 44px; height: 44px; }
+    #btn-nav { display: inline-flex; margin-left: auto; min-width: var(--tap); width: var(--tap); height: var(--tap); }
     .refresh-controls {
       display: none; margin-left: 0; position: absolute; z-index: 90;
       top: calc(100% + var(--rail-tick) + 4px); right: 8px; left: 8px;
@@ -198,12 +208,12 @@
     .refresh-controls.is-open { display: flex; }
     .refresh-controls > .btn,
     .refresh-controls > .menu-wrap > .btn {
-      width: 100%; min-width: 0; height: 44px; justify-content: flex-start;
+      width: 100%; min-width: 0; height: var(--tap); justify-content: flex-start;
       padding: 0 12px; gap: 10px;
     }
-    /* The theme trigger keeps the flyout's full width and its 44px target.
+    /* The theme trigger keeps the flyout's full width and its shared tap target.
        A later coarse-pointer rule must not shrink it back to an icon square. */
-    #btn-theme { min-height: 44px; }
+    #btn-theme { min-height: var(--tap); }
     .refresh-controls .menu-wrap { width: 100%; }
     .hdr-btn-label { display: inline; font: 650 12px var(--sans); color: var(--text); }
   }
@@ -226,11 +236,9 @@
   .pause-hold:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
   .pause-hold.editing { color: var(--warn); }
   .pause-hold button { min-width: 0; padding: 2px 8px; cursor: pointer; }
-  #pause-menu { width: 360px; }
-  #debug-menu { width: 360px; }
+  #pause-menu, #debug-menu { width: 360px; }
   #btn-debug[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); }
   #btn-debug[aria-pressed="true"]:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) var(--halo), transparent); }
-  .hdr-menu[hidden] { display: none !important; }
   #btn-settings[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
   #btn-pause[aria-pressed="true"] { color: var(--warn); border-color: var(--warn); }
   #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent); }
@@ -273,8 +281,9 @@
     top: calc(100% + (var(--rail-h) - var(--hdr-btn)) / 2 + var(--rail-tick) + 4px);
     z-index: 40; width: 320px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); padding: 12px; font-family: var(--mono);
+    box-shadow: var(--shadow-menu); padding: 12px; font-family: var(--mono);
   }
+  .clear-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   @media (max-width: 800px) {
     .hdr-menu, #pause-menu, #debug-menu, #limits-menu, #restart-menu {
       position: static; width: 100%; top: auto; right: auto; margin-top: 4px;
@@ -283,7 +292,6 @@
     .clear-opts { grid-template-columns: 1fr; }
   }
   .clear-menu-hd { font-size: 11px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
-  .clear-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .clear-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .clear-opts select, .clear-opts input { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
   #limits-menu .clear-opts input[type="checkbox"] { width: 14px; height: 14px; padding: 0; margin: 2px 0 0; }
@@ -300,7 +308,7 @@
     transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
   }
   .btn:hover { color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
-  .btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   /* Danger variants come AFTER .btn so the cascade (equal single-class
      specificity, later wins) always beats the neutral base skin. Weight goes
      with impact: delete-matching = light red tint; the "everything"
@@ -327,15 +335,14 @@
     padding: 10px 28px; background: var(--panel); border-top: 2px solid var(--warn);
     border-bottom: 1px solid var(--border2); font: 11px/1.5 var(--mono); scrollbar-width: thin;
   }
-  .storm-banner[hidden] { display: none; }
-  .storm-banner:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .storm-banner:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
   .storm-row {
     display: block; width: 100%; border: 0; background: transparent; color: inherit;
     text-align: left; font: inherit; cursor: pointer; padding: 5px 3px;
   }
   .storm-row + .storm-row { border-top: 1px solid var(--border); }
   .storm-row:hover { background: var(--panel2); }
-  .storm-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .storm-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .storm-heading, .storm-detail { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 14px; }
   .storm-heading strong { color: var(--text); font-weight: 600; }
   .storm-state, .storm-reason { color: var(--warn); }
@@ -345,7 +352,6 @@
   /* The storm dialog is the one surface that must feel urgent and absolute,
      so it uses the mode-owned storm scrim rather than the base veil. */
   .storm-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: var(--veil-strong); }
-  .storm-dialog[hidden] { display: none; }
   .storm-dialog-panel { width: min(580px, 100%); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; border: 1px solid var(--border2); background: var(--panel); }
   .storm-dialog-body { overflow-y: auto; overscroll-behavior: contain; padding: 6px 18px 18px; font: 11px/1.5 var(--mono); }
   .storm-facts { margin: 0; }
@@ -359,7 +365,6 @@
       max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     background: var(--veil); overflow: auto;
   }
-  .operator-dialog[hidden] { display: none; }
   .operator-dialog-panel {
     width: min(22rem, 100%); max-width: 100%;
     border: 1px solid var(--border2); border-radius: 14px; background: var(--panel);
@@ -367,16 +372,14 @@
     box-shadow: 0 18px 40px rgba(var(--shadow-rgb),.4);
   }
   .operator-dialog-brand { display: flex; align-items: center; gap: 11px; margin: 0 0 12px; }
-  .operator-dialog-brand .brand-logo { width: 28px; height: 28px; }
   .operator-dialog-panel h3 { margin: 0; font: 650 15px/1.2 var(--mono); letter-spacing: -.01em; }
   .operator-dialog-note { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
   .operator-dialog-note[data-err] { color: var(--err); }
   .operator-dialog input {
-    width: 100%; box-sizing: border-box; margin: 0 0 14px; min-height: 42px;
+    width: 100%; margin: 0 0 14px; min-height: 42px;
     font: 13px var(--mono); color: var(--text); background: var(--rail);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   }
-  .operator-dialog input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .operator-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .operator-dialog-actions .btn { width: 100%; min-height: 42px; }
   .storm-resolution { margin: 12px 0 0; color: var(--text); }
@@ -387,12 +390,11 @@
      stretched, leaving unused side gutters on a fullscreen display. Extra
      width lands on the RIGHT of the two-column layouts (gallery next to the
      fixed rail, request table next to the traffic chart). */
-  main { padding: 20px 28px; width: 100%; box-sizing: border-box; }
+  main { padding: 20px 28px; width: 100%; }
 
-  .drawer[hidden] { display: none; }
   .hold-edit { color: inherit; font: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
   .hold-edit:disabled { cursor: default; opacity: .5; }
-  .hold-edit:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+  .hold-edit:focus-visible { outline: var(--focus-outline); outline-offset: 3px; }
   .pause-hold > .hold-edit { flex: 1; }
   .storage-warning { color: var(--warn); }
   /* KPI band: an instrument readout strip, not a deck of cards. One continuous
@@ -410,7 +412,8 @@
   }
   /* Graduated tick baseline (minor ticks + a major tick), the readout strip's
      "scale". Feathered so it reads as a scale, not a hard rule. */
-  .kpis::after {
+  .kpis::after,
+  .traffic-card.tiles-only .chart-totals::after {
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
     background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
@@ -438,7 +441,7 @@
   .kpi .val { font-family: var(--mono); font-size: 21px; font-weight: 650; letter-spacing: -.02em; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
   /* Dual-value tiles (tokens in/out): scale the value down just enough that
      both numbers always fit the tile width - never ellipsize one away. */
-  .kpi .val-duo { font-size: 17px; letter-spacing: -.02em; }
+  .kpi .val-duo { font-size: 17px; }
   .kpi .val .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .kpi .sub2 { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* In-flight tile: the value plus a two-ended summary survive the narrowest
@@ -496,12 +499,12 @@
      every common value fits its track (the widest, the in/out/cached
      triple at the band's 13px, needs 150px + 16px padding per tile); the
      log keeps the rest. */
-    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); }
+    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
        and let main take what remains - otherwise header + 100vh main overflows
        by exactly the header height. */
     body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-    main { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; box-sizing: border-box; overflow: hidden; }
+    main { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; overflow: hidden; }
     /* The status-line footer is a slim fixed-height rail in the locked column -
        it never shrinks and never grows, so it barely touches the log's space. */
     footer { flex-shrink: 0; }
@@ -512,1316 +515,11 @@
     }
     #explorer .xp-body { flex: 1 1 0; min-height: 0; }
     #explorer .xp-gallery { height: auto; }
-    .grid-pair { flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
     /* The plot is the card's purpose: it keeps a readable floor even when
        the totals strip wraps to two rows, and never collapses to a sliver. */
     .grid-pair .chart-wrap { flex: 1 1 0; min-height: 120px; height: auto; }
     #tbl-requests { flex: 1 1 0; min-height: 0; max-height: none; }
   }
-
-  /* ---- unified explorer: scope bar + dimension rail + node gallery ---- */
-  #explorer { margin-bottom: 16px; }
-  @media (min-width: 1200px) { #explorer { margin-bottom: 10px; } }
-  /* Scope bar: chips wrap onto at most TWO rows, then scroll vertically. A chip
-     row is ~22px and the row gap is 6px, so two rows ≈ 50px - 56px leaves
-     enough slack that sub-pixel rounding never triggers the scrollbar early.
-     Beyond two rows we scroll rather than let the chips push the gallery/pair
-     down and break the viewport fit. */
-  .xp-scope { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; overflow-y: auto; overflow-x: hidden; max-height: 56px; margin-bottom: 12px; font-family: var(--mono); font-size: 11px; scrollbar-width: thin; }
-  /* Deliberately slimmer than the grouped 5px/3px and 6px/3px overlay
-     recipes: this scrollbar only appears once chips wrap past the two rows
-     the 56px strip allows, and a 4px thumb with a 2px radius keeps the rare
-     fallback from eating the short strip's height. */
-  .xp-scope::-webkit-scrollbar { width: 4px; }
-  .xp-scope::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-  .xp-scope .bc-root { color: var(--muted); font-weight: 600; text-decoration: none; padding: 2px 6px; border-radius: 5px; }
-  .xp-scope .bc-root:hover { color: var(--accent); background: var(--panel2); }
-  .xp-scope .bc-sep { color: var(--border2); }
-  .xp-chip {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: color-mix(in srgb, var(--ent, var(--border2)) 9%, var(--panel2));
-    border: 1px solid color-mix(in srgb, var(--ent, var(--border2)) 55%, var(--border2));
-    border-radius: 6px; padding: 2px 4px 2px 8px; color: var(--text);
-  }
-  .xp-chip .chip-x {
-    background: none; border: none; color: var(--muted); cursor: pointer;
-    font: inherit; padding: 0 4px; border-radius: 4px; line-height: 1.4;
-  }
-  .xp-chip .chip-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
-  .xp-clear { margin-left: auto; }
-  /* Two-column body: fixed rail + flexible gallery. The rail is the stable
-     anchor (9 dimensions ≈ a fixed height); the gallery sizes to its content
-     up to that height, then scrolls. align-items:start keeps the rail its
-     natural height; the rail's own height becomes the gallery's cap via the
-     grid stretch on the main column. */
-  .xp-body { display: grid; grid-template-columns: 216px 1fr; gap: 16px; align-items: stretch; min-height: 0; }
-  .xp-rail-col { min-height: 0; display: flex; flex-direction: column; }
-  .xp-dim-trigger { display: none; }
-  /* min-height:0 lets the gallery shrink to fill the fixed explorer box and
-     scroll internally, instead of overflowing past it (flex children default
-     to min-height:auto, which refuses to shrink below content height). */
-  .xp-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 14px; }
-  /* The rail scrolls internally within the fixed explorer box: min-height:0
-     lets it shrink below its content height, and overflow-y:auto scrolls the
-     dimension list instead of clipping the last item (Error) at the bottom. */
-  .xp-rail { display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
-  /* The internal-scroll surfaces share one slim overlay scrollbar (5px
-     thumb, muted border tone, softly rounded); grouped so the feel cannot
-     drift between rails, the gallery, and the shared .scroll helper. The
-     drawer and settings field lists use the roomier 6px variant grouped
-     at the drawer below. */
-  .xp-rail::-webkit-scrollbar, .xp-gallery::-webkit-scrollbar, .st-rail::-webkit-scrollbar, .scroll::-webkit-scrollbar { width: 5px; }
-  .xp-rail::-webkit-scrollbar-thumb, .xp-gallery::-webkit-scrollbar-thumb, .st-rail::-webkit-scrollbar-thumb, .scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-  /* Rail rows are one design shared by the explorer dimension rail and the
-     settings rail: grouped selectors own the common row chrome, hover,
-     active base, focus ring, and count style. Each family keeps only its
-     deviations next to its own section below. */
-  .xp-rail-item, .st-rail-item {
-    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-    background: none; border: 1px solid transparent; border-left: 2px solid transparent;
-    border-radius: 7px; padding: 6px 8px; cursor: pointer; color: var(--text); font: inherit;
-  }
-  .xp-rail-item:hover, .st-rail-item:hover { background: var(--panel2); }
-  .xp-rail-item.active, .st-rail-item.active { background: var(--panel2); border-color: var(--border2); }
-  .xp-rail-item:focus-visible, .st-rail-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .xp-rail-item .rail-n, .st-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; }
-  /* Explorer family deviation: the active edge keys to the entity color and
-     counts right-align (they sit alone at the row's end). */
-  .xp-rail-item.active { border-left-color: var(--ent); }
-  .xp-rail-item .rail-n { text-align: right; }
-  /* Gallery: one node-card per value of the active dimension. It fills the
-     explorer box (flex:1 within .xp-main) and scrolls internally in whole rows
-     when there are more cards than fit - cards always render at full height,
-     never crushed. align-content:start keeps rows top-aligned. */
-  /* The min track width is in rem so it scales with the root font size: on
-     browser zoom the columns widen (fewer per row) instead of squeezing, so
-     card content reflows and never clips. Rows are max-content so each card is
-     exactly as tall as its content - never stretched or crushed to fit the
-     container (that was clipping card footers). */
-   /* scroll-padding-bottom gives the last row breathing room WHILE
-      SCROLLING (the row lands 12px above the box edge at full scroll, so
-      its border and soft shadow are never clipped flush) without adding
-      any box height - a padding-bottom here made the one-row band cap
-      12px taller than its row and let the next row's top edge peek into
-      view. */
-   .xp-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); grid-auto-rows: max-content; gap: 10px; overflow-y: auto; align-content: start; flex: 1 1 auto; min-height: 0; scroll-padding-bottom: 12px; box-sizing: border-box;
-     /* Whole-row landing, WITHOUT fighting the wheel: every card row is a
-        snap point, but proximity - not mandatory - so a small trackpad or
-        wheel delta accumulates instead of being snapped back to the row
-        start (mandatory made the one-row band twitch and never scroll);
-        a scroll that comes to rest NEAR a row still lands on it whole, so
-        a row is never left sliced across the fold. */
-    scroll-snap-type: y proximity; }
-  .xp-node { scroll-snap-align: start; }
-  .xp-node {
-    display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 7px; align-content: start;
-    background: var(--panel2); border: 1px solid var(--border);
-    border-radius: 11px; padding: 10px 12px; cursor: pointer; text-align: left; color: var(--text);
-    font: inherit; min-width: 0; position: relative; overflow: hidden;
-    /* Height is fully content-driven - no min-height floor. A fixed floor that
-       is even a few px short of the natural content height makes the grid row
-       shorter than the content and (with overflow:hidden) clips the footer.
-       Letting content size the card means it can never clip, at any zoom.
-       Inner bands are reserved grid rows so KPIs stay put across a
-       stretched gallery row (flex-wrap used to let "cost $0" collapse a line). */
-    box-sizing: border-box;
-    transition: border-color .16s ease, transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .16s ease, background .16s ease;
-  }
-  /* Soft entity wash from the leading edge (replaces the hard 3px side bar). */
-  .xp-node::before {
-    content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .10;
-    background: linear-gradient(90deg, var(--ent, var(--border2)), transparent 45%);
-  }
-  .xp-node:hover { border-color: var(--border2); transform: translateY(-1px); box-shadow: 0 8px 20px rgba(var(--shadow-rgb),.26); }
-  .xp-node.selected { border-color: var(--ent); background: color-mix(in srgb, var(--ent) 10%, var(--panel2)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ent) 55%, transparent) inset, 0 8px 22px rgba(var(--shadow-rgb),.30); }
-  /* Selection keeps every secondary KPI legible on the tinted surface while
-     the border and tint still carry the selected state. */
-  .xp-node.selected .xp-node-n small,
-  .xp-node.selected .xp-node-kpis,
-  .xp-node.selected .xp-p95,
-  .xp-node.selected .xp-node-signals,
-  .xp-node.selected .share-pct,
-  .xp-node.selected .xp-conversation-role { color: var(--text); }
-  .xp-node:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .xp-node-hd { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .xp-node-hd .ent { flex: 1; min-width: 0; }
-  .xp-node-n { font-family: var(--mono); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
-  .xp-node-n small { color: var(--muted); font-weight: 400; font-size: 9px; margin-left: 3px; }
-  .xp-node-share { display: block; min-width: 0; }
-  .xp-node-kpis {
-    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 3px 10px;
-    align-content: start; font-family: var(--mono); font-size: 10px; color: var(--muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .xp-node-kpis > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .xp-node-kpis > span:nth-child(odd):last-child { grid-column: 1 / -1; }
-  .xp-node-kpis b { color: var(--text); font-weight: 600; }
-  .xp-p95 { color: var(--muted); font-size: 9px; }
-  .xp-node-foot { display: flex; align-items: flex-end; justify-content: flex-end; gap: 10px; }
-  .xp-node-signals { font-family: var(--mono); font-size: 10px; white-space: nowrap; flex-shrink: 0; text-align: right; color: var(--muted); }
-  .xp-node-err { color: var(--err); }
-  .xp-node-rate { color: var(--rl); }
-  .xp-conversation-node { min-width: 0; display: flex; flex-direction: column; gap: 4px; scroll-snap-align: start; }
-  .xp-conversation-node > .xp-node { width: 100%; flex: 1; }
-  .xp-conversation-role { color: var(--muted); font-size: 9px; flex-shrink: 0; }
-  .xp-conversation-parent { color: var(--muted); font: 10px/1.4 var(--mono); min-width: 0; overflow-wrap: anywhere; padding: 0 8px; }
-  a.xp-conversation-parent:hover, a.xp-conversation-parent:focus-visible { color: var(--accent); }
-  /* Mobile: the nine-item rail becomes one compact "by <dim>" picker so the
-     gallery keeps the screen. The same rail list drops in as a menu. */
-  @media (max-width: 900px) {
-    #explorer { overflow: visible; }
-    .xp-body { grid-template-columns: 1fr; }
-    .xp-rail-col { position: relative; z-index: 12; }
-    .xp-dim-trigger {
-      display: flex; align-items: center; gap: 8px; width: 100%;
-      min-height: 44px; padding: 8px 10px; text-align: left; cursor: pointer;
-      background: color-mix(in srgb, var(--ent, var(--border2)) 8%, var(--panel2));
-      color: var(--text); font: inherit;
-      border: 1px solid color-mix(in srgb, var(--ent, var(--border2)) 55%, var(--border2));
-      border-radius: 8px;
-    }
-    .xp-dim-trigger:hover { border-color: var(--accent); }
-    .xp-dim-trigger:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-    .xp-dim-by { color: var(--muted); font-size: 10px; font-family: var(--mono); text-transform: none; letter-spacing: .06em; }
-    .xp-dim-trigger .rail-n { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
-    .xp-dim-caret { width: 12px; height: 12px; flex-shrink: 0; color: var(--muted); transition: transform .16s ease; }
-    .xp-dim-trigger[aria-expanded="true"] .xp-dim-caret { transform: rotate(180deg); }
-    .xp-rail {
-      display: none; flex-direction: column; flex-wrap: nowrap; gap: 2px;
-      position: absolute; left: 0; right: 0; top: calc(100% + 6px);
-      z-index: 13; max-height: min(70vh, 420px); overflow-y: auto;
-      background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-      box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); padding: 8px;
-    }
-    .xp-rail.open { display: flex; }
-    .xp-rail-item { padding: 9px 10px; min-height: 40px; }
-  }
-
-  /* ---- detail slide-over drawer ---- */
-  /* The drawer sits beside live log rows that must stay readable through the
-     scrim, so it uses the lightest mode-owned veil. The page behind it is
-     locked while the inspector is open; the body itself contains its wheel. */
-  html.drawer-open, html.drawer-open body { overflow: hidden; }
-  /* drawerShow reserves the scrollbar gutter it removes, so the page behind
-     the inspector keeps its exact width instead of jumping sideways. */
-  html.drawer-open body { padding-right: var(--drawer-gutter, 0px); }
-  /* The rail stays visible for context but is inert while the inspector owns
-     the interaction; dim it so it never reads as an active surface. */
-  html.drawer-open header { opacity: .6; }
-  .drawer-veil {
-    position: fixed; inset: 0; background: var(--veil-soft); opacity: 0; pointer-events: none;
-    transition: opacity .18s; z-index: 60;
-  }
-  .drawer-veil.open { opacity: 1; pointer-events: auto; }
-  .drawer {
-    position: fixed; top: calc(var(--rail-h) + var(--rail-tick)); right: 0; bottom: 0;
-    width: min(640px, 100vw); max-width: 94vw;
-    background: var(--panel); border-left: 1px solid var(--border2); z-index: 61;
-    transform: translateX(100%); transition: transform .2s cubic-bezier(.32,.72,.35,1);
-    display: flex; flex-direction: column; box-shadow: -24px 0 60px rgba(var(--shadow-rgb),.5);
-  }
-  .drawer.open { transform: none; }
-  .drawer-hd {
-    display: flex; align-items: center; gap: 7px; padding: 10px 12px 11px;
-    border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--panel);
-    position: relative; z-index: 2;
-  }
-  .drawer-hd h3 {
-    margin: 0; font: 650 11.5px var(--sans); letter-spacing: .02em;
-    flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden;
-  }
-  .drawer-hd h3 .d-title-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .drawer-hd .nav-btns { display: flex; gap: 2px; flex-shrink: 0; }
-  .drawer-hd .nav-btns .btn {
-    width: 28px; height: 28px; padding: 0; display: inline-flex;
-    align-items: center; justify-content: center; font-size: 14px; line-height: 1;
-  }
-  .drawer-hd .btn { padding: 4px 8px; border-radius: 7px; }
-  .drawer-back { flex: none; padding: 3px 7px; font-size: 10px; }
-  .drawer-tool { flex: none; font-size: 9.5px; letter-spacing: .04em; padding: 5px 7px; }
-  .d-key { margin-left: 4px; font-size: 9px; color: var(--muted); }
-  .drawer-body {
-    overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
-    padding: 14px 16px calc(28px + env(safe-area-inset-bottom, 0px));
-    font-family: var(--mono); font-size: 11px; flex: 1; scrollbar-gutter: stable;
-  }
-  .drawer-body::-webkit-scrollbar, .st-fields::-webkit-scrollbar { width: 6px; }
-  .drawer-body::-webkit-scrollbar-thumb, .st-fields::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-
-  /* The one polite copy outcome. It sits above every modal surface because a
-     copy can be initiated from the drawer, Settings or a capture view. */
-  .toast {
-    position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
-    transform: translate(-50%, 10px); z-index: 100; max-width: min(420px, calc(100vw - 24px));
-    padding: 7px 12px; border: 1px solid var(--border2); border-radius: 8px;
-    background: var(--panel); color: var(--text); font: 11px var(--mono);
-    box-shadow: 0 10px 30px rgba(var(--shadow-rgb), .45);
-    opacity: 0; pointer-events: none; transition: opacity .16s ease, transform .16s ease;
-  }
-  .toast.show { opacity: 1; transform: translate(-50%, 0); }
-  .toast.err { border-color: var(--err); color: var(--err-text); }
-
-  /* ---- settings instrument sheet (explorer topology, not a form dump) ---- */
-  .st-veil {
-    position: fixed; inset: 0; background: var(--veil); opacity: 0; pointer-events: none;
-    transition: opacity .18s ease; z-index: 70;
-  }
-  .st-veil.open { opacity: 1; pointer-events: auto; }
-  .st-sheet {
-    position: fixed; z-index: 71; top: calc(var(--rail-h) + var(--rail-tick)); left: 50%;
-    width: min(1080px, calc(100vw - 24px)); height: calc(100vh - var(--rail-h) - var(--rail-tick) - 8px);
-    display: flex; flex-direction: column;
-    background: var(--panel); border: 1px solid var(--border2); border-radius: 14px;
-    box-shadow: 0 24px 64px rgba(var(--shadow-rgb),.55), 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent) inset;
-    transform: translateX(-50%) translateY(12px); opacity: 0; pointer-events: none;
-    transition: transform .2s cubic-bezier(.32,.72,.35,1), opacity .2s ease;
-    overflow: hidden;
-  }
-  .st-sheet.open { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
-  .st-sheet[hidden] { display: none !important; }
-  .st-hd {
-    display: flex; align-items: center; gap: 12px; padding: 11px 16px 13px;
-    border-bottom: 1px solid var(--border2); flex-shrink: 0; position: relative;
-    background: var(--rail);
-  }
-  .st-hd::after {
-    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 7px; pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.55), transparent);
-    mask-image: linear-gradient(to top, rgba(0,0,0,.55), transparent);
-  }
-  .st-hd h3 { margin: 0; font: 650 13px/1.2 var(--mono); letter-spacing: .01em; color: var(--text); }
-  .st-hd input[type="search"] {
-    flex: 1; min-width: 0; max-width: 320px; margin-left: auto;
-    background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
-    font: 11px var(--mono); padding: 6px 10px; border-radius: 8px;
-  }
-  .st-hd input[type="search"]:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
-  .st-body { display: grid; grid-template-columns: 220px 1fr; gap: 0; min-height: 0; flex: 1; }
-  .st-side {
-    display: flex; flex-direction: column; min-height: 0; min-width: 0;
-    background: var(--rail); border-right: 1px solid var(--border);
-  }
-  .st-rail {
-    display: flex; flex-direction: column; gap: 2px; padding: 10px 8px;
-    overflow-y: auto; min-height: 0; flex: 1;
-  }
-  /* The settings rail's row chrome is the shared design grouped with
-     .xp-rail-item in the explorer section above; only the family's
-     deviations live here: the entity-accent fallback for the active edge,
-     the label that pushes counts out, and the search-hit/miss states. */
-  .st-rail-item.active { border-left-color: var(--ent, var(--accent)); }
-  .st-rail-item .ent { flex: 1; }
-  .st-rail-item.has-hit .rail-n { color: var(--accent); }
-  .st-rail-item.is-miss { opacity: .4; }
-  .st-live {
-    flex-shrink: 0; padding: 10px 12px 12px; border-top: 1px solid var(--border);
-    font: 10px/1.45 var(--mono); color: var(--muted);
-  }
-  .st-live-row { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 8px; align-items: baseline; }
-  .st-live-row .k { color: var(--muted); }
-  .st-live-row .v { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .st-main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-  .st-pane-hd { padding: 16px 22px 6px; flex-shrink: 0; }
-  .st-pane-hd h4 { margin: 0 0 4px; font: 650 13px/1.3 var(--sans); color: var(--text); letter-spacing: .01em; }
-  .st-pane-hd p { margin: 0; font: 11px/1.45 var(--sans); color: var(--muted); max-width: 62ch; }
-  .st-banner { margin-top: 8px; font: 10px/1.4 var(--mono); color: var(--warn); }
-  .st-fields { overflow-y: auto; flex: 1; min-height: 0; padding: 4px 14px 22px; }
-  .st-row {
-    display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
-    gap: 6px 28px; align-items: center; padding: 9px 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .st-row[hidden] { display: none !important; }
-  .st-row:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
-  .st-row.st-block { grid-template-columns: 1fr; align-items: start; gap: 8px; padding-top: 12px; padding-bottom: 12px; }
-  .st-check { display: flex; align-items: center; gap: 8px; font: 12px/1.3 var(--sans); color: var(--text); }
-  .st-backup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
-  .st-backup-actions .btn-accent { margin-left: auto; }
-  /* The storage category's delete-matching block: the scoped delete's
-     filter grid (the same seven rows the Logs menu carries) and its live
-     count preview, rendered like the backup action rows. */
-  .st-del-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .st-del-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
-  .st-del-opts select { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
-  .st-del-count { font: 10px/1.4 var(--mono); color: var(--warn); min-height: 14px; }
-  .st-name { font: 600 12px/1.3 var(--sans); color: var(--text); display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
-  .st-name[for] { cursor: pointer; }
-  .st-pill {
-    font: 600 9px var(--mono); letter-spacing: .04em; padding: 1px 6px; border-radius: 4px;
-    text-transform: lowercase;
-  }
-  .st-pill.lock { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-  .st-ctl { display: flex; flex-direction: column; gap: 4px; align-items: stretch; min-width: 0; }
-  .st-ctl-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .st-ctl-line > input, .st-ctl-line > textarea { min-width: 0; }
-  .st-unit { font: 10px var(--mono); color: var(--muted); flex-shrink: 0; }
-  .st-ctl input[type="text"], .st-ctl input[type="number"], .st-ctl textarea {
-    width: 100%; font: 12px var(--mono); padding: 6px 10px; border-radius: 8px;
-    background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
-  }
-  .st-ctl input:focus, .st-ctl textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
-  .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .5; cursor: not-allowed; }
-  .st-ctl textarea { min-height: 64px; resize: vertical; }
-  .st-hint { font: 10px var(--mono); color: var(--muted); }
-  .st-help { min-width: 0; max-width: 100%; }
-  .st-help summary { width: fit-content; max-width: 100%; cursor: pointer; color: var(--muted); font: 10px var(--mono); overflow-wrap: anywhere; }
-  .st-help summary:hover, .st-help summary:focus-visible { color: var(--accent); }
-  .st-help-text { margin-top: 4px; color: var(--text); font: 11px/1.45 var(--sans); overflow-wrap: anywhere; }
-  .st-error { max-width: 100%; color: var(--err); font: 10px/1.35 var(--mono); overflow-wrap: anywhere; }
-  .st-error:empty { display: none; }
-  .st-row:has(.st-switch) .st-ctl { align-items: flex-end; }
-  .st-switch {
-    appearance: none; -webkit-appearance: none; position: relative;
-    width: 36px; height: 20px; border-radius: 10px; cursor: pointer; flex-shrink: 0;
-    background: var(--panel2); border: 1px solid var(--border2); padding: 0;
-  }
-  .st-switch:checked { background: color-mix(in srgb, var(--accent) 40%, var(--panel2)); border-color: var(--accent); }
-  .st-switch::after {
-    content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px;
-    border-radius: 50%; background: var(--muted);
-    transition: transform .16s ease, background .16s ease;
-  }
-  .st-switch:checked::after { transform: translateX(16px); background: var(--text); }
-  .st-switch:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-  /* Provider field-map editor: each provider is its own section - a
-     full-bleed header band (entity glyph + title-style label) over a body of
-     consistently skinned fields. Fields use the darker --rail fill so they
-     read as fields against the --panel2 card; "add" inputs wear a dashed
-     border to signal type-here-to-append; usage rows align on one grid
-     (field | → | path | ✕) so paths line up vertically across the card. */
-  .st-prov {
-    display: flex; flex-direction: column; margin-bottom: 14px;
-    background: var(--panel2); border: 1px solid var(--border); border-radius: 12px;
-    overflow: hidden; box-shadow: 0 2px 10px rgba(var(--shadow-rgb),.2);
-  }
-  .prov-hd {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 8px 8px 12px;
-    background: color-mix(in srgb, var(--text) 3%, transparent);
-    border-bottom: 1px solid var(--border);
-    cursor: pointer; /* the band toggles collapse; its inputs keep their own */
-  }
-  /* The provider icon rides the entity system: both emitters (the provider
-     card header and the picker menu) set --ent to the provider entity
-     color, so the icon and its glow rekey with the entity palette. */
-  .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
-  .prov-hd .sp-label {
-    flex: 1; min-width: 0; background: transparent; border-color: transparent;
-    font: 600 12px var(--mono); color: var(--text); padding: 4px 8px; border-radius: 7px;
-    cursor: text;
-  }
-  .prov-hd .sp-label:hover { border-color: var(--border2); }
-  .prov-hd .sp-label:focus { background: var(--rail); border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
-  /* Nesting: the body is indented under a hairline tree-guide so everything
-     in it visibly belongs to the provider above. */
-  .prov-body {
-    position: relative; display: flex; flex-direction: column; gap: 13px;
-    padding: 13px 12px 13px 30px;
-  }
-  .prov-body::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 0; width: 1px; background: var(--border); }
-  .prov-sec { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-  .prov-lb {
-    display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
-    font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em;
-  }
-  .prov-sub { text-transform: none; letter-spacing: 0; }
-  .prov-sec input, .prov-sec select {
-    font: 11px var(--mono); color: var(--text);
-    background: var(--rail); border: 1px solid var(--border); border-radius: 7px;
-    padding: 5px 9px; width: auto;
-  }
-  .prov-sec input::placeholder { color: var(--muted); opacity: 1; }
-  .prov-sec input:focus, .prov-sec select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
-  .prov-chips { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 1px; }
-  .prov-chips:empty { display: none; }
-  .prov-chip {
-    display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
-    font-size: 10px; padding: 3px 3px 3px 9px; color: var(--text);
-    background: var(--rail); border: 1px solid var(--border2); border-radius: 7px;
-  }
-  .prov-chip .prov-chip-p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
-  .prov-chip .prov-x { padding: 1px 4px; }
-  .prov-umap { display: flex; flex-direction: column; gap: 5px; }
-  .prov-umap:empty { display: none; }
-  .prov-urow { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr 24px; gap: 6px; align-items: center; }
-  .prov-urow .sp-ufield { font-size: 10px; padding: 4px 5px; width: 100%; }
-  .prov-urow .sp-upath { font-size: 10px; }
-  .prov-arrow { color: var(--muted); font-size: 10px; text-align: center; }
-  .prov-add { display: flex; gap: 6px; align-items: center; }
-  .prov-add input, .prov-add select { flex: 1; min-width: 0; }
-  .prov-add input { border-style: dashed; }
-  .prov-add .prov-addbtn { padding: 4px 11px; flex-shrink: 0; font-size: 11px; }
-  /* Model rules editor: the six-slot row (mode | from | → | to | ◉▲▼ | ✕)
-     widens .prov-urow's grid; the preview row shares it. Below it live the
-     inline validation slot (grid-span), the step trace, the real-traffic
-     example table, and the tools row (templates + restore + count). */
-  .mr-row, .mr-preview { grid-template-columns: 78px minmax(120px, 1fr) 14px minmax(120px, 1fr) 52px 24px; }
-  .mr-row .mr-mode, .mr-add .mr-mode { font-size: 10px; padding: 4px 5px; }
-  .mr-add select { flex: 0 0 78px; }
-  .mr-what { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
-  .mr-out { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mr-move { display: flex; gap: 2px; justify-content: flex-end; }
-  .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; }
-  .mr-move button:hover { color: var(--accent); }
-  .mr-move .mr-vis[aria-pressed="false"] { color: var(--text); }
-  .mr-row[data-mr-off="1"] { opacity: .45; }
-  .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
-  .mr-err:empty { display: none; }
-  .mr-err[data-level="error"] { color: var(--err-text); }
-  .mr-err[data-level="warn"] { color: var(--warn-text); }
-  .mr-hint { font-size: 9.5px; color: var(--muted); line-height: 1.5; margin: 0 0 7px; }
-  .mr-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
-  .mr-tools select { font-size: 10px; padding: 3px 5px; max-width: 190px; }
-  .mr-restore { background: none; border: none; color: var(--muted); font: inherit; font-size: 9.5px; cursor: pointer; padding: 0; }
-  .mr-restore:hover { color: var(--accent); }
-  .mr-count { margin-left: auto; font-size: 9.5px; white-space: nowrap; }
-  .mr-trace { font-size: 9.5px; line-height: 1.7; margin: 2px 0 4px; overflow-wrap: anywhere; }
-  .mr-trace .mr-step-in { color: var(--muted); }
-  .mr-trace .mr-step-rule { color: var(--accent2); font-style: normal; margin: 0 3px 0 6px; font-size: 8.5px; }
-  .mr-trace .mr-step-rule::before { content: '→ '; }
-  .mr-trace .mr-step { background: var(--panel2); border-radius: 4px; padding: 1px 4px; }
-  .mr-examples { display: flex; flex-direction: column; gap: 2px; margin: 6px 0 10px; }
-  .mr-ex-hd { font-size: 9px; text-transform: none; letter-spacing: .05em; margin-bottom: 3px; }
-  .mr-ex { display: grid; grid-template-columns: 1fr 14px 1fr auto; gap: 6px; align-items: center; font-size: 10px; }
-  .mr-ex-in { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mr-ex-out { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mr-ex.ch .mr-ex-out { color: var(--accent); }
-  .mr-ex-n { font-size: 9px; }
-  /* The rules editor's muted bits: the preview's empty placeholder (toggled
-     per keystroke), the rule count and the example-table metadata. Every
-     emission site lives inside .mr-wrap, so the token scopes here and the
-     toggle in mrPreview actually changes the text color. */
-  .mr-wrap .muted { color: var(--muted); }
-  .prov-add-u { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr; gap: 6px; }
-  .prov-add-u .prov-addbtn { grid-column: 3; justify-self: start; }
-  /* Models enrichment: same row grammar as the usage map (one visual system
-     for all structured per-provider maps). */
-  .prov-mmap { display: flex; flex-direction: column; gap: 5px; }
-  .prov-mmap:empty { display: none; }
-  .prov-urow .sp-mfield { font-size: 10px; padding: 4px 5px; width: 100%; }
-  .prov-urow .sp-mkey { font-size: 10px; }
-  .prov-add-m { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr; gap: 6px; }
-  .prov-add-m .prov-addbtn { grid-column: 3; justify-self: start; }
-  /* Upstream headers: name → value rows in the same map grammar (no arrow -
-     the pair is a plain name/value, not a canonical-field mapping). */
-  .prov-hmap { display: flex; flex-direction: column; gap: 5px; }
-  .prov-hmap:empty { display: none; }
-  .prov-hrow { display: grid; grid-template-columns: minmax(130px, 190px) 1fr 24px; gap: 6px; align-items: center; }
-  .prov-hrow .sp-hname, .prov-hrow .sp-hval { font-size: 10px; }
-  .prov-add-h { display: grid; grid-template-columns: minmax(130px, 190px) 1fr 24px; gap: 6px; }
-  .prov-add-h .prov-addbtn { grid-column: 3; justify-self: start; }
-  /* "+ add provider" lives in the field's title row (top right, aligned with
-     "Provider field maps") and opens a dropdown in the .hdr-menu idiom. The
-     picker only offers seen providers NOT already mapped. */
-  .prov-top { position: relative; margin-left: auto; flex-shrink: 0; }
-  .prov-top .btn { font-size: 10px; padding: 3px 10px; }
-  .prov-menu {
-    position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
-    min-width: 290px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
-    background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
-  }
-  .prov-menu[hidden] { display: none !important; }
-  .prov-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
-  .prov-menu-list:empty::after { content: 'no providers to add'; font-size: 10px; color: var(--muted); padding: 3px 6px; }
-  .prov-menu-item {
-    display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
-    font: 11px var(--mono); color: var(--text); background: none; border: none;
-    border-radius: 6px; padding: 5px 7px; cursor: pointer;
-    transition: background .16s ease;
-  }
-  .prov-menu-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
-  .prov-menu-item .prov-ic { font-size: 11px; }
-  .prov-menu-custom { display: flex; gap: 5px; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; }
-  .prov-menu-custom input { flex: 1; min-width: 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; }
-  .prov-menu-custom input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
-  .prov-chev {
-    border: none; background: none; color: var(--muted); cursor: pointer;
-    padding: 3px; border-radius: 6px; flex-shrink: 0; display: inline-flex; margin-left: auto;
-  }
-  .prov-chev svg {
-    width: 13px; height: 13px; display: block; stroke: currentColor; fill: none;
-    stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
-    transition: transform .16s ease;
-  }
-  .prov-chev:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
-  .st-prov.collapsed .prov-chev svg { transform: rotate(-90deg); }
-  .st-prov.collapsed .prov-body { display: none; }
-  .prov-x {
-    border: none; background: none; color: var(--muted); cursor: pointer;
-    font-size: 11px; line-height: 1; padding: 3px 6px; border-radius: 6px; font-family: var(--mono);
-    flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
-  }
-  .prov-x svg {
-    width: 13px; height: 13px; display: block; stroke: currentColor; fill: none;
-    stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
-  }
-  .prov-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
-  .prov-bad, .prov-bad:focus { border-color: var(--err) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 15%, transparent) !important; }
-  .ro-wrap { min-width: 0; max-width: 100%; }
-  .ro-wrap .mr-tools { flex-wrap: wrap; }
-  .ro-add { position: relative; display: inline-flex; min-width: 0; }
-  .ro-add-btn { min-height: 26px; }
-  .ro-tpl-menu {
-    position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
-    width: max-content; max-width: min(290px, calc(100vw - 32px));
-    display: flex; flex-direction: column; gap: 2px; padding: 6px;
-    background: var(--panel); border: 1px solid var(--border2); border-radius: 9px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
-  }
-  .ro-tpl-menu[hidden] { display: none !important; }
-  .ro-tpl-item {
-    min-width: 0; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 6px;
-    background: none; color: var(--text); font: 10px var(--mono); text-align: left;
-    cursor: pointer; overflow-wrap: anywhere;
-  }
-  .ro-tpl-item:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
-  .ro-tpl-item:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .ro-rule {
-    min-width: 0; overflow: hidden; background: var(--panel2);
-    border: 1px solid var(--border); border-radius: 9px;
-  }
-  .ro-rule:focus, .ro-rule:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
-  .ro-rule-head {
-    display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto;
-    gap: 8px; align-items: center; min-width: 0; padding: 7px 8px;
-    background: color-mix(in srgb, var(--text) 3%, transparent);
-  }
-  .ro-disclosure {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 26px; min-height: 26px; padding: 0; border: 1px solid var(--border2);
-    border-radius: 6px; background: var(--rail); color: var(--muted);
-    cursor: pointer; font: 13px/1 var(--mono);
-  }
-  .ro-disclosure:hover { color: var(--accent); border-color: var(--accent); }
-  .ro-disclosure:focus, .ro-disclosure:focus-visible, .ro-head-actions button:focus, .ro-head-actions button:focus-visible, .ro-add-btn:focus, .ro-add-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .ro-num { min-width: 38px; color: var(--muted); font: 10px var(--mono); }
-  .ro-summary { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .ro-summary-scope, .ro-summary-actions { min-width: 0; overflow-wrap: anywhere; font: 10px/1.35 var(--mono); }
-  .ro-summary-scope { color: var(--text); }
-  .ro-summary-actions { color: var(--muted); font-size: 9px; }
-  .ro-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; flex-wrap: wrap; }
-  .ro-head-actions button {
-    min-height: 26px; padding: 3px 7px; border: 1px solid var(--border2);
-    border-radius: 6px; background: var(--rail); color: var(--muted);
-    cursor: pointer; font: 9px var(--mono); white-space: nowrap;
-  }
-  .ro-head-actions button:hover { color: var(--text); border-color: var(--accent); }
-  .ro-head-actions .prov-x { font-size: 9px; }
-  .ro-rule-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 9px 10px 10px; border-top: 1px solid var(--border); }
-  .ro-rule-body[hidden] { display: none !important; }
-  .ro-rule .ro-scope, .ro-rule .ro-body { display: grid; gap: 6px; min-width: 0; }
-  .ro-rule .ro-scope { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .ro-rule .ro-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .ro-rule .ro-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-  .ro-rule .ro-field > span { min-width: 0; color: var(--muted); font: 9px var(--mono); overflow-wrap: anywhere; }
-  .ro-rule .ro-field input { width: 100%; min-width: 0; }
-  .ro-scope input, .ro-body input { flex: 1; min-width: 0; }
-  .sc-card .prov-lb .prov-x { margin-left: auto; }
-  .ro-rule .mr-err { overflow-wrap: anywhere; }
-  .ro-error-detail { color: var(--err); font: 9.5px/1.35 var(--mono); overflow-wrap: anywhere; }
-  .ro-error-detail + .ro-error-detail { margin-top: 3px; }
-  .st-ft {
-    display: flex; align-items: center; gap: 12px; padding: 12px 16px 10px;
-    border-top: 1px solid var(--border2); flex-shrink: 0; background: var(--rail); position: relative;
-  }
-  .st-ft::before {
-    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
-    mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
-  }
-  .st-status { flex: 1; min-height: 15px; font: 11px var(--mono); color: var(--warn); }
-  .st-status.ok { color: var(--ok); }
-  .st-actions { display: flex; gap: 8px; }
-  @media (max-width: 720px) {
-    .st-sheet { border-radius: 12px; }
-    .st-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-    .st-side { border-right: none; border-bottom: 1px solid var(--border); }
-    .st-rail { flex-direction: row; flex-wrap: wrap; max-height: 96px; }
-    .st-rail-item { width: auto; }
-    .st-live { display: none; }
-    .st-row { grid-template-columns: 1fr; gap: 6px; }
-    .st-row:has(.st-switch) .st-ctl { align-items: flex-start; }
-    .st-del-opts { grid-template-columns: 1fr; }
-    .st-hd input[type="search"] { max-width: none; }
-    .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
-    .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
-    .ro-head-actions { justify-content: flex-start; flex-wrap: wrap; }
-    .ro-head-actions button { min-height: 24px; }
-    .ro-rule .ro-scope, .ro-rule .ro-body { grid-template-columns: minmax(0, 1fr); }
-    .ro-rule-body { padding-inline: 8px; }
-    .ro-tpl-menu { max-width: min(290px, calc(100vw - 32px)); }
-  }
-
-  .card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
-    padding: 16px 18px; overflow: hidden; position: relative;
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent) inset, 0 12px 28px rgba(var(--shadow-rgb),.24);
-  }
-  .card h2 { margin: 0 0 10px; font-size: 11px; font-weight: 650; color: var(--muted); text-transform: none; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
-
-  .chart-wrap { position: relative; height: 210px; width: 100%; }
-  /* Period totals strip pinned above the plot: the VIEWED window's
-     server-computed bucket sums, always visible regardless of hover. An
-     auto-fit grid fills one even row while the tiles fit (empty tracks
-     collapse, so sparse presets stretch like before); denser plotted
-     presets wrap into further rows of the same tile width instead of
-     crushing or overflowing. The 84px floor fits every bounded tile value
-     (compact K/M/B money and counts stay ≤ 8 monospace characters). */
-  .chart-totals {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(84px, 100%), 1fr)); gap: 10px;
-    font-size: 15px; line-height: 1; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text);
-    padding: 2px 0 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border);
-    min-height: 57px; flex-shrink: 0;
-  }
-  /* Fixed tile height: a tile that gains (or never had) a share sub-row
-     reserves the same space, so live data arriving can never re-wrap or
-     resize the strip - and the plot below it never moves. Sparks stay
-     bottom-pinned whatever the tile carries. */
-  .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
-  .chart-totals .tl { color: var(--muted); font-size: 10px; }
-  /* The summary preset: no plot, the tiles ARE the surface. They borrow the
-     KPI band's blended cell language instead of stacking a second box layer
-     inside the card: no per-tile panel, border or radius - cells sit
-     directly on the card's panel separated by the same faint left hairline
-     (first cell open, like the KPI band), and the band closes with the
-     shared graduated-scale tick strip instead of a hard rule. The tiles are
-     plain readouts; the metrics picker at the card head owns what shows
-     (the same dash.chart hidden set the legend uses), hidden metrics leave
-     the band and the auto-fit grid reflows, and the spark keeps each
-      tile's color voice, so cells carry no per-metric leading tick. The
-      tiles wrap into as many whole rows as the selection needs, and the
-      page scrolls past them, so every selected tile always renders at
-      every viewport.
-      Sizing: every tile is ONE fixed height per window. At the full locked
-      height it is 118px (label 10 + value 13 + the tokens tile's two share
-      lines 20 + spark 32 + three 6px gaps + 20px padding = 113, all
-      line-height-1 rows so the number is typeface-independent, with
-      breathing room); the short-locked media queries below lower the cell
-      and spark together so the card still fits the pair. Either way a tile
-      is the same size whatever it carries - spark or no spark, one share
-      line or two - and the no-data skeleton swaps to data without moving the
-      card.
-      The spark is flex-shrink: 0 - it never acts as the overflow shock
-      absorber; an oversized tile must clip visibly (the browser gate
-      catches it), never silently crush the spark. The band sits
-      at its natural rows height - it never stretches to fill the card (the
-      old flex-basis-0 stretch collapsed the strip to a sliver on
-      content-height cards and clipped the sparks) - and the card itself
-      opts out of the pair's column stretch, so the summary never paints a
-      hollow tall card: what you see is what the metrics need. */
-  .traffic-card.tiles-only { align-self: start; }
-  .traffic-card.tiles-only .chart-wrap,
-  .traffic-card.tiles-only .chart-axes,
-  .traffic-card.tiles-only #traffic-legend { display: none; }
-  .traffic-card.tiles-only .chart-totals {
-    position: relative;
-    /* 13px values are the band's fit size: the widest common value - the
-       in/out/cached triple, e.g. "95.21M/392.78K/92.85M" - measures 150px
-       at 13px (173px at the strip's 15px, far past a 3-track row's ~160px
-       cell). With the 8px tile side padding that needs a 166px track, so
-       the floor is 170px and the lock's pair floor (572px card, below)
-       keeps three whole tracks in the timeline card at every locked
-       window. Extreme values ellipsize (the val-pair rule below), never
-       overlap. */
-    grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
-    gap: 8px;
-    font-size: 13px;
-    margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
-  }
-  .traffic-card.tiles-only .chart-totals::after {
-    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
-    mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
-  }
-  .traffic-card.tiles-only .chart-total {
-    position: relative;
-    justify-content: space-between; gap: 6px; padding: 10px 8px; height: 118px;
-    background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
-  }
-  .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
-  .traffic-card.tiles-only .chart-total:first-child { border-left: 0; }
-  /* The KPI band's idiom, applied to the band tile's value pair: a value
-     wider than its track (extreme token counts) truncates with an ellipsis
-     instead of painting over the neighboring tile - the KPI row above
-     clips the same way, and the tile is a summary: exact figures live in
-     the KPI band and the request drawer. */
-  .traffic-card.tiles-only .chart-total .val-pair { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-  /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
-     the tile bottom, so the sparks align across the row whatever sub-rows a
-     tile carries. Sparks belong to the summary tiles alone (the plotted
-     presets' strips carry values, no evolution line). At the full locked
-     height the explicit height matches CHART_SPARK_H exactly so the viewBox
-     draws at 1:1 and the line keeps its stroke weight instead of stretching;
-     the short-locked overrides below scale that same viewBox down with the
-     cell. */
-  .chart-total .spark { display: block; width: 100%; height: 32px; margin-top: auto; }
-  /* Locked short windows: the pair's grid row can be shorter than two 118px
-     tile rows (1366x750 gives 284px, 1366x768 302px). Keep every tile's
-     content - label, value, both share lines and a real spark - inside the
-     card by shortening the fixed cell and the spark, never by clipping the
-     card or letting it spill into the footer. The 1440x1000-class windows
-     keep the full 118px / 32px cells. */
-  @media (min-width: 1200px) and (min-height: 750px) and (max-height: 767px) {
-    .traffic-card.tiles-only .chart-total { height: 92px; gap: 2px; padding: 9px 8px; }
-    .traffic-card.tiles-only .chart-total .spark { height: 22px; }
-  }
-  @media (min-width: 1200px) and (min-height: 768px) and (max-height: 799px) {
-    .traffic-card.tiles-only .chart-total { height: 102px; gap: 3px; padding: 9px 8px; }
-    .traffic-card.tiles-only .chart-total .spark { height: 26px; }
-  }
-  /* Merged in/out pair: one wrapped line whose halves mirror the token
-     bars' colors (input purple, output green) over a thin muted separator -
-     tile and bars read as one story, and the pair fits the narrowest tile
-     like the KPI band's duo. */
-  .chart-totals .val-pair { white-space: nowrap; }
-  .chart-totals .v-in { color: var(--accent2); }
-  .chart-totals .v-out { color: var(--ok); }
-   /* Requests pair: request count in the requests plot's accent, the blended
-      token volume in the token story's cyan. */
-   .chart-totals .v-req { color: var(--accent); }
-   .chart-totals .v-tok { color: var(--cyan); }
-   /* Tokens triple: the in/out halves in the token bars' colors, cached
-      tokens in the cache line's muted tone - the third plot color of the
-      tokens preset. */
-   .chart-totals .v-cache { color: var(--muted); }
-   /* Health pair: errors in the chart's error red, rate-limited requests in
-      the 429 tone - the same two colors as the health lines below. */
-   .chart-totals .v-err { color: var(--err); }
-   .chart-totals .v-rl { color: var(--rl); }
-   /* Timing pair: latency in the latency plot's accent, speed in its green -
-      the same two colors as the latency preset's lines, so the tile halves
-      and the duo sparks below them read as one story. */
-   .chart-totals .v-ttft { color: var(--accent); }
-   .chart-totals .v-tps { color: var(--ok); }
-   .chart-totals .pair-sep { color: var(--muted); padding: 0 1px; }
-   /* Measured shares ride under the value on their own row (block breaks the
-      inline run), so a long suffix can never push a narrow tile sideways. */
-   .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
-  .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
-  .chart-scale { font-size: 9px; }
-  .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
-  .chart-context[hidden] { display: none; }
-  /* A readable, complete bucket readout on the opposite side of the pointer. */
-  #chart-hover {
-    position: absolute; top: 8px; right: 8px; z-index: 3;
-    background: var(--panel); border: 1px solid var(--border2);
-    box-shadow: 0 6px 20px rgba(var(--shadow-rgb),.3); border-radius: 7px;
-    padding: 10px 12px; font-family: var(--mono); font-size: 11px;
-    color: var(--text); pointer-events: none; max-width: calc(100% - 16px);
-  }
-  #chart-hover[hidden] { display: none; }
-  .chart-hover-time { color: var(--muted); font-size: 10px; margin-bottom: 7px; }
-  .chart-hover-row { display: flex; justify-content: space-between; gap: 20px; line-height: 1.8; }
-  .chart-controls { display: flex; gap: 6px; margin-left: auto; align-items: center; }
-  .chart-controls select {
-    background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
-    font-size: 11px; padding: 4px 10px; border-radius: 7px; cursor: pointer;
-    font-family: var(--mono); transition: all .15s;
-  }
-  .chart-controls select:hover { color: var(--text); border-color: var(--accent); }
-  .chart-controls select:focus-visible, #traffic-legend button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  /* The summary metrics picker: the trigger matches the row's select
-     language (panel2 fill, hairline border, hover accent; height pinned to
-     the native select box the row's shared font and padding produce) so the
-     control reads as one of the chart controls, with the registry chevron
-     flipping open. The menu mirrors the provider picker's panel - absolute
-     under the trigger, mono rows - but with no fixed width floor: the
-     provider menu's min-width exists for its input row, and this menu has
-     only rows, so it shrink-wraps its longest entry. Rows carry a
-     fixed-width check slot - checked rows keep the accent check and full
-     text, unchecked rows dim to muted, so the current selection reads at a
-     glance. */
-  .metrics-pick { position: relative; }
-  .metrics-pick[hidden] { display: none; }
-  #chart-metrics-btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
-    font: 11px var(--mono); padding: 4px 10px; height: 24px; border-radius: 7px; cursor: pointer;
-    transition: all .15s;
-  }
-  #chart-metrics-btn:hover { color: var(--text); border-color: var(--accent); }
-  #chart-metrics-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  #chart-metrics-btn svg { width: 9px; height: 9px; stroke: currentColor; fill: none; stroke-width: 1.5; }
-  #chart-metrics-btn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
-  #chart-metrics-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
-  #chart-metrics-btn .mp-count { color: var(--muted); font-variant-numeric: tabular-nums; }
-  /* Fixed, not absolute: the menu lives in the card head, and the card's
-     overflow: hidden clipped any menu taller than the card's remaining
-     space. Fixed placement escapes every ancestor clip; chart.js's
-     syncMetricsMenuEdge owns the coordinates (right-aligned to the
-     trigger, flipping above it near the window's bottom edge), so this
-     rule positions nothing beyond keeping an unplaced menu offscreen. */
-  .metrics-menu {
-    position: fixed; top: -9999px; right: auto; z-index: 40;
-    padding: 8px; display: flex; flex-direction: column; gap: 2px;
-    background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
-  }
-  .metrics-menu[hidden] { display: none !important; }
-  .metrics-row {
-    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-    font: 11px var(--mono); color: var(--text); background: none; border: none;
-    border-radius: 6px; padding: 5px 7px; cursor: pointer;
-  }
-  .metrics-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
-  .metrics-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .metrics-row[aria-checked="false"] { color: var(--muted); }
-  .metrics-row .mp-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
-  .traffic-card .card-hd { flex-wrap: wrap; flex-shrink: 0; }
-  @media (max-width: 480px) {
-    .chart-totals { gap: 8px; }
-    /* The picker trigger is a chart control: it takes the selects' mobile
-       treatment (6px inline padding), drops its count chip (the menu rows
-       carry the state; the aria-label keeps the full truth) and, like the
-       card header above it, lets the row wrap - the narrowest phones get
-       the trigger on its own line instead of an overflow. */
-    .chart-controls select, #chart-metrics-btn { padding-inline: 6px; }
-    .chart-controls { flex-wrap: wrap; }
-    .metrics-pick .mp-count { display: none; }
-  }
-  .card-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
-  .card-hd .htext { margin-left: auto; } /* push trailing hint to the right; controls after it sit at the far right */
-
-  /* ---- entity explorer: pivot chips + entity badges ---- */
-  /* Entity badge: icon + color + label triple (WCAG redundant encoding). The
-     --ent custom property carries the type color; the icon is always shown so
-     type is recognizable without color. */
-  /* Icon and label share one 14px band (the favicon box) so a provider name
-     sits on the same centerline as its glyph - not a 16.5px line-box hanging
-     below a 14px image (`|-` not `| /name`). */
-  .ent { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; line-height: 1; min-width: 0; vertical-align: middle; }
-  .ent-ic { color: var(--ent); font-size: 11px; line-height: 1; flex-shrink: 0; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; text-align: center; }
-  /* A provider favicon can be a dark plate (OpenDesign's is near-black), which
-     all but disappears against a dark surface on its own. The 1px padding and
-     its text-derived hairline ring give every icon a visible tile edge without
-     changing the 14px layout box, so the band above still holds. The ring is a
-     --text mix, not a fixed color, so it inverts with the mode and survives
-     every palette. It sits inside the box because a parent clip (td and
-     .req-model both set overflow: hidden) would cut an outer outline. */
-  .ent-fav { width: 14px; height: 14px; padding: 1px; box-sizing: border-box; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent); }
-  .ent-lb { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; height: 14px; display: inline-flex; align-items: center; }
-  a.ent:hover .ent-lb { color: var(--ent); }
-  /* entityPivot: an entityBadge wrapped in a navigable link. */
-  a.ent-link { text-decoration: none; border-radius: 5px; padding: 1px 2px; }
-  a.ent-link:hover { background: var(--panel2); }
-  /* Inset focus ring so .req-model's overflow clip cannot cut the indicator
-     off the last entity in the identity cell. */
-  a.ent-link:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  /* Client hover card: identity + request config. Fixed, never intercepts
-     the pointer (the badge stays the hover target). */
-  #client-tip {
-    position: fixed; z-index: 90;
-    background: var(--panel); border: 1px solid var(--border2); border-radius: 8px;
-    padding: 8px 10px; font-family: var(--mono); font-size: 11px; color: var(--text);
-    pointer-events: none; box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5);
-    max-width: 300px; min-width: 180px; line-height: 1.45;
-  }
-  #client-tip[hidden] { display: none !important; }
-  .ct-h { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .06em; margin: 7px 0 3px; }
-  .ct-h:first-child { margin-top: 0; }
-  .ct-row { display: flex; gap: 8px; align-items: baseline; }
-  .ct-k { color: var(--muted); min-width: 72px; flex-shrink: 0; font-size: 10px; }
-  .ct-v { color: var(--text); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Share bar: part-to-whole proportion for a dimension value (bar + %). */
-  .share { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
-  .share-bar { display: inline-block; width: 56px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
-  .share-fill { display: block; height: 100%; border-radius: 3px; }
-  .share-pct { color: var(--muted); font-size: 10px; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .traffic-card .card-hd { justify-content: space-between; }
-  .traffic-card .card-hd h2 { margin: 0; }
-
-  .legend { display: flex; gap: 14px; font-size: 10px; color: var(--muted); font-family: var(--mono); margin-top: 8px; flex-wrap: wrap; justify-content: center; padding: 6px 0 2px; }
-  .legend .leg-item {
-    display: flex; align-items: center; gap: 5px; background: none; border: none;
-    color: var(--muted); font-size: 10px; font-family: var(--mono); cursor: pointer;
-    padding: 2px 4px; border-radius: 4px; transition: all .15s;
-  }
-  .legend .leg-item:hover { color: var(--text); }
-  .legend .leg-item .swatch { width: 10px; height: 3px; border-radius: 2px; background: var(--sw, var(--muted)); display: inline-block; }
-  .legend .leg-item.off { color: var(--border2); text-decoration: line-through; }
-  #traffic-legend { column-gap: 12px; row-gap: 5px; flex-shrink: 0; margin-top: 2px; }
-  #traffic-legend .leg-item { min-height: 26px; color: var(--text); }
-  #traffic-legend .leg-item:hover { background: var(--panel2); }
-  #traffic-legend .leg-item.off { color: var(--muted); text-decoration: none; }
-  #traffic-legend .leg-item.off .swatch { opacity: .25; }
-  #traffic-legend .swatch { width: 14px; height: 2px; border-radius: 0; }
-  #traffic-legend .swatch.bar { width: 7px; height: 9px; border-radius: 1px; }
-  #traffic-legend .swatch.dashed { background: none; border-top: 2px dashed var(--sw); }
-
-  .vt { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; cursor: default; }
-
-  select {
-    background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
-    font-size: 11px; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-family: inherit;
-  }
-  .req-status { margin-left: 8px; padding: 3px 8px; font-size: 10px; }
-  select:hover, select:focus { border-color: var(--accent); outline: none; }
-
-  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  /* Request log: content-sized columns. Automatic layout fits each column to
-     its widest cell; log.js ratchets the natural width into a min-width on the
-     header cell (see reqThead), which auto layout treats as a hard column
-     floor. Columns therefore grow with new maxima and never shrink back when a
-     live row finalizes or a shorter value replaces the widest one. */
-  #tbl-requests table { table-layout: auto; }
-  #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
-  /* The identity cell keeps every badge at its natural width: the column floor
-     was measured from the full one-line client · provider · model, so no badge
-     is capped or wrapped. A card narrower than the learned columns scrolls
-     horizontally instead of squeezing a name into an ellipsis. */
-  .req-ident { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0; }
-  .req-ident > .ent { flex: 0 0 auto; }
-  .req-ident .ent { gap: 3px; }
-  .req-ident > .req-model { display: inline-flex; align-items: center; flex: 0 0 auto; max-width: 100%; overflow: hidden; }
-  .req-ident > .req-model > .ent { min-width: 0; max-width: 100%; overflow: hidden; }
-  /* Backstop only: the measured floor already fits every label, so the dots
-     appear only if a layout without measurement (jsdom, a stubbed viewport)
-     forces a cell below its content. */
-  .req-ident .ent-lb { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Offscreen natural-width probe for the request log's column floors. The
-     probe must not inherit the fixed-card table width or the identity cell's
-     fill behaviour: max-content measures the content itself, and the identity
-     row measures all three badges on one line. */
-  #req-measure { position: absolute; left: -100000px; top: 0; visibility: hidden; pointer-events: none; }
-  #req-measure table { table-layout: auto; width: max-content; border-collapse: collapse; }
-  #req-measure .req-ident { width: max-content; }
-  th { color: var(--muted); font-weight: 550; font-size: 10px; text-transform: none; letter-spacing: .07em; position: sticky; top: 0; background: var(--panel); z-index: 2; }
-  tr:hover td { background: var(--panel2); }
-  td { color: var(--text); }
-  .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; font-family: var(--mono); font-weight: 600; }
-  .pill.ok { background: color-mix(in srgb, var(--ok) var(--pill-tint), transparent); color: var(--ok); }
-  .pill.err { background: color-mix(in srgb, var(--err) var(--pill-tint), transparent); color: var(--err); }
-  .pill.warn { background: color-mix(in srgb, var(--warn) var(--pill-tint), transparent); color: var(--warn); }
-  /* Client-cancelled row: warm muted gray - an outcome of its own, not a failure. */
-  .pill.cancel { background: color-mix(in srgb, var(--neutral) var(--pill-tint), transparent); color: var(--text); }
-  /* In-flight request pill: the accent "live" pulse for a row still streaming. */
-  .pill.live { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
-  /* Operator hold: parked, not in flight. Muted, no pulse. Click opens the hold editor. */
-  .pill.paused { background: color-mix(in srgb, var(--warn) var(--pill-tint-strong), transparent); color: var(--warn); cursor: pointer; }
-  .pill.throttled { background: color-mix(in srgb, var(--accent2) var(--pill-tint-strong), transparent); color: var(--accent2); cursor: pointer; }
-  .pill.debug { background: color-mix(in srgb, var(--cyan) var(--pill-tint-strong), transparent); color: var(--cyan); cursor: pointer; }
-  @keyframes livepulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
-  @media (prefers-reduced-motion: reduce) { .pill.live { animation: none; } }
-  tr.live-row td { color: var(--muted); }
-  /* Retry toggle + absorbed-attempt sub-rows (nested under the final request). */
-  .retry-toggle { border: none; cursor: pointer; font: inherit; }
-  .retry-toggle .retry-caret { display: inline-block; margin-left: 2px; }
-  .retry-toggle:hover { filter: brightness(1.2); }
-  tr.retry-sub td { background: color-mix(in srgb, var(--warn) 4%, transparent); color: var(--muted); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
-  tr.retry-sub { cursor: pointer; }
-  tr.retry-sub:hover td { background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--text); }
-  /* The nested err pill keeps its 13% err tint over the hovered warn row;
-     --err is too dim there, so the proven error-text ink carries the label. */
-  tr.retry-sub:hover td .pill.err { color: var(--err-text); }
-  .retry-tick { color: var(--warn); margin-right: 4px; }
-  .retry-sub-label { font-size: 10.5px; }
-  .retry-sub-msg { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* A retry message is retained up to 512 characters. In the table's auto
-     layout a nowrap colspan cell would make the whole table as wide as that
-     message, then collapse it again when the sub-row closes. Cap the inner
-     text below the narrowest learned table (the 14 header cells alone) so
-     the sub-row ellipsizes inside the current width; the full message stays
-     in the cell title and the request drawer. */
-  .retry-sub-text { display: inline-block; max-width: 72ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-
-  /* Day dividers - the request log nests by local calendar day. Each divider
-     is a major graduation on the instrument scale: a dated chip riding the
-     same feathered tick strip as the header/footer rails, pinned below the
-     sticky column header while its day is in view. It is a ruler, not a row:
-     no hover repaint, and the sticky <td> (not <tr>) stays opaque over the
-     scrolling content. The 10px th line at the inherited 1.5 line-height,
-     its 7px vertical padding and the collapsed 1px rule measure 29.5px, so
-     top parks the strip exactly on the header's bottom edge with no seam for
-     scrolling rows to show through. */
-  tr.day-sep td {
-    position: sticky; top: 29.5px; z-index: 1;
-    background: var(--panel);
-    padding: 3px 10px 2px;
-    border-bottom: none;
-  }
-  tr.day-sep:hover td { background: var(--panel); }
-  .day-line { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .day-chip {
-    color: var(--muted); font-size: 9.5px; font-weight: 600;
-    text-transform: none; letter-spacing: .08em; flex-shrink: 0;
-  }
-  .day-rule {
-    flex: 1; height: 7px; min-width: 40px;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
-    mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
-  }
-
-  /* ---- request inspector: hero, cards, rows and long-text surfaces ---- */
-  /* The hero is the scanner: outcome, route and the four numbers an operator
-     reads before opening a section. Sections remain the full inventory. */
-  .d-hero {
-    position: relative; margin: 0 0 12px; padding: 11px 13px 12px;
-    background: var(--panel2); border: 1px solid var(--border2); border-radius: 10px;
-    overflow: hidden;
-  }
-  .d-hero::before {
-    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
-    mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
-  }
-  .d-hero-top { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding-top: 3px; }
-  .d-method {
-    color: var(--accent2); font: 700 9.5px var(--mono); letter-spacing: .05em;
-    border: 1px solid color-mix(in srgb, var(--accent2) 30%, var(--border2));
-    border-radius: 4px; padding: 1px 5px; flex: none;
-  }
-  .d-path-row { display: flex; align-items: flex-start; gap: 3px; flex: 1 1 100%; min-width: 0; }
-  .d-path {
-    flex: 1 1 auto; min-width: 0; color: var(--text); font-size: 11.5px; line-height: 1.45;
-    overflow-wrap: anywhere; word-break: break-word;
-  }
-  .d-path-row .copy-btn { flex: none; opacity: .55; margin-top: -3px; }
-  .d-hero-ident .copy-btn { vertical-align: middle; opacity: .55; }
-  .d-hero-ident {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px;
-    margin-top: 8px; color: var(--muted); min-width: 0;
-  }
-  .d-hero-ident .ent { max-width: 100%; }
-  .d-sep { color: var(--border2); }
-  .d-model { color: var(--text); overflow-wrap: anywhere; }
-  .d-canon { color: var(--muted); font-size: 10px; }
-  .d-stats {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
-    gap: 0; margin-top: 10px; border-top: 1px solid var(--border);
-  }
-  .d-stat { display: flex; flex-direction: column; gap: 1px; min-width: 0; padding: 7px 10px 0; border-left: 1px solid var(--border); }
-  .d-stat:first-child { border-left: 0; padding-left: 0; }
-  .d-stat-k { color: var(--muted); font-size: 9px; letter-spacing: .05em; }
-  .d-stat-v { color: var(--text); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-
-  /* The final failure reads as one alert, not a buried key/value block. */
-  .d-alert {
-    margin: 0 0 12px; padding: 10px 12px; border-radius: 10px;
-    border: 1px solid color-mix(in srgb, var(--err) 38%, var(--border));
-    border-top: 2px solid var(--err);
-    background: color-mix(in srgb, var(--err) 7%, var(--panel));
-  }
-  .d-alert-hd { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; }
-  .d-alert-ico { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--err); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
-  .d-alert-title { color: var(--err-text); font-weight: 650; font-size: 11px; }
-  .d-alert-type { color: var(--text); font-size: 10.5px; border: 1px solid var(--border2); border-radius: 4px; padding: 1px 5px; overflow-wrap: anywhere; }
-  .d-alert-code { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-  .d-alert .copy-btn { margin-left: auto; opacity: .65; }
-  .d-alert-msg {
-    margin-top: 8px; padding-top: 8px; border-top: 1px solid color-mix(in srgb, var(--err) 20%, var(--border));
-    color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
-    max-height: 220px; overflow: auto; line-height: 1.45;
-  }
-
-  /* Section cards: a compact header with copy/collapse, then the field grid. */
-  .detail-section {
-    margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px;
-    background: color-mix(in srgb, var(--panel2) 48%, transparent);
-    overflow: hidden; scroll-margin-top: 46px;
-  }
-  .detail-sec-hd {
-    display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 11px;
-    background: color-mix(in srgb, var(--panel2) 72%, transparent);
-    border-bottom: 1px solid var(--border);
-  }
-  .detail-section h4 {
-    margin: 0; flex: 1; min-width: 0; font-size: 10px; color: var(--muted);
-    text-transform: none; letter-spacing: .07em; font-weight: 600;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .detail-sec-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-  .detail-sec-actions #drawer-debug-status {
-    color: var(--err); font-size: 10px; max-width: 180px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .detail-sec-body { padding: 7px 11px 8px; }
-  .detail-section.collapsed .detail-sec-body { display: none; }
-  .detail-section.collapsed .detail-sec-hd { border-bottom-color: transparent; }
-  .sec-toggle {
-    width: 24px; height: 24px; padding: 0; flex: none; display: inline-flex;
-    align-items: center; justify-content: center; background: transparent;
-    border: 1px solid transparent; border-radius: 5px; color: var(--muted); cursor: pointer;
-  }
-  .sec-toggle svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
-  .detail-section.collapsed .sec-toggle svg { transform: rotate(-90deg); }
-  .sec-toggle:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
-  .sec-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .55; }
-
-  /* Rows stay one grid so every value aligns down the card. The copy action
-     is a third column only when the row actually carries one. */
-  .detail-kv {
-    display: grid; grid-template-columns: 148px minmax(0, 1fr); gap: 2px 12px;
-    align-items: start; font-size: 11px; padding: 3px 0;
-    border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
-  }
-  .detail-kv:first-child { border-top: 0; padding-top: 1px; }
-  .detail-kv:has(> .copy-btn) { grid-template-columns: 148px minmax(0, 1fr) 24px; }
-  .detail-kv .k { color: var(--muted); font-size: 10px; line-height: 1.45; padding-top: 1px; overflow-wrap: anywhere; }
-  .detail-kv .v { color: var(--text); line-height: 1.5; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
-  .detail-kv .v .pill, .detail-kv .v .ent { vertical-align: middle; }
-  .detail-kv > .copy-btn { width: 24px; height: 24px; margin-top: -2px; }
-  .detail-kv:hover { background: color-mix(in srgb, var(--text) 2.5%, transparent); border-radius: 6px; }
-  .d-muted { color: var(--muted); }
-
-  /* One copy affordance everywhere; hidden until the row or section is under
-     the pointer or keyboard focus, always available on coarse pointers. */
-  .copy-btn {
-    width: 24px; height: 24px; flex: none; padding: 0; display: inline-flex;
-    align-items: center; justify-content: center; background: transparent;
-    border: 1px solid transparent; border-radius: 5px; color: var(--muted);
-    cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, border-color .12s, background .12s;
-  }
-  .copy-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
-  .copy-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
-  .copy-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
-  .copy-btn.copied { color: var(--ok); opacity: 1; }
-  /* The debug download is a persistent action, not a hover-only copy. */
-  #drawer-debug-download { opacity: .65; }
-  #drawer-debug-download:hover { opacity: 1; }
-  .detail-kv:hover > .copy-btn, .detail-kv:focus-within > .copy-btn,
-  .d-hero:hover .copy-btn, .d-hero:focus-within .copy-btn,
-  .detail-code:hover .copy-btn, .detail-code:focus-within .copy-btn,
-  .detail-sec-hd:hover .copy-btn, .detail-sec-hd:focus-within .copy-btn,
-  .d-alert:hover .copy-btn, .d-alert:focus-within .copy-btn { opacity: .85; }
-
-  /* Absorbed attempts read as a compact timeline; the whole row opens the
-     attempt view, and the provider request id stays the matching key. */
-  .attempt-link {
-    display: grid; grid-template-columns: 28px minmax(0, 1fr) 14px; gap: 2px 8px;
-    align-items: start; padding: 8px 6px; margin: 0 -6px; border-radius: 8px;
-    border-top: 1px solid var(--border); cursor: pointer;
-  }
-  .attempt-link:first-of-type { border-top: 0; }
-  .attempt-ord { grid-column: 1; grid-row: 1; color: var(--muted); font-size: 10px; padding-top: 2px; text-align: right; font-variant-numeric: tabular-nums; }
-  .attempt-main { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .attempt-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
-  .attempt-when { color: var(--muted); font-size: 9.5px; font-variant-numeric: tabular-nums; }
-  .attempt-detail {
-    color: var(--text); line-height: 1.45; overflow-wrap: anywhere;
-    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
-  }
-  .attempt-extra { color: var(--muted); font-size: 10px; display: flex; flex-wrap: wrap; gap: 2px 8px; }
-  .attempt-open { grid-column: 3; grid-row: 1; align-self: center; color: var(--muted); font-size: 14px; }
-  .attempt-link:hover { background: var(--panel2); }
-  .attempt-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-
-  /* Long text: one scrollable code surface with its own size line, wrap,
-     copy and expand controls. The fade only exists while collapsed. */
-  .detail-code { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; }
-  .detail-code-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 9px; background: var(--panel2); border-bottom: 1px solid var(--border); }
-  .detail-code-meta { flex: 1; min-width: 0; color: var(--muted); font-size: 9.5px; letter-spacing: .03em; }
-  .detail-code-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-  .mini-btn {
-    background: transparent; border: 1px solid transparent; color: var(--muted);
-    font: 10px var(--mono); padding: 2px 6px; border-radius: 5px; cursor: pointer;
-  }
-  .mini-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
-  .mini-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .detail-code .copy-btn { opacity: .65; }
-  .preview-box {
-    background: var(--panel); border: 0; border-radius: 0; padding: 9px 11px; margin: 0;
-    color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
-    font: 11px/1.5 var(--mono); max-height: none; overflow-x: hidden;
-  }
-  .preview-box:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
-  .detail-code.nowrap .preview-box { white-space: pre; overflow-x: auto; overflow-wrap: normal; word-break: normal; }
-  .detail-code.collapsed .preview-box { max-height: 168px; overflow: hidden; position: relative; }
-  .detail-code.collapsed .preview-box::after {
-    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 36px; pointer-events: none;
-    background: linear-gradient(to top, var(--panel), transparent);
-  }
-
-  /* Sticky section jump strip: the inspector's own miniature rail. */
-  /* Classified card groups: one sticky tab strip, then only the selected
-     group's cards. The tab counts come from the rendered sections, so a
-     conditional card never leaves a stale category behind. */
-  .d-tabs {
-    position: sticky; top: -14px; z-index: 3; display: flex; gap: 2px;
-    margin: 0 -4px 10px; padding: 0 4px; overflow-x: auto; scrollbar-width: none;
-    background: var(--panel); border-bottom: 1px solid var(--border);
-  }
-  .d-tabs::-webkit-scrollbar { display: none; }
-  .d-tab {
-    flex: none; background: transparent; border: 0; border-bottom: 2px solid transparent;
-    color: var(--muted); font: 10px/1.4 var(--mono); padding: 8px 8px 7px;
-    cursor: pointer; white-space: nowrap;
-  }
-  .d-tab:hover { color: var(--text); }
-  .d-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
-  .d-tab-n { margin-left: 4px; color: var(--muted); font-size: 9px; }
-  .d-tab[aria-selected="true"] .d-tab-n { color: var(--accent); }
-  .d-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .d-group[hidden] { display: none; }
-
-  .exp-row { cursor: pointer; }
-  tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
-
-  .scroll { max-height: 380px; overflow-y: auto; overflow-x: auto; }
-  /* The request log is a keyboard-scrollable region (role="region" in
-     index.html). An inset ring stays visible inside the card's clipped box. */
-  #tbl-requests:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  /* The requests log keeps ONE stable height in the stacked scrolling
-     layout: a definite box means an arriving request only scrolls inside
-     it, instead of growing the card row by row and shoving the rest of
-     the page (and the footer) down on every completion. The locked layout
-     overrides this with its own flex fill (flex-basis 0 ignores height). */
-  #tbl-requests { height: 380px; }
-  .empty { color: var(--muted); text-align: center; padding: 36px; font-family: var(--mono); font-size: 12px; }
-
-  /* Status-line footer: a slim instrument rail (vim/tmux-style), not a link
-     farm. Mirrors the header's graduated tick scale along its top edge. */
-  footer {
-    position: relative; display: flex; align-items: center; gap: 16px;
-    padding: 6px max(28px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(28px, env(safe-area-inset-left, 0px));
-    font-size: 11px; font-family: var(--mono);
-    color: var(--muted);     background: var(--rail);
-    border-top: 1px solid var(--border2);
-    box-shadow: 0 -10px 24px rgba(var(--shadow-rgb),.28);
-  }
-  footer::before {
-    content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: var(--rail-tick); pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.7), transparent);
-    mask-image: linear-gradient(to top, rgba(0,0,0,.7), transparent);
-  }
-  footer .f-cell { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-  footer .f-sep { color: var(--border2); }
-  footer .f-right { margin-left: auto; display: flex; align-items: center; gap: 16px; }
-  /* Mobile: the status-line wraps to two rows and the brand tagline drops, so
-     the footer never forces horizontal page scroll. This block sits near the
-     end of the stylesheet so its `main`/card padding overrides the base rules
-     above (equal specificity → source order decides). Side padding shrinks so
-     the content uses more of the narrow width. */
-  @media (max-width: 640px) {
-    main { padding: 14px 10px; }
-    .kpis { margin-bottom: 14px; }
-    .kpi { padding: 10px 11px 12px 13px; }
-    .kpi .flight-mix { left: 13px; right: 11px; bottom: 6px; }
-    section.card, #explorer { margin-bottom: 14px; }
-    .card { padding: 12px 12px; }
-    .xp-body { gap: 10px; }
-    footer { flex-wrap: wrap; gap: 4px 12px; padding: 6px max(10px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(10px, env(safe-area-inset-left, 0px)); row-gap: 4px; }
-    footer .f-right { margin-left: 0; width: 100%; justify-content: space-between; gap: 8px; }
-    footer .f-right .f-cell:first-child { display: none; } /* hide the footer clock on the narrowest viewport */
-  }
-  footer .f-live { color: var(--ok); }
-  footer .f-live.paused { color: var(--muted); }
-  footer b { color: var(--text); font-weight: 600; }
-
-  /* uPlot captures literal cursor colors in its vendored stylesheet, where
-     `.u-hz .u-cursor-x` shades the vertical cursor. The uplot and u-hz
-     classes are the same element, so the override targets the overlay child
-     directly and outranks the vendor rule. Cursor-y and the selection box are
-     disabled by chart.js and have no rule here. */
-  .uplot .u-over > .u-cursor-x { border-color: var(--muted); }
 
   /* Theme tray: a current-vs-preview comparator, one compact surface radio
      group in the caption bar, a palette radio group, and Reset/Close actions.
@@ -1903,8 +601,7 @@
     background: var(--panel); border-color: var(--border2); color: var(--text);
     box-shadow: 0 1px 2px rgba(var(--shadow-rgb), .18);
   }
-  .theme-mode-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
-  .theme-mode-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .theme-mode-opt:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .theme-palette-hd { margin: 0 2px 8px; }
   /* Eight rows fit the normal desktop window. On a short window wider than
      800px the tray is the one vertical scroller; at 800px or narrower the
@@ -1913,10 +610,12 @@
   .theme-list { display: flex; flex-direction: column; gap: 2px; padding: 2px; min-width: 232px; }
   .theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
   .theme-opt:hover { background: var(--panel2); border-color: var(--border2); }
+  /* The selected row repeats the base ink so the contrast contract reads the
+     state's own declaration, never the base .theme-opt rule. */
   .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) var(--selected-tint), transparent); border-color: var(--accent); color: var(--text); }
   .theme-opt[aria-checked="true"] .theme-hint { color: var(--text); }
-  .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
-  .theme-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .theme-mode-opt.is-preview, .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
+  .theme-opt:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .theme-swatch { width: 36px; height: 24px; flex: none; border-radius: 4px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--bg) 0 25%, var(--panel2) 25% 50%, var(--accent) 50% 75%, var(--accent2) 75% 100%); }
   .theme-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
   .theme-name { font-size: 13px; font-weight: 600; }
@@ -1934,25 +633,25 @@
        its palette list must not become nested scrollers that swallow a wheel
        or touch swipe before the flyout moves. A narrow fine-pointer window is
        compact too, so it gets the same picker without the comparator. Width
-       still fits the flyout and every option keeps its 44px target. */
+       still fits the flyout and every option keeps its shared tap target. */
     #theme-menu {
       width: min(368px, 100%);
       max-height: none; overflow: visible; overscroll-behavior: auto;
     }
     .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
-    .theme-opt { min-height: 44px; }
-    .theme-mode-opt { min-height: 44px; }
-    .theme-ft .btn { min-height: 44px; }
+    .theme-opt { min-height: var(--tap); }
+    .theme-mode-opt { min-height: var(--tap); }
+    .theme-ft .btn { min-height: var(--tap); }
   }
   @media (hover: none), (pointer: coarse) {
     /* No hover means no candidate to show. Keep the current caption, the
        surface control and every palette row; the "Preview: same" line and the
        hover hint would describe a gesture this device cannot make. */
     .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
-    .theme-mode-opt, .theme-ft .btn { min-height: 44px; }
+    .theme-mode-opt, .theme-ft .btn { min-height: var(--tap); }
   }
   @media (pointer: coarse) and (min-width: 801px) {
-    #btn-theme { min-width: 44px; width: 44px; height: 44px; }
+    #btn-theme { min-width: var(--tap); width: var(--tap); height: var(--tap); }
   }
   @media (max-height: 760px) {
     /* The comparator and hint would push the palette or footer out of a short
@@ -1969,46 +668,4 @@
     .theme-mode-field { margin-left: 0; justify-items: stretch; }
     .theme-mode { width: 100%; }
     .theme-hint { display: none; }
-  }
-
-  /* ---- narrow inspector ---- */
-  /* These overrides sit at the end of the sheet: equal-specificity grid and
-     row rules above would otherwise win on source order. */
-  @media (max-width: 720px) {
-    /* Narrow viewports get the whole inspector: no sliver of veil to hit by
-       accident, a stacked key/value rhythm and full-width code surfaces. */
-    .drawer { width: 100vw; max-width: 100vw; border-left: 0; }
-    .drawer-hd { padding: 8px 9px 9px; gap: 5px; }
-    .drawer-hd h3 { font-size: 11px; }
-    .drawer-hd .nav-btns .btn { width: 38px; height: 38px; }
-    .drawer-hd .btn { min-width: 38px; min-height: 38px; }
-    .drawer-hd .drawer-tool { padding: 5px 8px; }
-    .d-key { display: none; }
-    .drawer-body { padding: 10px 10px calc(24px + env(safe-area-inset-bottom, 0px)); }
-    .d-hero { padding: 10px 10px 11px; }
-    .d-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
-    .d-stat { padding: 0; border-left: 0; }
-    .d-stat:first-child { padding-left: 0; }
-    .detail-kv, .detail-kv:has(> .copy-btn) {
-      grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding: 6px 0;
-    }
-    .detail-kv .k { grid-column: 1; grid-row: 1; padding-top: 0; font-size: 9.5px; }
-    .detail-kv .v { grid-column: 1; grid-row: 2; }
-    .detail-kv > .copy-btn, .detail-kv:has(> .copy-btn) > .copy-btn {
-      grid-column: 2; grid-row: 1 / span 2; align-self: center; width: 34px; height: 34px; margin: 0;
-    }
-    .detail-sec-hd { padding: 5px 5px 5px 9px; }
-    .detail-sec-body { padding: 5px 9px 8px; }
-    .sec-toggle { width: 32px; height: 32px; }
-    .detail-code-bar { padding: 3px 5px 3px 8px; }
-    .mini-btn { min-height: 30px; padding: 3px 8px; }
-    .d-tabs { top: -10px; margin: 0 -2px 8px; }
-    .d-tab { min-height: 36px; padding: 8px 6px; font-size: 9.5px; }
-    .copy-btn { opacity: .65; }
-    .attempt-link { padding: 7px 4px; margin: 0 -4px; }
-    .toast { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
-  }
-  @media (hover: none), (pointer: coarse) {
-    .copy-btn { opacity: .65; width: 32px; height: 32px; }
-    .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .7; }
   }

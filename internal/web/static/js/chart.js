@@ -688,7 +688,7 @@ const shareText = (a, b, of) => {
   const p = pct(a, b);
   return p === '-' ? null : p + (of ? ' ' + of : '');
 };
-// TILE_HALVES pairs every summary-tile metric half's CSS class (dashboard.css
+// TILE_HALVES pairs every summary-tile metric half's CSS class (charts.css
 // owns the class styling) with the palette key that colors the half's spark
 // line. tilePair emits the half spans and tileSpark emits the spark lines,
 // both from this one registry, so a half's class and its spark color cannot
@@ -743,7 +743,7 @@ const TILE_TITLES = {
 
 // summaryVisibleTiles is the one owner of which summary tiles render: the
 // preset's tile order minus the picker's hidden set - nothing else. Every
-// selected tile always renders; the band's auto-fit grid (dashboard.css)
+// selected tile always renders; the band's auto-fit grid (charts.css)
 // wraps the tiles into as many whole rows as the card needs, and the page
 // scrolls past them, so no tile can ever hang out of reach at any viewport.
 function summaryVisibleTiles(preset) {

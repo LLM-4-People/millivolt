@@ -338,23 +338,23 @@ class RepositoryChecks(unittest.TestCase):
         js = 'const CHART_SPARK_W = 72, CHART_SPARK_H = 14;\n'
         css = '.chart-total .spark { display: block; height: 14px; }\n'
         pairs = [("internal/web/static/js/chart.js", js),
-                 ("internal/web/static/css/dashboard.css", css)]
+                 (check.SPARK_HEIGHT_CSS, css)]
         self.assertEqual(check.spark_height_mirror_errors(pairs), [])
         drifted = [("internal/web/static/js/chart.js", js),
-                   ("internal/web/static/css/dashboard.css",
+                   (check.SPARK_HEIGHT_CSS,
                     '.chart-total .spark { display: block; height: 13px; }\n')]
         self.assertEqual(check.spark_height_mirror_errors(drifted), [
             "internal/web/static/js/chart.js: CHART_SPARK_H=14 no longer mirrors "
-            "the .chart-total .spark height=13px in internal/web/static/css/dashboard.css"])
+            f"the .chart-total .spark height=13px in {check.SPARK_HEIGHT_CSS}"])
         # A vanished anchor is drift too, never a silent pass.
         self.assertEqual(check.spark_height_mirror_errors(
             [("internal/web/static/js/chart.js", 'const x = 1;\n'),
-             ("internal/web/static/css/dashboard.css", css)]),
+             (check.SPARK_HEIGHT_CSS, css)]),
             ["internal/web/static/js/chart.js: CHART_SPARK_H declaration not found"])
         self.assertEqual(check.spark_height_mirror_errors(
             [("internal/web/static/js/chart.js", js),
-             ("internal/web/static/css/dashboard.css", '.x { height: 14px; }\n')]),
-            ["internal/web/static/css/dashboard.css: .chart-total .spark height not found"])
+             (check.SPARK_HEIGHT_CSS, '.x { height: 14px; }\n')]),
+            [f"{check.SPARK_HEIGHT_CSS}: .chart-total .spark height not found"])
 
     def test_palette_mirror_detector(self):
         good = [
@@ -480,10 +480,11 @@ class RepositoryChecks(unittest.TestCase):
     def test_dashboard_side_tabs_and_nested_retry_ink(self):
         """Decorative side-tab borders and the nested err pill are design
         invariants the antipattern detector and the contrast contract also
-        guard. Pin them in the served stylesheet so neither a detector-only
+        guard. Pin them in the served stylesheets so neither a detector-only
         pass nor a browser-only pass owns the rule."""
-        css = (check.ROOT / "internal/web/static/css/dashboard.css").read_text(
-            encoding="utf-8")
+        css = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted((check.ROOT / "internal/web/static/css").glob("*.css")))
         css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
         side_tabs = re.findall(
             r"border-left:\s*([2-9][0-9]*)px\s+solid\s+(?!transparent)([^;]+);", css)
