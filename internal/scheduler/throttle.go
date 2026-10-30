@@ -424,11 +424,11 @@ func (s *Scheduler) throttleQueued() map[string]int {
 	out := map[string]int{}
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
-		for _, w := range g.queue {
+		g.queue.forEach(func(w *waiter) {
 			if w.provider != "" {
 				out[w.provider]++
 			}
-		}
+		})
 		if g.provider != "" {
 			out[g.provider] += g.sendWaiters
 		}
@@ -758,7 +758,7 @@ func (s *Scheduler) markQueuedProviderGroups(provider string) {
 			continue
 		}
 		g.mu.Lock()
-		if g.queued > 0 {
+		if g.queue.live > 0 {
 			g.markGateWaitingLocked()
 		}
 		g.mu.Unlock()

@@ -217,7 +217,7 @@ func TestThrottleConcurrentPolicyTimerAndCancel(t *testing.T) {
 	})
 }
 
-func TestQueueCompactionPreservesWaitersAndClearsTail(t *testing.T) {
+func TestQueueRemovalPreservesWaitersAndOrder(t *testing.T) {
 	s := New(Options{})
 	s.AddHold(Hold{ID: "hold", Clients: []string{"held"}})
 	g := s.groupFor("group", 2)
@@ -228,30 +228,22 @@ func TestQueueCompactionPreservesWaitersAndClearsTail(t *testing.T) {
 		ws[i] = &waiter{ch: make(chan struct{}, 1), ctx: context.Background()}
 	}
 	ws[1].client, ws[4].client, ws[2].ctx = "held", "held", ctx
-	g.queue = append([]*waiter(nil), ws...)
-	g.queued = len(ws)
-	backing := g.queue[:cap(g.queue)]
-	g.drain()
-	if !slices.Equal(g.queue, []*waiter{ws[1], ws[2], ws[4], ws[5], ws[6], ws[7]}) || g.inFlight != 2 {
-		t.Fatal("compaction lost held/cancelled waiters or changed FIFO suffix")
+	g.mu.Lock()
+	for _, w := range ws {
+		g.queue.push(&w.queueNode, w)
 	}
-	for _, w := range backing[len(g.queue):] {
-		if w != nil {
-			t.Fatal("departed grant retained in queue backing array")
-		}
+	g.mu.Unlock()
+	g.drain()
+	if got, want := queueWaiters(g), []*waiter{ws[1], ws[2], ws[4], ws[5], ws[6], ws[7]}; !slices.Equal(got, want) || g.inFlight != 2 {
+		t.Fatalf("drain lost held/cancelled waiters or changed FIFO order: queue=%v in_flight=%d", got, g.inFlight)
 	}
 	g.removeWaiter(ws[2])
-	if g.inFlight != 2 || !slices.Equal(g.queue, []*waiter{ws[1], ws[4], ws[5], ws[6], ws[7]}) {
-		t.Fatal("cancelled queued waiter was mistaken for a phantom grant")
-	}
-	for _, w := range backing[len(g.queue):] {
-		if w != nil {
-			t.Fatal("cancelled waiter retained in queue backing array")
-		}
+	if got, want := queueWaiters(g), []*waiter{ws[1], ws[4], ws[5], ws[6], ws[7]}; !slices.Equal(got, want) || g.inFlight != 2 {
+		t.Fatalf("cancelled queued waiter was mistaken for a phantom grant: queue=%v in_flight=%d", got, g.inFlight)
 	}
 	g.removeWaiter(ws[0]) // granted but caller cancelled before consuming its signal
 	if g.inFlight != 2 || len(ws[5].ch) != 1 {
-		t.Fatal("phantom grant did not free its slot for the next FIFO waiter")
+		t.Fatalf("phantom grant did not free its slot for the next FIFO waiter: in_flight=%d", g.inFlight)
 	}
 }
 
@@ -359,10 +351,11 @@ func BenchmarkQueueDrain(b *testing.B) {
 			for i := range ws {
 				ws[i] = &waiter{ch: make(chan struct{}, 1), ctx: context.Background()}
 			}
-			g.queue = make([]*waiter, 0, n)
 			b.ReportAllocs()
 			for b.Loop() {
-				g.queue = append(g.queue[:0], ws...)
+				for _, w := range ws {
+					g.queue.push(&w.queueNode, w)
+				}
 				g.inFlight = 0
 				g.drain()
 				for _, w := range ws {
@@ -486,13 +479,13 @@ func BenchmarkThrottlePolicyListing(b *testing.B) {
 				for i := 0; i < groups; i++ {
 					g := s.groupFor(provider+"|"+strconv.Itoa(i), 0)
 					for j := 0; j < queued; j++ {
-						g.queue = append(g.queue, &waiter{
+						w := &waiter{
 							ch:       make(chan struct{}, 1),
 							ctx:      context.Background(),
 							provider: provider,
-						})
+						}
+						g.queue.push(&w.queueNode, w)
 					}
-					g.queued = queued
 				}
 				b.Run("policies", func(b *testing.B) {
 					b.ReportAllocs()

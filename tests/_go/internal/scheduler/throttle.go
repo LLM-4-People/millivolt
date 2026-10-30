@@ -865,11 +865,7 @@ func providerQueuedGroups(s *Scheduler, provider string) int64 {
 func (idx *providerIndex) snapshot() []*group {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	out := make([]*group, 0, idx.live)
-	for g := idx.head; g != nil; g = g.providerNext {
-		out = append(out, g)
-	}
-	return out
+	return idx.groups.appendTo(make([]*group, 0, idx.groups.live))
 }
 
 // providerGroupsSnapshot returns a provider's live attributed groups. The
@@ -998,9 +994,9 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 			}
 			for _, g := range providerGroupsSnapshot(s, provider) {
 				g.mu.Lock()
-				nonEmpty := g.queued > 0
+				nonEmpty := g.queue.live > 0
 				if g.hasQueued.Load() != nonEmpty {
-					t.Errorf("group witness = %v with queued=%d", g.hasQueued.Load(), g.queued)
+					t.Errorf("group witness = %v with queued=%d", g.hasQueued.Load(), g.queue.live)
 				}
 				g.mu.Unlock()
 			}
@@ -1064,8 +1060,8 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 	}
 	for _, g := range providerGroupsSnapshot(s, provider) {
 		g.mu.Lock()
-		if g.hasQueued.Load() || g.queued != 0 {
-			t.Errorf("drained group retained witness=%v queued=%d", g.hasQueued.Load(), g.queued)
+		if g.hasQueued.Load() || g.queue.live != 0 {
+			t.Errorf("drained group retained witness=%v queued=%d", g.hasQueued.Load(), g.queue.live)
 		}
 		g.mu.Unlock()
 	}
@@ -1195,5 +1191,40 @@ func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
 	}
 	if st := s.Stats(); st.SendWaiters != 0 {
 		t.Fatalf("send waiters = %d after the gate opened, want 0", st.SendWaiters)
+	}
+}
+
+// TestThrottleQueuedIgnoresCancelledWaiters pins both halves of the queue
+// ownership contract: cancelling a non-head waiter unlinks it immediately, and
+// the dashboard's throttle listing counts only live waiters. The queue has no
+// tombstone representation, so a scan cannot dereference a dead slot.
+func TestThrottleQueuedIgnoresCancelledWaiters(t *testing.T) {
+	s := New(Options{})
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	g := s.groupFor("p|k", 1)
+	waiters := make([]*waiter, 16)
+	for i := range waiters {
+		waiters[i] = &waiter{ch: make(chan struct{}, 1), ctx: context.Background(), provider: "p"}
+	}
+	g.mu.Lock()
+	for _, w := range waiters {
+		g.queue.push(&w.queueNode, w)
+	}
+	g.mu.Unlock()
+
+	g.removeWaiter(waiters[1])
+	g.mu.Lock()
+	live, unlinked := g.queue.live, waiters[1].queueNode.owner == nil && waiters[1].queueNode.prev == nil && waiters[1].queueNode.next == nil
+	g.mu.Unlock()
+	if !unlinked {
+		t.Fatal("cancelled waiter retained a queue link")
+	}
+	if live != len(waiters)-1 {
+		t.Fatalf("live queue depth = %d, want %d", live, len(waiters)-1)
+	}
+
+	infos := s.ListThrottles()
+	if len(infos) != 1 || infos[0].Provider != "p" || infos[0].Queued != len(waiters)-1 {
+		t.Fatalf("ListThrottles = %+v, want p with queued %d", infos, len(waiters)-1)
 	}
 }

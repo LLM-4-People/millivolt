@@ -23,6 +23,16 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// queueWaiters snapshots a group's live admission queue in FIFO order for
+// tests that pin ordering, membership, and the absence of departed waiters.
+func queueWaiters(g *group) []*waiter {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]*waiter, 0, g.queue.live)
+	g.queue.forEach(func(w *waiter) { out = append(out, w) })
+	return out
+}
+
 // groupBackoffState reads a group's stored attempt-level and request-level
 // backoff under the group lock. The scheduler exports no observer; production
 // consumes these values through BackoffFor/FailSend/EndSend behavior.

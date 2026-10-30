@@ -312,15 +312,15 @@ func TestEvictionKeepsProviderAccountingCoherent(t *testing.T) {
 		}
 		seen[g] = true
 		g.mu.Lock()
-		if g.inFlight < 0 || g.queued < 0 {
-			t.Fatalf("group %q has negative counters: in_flight=%d queued=%d", g.key, g.inFlight, g.queued)
+		if g.inFlight < 0 || g.queue.live < 0 {
+			t.Fatalf("group %q has negative counters: in_flight=%d queued=%d", g.key, g.inFlight, g.queue.live)
 		}
-		if g.hasQueued.Load() != (g.queued > 0) {
-			t.Fatalf("group %q witness=%v with queued=%d", g.key, g.hasQueued.Load(), g.queued)
+		if g.hasQueued.Load() != (g.queue.live > 0) {
+			t.Fatalf("group %q witness=%v with queued=%d", g.key, g.hasQueued.Load(), g.queue.live)
 		}
-		if g.queued > 0 {
+		if g.queue.live > 0 {
 			queuedGroups++
-			queuedWaiters += g.queued
+			queuedWaiters += g.queue.live
 		}
 		g.mu.Unlock()
 	}
@@ -466,10 +466,8 @@ func assertSchedulerQuiescent(t *testing.T, s *Scheduler, provider string) {
 	}
 
 	s.idleMu.Lock()
-	listed := make([]*group, 0)
-	for g := s.idleHead; g != nil; g = g.idleNext {
-		listed = append(listed, g)
-	}
+	listed := make([]*group, 0, s.idle.live)
+	s.idle.forEach(func(g *group) { listed = append(listed, g) })
 	s.idleMu.Unlock()
 	if len(listed) != len(groups) {
 		t.Fatalf("idle list holds %d groups, map holds %d", len(listed), len(groups))
@@ -479,8 +477,8 @@ func assertSchedulerQuiescent(t *testing.T, s *Scheduler, provider string) {
 			t.Fatalf("idle list retains group %p absent from the map", g)
 		}
 		g.mu.Lock()
-		if g.inFlight != 0 || g.queued != 0 || g.retired {
-			t.Fatalf("idle group %q has in_flight=%d queued=%d retired=%v", g.key, g.inFlight, g.queued, g.retired)
+		if g.inFlight != 0 || g.queue.live != 0 || g.retired {
+			t.Fatalf("idle group %q has in_flight=%d queued=%d retired=%v", g.key, g.inFlight, g.queue.live, g.retired)
 		}
 		g.mu.Unlock()
 	}

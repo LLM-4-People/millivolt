@@ -16,7 +16,7 @@ func groupQueued(s *Scheduler, key string) int {
 	g := s.groupFor(key, 0)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.queued
+	return g.queue.live
 }
 
 // providerGateWaiters reads a provider's fair-waiting count under the scheduler
@@ -375,10 +375,10 @@ func TestFairDrainNoStarvation(t *testing.T) {
 	})
 }
 
-// TestFairDrainCancellationDoesNotLeak pins tombstone handling inside a fair
-// pass: the cancelled head of key A is skipped without consuming the pass's
-// one-grant budget, both live keys receive exactly one freed slot, and no
-// phantom slot or queue count survives.
+// TestFairDrainCancellationDoesNotLeak pins cancelled-waiter handling inside a
+// fair pass: the cancelled head of key A is skipped without consuming the
+// pass's one-grant budget, both live keys receive exactly one freed slot, and
+// no phantom slot or queue count survives.
 func TestFairDrainCancellationDoesNotLeak(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
@@ -1049,12 +1049,12 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 			for i, key := range keys {
 				g := s.groupFor(key, 0)
 				g.mu.Lock()
-				g.queue = append(g.queue, &waiter{
+				w := &waiter{
 					ch:       make(chan struct{}, 1),
 					ctx:      ctx,
 					provider: provider,
-				})
-				g.queued = 1
+				}
+				g.queue.push(&w.queueNode, w)
 				g.syncQueueLocked()
 				g.markGateWaitingLocked()
 				g.mu.Unlock()
@@ -1077,25 +1077,25 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 				// Queue the target's next waiter, then pin the rotation to the
 				// group before its tail slot so the release reaches it first.
 				target.mu.Lock()
-				target.queue = append(target.queue, &waiter{
+				pendingWaiter := &waiter{
 					ch:       make(chan struct{}, 1),
 					ctx:      ctx,
 					provider: provider,
-				})
-				target.queued = 1
+				}
+				target.queue.push(&pendingWaiter.queueNode, pendingWaiter)
 				target.syncQueueLocked()
 				target.markGateWaitingLocked()
-				pending := target.queue[len(target.queue)-1]
+				pending := pendingWaiter
 				target.mu.Unlock()
 
 				idx.mu.Lock()
-				// The previous grant tombstoned the target's tail slot, so
-				// the last live group before the new target tail is the pin.
-				pin := len(idx.fair) - 2
-				for pin >= 0 && idx.fair[pin] == nil {
-					pin--
+				// Pin the rotation to the fair group before the target, so the
+				// release reaches the target first.
+				if prev := target.fairNode.prev; prev != nil {
+					idx.cursor = prev.value
+				} else {
+					idx.cursor = nil
 				}
-				idx.cursor = idx.fair[pin]
 				idx.mu.Unlock()
 
 				holder(0)
@@ -1109,9 +1109,9 @@ func BenchmarkThrottledReleaseFairBacklog(b *testing.B) {
 			b.StopTimer()
 			for _, g := range backlogGroups {
 				g.mu.Lock()
-				g.queue = nil
-				g.queued = 0
-				g.tombstones = 0
+				for g.queue.head != nil {
+					g.queue.remove(g.queue.head)
+				}
 				g.syncQueueLocked()
 				g.mu.Unlock()
 			}
@@ -1152,12 +1152,12 @@ func BenchmarkThrottledReleasePacedPeers(b *testing.B) {
 				}
 				g := s.groupFor(key, 0)
 				g.mu.Lock()
-				g.queue = append(g.queue, &waiter{
+				w := &waiter{
 					ch:       make(chan struct{}, 1),
 					ctx:      context.Background(),
 					provider: provider,
-				})
-				g.queued = 1
+				}
+				g.queue.push(&w.queueNode, w)
 				g.syncQueueLocked()
 				g.mu.Unlock()
 			}

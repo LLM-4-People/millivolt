@@ -19,13 +19,13 @@ const maxSchedulerGroups = 100_000
 // O(1). fair is the provider's fair-waiting set: groups with at least one live
 // waiter that the shared provider gate (concurrency or request/token bucket)
 // refused, and that therefore need the fair drain's next turn. A group's
-// gateWaiting flag is the membership authority; unmarking leaves a nil
-// tombstone that the next snapshot, or the dead-entry threshold, compacts away.
-// fairCount is the lock-free witness: a new key may take the fast path only
-// when it is zero, so a peer parked on its own pacing window, hold, anti-burst
-// ramp or per-key cap never suppresses an unrelated key's grant. cursor is the
-// group a productive drain served last; fairSnapshot starts after it, so
-// repeated drains do not favor the first-attributed key.
+// gateWaiting flag is the membership authority, and the fair node below is its
+// list link; there is no nil tombstone or compaction pass. fairCount is the
+// lock-free witness: a new key may take the fast path only when it is zero, so
+// a peer parked on its own pacing window, hold, anti-burst ramp or per-key cap
+// never suppresses an unrelated key's grant. cursor is the group a productive
+// drain served last; fairSnapshot starts after it, so repeated drains do not
+// favor the first-attributed key.
 //
 // queued counts the indexed groups whose queue currently holds at least one
 // live waiter. It is the provider's total queued-group accounting (a strict
@@ -33,57 +33,32 @@ const maxSchedulerGroups = 100_000
 // under the group's own mutex, so maintaining it never needs Scheduler.mu.
 type providerIndex struct {
 	mu        sync.Mutex
-	head      *group
-	tail      *group
-	live      int
-	fair      []*group // fair-waiting groups plus nil tombstones; guarded by mu
-	fairDead  int      // tombstone count in fair; guarded by mu
-	cursor    *group   // last group served by a productive drain; nil = snapshot head
+	groups    linkedList[group]
+	fair      linkedList[group]
+	cursor    *group // last group served by a productive drain; nil = snapshot head
 	fairCount atomic.Int64
 	queued    atomic.Int64
 }
 
 // linkLocked appends g at the provider's tail. Callers hold idx.mu.
 func (idx *providerIndex) linkLocked(g *group) {
-	if g.providerListed {
+	if g.providerNode.owner != nil {
 		return
 	}
-	g.providerListed = true
-	g.providerPrev = idx.tail
-	g.providerNext = nil
-	if idx.tail != nil {
-		idx.tail.providerNext = g
-	} else {
-		idx.head = g
-	}
-	idx.tail = g
-	idx.live++
+	idx.groups.push(&g.providerNode, g)
 }
 
 // unlinkLocked removes g from the provider's list in O(1). Callers hold idx.mu.
 func (idx *providerIndex) unlinkLocked(g *group) {
-	if !g.providerListed {
+	if !idx.groups.remove(&g.providerNode) {
 		return
 	}
-	if g.providerPrev != nil {
-		g.providerPrev.providerNext = g.providerNext
-	} else {
-		idx.head = g.providerNext
-	}
-	if g.providerNext != nil {
-		g.providerNext.providerPrev = g.providerPrev
-	} else {
-		idx.tail = g.providerPrev
-	}
-	g.providerPrev, g.providerNext = nil, nil
-	g.providerListed = false
 	if idx.cursor == g {
 		// The last group served by a productive drain is going away. The next
-		// snapshot starts at the slice head; eviction only removes idle groups,
+		// snapshot starts at the list head; eviction only removes idle groups,
 		// so a group with no queued waiter had no fair turn left to lose.
 		idx.cursor = nil
 	}
-	idx.live--
 }
 
 // markFairLocked adds g to the provider's fair-waiting set. Callers hold g.mu
@@ -94,14 +69,13 @@ func (idx *providerIndex) markFairLocked(g *group) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	g.gateWaiting.Store(true)
-	g.fairIndex = len(idx.fair)
-	idx.fair = append(idx.fair, g)
+	idx.fair.push(&g.fairNode, g)
 	idx.fairCount.Add(1)
 }
 
-// clearFairLocked removes g from the provider's fair-waiting set and compacts
-// tombstones once they reach half the slice, so an unmarked set releases its
-// entries instead of retaining every group that ever waited. Callers hold g.mu.
+// clearFairLocked removes g from the provider's fair-waiting set. Callers hold
+// g.mu. The counter moves once per gateWaiting edge; the list unlink is the
+// membership change, so no dead entry survives the call.
 func (idx *providerIndex) clearFairLocked(g *group) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
@@ -110,69 +84,47 @@ func (idx *providerIndex) clearFairLocked(g *group) {
 	}
 	g.gateWaiting.Store(false)
 	idx.fairCount.Add(-1)
-	if g.fairIndex >= 0 && g.fairIndex < len(idx.fair) && idx.fair[g.fairIndex] == g {
-		idx.fair[g.fairIndex] = nil
-		idx.fairDead++
-	}
-	if idx.fairDead > 0 && idx.fairDead >= len(idx.fair)/2 {
-		idx.compactFairLocked()
-	}
-}
-
-// compactFairLocked drops tombstoned entries and restores every live member's
-// slice index. Callers hold idx.mu; index writes are guarded by that lock.
-func (idx *providerIndex) compactFairLocked() {
-	live := idx.fair[:0]
-	for _, g := range idx.fair {
-		if g == nil {
-			continue
-		}
-		g.fairIndex = len(live)
-		live = append(live, g)
-	}
-	clear(idx.fair[len(live):])
-	idx.fair = live
-	idx.fairDead = 0
+	idx.fair.remove(&g.fairNode)
 }
 
 // fairSnapshot returns the fair-waiting groups, rotated so the next drain
 // starts after the group the last productive pass served. Only a group whose
 // queued head the shared gate refused enters this set, so a release allocates
 // and walks work that actually waits on that gate instead of every queued key.
-// Tombstones are compacted here; callers must not hold idx.mu, and the group
-// mutexes are only taken later by drainProvider after this snapshot is
-// complete.
+// Callers must not hold idx.mu, and the group mutexes are only taken later by
+// drainProvider after this snapshot is complete.
 func (idx *providerIndex) fairSnapshot() []*group {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	if idx.fairDead > 0 {
-		idx.compactFairLocked()
-	}
-	n := len(idx.fair)
+	n := idx.fair.live
 	if n == 0 {
 		idx.cursor = nil
 		return nil
 	}
-	start := 0
-	found := idx.cursor == nil
+	out := make([]*group, 0, n)
+	start := idx.fair.head
 	if idx.cursor != nil {
-		for i, g := range idx.fair {
-			if g == idx.cursor {
-				start = (i + 1) % n
-				found = true
-				break
-			}
+		for start != nil && start.value != idx.cursor {
+			start = start.next
+		}
+		if start == nil {
+			// The last served group emptied or was detached; begin at the list
+			// head instead of leaving a stale anchor behind.
+			idx.cursor = nil
 		}
 	}
-	if !found {
-		// The last served group emptied or was detached; begin at the slice
-		// head instead of leaving a stale anchor behind.
-		idx.cursor = nil
+	if idx.cursor == nil || start == nil {
+		return idx.fair.appendTo(out)
 	}
-	out := make([]*group, 0, n)
-	out = append(out, idx.fair[start:]...)
-	out = append(out, idx.fair[:start]...)
-	return out
+	for node := start.next; node != nil; node = node.next {
+		out = append(out, node.value)
+	}
+	for node := idx.fair.head; ; node = node.next {
+		out = append(out, node.value)
+		if node == start {
+			return out
+		}
+	}
 }
 
 // advanceFair publishes the last group a productive drain served. The next
@@ -192,11 +144,7 @@ func (idx *providerIndex) advanceFair(last *group) {
 func (idx *providerIndex) snapshotAll() []*group {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	out := make([]*group, 0, idx.live)
-	for g := idx.head; g != nil; g = g.providerNext {
-		out = append(out, g)
-	}
-	return out
+	return idx.groups.appendTo(make([]*group, 0, idx.groups.live))
 }
 
 func (s *Scheduler) groupFor(key string, maxConcurrent int) *group {
@@ -281,14 +229,7 @@ func (s *Scheduler) idlePushLocked(g *group) {
 	if g.idleListed.Load() {
 		return
 	}
-	g.idlePrev = s.idleTail
-	g.idleNext = nil
-	if s.idleTail != nil {
-		s.idleTail.idleNext = g
-	} else {
-		s.idleHead = g
-	}
-	s.idleTail = g
+	s.idle.push(&g.idleNode, g)
 	g.idleListed.Store(true)
 }
 
@@ -297,19 +238,8 @@ func (s *Scheduler) idleUnlinkLocked(g *group) bool {
 	if !g.idleListed.Load() {
 		return false
 	}
-	if g.idlePrev != nil {
-		g.idlePrev.idleNext = g.idleNext
-	} else {
-		s.idleHead = g.idleNext
-	}
-	if g.idleNext != nil {
-		g.idleNext.idlePrev = g.idlePrev
-	} else {
-		s.idleTail = g.idlePrev
-	}
-	g.idlePrev, g.idleNext = nil, nil
 	g.idleListed.Store(false)
-	return true
+	return s.idle.remove(&g.idleNode)
 }
 
 // markGroupBusyLocked removes g from the idle order when its first in-flight
@@ -330,7 +260,7 @@ func (s *Scheduler) markGroupBusyLocked(g *group) {
 // with a remaining backlog is never idle, so a ramp epoch survives a busy
 // drain. Callers hold g.mu.
 func (s *Scheduler) markGroupIdleLocked(g *group) {
-	if g.retired || g.inFlight != 0 || g.queued != 0 {
+	if g.retired || g.inFlight != 0 || g.queue.live != 0 {
 		return
 	}
 	if !g.rampStart.IsZero() && g.idleSince.IsZero() {
@@ -346,7 +276,7 @@ func (s *Scheduler) markGroupIdleLocked(g *group) {
 func (s *Scheduler) popIdleGroupLocked() *group {
 	s.idleMu.Lock()
 	defer s.idleMu.Unlock()
-	g := s.idleHead
+	g := s.idle.first()
 	if g == nil {
 		return nil
 	}
@@ -377,12 +307,12 @@ func (s *Scheduler) makeGroupRoomLocked() {
 // the retired flag and retries against the map. Callers hold s.mu.
 func (s *Scheduler) evictIdleGroupLocked(g *group) bool {
 	g.mu.Lock()
-	if g.retired || g.inFlight != 0 || g.queued != 0 {
+	if g.retired || g.inFlight != 0 || g.queue.live != 0 {
 		g.mu.Unlock()
 		return false
 	}
 	g.retired = true
-	// A retired group is idle by construction (queued == 0 already cleared its
+	// A retired group is idle by construction (an empty queue already cleared its
 	// fair mark through syncQueueLocked); clear defensively so a stale mark can
 	// never keep an evicted group in the provider's fair set.
 	g.clearGateWaitingLocked()
@@ -434,7 +364,7 @@ func (s *Scheduler) detachProviderLocked(g *group) {
 	g.mu.Unlock()
 	idx.mu.Lock()
 	idx.unlinkLocked(g)
-	empty := idx.live == 0
+	empty := idx.groups.live == 0
 	idx.mu.Unlock()
 	if empty && s.providerGroups[g.provider] == idx {
 		delete(s.providerGroups, g.provider)
