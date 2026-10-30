@@ -7,8 +7,8 @@
 </picture>
 
 <picture>
-  <source media="(max-width: 760px)" srcset="docs/images/brand/readme-spec-mobile.svg">
-  <img src="docs/images/brand/readme-spec.svg" alt="Readout: three client protocols, one Go binary, 22 MCP tools, one operator plane" width="1600">
+  <source media="(min-width: 761px)" srcset="docs/images/brand/readme-spec.svg">
+  <img src="docs/images/brand/readme-spec-mobile.svg" alt="Readout: three client protocols, one Go binary, 22 MCP tools, one operator plane" width="800">
 </picture>
 
 **See every AI request. Keep your own routing.** millivolt is a patch bay for
@@ -150,7 +150,7 @@ health; see [capture limitations](docs/dashboard.md).
 
 Three moves: **route, watch, intervene.**
 
-### <kbd>01</kbd> Route: your URL, your key
+### <kbd>A</kbd> Route: your URL, your key
 
 Choose the upstream base URL, credentials, authentication header or prefix,
 path, and query on each request. Constrain accepted URL prefixes in
@@ -158,7 +158,7 @@ configuration. Optional adapters translate between OpenAI Chat Completions,
 OpenAI Responses, and Anthropic Messages through one canonical model; the
 Cursor Connect bridge is a separate, Chat-only direct path.
 
-### <kbd>02</kbd> Watch: the request, not just the total
+### <kbd>B</kbd> Watch: the request, not just the total
 
 Watch in-flight requests next to global request, token, and cost totals. Open a
 row for TTFT, throughput, retries, queue wait, token mix, and provider-reported
@@ -166,7 +166,7 @@ cost. History stays in SQLite; an in-memory ring is available when you do not
 need retention. Scope by client, provider, model, conversation, tool, status,
 error, time, or key without losing the selected filter.
 
-### <kbd>03</kbd> Intervene: before the retry storm
+### <kbd>C</kbd> Intervene: before the retry storm
 
 Pause new sends and retries by client, provider, or all traffic; running sends
 finish. Set provider-wide concurrency, request-rate, and token-rate limits, plus
@@ -198,6 +198,8 @@ system, or a compliance audit log.
 
 ---
 
+<p><kbd>06 / REFERENCE</kbd></p>
+
 ## Performance and footprint
 
 Small image, not magic RAM. [Performance](docs/performance.md) has the
@@ -207,8 +209,9 @@ measurements and caveats.
 
 [proxy.example.yaml](proxy.example.yaml) is the generated, documented example.
 It includes enabled compatibility profiles without registering provider keys or
-upstream URLs. `proxy.yaml` is your ignored local configuration; do not commit
-it. Defaults, example profiles, and validation are defined in `internal/config`;
+upstream URLs. Your local `proxy.yaml` is ignored; do not commit it.
+
+Defaults, example profiles, and validation are defined in `internal/config`;
 Settings uses that same schema. See [operations](docs/operations.md) for
 overrides, reloads, backups, and restart requirements.
 
@@ -226,11 +229,11 @@ vulnerabilities.
 
 ---
 
-<p><kbd>06 / FIELD GUIDE</kbd></p>
+<p><kbd>07 / FIELD GUIDE</kbd></p>
 
 ## Documentation
 
-| # | Path | Covers |
+| Guide | Path | Covers |
 | --- | --- | --- |
 | `01` | [Quickstart](#quickstart) · [container operation](docs/operations.md#containers) | First run, images, volumes, shutdown |
 | `02` | [Protocol](docs/protocol.md) · [adapters](docs/adapters.md) | Client setup, translation, compatibility |

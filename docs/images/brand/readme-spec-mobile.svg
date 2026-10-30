@@ -14,8 +14,8 @@
     <rect x="0" y="0" width="800" height="8" fill="url(#ticks)"/>
     <rect x="0.5" y="0.5" width="799" height="383" rx="18" fill="none" stroke="#3a342b"/>
     <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
-      <text x="28" y="30" font-size="14" letter-spacing="3"><tspan fill="#97907e">MILLIVOLT </tspan><tspan fill="#7aa0ff">/ SPEC</tspan></text>
-      <text x="772" y="30" fill="#6b655d" font-size="13" letter-spacing="2.4" text-anchor="end">READOUT / 01</text>
+      <text x="28" y="30" font-size="18" letter-spacing="3"><tspan fill="#97907e">MILLIVOLT </tspan><tspan fill="#7aa0ff">/ SPEC</tspan></text>
+      <text x="772" y="30" fill="#6b655d" font-size="15" letter-spacing="2.4" text-anchor="end">READOUT / 01</text>
       <path d="M28 46H772" stroke="#2a2622"/>
       <path d="M400 54V368M28 212H772" stroke="#2a2622"/>
       <g fill="#e8e4de" font-size="76" font-weight="500">
@@ -24,7 +24,7 @@
         <text x="28" y="302">22</text>
         <text x="428" y="302">01</text>
       </g>
-      <g fill="#97907e" font-size="20" letter-spacing="2.6">
+      <g fill="#97907e" font-size="24" letter-spacing="2.2">
         <text x="28" y="168">CLIENT PROTOCOLS</text>
         <text x="428" y="168">GO BINARY</text>
         <text x="28" y="334">MCP TOOLS</text>
