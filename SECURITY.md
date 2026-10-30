@@ -77,9 +77,12 @@ Do not rely on the dashboard as the sole security or billing record. See
 
 ## Code scanning
 
-GitHub code scanning (CodeQL) reports on pull requests. Alerts are triaged
-against the [deployment boundary](#deployment-boundary), not dismissed for
-convenience. The current categories and their trust-boundary evidence:
+GitHub code scanning (CodeQL) reports on pull requests and the default branch.
+Alerts are triaged against the [deployment boundary](#deployment-boundary), not
+dismissed for convenience. True positives are fixed and covered by regression
+tests; accepted false positives record their rationale in the alert instead of
+being hidden by a broad path exclusion. The current categories and their
+trust-boundary evidence:
 
 - Operator-only read-only SQL (`internal/storage/query_admin.go`). The query
   console sits behind the operator gate, accepts one SELECT, and enforces
@@ -99,12 +102,16 @@ convenience. The current categories and their trust-boundary evidence:
   response-size guard. Input is rejected at those bounds before the sized
   allocation, so neither is an attacker-controlled unbounded size.
 
-Two alerts were true positives and are fixed: the operator session cookie now
-sets `Secure` when the request arrived over TLS or through an https-forwarding
-ingress, and integer configuration values are range-checked against the
-platform's `int` width before conversion. Dismissing or resolving a
-code-scanning alert is a maintainer action in the GitHub security UI; this note
-records triage rationale and does not dismiss any alert automatically.
+The integer-conversion findings were true positives and are fixed: the
+operator session cookie now sets `Secure` when the request arrived over TLS or
+through an https-forwarding ingress, and integer configuration values are
+range-checked against the platform's `int` width before conversion. The
+allocation findings are closed by construction, using overflow-safe capacity
+owners. The operator SQL console and the transparent response-writer wrappers
+are accepted boundaries; their alerts are dismissed with a recorded reason.
+Dismissing or resolving a code-scanning alert is a maintainer action in the
+GitHub security UI; this note records triage rationale and does not dismiss any
+alert automatically.
 
 ## Scope
 
