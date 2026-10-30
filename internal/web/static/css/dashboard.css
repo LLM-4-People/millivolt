@@ -367,12 +367,11 @@
     box-shadow: 0 18px 40px rgba(var(--shadow-rgb),.4);
   }
   .operator-dialog-brand { display: flex; align-items: center; gap: 11px; margin: 0 0 12px; }
-  .operator-dialog-brand .brand-logo { width: 28px; height: 28px; }
   .operator-dialog-panel h3 { margin: 0; font: 650 15px/1.2 var(--mono); letter-spacing: -.01em; }
   .operator-dialog-note { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
   .operator-dialog-note[data-err] { color: var(--err); }
   .operator-dialog input {
-    width: 100%; box-sizing: border-box; margin: 0 0 14px; min-height: 42px;
+    width: 100%; margin: 0 0 14px; min-height: 42px;
     font: 13px var(--mono); color: var(--text); background: var(--rail);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   }
@@ -387,7 +386,7 @@
      stretched, leaving unused side gutters on a fullscreen display. Extra
      width lands on the RIGHT of the two-column layouts (gallery next to the
      fixed rail, request table next to the traffic chart). */
-  main { padding: 20px 28px; width: 100%; box-sizing: border-box; }
+  main { padding: 20px 28px; width: 100%; }
 
   .drawer[hidden] { display: none; }
   .hold-edit { color: inherit; font: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
@@ -438,7 +437,7 @@
   .kpi .val { font-family: var(--mono); font-size: 21px; font-weight: 650; letter-spacing: -.02em; line-height: 1.05; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
   /* Dual-value tiles (tokens in/out): scale the value down just enough that
      both numbers always fit the tile width - never ellipsize one away. */
-  .kpi .val-duo { font-size: 17px; letter-spacing: -.02em; }
+  .kpi .val-duo { font-size: 17px; }
   .kpi .val .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .kpi .sub2 { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* In-flight tile: the value plus a two-ended summary survive the narrowest
@@ -501,7 +500,7 @@
        and let main take what remains - otherwise header + 100vh main overflows
        by exactly the header height. */
     body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
-    main { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; box-sizing: border-box; overflow: hidden; }
+    main { display: flex; flex-direction: column; flex: 1 1 0; min-height: 0; overflow: hidden; }
     /* The status-line footer is a slim fixed-height rail in the locked column -
        it never shrinks and never grows, so it barely touches the log's space. */
     footer { flex-shrink: 0; }
@@ -604,7 +603,7 @@
       any box height - a padding-bottom here made the one-row band cap
       12px taller than its row and let the next row's top edge peek into
       view. */
-   .xp-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); grid-auto-rows: max-content; gap: 10px; overflow-y: auto; align-content: start; flex: 1 1 auto; min-height: 0; scroll-padding-bottom: 12px; box-sizing: border-box;
+   .xp-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); grid-auto-rows: max-content; gap: 10px; overflow-y: auto; align-content: start; flex: 1 1 auto; min-height: 0; scroll-padding-bottom: 12px;
      /* Whole-row landing, WITHOUT fighting the wheel: every card row is a
         snap point, but proximity - not mandatory - so a small trackpad or
         wheel delta accumulates instead of being snapped back to the row
@@ -624,7 +623,6 @@
        Letting content size the card means it can never clip, at any zoom.
        Inner bands are reserved grid rows so KPIs stay put across a
        stretched gallery row (flex-wrap used to let "cost $0" collapse a line). */
-    box-sizing: border-box;
     transition: border-color .16s ease, transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .16s ease, background .16s ease;
   }
   /* Soft entity wash from the leading edge (replaces the hard 3px side bar). */
@@ -1148,11 +1146,10 @@
     .st-hd input[type="search"] { max-width: none; }
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
-    .ro-head-actions { justify-content: flex-start; flex-wrap: wrap; }
+    .ro-head-actions { justify-content: flex-start; }
     .ro-head-actions button { min-height: 24px; }
     .ro-rule .ro-scope, .ro-rule .ro-body { grid-template-columns: minmax(0, 1fr); }
     .ro-rule-body { padding-inline: 8px; }
-    .ro-tpl-menu { max-width: min(290px, calc(100vw - 32px)); }
   }
 
   .card {
@@ -1402,7 +1399,7 @@
      --text mix, not a fixed color, so it inverts with the mode and survives
      every palette. It sits inside the box because a parent clip (td and
      .req-model both set overflow: hidden) would cut an outer outline. */
-  .ent-fav { width: 14px; height: 14px; padding: 1px; box-sizing: border-box; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent); }
+  .ent-fav { width: 14px; height: 14px; padding: 1px; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent); }
   .ent-lb { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; height: 14px; display: inline-flex; align-items: center; }
   a.ent:hover .ent-lb { color: var(--ent); }
   /* entityPivot: an entityBadge wrapped in a navigable link. */
@@ -1913,7 +1910,7 @@
   .theme-list { display: flex; flex-direction: column; gap: 2px; padding: 2px; min-width: 232px; }
   .theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
   .theme-opt:hover { background: var(--panel2); border-color: var(--border2); }
-  .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) var(--selected-tint), transparent); border-color: var(--accent); color: var(--text); }
+  .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) var(--selected-tint), transparent); border-color: var(--accent); }
   .theme-opt[aria-checked="true"] .theme-hint { color: var(--text); }
   .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
   .theme-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
@@ -1988,7 +1985,6 @@
     .d-hero { padding: 10px 10px 11px; }
     .d-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
     .d-stat { padding: 0; border-left: 0; }
-    .d-stat:first-child { padding-left: 0; }
     .detail-kv, .detail-kv:has(> .copy-btn) {
       grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding: 6px 0;
     }
