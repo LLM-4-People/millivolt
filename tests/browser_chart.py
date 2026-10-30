@@ -59,7 +59,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                     if (pixels[i+2]>pixels[i]*1.3 && pixels[i+2]>pixels[i+1]*1.1) latency++;
                 }
                 const card=document.querySelector('.traffic-card');
-                const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
+                const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>({id:e.id||e.className,cw:e.clientWidth,sw:e.scrollWidth,text:(e.textContent||'').trim().slice(0,80)}));
                 // The line-only domain must be the first and last
                 // sample exactly, so the series touches both plot
                 // edges instead of stranding a half bucket of dead
