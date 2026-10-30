@@ -107,6 +107,7 @@
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html { color-scheme: dark; accent-color: var(--accent); caret-color: var(--accent); overflow-x: clip; }
   /* Butter-smooth: every interactive surface eases its color/border/background
      changes instead of snapping. Kept off layout properties for perf. */
@@ -226,11 +227,9 @@
   .pause-hold:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
   .pause-hold.editing { color: var(--warn); }
   .pause-hold button { min-width: 0; padding: 2px 8px; cursor: pointer; }
-  #pause-menu { width: 360px; }
-  #debug-menu { width: 360px; }
+  #pause-menu, #debug-menu { width: 360px; }
   #btn-debug[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); }
   #btn-debug[aria-pressed="true"]:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) var(--halo), transparent); }
-  .hdr-menu[hidden] { display: none !important; }
   #btn-settings[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
   #btn-pause[aria-pressed="true"] { color: var(--warn); border-color: var(--warn); }
   #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent); }
@@ -327,7 +326,6 @@
     padding: 10px 28px; background: var(--panel); border-top: 2px solid var(--warn);
     border-bottom: 1px solid var(--border2); font: 11px/1.5 var(--mono); scrollbar-width: thin;
   }
-  .storm-banner[hidden] { display: none; }
   .storm-banner:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
   .storm-row {
     display: block; width: 100%; border: 0; background: transparent; color: inherit;
@@ -345,7 +343,6 @@
   /* The storm dialog is the one surface that must feel urgent and absolute,
      so it uses the mode-owned storm scrim rather than the base veil. */
   .storm-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: var(--veil-strong); }
-  .storm-dialog[hidden] { display: none; }
   .storm-dialog-panel { width: min(580px, 100%); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; border: 1px solid var(--border2); background: var(--panel); }
   .storm-dialog-body { overflow-y: auto; overscroll-behavior: contain; padding: 6px 18px 18px; font: 11px/1.5 var(--mono); }
   .storm-facts { margin: 0; }
@@ -359,7 +356,6 @@
       max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
     background: var(--veil); overflow: auto;
   }
-  .operator-dialog[hidden] { display: none; }
   .operator-dialog-panel {
     width: min(22rem, 100%); max-width: 100%;
     border: 1px solid var(--border2); border-radius: 14px; background: var(--panel);
@@ -375,7 +371,6 @@
     font: 13px var(--mono); color: var(--text); background: var(--rail);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   }
-  .operator-dialog input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .operator-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .operator-dialog-actions .btn { width: 100%; min-height: 42px; }
   .storm-resolution { margin: 12px 0 0; color: var(--text); }
@@ -388,7 +383,6 @@
      fixed rail, request table next to the traffic chart). */
   main { padding: 20px 28px; width: 100%; }
 
-  .drawer[hidden] { display: none; }
   .hold-edit { color: inherit; font: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
   .hold-edit:disabled { cursor: default; opacity: .5; }
   .hold-edit:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
@@ -409,7 +403,8 @@
   }
   /* Graduated tick baseline (minor ticks + a major tick), the readout strip's
      "scale". Feathered so it reads as a scale, not a hard rule. */
-  .kpis::after {
+  .kpis::after,
+  .traffic-card.tiles-only .chart-totals::after {
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
     background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
@@ -569,7 +564,7 @@
      drawer and settings field lists use the roomier 6px variant grouped
      at the drawer below. */
   .xp-rail::-webkit-scrollbar, .xp-gallery::-webkit-scrollbar, .st-rail::-webkit-scrollbar, .scroll::-webkit-scrollbar { width: 5px; }
-  .xp-rail::-webkit-scrollbar-thumb, .xp-gallery::-webkit-scrollbar-thumb, .st-rail::-webkit-scrollbar-thumb, .scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  .xp-rail::-webkit-scrollbar-thumb, .xp-gallery::-webkit-scrollbar-thumb, .st-rail::-webkit-scrollbar-thumb, .scroll::-webkit-scrollbar-thumb, .drawer-body::-webkit-scrollbar-thumb, .st-fields::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
   /* Rail rows are one design shared by the explorer dimension rail and the
      settings rail: grouped selectors own the common row chrome, hover,
      active base, focus ring, and count style. Each family keeps only its
@@ -709,7 +704,7 @@
     position: fixed; inset: 0; background: var(--veil-soft); opacity: 0; pointer-events: none;
     transition: opacity .18s; z-index: 60;
   }
-  .drawer-veil.open { opacity: 1; pointer-events: auto; }
+  .drawer-veil.open, .st-veil.open { opacity: 1; pointer-events: auto; }
   .drawer {
     position: fixed; top: calc(var(--rail-h) + var(--rail-tick)); right: 0; bottom: 0;
     width: min(640px, 100vw); max-width: 94vw;
@@ -743,7 +738,6 @@
     font-family: var(--mono); font-size: 11px; flex: 1; scrollbar-gutter: stable;
   }
   .drawer-body::-webkit-scrollbar, .st-fields::-webkit-scrollbar { width: 6px; }
-  .drawer-body::-webkit-scrollbar-thumb, .st-fields::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
   /* The one polite copy outcome. It sits above every modal surface because a
      copy can be initiated from the drawer, Settings or a capture view. */
@@ -763,7 +757,6 @@
     position: fixed; inset: 0; background: var(--veil); opacity: 0; pointer-events: none;
     transition: opacity .18s ease; z-index: 70;
   }
-  .st-veil.open { opacity: 1; pointer-events: auto; }
   .st-sheet {
     position: fixed; z-index: 71; top: calc(var(--rail-h) + var(--rail-tick)); left: 50%;
     width: min(1080px, calc(100vw - 24px)); height: calc(100vh - var(--rail-h) - var(--rail-tick) - 8px);
@@ -775,7 +768,6 @@
     overflow: hidden;
   }
   .st-sheet.open { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
-  .st-sheet[hidden] { display: none !important; }
   .st-hd {
     display: flex; align-items: center; gap: 12px; padding: 11px 16px 13px;
     border-bottom: 1px solid var(--border2); flex-shrink: 0; position: relative;
@@ -793,7 +785,6 @@
     background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
     font: 11px var(--mono); padding: 6px 10px; border-radius: 8px;
   }
-  .st-hd input[type="search"]:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .st-body { display: grid; grid-template-columns: 220px 1fr; gap: 0; min-height: 0; flex: 1; }
   .st-side {
     display: flex; flex-direction: column; min-height: 0; min-width: 0;
@@ -829,7 +820,6 @@
     gap: 6px 28px; align-items: center; padding: 9px 8px;
     border-bottom: 1px solid var(--border);
   }
-  .st-row[hidden] { display: none !important; }
   .st-row:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
   .st-row.st-block { grid-template-columns: 1fr; align-items: start; gap: 8px; padding-top: 12px; padding-bottom: 12px; }
   .st-check { display: flex; align-items: center; gap: 8px; font: 12px/1.3 var(--sans); color: var(--text); }
@@ -857,7 +847,6 @@
     width: 100%; font: 12px var(--mono); padding: 6px 10px; border-radius: 8px;
     background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
   }
-  .st-ctl input:focus, .st-ctl textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .5; cursor: not-allowed; }
   .st-ctl textarea { min-height: 64px; resize: vertical; }
   .st-hint { font: 10px var(--mono); color: var(--muted); }
@@ -929,7 +918,6 @@
     padding: 5px 9px; width: auto;
   }
   .prov-sec input::placeholder { color: var(--muted); opacity: 1; }
-  .prov-sec input:focus, .prov-sec select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .prov-chips { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 1px; }
   .prov-chips:empty { display: none; }
   .prov-chip {
@@ -939,11 +927,11 @@
   }
   .prov-chip .prov-chip-p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); }
   .prov-chip .prov-x { padding: 1px 4px; }
-  .prov-umap { display: flex; flex-direction: column; gap: 5px; }
-  .prov-umap:empty { display: none; }
+  .prov-umap, .prov-mmap, .prov-hmap { display: flex; flex-direction: column; gap: 5px; }
+  .prov-umap:empty, .prov-mmap:empty, .prov-hmap:empty { display: none; }
   .prov-urow { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr 24px; gap: 6px; align-items: center; }
-  .prov-urow .sp-ufield { font-size: 10px; padding: 4px 5px; width: 100%; }
-  .prov-urow .sp-upath { font-size: 10px; }
+  .prov-urow .sp-ufield, .prov-urow .sp-mfield { font-size: 10px; padding: 4px 5px; width: 100%; }
+  .prov-urow .sp-upath, .prov-urow .sp-mkey, .prov-hrow .sp-hname, .prov-hrow .sp-hval { font-size: 10px; }
   .prov-arrow { color: var(--muted); font-size: 10px; text-align: center; }
   .prov-add { display: flex; gap: 6px; align-items: center; }
   .prov-add input, .prov-add select { flex: 1; min-width: 0; }
@@ -990,24 +978,14 @@
      emission site lives inside .mr-wrap, so the token scopes here and the
      toggle in mrPreview actually changes the text color. */
   .mr-wrap .muted { color: var(--muted); }
-  .prov-add-u { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr; gap: 6px; }
-  .prov-add-u .prov-addbtn { grid-column: 3; justify-self: start; }
   /* Models enrichment: same row grammar as the usage map (one visual system
      for all structured per-provider maps). */
-  .prov-mmap { display: flex; flex-direction: column; gap: 5px; }
-  .prov-mmap:empty { display: none; }
-  .prov-urow .sp-mfield { font-size: 10px; padding: 4px 5px; width: 100%; }
-  .prov-urow .sp-mkey { font-size: 10px; }
-  .prov-add-m { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr; gap: 6px; }
-  .prov-add-m .prov-addbtn { grid-column: 3; justify-self: start; }
+  .prov-add-u, .prov-add-m { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr; gap: 6px; }
+  .prov-add-u .prov-addbtn, .prov-add-m .prov-addbtn, .prov-add-h .prov-addbtn { grid-column: 3; justify-self: start; }
   /* Upstream headers: name → value rows in the same map grammar (no arrow -
      the pair is a plain name/value, not a canonical-field mapping). */
-  .prov-hmap { display: flex; flex-direction: column; gap: 5px; }
-  .prov-hmap:empty { display: none; }
   .prov-hrow { display: grid; grid-template-columns: minmax(130px, 190px) 1fr 24px; gap: 6px; align-items: center; }
-  .prov-hrow .sp-hname, .prov-hrow .sp-hval { font-size: 10px; }
   .prov-add-h { display: grid; grid-template-columns: minmax(130px, 190px) 1fr 24px; gap: 6px; }
-  .prov-add-h .prov-addbtn { grid-column: 3; justify-self: start; }
   /* "+ add provider" lives in the field's title row (top right, aligned with
      "Provider field maps") and opens a dropdown in the .hdr-menu idiom. The
      picker only offers seen providers NOT already mapped. */
@@ -1019,7 +997,6 @@
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
   }
-  .prov-menu[hidden] { display: none !important; }
   .prov-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
   .prov-menu-list:empty::after { content: 'no providers to add'; font-size: 10px; color: var(--muted); padding: 3px 6px; }
   .prov-menu-item {
@@ -1032,6 +1009,10 @@
   .prov-menu-item .prov-ic { font-size: 11px; }
   .prov-menu-custom { display: flex; gap: 5px; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; }
   .prov-menu-custom input { flex: 1; min-width: 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; }
+  .operator-dialog input:focus,
+  .st-hd input[type="search"]:focus,
+  .st-ctl input:focus, .st-ctl textarea:focus,
+  .prov-sec input:focus, .prov-sec select:focus,
   .prov-menu-custom input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .prov-chev {
     border: none; background: none; color: var(--muted); cursor: pointer;
@@ -1067,7 +1048,6 @@
     background: var(--panel); border: 1px solid var(--border2); border-radius: 9px;
     box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
   }
-  .ro-tpl-menu[hidden] { display: none !important; }
   .ro-tpl-item {
     min-width: 0; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 6px;
     background: none; color: var(--text); font: 10px var(--mono); text-align: left;
@@ -1107,7 +1087,6 @@
   .ro-head-actions button:hover { color: var(--text); border-color: var(--accent); }
   .ro-head-actions .prov-x { font-size: 9px; }
   .ro-rule-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 9px 10px 10px; border-top: 1px solid var(--border); }
-  .ro-rule-body[hidden] { display: none !important; }
   .ro-rule .ro-scope, .ro-rule .ro-body { display: grid; gap: 6px; min-width: 0; }
   .ro-rule .ro-scope { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .ro-rule .ro-body { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1123,7 +1102,8 @@
     display: flex; align-items: center; gap: 12px; padding: 12px 16px 10px;
     border-top: 1px solid var(--border2); flex-shrink: 0; background: var(--rail); position: relative;
   }
-  .st-ft::before {
+  .st-ft::before,
+  .d-hero::before {
     content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
     background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
@@ -1227,12 +1207,6 @@
     font-size: 13px;
     margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
   }
-  .traffic-card.tiles-only .chart-totals::after {
-    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
-    mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
-  }
   .traffic-card.tiles-only .chart-total {
     position: relative;
     justify-content: space-between; gap: 6px; padding: 10px 8px; height: 118px;
@@ -1300,7 +1274,6 @@
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
-  .chart-context[hidden] { display: none; }
   /* A readable, complete bucket readout on the opposite side of the pointer. */
   #chart-hover {
     position: absolute; top: 8px; right: 8px; z-index: 3;
@@ -1309,7 +1282,6 @@
     padding: 10px 12px; font-family: var(--mono); font-size: 11px;
     color: var(--text); pointer-events: none; max-width: calc(100% - 16px);
   }
-  #chart-hover[hidden] { display: none; }
   .chart-hover-time { color: var(--muted); font-size: 10px; margin-bottom: 7px; }
   .chart-hover-row { display: flex; justify-content: space-between; gap: 20px; line-height: 1.8; }
   .chart-controls { display: flex; gap: 6px; margin-left: auto; align-items: center; }
@@ -1332,7 +1304,6 @@
      text, unchecked rows dim to muted, so the current selection reads at a
      glance. */
   .metrics-pick { position: relative; }
-  .metrics-pick[hidden] { display: none; }
   #chart-metrics-btn {
     display: inline-flex; align-items: center; gap: 6px;
     background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
@@ -1357,7 +1328,6 @@
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
   }
-  .metrics-menu[hidden] { display: none !important; }
   .metrics-row {
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     font: 11px var(--mono); color: var(--text); background: none; border: none;
@@ -1416,7 +1386,6 @@
     pointer-events: none; box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5);
     max-width: 300px; min-width: 180px; line-height: 1.45;
   }
-  #client-tip[hidden] { display: none !important; }
   .ct-h { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .06em; margin: 7px 0 3px; }
   .ct-h:first-child { margin-top: 0; }
   .ct-row { display: flex; gap: 8px; align-items: baseline; }
@@ -1560,12 +1529,6 @@
     background: var(--panel2); border: 1px solid var(--border2); border-radius: 10px;
     overflow: hidden;
   }
-  .d-hero::before {
-    content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
-    background: var(--tick-strip);
-    -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
-    mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
-  }
   .d-hero-top { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding-top: 3px; }
   .d-method {
     color: var(--accent2); font: 700 9.5px var(--mono); letter-spacing: .05em;
@@ -1631,7 +1594,7 @@
     text-transform: none; letter-spacing: .07em; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .detail-sec-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .detail-sec-actions, .detail-code-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
   .detail-sec-actions #drawer-debug-status {
     color: var(--err); font-size: 10px; max-width: 180px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1646,7 +1609,6 @@
   }
   .sec-toggle svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
   .detail-section.collapsed .sec-toggle svg { transform: rotate(-90deg); }
-  .sec-toggle:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
   .sec-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .55; }
 
@@ -1675,7 +1637,7 @@
     cursor: pointer; opacity: 0; transition: opacity .12s, color .12s, border-color .12s, background .12s;
   }
   .copy-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
-  .copy-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
+  .sec-toggle:hover, .copy-btn:hover, .mini-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
   .copy-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
   .copy-btn.copied { color: var(--ok); opacity: 1; }
   /* The debug download is a persistent action, not a hover-only copy. */
@@ -1713,12 +1675,10 @@
   .detail-code { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); overflow: hidden; }
   .detail-code-bar { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 9px; background: var(--panel2); border-bottom: 1px solid var(--border); }
   .detail-code-meta { flex: 1; min-width: 0; color: var(--muted); font-size: 9.5px; letter-spacing: .03em; }
-  .detail-code-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
   .mini-btn {
     background: transparent; border: 1px solid transparent; color: var(--muted);
     font: 10px var(--mono); padding: 2px 6px; border-radius: 5px; cursor: pointer;
   }
-  .mini-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
   .mini-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .detail-code .copy-btn { opacity: .65; }
   .preview-box {
@@ -1754,7 +1714,6 @@
   .d-tab-n { margin-left: 4px; color: var(--muted); font-size: 9px; }
   .d-tab[aria-selected="true"] .d-tab-n { color: var(--accent); }
   .d-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .d-group[hidden] { display: none; }
 
   .exp-row { cursor: pointer; }
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
@@ -1898,7 +1857,6 @@
     background: var(--panel); border-color: var(--border2); color: var(--text);
     box-shadow: 0 1px 2px rgba(var(--shadow-rgb), .18);
   }
-  .theme-mode-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
   .theme-mode-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .theme-palette-hd { margin: 0 2px 8px; }
   /* Eight rows fit the normal desktop window. On a short window wider than
@@ -1910,7 +1868,7 @@
   .theme-opt:hover { background: var(--panel2); border-color: var(--border2); }
   .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) var(--selected-tint), transparent); border-color: var(--accent); }
   .theme-opt[aria-checked="true"] .theme-hint { color: var(--text); }
-  .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
+  .theme-mode-opt.is-preview, .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
   .theme-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .theme-swatch { width: 36px; height: 24px; flex: none; border-radius: 4px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--bg) 0 25%, var(--panel2) 25% 50%, var(--accent) 50% 75%, var(--accent2) 75% 100%); }
   .theme-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
