@@ -491,11 +491,13 @@ def base_values(
     canonical_tag = ""
     if include_canonical:
         canonical_tag = f'<link rel="canonical" href="{attr_escape(canonical)}">'
+    og_url = base_url if output == "404.html" else canonical
     return {
         "title": html.escape(title),
         "description": attr_escape(description),
         "canonical": attr_escape(canonical),
         "canonical_tag": canonical_tag,
+        "og_url": attr_escape(og_url),
         "og_image": attr_escape(og_image),
         "og_image_alt": attr_escape("millivolt: three client protocols in, any configured upstream out, every request recorded"),
         "site_name": "millivolt",

@@ -206,6 +206,30 @@ def performance_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str
     return errors
 
 
+def not_found_base_errors() -> list[str]:
+    """A nested 404 must use the absolute path of whatever base it deploys on."""
+    errors: list[str] = []
+    for base_url, prefix in (
+        ("https://example.com/", "/"),
+        ("https://example.com/prefix/", "/prefix/"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="millivolt-404-") as temp:
+            site = Path(temp) / "site"
+            build_site(site, base_url=base_url)
+            text = (site / "404.html").read_text(encoding="utf-8")
+            for needle in (
+                f'href="{prefix}assets/site.css"',
+                f'href="{prefix}index.html"',
+                'name="robots" content="noindex,follow"',
+                f'property="og:url" content="{base_url}"',
+            ):
+                if needle not in text:
+                    errors.append(f"404.html at {base_url} is missing {needle}")
+            if 'rel="canonical"' in text:
+                errors.append(f"404.html at {base_url} must not declare a canonical URL")
+    return errors
+
+
 def check_site(site: Path) -> list[str]:
     errors: list[str] = []
     pages = sorted(site.rglob("*.html"))
@@ -421,6 +445,7 @@ def check_site(site: Path) -> list[str]:
     if "<loc>" not in sitemap:
         errors.append("sitemap has no URLs")
     errors.extend(performance_page_errors(site, page_texts))
+    errors.extend(not_found_base_errors())
     return errors
 
 
