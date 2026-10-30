@@ -1,0 +1,48 @@
+name: Usage question
+description: Ask how to configure, deploy, or operate millivolt.
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read the documentation index and search existing issues first. Remove
+        credentials, private prompts, databases, and local configuration.
+        Security vulnerabilities belong in the private advisory channel.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do
+      description: The operator workflow or outcome you need.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Documentation, configuration, or commands you already used.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Sanitized configuration shape
+      description: Relevant fields with credentials and host-specific paths removed.
+      render: yaml
+  - type: input
+    id: version
+    attributes:
+      label: millivolt version or revision
+      placeholder: v0.4.7 or 0870fc5
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before asking
+      options:
+        - label: I read the documentation index and searched existing issues.
+          required: true
+        - label: I removed credentials, private prompts, and local configuration.
+          required: true

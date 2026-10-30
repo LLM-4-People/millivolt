@@ -9,6 +9,19 @@ non-sensitive bugs and proposals, and
 [pull requests](https://github.com/LLM-4-People/millivolt/pulls) for changes.
 Security reports belong in the private channel in [SECURITY.md](SECURITY.md).
 
+## Support and first change
+
+[SUPPORT.md](SUPPORT.md) routes usage questions, reproducible defects, concrete
+proposals, and security reports. For a first change, fork the repository, branch
+from `origin/testing`, update the existing shared owner, and add a targeted
+regression. Run `scripts/check.sh` and report what ran. Open the pull request
+against `testing`, not `main`.
+
+Use the `good first issue` label only for documentation, tests, or tooling with
+a clear scope and expected result. Do not label credential handling,
+authentication, storage, protocol-core, or release work. Ask in the issue before
+starting.
+
 ## Branch workflow
 
 New features branch from and land on `testing` first, with their documentation

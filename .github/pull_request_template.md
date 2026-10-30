@@ -1,56 +1,33 @@
 ## Summary
 
-Describe the change and the existing shared owner it updates.
+What changed, and which existing shared owner it updates.
 
-## Linked issue
+## Related issue
 
-Closes #
+Refs #
+
+Use `Closes #` only in a promotion pull request to `main`. Closing keywords are
+ignored when the base branch is `testing`.
 
 ## Target branch
 
-- [ ] `testing` (default)
-- [ ] `main` promotion from `testing`, with `VERSION` bumped above every release tag for code-bearing changes (Dependabot security and docs/site-only promotions skip the version check)
-
-For a `main` promotion, merge with a merge commit. Squash, rebase, and direct
-pushes are disabled by the `main-testing-first` ruleset, which has no bypass
-actors. The `required` check proves the head is the current `testing` tip, main
-is already merged back into `testing`, and the full gate succeeded for that
-commit or for the closest gated `testing` commit when only docs paths changed
-since it. Pending exact runs get a short bounded wait. It does not rerun the
-suite. Dependabot's `main` security PRs still run the full gate, and docs/site-only
-promotions skip the version and full-gate proofs but validate docs, workflow
-policy and the site.
-
-## Main promotion
-
-Complete only when targeting `main`:
-
-- [ ] The head commit is the current `testing` tip and `main` is already merged back into `testing`.
-- [ ] `VERSION` is newer than every existing `v*` release tag (Dependabot security and docs/site-only promotions skip this check).
-- [ ] I will merge with a merge commit and will not add a ruleset bypass.
-
-## Type of change
-
-- [ ] Bug fix
-- [ ] Feature
-- [ ] Documentation or site
-- [ ] Refactor, tests, or tooling
-- [ ] Breaking change, with the migration described below
+Open feature pull requests against `testing`. GitHub's default base is `main`,
+so change it before creating the pull request. `main` is promotion-only and
+accepts merge commits only.
 
 ## Verification
 
-List the checks actually run and any check that did not run. For performance
-changes, include the workload and durable-accounting result.
+List the commands actually run and any check that did not run. CI is the
+authority for the full gate.
 
-- [ ] `scripts/check.sh` core checks
-- [ ] Browser fixtures against the private dev instance
-- [ ] Live MCP integration when the operator or MCP surface changed
-- [ ] Container fixture when Docker, Compose, or startup changed
-- [ ] Static site build and link check when docs, README, or `site-src` changed
-- [ ] A regression covers a reproduced defect
+- `scripts/check.sh`:
+- Browser, live MCP, container, or site checks, when affected:
+
+## Breaking change
+
+Describe the migration, or write "None".
 
 ## Documentation and safety
 
 - [ ] User-visible behavior, configuration, and operations docs are updated.
-- [ ] The change does not include credentials, local configuration, private history, or unauthorized captures.
-- [ ] The `CONTRIBUTING.md` change checklist was reviewed.
+- [ ] No credentials, local configuration, private history, or unauthorized captures are included.

@@ -73,5 +73,3 @@ body:
       options:
         - label: I removed credentials, private prompts, databases, and local config from this report.
           required: true
-        - label: This is not a security vulnerability; I know the private reporting channel.
-          required: true
