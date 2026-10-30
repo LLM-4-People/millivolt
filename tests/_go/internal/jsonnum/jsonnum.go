@@ -7,6 +7,7 @@ package jsonnum
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -288,6 +289,36 @@ func TestParseInt64Bounds(t *testing.T) {
 			}
 			if err != nil || got != tc.want {
 				t.Fatalf("ParseInt64(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseIntBounds(t *testing.T) {
+	min := big.NewInt(int64(math.MinInt))
+	max := big.NewInt(int64(math.MaxInt))
+	above := new(big.Int).Add(max, big.NewInt(1)).String()
+	below := new(big.Int).Sub(min, big.NewInt(1)).String()
+	for _, tc := range []struct {
+		literal string
+		want    int
+		wantErr error
+	}{
+		{literal: max.String(), want: math.MaxInt},
+		{literal: min.String(), want: math.MinInt},
+		{literal: above, wantErr: ErrOutOfRange},
+		{literal: below, wantErr: ErrOutOfRange},
+	} {
+		t.Run(tc.literal, func(t *testing.T) {
+			got, err := Parse([]byte(tc.literal))
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Parse(%s) error = %v, want %v", tc.literal, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("Parse(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
 			}
 		})
 	}
