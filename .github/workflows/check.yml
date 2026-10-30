@@ -1242,10 +1242,14 @@ jobs:
           RELEASE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           {
-            if [ "${{ steps.cut.outputs.skip }}" = "true" ]; then
+            if [ "${{ job.status }}" != "success" ]; then
+              echo "### Release did not complete"
+              echo
+              echo "The job did not complete successfully. Inspect the job log; no release receipt is claimed."
+            elif [ "${{ steps.cut.outputs.skip }}" = "true" ]; then
               echo "### No release cut"
               echo
-              echo "VERSION is already tagged at HEAD; no image or release was published."
+              echo "VERSION is already tagged; no image or release was published."
             elif [ -n "${RELEASE_VERSION:-}" ]; then
               echo "### millivolt ${RELEASE_VERSION}"
               echo

@@ -276,9 +276,12 @@ def check_release(checks: dict, errors: list[str]) -> None:
     else:
         if "always()" not in str(summary_step.get("if", "")):
             errors.append("check.yml: the release summary must run for both success and skip")
-        for needle in ("No release cut", "releases/tag/v${RELEASE_VERSION}", "GITHUB_STEP_SUMMARY"):
+        for needle in ("No release cut", "releases/tag/v${RELEASE_VERSION}", "GITHUB_STEP_SUMMARY",
+                       "job.status", "no release receipt is claimed"):
             if needle not in summary_run:
                 errors.append(f"check.yml: release summary is missing {needle}")
+        if "VERSION is already tagged at HEAD" in summary_run:
+            errors.append("check.yml: the skip summary must not claim the tag is at HEAD")
     meta = next((step for step in steps(publish)
                  if step.get("name") == "Define image tags and labels"), {})
     meta_with = meta.get("with") or {}
