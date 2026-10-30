@@ -43,6 +43,8 @@
     --rail-h: calc(56px + env(safe-area-inset-top, 0px));
     --rail-tick: 8px;
     --hdr-btn: 32px;
+    /* The minimum touch target for mobile and coarse-pointer controls. */
+    --tap: 44px;
     /* Graduated-scale tick color (the shell's signature motif), derived
        from the text color so the faint rail tracks it. */
     --tick: color-mix(in srgb, var(--text) 7%, transparent);
@@ -62,6 +64,9 @@
        accent-filled controls. Derived from --accent so theme drifts once. */
     --focus-ring: color-mix(in srgb, var(--accent) 12%, transparent);
     --focus-ring-strong: color-mix(in srgb, var(--accent) var(--halo), transparent);
+    /* The keyboard focus edge. Each wearing rule keeps its own literal
+       outline-offset: the inset/outset is a per-surface decision. */
+    --focus-outline: 1px solid var(--accent);
     /* Shared alpha strengths for the tinted overlays, so a rung of the
        ladder cannot drift surface by surface: the status pills rest at
        --pill-tint and wear --pill-tint-strong once they flag an
@@ -89,6 +94,8 @@
     /* Elevation ink is a mode material, not a per-component literal. Clear
        swaps it for a warm shadow so cards and menus do not read as soot. */
     --shadow-rgb: 0,0,0;
+    /* Floating menu and tooltip elevation, one rung above the card shadow. */
+    --shadow-menu: 0 12px 32px rgba(var(--shadow-rgb),.5);
     /* The cancelled neutral is distinct from both muted copy and status ink. */
     --neutral: #a8a096;
     /* Chart gridline alpha: core.js blends this onto --border2 for the
@@ -151,7 +158,7 @@
      text colors and only marks hover/focus on the wordmark. */
   .brand { display: flex; align-items: center; gap: 11px; color: inherit; text-decoration: none; }
   .brand:hover h1, .brand:focus-visible h1 { color: var(--accent); }
-  .brand:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+  .brand:focus-visible { outline: var(--focus-outline); outline-offset: 3px; border-radius: 6px; }
   /* The mark: a probe trace crossing a graduated scale - the millivolt
      instrument reading the stream. A soft glowing well, no hard gem tile. */
   .brand-logo {
@@ -186,7 +193,7 @@
   @media (max-width: 800px) {
     header { padding: 0 14px; gap: 10px; }
     header .sub { display: none; }
-    #btn-nav { display: inline-flex; margin-left: auto; min-width: 44px; width: 44px; height: 44px; }
+    #btn-nav { display: inline-flex; margin-left: auto; min-width: var(--tap); width: var(--tap); height: var(--tap); }
     .refresh-controls {
       display: none; margin-left: 0; position: absolute; z-index: 90;
       top: calc(100% + var(--rail-tick) + 4px); right: 8px; left: 8px;
@@ -199,12 +206,12 @@
     .refresh-controls.is-open { display: flex; }
     .refresh-controls > .btn,
     .refresh-controls > .menu-wrap > .btn {
-      width: 100%; min-width: 0; height: 44px; justify-content: flex-start;
+      width: 100%; min-width: 0; height: var(--tap); justify-content: flex-start;
       padding: 0 12px; gap: 10px;
     }
-    /* The theme trigger keeps the flyout's full width and its 44px target.
+    /* The theme trigger keeps the flyout's full width and its shared tap target.
        A later coarse-pointer rule must not shrink it back to an icon square. */
-    #btn-theme { min-height: 44px; }
+    #btn-theme { min-height: var(--tap); }
     .refresh-controls .menu-wrap { width: 100%; }
     .hdr-btn-label { display: inline; font: 650 12px var(--sans); color: var(--text); }
   }
@@ -272,7 +279,7 @@
     top: calc(100% + (var(--rail-h) - var(--hdr-btn)) / 2 + var(--rail-tick) + 4px);
     z-index: 40; width: 320px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); padding: 12px; font-family: var(--mono);
+    box-shadow: var(--shadow-menu); padding: 12px; font-family: var(--mono);
   }
   .clear-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   @media (max-width: 800px) {
@@ -299,7 +306,7 @@
     transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
   }
   .btn:hover { color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
-  .btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   /* Danger variants come AFTER .btn so the cascade (equal single-class
      specificity, later wins) always beats the neutral base skin. Weight goes
      with impact: delete-matching = light red tint; the "everything"
@@ -326,14 +333,14 @@
     padding: 10px 28px; background: var(--panel); border-top: 2px solid var(--warn);
     border-bottom: 1px solid var(--border2); font: 11px/1.5 var(--mono); scrollbar-width: thin;
   }
-  .storm-banner:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .storm-banner:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
   .storm-row {
     display: block; width: 100%; border: 0; background: transparent; color: inherit;
     text-align: left; font: inherit; cursor: pointer; padding: 5px 3px;
   }
   .storm-row + .storm-row { border-top: 1px solid var(--border); }
   .storm-row:hover { background: var(--panel2); }
-  .storm-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .storm-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .storm-heading, .storm-detail { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 14px; }
   .storm-heading strong { color: var(--text); font-weight: 600; }
   .storm-state, .storm-reason { color: var(--warn); }
@@ -385,7 +392,7 @@
 
   .hold-edit { color: inherit; font: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
   .hold-edit:disabled { cursor: default; opacity: .5; }
-  .hold-edit:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+  .hold-edit:focus-visible { outline: var(--focus-outline); outline-offset: 3px; }
   .pause-hold > .hold-edit { flex: 1; }
   .storage-warning { color: var(--warn); }
   /* KPI band: an instrument readout strip, not a deck of cards. One continuous
@@ -576,7 +583,7 @@
   }
   .xp-rail-item:hover, .st-rail-item:hover { background: var(--panel2); }
   .xp-rail-item.active, .st-rail-item.active { background: var(--panel2); border-color: var(--border2); }
-  .xp-rail-item:focus-visible, .st-rail-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .xp-rail-item:focus-visible, .st-rail-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .xp-rail-item .rail-n, .st-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; }
   /* Explorer family deviation: the active edge keys to the entity color and
      counts right-align (they sit alone at the row's end). */
@@ -634,7 +641,7 @@
   .xp-node.selected .xp-node-signals,
   .xp-node.selected .share-pct,
   .xp-node.selected .xp-conversation-role { color: var(--text); }
-  .xp-node:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .xp-node:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .xp-node-hd { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .xp-node-hd .ent { flex: 1; min-width: 0; }
   .xp-node-n { font-family: var(--mono); font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; }
@@ -666,14 +673,14 @@
     .xp-rail-col { position: relative; z-index: 12; }
     .xp-dim-trigger {
       display: flex; align-items: center; gap: 8px; width: 100%;
-      min-height: 44px; padding: 8px 10px; text-align: left; cursor: pointer;
+      min-height: var(--tap); padding: 8px 10px; text-align: left; cursor: pointer;
       background: color-mix(in srgb, var(--ent, var(--border2)) 8%, var(--panel2));
       color: var(--text); font: inherit;
       border: 1px solid color-mix(in srgb, var(--ent, var(--border2)) 55%, var(--border2));
       border-radius: 8px;
     }
     .xp-dim-trigger:hover { border-color: var(--accent); }
-    .xp-dim-trigger:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+    .xp-dim-trigger:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
     .xp-dim-by { color: var(--muted); font-size: 10px; font-family: var(--mono); text-transform: none; letter-spacing: .06em; }
     .xp-dim-trigger .rail-n { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 11px; font-variant-numeric: tabular-nums; }
     .xp-dim-caret { width: 12px; height: 12px; flex-shrink: 0; color: var(--muted); transition: transform .16s ease; }
@@ -683,7 +690,7 @@
       position: absolute; left: 0; right: 0; top: calc(100% + 6px);
       z-index: 13; max-height: min(70vh, 420px); overflow-y: auto;
       background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-      box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); padding: 8px;
+      box-shadow: var(--shadow-menu); padding: 8px;
     }
     .xp-rail.open { display: flex; }
     .xp-rail-item { padding: 9px 10px; min-height: 40px; }
@@ -869,7 +876,7 @@
     transition: transform .16s ease, background .16s ease;
   }
   .st-switch:checked::after { transform: translateX(16px); background: var(--text); }
-  .st-switch:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .st-switch:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
   /* Provider field-map editor: each provider is its own section - a
      full-bleed header band (entity glyph + title-style label) over a body of
      consistently skinned fields. Fields use the darker --rail fill so they
@@ -995,7 +1002,7 @@
     position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
     min-width: 290px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
+    box-shadow: var(--shadow-menu); font-family: var(--mono);
   }
   .prov-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
   .prov-menu-list:empty::after { content: 'no providers to add'; font-size: 10px; color: var(--muted); padding: 3px 6px; }
@@ -1046,7 +1053,7 @@
     width: max-content; max-width: min(290px, calc(100vw - 32px));
     display: flex; flex-direction: column; gap: 2px; padding: 6px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 9px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
+    box-shadow: var(--shadow-menu); font-family: var(--mono);
   }
   .ro-tpl-item {
     min-width: 0; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 6px;
@@ -1054,12 +1061,12 @@
     cursor: pointer; overflow-wrap: anywhere;
   }
   .ro-tpl-item:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
-  .ro-tpl-item:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .ro-tpl-item:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .ro-rule {
     min-width: 0; overflow: hidden; background: var(--panel2);
     border: 1px solid var(--border); border-radius: 9px;
   }
-  .ro-rule:focus, .ro-rule:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .ro-rule:focus, .ro-rule:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
   .ro-rule-head {
     display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto;
     gap: 8px; align-items: center; min-width: 0; padding: 7px 8px;
@@ -1072,7 +1079,7 @@
     cursor: pointer; font: 13px/1 var(--mono);
   }
   .ro-disclosure:hover { color: var(--accent); border-color: var(--accent); }
-  .ro-disclosure:focus, .ro-disclosure:focus-visible, .ro-head-actions button:focus, .ro-head-actions button:focus-visible, .ro-add-btn:focus, .ro-add-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .ro-disclosure:focus, .ro-disclosure:focus-visible, .ro-head-actions button:focus, .ro-head-actions button:focus-visible, .ro-add-btn:focus, .ro-add-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .ro-num { min-width: 38px; color: var(--muted); font: 10px var(--mono); }
   .ro-summary { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .ro-summary-scope, .ro-summary-actions { min-width: 0; overflow-wrap: anywhere; font: 10px/1.35 var(--mono); }
@@ -1326,7 +1333,7 @@
     position: fixed; top: -9999px; right: auto; z-index: 40;
     padding: 8px; display: flex; flex-direction: column; gap: 2px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
+    box-shadow: var(--shadow-menu); font-family: var(--mono);
   }
   .metrics-row {
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
@@ -1334,7 +1341,7 @@
     border-radius: 6px; padding: 5px 7px; cursor: pointer;
   }
   .metrics-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
-  .metrics-row:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .metrics-row:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .metrics-row[aria-checked="false"] { color: var(--muted); }
   .metrics-row .mp-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
   .traffic-card .card-hd { flex-wrap: wrap; flex-shrink: 0; justify-content: space-between; }
@@ -1376,14 +1383,14 @@
   a.ent-link:hover { background: var(--panel2); }
   /* Inset focus ring so .req-model's overflow clip cannot cut the indicator
      off the last entity in the identity cell. */
-  a.ent-link:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  a.ent-link:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   /* Client hover card: identity + request config. Fixed, never intercepts
      the pointer (the badge stays the hover target). */
   #client-tip {
     position: fixed; z-index: 90;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 8px;
     padding: 8px 10px; font-family: var(--mono); font-size: 11px; color: var(--text);
-    pointer-events: none; box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5);
+    pointer-events: none; box-shadow: var(--shadow-menu);
     max-width: 300px; min-width: 180px; line-height: 1.45;
   }
   .ct-h { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .06em; margin: 7px 0 3px; }
@@ -1609,7 +1616,7 @@
   }
   .sec-toggle svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform .16s ease; }
   .detail-section.collapsed .sec-toggle svg { transform: rotate(-90deg); }
-  .sec-toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .sec-toggle:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .55; }
 
   /* Rows stay one grid so every value aligns down the card. The copy action
@@ -1638,7 +1645,7 @@
   }
   .copy-btn svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
   .sec-toggle:hover, .copy-btn:hover, .mini-btn:hover { color: var(--text); border-color: var(--border2); background: var(--panel); }
-  .copy-btn:focus-visible { opacity: 1; outline: 1px solid var(--accent); outline-offset: 1px; }
+  .copy-btn:focus-visible { opacity: 1; outline: var(--focus-outline); outline-offset: 1px; }
   .copy-btn.copied { color: var(--ok); opacity: 1; }
   /* The debug download is a persistent action, not a hover-only copy. */
   #drawer-debug-download { opacity: .65; }
@@ -1668,7 +1675,7 @@
   .attempt-extra { color: var(--muted); font-size: 10px; display: flex; flex-wrap: wrap; gap: 2px 8px; }
   .attempt-open { grid-column: 3; grid-row: 1; align-self: center; color: var(--muted); font-size: 14px; }
   .attempt-link:hover { background: var(--panel2); }
-  .attempt-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .attempt-link:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
 
   /* Long text: one scrollable code surface with its own size line, wrap,
      copy and expand controls. The fade only exists while collapsed. */
@@ -1679,14 +1686,14 @@
     background: transparent; border: 1px solid transparent; color: var(--muted);
     font: 10px var(--mono); padding: 2px 6px; border-radius: 5px; cursor: pointer;
   }
-  .mini-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .mini-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .detail-code .copy-btn { opacity: .65; }
   .preview-box {
     background: var(--panel); border: 0; border-radius: 0; padding: 9px 11px; margin: 0;
     color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
     font: 11px/1.5 var(--mono); max-height: none; overflow-x: hidden;
   }
-  .preview-box:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .preview-box:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
   .detail-code.nowrap .preview-box { white-space: pre; overflow-x: auto; overflow-wrap: normal; word-break: normal; }
   .detail-code.collapsed .preview-box { max-height: 168px; overflow: hidden; position: relative; }
   .detail-code.collapsed .preview-box::after {
@@ -1713,7 +1720,7 @@
   .d-tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
   .d-tab-n { margin-left: 4px; color: var(--muted); font-size: 9px; }
   .d-tab[aria-selected="true"] .d-tab-n { color: var(--accent); }
-  .d-tab:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .d-tab:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
 
   .exp-row { cursor: pointer; }
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
@@ -1721,7 +1728,7 @@
   .scroll { max-height: 380px; overflow-y: auto; overflow-x: auto; }
   /* The request log is a keyboard-scrollable region (role="region" in
      index.html). An inset ring stays visible inside the card's clipped box. */
-  #tbl-requests:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  #tbl-requests:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   /* The requests log keeps ONE stable height in the stacked scrolling
      layout: a definite box means an arriving request only scrolls inside
      it, instead of growing the card row by row and shoving the rest of
@@ -1857,7 +1864,7 @@
     background: var(--panel); border-color: var(--border2); color: var(--text);
     box-shadow: 0 1px 2px rgba(var(--shadow-rgb), .18);
   }
-  .theme-mode-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .theme-mode-opt:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .theme-palette-hd { margin: 0 2px 8px; }
   /* Eight rows fit the normal desktop window. On a short window wider than
      800px the tray is the one vertical scroller; at 800px or narrower the
@@ -1869,7 +1876,7 @@
   .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) var(--selected-tint), transparent); border-color: var(--accent); }
   .theme-opt[aria-checked="true"] .theme-hint { color: var(--text); }
   .theme-mode-opt.is-preview, .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
-  .theme-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .theme-opt:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .theme-swatch { width: 36px; height: 24px; flex: none; border-radius: 4px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--bg) 0 25%, var(--panel2) 25% 50%, var(--accent) 50% 75%, var(--accent2) 75% 100%); }
   .theme-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
   .theme-name { font-size: 13px; font-weight: 600; }
@@ -1887,25 +1894,25 @@
        its palette list must not become nested scrollers that swallow a wheel
        or touch swipe before the flyout moves. A narrow fine-pointer window is
        compact too, so it gets the same picker without the comparator. Width
-       still fits the flyout and every option keeps its 44px target. */
+       still fits the flyout and every option keeps its shared tap target. */
     #theme-menu {
       width: min(368px, 100%);
       max-height: none; overflow: visible; overscroll-behavior: auto;
     }
     .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
-    .theme-opt { min-height: 44px; }
-    .theme-mode-opt { min-height: 44px; }
-    .theme-ft .btn { min-height: 44px; }
+    .theme-opt { min-height: var(--tap); }
+    .theme-mode-opt { min-height: var(--tap); }
+    .theme-ft .btn { min-height: var(--tap); }
   }
   @media (hover: none), (pointer: coarse) {
     /* No hover means no candidate to show. Keep the current caption, the
        surface control and every palette row; the "Preview: same" line and the
        hover hint would describe a gesture this device cannot make. */
     .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
-    .theme-mode-opt, .theme-ft .btn { min-height: 44px; }
+    .theme-mode-opt, .theme-ft .btn { min-height: var(--tap); }
   }
   @media (pointer: coarse) and (min-width: 801px) {
-    #btn-theme { min-width: 44px; width: 44px; height: 44px; }
+    #btn-theme { min-width: var(--tap); width: var(--tap); height: var(--tap); }
   }
   @media (max-height: 760px) {
     /* The comparator and hint would push the palette or footer out of a short
