@@ -98,20 +98,21 @@ trust-boundary evidence:
 - Bounded allocations (`cmd/proxy/mcp.go`, `internal/sse/frames.go`). The MCP
   recorder cap is the fixed `mcp.MaxResponseBytes` read budget (64 MiB) plus one
   byte, not a configurable limit. The SSE frame capacity is the marshaled
-  payload length, bounded by the relay's scanner and encoder frame caps and the
-  response-size guard. Input is rejected at those bounds before the sized
-  allocation, so neither is an attacker-controlled unbounded size.
+  payload length plus the fixed framing overhead, bounded by the relay's scanner
+  and encoder frame caps and the response-size guard. Input is rejected at those
+  bounds before the sized allocation, so neither is an attacker-controlled
+  unbounded size.
 
-The integer-conversion findings were true positives and are fixed: the
-operator session cookie now sets `Secure` when the request arrived over TLS or
-through an https-forwarding ingress, and integer configuration values are
-range-checked against the platform's `int` width before conversion. The
-allocation findings are closed by construction, using overflow-safe capacity
-owners. The operator SQL console and the transparent response-writer wrappers
-are accepted boundaries; their alerts are dismissed with a recorded reason.
-Dismissing or resolving a code-scanning alert is a maintainer action in the
-GitHub security UI; this note records triage rationale and does not dismiss any
-alert automatically.
+The operator-cookie and integer-conversion findings were true positives and are
+fixed: the operator session cookie now sets `Secure` when the request arrived
+over TLS or through an https-forwarding ingress; the jsonnum, config, and
+throttle conversions now parse or bound at the target width and carry
+regression tests. The allocation findings are closed by construction, using
+overflow-safe capacity owners. The operator SQL console and the transparent
+response-writer wrappers are accepted boundaries; their alerts are dismissed
+with a recorded reason. Dismissing or resolving a code-scanning alert is a
+maintainer action in the GitHub security UI; this note records triage rationale
+and does not dismiss any alert automatically.
 
 ## Scope
 
