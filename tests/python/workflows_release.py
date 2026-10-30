@@ -220,7 +220,7 @@ def check_release(checks: dict, errors: list[str]) -> None:
     if attest_index < 0:
         errors.append("check.yml: release image must carry a GitHub artifact attestation")
     elif not (image_index < attest_index < tag_push_index):
-        errors.append("check.yml: the image attestation must finish before the tag becomes public")
+        errors.append("check.yml: the workflow-pushed Git tag must follow the image attestation")
     else:
         attest = steps(publish)[attest_index]
         if not str(attest.get("uses", "")).startswith("actions/attest@"):
