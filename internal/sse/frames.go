@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 )
 
 // Client-facing OpenAI-compatible SSE frame primitives, the write-side
@@ -36,13 +37,10 @@ func MarshalWireJSON(v any) ([]byte, error) {
 }
 
 // DataFrame renders one SSE frame around a marshaled payload: "data: " +
-// payload + the blank line that terminates the event.
+// payload + the blank line that terminates the event. slices.Concat owns the
+// total-size overflow check instead of hand-written capacity arithmetic.
 func DataFrame(payload []byte) []byte {
-	b := make([]byte, 0, len("data: ")+len(payload)+2)
-	b = append(b, "data: "...)
-	b = append(b, payload...)
-	b = append(b, '\n', '\n')
-	return b
+	return slices.Concat([]byte("data: "), payload, []byte("\n\n"))
 }
 
 // EmitFrame marshals obj without HTML escaping, writes it to w as one SSE

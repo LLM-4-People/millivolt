@@ -88,7 +88,15 @@ def local_target(site: Path, page: Path, url: str) -> tuple[Path | None, str]:
     path = unquote(split.path)
     if not path:
         return None, split.fragment
-    target = (site / page.parent / path).resolve()
+    absolute = path.startswith("/")
+    base_path = urlsplit(DEFAULT_BASE_URL).path
+    if base_path != "/" and path.startswith(base_path):
+        path = path[len(base_path):]
+    if path.startswith("/"):
+        path = path.lstrip("/")
+        absolute = True
+    base = site if absolute else site / page.parent
+    target = (base / path).resolve()
     if target.is_dir():
         target = target / "index.html"
     return target, split.fragment
@@ -198,6 +206,30 @@ def performance_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str
     operations = (ROOT / "docs/operations.md").read_text(encoding="utf-8")
     if "### Measured example" in operations:
         errors.append("operations.md still carries a second measured example")
+    return errors
+
+
+def not_found_base_errors() -> list[str]:
+    """A nested 404 must use the absolute path of whatever base it deploys on."""
+    errors: list[str] = []
+    for base_url, prefix in (
+        ("https://example.com/", "/"),
+        ("https://example.com/prefix/", "/prefix/"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="millivolt-404-") as temp:
+            site = Path(temp) / "site"
+            build_site(site, base_url=base_url)
+            text = (site / "404.html").read_text(encoding="utf-8")
+            for needle in (
+                f'href="{prefix}assets/site.css"',
+                f'href="{prefix}index.html"',
+                'name="robots" content="noindex,follow"',
+                f'property="og:url" content="{base_url}"',
+            ):
+                if needle not in text:
+                    errors.append(f"404.html at {base_url} is missing {needle}")
+            if 'rel="canonical"' in text:
+                errors.append(f"404.html at {base_url} must not declare a canonical URL")
     return errors
 
 
@@ -328,6 +360,15 @@ def check_site(site: Path) -> list[str]:
     errors.extend(entity_color_errors())
     errors.extend(brand_image_errors())
 
+    not_found = page_texts.get(site / "404.html", "")
+    base_path = urlsplit(DEFAULT_BASE_URL).path
+    if 'name="robots" content="noindex,follow"' not in not_found:
+        errors.append("404.html must be noindex,follow")
+    if 'rel="canonical"' in not_found:
+        errors.append("404.html must not declare a canonical URL")
+    if f'href="{base_path}assets/site.css"' not in not_found:
+        errors.append("404.html must load site assets from the absolute site root")
+
     for name in ("docs/index.html", "docs/dashboard.html", "docs/operations.html",
                  "contributing.html", "security.html", "404.html", "search.json",
                  "sitemap.xml", "robots.txt", "assets/tokens.css", "assets/site.css",
@@ -407,6 +448,7 @@ def check_site(site: Path) -> list[str]:
     if "<loc>" not in sitemap:
         errors.append("sitemap has no URLs")
     errors.extend(performance_page_errors(site, page_texts))
+    errors.extend(not_found_base_errors())
     return errors
 
 

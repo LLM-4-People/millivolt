@@ -4,12 +4,21 @@ millivolt is one self-hosted service for routing OpenAI-compatible traffic,
 seeing what happened, and controlling the operator surface. Start with the path
 that matches what you need to do.
 
-## Start here
+## First ten minutes
 
-- [Run it locally](../README.md#quickstart) - Docker Compose first, source second.
-- [Connect a client](../README.md#connect-a-client) - base URL, routing headers, and a working curl.
-- [Tour the dashboard](dashboard.md) - the views, charts, request drawer, and Settings.
-- [Read the protocol](protocol.md) - endpoints, upstream routing, retries, model discovery, and conversations.
+1. [Run the Compose quickstart](../README.md#quickstart).
+2. [Connect a client](../README.md#connect-a-client) and send one request.
+3. Open the [dashboard](dashboard.md) and find that request.
+4. Read [security](../SECURITY.md) before exposing the listener.
+
+## Choose a path
+
+| Goal | Start with |
+| --- | --- |
+| Evaluate the proxy | [Protocol](protocol.md), [dashboard tour](dashboard.md) |
+| Operate a deployment | [Operations](operations.md), [reverse proxy](reverse-proxy.md), [performance](performance.md) |
+| Integrate a client or agent | [Adapters](adapters.md), [MCP server](mcp.md) |
+| Contribute a change | [Contributing](../CONTRIBUTING.md), [support](../SUPPORT.md) |
 
 ## Guides
 

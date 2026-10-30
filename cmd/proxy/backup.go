@@ -495,10 +495,11 @@ func stageRestoreUpload(dir string, body io.Reader, limit int64) (string, error)
 }
 
 // copyRestoreUpload streams the body in bounded chunks and refuses the chunk
-// that would cross the archive ceiling. http.MaxBytesReader owns the same cap
-// at the transport; this count keeps a non-HTTP reader (tests and future
-// callers) equally bounded.
-func copyRestoreUpload(dst io.Writer, src io.Reader, limit int64) error {
+// that would cross the archive ceiling. The destination is the staged file,
+// not an arbitrary writer, so this upload path cannot become a response write.
+// http.MaxBytesReader owns the same cap at the transport; this count keeps a
+// non-HTTP reader equally bounded.
+func copyRestoreUpload(dst *os.File, src io.Reader, limit int64) error {
 	buf := make([]byte, restoreUploadBuffer)
 	var n int64
 	for {
@@ -525,7 +526,7 @@ func copyRestoreUpload(dst io.Writer, src io.Reader, limit int64) error {
 	}
 }
 
-func writeRestoreChunk(dst io.Writer, b []byte) error {
+func writeRestoreChunk(dst *os.File, b []byte) error {
 	n, err := dst.Write(b)
 	if err == nil && n != len(b) {
 		return io.ErrShortWrite

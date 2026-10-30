@@ -749,7 +749,9 @@ Release builds request an SBOM and max-mode provenance. The image and its
 attestations are published before the tag and release are updated; the workflow
 never pushes `main`. A failed image build does not leave a public release
 pointing at a missing image. Verify
-the published manifest and attestations with `docker buildx imagetools inspect`
+the published manifest and attestations with `docker buildx imagetools inspect`,
+verify the repository-associated artifact attestation with
+`gh attestation verify oci://ghcr.io/llm-4-people/millivolt:<version> -R LLM-4-People/millivolt`,
 and pin the digest for deployment. A tag name alone is not an integrity check.
 
 Set `MILLIVOLT_IMAGE` to the desired full image reference or published digest

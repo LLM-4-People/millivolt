@@ -157,6 +157,7 @@
     title.textContent = entry.title;
     link.appendChild(title);
     const heading = (entry.headings || []).find((item) => item.text.toLowerCase().includes(term));
+    if (heading && heading.id) link.href = root + entry.url + "#" + heading.id;
     const detail = document.createElement("span");
     detail.textContent = heading ? heading.text : entry.description;
     link.appendChild(detail);
@@ -170,6 +171,7 @@
     const term = query.trim().toLowerCase();
     if (!term) {
       empty.hidden = true;
+      live.textContent = "";
       return;
     }
     if (!index) {
@@ -192,9 +194,15 @@
       matches.push({ entry, score });
     }
     matches.sort((a, b) => b.score - a.score || a.entry.title.localeCompare(b.entry.title));
-    matches.slice(0, 12).forEach(({ entry }) => results.appendChild(resultFor(entry, term)));
+    const shown = matches.slice(0, 12);
+    shown.forEach(({ entry }) => results.appendChild(resultFor(entry, term)));
     empty.hidden = matches.length > 0;
     if (!matches.length) empty.textContent = "No matching page. Try a shorter term or browse the docs.";
+    live.textContent = !matches.length
+      ? "No matching page."
+      : matches.length > shown.length
+        ? `Showing ${shown.length} of ${matches.length} results.`
+        : `${matches.length} result${matches.length === 1 ? "" : "s"}.`;
   };
 
   const openSearch = async () => {
@@ -207,6 +215,7 @@
     }
     if (results) results.replaceChildren();
     if (empty) empty.hidden = true;
+    live.textContent = "";
     if (input) search("");
     loadIndex().catch(() => {
       if (empty) {

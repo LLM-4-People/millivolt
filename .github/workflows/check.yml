@@ -487,6 +487,24 @@ jobs:
             github.event.pull_request.user.login != 'dependabot[bot]'))
         run: exit 1
 
+      - name: Explain the required gate failure
+        # The gate step must stay a bare `exit 1` so the policy test can prove
+        # it never softens. This presentation-only step then names the failed
+        # leg in the run summary and in one annotation.
+        if: failure()
+        run: |
+          {
+            echo "### Required gate failed"
+            echo
+            echo "| leg | result |"
+            echo "| --- | --- |"
+            echo "| unit | ${{ needs.unit.result }} |"
+            echo "| browser | ${{ needs.browser.result }} |"
+            echo "| container | ${{ needs.container.result }} |"
+            echo "| escalation-proof | ${{ needs.escalation-proof.result }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error file=.github/workflows/check.yml,title=Required gate::unit=${{ needs.unit.result }}, browser=${{ needs.browser.result }}, container=${{ needs.container.result }}, escalation-proof=${{ needs.escalation-proof.result }}"
+
       # A merged promotion PR releases from the merge event itself. GitHub
       # occasionally drops a main push event after updating the ref; the
       # merged-PR payload still carries the exact merge commit, base and head.
@@ -977,6 +995,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       GOTOOLCHAIN: local
     # A main push whose VERSION is already tagged, normally a Dependabot
@@ -1082,7 +1103,14 @@ jobs:
             org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
             org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}
             org.opencontainers.image.source=https://github.com/LLM-4-People/millivolt
+            org.opencontainers.image.documentation=https://llm-4-people.github.io/millivolt/
             org.opencontainers.image.licenses=MIT
+          annotations: |
+            org.opencontainers.image.description=Self-hosted OpenAI-compatible inference proxy with a live dashboard, SQLite history, and routing controls.
+            org.opencontainers.image.documentation=https://llm-4-people.github.io/millivolt/
+        env:
+          # The package page reads the multi-arch index annotation.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: steps.cut.outputs.skip != 'true'
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
@@ -1103,6 +1131,7 @@ jobs:
           provenance: mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           build-args: REVISION=${{ steps.cut.outputs.revision }}
           # Reuse both native check scopes, which already hold the expensive
           # Go layers for each platform. Export only the final image layers
@@ -1112,6 +1141,16 @@ jobs:
             type=gha,scope=millivolt-container-linux-amd64
             type=gha,scope=millivolt-container-linux-arm64
           cache-to: type=gha,mode=min,scope=millivolt-publish-multiarch,ignore-error=true
+      - name: Attest the published image
+        # For a workflow-created release, this orders the signed attestation
+        # before the Git tag push and GitHub release. A manually pushed tag is
+        # already public, and the build step has already pushed the image tags.
+        if: steps.cut.outputs.skip != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/llm-4-people/millivolt
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
       - name: Push verified tag
         if: steps.cut.outputs.skip != 'true' && github.ref_type != 'tag'
         env:
@@ -1132,20 +1171,57 @@ jobs:
           # Notes come from the real commit log since the previous release
           # tag (push-based work has no PRs for --generate-notes to list).
           previous="$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')"
+          if [ -n "$previous" ]; then
+            subjects="$(git log --no-merges --no-decorate --format='%s' "$previous..v$RELEASE_VERSION")"
+          else
+            subjects="$(git log --no-merges --no-decorate --format='%s')"
+          fi
+          subjects="$(printf '%s\n' "$subjects" | awk '{ if ($0 ~ /^bump version to /) next; if (seen[$0]++) next; print }')"
+          highlights="$(printf '%s\n' "$subjects" | grep -E '^(feat|fix|perf)(\(|!|:)' || true)"
+          internal="$(printf '%s\n' "$subjects" | grep -Ev '^(feat|fix|perf)(\(|!|:)' || true)"
           {
-            echo "## What's included"
-            if [ -n "$previous" ]; then
-              git log --no-merges --no-decorate --format='- %h %s' "$previous..v$RELEASE_VERSION" \
-                | awk '{ subject=$0; sub(/^- [0-9a-f]+ /, "", subject); if (subject ~ /^bump version to /) next; if (seen[subject]++) next; print }'
+            echo "## Highlights"
+            if [ -n "$highlights" ]; then
+              printf '%s\n' "$highlights" | sed 's/^/- /'
             else
-              git log --no-merges --no-decorate --format='- %h %s' \
-                | awk '{ subject=$0; sub(/^- [0-9a-f]+ /, "", subject); if (subject ~ /^bump version to /) next; if (seen[subject]++) next; print }'
+              echo "- Maintenance and internal changes only."
             fi
             echo
+            echo "## Compatibility"
+            echo
+            echo "- Pre-1.0: configuration and API details can change between releases."
+            echo
+            echo "## Upgrade"
+            echo
+            echo '```sh'
+            echo "docker pull ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}"
+            echo '```'
+            echo
+            echo "For Compose:"
+            echo
+            echo '```sh'
+            echo "MILLIVOLT_IMAGE=ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION} docker compose up -d"
+            echo '```'
+            echo
+            if [ -n "$internal" ]; then
+              echo "<details>"
+              echo "<summary>Other changes</summary>"
+              echo
+              printf '%s\n' "$internal" | sed 's/^/- /'
+              echo
+              echo "</details>"
+              echo
+            fi
             echo "**Image:** \`ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}\`"
             if [ -n "${{ steps.image.outputs.digest }}" ]; then
               echo "**Digest:** \`${{ steps.image.outputs.digest }}\`"
             fi
+            echo
+            echo "**Verification:** BuildKit provenance and SBOM attestations are attached to the image. Verify the GitHub artifact attestation and pin the digest before deployment:"
+            echo
+            echo '```sh'
+            echo "gh attestation verify oci://ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION} -R LLM-4-People/millivolt"
+            echo '```'
             if [ -n "$previous" ]; then
               echo
               echo "**Full changelog:** https://github.com/LLM-4-People/millivolt/compare/${previous}...v${RELEASE_VERSION}"
@@ -1155,6 +1231,39 @@ jobs:
           if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
           gh release view "v$RELEASE_VERSION" >/dev/null 2>&1 || \
             gh release create "v$RELEASE_VERSION" "${flags[@]}"
+
+      - name: Summarize the release
+        # The run summary is the release receipt. It must describe both a
+        # published release and the intentional already-tagged skip.
+        if: always()
+        env:
+          RELEASE_VERSION: ${{ steps.cut.outputs.version }}
+          RELEASE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          {
+            if [ "${{ job.status }}" != "success" ]; then
+              echo "### Release did not complete"
+              echo
+              echo "The job did not complete successfully. Inspect the job log; no release receipt is claimed."
+            elif [ "${{ steps.cut.outputs.skip }}" = "true" ]; then
+              echo "### No release cut"
+              echo
+              echo "VERSION is already tagged; no image or release was published."
+            elif [ -n "${RELEASE_VERSION:-}" ]; then
+              echo "### millivolt ${RELEASE_VERSION}"
+              echo
+              echo "- Release: https://github.com/${{ github.repository }}/releases/tag/v${RELEASE_VERSION}"
+              echo "- Image: \`ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}\`"
+              if [ -n "${RELEASE_DIGEST:-}" ]; then
+                echo "- Digest: \`${RELEASE_DIGEST}\`"
+              fi
+              echo "- Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            else
+              echo "### Release did not complete"
+              echo
+              echo "The cut step did not produce a release version. Inspect the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-testing:
     needs: [unit, browser, container]

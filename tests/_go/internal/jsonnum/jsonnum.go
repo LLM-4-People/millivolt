@@ -7,6 +7,7 @@ package jsonnum
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -31,7 +32,6 @@ func TestParseIntegralSpellings(t *testing.T) {
 		{"1000000.000", 1000000},
 		{"10000e2", 1000000},
 		{"-1000000", -1000000},
-		{"1000000000000000000", 1000000000000000000},
 	} {
 		t.Run(tc.literal, func(t *testing.T) {
 			got, err := Parse([]byte(tc.literal))
@@ -271,6 +271,8 @@ func TestParseInt64Bounds(t *testing.T) {
 		{literal: "5e0", want: 5},
 		{literal: "1e3", want: 1000},
 		{literal: "-2", want: -2},
+		{literal: "1000000000000000000", want: 1000000000000000000},
+		{literal: "1e18", want: 1000000000000000000},
 		{literal: "9223372036854775807", want: 9223372036854775807},
 		{literal: "-9223372036854775808", want: -9223372036854775808},
 		{literal: "9223372036854775808", wantErr: ErrOutOfRange},
@@ -288,6 +290,36 @@ func TestParseInt64Bounds(t *testing.T) {
 			}
 			if err != nil || got != tc.want {
 				t.Fatalf("ParseInt64(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseIntBounds(t *testing.T) {
+	min := big.NewInt(int64(math.MinInt))
+	max := big.NewInt(int64(math.MaxInt))
+	above := new(big.Int).Add(max, big.NewInt(1)).String()
+	below := new(big.Int).Sub(min, big.NewInt(1)).String()
+	for _, tc := range []struct {
+		literal string
+		want    int
+		wantErr error
+	}{
+		{literal: max.String(), want: math.MaxInt},
+		{literal: min.String(), want: math.MinInt},
+		{literal: above, wantErr: ErrOutOfRange},
+		{literal: below, wantErr: ErrOutOfRange},
+	} {
+		t.Run(tc.literal, func(t *testing.T) {
+			got, err := Parse([]byte(tc.literal))
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Parse(%s) error = %v, want %v", tc.literal, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("Parse(%s) = %d, %v; want %d", tc.literal, got, err, tc.want)
 			}
 		})
 	}

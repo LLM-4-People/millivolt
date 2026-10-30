@@ -369,10 +369,11 @@ func asInt(v any) (int, error) {
 		return 0, err
 	}
 	// int is 32 bits on some supported targets; reject a value that would wrap
-	// instead of silently changing the configured limit. strconv.IntSize is a
-	// compile-time constant, so the check disappears on 64-bit builds.
-	if strconv.IntSize == 32 && (n < math.MinInt32 || n > math.MaxInt32) {
-		return 0, fmt.Errorf("want integer in [%d, %d], got %d", math.MinInt32, math.MaxInt32, n)
+	// instead of silently changing the configured limit. math.MinInt and
+	// math.MaxInt make the bound explicit on every target, so the conversion
+	// is safe even where the 32-bit branch is compiled out.
+	if n < math.MinInt || n > math.MaxInt {
+		return 0, fmt.Errorf("want integer in [%d, %d], got %d", math.MinInt, math.MaxInt, n)
 	}
 	return int(n), nil
 }

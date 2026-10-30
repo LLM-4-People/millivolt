@@ -124,6 +124,9 @@ func (s *Store) queryScan(ctx context.Context, query string, jsonOut *[]byte, ke
 	}
 	// modernc steps the first row inside QueryContext; limits must already
 	// be installed here, not merely before Rows.Next/Scan.
+	//
+	// Direct Store.Query callers pass trusted SQL; the HTTP console path is
+	// gated and validated in HandleQuery before reaching this scan.
 	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err

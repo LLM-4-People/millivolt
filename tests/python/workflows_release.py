@@ -216,6 +216,20 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: release image must include an SBOM")
     if image.get("with", {}).get("provenance") != "mode=max":
         errors.append("check.yml: release image must include max provenance")
+    attest_index = named_step(publish, "Attest the published image")
+    if attest_index < 0:
+        errors.append("check.yml: release image must carry a GitHub artifact attestation")
+    elif not (image_index < attest_index < tag_push_index):
+        errors.append("check.yml: the workflow-pushed Git tag must follow the image attestation")
+    else:
+        attest = steps(publish)[attest_index]
+        if not str(attest.get("uses", "")).startswith("actions/attest@"):
+            errors.append("check.yml: the image attestation must use actions/attest")
+        attest_with = attest.get("with") or {}
+        if attest_with.get("subject-digest") != "${{ steps.image.outputs.digest }}":
+            errors.append("check.yml: the attestation must cover the published image digest")
+        if attest_with.get("push-to-registry") is not True:
+            errors.append("check.yml: the attestation must be pushed to the registry")
     cut = next((step for step in steps(publish) if step.get("name") == "Cut the next version"), {})
     cut_run = str(cut.get("run", ""))
     if "git push" in cut_run:
@@ -242,6 +256,39 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: the release workflow must push the verified tag")
     if "skip != 'true'" not in str(tag_push.get("if", "")):
         errors.append("check.yml: the tag push must honor the no-release guard")
+    release_step = steps(publish)[release_index] if release_index >= 0 else {}
+    release_run = str(release_step.get("run", ""))
+    for needle in (
+        "## Highlights",
+        "## Compatibility",
+        "## Upgrade",
+        "docker pull ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}",
+        "<summary>Other changes</summary>",
+        "gh attestation verify oci://ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}",
+    ):
+        if needle not in release_run:
+            errors.append(f"check.yml: release notes are missing {needle}")
+    summary_step = next((step for step in steps(publish)
+                         if step.get("name") == "Summarize the release"), {})
+    summary_run = str(summary_step.get("run", ""))
+    if not summary_step:
+        errors.append("check.yml: publish must summarize the release in the run summary")
+    else:
+        if "always()" not in str(summary_step.get("if", "")):
+            errors.append("check.yml: the release summary must run for both success and skip")
+        for needle in ("No release cut", "releases/tag/v${RELEASE_VERSION}", "GITHUB_STEP_SUMMARY",
+                       "job.status", "no release receipt is claimed"):
+            if needle not in summary_run:
+                errors.append(f"check.yml: release summary is missing {needle}")
+        if "VERSION is already tagged at HEAD" in summary_run:
+            errors.append("check.yml: the skip summary must not claim the tag is at HEAD")
+    meta = next((step for step in steps(publish)
+                 if step.get("name") == "Define image tags and labels"), {})
+    meta_with = meta.get("with") or {}
+    if "org.opencontainers.image.description" not in str(meta_with.get("annotations", "")):
+        errors.append("check.yml: release image must carry a package description annotation")
+    if (meta.get("env") or {}).get("DOCKER_METADATA_ANNOTATIONS_LEVELS") != "index,manifest":
+        errors.append("check.yml: package annotations must target the index and manifest")
     publish_text = (WORKFLOWS / "check.yml").read_text(encoding="utf-8")
     errors.extend(main_push_errors(publish_text))
     for label, line in (

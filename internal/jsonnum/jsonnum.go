@@ -19,7 +19,8 @@ var (
 	ErrNotNumber = errors.New("must be an integer number")
 	// ErrNotInteger reports a fractional value.
 	ErrNotInteger = errors.New("must be an integer")
-	// ErrOutOfRange reports an integral value that does not fit int64.
+	// ErrOutOfRange reports an integral value outside the target parser's
+	// integer range: int64 for ParseInt64, or the platform int for Parse.
 	ErrOutOfRange = errors.New("is outside the supported integer range")
 	// ErrNegative reports a negative value where the schema requires a
 	// non-negative timestamp.
@@ -38,62 +39,75 @@ const exponentClamp = 1 << 30
 // fractional value, an overflow, or a non-number literal fails with one of the
 // exported reasons.
 func Parse(raw []byte) (int, error) {
-	n, err := ParseInt64(raw)
+	signed, err := integerLiteral(raw)
 	if err != nil {
 		return 0, err
 	}
-	if int64(int(n)) != n {
+	// Atoi is the int-sized parser, so the conversion never narrows a wider
+	// value and the platform bound is enforced by strconv itself.
+	n, err := strconv.Atoi(signed)
+	if err != nil {
 		return 0, ErrOutOfRange
 	}
-	return int(n), nil
+	return n, nil
 }
 
 // ParseInt64 decodes one JSON number literal into an exact int64. It accepts
 // every spelling whose mathematical value is integral and fits int64, and
 // rejects fractional values, overflow and non-number literals.
 func ParseInt64(raw []byte) (int64, error) {
-	lit := strings.TrimSpace(string(raw))
-	if lit == "" {
-		return 0, ErrNotNumber
-	}
-	digits, scale, negative, ok := decimalParts(lit)
-	if !ok {
-		return 0, ErrNotNumber
-	}
-	sig := strings.TrimLeft(digits, "0")
-	if sig == "" {
-		// Every spelling of zero is integral, including 0.0 and 0e999.
-		return 0, nil
-	}
-	switch {
-	case scale < 0:
-		drop := -scale
-		if drop >= len(sig) {
-			return 0, ErrNotInteger
-		}
-		for _, c := range sig[len(sig)-drop:] {
-			if c != '0' {
-				return 0, ErrNotInteger
-			}
-		}
-		sig = sig[:len(sig)-drop]
-	case scale > 0:
-		if len(sig)+scale > 19 {
-			return 0, ErrOutOfRange
-		}
-		sig += strings.Repeat("0", scale)
-	}
-	// Parse the sign with the magnitude so the minimum int64 value is
-	// accepted: its magnitude overflows int64 before negation.
-	signed := sig
-	if negative {
-		signed = "-" + sig
+	signed, err := integerLiteral(raw)
+	if err != nil {
+		return 0, err
 	}
 	n, err := strconv.ParseInt(signed, 10, 64)
 	if err != nil {
 		return 0, ErrOutOfRange
 	}
 	return n, nil
+}
+
+// integerLiteral normalizes one integral JSON number to its exact decimal
+// integer spelling. It owns the grammar and scale handling shared by the int
+// and int64 parsers; the caller chooses the target width at the final parse.
+func integerLiteral(raw []byte) (string, error) {
+	lit := strings.TrimSpace(string(raw))
+	if lit == "" {
+		return "", ErrNotNumber
+	}
+	digits, scale, negative, ok := decimalParts(lit)
+	if !ok {
+		return "", ErrNotNumber
+	}
+	sig := strings.TrimLeft(digits, "0")
+	if sig == "" {
+		// Every spelling of zero is integral, including 0.0 and 0e999.
+		return "0", nil
+	}
+	switch {
+	case scale < 0:
+		drop := -scale
+		if drop >= len(sig) {
+			return "", ErrNotInteger
+		}
+		for _, c := range sig[len(sig)-drop:] {
+			if c != '0' {
+				return "", ErrNotInteger
+			}
+		}
+		sig = sig[:len(sig)-drop]
+	case scale > 0:
+		if len(sig)+scale > 19 {
+			return "", ErrOutOfRange
+		}
+		sig += strings.Repeat("0", scale)
+	}
+	// Parse the sign with the magnitude so the minimum int64 value is
+	// accepted: its magnitude overflows int64 before negation.
+	if negative {
+		return "-" + sig, nil
+	}
+	return sig, nil
 }
 
 // Int64 is a JSON number whose mathematical value is an integer. It accepts
