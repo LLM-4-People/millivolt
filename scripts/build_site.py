@@ -769,9 +769,26 @@ def copy_assets(site_root: Path, tokens: dict[str, str]) -> None:
     (site_root / ".nojekyll").write_text("", encoding="utf-8")
 
 
+def readme_cover_errors() -> list[str]:
+    """The GitHub cover must not pin height. GitHub's markdown CSS applies
+    max-width but not height:auto, so a fixed height stays at the intrinsic
+    height while the width shrinks, squashing the 2.5:1 artwork. The width hint
+    alone scales correctly."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    cover = re.search(r'<img[^>]*readme-cover-dark\.png[^>]*>', readme)
+    if cover is None:
+        return ["README is missing the cover fallback image"]
+    if re.search(r'\bheight=', cover.group(0)):
+        return ["README cover declares height; GitHub keeps it fixed and squashes the image"]
+    return []
+
+
 def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     output = output.resolve()
     base_url = base_url.rstrip("/") + "/"
+    cover_errors = readme_cover_errors()
+    if cover_errors:
+        raise BuildError("; ".join(cover_errors))
     version = read_version()
     tokens = canonical_tokens()
     if "--rail" not in tokens:
