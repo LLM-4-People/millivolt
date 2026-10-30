@@ -54,8 +54,9 @@ jobs:
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Build and validate the site
         env:
-          SITE_URL: ${{ steps.pages.outputs.base_url || 'https://llm-4-people.github.io/millivolt' }}
+          SITE_URL: ${{ steps.pages.outputs.base_url }}
         run: |
+          test -n "$SITE_URL"
           python3 -B -O -m tests.python.site
           python3 scripts/build_site.py --output site --base-url "$SITE_URL"
       - name: Upload Pages artifact

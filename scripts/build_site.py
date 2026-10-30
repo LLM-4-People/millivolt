@@ -18,6 +18,7 @@ import re
 import shutil
 import struct
 import sys
+import textwrap
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -162,6 +163,14 @@ def plain_text(fragment: str) -> str:
 
 def strip_html(fragment: str) -> str:
     return SPACE.sub(" ", html.unescape(TAG.sub("", fragment))).strip()
+
+
+def summarize(text: str, width: int = 158) -> str:
+    """Trim a description at a word boundary instead of cutting mid-token."""
+    compact = SPACE.sub(" ", text).strip()
+    if not compact:
+        return ""
+    return textwrap.shorten(compact, width=width, placeholder="...")
 
 
 def attr_escape(value: str) -> str:
@@ -401,8 +410,7 @@ def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, st
     content = enhance_images_with_root(content, output, site_root)
     first_paragraph = PARAGRAPH.search(content)
     description = plain_text(first_paragraph.group(1)) if first_paragraph else title
-    if len(description) > 180:
-        description = description[:177].rstrip() + "..."
+    description = summarize(description)
     return title, description, content, md.toc_tokens
 
 
@@ -439,8 +447,7 @@ def page_for_source(source: Path, *, kind: str) -> Page:
         title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
         paragraph = PARAGRAPH.search(markdown.markdown(text, extensions=["extra"]))
         description = plain_text(paragraph.group(1)) if paragraph else title
-        if len(description) > 180:
-            description = description[:177].rstrip() + "..."
+        description = summarize(description)
     return Page(source=source, output=output, title=title, description=description, kind=kind)
 
 
@@ -463,21 +470,32 @@ def base_values(
     theme_color: str,
     head_extra: str = "",
     active: str = "docs",
+    root_override: str | None = None,
+    include_canonical: bool = True,
 ) -> dict[str, str]:
     canonical_path = "" if output == "index.html" else output
     canonical = urljoin(base_url, canonical_path)
     og_image = urljoin(base_url, "assets/og.png")
-    root = page_relative("index.html", output)
-    root = root[: -len("index.html")] if root.endswith("index.html") else root
-    # For docs/foo.html root is "../"; for root pages and index.html it is "".
-    if root in ("", "./"):
-        root = ""
-    elif not root.endswith("/"):
-        root += "/"
+    if root_override is None:
+        root = page_relative("index.html", output)
+        root = root[: -len("index.html")] if root.endswith("index.html") else root
+        # For docs/foo.html root is "../"; for root pages and index.html it is "".
+        if root in ("", "./"):
+            root = ""
+        elif not root.endswith("/"):
+            root += "/"
+    else:
+        root = root_override
+        if root and not root.endswith("/"):
+            root += "/"
+    canonical_tag = ""
+    if include_canonical:
+        canonical_tag = f'<link rel="canonical" href="{attr_escape(canonical)}">'
     return {
         "title": html.escape(title),
         "description": attr_escape(description),
         "canonical": attr_escape(canonical),
+        "canonical_tag": canonical_tag,
         "og_image": attr_escape(og_image),
         "og_image_alt": attr_escape("millivolt: three client protocols in, any configured upstream out, every request recorded"),
         "site_name": "millivolt",
@@ -538,17 +556,33 @@ def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
     perf = performance_headline()
     schema = {
         "@context": "https://schema.org",
-        "@type": "SoftwareApplication",
-        "name": "millivolt",
-        "applicationCategory": "DeveloperApplication",
-        "operatingSystem": "Linux",
-        "description": "Self-hosted OpenAI-compatible inference proxy with a live dashboard, SQLite history, and operator controls.",
-        "license": "https://opensource.org/licenses/MIT",
-        "codeRepository": GITHUB_REPOSITORY,
+        "@graph": [
+            {
+                "@type": "WebSite",
+                "name": "millivolt",
+                "url": base_url,
+            },
+            {
+                "@type": "SoftwareApplication",
+                "name": "millivolt",
+                "applicationCategory": "DeveloperApplication",
+                "operatingSystem": "Linux",
+                "description": "Self-hosted OpenAI-compatible inference proxy with a live dashboard, SQLite history, and operator controls.",
+                "license": "https://opensource.org/licenses/MIT",
+                "codeRepository": GITHUB_REPOSITORY,
+                "downloadUrl": GITHUB_REPOSITORY + "/releases/latest",
+                "softwareVersion": version,
+                "offers": {
+                    "@type": "Offer",
+                    "price": "0",
+                    "priceCurrency": "USD",
+                },
+            },
+        ],
     }
     head_extra = '<script type="application/ld+json">' + json.dumps(schema, ensure_ascii=False) + "</script>"
     values = base_values(
-        title="millivolt - precision instrument on the wire",
+        title="millivolt: self-hosted OpenAI-compatible LLM proxy",
         description="See every AI request. Keep your own routing with a self-hosted OpenAI-compatible proxy, live dashboard, and SQLite history.",
         output="index.html",
         base_url=base_url,
@@ -637,13 +671,20 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
 
 
 def render_not_found(*, version: str, base_url: str, theme_color: str) -> str:
+    # A custom 404 served from a nested path must not resolve assets relative
+    # to that path. Use the site's absolute base path and keep the page out of
+    # search results with no canonical URL.
+    site_root = urlsplit(base_url).path or "/"
+    if not site_root.endswith("/"):
+        site_root += "/"
     body = (
         '<main id="main" class="wrap not-found">'
         '<p class="eyebrow">404</p>'
         "<h1>Page not found.</h1>"
         "<p>The page may have moved, or the link may be stale. Start from the "
-        '<a href="index.html">overview</a> or the <a href="docs/index.html">documentation</a>.</p>'
-        '<a class="btn btn-primary" href="index.html#quickstart">Run it locally</a>'
+        f'<a href="{attr_escape(site_root)}index.html">overview</a> or the '
+        f'<a href="{attr_escape(site_root)}docs/index.html">documentation</a>.</p>'
+        f'<a class="btn btn-primary" href="{attr_escape(site_root)}index.html#quickstart">Run it locally</a>'
         "</main>"
     )
     values = base_values(
@@ -656,6 +697,9 @@ def render_not_found(*, version: str, base_url: str, theme_color: str) -> str:
         body_class="docs",
         theme_color=theme_color,
         active="",
+        root_override=site_root,
+        include_canonical=False,
+        head_extra='<meta name="robots" content="noindex,follow">',
     )
     return render_base(values)
 

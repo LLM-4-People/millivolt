@@ -88,6 +88,11 @@ def local_target(site: Path, page: Path, url: str) -> tuple[Path | None, str]:
     path = unquote(split.path)
     if not path:
         return None, split.fragment
+    base_path = urlsplit(DEFAULT_BASE_URL).path
+    if base_path != "/" and path.startswith(base_path):
+        path = path[len(base_path):]
+    if path.startswith("/"):
+        path = path.lstrip("/")
     target = (site / page.parent / path).resolve()
     if target.is_dir():
         target = target / "index.html"
@@ -327,6 +332,15 @@ def check_site(site: Path) -> list[str]:
         errors.append("README is missing anchors used by the site: " + ", ".join(missing_readme))
     errors.extend(entity_color_errors())
     errors.extend(brand_image_errors())
+
+    not_found = page_texts.get(site / "404.html", "")
+    base_path = urlsplit(DEFAULT_BASE_URL).path
+    if 'name="robots" content="noindex,follow"' not in not_found:
+        errors.append("404.html must be noindex,follow")
+    if 'rel="canonical"' in not_found:
+        errors.append("404.html must not declare a canonical URL")
+    if f'href="{base_path}assets/site.css"' not in not_found:
+        errors.append("404.html must load site assets from the absolute site root")
 
     for name in ("docs/index.html", "docs/dashboard.html", "docs/operations.html",
                  "contributing.html", "security.html", "404.html", "search.json",
