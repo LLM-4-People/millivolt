@@ -854,7 +854,7 @@
   .st-pill.lock { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .st-ctl { display: flex; flex-direction: column; gap: 4px; align-items: stretch; min-width: 0; }
   .st-ctl-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .st-ctl-line > input, .st-ctl-line > textarea { min-width: 0; }
+  .st-ctl-line > input { min-width: 0; }
   .st-unit { font: 10px var(--mono); color: var(--muted); flex-shrink: 0; }
   .st-ctl input[type="text"], .st-ctl input[type="number"], .st-ctl textarea {
     width: 100%; font: 12px var(--mono); padding: 6px 10px; border-radius: 8px;
