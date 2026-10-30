@@ -19,7 +19,8 @@ var (
 	ErrNotNumber = errors.New("must be an integer number")
 	// ErrNotInteger reports a fractional value.
 	ErrNotInteger = errors.New("must be an integer")
-	// ErrOutOfRange reports an integral value that does not fit int64.
+	// ErrOutOfRange reports an integral value outside the target parser's
+	// integer range: int64 for ParseInt64, or the platform int for Parse.
 	ErrOutOfRange = errors.New("is outside the supported integer range")
 	// ErrNegative reports a negative value where the schema requires a
 	// non-negative timestamp.
