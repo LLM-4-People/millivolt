@@ -230,7 +230,7 @@ func TestQueueRemovalPreservesWaitersAndOrder(t *testing.T) {
 	ws[1].client, ws[4].client, ws[2].ctx = "held", "held", ctx
 	g.mu.Lock()
 	for _, w := range ws {
-		g.queue.push(w)
+		g.queue.push(&w.queueNode, w)
 	}
 	g.mu.Unlock()
 	g.drain()
@@ -354,7 +354,7 @@ func BenchmarkQueueDrain(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				for _, w := range ws {
-					g.queue.push(w)
+					g.queue.push(&w.queueNode, w)
 				}
 				g.inFlight = 0
 				g.drain()
@@ -479,11 +479,12 @@ func BenchmarkThrottlePolicyListing(b *testing.B) {
 				for i := 0; i < groups; i++ {
 					g := s.groupFor(provider+"|"+strconv.Itoa(i), 0)
 					for j := 0; j < queued; j++ {
-						g.queue.push(&waiter{
+						w := &waiter{
 							ch:       make(chan struct{}, 1),
 							ctx:      context.Background(),
 							provider: provider,
-						})
+						}
+						g.queue.push(&w.queueNode, w)
 					}
 				}
 				b.Run("policies", func(b *testing.B) {

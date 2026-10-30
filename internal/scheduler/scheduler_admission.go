@@ -25,19 +25,16 @@ type group struct {
 	// providerIdx is the attributed index (nil until attribution). Attribution
 	// publishes it under both Scheduler.mu and the group mutex: fair-set
 	// marking reads it under g.mu, and eviction clears it under both locks
-	// after retiring the group. providerPrev/providerNext/providerListed are
-	// the index list links, guarded by providerIdx.mu.
-	providerIdx    *providerIndex
-	providerPrev   *group
-	providerNext   *group
-	providerListed bool
-	// idlePrev/idleNext order idle groups for LRU eviction and are guarded by
+	// after retiring the group. providerNode is the index list link, guarded
+	// by providerIdx.mu.
+	providerIdx  *providerIndex
+	providerNode listNode[group]
+	// idleNode orders idle groups for LRU eviction and is guarded by
 	// Scheduler.idleMu. idleListed is a lock-free fast-path witness for that
 	// membership; it changes under idleMu. Activity transitions, which hold
 	// g.mu, skip the idle lock when it is false; eviction re-verifies idleness
 	// under g.mu. A listed group is idle (inFlight == 0 and queue empty).
-	idlePrev   *group
-	idleNext   *group
+	idleNode   listNode[group]
 	idleListed atomic.Bool
 	// retired is set under mu only after eviction re-verified that no
 	// in-flight slot or queued waiter remains. A stale Acquire that looked the
@@ -45,15 +42,15 @@ type group struct {
 	retired        bool
 	maxConcurrent  int
 	inFlight       int
-	nextAllowedAt  time.Time     // do not send before this time (after rate limit)
-	backoff        time.Duration // attempt-level (BackoffFor; grows even with a hint)
-	requestBackoff time.Duration // consecutive failed requests (FailSend)
-	tripped        bool          // a request is retrying; siblings must WaitSend
-	probing        bool          // the retrying request holds the send token
-	sendWaiters    int           // callers parked in WaitSend's send gate
-	sendKick       chan struct{} // closed and replaced when the send gate changes
-	pacer          wakeTimer     // one shared pacing wakeup, not one per waiter
-	queue          waiterQueue   // parked Acquire callers, oldest first
+	nextAllowedAt  time.Time          // do not send before this time (after rate limit)
+	backoff        time.Duration      // attempt-level (BackoffFor; grows even with a hint)
+	requestBackoff time.Duration      // consecutive failed requests (FailSend)
+	tripped        bool               // a request is retrying; siblings must WaitSend
+	probing        bool               // the retrying request holds the send token
+	sendWaiters    int                // callers parked in WaitSend's send gate
+	sendKick       chan struct{}      // closed and replaced when the send gate changes
+	pacer          wakeTimer          // one shared pacing wakeup, not one per waiter
+	queue          linkedList[waiter] // parked Acquire callers, oldest first
 	// hasQueued mirrors queue.live > 0 for lock-free drainProvider probes.
 	// providerQueued is the owning provider index's queued-group counter,
 	// installed at first attribution. Both move together, only under mu, at the
@@ -66,11 +63,11 @@ type group struct {
 	// lock-free fair-waiting count, installed at attribution under mu. The
 	// fast path admits only when the count is zero, so a peer parked on
 	// pacing, a hold, the anti-burst ramp or a per-key cap never blocks it.
-	// fairIndex is this group's slot in the index's fair slice, guarded by
-	// providerIdx.mu. All three are published together under mu.
+	// fairNode is the fair-set link, guarded by providerIdx.mu. All three are
+	// published together under mu.
 	gateWaiting  atomic.Bool
 	providerFair *atomic.Int64
-	fairIndex    int
+	fairNode     listNode[group]
 	// rampStart anchors this group's anti-burst epoch: allowance grows from 1
 	// toward the provider's configured Concurrency as time passes. Zero means
 	// no epoch yet. idleSince stamps the moment the group became fully idle
@@ -96,9 +93,7 @@ type waiter struct {
 	onUnhold  func()
 	estTokens int64
 	admission admission // exact provider/token owners captured at grant
-	queue     *waiterQueue
-	prev      *waiter
-	next      *waiter
+	queueNode listNode[waiter]
 }
 
 // WaiterHooks is optional Acquire context: which client/provider this caller
@@ -214,7 +209,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 			return nil, ErrQueueFull
 		}
 	}
-	g.queue.push(w)
+	g.queue.push(&w.queueNode, w)
 	g.syncQueueLocked()
 	g.sched.markGroupBusyLocked(g)
 	if w.holdID != "" && opts.MaxWait > 0 {
@@ -428,7 +423,8 @@ func (g *group) markGateWaitingLocked() {
 
 // clearGateWaitingLocked withdraws g from its provider's fair-waiting set.
 // Callers hold g.mu. The lock-free fast path observes the count drop
-// immediately; the slice tombstone is compacted by the next snapshot.
+// immediately, and the fair node is unlinked in the same transition, so no
+// dead entry survives the call.
 func (g *group) clearGateWaitingLocked() {
 	if g.providerIdx == nil || !g.gateWaiting.Load() {
 		return
@@ -647,7 +643,7 @@ func (g *group) drainLimited(budget int) int {
 	now := time.Now()
 	granted := 0
 	refused, budgetStop := false, false
-	for w := g.queue.head; w != nil; {
+	for node := g.queue.head; node != nil; {
 		if budget > 0 && granted >= budget {
 			budgetStop = true
 			break
@@ -655,16 +651,16 @@ func (g *group) drainLimited(budget int) int {
 		if (g.maxConcurrent != 0 && g.inFlight >= g.maxConcurrent) || now.Before(g.nextAllowedAt) {
 			break
 		}
-		next := w.next
+		w, next := node.value, node.next
 		// Leave cancelled waiters queued so their own removeWaiter observes
 		// membership. Dropping here made removeWaiter treat the cancellation
 		// as a grant and decrement a live in-flight slot.
 		if w.ctx != nil && w.ctx.Err() != nil {
-			w = next
+			node = next
 			continue
 		}
 		if g.sched.matchingHold(w.client, w.provider) != nil {
-			w = next
+			node = next
 			continue
 		}
 		ok, lease, wait, gateBlocked := g.admitLocked(now, w.provider, w.estTokens)
@@ -676,7 +672,7 @@ func (g *group) drainLimited(budget int) int {
 			break
 		}
 		w.admission = lease
-		g.queue.remove(w)
+		g.queue.remove(&w.queueNode)
 		g.inFlight++
 		granted++
 		// Non-blocking send: w.ch is buffered (cap 1) so this always succeeds
@@ -686,7 +682,7 @@ func (g *group) drainLimited(budget int) int {
 		case w.ch <- struct{}{}:
 		default:
 		}
-		w = next
+		node = next
 	}
 	if granted > 0 {
 		g.syncQueueLocked()
@@ -734,8 +730,8 @@ func (g *group) syncQueueLocked() {
 
 func (g *group) removeWaiter(w *waiter) {
 	g.mu.Lock()
-	headRemoved := g.queue.head == w
-	found := g.queue.remove(w)
+	headRemoved := g.queue.first() == w
+	found := g.queue.remove(&w.queueNode)
 	if !found {
 		headRemoved = false
 		// The waiter was already granted a slot (unlinked + signaled) but

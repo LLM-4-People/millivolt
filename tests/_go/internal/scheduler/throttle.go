@@ -865,11 +865,7 @@ func providerQueuedGroups(s *Scheduler, provider string) int64 {
 func (idx *providerIndex) snapshot() []*group {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	out := make([]*group, 0, idx.live)
-	for g := idx.head; g != nil; g = g.providerNext {
-		out = append(out, g)
-	}
-	return out
+	return idx.groups.appendTo(make([]*group, 0, idx.groups.live))
 }
 
 // providerGroupsSnapshot returns a provider's live attributed groups. The
@@ -1212,13 +1208,13 @@ func TestThrottleQueuedIgnoresCancelledWaiters(t *testing.T) {
 	}
 	g.mu.Lock()
 	for _, w := range waiters {
-		g.queue.push(w)
+		g.queue.push(&w.queueNode, w)
 	}
 	g.mu.Unlock()
 
 	g.removeWaiter(waiters[1])
 	g.mu.Lock()
-	live, unlinked := g.queue.live, waiters[1].queue == nil && waiters[1].prev == nil && waiters[1].next == nil
+	live, unlinked := g.queue.live, waiters[1].queueNode.owner == nil && waiters[1].queueNode.prev == nil && waiters[1].queueNode.next == nil
 	g.mu.Unlock()
 	if !unlinked {
 		t.Fatal("cancelled waiter retained a queue link")

@@ -65,14 +65,13 @@ type Scheduler struct {
 	// lock and retires that group's counter pointer with the entry.
 	providerGroups map[string]*providerIndex
 	storms         stormState
-	// idleMu guards the idle-group LRU (idleHead/idleTail and each group's
-	// idle links). A group with no in-flight slot and no queued waiter sits on
-	// this list; the head is the oldest eviction candidate. Transition owners
-	// add and remove a group while holding its g.mu, and eviction re-verifies
-	// idleness under that same g.mu before removing it.
-	idleMu   sync.Mutex
-	idleHead *group
-	idleTail *group
+	// idleMu guards the idle-group LRU (the scheduler's idle list and each
+	// group's idle node). A group with no in-flight slot and no queued waiter
+	// sits on this list; the head is the oldest eviction candidate. Transition
+	// owners add and remove a group while holding its g.mu, and eviction
+	// re-verifies idleness under that same g.mu before removing it.
+	idleMu sync.Mutex
+	idle   linkedList[group]
 	// pacing carries the pacing/backoff fields of recently evicted idle
 	// groups, bounded by maxSchedulerPacingStates.
 	pacing pacingLRU

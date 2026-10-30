@@ -21,7 +21,12 @@ type pacingState struct {
 	backoff        time.Duration
 	requestBackoff time.Duration
 	tripped        bool
-	prev, next     *pacingState
+}
+
+// pacingEntry owns one state's membership node in the pacing LRU.
+type pacingEntry struct {
+	state pacingState
+	node  listNode[pacingEntry]
 }
 
 // pacingLRU is a fixed-capacity least-recently-used map of pacingState values.
@@ -29,9 +34,8 @@ type pacingState struct {
 // eviction, never on the admission hot path.
 type pacingLRU struct {
 	mu     sync.Mutex
-	states map[string]*pacingState
-	head   *pacingState
-	tail   *pacingState
+	states map[string]*pacingEntry
+	recent linkedList[pacingEntry]
 }
 
 // put inserts or replaces key's pacing state and evicts the oldest state past
@@ -40,31 +44,28 @@ func (p *pacingLRU) put(key string, st pacingState) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.states == nil {
-		p.states = make(map[string]*pacingState, maxSchedulerPacingStates)
+		p.states = make(map[string]*pacingEntry, maxSchedulerPacingStates)
 	}
 	if old := p.states[key]; old != nil {
-		p.unlinkLocked(old)
+		p.recent.remove(&old.node)
 		delete(p.states, key)
 	}
-	node := &pacingState{
+	entry := &pacingEntry{state: pacingState{
 		key:            key,
 		nextAllowedAt:  st.nextAllowedAt,
 		backoff:        st.backoff,
 		requestBackoff: st.requestBackoff,
 		tripped:        st.tripped,
-		prev:           p.tail,
-	}
-	if p.tail != nil {
-		p.tail.next = node
-	} else {
-		p.head = node
-	}
-	p.tail = node
-	p.states[key] = node
-	for len(p.states) > maxSchedulerPacingStates && p.head != nil {
-		oldest := p.head
-		p.unlinkLocked(oldest)
-		delete(p.states, oldest.key)
+	}}
+	p.recent.push(&entry.node, entry)
+	p.states[key] = entry
+	for len(p.states) > maxSchedulerPacingStates {
+		oldest := p.recent.first()
+		if oldest == nil {
+			break
+		}
+		p.recent.remove(&oldest.node)
+		delete(p.states, oldest.state.key)
 	}
 }
 
@@ -72,32 +73,13 @@ func (p *pacingLRU) put(key string, st pacingState) {
 func (p *pacingLRU) take(key string) (pacingState, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	node := p.states[key]
-	if node == nil {
+	entry := p.states[key]
+	if entry == nil {
 		return pacingState{}, false
 	}
-	p.unlinkLocked(node)
+	p.recent.remove(&entry.node)
 	delete(p.states, key)
-	return pacingState{
-		nextAllowedAt:  node.nextAllowedAt,
-		backoff:        node.backoff,
-		requestBackoff: node.requestBackoff,
-		tripped:        node.tripped,
-	}, true
-}
-
-func (p *pacingLRU) unlinkLocked(n *pacingState) {
-	if n.prev != nil {
-		n.prev.next = n.next
-	} else {
-		p.head = n.next
-	}
-	if n.next != nil {
-		n.next.prev = n.prev
-	} else {
-		p.tail = n.prev
-	}
-	n.prev, n.next = nil, nil
+	return entry.state, true
 }
 
 // adoptPacingLocked copies a recently evicted group's pacing state into a

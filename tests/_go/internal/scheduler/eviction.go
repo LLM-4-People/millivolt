@@ -466,10 +466,8 @@ func assertSchedulerQuiescent(t *testing.T, s *Scheduler, provider string) {
 	}
 
 	s.idleMu.Lock()
-	listed := make([]*group, 0)
-	for g := s.idleHead; g != nil; g = g.idleNext {
-		listed = append(listed, g)
-	}
+	listed := make([]*group, 0, s.idle.live)
+	s.idle.forEach(func(g *group) { listed = append(listed, g) })
 	s.idleMu.Unlock()
 	if len(listed) != len(groups) {
 		t.Fatalf("idle list holds %d groups, map holds %d", len(listed), len(groups))
