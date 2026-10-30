@@ -75,7 +75,7 @@ For isolated development and checks, see [Contributing](CONTRIBUTING.md).
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600" height="640">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600">
 </picture>
 
 Three client protocols enter one proxy; each request can target a different

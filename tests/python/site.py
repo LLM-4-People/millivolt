@@ -151,6 +151,15 @@ def brand_image_errors() -> list[str]:
         actual = image_size(ROOT / name)
         if actual != expected:
             errors.append(f"{name}: dimensions are {actual}, expected {expected[0]}x{expected[1]}")
+    # GitHub's markdown CSS applies max-width but not height:auto. A fixed
+    # height attribute therefore stays at the intrinsic height while the width
+    # shrinks, squashing the 2.5:1 cover. The width hint alone scales correctly.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    cover = re.search(r'<img[^>]*readme-cover-dark\.png[^>]*>', readme)
+    if cover is None:
+        errors.append("README is missing the cover fallback image")
+    elif re.search(r'\bheight=', cover.group(0)):
+        errors.append("README cover declares height; GitHub keeps it fixed and squashes the image")
     return errors
 
 
