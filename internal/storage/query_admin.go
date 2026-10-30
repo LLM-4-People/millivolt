@@ -124,6 +124,12 @@ func (s *Store) queryScan(ctx context.Context, query string, jsonOut *[]byte, ke
 	}
 	// modernc steps the first row inside QueryContext; limits must already
 	// be installed here, not merely before Rows.Next/Scan.
+	//
+	// The SQL console intentionally executes the operator's own SELECT. This
+	// is not an injection sink: the operator gate, validateQuery's SELECT-only
+	// and single-statement rules, SQLite limits, and the query timeout own the
+	// boundary. Dynamic SQL cannot be parameterized without removing the
+	// feature, so CodeQL's taint finding is accepted here.
 	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
