@@ -8,7 +8,7 @@ choose answers on the other. It can translate when the two ends disagree, pass
 the request through untouched, and measure the crossing: timing, tokens, cost,
 retries, outcome. Body capture only when you ask.
 
-millivolt stays a relay, not a platform: no separate provider registry, no
+**millivolt stays a relay, not a platform.** No separate provider registry, no
 API-key vault, no user accounts. One Go binary. One dashboard. One operator or
 a small team.
 
@@ -91,7 +91,7 @@ client at the proxy. The upstream URL and key stay yours; the proxy does not
 register providers or keys. The request path selects the client protocol, and
 `X-Proxy-Format` selects the upstream protocol.
 
-| Set | To |
+| Client setting | Value |
 | --- | --- |
 | **API base URL** | `http://127.0.0.1:8080/v1` |
 | **API key** | your upstream key. It is forwarded upstream, `Authorization` by default; it does not authenticate dashboard access. |
@@ -214,7 +214,7 @@ vulnerabilities.
 
 ## Documentation
 
-| If you want to... | Start with |
+| Your next move | Read this |
 | --- | --- |
 | Run it | [Quickstart](#quickstart), [container operation](docs/operations.md#containers) |
 | Point a client | [Protocol](docs/protocol.md), [adapters](docs/adapters.md) |
