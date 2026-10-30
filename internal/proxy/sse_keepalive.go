@@ -160,7 +160,7 @@ func (p *ssePacer) writeSSELocked(b []byte) (int, error) {
 	if p.writeProgress > 0 {
 		_ = http.NewResponseController(p.w).SetWriteDeadline(time.Now().Add(p.writeProgress))
 	}
-	// SSE is not HTML; this is a transparent stream write.
+	// Transparent body write; the handler or upstream owns the type and escaping.
 	n, err := p.w.Write(b)
 	if n > 0 {
 		p.atLineStart = b[n-1] == '\n'
