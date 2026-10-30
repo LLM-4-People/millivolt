@@ -106,6 +106,20 @@ platform's `int` width before conversion. Dismissing or resolving a
 code-scanning alert is a maintainer action in the GitHub security UI; this note
 records triage rationale and does not dismiss any alert automatically.
 
+## Scope
+
+In scope: the proxy, dashboard, MCP server, container image, and repository
+automation. Out of scope: findings that require a compromised host, an operator
+who already holds the credential, a misconfigured ingress, or a third-party
+provider. A report that depends on the documented trusted-operator boundary must
+show how that boundary is crossed.
+
+## Safe harbor
+
+The maintainers will not pursue or support legal action for good-faith research
+that stays within this scope, avoids privacy violations, service disruption, and
+data destruction, and allows reasonable time to fix the issue before disclosure.
+
 ## Reporting a vulnerability
 
 Do not publish credentials, private request content, or actionable exploit
