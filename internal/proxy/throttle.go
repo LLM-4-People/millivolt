@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -667,7 +668,10 @@ func parseLimitInt(s string, max int64) (n int64, off bool, err error) {
 		return 0, true, nil
 	}
 	n, err = strconv.ParseInt(s, 10, 64)
-	if err != nil || n <= 0 || n > max {
+	// The int-width bound keeps the later int conversion safe on 32-bit
+	// targets; maxLimitConcurrency is much smaller, but keeping both makes
+	// the conversion independent of that policy constant.
+	if err != nil || n <= 0 || n > max || n > math.MaxInt {
 		return 0, false, fmt.Errorf("out of range")
 	}
 	return n, false, nil
