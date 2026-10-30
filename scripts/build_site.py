@@ -52,11 +52,13 @@ BRAND_ASSETS = {
     "favicon.ico": BRAND_SOURCE / "favicon.ico",
     "apple-touch-icon.png": BRAND_SOURCE / "apple-touch-icon.png",
 }
-# README-only covers stay in the repository for GitHub's renderer; no
-# generated site page references them.
+# README-only artwork stays in the repository for GitHub's renderer; no
+# generated site page references it.
 SITE_IMAGE_EXCLUDES = frozenset({
     "brand/readme-cover-dark.png",
     "brand/readme-cover-light.png",
+    "brand/readme-spec.svg",
+    "brand/readme-spec-mobile.svg",
 })
 
 ROOT_PAGE_MAP = {
@@ -769,26 +771,30 @@ def copy_assets(site_root: Path, tokens: dict[str, str]) -> None:
     (site_root / ".nojekyll").write_text("", encoding="utf-8")
 
 
-def readme_cover_errors() -> list[str]:
-    """The GitHub cover must not pin height. GitHub's markdown CSS applies
+def readme_image_errors() -> list[str]:
+    """README images must not pin height. GitHub's markdown CSS applies
     max-width but not height:auto, so a fixed height stays at the intrinsic
-    height while the width shrinks, squashing the 2.5:1 artwork. The width hint
-    alone scales correctly."""
+    height while the width shrinks, squashing the artwork. The width hint alone
+    scales correctly."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    cover = re.search(r'<img[^>]*readme-cover-dark\.png[^>]*>', readme)
-    if cover is None:
-        return ["README is missing the cover fallback image"]
-    if re.search(r'\bheight=', cover.group(0)):
-        return ["README cover declares height; GitHub keeps it fixed and squashes the image"]
-    return []
+    errors = []
+    images = re.findall(r"<img\b[^>]*>", readme)
+    if not any("readme-cover-dark.png" in tag for tag in images):
+        errors.append("README is missing the cover fallback image")
+    for tag in images:
+        if not re.search(r"\bheight=", tag):
+            continue
+        src = re.search(r'\bsrc="([^"]*)"', tag)
+        errors.append(f"README image declares height: {src.group(1) if src else tag}")
+    return errors
 
 
 def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     output = output.resolve()
     base_url = base_url.rstrip("/") + "/"
-    cover_errors = readme_cover_errors()
-    if cover_errors:
-        raise BuildError("; ".join(cover_errors))
+    image_errors = readme_image_errors()
+    if image_errors:
+        raise BuildError("; ".join(image_errors))
     version = read_version()
     tokens = canonical_tokens()
     if "--rail" not in tokens:

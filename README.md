@@ -1,12 +1,22 @@
 # millivolt
 
-**See every AI request. Keep your own routing.**
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600">
+</picture>
 
-millivolt is a patch bay for model traffic. OpenAI Chat Completions, OpenAI
-Responses, and Anthropic Messages clients plug in on one side. The upstream you
-choose answers on the other. It can translate when the two ends disagree, pass
-the request through untouched, and measure the crossing: timing, tokens, cost,
-retries, outcome. Body capture only when you ask.
+<picture>
+  <source media="(max-width: 760px)" srcset="docs/images/brand/readme-spec-mobile.svg">
+  <img src="docs/images/brand/readme-spec.svg" alt="Readout: three client protocols, one Go binary, 22 MCP tools, one operator plane" width="1600">
+</picture>
+
+**See every AI request. Keep your own routing.** millivolt is a patch bay for
+model traffic. OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages
+clients plug in on one side. The upstream you choose answers on the other. It
+can translate when the two ends disagree, pass the request through untouched,
+and measure the crossing: timing, tokens, cost, retries, outcome. Body capture
+only when you ask.
 
 **millivolt stays a relay, not a platform.** No separate provider registry, no
 API-key vault, no user accounts. One Go binary. One dashboard. One operator or
@@ -17,21 +27,11 @@ a small team.
 [Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://llm-4-people.github.io/millivolt/) ·
 [Dashboard guide](docs/dashboard.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
 
-Pre-1.0 · Linux · MIT · single operator or small team. The 0.x series can change
-configuration and API details between releases.
+<sub>Pre-1.0 · Linux · MIT · single operator or small team. The 0.x series can change configuration and API details between releases.</sub>
 
-## Three client protocols, one relay
+---
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
-  <img src="docs/images/brand/readme-cover-dark.png" alt="Diagram showing OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages clients routing through one proxy to any configured upstream, with SQLite metadata below" width="1600">
-</picture>
-
-**Three client protocols in. A route chosen per request. Metadata stays on your
-host.**
-
-History is SQLite or an in-memory ring.
+<p><kbd>01 / FIRST RUN</kbd></p>
 
 ## Quickstart
 
@@ -84,6 +84,10 @@ go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 
 For isolated development and checks, see [Contributing](CONTRIBUTING.md).
 
+---
+
+<p><kbd>02 / CONNECT</kbd></p>
+
 ## Connect a client
 
 Point an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages
@@ -121,6 +125,10 @@ Relay is transparent by default, not byte-identical by contract: buffering,
 retries, SSE keepalives, translation, and overrides can change bytes. See
 [protocol](docs/protocol.md).
 
+---
+
+<p><kbd>03 / OBSERVE</kbd></p>
+
 ## Dashboard overview
 
 **Global totals stay global.** Explorer cards, timelines, and the request log
@@ -134,11 +142,15 @@ Static capture from an authorized, redacted history snapshot; identifiers are
 replaced. The offline indicator reflects the capture session, not service
 health; see [capture limitations](docs/dashboard.md).
 
+---
+
+<p><kbd>04 / CONTROL</kbd></p>
+
 ## What you get
 
 Three moves: **route, watch, intervene.**
 
-### Route: your URL, your key
+### <kbd>01</kbd> Route: your URL, your key
 
 Choose the upstream base URL, credentials, authentication header or prefix,
 path, and query on each request. Constrain accepted URL prefixes in
@@ -146,7 +158,7 @@ configuration. Optional adapters translate between OpenAI Chat Completions,
 OpenAI Responses, and Anthropic Messages through one canonical model; the
 Cursor Connect bridge is a separate, Chat-only direct path.
 
-### Watch: the request, not just the total
+### <kbd>02</kbd> Watch: the request, not just the total
 
 Watch in-flight requests next to global request, token, and cost totals. Open a
 row for TTFT, throughput, retries, queue wait, token mix, and provider-reported
@@ -154,7 +166,7 @@ cost. History stays in SQLite; an in-memory ring is available when you do not
 need retention. Scope by client, provider, model, conversation, tool, status,
 error, time, or key without losing the selected filter.
 
-### Intervene: before the retry storm
+### <kbd>03</kbd> Intervene: before the retry storm
 
 Pause new sends and retries by client, provider, or all traffic; running sends
 finish. Set provider-wide concurrency, request-rate, and token-rate limits, plus
@@ -167,24 +179,24 @@ One Go service also carries the dashboard, SQLite, and a 22-tool MCP server at
 `/mcp`. An LLM client needs only the endpoint and its Bearer credential. See
 the [MCP server guide](docs/mcp.md).
 
+---
+
+<p><kbd>05 / BOUNDARIES</kbd></p>
+
 ## What it is not
 
 millivolt is deliberately narrow. It is not a multi-tenant gateway, a billing
 system, or a compliance audit log.
 
-- **Not multi-tenant.** One shared operator credential protects the dashboard
-  and operator plane only. Inference is transparent and depends on the network
-  or ingress boundary. There are no per-user accounts.
-- **Not a guarantee of durable accounting: it is best-effort.** Sustained
-  overload can drop records even when inference succeeds. Backups, capacity,
-  and storage drops are covered in
-  [storage and accounting](docs/operations.md#storage-and-accounting).
-- **Not a byte-for-byte or exactly-once contract.** Normal paths preserve
-  content, with documented exceptions. See [protocol](docs/protocol.md).
-- **Not an invoice or an audit log.** Cost is provider-reported; this is not an
-  independent billing system or a complete compliance record.
-- **Not portable to every OS.** Linux is the only supported target. See
-  [containers](docs/operations.md#containers).
+| Boundary | What it means |
+| --- | --- |
+| **Tenancy** | Not multi-tenant. One shared operator credential protects the dashboard and operator plane only. Inference is transparent and depends on the network or ingress boundary. There are no per-user accounts. |
+| **Accounting** | Best-effort, not a guarantee. Sustained overload can drop records even when inference succeeds. Backups, capacity, and storage drops are covered in [storage and accounting](docs/operations.md#storage-and-accounting). |
+| **Relay contract** | Transparent by default, not byte-for-byte or exactly-once. Normal paths preserve content, with documented exceptions. See [protocol](docs/protocol.md). |
+| **Billing and compliance** | Not an invoice or audit log. Cost is provider-reported; this is not an independent billing system or a complete compliance record. |
+| **Portability** | Linux is the only supported target. See [containers](docs/operations.md#containers). |
+
+---
 
 ## Performance and footprint
 
@@ -212,16 +224,20 @@ full checklist, version rules, and promotion proofs. Use [support](SUPPORT.md)
 for usage questions and the private channel in [security](SECURITY.md) for
 vulnerabilities.
 
+---
+
+<p><kbd>06 / FIELD GUIDE</kbd></p>
+
 ## Documentation
 
-| Your next move | Read this |
-| --- | --- |
-| Run it | [Quickstart](#quickstart), [container operation](docs/operations.md#containers) |
-| Point a client | [Protocol](docs/protocol.md), [adapters](docs/adapters.md) |
-| Run it day to day | [Operations](docs/operations.md), [performance](docs/performance.md), [reverse proxy](docs/reverse-proxy.md) |
-| Drive it from an LLM | [MCP server](docs/mcp.md) |
-| Understand the design | [Architecture](docs/architecture.md) |
-| Contribute | [Contributing](CONTRIBUTING.md), [support](SUPPORT.md), [security](SECURITY.md) |
+| # | Path | Covers |
+| --- | --- | --- |
+| `01` | [Quickstart](#quickstart) · [container operation](docs/operations.md#containers) | First run, images, volumes, shutdown |
+| `02` | [Protocol](docs/protocol.md) · [adapters](docs/adapters.md) | Client setup, translation, compatibility |
+| `03` | [Operations](docs/operations.md) · [performance](docs/performance.md) · [reverse proxy](docs/reverse-proxy.md) | Day-to-day operation and measurements |
+| `04` | [MCP server](docs/mcp.md) | The 22-tool operator API |
+| `05` | [Architecture](docs/architecture.md) | Ownership and invariants |
+| `06` | [Contributing](CONTRIBUTING.md) · [support](SUPPORT.md) · [security](SECURITY.md) | Development, help, reporting |
 
 The application is [MIT licensed](LICENSE). Dependency notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
