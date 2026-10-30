@@ -995,6 +995,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       GOTOOLCHAIN: local
     # A main push whose VERSION is already tagged, normally a Dependabot
@@ -1138,6 +1141,17 @@ jobs:
             type=gha,scope=millivolt-container-linux-amd64
             type=gha,scope=millivolt-container-linux-arm64
           cache-to: type=gha,mode=min,scope=millivolt-publish-multiarch,ignore-error=true
+      - name: Attest the published image
+        # The tag becomes public only after the image and its signed GitHub
+        # attestation exist. BuildKit already attaches provenance and an SBOM;
+        # this adds the repository-associated Sigstore record that
+        # `gh attestation verify` checks.
+        if: steps.cut.outputs.skip != 'true'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/llm-4-people/millivolt
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
       - name: Push verified tag
         if: steps.cut.outputs.skip != 'true' && github.ref_type != 'tag'
         env:
@@ -1204,7 +1218,11 @@ jobs:
               echo "**Digest:** \`${{ steps.image.outputs.digest }}\`"
             fi
             echo
-            echo "**Verification:** BuildKit provenance and SBOM attestations are attached to the image. Check the published digest before deployment."
+            echo "**Verification:** BuildKit provenance and SBOM attestations are attached to the image. Verify the GitHub artifact attestation and pin the digest before deployment:"
+            echo
+            echo '```sh'
+            echo "gh attestation verify oci://ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION} -R LLM-4-People/millivolt"
+            echo '```'
             if [ -n "$previous" ]; then
               echo
               echo "**Full changelog:** https://github.com/LLM-4-People/millivolt/compare/${previous}...v${RELEASE_VERSION}"

@@ -216,6 +216,20 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: release image must include an SBOM")
     if image.get("with", {}).get("provenance") != "mode=max":
         errors.append("check.yml: release image must include max provenance")
+    attest_index = named_step(publish, "Attest the published image")
+    if attest_index < 0:
+        errors.append("check.yml: release image must carry a GitHub artifact attestation")
+    elif not (image_index < attest_index < tag_push_index):
+        errors.append("check.yml: the image attestation must finish before the tag becomes public")
+    else:
+        attest = steps(publish)[attest_index]
+        if not str(attest.get("uses", "")).startswith("actions/attest@"):
+            errors.append("check.yml: the image attestation must use actions/attest")
+        attest_with = attest.get("with") or {}
+        if attest_with.get("subject-digest") != "${{ steps.image.outputs.digest }}":
+            errors.append("check.yml: the attestation must cover the published image digest")
+        if attest_with.get("push-to-registry") is not True:
+            errors.append("check.yml: the attestation must be pushed to the registry")
     cut = next((step for step in steps(publish) if step.get("name") == "Cut the next version"), {})
     cut_run = str(cut.get("run", ""))
     if "git push" in cut_run:
@@ -250,7 +264,7 @@ def check_release(checks: dict, errors: list[str]) -> None:
         "## Upgrade",
         "docker pull ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}",
         "<summary>Other changes</summary>",
-        "BuildKit provenance and SBOM",
+        "gh attestation verify oci://ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}",
     ):
         if needle not in release_run:
             errors.append(f"check.yml: release notes are missing {needle}")
