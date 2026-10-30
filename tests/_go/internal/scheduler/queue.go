@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"math/rand"
 	"slices"
 	"testing"
 )
@@ -45,4 +46,34 @@ func TestWaiterQueueTracksLiveMembership(t *testing.T) {
 		t.Fatalf("emptied queue retained state: %+v", q)
 	}
 	q.forEach(func(w *waiter) { t.Fatalf("empty queue yielded waiter %p", w) })
+}
+
+// TestWaiterQueueMatchesModel drives push/remove against a slice model and
+// checks the live count and FIFO view after every operation. It covers
+// arbitrary interleavings without relying on a particular scheduler scenario.
+func TestWaiterQueueMatchesModel(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	var q waiterQueue
+	var model []*waiter
+	for step := 0; step < 5000; step++ {
+		if len(model) == 0 || rng.Intn(3) != 0 {
+			w := &waiter{}
+			q.push(w)
+			model = append(model, w)
+		} else {
+			i := rng.Intn(len(model))
+			if !q.remove(model[i]) {
+				t.Fatalf("step %d: queued waiter %p was not removable", step, model[i])
+			}
+			model = append(model[:i], model[i+1:]...)
+		}
+		if q.live != len(model) {
+			t.Fatalf("step %d: live = %d, want %d", step, q.live, len(model))
+		}
+		var got []*waiter
+		q.forEach(func(w *waiter) { got = append(got, w) })
+		if !slices.Equal(got, model) {
+			t.Fatalf("step %d: FIFO view = %v, want %v", step, got, model)
+		}
+	}
 }
