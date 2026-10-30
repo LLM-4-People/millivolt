@@ -107,6 +107,7 @@ type exportWriter struct {
 
 func (w *exportWriter) Write(p []byte) (int, error) {
 	w.started = true
+	// Export streaming writes a gzip artifact, not HTML.
 	return w.ResponseWriter.Write(p)
 }
 

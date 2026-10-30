@@ -284,6 +284,7 @@ type debugRW struct {
 
 func (d *debugRW) Write(p []byte) (int, error) {
 	d.tap.respBody.Write(p)
+	// Capture tee; bytes pass through to the handler's own response.
 	return d.ResponseWriter.Write(p)
 }
 

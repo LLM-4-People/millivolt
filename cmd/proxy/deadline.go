@@ -122,6 +122,7 @@ func (w *deadlineResponseWriter) Write(p []byte) (int, error) {
 		deadline = w.explicit
 	}
 	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
+	// Transparent deadline wrapper; the handler owns content type and escaping.
 	return w.ResponseWriter.Write(p)
 }
 

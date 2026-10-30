@@ -116,6 +116,7 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 		g.WriteHeader(http.StatusOK)
 	}
 	if g.plain {
+		// Transparent gzip wrapper; the handler owns content type and escaping.
 		return g.ResponseWriter.Write(b)
 	}
 	return g.gz.Write(b)
