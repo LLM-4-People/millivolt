@@ -48,8 +48,8 @@ pre-create directories writable by UID/GID `65532:65532`; see
 [persistent state](docs/operations.md#persistent-state-and-configuration).
 
 The published image is `ghcr.io/llm-4-people/millivolt:main` for amd64 and
-arm64. Version tags and digests are the reproducible choice; see
-[versions and images](docs/operations.md#versions-and-images).
+arm64. Version tags identify releases; pin a digest when exact bytes matter.
+See [versions and images](docs/operations.md#versions-and-images).
 
 Stop with `docker compose stop`. For image selection, configuration, backups,
 updates, shutdown, or protected ingress, see
@@ -82,20 +82,7 @@ Three client protocols enter one proxy; each request can target a different
 configured upstream. Request metadata and metrics stay in SQLite or an in-memory
 ring, and body capture is opt-in.
 
-## Dashboard overview
-
-Global totals stay global; explorer cards, timelines, and the request log share
-one selected scope. See the [visual guide](docs/dashboard.md) for focused captures
-of tokens, speed and latency, cost, providers, models, conversations, and
-Settings.
-
-![Screenshot of the millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline](docs/images/overview/dashboard.png)
-
-Static capture from an authorized, redacted history snapshot; identifiers are
-replaced. The offline indicator reflects the capture session, not service
-health; see [capture limitations](docs/dashboard.md).
-
-### Connect a client
+## Connect a client
 
 Point an OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages
 client at the proxy. The upstream URL and key stay yours; the proxy does not
@@ -130,6 +117,19 @@ Normal relay paths preserve request and response content, with documented
 exceptions for buffering, retries, SSE keepalives, format translation, and
 configured overrides. This is not an unconditional byte-for-byte or
 exactly-once contract. See [protocol](docs/protocol.md).
+
+## Dashboard overview
+
+Global totals stay global; explorer cards, timelines, and the request log share
+one selected scope. See the [visual guide](docs/dashboard.md) for focused captures
+of tokens, speed and latency, cost, providers, models, conversations, and
+Settings.
+
+![Screenshot of the millivolt dashboard with global request, token, and cost totals above a scoped request log and timeline](docs/images/overview/dashboard.png)
+
+Static capture from an authorized, redacted history snapshot; identifiers are
+replaced. The offline indicator reflects the capture session, not service
+health; see [capture limitations](docs/dashboard.md).
 
 ## What you get
 
