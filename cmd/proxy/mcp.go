@@ -157,7 +157,10 @@ func (r *inProcessRecorder) Write(data []byte) (int, error) {
 	if len(data) > remaining {
 		data = data[:remaining]
 	}
-	if need := len(r.body) + len(data); need > cap(r.body) {
+	// remaining-len(data) is non-negative, so deriving the target from the
+	// fixed budget avoids adding two potentially large lengths.
+	need := inProcessRecorderBufferMax - (remaining - len(data))
+	if need > cap(r.body) {
 		grown := cap(r.body) * 2
 		if grown < need {
 			grown = need
