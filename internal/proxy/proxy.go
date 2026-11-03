@@ -833,7 +833,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	state := &stormRequestState{rec: rec, format: t.format}
-	ctx := context.WithValue(r.Context(), stormContextKey{}, state)
+	ctx, cancelCtx := context.WithCancel(context.WithValue(r.Context(), stormContextKey{}, state))
+	defer cancelCtx()
 	defer func() {
 		s.finishStormResponse(ctx, false)
 	}()
@@ -872,6 +873,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var pacer *ssePacer
 	if stream {
 		pacer = s.newSSEPacerFor(w)
+		// A keepalive that cannot be written means the client is gone. Cancel
+		// the request context so a parked queue wait (or a send gate wait)
+		// unwinds instead of staying queued until a provider timer fires.
+		pacer.onGone = cancelCtx
 		w = pacer
 		pacer.Arm()
 	}
@@ -927,7 +932,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if t.format != "cursor" {
 		_, err = s.waitStormGate(ctx, hooks, true)
 		if err != nil {
-			if r.Context().Err() != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
 				markClientGone(rec)
 				return
 			}
@@ -948,7 +953,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "queued request released by the operator; retry", http.StatusServiceUnavailable, s.retryAfterHeader())
 			return
 		}
-		if r.Context().Err() == context.Canceled {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			// Covers both the client's own disconnect and a keepalive write
+			// failure that proved the socket is gone (pacer.onGone). A
+			// DeadlineExceeded stays a proxy-side failure below.
 			markClientGone(rec)
 			return
 		}
@@ -984,7 +992,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// "client closed request" (never an error, matching the broken-pipe
 		// stream classification). A nil request context (e.g. our own request
 		// deadline) is a real proxy-side failure: 502 upstream_unreachable.
-		if r.Context().Err() == context.Canceled {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			// Covers both the client's own disconnect and a keepalive write
+			// failure that proved the socket is gone (pacer.onGone). A
+			// DeadlineExceeded stays a proxy-side failure below.
 			markClientGone(rec)
 			return
 		}

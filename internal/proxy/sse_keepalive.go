@@ -60,6 +60,10 @@ type ssePacer struct {
 	atLineStart   bool
 	interval      time.Duration
 	writeProgress time.Duration
+	// onGone fires once when a keepalive write fails, which proves the client
+	// socket is gone. It cancels the request context so a parked queue or send
+	// gate wait unwinds instead of staying queued until a provider timer fires.
+	onGone func()
 }
 
 func newSSEPacer(w http.ResponseWriter, interval, writeProgress time.Duration) *ssePacer {
@@ -237,8 +241,16 @@ func (p *ssePacer) Start() {
 		p.commitSSELocked()
 	}
 	p.mu.Unlock()
-	if first {
-		p.writeComment(true)
+	if first && !p.writeComment(true) {
+		p.gone()
+	}
+}
+
+// gone reports a failed keepalive write to the request owner once. It runs
+// outside p.mu so the cancel path can never re-enter the pacer.
+func (p *ssePacer) gone() {
+	if p.onGone != nil {
+		p.onGone()
 	}
 }
 
@@ -267,6 +279,7 @@ func (p *ssePacer) loop() {
 				continue
 			}
 			if !p.writeComment(false) {
+				p.gone()
 				return
 			}
 		}
