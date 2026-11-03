@@ -96,6 +96,13 @@ target cannot consume them:
   merging them would corrupt genuinely distinct summary and content text.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
+- A Responses `max_tool_calls` request field has no cross-protocol equivalent.
+  A native Responses relay forwards it byte for byte, so the provider still
+  caps its own tool calls. A translated request drops it with a
+  `max_tool_calls` warning and `translation_loss: reject` turns that loss into
+  a 400 before any upstream send. The translated turn therefore has no
+  provider tool-call cap unless the client also sets one the target protocol
+  understands.
 - A Responses item `phase` is a wire hint with no target equivalent. A
   non-streaming request or response records one `input.phase` or `output.phase`
   warning. A translated stream keeps one `output.phase` warning only in the
