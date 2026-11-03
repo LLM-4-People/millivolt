@@ -70,8 +70,11 @@ func TestResponsesMalformedTextKeepsRecord(t *testing.T) {
 			if rec.ReqTopLogprobs == nil || *rec.ReqTopLogprobs != 2 {
 				t.Fatalf("top_logprobs = %v, want 2", rec.ReqTopLogprobs)
 			}
-			if got := estimateTokens(rec); got == 0 {
-				t.Fatal("estimateTokens = 0; the record no longer reserves the output cap")
+			// The reservation is the prompt share only; the declared output
+			// ceiling is a ceiling, not expected usage, and must not inflate it.
+			chars := rec.CharsSystem + rec.CharsUser + rec.CharsAssistant + rec.CharsTool
+			if got, want := estimateTokens(rec), int64(chars/4); got != want {
+				t.Fatalf("estimateTokens = %d, want the prompt share %d", got, want)
 			}
 			if shape.name == "object control" {
 				if rec.ReqResponseFormat != "json_object" || rec.ReqVerbosity != "low" {
@@ -108,6 +111,6 @@ func TestResponsesMalformedTextKeepsRecord(t *testing.T) {
 			rec.TurnsUser, rec.CharsSystem, rec.CharsUser, len("SYS"), len("hello there"))
 	}
 	if got := estimateTokens(rec); got == 0 {
-		t.Fatal("chat estimateTokens = 0; the record no longer reserves the prompt and output cap")
+		t.Fatal("chat estimateTokens = 0; the record no longer reserves the prompt")
 	}
 }

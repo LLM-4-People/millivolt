@@ -744,19 +744,23 @@ func parseRampDuration(s string) (time.Duration, error) {
 	return parseLimitWindow(s)
 }
 
-// estimateTokens is the Acquire-time reservation: prompt chars/4 plus
-// req_max_tokens when the client sent one. Zero means "don't reserve;
-// settle actual usage when the response ends".
+// estimateTokens is the Acquire-time reservation: prompt characters / 4.
+//
+// The client's output ceiling (max_tokens / max_completion_tokens /
+// max_output_tokens) is deliberately NOT part of the reservation. It is a
+// ceiling, not expected usage, and reserving it turned a token *budget* into a
+// worst-case concurrency cap: a 500K/6h budget admitted only a handful of
+// requests that each declared a 32K output limit, so every later request
+// queued even though actual usage was tiny. Actual usage is charged at
+// settlement (`settleTokens`), so the bucket still enforces the window and can
+// go into debt on a real burst; the documented contract is a token budget that
+// permits bursts, not strict fixed-window quota enforcement.
 func estimateTokens(rec *metrics.Record) int64 {
 	if rec == nil {
 		return 0
 	}
 	chars := rec.CharsSystem + rec.CharsUser + rec.CharsAssistant + rec.CharsTool
-	est := int64(chars / 4)
-	if rec.ReqMaxTokens != nil && *rec.ReqMaxTokens > 0 {
-		est += int64(*rec.ReqMaxTokens)
-	}
-	return est
+	return int64(chars / 4)
 }
 
 // settleTokens is the actual usage charged against the token window.

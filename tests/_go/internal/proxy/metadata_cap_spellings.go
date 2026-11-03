@@ -4,8 +4,8 @@ package proxy
 // take the split-decode recovery. The parameter block used to type the three
 // caps as *int, so 1e6 or 1000000.0 failed the merged metadata decode and the
 // recovery returned after stamping only the cap. The record then lost
-// temperature, tools, turns and character composition, and estimateTokens
-// reserved only the output cap. The wire body was always correct, so only these
+// temperature, tools, turns and character composition, so the reservation
+// described only the output cap. The wire body was always correct, so only these
 // record invariants catch the defect.
 
 import (
@@ -98,8 +98,8 @@ func TestTokenCapSpellingKeepsRequestMetadata(t *testing.T) {
 						t.Fatalf("record chars = system %d user %d, want 3/%d (split-decode recovery dropped the composition)",
 							rec.CharsSystem, rec.CharsUser, capMetadataPromptChars)
 					}
-					if got, want := estimateTokens(rec), int64(capMetadataPromptChars/4+1000000); got != want {
-						t.Fatalf("estimateTokens = %d, want %d (prompt share and cap reservation)", got, want)
+					if got, want := estimateTokens(rec), int64(capMetadataPromptChars/4); got != want {
+						t.Fatalf("estimateTokens = %d, want %d (prompt share only)", got, want)
 					}
 				})
 			}

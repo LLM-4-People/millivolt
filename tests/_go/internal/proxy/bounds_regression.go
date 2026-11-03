@@ -55,14 +55,10 @@ func TestParseRetryAfterClamped(t *testing.T) {
 }
 
 // TestMaxRequestOutputTokensBound pins the trust-boundary rejection of a
-// hostile client token cap. The decoded max_tokens feeds estimateTokens at
-// Acquire time with no range check anywhere: MaxInt64 wraps the estimate
-// negative so the scheduler's need <= 0 branch skips the reservation, and a
-// huge finite value exceeds any configured capacity so the need > capacity
-// branch admits the request and debits the provider-wide token bucket by
-// the attacker-chosen amount, token-blocking every other client for the
-// in-flight window. max_tokens and max_completion_tokens both decode into
-// the same ReqMaxTokens (preferring max_completion_tokens, like the
+// hostile client token cap. The cap reaches the upstream wire and the record;
+// an attacker-chosen value must never become a provider instruction or leak
+// into a translated re-decode. max_tokens and max_completion_tokens both decode
+// into the same ReqMaxTokens (preferring max_completion_tokens, like the
 // Anthropic translator), so one bound rejects both spellings - including a
 // both-fields body whose max_completion_tokens the translator would have
 // carried into the translated re-decode past a max_tokens-only check.
