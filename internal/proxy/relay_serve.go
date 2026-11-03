@@ -190,11 +190,15 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
 		if t.translate {
+			// One snapshot for the whole buffered translate branch: the config
+			// owner is the only source of the bound, and a concurrent reload
+			// must not change it midway through one document.
+			translateMax := int64(s.cfg().TranslatedResponseMaxBytes)
 			// Reserve the whole-document buffer process-wide before reading.
 			// The reservation is held until this branch has written the
 			// translated body, so concurrent translations cannot multiply the
 			// per-document cap without bound.
-			reserve := responseReadReserve(resp.ContentLength, maxTranslateBodyBytes+1)
+			reserve := responseReadReserve(resp.ContentLength, translateMax+1)
 			if !s.respBudget.acquire(reserve) {
 				writeResponseBufferBudget(w, rec, t.inbound)
 				return
@@ -208,7 +212,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			if resp.Request != nil {
 				readCtx = resp.Request.Context()
 			}
-			full, rerr := s.readWholeDocument(readCtx, resp.Body, maxTranslateBodyBytes+1)
+			full, rerr := s.readWholeDocument(readCtx, resp.Body, translateMax+1)
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr)
 				if rec.ClientDisconnected {
@@ -222,10 +226,10 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// Past the cap the document cannot be translated, and verbatim
 			// relay would break the translated-shape contract: fail closed
 			// with a real 502 (the status line is still uncommitted here).
-			if int64(len(full)) > maxTranslateBodyBytes {
+			if int64(len(full)) > translateMax {
 				rec.StatusCode = http.StatusBadGateway
 				rec.ErrorType = "response_too_large"
-				rec.ErrorMsg = "upstream translated body exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
+				rec.ErrorMsg = "upstream translated body exceeds " + config.FormatByteSize(translateMax)
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
 					"upstream response too large to translate")
 				return
@@ -267,10 +271,10 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// cap: past the same buffering bound the response cannot be relayed
 			// within the translated-shape contract, so fail closed before any
 			// byte reaches the client.
-			if int64(len(out)) > maxTranslateBodyBytes {
+			if int64(len(out)) > translateMax {
 				rec.StatusCode = http.StatusBadGateway
 				rec.ErrorType = "response_too_large"
-				rec.ErrorMsg = "translated response exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
+				rec.ErrorMsg = "translated response exceeds " + config.FormatByteSize(translateMax)
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
 					"translated response too large")
 				return

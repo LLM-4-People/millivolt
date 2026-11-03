@@ -176,9 +176,9 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 // the document cannot be translated, and relaying it verbatim would break the
 // translated-shape contract, so the read fails closed as 502 (nothing has been
 // written to the client yet on that path - the status line is committed only
-// after a successful translation). The 32 MiB ceiling (proxy.go's
-// maxTranslateBodyBytes, the request-side default scale) is pinned literally
-// here: silent drift of that constant must fail this test.
+// after a successful translation). The default translated_response_max_bytes
+// (32 MiB) is pinned literally here: silent drift of the default must fail this
+// test.
 func TestTranslatedResponseBodyBounded(t *testing.T) {
 	const wantCapBytes = 32 << 20
 	// A valid Anthropic 200 body whose single text block pads the framed

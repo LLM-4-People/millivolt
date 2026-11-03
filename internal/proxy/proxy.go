@@ -105,15 +105,6 @@ const (
 	// error. Past the cap the hold is abandoned: no terminal region this large
 	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
 	terminalHoldMax = 64 * 1024
-	// maxTranslateBodyBytes caps the buffered read of a translated
-	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool
-	// prefixes above, translation needs the WHOLE document, so this is a
-	// hard fail-closed cap, not a graceful prefix: past it the body cannot be
-	// translated, and relaying it verbatim would break the translated-shape
-	// contract, so the read fails closed as a 502 (nothing has been written
-	// to the client yet on that path). Sized at the request-side default
-	// scale (max_request_bytes). Safety guardrail, not user-tunable.
-	maxTranslateBodyBytes = 32 << 20 // 32 MiB
 )
 
 // isNonRetryableQuotaErr is the proxy-local spelling of the canonical quota

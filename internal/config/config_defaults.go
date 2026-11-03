@@ -49,6 +49,12 @@ const (
 	// Inbound body band (Validate, overlay, Schema).
 	MaxRequestBytesMin = 1024
 	MaxRequestBytesMax = 1 << 30
+	// Model discovery entry band and translated-response body band (Validate,
+	// overlay, Schema).
+	ModelsDiscoveryMaxEntriesMin  = 100
+	ModelsDiscoveryMaxEntriesMax  = 1_000_000
+	TranslatedResponseMaxBytesMin = 4 << 10
+	TranslatedResponseMaxBytesMax = 1 << 30
 	// Tool-call bands (Validate, overlay, Schema). The ceiling bounds what an
 	// operator may select; the format codec's direct-library defaults are the
 	// same documented values, pinned by a contract test.
@@ -162,12 +168,14 @@ func Default() *Config {
 		RestartDrainTimeout: 10 * time.Minute,
 		MemoryLimit:         0, // 0 = auto cgroup ceiling, else unbounded; GOMEMLIMIT wins
 
-		MaxRequestBytes:         32 << 20, // 32 MiB
-		RequestToolCallsMax:     format.WireToolCallsMax,
-		UpstreamTimeout:         5 * time.Minute,
-		ModelsDiscoveryTimeout:  30 * time.Second,
-		ModelsDiscoveryMaxBytes: 8 << 20,
-		ModelsDiscoveryMaxPages: 100,
+		MaxRequestBytes:            32 << 20, // 32 MiB
+		RequestToolCallsMax:        format.WireToolCallsMax,
+		UpstreamTimeout:            5 * time.Minute,
+		ModelsDiscoveryTimeout:     30 * time.Second,
+		ModelsDiscoveryMaxBytes:    8 << 20,
+		ModelsDiscoveryMaxPages:    100,
+		ModelsDiscoveryMaxEntries:  10_000,
+		TranslatedResponseMaxBytes: 32 << 20,
 
 		MaxConnsPerHost:     512,
 		MaxIdleConns:        512,

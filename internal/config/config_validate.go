@@ -98,6 +98,9 @@ func (c *Config) Validate() error {
 	if err := checkByteSize("max_request_bytes", c.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
 		return err
 	}
+	if err := checkByteSize("translated_response_max_bytes", c.TranslatedResponseMaxBytes, TranslatedResponseMaxBytesMin, TranslatedResponseMaxBytesMax); err != nil {
+		return err
+	}
 	if c.RequestToolCallsMax < RequestToolCallsMin || c.RequestToolCallsMax > RequestToolCallsBandMax {
 		return fmt.Errorf("request_tool_calls_max: must be %d..%d, got %d",
 			RequestToolCallsMin, RequestToolCallsBandMax, c.RequestToolCallsMax)
@@ -489,6 +492,7 @@ func validateModelsDiscovery(c *Config) error {
 		{"models_discovery_timeout", int64(c.ModelsDiscoveryTimeout), int64(ModelsDiscoveryTimeoutMin), int64(ModelsDiscoveryTimeoutMax)},
 		{"models_discovery_max_bytes", int64(c.ModelsDiscoveryMaxBytes), ModelsDiscoveryMaxBytesMin, ModelsDiscoveryMaxBytesMax},
 		{"models_discovery_max_pages", int64(c.ModelsDiscoveryMaxPages), ModelsDiscoveryMaxPagesMin, ModelsDiscoveryMaxPagesMax},
+		{"models_discovery_max_entries", int64(c.ModelsDiscoveryMaxEntries), ModelsDiscoveryMaxEntriesMin, ModelsDiscoveryMaxEntriesMax},
 	} {
 		if limit.value < limit.min || limit.value > limit.max {
 			if limit.key == "models_discovery_timeout" {

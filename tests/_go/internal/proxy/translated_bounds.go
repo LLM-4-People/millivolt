@@ -187,13 +187,13 @@ func TestTranslatedResponseOutputCapFailsClosed(t *testing.T) {
 	if diff <= 0 {
 		t.Fatalf("fixture translation shrinks (%d-byte diff); cannot exercise the output cap", diff)
 	}
-	contentLen := maxTranslateBodyBytes - 1 - len(prefix) - len(suffix)
+	contentLen := int(config.Default().TranslatedResponseMaxBytes) - 1 - len(prefix) - len(suffix)
 	if contentLen <= 0 {
 		t.Fatal("fixture prefix/suffix exceed the translation cap")
 	}
 	upstreamBody := []byte(prefix + strings.Repeat("x", contentLen) + suffix)
-	if len(upstreamBody) != maxTranslateBodyBytes-1 {
-		t.Fatalf("fixture input = %d bytes, want %d", len(upstreamBody), maxTranslateBodyBytes-1)
+	if len(upstreamBody) != int(config.Default().TranslatedResponseMaxBytes)-1 {
+		t.Fatalf("fixture input = %d bytes, want %d", len(upstreamBody), int(config.Default().TranslatedResponseMaxBytes)-1)
 	}
 
 	p := New(config.Default(), metrics.Noop{})

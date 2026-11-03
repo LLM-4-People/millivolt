@@ -73,6 +73,21 @@ type Config struct {
 	ModelsDiscoveryTimeout  time.Duration `yaml:"models_discovery_timeout" json:"models_discovery_timeout"`
 	ModelsDiscoveryMaxBytes ByteSize      `yaml:"models_discovery_max_bytes" json:"models_discovery_max_bytes"`
 	ModelsDiscoveryMaxPages int           `yaml:"models_discovery_max_pages" json:"models_discovery_max_pages"`
+	// ModelsDiscoveryMaxEntries bounds the model entries one discovery request
+	// may retain across every primary page and enrichment source. The raw-byte
+	// budget alone cannot bound discovery memory: a compact 8 MiB body of
+	// {"id":"x"} objects holds over 600k entries, and one decoded map per entry
+	// costs hundreds of MiB. Exceeding it fails closed, never a partial list.
+	// Raise it for providers that publish unusually large catalogs. Hot-reloads
+	// for new discovery requests.
+	ModelsDiscoveryMaxEntries int `yaml:"models_discovery_max_entries" json:"models_discovery_max_entries"`
+
+	// TranslatedResponseMaxBytes caps the whole buffered read of a translated
+	// non-streaming upstream response, and the translated document written
+	// back. Translation needs the complete document, so this fails closed with
+	// 502 response_too_large instead of relaying a prefix. Raise it when
+	// translating unusually large provider responses. Hot-reloads.
+	TranslatedResponseMaxBytes ByteSize `yaml:"translated_response_max_bytes" json:"translated_response_max_bytes"`
 
 	// AllowedBaseURLs is an optional allowlist of upstream base URL prefixes.
 	// When non-empty, only targets matching one of these prefixes are accepted;

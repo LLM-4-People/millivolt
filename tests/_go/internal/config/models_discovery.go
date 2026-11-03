@@ -30,6 +30,7 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 	}{
 		{"models_discovery_max_bytes", ModelsDiscoveryMaxBytesMin, ModelsDiscoveryMaxBytesMax},
 		{"models_discovery_max_pages", ModelsDiscoveryMaxPagesMin, ModelsDiscoveryMaxPagesMax},
+		{"models_discovery_max_entries", ModelsDiscoveryMaxEntriesMin, ModelsDiscoveryMaxEntriesMax},
 	} {
 		for _, invalid := range []string{"-1", "0", fmt.Sprint(field.min - 1), fmt.Sprint(field.max + 1), "4096.5", "4096.0", "null", "bad"} {
 			got, err := load(field.key + ": " + invalid)
@@ -82,12 +83,13 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 	changed.ModelsDiscoveryTimeout = ModelsDiscoveryTimeoutMin
 	changed.ModelsDiscoveryMaxBytes = ModelsDiscoveryMaxBytesMin
 	changed.ModelsDiscoveryMaxPages = ModelsDiscoveryMaxPagesMin
+	changed.ModelsDiscoveryMaxEntries = ModelsDiscoveryMaxEntriesMin
 	var out bytes.Buffer
 	if err := WriteYAML(&out, changed); err != nil {
 		t.Fatal(err)
 	}
 	got, err = load(out.String())
-	if err != nil || got.ModelsDiscoveryTimeout != changed.ModelsDiscoveryTimeout || got.ModelsDiscoveryMaxBytes != changed.ModelsDiscoveryMaxBytes || got.ModelsDiscoveryMaxPages != changed.ModelsDiscoveryMaxPages {
+	if err != nil || got.ModelsDiscoveryTimeout != changed.ModelsDiscoveryTimeout || got.ModelsDiscoveryMaxBytes != changed.ModelsDiscoveryMaxBytes || got.ModelsDiscoveryMaxPages != changed.ModelsDiscoveryMaxPages || got.ModelsDiscoveryMaxEntries != changed.ModelsDiscoveryMaxEntries {
 		t.Fatalf("roundtrip: %+v %v", got, err)
 	}
 	n := 0
@@ -99,7 +101,7 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 			}
 		}
 	}
-	if n != 3 {
+	if n != 4 {
 		t.Fatalf("schema discovery fields=%d", n)
 	}
 	got, err = load("models_discovery_max_byte: 8192")

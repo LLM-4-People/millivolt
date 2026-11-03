@@ -90,7 +90,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | --- | --- |
 | Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
 | Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
-| Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
+| Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap and SSE keepalives. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
