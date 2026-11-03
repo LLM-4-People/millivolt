@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -60,11 +61,11 @@ func releaseRequestBodyScratch(buf []byte) {
 // routing + observability metadata once. Direct callers use the 1 MiB
 // speculative guardrail; the proxy passes the admitted upload size so a
 // declared body can be read once in place instead of prefix + copy.
-func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, rec *metrics.Record, err error) {
-	return readRequestHint(r, maxBytes, preview, requestReadHintMax)
+func readRequest(r *http.Request, maxBytes int64, preview bool, cfg *config.Config) (body []byte, rec *metrics.Record, err error) {
+	return readRequestHint(r, maxBytes, preview, requestReadHintMax, cfg)
 }
 
-func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int64) (body []byte, rec *metrics.Record, err error) {
+func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int64, cfg *config.Config) (body []byte, rec *metrics.Record, err error) {
 	rec = new(metrics.Record)
 	if r.Body == nil {
 		rec.Start = time.Now()
@@ -89,7 +90,7 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 	// Request timing excludes upload, but includes the unified metadata decode
 	// and any later format translation. This is the sole Start owner.
 	rec.Start = time.Now()
-	if err := parseLLMRequest(body, rec, preview); err != nil {
+	if err := parseLLMRequest(body, rec, preview, cfg); err != nil {
 		return nil, nil, err
 	}
 	return body, rec, nil

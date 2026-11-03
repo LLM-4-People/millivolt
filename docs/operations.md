@@ -89,13 +89,13 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Settings category | Configuration area |
 | --- | --- |
 | Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
-| Request | Upload bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
+| Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
 | Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
-| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), Cursor parked-run lifetime and heartbeat. |
+| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call and Cursor parked-run bounds, Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
 | Backup | Size cap for one Settings backup download or restore upload. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |

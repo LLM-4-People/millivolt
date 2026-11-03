@@ -72,7 +72,7 @@ var (
 	// over-bound provider identity field.
 	errNativeIdentityTooLong = errors.New("anthropic: identity field exceeds limit")
 	// errNativeToolBlocks is the stable fail-closed reason for opening more
-	// concurrent tool blocks than toolBlocksMax.
+	// concurrent tool blocks than StreamToolCallsMax.
 	errNativeToolBlocks = errors.New("anthropic: concurrent tool block limit exceeded")
 	// errNativeToolInitialBytes is the stable fail-closed reason for retaining
 	// more initial tool input than toolInitialBytesMax across open blocks.

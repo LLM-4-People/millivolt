@@ -24,7 +24,7 @@ func BenchmarkRequestMetadata(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				var rec metrics.Record
-				parseLLMRequest(body, &rec, false)
+				parseTestRequest(body, &rec, false)
 				if rec.CharsUser != size {
 					b.Fatal("incorrect content size")
 				}
@@ -47,7 +47,7 @@ func BenchmarkRequestMetadataShapes(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				var rec metrics.Record
-				parseLLMRequest(body, &rec, false)
+				parseTestRequest(body, &rec, false)
 			}
 		})
 	}

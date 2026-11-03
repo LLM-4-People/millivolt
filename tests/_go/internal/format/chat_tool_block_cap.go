@@ -3,7 +3,7 @@ package format
 // Round 7 C-U(c) regression: the Chat stream decoder tracked every distinct
 // tool-call index without a cap, unlike the Anthropic and Responses decoders.
 // A source that opens unique indices without closing them could grow the block
-// and argument maps until the terminal; the shared toolBlocksMax bound now
+// and argument maps until the terminal; the shared StreamToolCallsMax bound now
 // fails the stream instead.
 
 import (
@@ -29,7 +29,7 @@ func chatToolBlockStream(count int) string {
 func TestChatStreamToolBlockCountIsBounded(t *testing.T) {
 	t.Run("1024 blocks pass", func(t *testing.T) {
 		var buf bytes.Buffer
-		if err := TranslateStreamBetween(ir.Chat, ir.Chat, &buf, strings.NewReader(chatToolBlockStream(toolBlocksMax)), nil, nil, StreamOptions{}); err != nil {
+		if err := TranslateStreamBetween(ir.Chat, ir.Chat, &buf, strings.NewReader(chatToolBlockStream(StreamToolCallsMax)), nil, nil, StreamOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(buf.String(), "data: [DONE]") {
@@ -39,12 +39,24 @@ func TestChatStreamToolBlockCountIsBounded(t *testing.T) {
 
 	t.Run("1025 blocks fail", func(t *testing.T) {
 		var buf bytes.Buffer
-		err := TranslateStreamBetween(ir.Chat, ir.Chat, &buf, strings.NewReader(chatToolBlockStream(toolBlocksMax+1)), nil, nil, StreamOptions{})
+		err := TranslateStreamBetween(ir.Chat, ir.Chat, &buf, strings.NewReader(chatToolBlockStream(StreamToolCallsMax+1)), nil, nil, StreamOptions{})
 		if err == nil || !strings.Contains(err.Error(), "tool calls") {
 			t.Fatalf("error = %v, want the tool-block cap", err)
 		}
 		if strings.Contains(buf.String(), "data: [DONE]") {
 			t.Fatalf("over-cap stream reached a clean terminal")
+		}
+	})
+
+	t.Run("configured bound applies", func(t *testing.T) {
+		var ok bytes.Buffer
+		if err := TranslateStreamBetween(ir.Chat, ir.Chat, &ok, strings.NewReader(chatToolBlockStream(8)), nil, nil, StreamOptions{ToolBlocksMax: 8}); err != nil {
+			t.Fatalf("stream at the configured bound rejected: %v", err)
+		}
+		var over bytes.Buffer
+		err := TranslateStreamBetween(ir.Chat, ir.Chat, &over, strings.NewReader(chatToolBlockStream(9)), nil, nil, StreamOptions{ToolBlocksMax: 8})
+		if err == nil || !strings.Contains(err.Error(), "8 tool calls") {
+			t.Fatalf("error = %v, want the configured 8-call bound", err)
 		}
 	})
 

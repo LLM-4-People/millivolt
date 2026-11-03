@@ -24,7 +24,7 @@ func TestChatResponseFormatUnknownTypeWarns(t *testing.T) {
 		t.Fatalf("unsupported response_format recorded no warning: %+v", req.Warnings)
 	}
 	for _, target := range []ir.Protocol{ir.Responses, ir.Anthropic} {
-		_, out, warnings, err := TranslateRequestBetweenIR(ir.Chat, target, []byte(body), 0, "")
+		_, out, warnings, err := TranslateRequestBetweenIR(ir.Chat, target, []byte(body), 0, "", testRequestLimits())
 		if err != nil {
 			t.Fatalf("%s translation: %v", target, err)
 		}

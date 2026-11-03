@@ -107,12 +107,20 @@ response_write_timeout: 10m
 go_memory_limit: 0B
 
 # ---- Request ----
-# Inbound body cap, SSRF allowlist, optional body-preview, and debug-capture retention.
+# Inbound body cap, tool-call history bound, SSRF allowlist, optional body-preview, and
+# debug-capture retention.
 # Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected
 # with 413.
 # Hot-reload: yes.
 #   type: bytes · range 1KiB..1GiB · default 32MiB
 max_request_bytes: 32MiB
+
+# Most tool calls across the whole message history of one inbound request. Real agent
+# turns replay a handful; raise it only for clients that resend unusually long tool loops,
+# because every call is materialized in memory during translation.
+# Hot-reload: yes.
+#   type: int · range 1..100000 · default 1024
+request_tool_calls_max: 1024
 
 # SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
 # operator). Each entry must be an absolute URL whose prefix is literally lowercase
@@ -556,12 +564,21 @@ sub_conversations:
     strip: true
 
 # ---- Format translation ----
-# Cross-protocol translation policy, Anthropic defaults and Cursor agent.v1 bridging.
+# Cross-protocol translation policy, streamed tool-call bound, Anthropic defaults and
+# Cursor agent.v1 bridging.
 # Injected into translated Anthropic requests when the client sent none of max_tokens,
 # max_completion_tokens or max_output_tokens.
 # Hot-reload: yes.
 #   type: int (tokens) · range 1..1000000 · default 4096
 anthropic_default_max_tokens: 4096
+
+# Most tool calls one translated response stream may carry: concurrent open blocks for
+# Anthropic and Responses, distinct calls for Chat (its stream has no per-call close
+# event). A stream past the bound ends with a translation_error. Raise it only for
+# providers that emit unusually large parallel tool batches.
+# Hot-reload: yes.
+#   type: int · range 1..65536 · default 1024
+stream_tool_calls_max: 1024
 
 # What a cross-protocol translation does when the target cannot represent a client field.
 # warn (default) drops optional fields and reports them in X-Proxy-Warnings; reject fails

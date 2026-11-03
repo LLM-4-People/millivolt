@@ -153,11 +153,11 @@ func imageDataURL(img *ir.Image) string {
 	return "data:" + img.MediaType + ";base64," + img.Data
 }
 
-// DecodeRequest decodes one inbound request body.
-func DecodeRequest(p ir.Protocol, body []byte) (*ir.Request, error) {
+// DecodeRequest decodes one inbound request body with the operator's limits.
+func DecodeRequest(p ir.Protocol, body []byte, limits RequestLimits) (*ir.Request, error) {
 	switch p {
 	case ir.Chat:
-		return DecodeChatRequest(body)
+		return decodeChatRequest(body, limits)
 	case ir.Responses:
 		return DecodeResponsesRequest(body)
 	case ir.Anthropic:
@@ -184,8 +184,8 @@ func EncodeRequest(p ir.Protocol, req *ir.Request, defaultMaxTokens int, promptC
 // TranslateRequestBetweenIR converts one request body between two protocols
 // and returns the canonical request so the caller can stamp request metadata
 // without re-parsing the translated wire document.
-func TranslateRequestBetweenIR(inbound, outbound ir.Protocol, body []byte, defaultMaxTokens int, promptCacheKey string) (*ir.Request, []byte, ir.Warnings, error) {
-	req, err := DecodeRequest(inbound, body)
+func TranslateRequestBetweenIR(inbound, outbound ir.Protocol, body []byte, defaultMaxTokens int, promptCacheKey string, limits RequestLimits) (*ir.Request, []byte, ir.Warnings, error) {
+	req, err := DecodeRequest(inbound, body, limits)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -212,9 +212,12 @@ func TranslateRequestBetweenIR(inbound, outbound ir.Protocol, body []byte, defau
 	return req, out, req.Warnings, nil
 }
 
-// TranslateRequestBetween converts one request body between two protocols.
+// TranslateRequestBetween converts one request body between two protocols
+// using the direct-library safety bounds. The proxy calls
+// TranslateRequestBetweenIR with its configured limits.
 func TranslateRequestBetween(inbound, outbound ir.Protocol, body []byte, defaultMaxTokens int, promptCacheKey string) ([]byte, ir.Warnings, error) {
-	_, out, warnings, err := TranslateRequestBetweenIR(inbound, outbound, body, defaultMaxTokens, promptCacheKey)
+	_, out, warnings, err := TranslateRequestBetweenIR(inbound, outbound, body, defaultMaxTokens, promptCacheKey,
+		RequestLimits{ToolCallsMax: WireToolCallsMax})
 	return out, warnings, err
 }
 
@@ -322,6 +325,11 @@ type StreamOptions struct {
 	// proxy passes its recorded request model so the lazily opened stream still
 	// names a real model.
 	FallbackModel string
+	// ToolBlocksMax bounds the tool blocks the source decoder tracks: open
+	// blocks for Anthropic and Responses, distinct calls for Chat. Zero keeps
+	// the package safety bound for direct library callers; the proxy always
+	// passes config.StreamToolCallsMax.
+	ToolBlocksMax int
 }
 
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
@@ -335,13 +343,23 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	case ir.Chat:
 		d := NewChatStreamDecoder(src)
 		d.observe = observe
+		if opts.ToolBlocksMax > 0 {
+			d.toolBlocksMax = opts.ToolBlocksMax
+		}
 		dec = d
 	case ir.Responses:
 		d := NewResponsesStreamDecoder(src)
 		d.observe = observe
+		if opts.ToolBlocksMax > 0 {
+			d.toolBlocksMax = opts.ToolBlocksMax
+		}
 		dec = d
 	case ir.Anthropic:
-		dec = NewAnthropicStreamDecoder(src, observe)
+		d := NewAnthropicStreamDecoder(src, observe)
+		if opts.ToolBlocksMax > 0 {
+			d.toolBlocksMax = opts.ToolBlocksMax
+		}
+		dec = d
 	default:
 		return fmt.Errorf("unsupported outbound protocol %q", outbound)
 	}

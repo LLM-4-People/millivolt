@@ -52,7 +52,7 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(tc.body), &rec, false)
+			parseTestRequest([]byte(tc.body), &rec, false)
 			if rec.Model != tc.model || rec.Stream != tc.stream {
 				t.Fatalf("routing = %q/%v, want %q/%v", rec.Model, rec.Stream, tc.model, tc.stream)
 			}
@@ -66,7 +66,7 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 	// elsewhere must not blind the trust-boundary check, but it must also
 	// not resurrect the rest of the parameters block.
 	var rec metrics.Record
-	parseLLMRequest([]byte(`{"model":"m","stream":true,"max_tokens":7,"temperature":0.5,"tools":{}}`), &rec, false)
+	parseTestRequest([]byte(`{"model":"m","stream":true,"max_tokens":7,"temperature":0.5,"tools":{}}`), &rec, false)
 	if rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != 7 {
 		t.Fatalf("split path: max_tokens = %v, want the recovered 7", rec.ReqMaxTokens)
 	}
@@ -94,7 +94,7 @@ func TestRequestMetadataScalarsBoundedBeforeRing(t *testing.T) {
 		t.Fatal(err)
 	}
 	var rec metrics.Record
-	parseLLMRequest(body, &rec, false)
+	parseTestRequest(body, &rec, false)
 	if rec.ReqToolChoice != huge || rec.ReqResponseFormat != huge ||
 		rec.ReqServiceTier != huge || rec.LastTurnRole != huge {
 		t.Fatalf("production decode did not capture the hostile scalars: %+v", rec)
@@ -120,7 +120,7 @@ func TestRequestMetadataScalarsBoundedBeforeRing(t *testing.T) {
 	}
 
 	var normal metrics.Record
-	parseLLMRequest([]byte(`{"model":"fixture","tool_choice":"auto","response_format":{"type":"json_object"},"service_tier":"flex","messages":[{"role":"assistant","content":"hi"}]}`), &normal, false)
+	parseTestRequest([]byte(`{"model":"fixture","tool_choice":"auto","response_format":{"type":"json_object"},"service_tier":"flex","messages":[{"role":"assistant","content":"hi"}]}`), &normal, false)
 	if normal.ReqToolChoice != "auto" || normal.ReqResponseFormat != "json_object" ||
 		normal.ReqServiceTier != "flex" || normal.LastTurnRole != "assistant" {
 		t.Fatalf("normal metadata decode changed: %+v", normal)
@@ -135,7 +135,7 @@ func TestRequestMetadataScalarsBoundedBeforeRing(t *testing.T) {
 
 func TestRequestMetadataDiscardedShapesAndDuplicates(t *testing.T) {
 	var rec metrics.Record
-	parseLLMRequest([]byte(`{"tools":[{},null,42,"schema",[1,2],false],
+	parseTestRequest([]byte(`{"tools":[{},null,42,"schema",[1,2],false],
 		"metadata":{"a":1,"a":2,"b":{"nested":[1,2]}},"metadata":{"c":null},
 		"logit_bias":{"a":false,"b":"text"},"logit_bias":{"a":null},
 		"messages":[{"role":"user","content":"discarded","content":"kept"},
@@ -148,7 +148,7 @@ func TestRequestMetadataDiscardedShapesAndDuplicates(t *testing.T) {
 		t.Fatalf("content/duplicate semantics changed: %+v", rec)
 	}
 	var nulled metrics.Record
-	parseLLMRequest([]byte(`{"tools":[1],"tools":null,"metadata":{"a":1},"metadata":null,
+	parseTestRequest([]byte(`{"tools":[1],"tools":null,"metadata":{"a":1},"metadata":null,
 		"system":"old","system":null,"messages":[{"role":"user","content":"old","content":null}]}`), &nulled, false)
 	if nulled.ReqToolsCount != 0 || nulled.ReqMetadataKeys != 0 || nulled.CharsSystem != 0 || nulled.CharsUser != 0 {
 		t.Fatalf("null replacement retained old metadata: %+v", nulled)
@@ -186,7 +186,7 @@ func TestRequestToolChoiceRecordsOnlyFunctionName(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(tc.body), &rec, false)
+			parseTestRequest([]byte(tc.body), &rec, false)
 			if rec.ReqToolChoice != tc.want {
 				t.Fatalf("ReqToolChoice = %q, want %q", rec.ReqToolChoice, tc.want)
 			}
@@ -241,13 +241,13 @@ func TestRequestToolChoiceDecodeAllocationBounded(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			body := hostileToolChoiceBody(name)
 			var warm metrics.Record
-			parseLLMRequest(body, &warm, false)
+			parseTestRequest(body, &warm, false)
 			if warm.ReqToolChoice != "tool:f" {
 				t.Fatalf("warm decode = %q, want tool:f", warm.ReqToolChoice)
 			}
 			alloc, _ := allocStats(func() {
 				var rec metrics.Record
-				parseLLMRequest(body, &rec, false)
+				parseTestRequest(body, &rec, false)
 				if rec.ReqToolChoice != "tool:f" {
 					t.Fatalf("ReqToolChoice = %q, want tool:f", rec.ReqToolChoice)
 				}
@@ -277,7 +277,7 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(tc.body), &rec, false)
+			parseTestRequest([]byte(tc.body), &rec, false)
 			if rec.ReqMetadataKeys != tc.want {
 				t.Fatalf("ReqMetadataKeys = %d, want %d", rec.ReqMetadataKeys, tc.want)
 			}
@@ -295,7 +295,7 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 	body.WriteString(`}}`)
 	raw := []byte(body.String())
 	var rec metrics.Record
-	err := parseLLMRequest(raw, &rec, false)
+	err := parseTestRequest(raw, &rec, false)
 	if err == nil || !strings.Contains(err.Error(), "metadata") {
 		t.Fatalf("hostile metadata error = %v, want the metadata preflight rejection", err)
 	}
@@ -304,7 +304,7 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 	}
 	alloc, allocs := allocStats(func() {
 		var rec metrics.Record
-		if err := parseLLMRequest(raw, &rec, false); err == nil {
+		if err := parseTestRequest(raw, &rec, false); err == nil {
 			t.Fatal("hostile metadata accepted")
 		}
 		if rec.ReqMetadataKeys != 0 {
@@ -330,7 +330,7 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 // while the rest of the parameters block stays dropped.
 func TestRequestMetadataTypeErrorKeepsCapOnly(t *testing.T) {
 	var rec metrics.Record
-	parseLLMRequest([]byte(`{"model":"m","stream":true,"max_tokens":7,"temperature":0.5,"metadata":"x"}`), &rec, false)
+	parseTestRequest([]byte(`{"model":"m","stream":true,"max_tokens":7,"temperature":0.5,"metadata":"x"}`), &rec, false)
 	if rec.Model != "m" || !rec.Stream || rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != 7 {
 		t.Fatalf("routing/cap lost on a metadata type error: %+v", rec)
 	}
@@ -350,7 +350,7 @@ func TestRequestMetadataDuplicateMessageArrayReuse(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(`{"messages":[{"role":"user","content":"kept"}]`+tc.suffix+`}`), &rec, true)
+			parseTestRequest([]byte(`{"messages":[{"role":"user","content":"kept"}]`+tc.suffix+`}`), &rec, true)
 			wantPreview := ""
 			if tc.wantTurns > 0 {
 				wantPreview = "kept"
@@ -382,7 +382,7 @@ func TestRequestMetadataUnicodeContentAndPreview(t *testing.T) {
 		body = append(body, []byte(`}]}`)...)
 		for _, preview := range []bool{false, true} {
 			var rec metrics.Record
-			parseLLMRequest(body, &rec, preview)
+			parseTestRequest(body, &rec, preview)
 			wantPreview := ""
 			if preview {
 				wantPreview = metrics.TruncatePreview(decoded)
@@ -393,7 +393,7 @@ func TestRequestMetadataUnicodeContentAndPreview(t *testing.T) {
 		}
 	}
 	var rec metrics.Record
-	parseLLMRequest([]byte(`{"messages":[{"role":"user","content":"earlier"},
+	parseTestRequest([]byte(`{"messages":[{"role":"user","content":"earlier"},
 		{"role":"user","content":[{"type":"text","text":"latest"},{"type":"input_image","image_url":"data:image/png;base64,AA=="},
 		{"type":"input_audio","input_audio":{"data":"AA=="}}]}]}`), &rec, true)
 	if rec.PromptPreview != "" || rec.CharsUser != 13 || rec.Images != 1 || rec.Attachments != 1 {
@@ -449,16 +449,16 @@ func (r *requestTimedReader) Read(p []byte) (int, error) {
 func TestReadRequestOwnsPostUploadStart(t *testing.T) {
 	const body = `{"messages":[{"role":"user","content":"hi"}]}`
 	r := &requestTimedReader{Reader: strings.NewReader(body)}
-	_, rec, err := readRequest(&http.Request{Body: io.NopCloser(r), ContentLength: int64(len(body))}, 1024, false)
+	_, rec, err := readTestRequest(&http.Request{Body: io.NopCloser(r), ContentLength: int64(len(body))}, 1024, false)
 	if err != nil || rec.Start.IsZero() || rec.Start.Before(r.lastRead) || rec.Start.After(time.Now()) || rec.CharsUser != 2 {
 		t.Fatalf("Start must follow upload and precede returning parsed metadata: rec=%+v lastRead=%v err=%v", rec, r.lastRead, err)
 	}
-	_, empty, err := readRequest(&http.Request{}, 1024, false)
+	_, empty, err := readTestRequest(&http.Request{}, 1024, false)
 	if err != nil || empty.Start.IsZero() {
 		t.Fatalf("body-less request must share the timing owner: rec=%+v err=%v", empty, err)
 	}
 	var pure metrics.Record
-	parseLLMRequest([]byte(body), &pure, false)
+	parseTestRequest([]byte(body), &pure, false)
 	if !pure.Start.IsZero() {
 		t.Fatal("the pure metadata decoder must not own request timing")
 	}
@@ -469,7 +469,7 @@ func TestReadRequestBoundedLengthHintAndErrors(t *testing.T) {
 	for _, declared := range []int64{-1, 0, 1, int64(len(body)), int64(len(body) + 50), 1 << 50} {
 		rc := &requestTestBody{Reader: strings.NewReader(body)}
 		r := &http.Request{Body: rc, ContentLength: declared}
-		got, rec, err := readRequest(r, 32<<20, false)
+		got, rec, err := readTestRequest(r, 32<<20, false)
 		if err != nil || string(got) != body || rec.Model != "m" || !rec.Stream || !rc.closed {
 			t.Fatalf("length=%d: body=%q record=%+v closed=%v err=%v", declared, got, rec, rc.closed, err)
 		}
@@ -480,7 +480,7 @@ func TestReadRequestBoundedLengthHintAndErrors(t *testing.T) {
 	for _, size := range []int{0, 1, 1023, 1024, 1025} {
 		for _, declared := range []int64{-1, 1, 1 << 50} {
 			rc := &requestTestBody{Reader: strings.NewReader(strings.Repeat("x", size))}
-			got, _, err := readRequest(&http.Request{Body: rc, ContentLength: declared}, 1024, false)
+			got, _, err := readTestRequest(&http.Request{Body: rc, ContentLength: declared}, 1024, false)
 			if (err != nil) != (size > 1024) || (err == nil && len(got) != size) || !rc.closed {
 				t.Fatalf("size=%d length=%d: len=%d closed=%v err=%v", size, declared, len(got), rc.closed, err)
 			}
@@ -495,13 +495,13 @@ func TestReadRequestBoundedLengthHintAndErrors(t *testing.T) {
 	for _, readErr := range []error{io.ErrUnexpectedEOF, errors.New("read failed")} {
 		for _, declared := range []int64{-1, 100} {
 			rc := &requestTestBody{Reader: requestErrorReader{readErr}}
-			_, _, err := readRequest(&http.Request{Body: rc, ContentLength: declared}, 1024, false)
+			_, _, err := readTestRequest(&http.Request{Body: rc, ContentLength: declared}, 1024, false)
 			if !errors.Is(err, readErr) || !rc.closed {
 				t.Fatalf("reader error changed: got=%v want=%v closed=%v", err, readErr, rc.closed)
 			}
 		}
 	}
-	got, rec, err := readRequest(&http.Request{}, 1024, false)
+	got, rec, err := readTestRequest(&http.Request{}, 1024, false)
 	if err != nil || len(got) != 0 || rec == nil {
 		t.Fatalf("nil body: %q %+v %v", got, rec, err)
 	}
@@ -514,7 +514,7 @@ func TestReadRequestHintAvoidsLargeBodyCopy(t *testing.T) {
 	body := strings.Repeat("x", 2<<20)
 	alloc, _ := allocStats(func() {
 		rc := &requestTestBody{Reader: strings.NewReader(body)}
-		got, _, err := readRequestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
+		got, _, err := readTestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
 		if err != nil || len(got) != len(body) {
 			t.Fatalf("len=%d err=%v", len(got), err)
 		}
@@ -598,7 +598,7 @@ func TestRequestMetadataTranslatedBodyOwnership(t *testing.T) {
 		t.Fatalf("translation changed: code=%d upstream=%s want=%s err=%v", w.Code, upstream, want, err)
 	}
 	var expected metrics.Record
-	parseLLMRequest(want, &expected, false)
+	parseTestRequest(want, &expected, false)
 	got := buf.Snapshot()[0]
 	if got.Model != "fixture-model" || got.Stream || !reflect.DeepEqual(got.ReqMaxTokens, expected.ReqMaxTokens) ||
 		got.CharsSystem != expected.CharsSystem || got.CharsUser != expected.CharsUser ||
@@ -632,7 +632,7 @@ func TestMaxCompletionTokensPrecedence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(tc.body), &rec, false)
+			parseTestRequest([]byte(tc.body), &rec, false)
 			if tc.want == 0 {
 				if rec.ReqMaxTokens != nil {
 					t.Fatalf("ReqMaxTokens = %v, want nil", *rec.ReqMaxTokens)
@@ -739,7 +739,7 @@ func TestRequestCollectionElementBounds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			err := parseTestRequest([]byte(tc.body), &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -803,7 +803,7 @@ func TestRequestNestedPayloadAllocationBound(t *testing.T) {
 			var parseErr error
 			alloc, _ := allocStats(func() {
 				var rec metrics.Record
-				parseErr = parseLLMRequest(raw, &rec, false)
+				parseErr = parseTestRequest(raw, &rec, false)
 			})
 			// The 200,000-part fixture trips the aggregate guardrail before
 			// any typed expansion; the bounded rejection is the contract.

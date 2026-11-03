@@ -25,7 +25,7 @@ func TestResponsesInitialArgumentsBound(t *testing.T) {
 			name: "concurrent tool blocks",
 			src: func() string {
 				var b strings.Builder
-				for i := 0; i <= toolBlocksMax; i++ {
+				for i := 0; i <= StreamToolCallsMax; i++ {
 					b.WriteString(openCall(i, "{}"))
 				}
 				return b.String()

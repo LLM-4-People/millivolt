@@ -98,6 +98,14 @@ func (c *Config) Validate() error {
 	if err := checkByteSize("max_request_bytes", c.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
 		return err
 	}
+	if c.RequestToolCallsMax < RequestToolCallsMin || c.RequestToolCallsMax > RequestToolCallsBandMax {
+		return fmt.Errorf("request_tool_calls_max: must be %d..%d, got %d",
+			RequestToolCallsMin, RequestToolCallsBandMax, c.RequestToolCallsMax)
+	}
+	if c.StreamToolCallsMax < StreamToolCallsMin || c.StreamToolCallsMax > StreamToolCallsBandMax {
+		return fmt.Errorf("stream_tool_calls_max: must be %d..%d, got %d",
+			StreamToolCallsMin, StreamToolCallsBandMax, c.StreamToolCallsMax)
+	}
 	if c.MemoryLimit != 0 {
 		if err := checkByteSize("go_memory_limit", c.MemoryLimit, MemoryLimitMin, MemoryLimitMax); err != nil {
 			return err

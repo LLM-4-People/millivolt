@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/format"
 )
 
 // RequestOverridesMax bounds the request_overrides list (internal
@@ -47,6 +49,13 @@ const (
 	// Inbound body band (Validate, overlay, Schema).
 	MaxRequestBytesMin = 1024
 	MaxRequestBytesMax = 1 << 30
+	// Tool-call bands (Validate, overlay, Schema). The ceiling bounds what an
+	// operator may select; the format codec's direct-library defaults are the
+	// same documented values, pinned by a contract test.
+	RequestToolCallsMin     = 1
+	RequestToolCallsBandMax = 100_000
+	StreamToolCallsMin      = 1
+	StreamToolCallsBandMax  = 65_536
 	// Soft runtime memory-limit band (Validate, overlay, Schema). The floor
 	// rejects limits below a fresh process's own documented footprint
 	// (~20 MiB idle), which could only force continuous collection; the
@@ -154,6 +163,7 @@ func Default() *Config {
 		MemoryLimit:         0, // 0 = auto cgroup ceiling, else unbounded; GOMEMLIMIT wins
 
 		MaxRequestBytes:         32 << 20, // 32 MiB
+		RequestToolCallsMax:     format.WireToolCallsMax,
 		UpstreamTimeout:         5 * time.Minute,
 		ModelsDiscoveryTimeout:  30 * time.Second,
 		ModelsDiscoveryMaxBytes: 8 << 20,
@@ -223,6 +233,7 @@ func Default() *Config {
 		ConversationMaxOpen: 64,
 
 		AnthropicDefaultMaxTokens:  4096,
+		StreamToolCallsMax:         format.StreamToolCallsMax,
 		TranslationLoss:            TranslationLossWarn,
 		CursorDefaultContextWindow: 0, // 0 = omit; let the client use its own default
 		CursorParkTTL:              3 * time.Hour,

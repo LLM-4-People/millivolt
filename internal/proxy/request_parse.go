@@ -8,25 +8,26 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+func parseLLMRequest(body []byte, rec *metrics.Record, preview bool, cfg *config.Config) error {
 	// The common minimal body is fully recognized by a lexical pre-pass. Every
 	// other shape, including preview capture, keeps the typed decode below
 	// unchanged.
 	if !preview && parseLLMRequestFast(body, rec) {
 		return nil
 	}
-	return parseLLMRequestSlow(body, rec, preview, true)
+	return parseLLMRequestSlow(body, rec, preview, true, cfg)
 }
 
 // parseGeneratedLLMRequest decodes the proxy's own translated request body.
 // It passes bound=false, so parseLLMRequestSlow skips ALL of
 // boundRequestMetadata: the messages/tools/stop array limits, the logit_bias,
 // metadata and distinct top-level-member counts, the aggregate content-part
-// and annotation counts, and the 1,024 aggregate tool-call bound. That is
+// and annotation counts, and the configured aggregate tool-call bound. That is
 // deliberate: translation legitimately changes composition (one tool result
 // becomes a content block, media parts split, lifted system fragments add
 // members), and re-applying the client-facing aggregate would reject a body
@@ -35,21 +36,21 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
 // wire collections, and the translated document is capped by
 // max_request_bytes before this decode runs. UTF-8 expansion, the typed
 // metadata decode and the token-cap recheck remain active.
-func parseGeneratedLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+func parseGeneratedLLMRequest(body []byte, rec *metrics.Record, preview bool, cfg *config.Config) error {
 	if !preview && parseLLMRequestFast(body, rec) {
 		return nil
 	}
-	return parseLLMRequestSlow(body, rec, preview, false)
+	return parseLLMRequestSlow(body, rec, preview, false, cfg)
 }
 
-func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool) error {
+func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool, cfg *config.Config) error {
 	// Reject replacement expansion before the first typed decode so raw
 	// invalid UTF-8 cannot multiply the request in memory.
 	if requestStringExpansionExceeded(body) {
 		return fmt.Errorf("request body contains invalid UTF-8 that expands beyond the request size")
 	}
 	if bound {
-		if err := boundRequestMetadata(body); err != nil {
+		if err := boundRequestMetadata(body, cfg); err != nil {
 			return err
 		}
 	}

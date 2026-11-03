@@ -107,7 +107,7 @@ func TestRequestStopArrayBound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			err := parseTestRequest([]byte(tc.body), &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -162,7 +162,7 @@ func TestRequestStopArrayAllocationBound(t *testing.T) {
 	var parseErr error
 	alloc, _ := allocStats(func() {
 		var rec metrics.Record
-		parseErr = parseLLMRequest(raw, &rec, false)
+		parseErr = parseTestRequest(raw, &rec, false)
 		if parseErr == nil {
 			t.Fatalf("%d-entry stop array was accepted", entries)
 		}
@@ -191,7 +191,7 @@ func TestRequestTopLevelMemberBound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			err := parseTestRequest([]byte(tc.body), &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -214,7 +214,7 @@ func TestRequestTopLevelMemberAllocationBound(t *testing.T) {
 	var parseErr error
 	alloc, _ := allocStats(func() {
 		var rec metrics.Record
-		parseErr = parseLLMRequest(raw, &rec, false)
+		parseErr = parseTestRequest(raw, &rec, false)
 		if parseErr == nil {
 			t.Fatalf("%d-key body was accepted", members)
 		}
@@ -242,7 +242,7 @@ func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{` + tc.key + `:"m","messages":[{"role":"user","content":"hi"}],"metadata":{}}`)
 			var rec metrics.Record
-			if err := parseLLMRequest(body, &rec, false); err != nil {
+			if err := parseTestRequest(body, &rec, false); err != nil {
 				t.Fatal(err)
 			}
 			if tc.name == "escaped ASCII" && rec.Model != "m" {
@@ -255,9 +255,10 @@ func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
 			if !decodeOK {
 				t.Fatal("decodeRequestKey rejected the fixture key")
 			}
+			cfg := testConfig()
 			var runErr error
 			allocs := testing.AllocsPerRun(100, func() {
-				runErr = boundRequestMetadata(body)
+				runErr = boundRequestMetadata(body, cfg)
 			})
 			if runErr != nil {
 				t.Fatalf("boundRequestMetadata = %v", runErr)
@@ -376,7 +377,7 @@ func TestRequestAggregateContentPartsBound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			err := parseTestRequest([]byte(tc.body), &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -401,7 +402,7 @@ func TestRequestAggregateContentPartsAllocationBound(t *testing.T) {
 	var parseErr error
 	alloc, _ := allocStats(func() {
 		var rec metrics.Record
-		parseErr = parseLLMRequest(raw, &rec, false)
+		parseErr = parseTestRequest(raw, &rec, false)
 		if parseErr == nil {
 			t.Fatalf("%d-message aggregate body was accepted", messages)
 		}
@@ -438,7 +439,7 @@ func duplicateContentBody(occurrences, parts int) []byte {
 func TestRequestDuplicateContentPartsBound(t *testing.T) {
 	raw := duplicateContentBody(5, metrics.ContentPartMax)
 	var rec metrics.Record
-	err := parseLLMRequest(raw, &rec, false)
+	err := parseTestRequest(raw, &rec, false)
 	if err == nil || !strings.Contains(err.Error(), "content parts") {
 		t.Fatalf("parseLLMRequest error = %v, want the aggregate content-part overflow for five duplicate content arrays", err)
 	}
@@ -448,7 +449,7 @@ func TestRequestDuplicateContentPartsBound(t *testing.T) {
 	// value is the one measured.
 	lastWins := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"ignored"}],"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,eA=="}}]}]}`)
 	var okRec metrics.Record
-	if err := parseLLMRequest(lastWins, &okRec, false); err != nil {
+	if err := parseTestRequest(lastWins, &okRec, false); err != nil {
 		t.Fatalf("duplicate content within the aggregate budget = %v, want accepted", err)
 	}
 	if okRec.Images != 1 || okRec.CharsUser != 0 {
@@ -465,7 +466,7 @@ func TestRequestDuplicateContentPartsAllocationBound(t *testing.T) {
 	var parseErr error
 	alloc := proxyContentAllocDelta(func() {
 		var rec metrics.Record
-		parseErr = parseLLMRequest(raw, &rec, false)
+		parseErr = parseTestRequest(raw, &rec, false)
 	})
 	t.Logf("duplicate content over-bound: input=%d occurrences=%d parts=%d alloc=%d",
 		len(raw), occurrences, occurrences*metrics.ContentPartMax, alloc)
@@ -552,7 +553,7 @@ func TestRequestStopCountDoesNotMaterialize(t *testing.T) {
 	var gotStop int
 	alloc, _ := allocStats(func() {
 		var rec metrics.Record
-		parseErr = parseLLMRequest(raw, &rec, false)
+		parseErr = parseTestRequest(raw, &rec, false)
 		gotStop = rec.ReqStop
 	})
 	if parseErr != nil {
@@ -582,7 +583,7 @@ func TestRequestModalitiesBound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			err := parseTestRequest([]byte(tc.body), &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}

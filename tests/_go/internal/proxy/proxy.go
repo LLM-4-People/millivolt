@@ -509,7 +509,7 @@ func TestParseLLMRequestCapturesNonContentParams(t *testing.T) {
 		"messages": [{"role":"user","content":"secret message content"}]
 	}`)
 	var rec metrics.Record
-	parseLLMRequest(body, &rec, false)
+	parseTestRequest(body, &rec, false)
 
 	// The shared parser extracts routing and non-content parameters together.
 	if rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != 512 {
@@ -556,7 +556,7 @@ func TestParseLLMRequestCapturesNonContentParams(t *testing.T) {
 
 func TestParseLLMRequestCapturesReasoningEffortAndVerbosity(t *testing.T) {
 	var rec metrics.Record
-	parseLLMRequest([]byte(`{"reasoning_effort":"high","verbosity":"low","messages":[{"role":"user","content":"hi"}]}`), &rec, false)
+	parseTestRequest([]byte(`{"reasoning_effort":"high","verbosity":"low","messages":[{"role":"user","content":"hi"}]}`), &rec, false)
 	if rec.ReqReasoningEffort != "high" {
 		t.Errorf("effort = %q", rec.ReqReasoningEffort)
 	}
@@ -565,13 +565,13 @@ func TestParseLLMRequestCapturesReasoningEffortAndVerbosity(t *testing.T) {
 	}
 
 	var rec2 metrics.Record
-	parseLLMRequest([]byte(`{"reasoning":{"effort":"xhigh"},"messages":[{"role":"user","content":"hi"}]}`), &rec2, false)
+	parseTestRequest([]byte(`{"reasoning":{"effort":"xhigh"},"messages":[{"role":"user","content":"hi"}]}`), &rec2, false)
 	if rec2.ReqReasoningEffort != "xhigh" {
 		t.Errorf("nested effort = %q", rec2.ReqReasoningEffort)
 	}
 
 	var rec3 metrics.Record
-	parseLLMRequest([]byte(`{"reasoning_effort":"drop this because spaces","verbosity":"also not ok!","messages":[{"role":"user","content":"secret"}]}`), &rec3, false)
+	parseTestRequest([]byte(`{"reasoning_effort":"drop this because spaces","verbosity":"also not ok!","messages":[{"role":"user","content":"secret"}]}`), &rec3, false)
 	if rec3.ReqReasoningEffort != "" || rec3.ReqVerbosity != "" {
 		t.Errorf("rejected tokens leaked: %q %q", rec3.ReqReasoningEffort, rec3.ReqVerbosity)
 	}
@@ -650,7 +650,7 @@ func TestParseLLMRequestMeasuresPromptComposition(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(tc.body), &rec, false)
+			parseTestRequest([]byte(tc.body), &rec, false)
 			if rec.CharsSystem != tc.wantCharsSystem {
 				t.Errorf("CharsSystem = %d, want %d", rec.CharsSystem, tc.wantCharsSystem)
 			}

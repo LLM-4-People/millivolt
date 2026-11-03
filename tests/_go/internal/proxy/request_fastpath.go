@@ -118,8 +118,8 @@ func requestFastPathCorpus() []struct {
 func compareFastPathRecord(t *testing.T, name string, body []byte, preview bool) {
 	t.Helper()
 	var got, want metrics.Record
-	gotErr := parseLLMRequest(body, &got, preview)
-	wantErr := parseLLMRequestSlow(body, &want, preview, true)
+	gotErr := parseTestRequest(body, &got, preview)
+	wantErr := parseLLMRequestSlow(body, &want, preview, true, testConfig())
 	if (gotErr == nil) != (wantErr == nil) {
 		t.Fatalf("%s preview=%v: error mismatch: fast=%v slow=%v", name, preview, gotErr, wantErr)
 	}
@@ -134,7 +134,7 @@ func compareFastPathRecord(t *testing.T, name string, body []byte, preview bool)
 	}
 	var direct, decoded metrics.Record
 	if parseLLMRequestFast(body, &direct) {
-		decodedErr := parseLLMRequestSlow(body, &decoded, false, true)
+		decodedErr := parseLLMRequestSlow(body, &decoded, false, true, testConfig())
 		if decodedErr != nil {
 			t.Fatalf("%s: fast path accepted a body the typed decode rejects: %v", name, decodedErr)
 		}

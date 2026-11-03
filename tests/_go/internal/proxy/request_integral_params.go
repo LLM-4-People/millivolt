@@ -27,7 +27,7 @@ func TestRequestIntegralParamsKeepRecord(t *testing.T) {
 	parse := func(body string) metrics.Record {
 		t.Helper()
 		var rec metrics.Record
-		if err := parseLLMRequest([]byte(body), &rec, false); err != nil {
+		if err := parseTestRequest([]byte(body), &rec, false); err != nil {
 			t.Fatalf("parse: %v", err)
 		}
 		return rec

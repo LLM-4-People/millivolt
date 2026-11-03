@@ -21,15 +21,16 @@ import (
 // single content-part array keeps the smaller ContentPartMax.
 const WireCollectionMax = 10_000
 
-// toolBlocksMax bounds the tool blocks a native stream decoder tracks while
-// translating one response. Anthropic and Responses open and close blocks, so
-// there it bounds the concurrent open set; Chat has no per-call close event,
-// so it bounds the distinct calls in one response. Each open block may retain
-// its initial JSON until its stop, and real parallel tool calls are
-// single-digit, so 1024 leaves ample headroom while failing a stream that
-// opens unique blocks without ever closing them. Internal safety guardrail,
-// not user-tunable.
-const toolBlocksMax = 1024
+// StreamToolCallsMax is the direct-library default for the tool blocks a
+// stream decoder tracks while translating one response. Anthropic and
+// Responses open and close blocks, so there it bounds the concurrent open set;
+// Chat has no per-call close event, so it bounds the distinct calls in one
+// response. Each open block may retain its initial JSON until its stop, and
+// real parallel tool calls are single-digit, so 1024 leaves ample headroom
+// while failing a stream that opens unique blocks without ever closing them.
+// The user setting is config.StreamToolCallsMax; the proxy passes it through
+// StreamOptions on every translated stream.
+const StreamToolCallsMax = 1024
 
 // toolInitialBytesMax bounds the total initial tool JSON retained by the
 // currently open tool blocks of one native stream. Each start may carry up to
@@ -128,9 +129,10 @@ const WireNestedCollectionMax = 10_000
 // this aggregate stops many lists at that cap from multiplying.
 const WireContentPartsMax = 16_384
 
-// WireToolCallsMax bounds the aggregate tool-call members over every message.
-// The proxy's request preflight and the Chat codec share this one value so the
-// translated wire cannot accept a document the passthrough path rejects.
+// WireToolCallsMax is the direct-library default for the aggregate tool-call
+// members over every message. The proxy enforces config.RequestToolCallsMax
+// instead, and a contract test keeps the two documented defaults equal; the
+// codec itself has no hidden ceiling above the value it is given.
 const WireToolCallsMax = 1024
 
 // boundedEchoMax bounds a body-controlled value echoed in an error or

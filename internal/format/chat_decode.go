@@ -16,10 +16,19 @@ import (
 )
 
 // DecodeChatRequest converts one Chat Completions request body into the
-// canonical request. The whole body must be valid UTF-8: a raw invalid byte is
-// rejected before the typed decode so the decoder's replacement rune cannot
-// expand a body-sized string.
+// canonical request with the direct-library safety bounds. The proxy calls
+// decodeChatRequest through DecodeRequest with the operator's configured
+// limits. The whole body must be valid UTF-8: a raw invalid byte is rejected
+// before the typed decode so the decoder's replacement rune cannot expand a
+// body-sized string.
 func DecodeChatRequest(body []byte) (*ir.Request, error) {
+	return decodeChatRequest(body, RequestLimits{ToolCallsMax: WireToolCallsMax})
+}
+
+func decodeChatRequest(body []byte, limits RequestLimits) (*ir.Request, error) {
+	if limits.ToolCallsMax < 1 {
+		return nil, errParseOpenAIBody(fmt.Errorf("tool-call bound must be positive, got %d", limits.ToolCallsMax))
+	}
 	if !utf8.Valid(body) {
 		return nil, errParseOpenAIBody(errors.New("request body is not valid UTF-8"))
 	}
@@ -78,7 +87,7 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		}
 		total := 0
 		for i, message := range messages {
-			if err := addWireArray(&total, message.ToolCalls, fmt.Sprintf("messages[%d].tool_calls", i), WireToolCallsMax); err != nil {
+			if err := addWireArray(&total, message.ToolCalls, fmt.Sprintf("messages[%d].tool_calls", i), limits.ToolCallsMax); err != nil {
 				return nil, errParseOpenAIBody(err)
 			}
 		}

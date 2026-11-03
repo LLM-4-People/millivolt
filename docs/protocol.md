@@ -193,8 +193,9 @@ value differ from the bytes the upstream reads. A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
 entries in a `messages`, `tools`, `functions`, `input`, `stop`,
 `stop_sequences` or `modalities` array, more than 10,000 members in a
-`metadata` or `stream_options` object, more than 1,024 aggregate
-`tool_calls` members across every message, more than 10,000 distinct top-level
+`metadata` or `stream_options` object, more than `request_tool_calls_max`
+aggregate `tool_calls` members across every message (default 1,024), more than
+10,000 distinct top-level
 members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
 top-level objects. Those preflight bounds apply to native and translated
 requests alike. A translated request also passes through its protocol codec,

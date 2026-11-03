@@ -51,6 +51,14 @@ type Config struct {
 	// will buffer to discover routing metadata. Larger bodies are rejected.
 	MaxRequestBytes ByteSize `yaml:"max_request_bytes" json:"max_request_bytes"`
 
+	// RequestToolCallsMax bounds the aggregate tool_calls members across every
+	// message of one inbound request, before translation materializes each
+	// member as a typed call and, on an Anthropic or Cursor target, a content
+	// block. Real agent history carries a handful per turn; raising it admits
+	// longer replayed tool loops at the cost of more transient memory per
+	// request. Hot-reloads.
+	RequestToolCallsMax int `yaml:"request_tool_calls_max" json:"request_tool_calls_max"`
+
 	// UpstreamTimeout is the maximum time to wait for an upstream response's
 	// headers. Streaming bodies are not subject to this timeout (only header
 	// arrival), so long generations are unaffected. Zero disables the cap.
@@ -316,6 +324,13 @@ type Config struct {
 	// when the client sent none of max_tokens, max_completion_tokens or
 	// max_output_tokens (Anthropic requires max_tokens).
 	AnthropicDefaultMaxTokens int `yaml:"anthropic_default_max_tokens" json:"anthropic_default_max_tokens"`
+	// StreamToolCallsMax bounds the tool blocks one translated response stream
+	// may track: concurrent open blocks for Anthropic and Responses, distinct
+	// calls for Chat (its stream has no per-call close event). A stream past
+	// the bound ends with a translation_error. Loops that fan out many parallel
+	// calls in one turn can raise it; each extra block retains provider bytes
+	// until it closes. Hot-reloads for new streams.
+	StreamToolCallsMax int `yaml:"stream_tool_calls_max" json:"stream_tool_calls_max"`
 	// TranslationLoss selects what a cross-protocol translation does when the
 	// target cannot represent a client field: warn (default) drops optional
 	// fields and reports them in X-Proxy-Warnings; reject fails the request

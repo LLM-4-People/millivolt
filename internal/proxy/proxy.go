@@ -594,7 +594,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, reserve)
+	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, reserve, s.cfg())
 	if err != nil {
 		status := http.StatusBadRequest
 		var overflow *http.MaxBytesError
@@ -747,7 +747,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// for the KV channel).
 	if t.translate && t.format != "cursor" {
 		req, translated, warnings, err := providerformat.TranslateRequestBetweenIR(
-			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
+			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue,
+			providerformat.RequestLimits{ToolCallsMax: s.cfg().RequestToolCallsMax})
 		if err != nil {
 			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 			return
@@ -778,7 +779,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
-			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview, s.cfg()); err != nil {
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
 			}

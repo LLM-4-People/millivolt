@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
@@ -380,15 +381,6 @@ const requestAnnotationsMax = providerformat.WireNestedCollectionMax
 // array fails in the preflight instead of after translation begins.
 const requestAnnotationArrayMax = metrics.ContentPartMax
 
-// requestToolCallsMax bounds the aggregate tool_calls array members over every
-// message. Each member expands into a typed tool-call value and, on the
-// translated Anthropic or Cursor wire, a content block/history part. A 300 KiB
-// body of empty calls therefore materializes six figures of typed values and
-// over a hundred MiB of transient allocation. Internal DoS guardrail, not a
-// wire-format or user-tunable limit; real requests carry a handful of calls
-// per turn.
-const requestToolCallsMax = providerformat.WireToolCallsMax
-
 // boundRequestMetadata is a lexical preflight over the top-level document. It
 // rejects only a valid JSON document whose messages/tools/stop array,
 // logit_bias object, distinct top-level member count, aggregate content parts,
@@ -397,7 +389,11 @@ const requestToolCallsMax = providerformat.WireToolCallsMax
 // with the shared byte scanner. One small distinct-key set per top-level object
 // records only the keys it sees; escaped and non-ASCII keys decode once per
 // member and that result feeds both the distinct set and field comparisons.
-func boundRequestMetadata(body []byte) error {
+// cfg is the live server snapshot, the single owner of every configured bound.
+func boundRequestMetadata(body []byte, cfg *config.Config) error {
+	if cfg == nil || cfg.RequestToolCallsMax < 1 {
+		return fmt.Errorf("request tool calls: invalid bound")
+	}
 	i := metrics.SkipSpace(body, 0)
 	if i >= len(body) || body[i] != '{' {
 		return nil
@@ -487,12 +483,12 @@ func boundRequestMetadata(body []byte) error {
 					return requestMetadataOverflow(body, fmt.Errorf("request content parts exceed %d", requestContentPartsMax))
 				}
 				contentParts += parts
-				calls, ok := countRequestMessagesToolCalls(body, i, requestToolCallsMax-toolCalls)
+				calls, ok := countRequestMessagesToolCalls(body, i, cfg.RequestToolCallsMax-toolCalls)
 				if !ok {
 					return nil
 				}
-				if calls > requestToolCallsMax-toolCalls {
-					return requestMetadataOverflow(body, fmt.Errorf("request tool calls exceed %d", requestToolCallsMax))
+				if calls > cfg.RequestToolCallsMax-toolCalls {
+					return requestMetadataOverflow(body, fmt.Errorf("request tool calls exceed %d", cfg.RequestToolCallsMax))
 				}
 				toolCalls += calls
 			}

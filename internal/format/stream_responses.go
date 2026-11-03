@@ -108,6 +108,7 @@ type ResponsesStreamDecoder struct {
 	// can be open at once.
 	initialArgsBytes int
 	openToolItems    int
+	toolBlocksMax    int
 	// argsEmitted retains the argument bytes already emitted for one item
 	// identity so a later authoritative done/terminal value can append only a
 	// strict extension. A provider that emits more than the bounded coverage
@@ -237,6 +238,7 @@ type ResponsesStreamDecoder struct {
 func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 	return &ResponsesStreamDecoder{
 		r:                    newSSEReader(r),
+		toolBlocksMax:        StreamToolCallsMax,
 		itemBlock:            map[int]int{},
 		partBlock:            map[[2]int]int{},
 		initialArgs:          map[string]string{},
@@ -402,8 +404,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.announcedToolKeys[key] = true
 				d.toolNames[key] = item.Name
 				d.openToolItems++
-				if d.openToolItems > toolBlocksMax {
-					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", toolBlocksMax)
+				if d.openToolItems > d.toolBlocksMax {
+					return nil, fmt.Errorf("responses stream exceeds %d concurrent tool calls", d.toolBlocksMax)
 				}
 				idx := d.newBlock()
 				d.itemBlock[outputIndex] = idx

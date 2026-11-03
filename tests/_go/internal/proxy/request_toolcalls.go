@@ -56,14 +56,14 @@ func TestRequestToolCallCountBound(t *testing.T) {
 	normal := `{"model":"m","messages":[{"role":"user","content":"hi"},` +
 		`{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"lookup","arguments":"{}"}}]},` +
 		`{"role":"assistant","content":"","tool_calls":[{"id":"c3","type":"function","function":{"name":"lookup","arguments":"{}"}}]}]}`
-	over := requestToolCallsBody(requestToolCallsMax + 1)
+	over := requestToolCallsBody(testConfig().RequestToolCallsMax + 1)
 	for _, tc := range []struct {
 		name    string
 		body    string
 		wantErr bool
 	}{
 		{"normal multi-tool accepted", normal, false},
-		{"aggregate at cap accepted", `{"model":"m","messages":[` + requestToolCallsMessage(requestToolCallsMax) + `]}`, false},
+		{"aggregate at cap accepted", `{"model":"m","messages":[` + requestToolCallsMessage(testConfig().RequestToolCallsMax) + `]}`, false},
 		{"aggregate over cap rejected", string(over), true},
 		{"calls across messages accumulate", `{"model":"m","messages":[` + requestToolCallsMessage(600) + `,` + requestToolCallsMessage(425) + `]}`, true},
 		{"duplicate tool_calls members accumulate", `{"model":"m","messages":[{"role":"assistant","tool_calls":` + requestToolCallsArray(600) + `,"tool_calls":` + requestToolCallsArray(425) + `}]}`, true},
@@ -76,11 +76,11 @@ func TestRequestToolCallCountBound(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			err := parseTestRequest([]byte(tc.body), &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}
-			if tc.wantErr && (!strings.Contains(err.Error(), "tool calls") || !strings.Contains(err.Error(), strconv.Itoa(requestToolCallsMax))) {
+			if tc.wantErr && (!strings.Contains(err.Error(), "tool calls") || !strings.Contains(err.Error(), strconv.Itoa(testConfig().RequestToolCallsMax))) {
 				t.Fatalf("tool-call overflow error = %v, want the bounded tool-call wording", err)
 			}
 		})
@@ -96,7 +96,7 @@ func TestRequestToolCallAllocationBound(t *testing.T) {
 	var parseErr error
 	alloc, _ := allocStats(func() {
 		var rec metrics.Record
-		parseErr = parseLLMRequest(raw, &rec, false)
+		parseErr = parseTestRequest(raw, &rec, false)
 		if parseErr == nil {
 			t.Fatalf("%d-call body was accepted", calls)
 		}
@@ -176,5 +176,33 @@ func TestRequestToolCallsReturn400BeforeTranslationAndUpstream(t *testing.T) {
 	mu.Unlock()
 	if n := strings.Count(got, `"type":"tool_use"`); n != 3 {
 		t.Fatalf("translated tool_use blocks = %d, want 3 (body: %s)", n, got)
+	}
+}
+
+// TestRequestToolCallBoundIsConfigurable proves the preflight applies the
+// bound it is given instead of a package constant: the same body passes at a
+// raised bound, fails at the documented default, and fails earlier at a
+// lowered bound.
+func TestRequestToolCallBoundIsConfigurable(t *testing.T) {
+	body := requestToolCallsBody(2048)
+	parse := func(bound int) error {
+		cfg := testConfig()
+		cfg.RequestToolCallsMax = bound
+		var rec metrics.Record
+		return parseLLMRequest(body, &rec, false, cfg)
+	}
+	if err := parse(testConfig().RequestToolCallsMax); err == nil {
+		t.Fatal("default bound accepted 2048 calls")
+	}
+	if err := parse(4096); err != nil {
+		t.Fatalf("raised bound rejected 2048 calls: %v", err)
+	}
+	small := requestToolCallsBody(2)
+	cfg := testConfig()
+	cfg.RequestToolCallsMax = 1
+	var rec metrics.Record
+	err := parseLLMRequest(small, &rec, false, cfg)
+	if err == nil || !strings.Contains(err.Error(), "request tool calls exceed 1") {
+		t.Fatalf("lowered bound error = %v, want the configured 1-call wording", err)
 	}
 }
