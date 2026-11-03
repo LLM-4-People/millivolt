@@ -21,11 +21,14 @@ import (
 // single content-part array keeps the smaller ContentPartMax.
 const WireCollectionMax = 10_000
 
-// toolBlocksMax bounds the concurrent tool blocks a native stream decoder
-// tracks while translating one response. Each open block may retain its
-// initial JSON until its stop; real parallel tool calls are single-digit, so
-// 1024 leaves ample headroom while failing a stream that opens unique blocks
-// without ever closing them. Internal safety guardrail, not user-tunable.
+// toolBlocksMax bounds the tool blocks a native stream decoder tracks while
+// translating one response. Anthropic and Responses open and close blocks, so
+// there it bounds the concurrent open set; Chat has no per-call close event,
+// so it bounds the distinct calls in one response. Each open block may retain
+// its initial JSON until its stop, and real parallel tool calls are
+// single-digit, so 1024 leaves ample headroom while failing a stream that
+// opens unique blocks without ever closing them. Internal safety guardrail,
+// not user-tunable.
 const toolBlocksMax = 1024
 
 // toolInitialBytesMax bounds the total initial tool JSON retained by the

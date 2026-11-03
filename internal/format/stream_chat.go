@@ -362,7 +362,9 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 		}
 		d.openToolBlocks++
 		if d.openToolBlocks > toolBlocksMax {
-			return fmt.Errorf("chat stream exceeds %d concurrent tool calls", toolBlocksMax)
+			// Chat carries no per-call close event, so this counts distinct
+			// tool calls in one response rather than concurrent open blocks.
+			return fmt.Errorf("chat stream exceeds %d tool calls", toolBlocksMax)
 		}
 		irIndex = d.nextIndex
 		id, err := d.commitToolID(id, irIndex)

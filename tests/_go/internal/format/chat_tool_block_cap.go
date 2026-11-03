@@ -40,7 +40,7 @@ func TestChatStreamToolBlockCountIsBounded(t *testing.T) {
 	t.Run("1025 blocks fail", func(t *testing.T) {
 		var buf bytes.Buffer
 		err := TranslateStreamBetween(ir.Chat, ir.Chat, &buf, strings.NewReader(chatToolBlockStream(toolBlocksMax+1)), nil, nil, StreamOptions{})
-		if err == nil || !strings.Contains(err.Error(), "concurrent tool calls") {
+		if err == nil || !strings.Contains(err.Error(), "tool calls") {
 			t.Fatalf("error = %v, want the tool-block cap", err)
 		}
 		if strings.Contains(buf.String(), "data: [DONE]") {
