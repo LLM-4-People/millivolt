@@ -317,3 +317,23 @@ func TestMaxLimitWindowMirrorsSchedulerRetryHint(t *testing.T) {
 			maxLimitWindow, scheduler.MaxRetryHint)
 	}
 }
+
+// TestRetryHintFromBody pins the reset-in-message fallback: a 429 whose only
+// reset hint is an RFC3339 instant in the message (for example
+// "membership rpm limit exceeded: 101/100 resets 2026-11-03T23:11:00Z") must
+// pace the retry instead of exhausting the ladder in seconds.
+func TestRetryHintFromBody(t *testing.T) {
+	reset := time.Now().Add(90 * time.Second).UTC().Format(time.RFC3339)
+	body := []byte(`{"error":{"code":"tier_limit_exceeded","message":"membership rpm limit exceeded: 101/100 resets ` + reset + `"}}`)
+	got := retryHintFromBody(body)
+	if got < 60*time.Second || got > 2*time.Minute {
+		t.Fatalf("retryHintFromBody = %v, want about 90s", got)
+	}
+	if got := retryHintFromBody([]byte(`{"error":{"message":"no reset here"}}`)); got != 0 {
+		t.Fatalf("body without a reset = %v, want 0", got)
+	}
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if got := retryHintFromBody([]byte("resets " + past)); got != 0 {
+		t.Fatalf("past reset = %v, want 0", got)
+	}
+}

@@ -403,6 +403,14 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 // publishing.
 func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBody []byte, authHeader string) time.Duration {
 	retryAfter := parseRetryAfter(resp)
+	// Some providers carry the only reset hint in the message body
+	// ("... resets 2026-11-03T23:11:00Z") instead of a header. Without it the
+	// retry ladder burns its budget in seconds and surfaces a 429 that would
+	// have cleared, which is exactly how an unknown code such as
+	// tier_limit_exceeded reaches the client.
+	if retryAfter == 0 && resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter = retryHintFromBody(errBody)
+	}
 	at := metrics.RetryAttempt{
 		StatusCode:   resp.StatusCode,
 		RetryAfterMs: int(retryAfter.Milliseconds()),

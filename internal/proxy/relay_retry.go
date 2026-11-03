@@ -371,3 +371,27 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	}
 	return 0
 }
+
+// retryHintFromBody finds an RFC3339 reset instant in a provider error body.
+// A 429 often explains the wait in its message ("... resets
+// 2026-11-03T23:11:00Z") while sending no Retry-After header; honoring that
+// instant lets the retry ladder wait for the window instead of exhausting in
+// seconds. Only a future instant bounded by MaxRetryHint is honored; a body
+// without a parseable timestamp contributes nothing.
+func retryHintFromBody(body []byte) time.Duration {
+	for i := 0; i+20 <= len(body); i++ {
+		if body[i] < '0' || body[i] > '9' ||
+			body[i+4] != '-' || body[i+7] != '-' || body[i+10] != 'T' {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, string(body[i:i+20]))
+		if err != nil {
+			continue
+		}
+		if d := time.Until(ts); d > 0 {
+			return scheduler.ClampRetryHint(d)
+		}
+		return 0
+	}
+	return 0
+}

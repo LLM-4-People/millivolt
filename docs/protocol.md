@@ -380,6 +380,11 @@ Provider Retry-After/reset hints are a floor on the wait, not a replacement
 for adaptive exponential backoff. A long hint is not clamped by the ordinary
 adaptive cap and can therefore outlast it. A short hint does not reset the
 doubling, so a 1s "retry shortly" cannot re-hammer a struggling upstream.
+When a 429 carries no header hint but its bounded error body contains an
+RFC3339 reset instant (for example "... resets 2026-11-03T23:11:00Z"), that
+instant is used as the same bounded hint: a provider-specific code such as
+`tier_limit_exceeded` then waits for its window instead of exhausting the
+retry budget in seconds and surfacing to the client.
 
 A finalized request retains its absorbed attempts and final outcome in one
 record. Every retried or final attempt stores the same upstream-response
