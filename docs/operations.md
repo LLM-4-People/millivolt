@@ -129,7 +129,7 @@ invariant, encode a protocol maximum, or only tune an internal heuristic.
 The wire-facing bounds are settings: `request_tool_calls_max`,
 `stream_tool_calls_max`, `translated_response_max_bytes`,
 `models_discovery_max_entries`, `non_stream_capture_max`,
-`stream_terminal_hold_max`, `token_response_max` and
+`stream_terminal_hold_max`, `stream_event_line_max`, `token_response_max` and
 `upstream_response_header_max`. A new guard must be classified in this table
 when it is added, and a guard that becomes operator-facing moves to the
 settings schema instead of keeping a parallel constant.

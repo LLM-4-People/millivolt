@@ -36,6 +36,9 @@ func TestUpstreamBufferSettingsBoundsAndSchema(t *testing.T) {
 		{"token_response_max", TokenResponseMaxMin, TokenResponseMaxMax, true,
 			func(c *Config) int64 { return int64(c.TokenResponseMaxBytes) },
 			func(c *Config, v int64) { c.TokenResponseMaxBytes = ByteSize(v) }},
+		{"stream_event_line_max", StreamEventLineMaxMin, StreamEventLineMaxMax, true,
+			func(c *Config) int64 { return int64(c.StreamEventLineMax) },
+			func(c *Config, v int64) { c.StreamEventLineMax = ByteSize(v) }},
 	} {
 		got, err := load("{}")
 		if err != nil || tc.field(got) != tc.field(defaults) {

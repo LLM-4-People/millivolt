@@ -105,6 +105,13 @@ type Config struct {
 	// the bytes are released verbatim. Hot-reloads for new streams.
 	StreamTerminalHoldMax ByteSize `yaml:"stream_terminal_hold_max" json:"stream_terminal_hold_max"`
 
+	// StreamEventLineMax bounds one SSE event line on both the passthrough
+	// relay and every translated stream decoder. The translated frame buffer
+	// is derived from it, so a source line the decoder accepts always has a
+	// relayable target frame. Raise it only for providers that emit unusually
+	// large single events. Hot-reloads for new streams.
+	StreamEventLineMax ByteSize `yaml:"stream_event_line_max" json:"stream_event_line_max"`
+
 	// TokenResponseMaxBytes bounds a token-endpoint response read during
 	// transparent credential refresh. Past it the refresh fails open and the
 	// original request is proxied. Hot-reloads.

@@ -66,22 +66,11 @@ const (
 	// capture the provider's error detail for metrics; the body itself is
 	// still relayed to the client in full. Safety guardrail, not user-tunable.
 	maxErrBodyBytes = 64 * 1024
-	// sseScannerBufInit sizes SSE scanner buffers; sseScannerBufMax bounds one
-	// source event line on the passthrough relay. The small initial buffer
-	// fits the ordinary chunk and grows on demand, so a stream that never
-	// exceeds it retains 4 KiB instead of 64. Safety guardrail, not
-	// user-tunable.
+	// sseScannerBufInit sizes SSE scanner buffers; the accepted source-event
+	// line bound is config.StreamEventLineMax. The small initial buffer fits
+	// the ordinary chunk and grows on demand, so a stream that never exceeds it
+	// retains 4 KiB instead of the configured maximum.
 	sseScannerBufInit = 4 * 1024
-	sseScannerBufMax  = 1024 * 1024
-	// translatedFrameBufMax bounds one translated SSE frame line. The
-	// translated scanner consumes the frames the format translator emits, so
-	// it takes the translator's own output bound: the accepted source-line
-	// bound plus JSON re-encoding and retained-identity expansion. Keeping
-	// that fact with the translator means every source line it accepts has a
-	// relayable frame instead of failing a legitimate chunk as
-	// translation_error. Safety guardrail, not user-tunable.
-	translatedFrameBufMax = max(providerformat.NativeStreamFrameMaxBytes,
-		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
 	// nonStreamGrowInit / nonStreamChunk size the incremental non-stream
 	// relay buffer (initial capture prefix / read chunk). Guardrails, not tunables.
 	nonStreamGrowInit = 64 * 1024
@@ -92,6 +81,18 @@ const (
 	// committed to verbatim relay. Safety guardrail, not user-tunable.
 	qualitySpoolMax = 1 << 20 // 1 MiB
 )
+
+// translatedFrameBufMax bounds one translated SSE frame line for the configured
+// accepted source-line bound. The translated scanner consumes the frames the
+// format translator emits, so it takes the translator's own output bound: the
+// accepted source-line bound plus JSON re-encoding and retained-identity
+// expansion. Keeping that fact with the translator means every source line it
+// accepts has a relayable frame instead of failing a legitimate chunk as a
+// translation_error.
+func translatedFrameBufMax(lineMax int) int {
+	return max(providerformat.NativeStreamFrameMax(lineMax),
+		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
+}
 
 // isNonRetryableQuotaErr is the proxy-local spelling of the canonical quota
 // predicate (metrics owns the vocabulary, next to ParseErrorEnvelope): a 429

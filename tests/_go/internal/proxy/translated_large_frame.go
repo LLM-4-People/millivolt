@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // TestTranslatedStreamLargeHTMLLiteralContentRelays pins the translated SSE
@@ -56,11 +58,11 @@ func TestTranslatedStreamLargeHTMLLiteralContentRelays(t *testing.T) {
 func TestTranslatedStreamFrameAtNativeLineCapRelays(t *testing.T) {
 	const prefix = `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`
 	const suffix = `"}}`
-	contentLen := sseScannerBufMax - 1 - len(prefix) - len(suffix)
+	contentLen := int(config.Default().StreamEventLineMax) - 1 - len(prefix) - len(suffix)
 	content := strings.Repeat("<", contentLen)
 	sourceLine := prefix + content + suffix
-	if len(sourceLine) != sseScannerBufMax-1 {
-		t.Fatalf("fixture source line = %d bytes, want %d", len(sourceLine), sseScannerBufMax-1)
+	if len(sourceLine) != int(config.Default().StreamEventLineMax)-1 {
+		t.Fatalf("fixture source line = %d bytes, want %d", len(sourceLine), int(config.Default().StreamEventLineMax)-1)
 	}
 	native := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg-cap","model":"claude-test","usage":{"input_tokens":4}}}`,
@@ -100,7 +102,7 @@ func TestTranslatedStreamWorstCaseFrameExpansionRelays(t *testing.T) {
 	const prefix = `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`
 	const suffix = `"}}`
 	const identityBytes = 512
-	contentLen := sseScannerBufMax - 1 - len(prefix) - len(suffix)
+	contentLen := int(config.Default().StreamEventLineMax) - 1 - len(prefix) - len(suffix)
 	// Source JSON escapes each control identity byte, which the translator
 	// decodes back to 512 control bytes and re-escapes into every chunk.
 	escapedIdentity := strings.Repeat(`\u0001`, identityBytes)
@@ -119,8 +121,8 @@ func TestTranslatedStreamWorstCaseFrameExpansionRelays(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sourceLine := prefix + tc.content + suffix
-			if len(sourceLine) > sseScannerBufMax-1 {
-				t.Fatalf("fixture source line = %d bytes, want <= %d", len(sourceLine), sseScannerBufMax-1)
+			if len(sourceLine) > int(config.Default().StreamEventLineMax)-1 {
+				t.Fatalf("fixture source line = %d bytes, want <= %d", len(sourceLine), int(config.Default().StreamEventLineMax)-1)
 			}
 			native := strings.Join([]string{
 				messageStart,

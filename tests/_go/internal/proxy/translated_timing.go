@@ -37,7 +37,7 @@ func TestTranslatedStreamTimestampsBeforeClientWrite(t *testing.T) {
 
 	start := time.Now()
 	rec := &metrics.Record{Start: start, FinalAttemptAt: start, End: start.Add(time.Second)}
-	s.streamBodyTranslated(context.Background(), w, body, rec, w, ir.Chat)
+	s.streamBodyTranslated(context.Background(), w, body, rec, w, ir.Chat, translatedFrameBufMax(int(config.Default().StreamEventLineMax)))
 	rec.End = time.Now()
 	metrics.FinalizeRecord(rec)
 

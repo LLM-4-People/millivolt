@@ -62,8 +62,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		return rescueNone
 	}
 	// One snapshot for the whole stream: a concurrent reload must not change
-	// the hold decision midway through a terminal region.
+	// the hold decision midway through a terminal region, and the accepted
+	// source-line bound must match the scanner in this loop.
 	holdMax := int(s.cfg().StreamTerminalHoldMax)
+	lineMax := int(s.cfg().StreamEventLineMax)
 	var (
 		lineBuf bytes.Buffer // partial line + current chunk bytes not yet consumed
 		out     bytes.Buffer // released bytes awaiting one client write
@@ -597,13 +599,13 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					holding = false
 					holdAborted = true
 				}
-			} else if len(eventName) > 0 && lineBuf.Len() > sseScannerBufMax {
+			} else if len(eventName) > 0 && lineBuf.Len() > lineMax {
 				// A newline-free giant inside a buffered terminal event:
 				// commit its bytes verbatim, exactly like a hold overflow.
 				eventBody = append(eventBody, lineBuf.Bytes()...)
 				abandonEventBuffer(now)
 				lineBuf.Reset()
-			} else if lineBuf.Len() > sseScannerBufMax {
+			} else if lineBuf.Len() > lineMax {
 				// Safety guardrail: a newline-free (or one giant) stream from a
 				// buggy or hostile upstream must not grow lineBuf without bound.
 				// A newline-free chunk never enters the line loop above, so the

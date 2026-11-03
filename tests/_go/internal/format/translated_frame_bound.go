@@ -1,11 +1,11 @@
 package format
 
 // Regression tests for the translated-frame output bound. The translator
-// accepts source lines up to sseLineBufMax and re-encodes their decoded or
+// accepts source lines up to StreamEventLineMax and re-encodes their decoded or
 // retained strings inside the OpenAI chunk envelope. Retained control-byte
 // id/model values are echoed into every chunk, a raw U+2028 expands from three
 // bytes to six, and an invalid UTF-8 byte becomes the three-byte U+FFFD
-// replacement. NativeStreamFrameMaxBytes must cover those expansions so the
+// replacement. NativeStreamFrameMax(StreamEventLineMax) must cover those expansions so the
 // proxy's translated relay scanner never rejects an accepted source frame.
 
 import (
@@ -26,7 +26,7 @@ const (
 // the former 2x source-line estimate, pinning that this bound is not a
 // restatement of the bug.
 func TestNativeStreamFrameMaxBytesCoversWorstCase(t *testing.T) {
-	contentLen := sseLineBufMax - 1 - len(frameContentPrefix) - len(frameContentSuffix)
+	contentLen := StreamEventLineMax - 1 - len(frameContentPrefix) - len(frameContentSuffix)
 	escapedIdentity := strings.Repeat(`\u0001`, nativeIdentityMaxBytes)
 	stream := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"` + escapedIdentity +
@@ -42,7 +42,7 @@ func TestNativeStreamFrameMaxBytesCoversWorstCase(t *testing.T) {
 		t.Fatalf("StreamToOpenAI rejected an accepted source frame: %v", err)
 	}
 
-	oldCap := 2*sseLineBufMax + 2*1024
+	oldCap := 2*StreamEventLineMax + 2*1024
 	maxLine := 0
 	for _, line := range strings.Split(out.String(), "\n") {
 		if !strings.HasPrefix(line, "data: ") {
@@ -59,16 +59,16 @@ func TestNativeStreamFrameMaxBytesCoversWorstCase(t *testing.T) {
 			t.Fatalf("translated data line is not JSON: %v", err)
 		}
 	}
-	if maxLine > NativeStreamFrameMaxBytes {
-		t.Fatalf("largest translated line = %d bytes, want <= NativeStreamFrameMaxBytes (%d)",
-			maxLine, NativeStreamFrameMaxBytes)
+	if maxLine > NativeStreamFrameMax(StreamEventLineMax) {
+		t.Fatalf("largest translated line = %d bytes, want <= NativeStreamFrameMax(StreamEventLineMax) (%d)",
+			maxLine, NativeStreamFrameMax(StreamEventLineMax))
 	}
 	if maxLine <= oldCap {
 		t.Fatalf("largest translated line = %d bytes, want > former cap %d to exercise the expansion bound",
 			maxLine, oldCap)
 	}
 	t.Logf("translated frame: source=%d bytes maxLine=%d bound=%d former=%d",
-		sseLineBufMax, maxLine, NativeStreamFrameMaxBytes, oldCap)
+		StreamEventLineMax, maxLine, NativeStreamFrameMax(StreamEventLineMax), oldCap)
 }
 
 // TestStreamToOpenAIInvalidUTF8Replacement pins the invalid-UTF-8 arm

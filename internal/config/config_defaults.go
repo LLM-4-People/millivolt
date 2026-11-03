@@ -62,6 +62,8 @@ const (
 	NonStreamCaptureMaxMax       = 64 << 20
 	StreamTerminalHoldMaxMin     = 4 << 10
 	StreamTerminalHoldMaxMax     = 1 << 20
+	StreamEventLineMaxMin        = 16 << 10
+	StreamEventLineMaxMax        = 16 << 20
 	TokenResponseMaxMin          = 4 << 10
 	TokenResponseMaxMax          = 16 << 20
 	// Tool-call bands (Validate, overlay, Schema). The ceiling bounds what an
@@ -188,6 +190,7 @@ func Default() *Config {
 		UpstreamResponseHeaderMax:  1 << 20,
 		NonStreamCaptureMax:        1 << 20,
 		StreamTerminalHoldMax:      64 << 10,
+		StreamEventLineMax:         format.StreamEventLineMax,
 		TokenResponseMaxBytes:      1 << 20,
 
 		MaxConnsPerHost:     512,

@@ -1240,12 +1240,12 @@ func TestEncodedKnownRouteWithInFormatTranslation(t *testing.T) {
 // scanner bound must cover every frame the format encoders can legally emit.
 func TestTranslatedFrameBufCoversEncoderCaps(t *testing.T) {
 	for name, cap := range map[string]int{
-		"native stream":          providerformat.NativeStreamFrameMaxBytes,
+		"native stream":          providerformat.NativeStreamFrameMax(providerformat.StreamEventLineMax),
 		"responses stream":       providerformat.ResponsesStreamFrameMaxBytes,
 		"responses stream + pad": providerformat.ResponsesStreamFrameMaxBytes + 2*1024,
 	} {
-		if translatedFrameBufMax < cap {
-			t.Fatalf("translatedFrameBufMax = %d, want at least %s (%d)", translatedFrameBufMax, name, cap)
+		if translatedFrameBufMax(int(config.Default().StreamEventLineMax)) < cap {
+			t.Fatalf("translatedFrameBufMax(int(config.Default().StreamEventLineMax)) = %d, want at least %s (%d)", translatedFrameBufMax(int(config.Default().StreamEventLineMax)), name, cap)
 		}
 	}
 }

@@ -110,6 +110,9 @@ func (c *Config) Validate() error {
 	if err := checkByteSize("stream_terminal_hold_max", c.StreamTerminalHoldMax, StreamTerminalHoldMaxMin, StreamTerminalHoldMaxMax); err != nil {
 		return err
 	}
+	if err := checkByteSize("stream_event_line_max", c.StreamEventLineMax, StreamEventLineMaxMin, StreamEventLineMaxMax); err != nil {
+		return err
+	}
 	if err := checkByteSize("token_response_max", c.TokenResponseMaxBytes, TokenResponseMaxMin, TokenResponseMaxMax); err != nil {
 		return err
 	}

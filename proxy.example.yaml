@@ -254,6 +254,14 @@ non_stream_capture_max: 1MiB
 #   type: bytes · range 4KiB..1MiB · default 64KiB
 stream_terminal_hold_max: 64KiB
 
+# One SSE event line accepted on the passthrough relay and by every translated stream
+# decoder. The translated frame buffer is derived from this value, so raising it raises
+# both bounds together. Raise it only for providers that emit unusually large single
+# events; it is a per-stream memory bound.
+# Hot-reload: yes.
+#   type: bytes · range 16KiB..16MiB · default 2MiB
+stream_event_line_max: 2MiB
+
 # Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 512
