@@ -844,6 +844,7 @@ both.
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
 | `GET/POST /admin/throttle` | Inspect/provider-limit updates. POST requires provider and accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge; `clear:true` removes policy. |
+| `POST /admin/queue/drain` | Release parked requests without waiting for their limit, pause hold or retry window. Requires exactly one scope: `all:true`, `provider`, `model` or `client`. Released requests answer with a retryable 503, never a provider error; in-flight requests are untouched. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
@@ -1077,12 +1078,17 @@ that stops sending for `upstream_stream_idle_timeout` is canceled.
 Request and token budgets start full when enabled and refill continuously at
 the configured count/window rate. Request budget is charged once per proxy
 admission, not again for each absorbed upstream retry. Token admission reserves
-an estimate from captured prompt characters divided by four plus a positive
-captured output limit, then settles against final reported usage. A reservation
-larger than the bucket's entire capacity can proceed while credit is positive,
-putting the bucket into debt that refill or usage settlement can repay. These
-controls permit bursts and oversized requests; they are not strict fixed-window
-provider quota enforcement.
+the captured prompt characters divided by four, then settles against final
+reported usage. The client's output ceiling (`max_tokens` and its spellings) is
+deliberately not reserved: it is a ceiling, not expected usage, and reserving it
+would turn the budget into a worst-case concurrency cap. A reservation larger
+than the bucket's entire capacity can proceed while credit is positive, putting
+the bucket into debt that refill or usage settlement can repay. These controls
+permit bursts and oversized requests; they are not strict fixed-window provider
+quota enforcement. A token budget therefore also sets the sustained average
+rate: 500K tokens per 6h refills at about 23 tokens/s, so once the initial
+budget is spent, later requests wait for refill unless actual usage settles
+lower than the reservation.
 
 ### Error storm protection
 
