@@ -55,6 +55,15 @@ const (
 	ModelsDiscoveryMaxEntriesMax  = 1_000_000
 	TranslatedResponseMaxBytesMin = 4 << 10
 	TranslatedResponseMaxBytesMax = 1 << 30
+	// Upstream response buffers (Validate, overlay, Schema).
+	UpstreamResponseHeaderMaxMin = 4 << 10
+	UpstreamResponseHeaderMaxMax = 64 << 20
+	NonStreamCaptureMaxMin       = 16 << 10
+	NonStreamCaptureMaxMax       = 64 << 20
+	StreamTerminalHoldMaxMin     = 4 << 10
+	StreamTerminalHoldMaxMax     = 1 << 20
+	TokenResponseMaxMin          = 4 << 10
+	TokenResponseMaxMax          = 16 << 20
 	// Tool-call bands (Validate, overlay, Schema). The ceiling bounds what an
 	// operator may select; the format codec's direct-library defaults are the
 	// same documented values, pinned by a contract test.
@@ -176,6 +185,10 @@ func Default() *Config {
 		ModelsDiscoveryMaxPages:    100,
 		ModelsDiscoveryMaxEntries:  10_000,
 		TranslatedResponseMaxBytes: 32 << 20,
+		UpstreamResponseHeaderMax:  1 << 20,
+		NonStreamCaptureMax:        1 << 20,
+		StreamTerminalHoldMax:      64 << 10,
+		TokenResponseMaxBytes:      1 << 20,
 
 		MaxConnsPerHost:     512,
 		MaxIdleConns:        512,

@@ -89,6 +89,27 @@ type Config struct {
 	// translating unusually large provider responses. Hot-reloads.
 	TranslatedResponseMaxBytes ByteSize `yaml:"translated_response_max_bytes" json:"translated_response_max_bytes"`
 
+	// UpstreamResponseHeaderMax bounds the upstream response headers the
+	// client accepts. Past it the request fails as a transport error. Restart
+	// required: the transport is built once at boot.
+	UpstreamResponseHeaderMax ByteSize `yaml:"upstream_response_header_max" json:"upstream_response_header_max"`
+
+	// NonStreamCaptureMax bounds the prefix of a non-streaming response body
+	// kept for usage/cost parsing. Larger documents still relay in full; their
+	// accounting may be incomplete. Hot-reloads.
+	NonStreamCaptureMax ByteSize `yaml:"non_stream_capture_max" json:"non_stream_capture_max"`
+
+	// StreamTerminalHoldMax bounds the bytes withheld at the end of a relayed
+	// SSE stream while the relay decides between verbatim release and an
+	// in-band degenerate-error substitution. Past it the hold is abandoned and
+	// the bytes are released verbatim. Hot-reloads for new streams.
+	StreamTerminalHoldMax ByteSize `yaml:"stream_terminal_hold_max" json:"stream_terminal_hold_max"`
+
+	// TokenResponseMaxBytes bounds a token-endpoint response read during
+	// transparent credential refresh. Past it the refresh fails open and the
+	// original request is proxied. Hot-reloads.
+	TokenResponseMaxBytes ByteSize `yaml:"token_response_max" json:"token_response_max"`
+
 	// AllowedBaseURLs is an optional allowlist of upstream base URL prefixes.
 	// When non-empty, only targets matching one of these prefixes are accepted;
 	// this mitigates SSRF if the proxy is reachable by untrusted clients. Empty

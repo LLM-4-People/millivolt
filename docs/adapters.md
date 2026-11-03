@@ -338,9 +338,10 @@ until that bound expires. A non-200 status that forbids a response body (1xx,
 whose error body the client cannot receive. Pre-commit failures (routing,
 request validation, translation, or an oversized translated body) answer in the
 client protocol's own error envelope. Non-streaming translation reads the complete upstream 200
-body and the translated document under a fixed 32 MiB cap each; exceeding
-either fails closed with 502 `response_too_large` before any client bytes. The
-cap is an internal safety constant, not a configurable limit.
+body and the translated document under `translated_response_max_bytes` each
+(default 32 MiB); exceeding either fails closed with 502 `response_too_large`
+before any client bytes. Translation buffers the whole document, so the
+setting also bounds one in-flight translation's memory.
 
 Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and

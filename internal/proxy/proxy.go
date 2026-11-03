@@ -82,29 +82,15 @@ const (
 	// translation_error. Safety guardrail, not user-tunable.
 	translatedFrameBufMax = max(providerformat.NativeStreamFrameMaxBytes,
 		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
-	// nonStreamCaptureMax bounds the prefix of a non-streaming response body
-	// kept for usage/cost parsing. Documents exceeding this capture can have
-	// unavailable accounting; their original bytes are still relayed in full.
-	// Safety guardrail, not user-tunable.
-	nonStreamCaptureMax = 1 << 20 // 1 MiB
 	// nonStreamGrowInit / nonStreamChunk size the incremental non-stream
 	// relay buffer (initial capture prefix / read chunk). Guardrails, not tunables.
 	nonStreamGrowInit = 64 * 1024
 	nonStreamChunk    = 32 * 1024
-	// maxResponseHeaderBytes is the abusive-upstream header cap on the
-	// outbound client. Safety guardrail, not user-tunable.
-	maxResponseHeaderBytes = 1 << 20 // 1 MiB
 	// qualitySpoolMax bounds the pre-write spool of a non-streaming 200 kept
 	// for degenerate-outcome verification. Degenerate bodies are tiny (empty
 	// JSON shells); a body past this cap is clearly not degenerate and is
 	// committed to verbatim relay. Safety guardrail, not user-tunable.
 	qualitySpoolMax = 1 << 20 // 1 MiB
-	// terminalHoldMax bounds the bytes withheld at the end of a relayed SSE
-	// stream (from the first terminal-candidate event onward) while the relay
-	// decides between verbatim release and substituting an in-band degenerate
-	// error. Past the cap the hold is abandoned: no terminal region this large
-	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
-	terminalHoldMax = 64 * 1024
 )
 
 // isNonRetryableQuotaErr is the proxy-local spelling of the canonical quota
@@ -414,7 +400,7 @@ func newUpstreamClient(cfg *config.Config) *http.Client {
 		MaxConnsPerHost:        cfg.MaxConnsPerHost,
 		IdleConnTimeout:        cfg.IdleConnTimeout,
 		ResponseHeaderTimeout:  cfg.UpstreamTimeout, // 0 = no header-arrival cap
-		MaxResponseHeaderBytes: maxResponseHeaderBytes,
+		MaxResponseHeaderBytes: int64(cfg.UpstreamResponseHeaderMax),
 		DialContext:            upstreamDialer(cfg).DialContext,
 		TLSHandshakeTimeout:    cfg.UpstreamTLSHandshakeTimeout,
 		// Without a cache every new HTTPS connection (idle expiry, reload)

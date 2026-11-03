@@ -108,6 +108,32 @@ The table is a navigation aid, not another source of default values.
 [Schema](../internal/config/schema.go), configuration validation and generated
 YAML remain authoritative when a setting is added or changed.
 
+### Guardrails that are not settings
+
+Every numeric guard is classified when it is added. A value becomes a setting
+when an operator can reasonably need a different number for legitimate traffic.
+It stays an internal constant when changing it independently would break an
+invariant, encode a protocol maximum, or only tune an internal heuristic.
+
+| Family | Examples | Why it stays internal |
+| --- | --- | --- |
+| Protocol maxima | Chat `stop` list of 4 | The wire defines the maximum; a larger value would produce a body the target rejects. |
+| Derived frame bounds | `NativeStreamFrameMaxBytes`, `ResponsesStreamFrameMaxBytes`, the proxy's translated frame buffer | Computed from the accepted source-line and retained-byte bounds plus the JSON escape expansion. A separate value could under-size a scanner, turning a valid frame into a translation error, or over-size it and defeat the retention bound. |
+| Recursion and canonicalization budgets | Anthropic nested block depth 16, tool-argument canonical depth 64, separator budget, canonical byte cap | They select a safe fallback (the raw-byte fingerprint) or cap decoder recursion. They are algorithm facts, not wire acceptance. |
+| Diagnostic echo bounds | 128-byte warning echo, 512-byte identity and provider-text retention, header echo caps | A request-sized diagnostic or identifier must never multiply across a stream or a stored row. Raising them cannot admit a request that is otherwise rejected; it only grows logs and frames. |
+| Record retention | Retained tool names (64), tool-call ids (1024), path/method/model/error caps, capture header caps | They bound the ring, pending snapshots and durable rows. Counts still count past the bound; only identities stop being retained. |
+| Metrics-only truncation | SSE analyzer event buffer, non-streaming choice cap | The relayed bytes are unaffected; the cap bounds the analyzer's typed decode. Raising it cannot change client behavior, only analysis memory. |
+| Cursor run and store budgets | Parked run count, per-run pending call/byte caps, blob store caps, aggregate store budget | They bound per-run and process memory for a bridge whose counts come from live tool batches, not operator intent. The per-run and aggregate caps are coupled. |
+| Internal heuristic thresholds | Quality retry spool, error-body capture, discovery output allowance, storage batch sizes, log scan and chart/explorer budgets | They decide whether an internal heuristic runs or how much work one pass may do. Changing them changes diagnostics or performance, not what a client may send or receive. |
+
+The wire-facing bounds are settings: `request_tool_calls_max`,
+`stream_tool_calls_max`, `translated_response_max_bytes`,
+`models_discovery_max_entries`, `non_stream_capture_max`,
+`stream_terminal_hold_max`, `token_response_max` and
+`upstream_response_header_max`. A new guard must be classified in this table
+when it is added, and a guard that becomes operator-facing moves to the
+settings schema instead of keeping a parallel constant.
+
 ### Saving settings safely
 
 Settings collects a draft until Apply. Revert reloads the saved document, and
@@ -1790,9 +1816,9 @@ storage guarantees.
 - Non-streaming usage/cost inspection keeps a bounded prefix, so larger valid
   responses can forward completely without complete accounting.
 - Optional non-streaming translation reads the complete upstream 200 body and
-  the translated document under a fixed 32 MiB cap each. Exceeding either
-  fails closed with 502 `response_too_large` before any client bytes; the cap
-  is an internal safety constant, not a setting, and discovery budgets do not
+  the translated document under the configured `translated_response_max_bytes`
+  each (default 32 MiB). Exceeding either fails closed with 502
+  `response_too_large` before any client bytes; discovery budgets do not
   bound the path.
 - General multi-line SSE accounting/native event assembly remains incomplete;
   some split terminal/content shapes can affect classification, not just metrics.

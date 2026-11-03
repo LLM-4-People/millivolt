@@ -206,8 +206,9 @@ func responsesOverBoundTerminal(typed bool) string {
 	return responsesCreatedFrame + b.String()
 }
 
-// TestResponsesOverBoundTerminalResolves pins R4-4: above terminalHoldMax a
-// multi-line terminal event is released verbatim without an artificial blank
+// TestResponsesOverBoundTerminalResolves pins R4-4: above the configured
+// stream terminal hold a multi-line terminal event is released verbatim
+// without an artificial blank
 // boundary, and its reassembled document still supplies the finish reason,
 // answer presence, TTFT and usage. Both a typed document and a document that
 // omits its type (classified by the buffered event name) are covered.
@@ -219,8 +220,8 @@ func TestResponsesOverBoundTerminalResolves(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			stream := responsesOverBoundTerminal(typed)
-			if len(stream) <= terminalHoldMax {
-				t.Fatalf("fixture is %d bytes, want above terminalHoldMax (%d)", len(stream), terminalHoldMax)
+			if len(stream) <= int(config.Default().StreamTerminalHoldMax) {
+				t.Fatalf("fixture is %d bytes, want above the configured hold (%d)", len(stream), int(config.Default().StreamTerminalHoldMax))
 			}
 			upstream := streamUpstream(t, stream)
 			defer upstream.Close()
@@ -270,9 +271,9 @@ func TestResponsesTypeLessBlankBoundaryOverBoundTerminalResolves(t *testing.T) {
 	for {
 		doc := prefix + strings.Repeat("x", pad) + suffix
 		base := len(eventName) + len("data: "+doc+"\n")
-		if base+2 > terminalHoldMax {
-			if base > terminalHoldMax {
-				t.Fatalf("fixture data line = %d bytes, want at most %d", base, terminalHoldMax)
+		if base+2 > int(config.Default().StreamTerminalHoldMax) {
+			if base > int(config.Default().StreamTerminalHoldMax) {
+				t.Fatalf("fixture data line = %d bytes, want at most %d", base, int(config.Default().StreamTerminalHoldMax))
 			}
 			break
 		}

@@ -166,6 +166,12 @@ debug_store_max_bytes: 512MiB
 #   type: bool · default true
 auto_token_refresh: true
 
+# Token-endpoint response read during transparent credential refresh. Past it the refresh
+# fails open and the original request is proxied unchanged.
+# Hot-reload: yes.
+#   type: bytes · range 4KiB..16MiB · default 1MiB
+token_response_max: 1MiB
+
 # ---- Upstream ----
 # Connection pool, header timeout, and stream keepalives.
 # How long to wait for upstream response headers. Streaming bodies are not subject to
@@ -225,6 +231,27 @@ models_discovery_max_entries: 10000
 # Hot-reload: yes.
 #   type: bytes · range 4KiB..1GiB · default 32MiB
 translated_response_max_bytes: 32MiB
+
+# Upstream response headers the client accepts. Past it the request fails as a transport
+# error. Restart required: the transport is built once at boot.
+# Hot-reload: NO (restart required).
+#   type: bytes · range 4KiB..64MiB · default 1MiB
+upstream_response_header_max: 1MiB
+
+# Prefix of a non-streaming response body kept for usage and cost parsing. Larger
+# documents still relay in full; their accounting may be incomplete. This is a capture
+# cap, not a forwarding cap.
+# Hot-reload: yes.
+#   type: bytes · range 16KiB..64MiB · default 1MiB
+non_stream_capture_max: 1MiB
+
+# Bytes withheld at the end of a relayed SSE stream while the relay decides between
+# verbatim release and an in-band degenerate-error substitution. Past it the hold is
+# abandoned and the bytes are released verbatim. Raise it only if a legitimate terminal
+# region is larger than 64 KiB.
+# Hot-reload: yes.
+#   type: bytes · range 4KiB..1MiB · default 64KiB
+stream_terminal_hold_max: 64KiB
 
 # Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.
 # Hot-reload: yes.

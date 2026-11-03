@@ -101,6 +101,18 @@ func (c *Config) Validate() error {
 	if err := checkByteSize("translated_response_max_bytes", c.TranslatedResponseMaxBytes, TranslatedResponseMaxBytesMin, TranslatedResponseMaxBytesMax); err != nil {
 		return err
 	}
+	if err := checkByteSize("upstream_response_header_max", c.UpstreamResponseHeaderMax, UpstreamResponseHeaderMaxMin, UpstreamResponseHeaderMaxMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("non_stream_capture_max", c.NonStreamCaptureMax, NonStreamCaptureMaxMin, NonStreamCaptureMaxMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("stream_terminal_hold_max", c.StreamTerminalHoldMax, StreamTerminalHoldMaxMin, StreamTerminalHoldMaxMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("token_response_max", c.TokenResponseMaxBytes, TokenResponseMaxMin, TokenResponseMaxMax); err != nil {
+		return err
+	}
 	if c.RequestToolCallsMax < RequestToolCallsMin || c.RequestToolCallsMax > RequestToolCallsBandMax {
 		return fmt.Errorf("request_tool_calls_max: must be %d..%d, got %d",
 			RequestToolCallsMin, RequestToolCallsBandMax, c.RequestToolCallsMax)

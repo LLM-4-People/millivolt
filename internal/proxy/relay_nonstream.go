@@ -202,7 +202,7 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 			}
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
-			if len(buf)+n <= nonStreamCaptureMax {
+			if len(buf)+n <= int(s.cfg().NonStreamCaptureMax) {
 				buf = append(buf, chunk[:n]...)
 			}
 		}
