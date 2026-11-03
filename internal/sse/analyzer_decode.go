@@ -8,11 +8,11 @@ import (
 )
 
 // eventDataMax bounds the per-event accumulation buffer. A legit SSE event is
-// a few KB; the proxy's configured stream event line bound defaults to 2 MiB,
-// so this is comfortably above any real event while preventing an unbounded
-// buffer from a hostile upstream that never sends a blank line. An event
-// between this bound and the configured line bound is analyzed from its
-// bounded prefix; the relayed bytes are unaffected.
+// a few KB; the proxy's configured event bound defaults to 2 MiB, so this is
+// comfortably above any real event while preventing an unbounded buffer from
+// a hostile upstream that never sends a blank line. An event between this
+// bound and the configured event bound is analyzed from its bounded prefix;
+// the relayed bytes are unaffected.
 const eventDataMax = 1 << 20
 
 // completeJSONObject reports whether payload is one whole JSON object: an

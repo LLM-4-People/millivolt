@@ -14,19 +14,17 @@ import (
 )
 
 const (
-	// sseLineBufInit / StreamEventLineMax bound a single SSE event line while
-	// scanning an upstream stream (initial buffer / hard default). The small
-	// initial buffer fits the ordinary event and grows on demand, so a stream
-	// that never exceeds it retains 4 KiB instead of 2 MiB. The default admits
-	// a 1 MiB answer repeated in a terminal response.completed frame plus its
-	// JSON envelope; the decoder's retained-text and overall response bounds
-	// remain the separate authority on total body size. The user setting is
-	// config.StreamEventLineMax; the proxy passes it through StreamOptions.
+	// sseLineBufInit / StreamEventMaxBytes bound one SSE event while scanning
+	// an upstream stream (initial buffer / hard default): a single line, and
+	// the accumulated data of a multi-line event. The small initial buffer
+	// fits the ordinary event and grows on demand, so a stream that never
+	// exceeds it retains 4 KiB instead of 2 MiB. The user setting is
+	// config.StreamEventMaxBytes; the proxy passes it through StreamOptions.
 	sseLineBufInit = 4 * 1024
 
-	// StreamEventLineMax is the direct-library default for one accepted source
-	// event line.
-	StreamEventLineMax = 2 * 1024 * 1024
+	// StreamEventMaxBytes is the direct-library default for one accepted source
+	// event: a single line and the accumulated data of a multi-line event.
+	StreamEventMaxBytes = 2 * 1024 * 1024
 
 	// nativeIdentityMaxBytes bounds provider-controlled identity strings
 	// (message id/model and tool-call id/name) at the translation boundary
@@ -57,7 +55,7 @@ const (
 )
 
 // NativeStreamFrameMax bounds one SSE data line emitted by StreamToOpenAI from
-// a source line the translator accepts at lineMax bytes. Re-encoding a decoded
+// a source line the translator accepts at eventMax bytes. Re-encoding a decoded
 // string or retained raw tool input can at most triple each source byte, and
 // the retained message id/model are echoed into every chunk, each bounded at
 // nativeIdentityMaxBytes and escaped to at most wireJSONDecodedByteMax bytes
@@ -65,8 +63,8 @@ const (
 // values. The proxy sizes its translated relay scanner from this bound for the
 // same configured line limit, so every accepted source frame relays instead of
 // failing as a translation_error.
-func NativeStreamFrameMax(lineMax int) int {
-	return wireJSONSourceByteMax*lineMax +
+func NativeStreamFrameMax(eventMax int) int {
+	return wireJSONSourceByteMax*eventMax +
 		2*wireJSONDecodedByteMax*nativeIdentityMaxBytes + nativeStreamFrameEnvelopeMax
 }
 

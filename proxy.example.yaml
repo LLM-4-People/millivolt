@@ -115,11 +115,13 @@ go_memory_limit: 0B
 #   type: bytes · range 1KiB..1GiB · default 32MiB
 max_request_bytes: 32MiB
 
-# Most tool calls across the whole message history of one inbound request. Real agent
-# turns replay a handful; raise it only for clients that resend unusually long tool loops,
-# because every call is materialized in memory during translation.
+# Most Chat tool calls across the whole message history of one inbound request, including
+# the deprecated per-message function_call shape. Anthropic tool_use and Responses
+# function_call history are bounded by their protocol collection limits instead. Real
+# agent turns replay a handful; raise it only for clients that resend unusually long tool
+# loops, because every call is materialized in memory during translation.
 # Hot-reload: yes.
-#   type: int · range 1..100000 · default 1024
+#   type: int · range 1..10000 · default 1024
 request_tool_calls_max: 1024
 
 # SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
@@ -233,34 +235,37 @@ models_discovery_max_entries: 10000
 #   type: bytes · range 4KiB..1GiB · default 32MiB
 translated_response_max_bytes: 32MiB
 
-# Upstream response headers the client accepts. Past it the request fails as a transport
-# error. Restart required: the transport is built once at boot.
-# Hot-reload: NO (restart required).
+# Upstream response headers the proxy accepts. Past it the request fails as a transport
+# error. The upstream client is rebuilt on reload, so new requests use the new value while
+# in-flight streams keep the client they started on.
+# Hot-reload: yes.
 #   type: bytes · range 4KiB..64MiB · default 1MiB
 upstream_response_header_max: 1MiB
 
 # Prefix of a non-streaming response body kept for usage and cost parsing. Larger
 # documents still relay in full; their accounting may be incomplete. This is a capture
-# cap, not a forwarding cap.
+# cap, not a forwarding cap, and it is per in-flight non-streaming request outside
+# max_inflight_response_bytes.
 # Hot-reload: yes.
 #   type: bytes · range 16KiB..64MiB · default 1MiB
 non_stream_capture_max: 1MiB
 
 # Bytes withheld at the end of a relayed SSE stream while the relay decides between
 # verbatim release and an in-band degenerate-error substitution. Past it the hold is
-# abandoned and the bytes are released verbatim. Raise it only if a legitimate terminal
-# region is larger than 64 KiB.
+# abandoned and the bytes are released verbatim. A single complete event line can exceed
+# it by up to stream_event_max_bytes. Raise it only if a legitimate terminal region is
+# larger than the default.
 # Hot-reload: yes.
 #   type: bytes · range 4KiB..1MiB · default 64KiB
 stream_terminal_hold_max: 64KiB
 
-# One SSE event line accepted on the passthrough relay and by every translated stream
-# decoder. The translated frame buffer is derived from this value, so raising it raises
-# both bounds together. Raise it only for providers that emit unusually large single
-# events; it is a per-stream memory bound.
+# Largest SSE event accepted on the passthrough relay and by every translated stream
+# decoder: a single line, and the accumulated data of a multi-line event. The translated
+# frame buffer is derived from this value, so both bounds move together. The floor is the
+# built-in accepted size; raise it only for providers that emit larger events.
 # Hot-reload: yes.
-#   type: bytes · range 16KiB..16MiB · default 2MiB
-stream_event_line_max: 2MiB
+#   type: bytes · range 2MiB..16MiB · default 2MiB
+stream_event_max_bytes: 2MiB
 
 # Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.
 # Hot-reload: yes.
@@ -628,7 +633,7 @@ anthropic_default_max_tokens: 4096
 # event). A stream past the bound ends with a translation_error. Raise it only for
 # providers that emit unusually large parallel tool batches.
 # Hot-reload: yes.
-#   type: int · range 1..65536 · default 1024
+#   type: int · range 1..10000 · default 1024
 stream_tool_calls_max: 1024
 
 # What a cross-protocol translation does when the target cannot represent a client field.

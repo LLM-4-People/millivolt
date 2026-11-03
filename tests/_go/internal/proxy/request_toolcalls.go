@@ -206,3 +206,30 @@ func TestRequestToolCallBoundIsConfigurable(t *testing.T) {
 		t.Fatalf("lowered bound error = %v, want the configured 1-call wording", err)
 	}
 }
+
+// TestRequestToolCallBoundCountsLegacyFunctionCall pins the deprecated
+// per-message function_call shape in the same aggregate as tool_calls: it
+// materializes a typed call too, so letting it bypass the setting would reopen
+// the amplification the preflight exists to stop.
+func TestRequestToolCallBoundCountsLegacyFunctionCall(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[` +
+		`{"role":"assistant","content":"","function_call":{"name":"f","arguments":"{}"}},` +
+		`{"role":"assistant","content":"","function_call":{"name":"g","arguments":"{}"}}]}`)
+	cfg := testConfig()
+	cfg.RequestToolCallsMax = 1
+	var rec metrics.Record
+	err := parseLLMRequest(body, &rec, false, cfg)
+	if err == nil || !strings.Contains(err.Error(), "request tool calls exceed 1") {
+		t.Fatalf("two legacy calls error = %v, want the configured 1-call wording", err)
+	}
+	cfg.RequestToolCallsMax = 2
+	if err := parseLLMRequest(body, &rec, false, cfg); err != nil {
+		t.Fatalf("two legacy calls at the configured bound rejected: %v", err)
+	}
+	// A null legacy value is no call.
+	nullBody := []byte(`{"model":"m","messages":[{"role":"assistant","content":"","function_call":null}]}`)
+	cfg.RequestToolCallsMax = 1
+	if err := parseLLMRequest(nullBody, &rec, false, cfg); err != nil {
+		t.Fatalf("null function_call counted as a call: %v", err)
+	}
+}

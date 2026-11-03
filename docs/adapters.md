@@ -574,7 +574,7 @@ multi-line event assembly still has limits; fixture coverage is not a blanket
 protocol-conformance claim.
 
 Native model discovery translates and completes supported paginated lists under
-the shared discovery time/byte/page budget. Optional enrichment fills missing
+the shared discovery time/byte/page/entry budget. Optional enrichment fills missing
 fields without replacing upstream-owned values; it draws from the same
 discovery entry budget and degrades to the base list when the remainder cannot
 hold its metadata source.

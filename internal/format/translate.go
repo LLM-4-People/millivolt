@@ -330,10 +330,10 @@ type StreamOptions struct {
 	// the package safety bound for direct library callers; the proxy always
 	// passes config.StreamToolCallsMax.
 	ToolBlocksMax int
-	// EventLineMax bounds one accepted source event line for every decoder.
-	// The proxy passes config.StreamEventLineMax; zero keeps the package
+	// EventMaxBytes bounds one accepted source event line for every decoder.
+	// The proxy passes config.StreamEventMaxBytes; zero keeps the package
 	// default for direct library callers.
-	EventLineMax int
+	EventMaxBytes int
 }
 
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
@@ -347,7 +347,7 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	case ir.Chat:
 		d := NewChatStreamDecoder(src)
 		d.observe = observe
-		d.r.setLineMax(opts.EventLineMax)
+		d.r.setEventMax(opts.EventMaxBytes)
 		if opts.ToolBlocksMax > 0 {
 			d.toolBlocksMax = opts.ToolBlocksMax
 		}
@@ -355,14 +355,14 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	case ir.Responses:
 		d := NewResponsesStreamDecoder(src)
 		d.observe = observe
-		d.r.setLineMax(opts.EventLineMax)
+		d.r.setEventMax(opts.EventMaxBytes)
 		if opts.ToolBlocksMax > 0 {
 			d.toolBlocksMax = opts.ToolBlocksMax
 		}
 		dec = d
 	case ir.Anthropic:
 		d := NewAnthropicStreamDecoder(src, observe)
-		d.r.setLineMax(opts.EventLineMax)
+		d.r.setEventMax(opts.EventMaxBytes)
 		if opts.ToolBlocksMax > 0 {
 			d.toolBlocksMax = opts.ToolBlocksMax
 		}

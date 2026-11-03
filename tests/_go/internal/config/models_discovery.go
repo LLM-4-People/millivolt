@@ -63,6 +63,7 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 		func(c *Config) { c.ModelsDiscoveryTimeout = ModelsDiscoveryTimeoutMin - 1 },
 		func(c *Config) { c.ModelsDiscoveryMaxBytes = ModelsDiscoveryMaxBytesMax + 1 },
 		func(c *Config) { c.ModelsDiscoveryMaxPages = ModelsDiscoveryMaxPagesMax + 1 },
+		func(c *Config) { c.ModelsDiscoveryMaxEntries = ModelsDiscoveryMaxEntriesMax + 1 },
 	} {
 		c := Default()
 		edit(c)

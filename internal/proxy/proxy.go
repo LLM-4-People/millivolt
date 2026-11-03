@@ -67,7 +67,7 @@ const (
 	// still relayed to the client in full. Safety guardrail, not user-tunable.
 	maxErrBodyBytes = 64 * 1024
 	// sseScannerBufInit sizes SSE scanner buffers; the accepted source-event
-	// line bound is config.StreamEventLineMax. The small initial buffer fits
+	// line bound is config.StreamEventMaxBytes. The small initial buffer fits
 	// the ordinary chunk and grows on demand, so a stream that never exceeds it
 	// retains 4 KiB instead of the configured maximum.
 	sseScannerBufInit = 4 * 1024
@@ -89,8 +89,8 @@ const (
 // expansion. Keeping that fact with the translator means every source line it
 // accepts has a relayable frame instead of failing a legitimate chunk as a
 // translation_error.
-func translatedFrameBufMax(lineMax int) int {
-	return max(providerformat.NativeStreamFrameMax(lineMax),
+func translatedFrameBufMax(eventMax int) int {
+	return max(providerformat.NativeStreamFrameMax(eventMax),
 		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
 }
 

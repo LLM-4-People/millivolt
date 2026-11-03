@@ -217,7 +217,7 @@ func TestResponsesTruncationNotRetried(t *testing.T) {
 // TestTranslatedPostTerminalDebrisStaysSuccess pins ADV-C: debris after the
 // translated terminal marker never rewrites a completed record as an error.
 func TestTranslatedPostTerminalDebrisStaysSuccess(t *testing.T) {
-	debris := "data: " + strings.Repeat("x", int(config.Default().StreamEventLineMax)+1024) + "\n\n"
+	debris := "data: " + strings.Repeat("x", int(config.Default().StreamEventMaxBytes)+1024) + "\n\n"
 	native := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"msg-post","model":"claude-test","usage":{"input_tokens":4}}}`,
 		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before"}}`,

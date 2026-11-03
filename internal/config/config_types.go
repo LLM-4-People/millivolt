@@ -51,12 +51,14 @@ type Config struct {
 	// will buffer to discover routing metadata. Larger bodies are rejected.
 	MaxRequestBytes ByteSize `yaml:"max_request_bytes" json:"max_request_bytes"`
 
-	// RequestToolCallsMax bounds the aggregate tool_calls members across every
-	// message of one inbound request, before translation materializes each
-	// member as a typed call and, on an Anthropic or Cursor target, a content
-	// block. Real agent history carries a handful per turn; raising it admits
-	// longer replayed tool loops at the cost of more transient memory per
-	// request. Hot-reloads.
+	// RequestToolCallsMax bounds the aggregate Chat tool calls across every
+	// message of one inbound request: tool_calls members plus the deprecated
+	// per-message function_call shape, before translation materializes each as
+	// a typed call and, on an Anthropic or Cursor target, a content block.
+	// Anthropic tool_use and Responses function_call history are bounded by
+	// their protocol collection limits instead. Real agent history carries a
+	// handful per turn; raising it admits longer replayed tool loops at the
+	// cost of more transient memory per request. Hot-reloads.
 	RequestToolCallsMax int `yaml:"request_tool_calls_max" json:"request_tool_calls_max"`
 
 	// UpstreamTimeout is the maximum time to wait for an upstream response's
@@ -89,9 +91,10 @@ type Config struct {
 	// translating unusually large provider responses. Hot-reloads.
 	TranslatedResponseMaxBytes ByteSize `yaml:"translated_response_max_bytes" json:"translated_response_max_bytes"`
 
-	// UpstreamResponseHeaderMax bounds the upstream response headers the
-	// client accepts. Past it the request fails as a transport error. Restart
-	// required: the transport is built once at boot.
+	// UpstreamResponseHeaderMax bounds the upstream response headers the proxy
+	// accepts. Past it the request fails as a transport error. Hot-reloads for
+	// new requests: the upstream client is rebuilt on reload and in-flight
+	// streams keep the client they started on.
 	UpstreamResponseHeaderMax ByteSize `yaml:"upstream_response_header_max" json:"upstream_response_header_max"`
 
 	// NonStreamCaptureMax bounds the prefix of a non-streaming response body
@@ -105,12 +108,13 @@ type Config struct {
 	// the bytes are released verbatim. Hot-reloads for new streams.
 	StreamTerminalHoldMax ByteSize `yaml:"stream_terminal_hold_max" json:"stream_terminal_hold_max"`
 
-	// StreamEventLineMax bounds one SSE event line on both the passthrough
-	// relay and every translated stream decoder. The translated frame buffer
-	// is derived from it, so a source line the decoder accepts always has a
-	// relayable target frame. Raise it only for providers that emit unusually
-	// large single events. Hot-reloads for new streams.
-	StreamEventLineMax ByteSize `yaml:"stream_event_line_max" json:"stream_event_line_max"`
+	// StreamEventMaxBytes bounds one SSE event on both the passthrough relay
+	// and every translated stream decoder: a single line, and the accumulated
+	// data of a multi-line event. The translated frame buffer is derived from
+	// it, so an event the decoder accepts always has a relayable target frame.
+	// The floor is the built-in accepted size; raise it only for providers that
+	// emit larger events. Hot-reloads for new streams.
+	StreamEventMaxBytes ByteSize `yaml:"stream_event_max_bytes" json:"stream_event_max_bytes"`
 
 	// TokenResponseMaxBytes bounds a token-endpoint response read during
 	// transparent credential refresh. Past it the refresh fails open and the

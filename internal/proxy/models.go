@@ -503,7 +503,8 @@ func jsonNumber(v any) (float64, bool) {
 // entries join by "id"; a mapped output field only fills entries that do not
 // already carry it (the upstream's own value always wins). The metadata source
 // draws from the discovery-wide entry budget that the primary list already
-// debited, so it can never hide a second 10,000-entry catalog. Any failure -
+// debited, so it can never hide a second catalog past the configured entry
+// budget. Any failure -
 // fetch, status, shape, or an insufficient remaining entry budget - degrades
 // to the unenriched base list: enrichment is a completeness win, never a hard
 // dependency.

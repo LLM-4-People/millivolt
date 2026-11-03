@@ -80,7 +80,8 @@ func decodeChatRequest(body []byte, limits RequestLimits) (*ir.Request, error) {
 	// proxy preflights the same aggregate so both paths accept the same body.
 	if len(bounds.Messages) > 0 {
 		var messages []struct {
-			ToolCalls json.RawMessage `json:"tool_calls"`
+			ToolCalls    json.RawMessage `json:"tool_calls"`
+			FunctionCall json.RawMessage `json:"function_call"`
 		}
 		if err := json.Unmarshal(bounds.Messages, &messages); err != nil {
 			return nil, errParseOpenAIBody(err)
@@ -89,6 +90,13 @@ func decodeChatRequest(body []byte, limits RequestLimits) (*ir.Request, error) {
 		for i, message := range messages {
 			if err := addWireArray(&total, message.ToolCalls, fmt.Sprintf("messages[%d].tool_calls", i), limits.ToolCallsMax); err != nil {
 				return nil, errParseOpenAIBody(err)
+			}
+			// The deprecated one-call shape materializes a typed call too.
+			if raw := bytes.TrimSpace(message.FunctionCall); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+				total++
+				if total > limits.ToolCallsMax {
+					return nil, errParseOpenAIBody(fmt.Errorf("messages[%d].function_call exceeds %d tool calls", i, limits.ToolCallsMax))
+				}
 			}
 		}
 	}

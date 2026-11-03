@@ -24,7 +24,7 @@ func TestUpstreamBufferSettingsBoundsAndSchema(t *testing.T) {
 		field    func(*Config) int64
 		set      func(*Config, int64)
 	}{
-		{"upstream_response_header_max", UpstreamResponseHeaderMaxMin, UpstreamResponseHeaderMaxMax, false,
+		{"upstream_response_header_max", UpstreamResponseHeaderMaxMin, UpstreamResponseHeaderMaxMax, true,
 			func(c *Config) int64 { return int64(c.UpstreamResponseHeaderMax) },
 			func(c *Config, v int64) { c.UpstreamResponseHeaderMax = ByteSize(v) }},
 		{"non_stream_capture_max", NonStreamCaptureMaxMin, NonStreamCaptureMaxMax, true,
@@ -36,9 +36,9 @@ func TestUpstreamBufferSettingsBoundsAndSchema(t *testing.T) {
 		{"token_response_max", TokenResponseMaxMin, TokenResponseMaxMax, true,
 			func(c *Config) int64 { return int64(c.TokenResponseMaxBytes) },
 			func(c *Config, v int64) { c.TokenResponseMaxBytes = ByteSize(v) }},
-		{"stream_event_line_max", StreamEventLineMaxMin, StreamEventLineMaxMax, true,
-			func(c *Config) int64 { return int64(c.StreamEventLineMax) },
-			func(c *Config, v int64) { c.StreamEventLineMax = ByteSize(v) }},
+		{"stream_event_max_bytes", StreamEventMaxBytesMin, StreamEventMaxBytesMax, true,
+			func(c *Config) int64 { return int64(c.StreamEventMaxBytes) },
+			func(c *Config, v int64) { c.StreamEventMaxBytes = ByteSize(v) }},
 	} {
 		got, err := load("{}")
 		if err != nil || tc.field(got) != tc.field(defaults) {

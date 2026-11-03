@@ -481,13 +481,14 @@ translates native formats, completes supported pagination, and optionally
 enriches missing fields. Unrecognized successful list bodies remain verbatim;
 primary discovery budget/errors fail explicitly, while optional enrichment can
 fall back to the complete base list. Discovery can apply limit headers without
-consuming an inference slot. Its time/byte/page limits are configuration-owned.
+consuming an inference slot. Its time/byte/page/entry limits are
+configuration-owned.
 
-Primary and enrichment entries share one 10,000-entry discovery budget;
-enrichment degrades to the base list when the remaining budget cannot hold its
-metadata source. The rendered list is bounded by
+Primary and enrichment entries share one `models_discovery_max_entries` budget
+(default 10,000); enrichment degrades to the base list when the remaining
+budget cannot hold its metadata source. The rendered list is bounded by
 `models_discovery_max_bytes` plus a fixed per-entry normalization allowance
-(512 bytes for each of the 10,000 entries) and is encoded without HTML escaping,
+(512 bytes for each configured entry) and is encoded without HTML escaping,
 so literal `<`, `>`, and `&` keep their wire size. A rendered list past that
 derived bound fails closed before any response bytes are written.
 

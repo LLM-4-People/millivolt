@@ -53,6 +53,18 @@ func TestTranslatedResponseMaxBytesBoundsAndPersistence(t *testing.T) {
 	if f == nil || f.Category != "upstream" || f.Kind != KindBytes || !f.HotReload {
 		t.Fatalf("schema = %+v", f)
 	}
+	// A translated response without a Content-Length reserves its whole cap
+	// against the process-wide response budget. A cap above that budget can
+	// never be acquired, so it is a configuration error, not a runtime 503.
+	c := Default()
+	c.TranslatedResponseMaxBytes = 512 << 20
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "cannot exceed max_inflight_response_bytes") {
+		t.Errorf("cap above the response budget error = %v, want the cross-field rejection", err)
+	}
+	c.MaxInflightResponseBytes = 0
+	if err := c.Validate(); err != nil {
+		t.Errorf("unlimited response budget rejected a large translated cap: %v", err)
+	}
 	if f.Min == nil || *f.Min != float64(TranslatedResponseMaxBytesMin) || f.Max == nil || *f.Max != float64(TranslatedResponseMaxBytesMax) {
 		t.Fatalf("schema band = %v..%v", f.Min, f.Max)
 	}

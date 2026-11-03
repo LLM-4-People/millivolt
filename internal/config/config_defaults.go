@@ -62,17 +62,18 @@ const (
 	NonStreamCaptureMaxMax       = 64 << 20
 	StreamTerminalHoldMaxMin     = 4 << 10
 	StreamTerminalHoldMaxMax     = 1 << 20
-	StreamEventLineMaxMin        = 16 << 10
-	StreamEventLineMaxMax        = 16 << 20
+	StreamEventMaxBytesMin       = 2 << 20
+	StreamEventMaxBytesMax       = 16 << 20
 	TokenResponseMaxMin          = 4 << 10
 	TokenResponseMaxMax          = 16 << 20
-	// Tool-call bands (Validate, overlay, Schema). The ceiling bounds what an
-	// operator may select; the format codec's direct-library defaults are the
-	// same documented values, pinned by a contract test.
+	// Tool-call bands (Validate, overlay, Schema). The ceiling matches the
+	// fixed top-level collection bound: a larger value could never be reached
+	// through a bounded request or a bounded translated stream, and it would
+	// only widen the per-request amplification an operator can authorize.
 	RequestToolCallsMin     = 1
-	RequestToolCallsBandMax = 100_000
+	RequestToolCallsBandMax = 10_000
 	StreamToolCallsMin      = 1
-	StreamToolCallsBandMax  = 65_536
+	StreamToolCallsBandMax  = 10_000
 	// Soft runtime memory-limit band (Validate, overlay, Schema). The floor
 	// rejects limits below a fresh process's own documented footprint
 	// (~20 MiB idle), which could only force continuous collection; the
@@ -190,7 +191,7 @@ func Default() *Config {
 		UpstreamResponseHeaderMax:  1 << 20,
 		NonStreamCaptureMax:        1 << 20,
 		StreamTerminalHoldMax:      64 << 10,
-		StreamEventLineMax:         format.StreamEventLineMax,
+		StreamEventMaxBytes:        format.StreamEventMaxBytes,
 		TokenResponseMaxBytes:      1 << 20,
 
 		MaxConnsPerHost:     512,

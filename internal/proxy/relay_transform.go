@@ -97,8 +97,8 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// One snapshot for the whole stream: the translator's accepted
 			// source-line bound and the relay scanner's frame bound must agree
 			// even if a reload lands while this stream is running.
-			lineMax := int(s.cfg().StreamEventLineMax)
-			frameMax := translatedFrameBufMax(lineMax)
+			eventMax := int(s.cfg().StreamEventMaxBytes)
+			frameMax := translatedFrameBufMax(eventMax)
 			pr, pw := io.Pipe()
 			tracked := &translatedStreamWriter{dst: pw, terminal: terminalFrameFor(t.inbound)}
 			costKeys := s.costKeysFor(rec.Provider)
@@ -134,7 +134,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 					IncludeUsage:  t.streamIncludeUsage,
 					FallbackModel: rec.Model,
 					ToolBlocksMax: s.cfg().StreamToolCallsMax,
-					EventLineMax:  lineMax,
+					EventMaxBytes: eventMax,
 				})
 				pw.CloseWithError(translationErr)
 			}()

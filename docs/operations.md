@@ -90,12 +90,12 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | --- | --- |
 | Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
 | Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
-| Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap and SSE keepalives. |
+| Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap, upstream response-header cap and SSE event/hold bounds. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
-| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call and Cursor parked-run bounds, Cursor parked-run lifetime and heartbeat. |
+| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call bounds, and Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
 | Backup | Size cap for one Settings backup download or restore upload. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
@@ -117,22 +117,24 @@ invariant, encode a protocol maximum, or only tune an internal heuristic.
 
 | Family | Examples | Why it stays internal |
 | --- | --- | --- |
-| Protocol maxima | Chat `stop` list of 4 | The wire defines the maximum; a larger value would produce a body the target rejects. |
-| Derived frame bounds | `NativeStreamFrameMaxBytes`, `ResponsesStreamFrameMaxBytes`, the proxy's translated frame buffer | Computed from the accepted source-line and retained-byte bounds plus the JSON escape expansion. A separate value could under-size a scanner, turning a valid frame into a translation error, or over-size it and defeat the retention bound. |
+| Protocol maxima | Chat `stop` list of 4 | The wire defines the practical maximum; a longer list is clamped to it with an approximation warning. |
+| Derived frame bounds | `NativeStreamFrameMax(lineMax)`, `ResponsesStreamFrameMaxBytes`, the proxy's translated frame buffer | Computed from the accepted source-event and retained-byte bounds plus the JSON escape expansion. A separate value could under-size a scanner, turning a valid frame into a translation error, or over-size it and defeat the retention bound. |
 | Recursion and canonicalization budgets | Anthropic nested block depth 16, tool-argument canonical depth 64, separator budget, canonical byte cap | They select a safe fallback (the raw-byte fingerprint) or cap decoder recursion. They are algorithm facts, not wire acceptance. |
 | Diagnostic echo bounds | 128-byte warning echo, 512-byte identity and provider-text retention, header echo caps | A request-sized diagnostic or identifier must never multiply across a stream or a stored row. Raising them cannot admit a request that is otherwise rejected; it only grows logs and frames. |
 | Record retention | Retained tool names (64), tool-call ids (1024), path/method/model/error caps, capture header caps | They bound the ring, pending snapshots and durable rows. Counts still count past the bound; only identities stop being retained. |
-| Metrics-only truncation | SSE analyzer event buffer, non-streaming choice cap | The relayed bytes are unaffected; the cap bounds the analyzer's typed decode. Raising it cannot change client behavior, only analysis memory. |
+| Metrics-only truncation | Non-streaming choice cap, SSE analyzer event buffer | The non-streaming choice cap never changes relayed bytes. The SSE analyzer cap can affect classification for events split across that bound, as the protocol limits note; raising it cannot admit a request that is otherwise rejected. |
 | Cursor run and store budgets | Parked run count, per-run pending call/byte caps, blob store caps, aggregate store budget | They bound per-run and process memory for a bridge whose counts come from live tool batches, not operator intent. The per-run and aggregate caps are coupled. |
-| Internal heuristic thresholds | Quality retry spool, error-body capture, discovery output allowance, storage batch sizes, log scan and chart/explorer budgets | They decide whether an internal heuristic runs or how much work one pass may do. Changing them changes diagnostics or performance, not what a client may send or receive. |
+| Internal heuristic thresholds | Quality retry spool, error-body capture, discovery output allowance, storage sweep batch sizes, log scan and chart/explorer budgets | They decide whether an internal heuristic runs or how much work one pass may do. Changing them changes diagnostics or performance, not what a client may send or receive. |
 
-The wire-facing bounds are settings: `request_tool_calls_max`,
+The operator-facing bounds are settings: `request_tool_calls_max`,
 `stream_tool_calls_max`, `translated_response_max_bytes`,
 `models_discovery_max_entries`, `non_stream_capture_max`,
-`stream_terminal_hold_max`, `stream_event_line_max`, `token_response_max` and
-`upstream_response_header_max`. A new guard must be classified in this table
-when it is added, and a guard that becomes operator-facing moves to the
-settings schema instead of keeping a parallel constant.
+`stream_terminal_hold_max`, `stream_event_max_bytes`, `token_response_max` and
+`upstream_response_header_max`. `non_stream_capture_max` trades accounting
+accuracy for memory and never changes relayed bytes. A new guard must be
+classified in this table when it is added, and a guard that becomes
+operator-facing moves to the settings schema instead of keeping a parallel
+constant.
 
 ### Saving settings safely
 

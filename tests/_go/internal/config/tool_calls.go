@@ -52,10 +52,10 @@ func TestToolCallSettingsBoundsAndPersistence(t *testing.T) {
 		edit func(*Config)
 		want string
 	}{
-		{func(c *Config) { c.RequestToolCallsMax = 0 }, "request_tool_calls_max: must be 1..100000, got 0"},
-		{func(c *Config) { c.RequestToolCallsMax = RequestToolCallsBandMax + 1 }, "request_tool_calls_max: must be 1..100000, got 100001"},
-		{func(c *Config) { c.StreamToolCallsMax = 0 }, "stream_tool_calls_max: must be 1..65536, got 0"},
-		{func(c *Config) { c.StreamToolCallsMax = StreamToolCallsBandMax + 1 }, "stream_tool_calls_max: must be 1..65536, got 65537"},
+		{func(c *Config) { c.RequestToolCallsMax = 0 }, "request_tool_calls_max: must be 1..10000, got 0"},
+		{func(c *Config) { c.RequestToolCallsMax = RequestToolCallsBandMax + 1 }, "request_tool_calls_max: must be 1..10000, got 10001"},
+		{func(c *Config) { c.StreamToolCallsMax = 0 }, "stream_tool_calls_max: must be 1..10000, got 0"},
+		{func(c *Config) { c.StreamToolCallsMax = StreamToolCallsBandMax + 1 }, "stream_tool_calls_max: must be 1..10000, got 10001"},
 	} {
 		c := Default()
 		tc.edit(c)

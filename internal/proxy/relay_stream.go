@@ -65,7 +65,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	// the hold decision midway through a terminal region, and the accepted
 	// source-line bound must match the scanner in this loop.
 	holdMax := int(s.cfg().StreamTerminalHoldMax)
-	lineMax := int(s.cfg().StreamEventLineMax)
+	eventMax := int(s.cfg().StreamEventMaxBytes)
 	var (
 		lineBuf bytes.Buffer // partial line + current chunk bytes not yet consumed
 		out     bytes.Buffer // released bytes awaiting one client write
@@ -101,8 +101,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
 		// the holdMax overflow): the stream then COMMITS to verbatim
 		// relay - no degenerate classification may substitute anything (a
-		// stream with a >64KiB terminal region is not one of the degenerate
-		// classes, and the client already saw the finish-reason bytes).
+		// terminal region larger than the configured hold is not one of the
+		// degenerate classes, and the client already saw the finish-reason
+		// bytes).
 		holdAborted bool
 		// rescueRequested carries the rescue decision out of finishHold
 		// (which returns only client-gone).
@@ -599,13 +600,13 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					holding = false
 					holdAborted = true
 				}
-			} else if len(eventName) > 0 && lineBuf.Len() > lineMax {
+			} else if len(eventName) > 0 && lineBuf.Len() > eventMax {
 				// A newline-free giant inside a buffered terminal event:
 				// commit its bytes verbatim, exactly like a hold overflow.
 				eventBody = append(eventBody, lineBuf.Bytes()...)
 				abandonEventBuffer(now)
 				lineBuf.Reset()
-			} else if lineBuf.Len() > lineMax {
+			} else if lineBuf.Len() > eventMax {
 				// Safety guardrail: a newline-free (or one giant) stream from a
 				// buggy or hostile upstream must not grow lineBuf without bound.
 				// A newline-free chunk never enters the line loop above, so the

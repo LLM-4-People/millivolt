@@ -60,12 +60,17 @@ func (s *Server) cursorClientFor() *http.Client {
 	// shared upstream client.
 	cfg := s.cfg()
 	dialer := upstreamDialer(cfg)
+	// The configured band tops out at 64 MiB, so the uint32 wire field cannot
+	// overflow. Both Cursor transports honor the same response-header cap as
+	// the shared HTTP relay.
+	headerListMax := uint32(cfg.UpstreamResponseHeaderMax)
 	plain := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, addr)
 		},
-		PingTimeout: cursorH2PingTimeout,
+		PingTimeout:       cursorH2PingTimeout,
+		MaxHeaderListSize: headerListMax,
 	}
 	tlsTransport := &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, tlsCfg *tls.Config) (net.Conn, error) {
@@ -77,7 +82,8 @@ func (s *Server) cursorClientFor() *http.Client {
 			tlsDialer := &tls.Dialer{NetDialer: dialer, Config: tlsCfg}
 			return tlsDialer.DialContext(ctx, network, addr)
 		},
-		PingTimeout: cursorH2PingTimeout,
+		PingTimeout:       cursorH2PingTimeout,
+		MaxHeaderListSize: headerListMax,
 	}
 	s.cursorClient = &http.Client{
 		Transport:     &cursorSchemeTransport{plain: plain, tls: tlsTransport},

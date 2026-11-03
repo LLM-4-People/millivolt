@@ -187,8 +187,11 @@ func (s *Server) classifyResendFailure(r *http.Request, rec *metrics.Record, err
 // by the LOCAL client disconnecting (ctx canceled by the client's close) is
 // recorded as a client disconnect, never as an upstream failure.
 func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record) {
+	// One snapshot per response: a reload must not change the capture bound
+	// midway through this body.
+	captureMax := int(s.cfg().NonStreamCaptureMax)
 	// Read into a single buffer; on EOF, parse usage from the captured bytes.
-	buf := make([]byte, 0, nonStreamGrowInit)
+	buf := make([]byte, 0, min(nonStreamGrowInit, captureMax))
 	chunk := make([]byte, nonStreamChunk)
 	for {
 		n, err := body.Read(chunk)
@@ -202,9 +205,7 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 			}
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
-			if len(buf)+n <= int(s.cfg().NonStreamCaptureMax) {
-				buf = append(buf, chunk[:n]...)
-			}
+			buf = appendCapturePrefix(buf, chunk[:n], captureMax)
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -320,6 +321,17 @@ func analyzeNonStreamBytes(buf []byte, rec *metrics.Record, usageKeys map[string
 		return
 	}
 	applyNonStreamAnalysis(rec, nonStreamAnalysis(buf, usageKeys, costKeys, preview))
+}
+
+// appendCapturePrefix appends at most maxBytes-len(buf) bytes of chunk, so a
+// read chunk larger than a small configured cap still contributes a true
+// prefix instead of being skipped whole.
+func appendCapturePrefix(buf, chunk []byte, maxBytes int) []byte {
+	if maxBytes <= 0 || len(buf) >= maxBytes {
+		return buf
+	}
+	take := min(len(chunk), maxBytes-len(buf))
+	return append(buf, chunk[:take]...)
 }
 
 // applyNonStreamAnalysis is the single owner that writes one non-stream
