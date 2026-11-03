@@ -378,6 +378,7 @@ func main() {
 	mux.Handle("/admin/pause", http.HandlerFunc(proxySrv.HandlePause))
 	mux.Handle("/admin/quota", http.HandlerFunc(proxySrv.HandleQuotaPause))
 	mux.Handle("/admin/throttle", http.HandlerFunc(proxySrv.HandleThrottle))
+	mux.Handle("/admin/queue/drain", http.HandlerFunc(proxySrv.HandleQueueDrain))
 	mux.Handle("/admin/debug", http.HandlerFunc(proxySrv.HandleDebug))
 	mux.Handle("/admin/debug/capture", web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))
 

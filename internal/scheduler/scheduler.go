@@ -95,6 +95,61 @@ type Scheduler struct {
 	// throttle writers take throttleMu -> gate/group mutexes. Reading through
 	// an immutable replacement removes that inversion entirely.
 	gateSnap atomic.Pointer[map[string]*providerGate]
+
+	// drainSeq/drainScope carry the operator queue-drain ticket. A waiter
+	// snapshots the sequence when it parks and compares after every wake, so a
+	// matching newer ticket releases it with ErrQueueDrained. Every field empty
+	// drains every parked waiter.
+	drainSeq   atomic.Uint64
+	drainScope atomic.Pointer[DrainScope]
+}
+
+// DrainScope selects parked waiters to release. An empty field matches every
+// value; all-empty drains the whole queue.
+type DrainScope struct {
+	Provider string
+	Model    string
+	Client   string
+}
+
+func (scope DrainScope) matches(provider, model, client string) bool {
+	if scope.Provider != "" && scope.Provider != provider {
+		return false
+	}
+	if scope.Model != "" && scope.Model != model {
+		return false
+	}
+	if scope.Client != "" && scope.Client != client {
+		return false
+	}
+	return true
+}
+
+// DrainQueue releases every parked admission waiter matching scope and returns
+// how many were signalled. It is operator flow control, not a provider
+// failure: waiters return ErrQueueDrained and the proxy answers them with a
+// retryable 503. In-flight requests are never cancelled (matching pause
+// semantics); only requests that have not been granted a slot are released.
+func (s *Scheduler) DrainQueue(scope DrainScope) uint64 {
+	seq := s.drainSeq.Add(1)
+	s.drainScope.Store(&scope)
+	// Closing the policy kick wakes every admission and send-gate waiter; each
+	// re-reads the ticket at the top of its loop.
+	s.pauseMu.Lock()
+	s.kickPolicyLocked()
+	s.pauseMu.Unlock()
+	s.drainAll()
+	return seq
+}
+
+// queueDrained reports whether a newer matching drain ticket exists for this
+// waiter, given the sequence it snapshotted at enqueue.
+func (s *Scheduler) queueDrained(snapshot uint64, provider, model, client string) bool {
+	if s.drainSeq.Load() <= snapshot {
+		return false
+	}
+	scope := s.drainScope.Load()
+	return scope != nil && scope.matches(provider, model, client)
 }
 
 // New builds a Scheduler. All Options are taken as-is - defaults are owned by
@@ -218,6 +273,10 @@ var (
 	// ErrQueueFull is returned when the group queue or a pause's MaxQueued
 	// cap is exhausted. The proxy maps this to HTTP 429.
 	ErrQueueFull = errorString("queue full")
+	// ErrQueueDrained is returned when an operator releases a parked waiter,
+	// either by draining the queue or by lowering a cap below current demand.
+	// The proxy maps it to a retryable 503 distinct from a provider failure.
+	ErrQueueDrained = errorString("queued request drained by operator")
 	// ErrGroupLimit is returned when a brand-new group would exceed the
 	// process-wide group bound. Existing keys are unaffected.
 	ErrGroupLimit = errorString("scheduler group limit reached")

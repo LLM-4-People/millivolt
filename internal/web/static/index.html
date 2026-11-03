@@ -227,11 +227,20 @@ try {
             <select id="lim-ramp"></select>
           </label>
         </div>
+        <div class="clear-opts">
+          <label>drain model
+            <input type="text" id="lim-drain-model" placeholder="any">
+          </label>
+          <label>drain client
+            <input type="text" id="lim-drain-client" placeholder="any">
+          </label>
+        </div>
         <div class="clear-menu-ft">
           <span class="clear-count" id="lim-count"></span>
           <div class="clear-actions">
             <button class="btn" id="btn-limits-apply" onclick="applyLimitsMenu()" disabled>Apply</button>
             <button class="btn" id="btn-limits-clear" onclick="clearLimitsMenu()" disabled>Clear</button>
+            <button class="btn" id="btn-limits-drain" onclick="drainLimitsQueue()">Drain queued</button>
           </div>
         </div>
       </div>

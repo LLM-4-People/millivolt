@@ -889,6 +889,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hooks := scheduler.WaiterHooks{
 		Client:    rec.Client,
 		Provider:  rec.Provider,
+		Model:     rec.Model,
 		EstTokens: estimateTokens(rec),
 		OnWait: func() {
 			if stream {
@@ -937,6 +938,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	queueStart := time.Now()
 	release, err := s.scheduler.AcquireWith(ctx, groupKey, maxConc, hooks)
 	if err != nil {
+		if errors.Is(err, scheduler.ErrQueueDrained) {
+			// Operator flow control: the queued request was released before it
+			// could send. Answer retryably; this is not a provider failure and
+			// must not look like one in the record.
+			rec.ErrorType = "queue_drained"
+			rec.ErrorMsg = err.Error()
+			w.Header().Set("Retry-After", "1")
+			writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "queued request released by the operator; retry", http.StatusServiceUnavailable, s.retryAfterHeader())
+			return
+		}
 		if r.Context().Err() == context.Canceled {
 			markClientGone(rec)
 			return

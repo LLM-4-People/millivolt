@@ -562,6 +562,37 @@ function clearLimitsMenu() {
   return mutateOperator('throttle', { provider, clear: true }, onLimitProviderChange);
 }
 
+// drainLimitsQueue releases requests the scheduler has parked. Scope
+// precedence: an explicit model or client field, else the selected provider,
+// else every queued request. It is operator flow control: released requests
+// answer with a retryable 503 and never count as provider failures.
+async function drainLimitsQueue() {
+  if (operatorState.throttle.busy) return;
+  const provider = $('lim-provider') ? $('lim-provider').value : '';
+  const model = $('lim-drain-model') ? $('lim-drain-model').value.trim() : '';
+  const client = $('lim-drain-client') ? $('lim-drain-client').value.trim() : '';
+  if (model && client) {
+    operatorError('throttle', 'drain either a model or a client, not both');
+    return;
+  }
+  const body = model ? { model } : client ? { client } : provider ? { provider } : { all: true };
+  operatorState.throttle.busy = true;
+  operatorState.throttle.sync();
+  try {
+    await operatorJsonBody('/admin/queue/drain', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
+    }, 'could not drain the queue');
+    if ($('lim-drain-model')) $('lim-drain-model').value = '';
+    if ($('lim-drain-client')) $('lim-drain-client').value = '';
+  } catch (err) {
+    operatorError('throttle', String(err.message || 'could not drain the queue'));
+  } finally {
+    operatorState.throttle.busy = false;
+    operatorState.throttle.sync();
+    syncLimitsMenuState();
+  }
+}
+
 function limitHoldLabel(t) {
   const bits = [];
   if (t.concurrency) bits.push('×' + t.concurrency);
