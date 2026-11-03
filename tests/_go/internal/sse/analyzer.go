@@ -764,7 +764,7 @@ func TestAnalyzerInBandErrorMessageBounded(t *testing.T) {
 	a.Feed([]byte(`data: {"error":{"message":"`+big+`"}}`), now)
 	var rec metrics.Record
 	a.Fill(&rec)
-	if len(rec.ErrorMsg) > metrics.PreviewMaxBytes+len("…") {
+	if len(rec.ErrorMsg) > metrics.RetainedErrorMsgMax+len("…") {
 		t.Errorf("ErrorMsg length %d exceeds bound", len(rec.ErrorMsg))
 	}
 	if rec.ErrorType != "provider_error" {

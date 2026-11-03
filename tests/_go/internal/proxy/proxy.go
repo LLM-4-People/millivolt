@@ -369,9 +369,9 @@ func TestAllowedBaseURLs(t *testing.T) {
 }
 
 // TestParseErrorBodyBounded pins two invariants: (1) the provider's error
-// message is bounded via metrics.TruncatePreview (it can echo user content, so
-// it must never be stored unbounded), and (2) an oversized body truncated
-// mid-token still yields a classifiable signature, not a blank one.
+// message is bounded by the shared record-retention bound (it can echo user
+// content, so it must never be stored unbounded), and (2) an oversized body
+// truncated mid-token still yields a classifiable signature, not a blank one.
 func TestParseErrorBodyBounded(t *testing.T) {
 	// A huge error message is truncated to the preview bound.
 	big := `{"error":{"type":"invalid_request_error","message":"` + strings.Repeat("x", 5000) + `"}}`
@@ -379,8 +379,8 @@ func TestParseErrorBodyBounded(t *testing.T) {
 	if typ != "invalid_request_error" {
 		t.Errorf("typ = %q", typ)
 	}
-	if len(msg) > metrics.PreviewMaxBytes+len("…") {
-		t.Errorf("msg len %d exceeds preview bound", len(msg))
+	if len(msg) > metrics.RetainedErrorMsgMax+len("…") {
+		t.Errorf("msg len %d exceeds the error-message bound", len(msg))
 	}
 
 	// A body that doesn't parse (e.g. truncated mid-token) still yields a
@@ -389,8 +389,8 @@ func TestParseErrorBodyBounded(t *testing.T) {
 	if typ2 == "" {
 		t.Error("unparseable error body yielded a blank error type")
 	}
-	if len(msg2) > metrics.PreviewMaxBytes+len("…") {
-		t.Errorf("fallback msg len %d exceeds preview bound", len(msg2))
+	if len(msg2) > metrics.RetainedErrorMsgMax+len("…") {
+		t.Errorf("fallback msg len %d exceeds the error-message bound", len(msg2))
 	}
 }
 

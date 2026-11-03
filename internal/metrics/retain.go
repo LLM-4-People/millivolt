@@ -28,8 +28,12 @@ const (
 	retainedRecordPathMax         = 1024
 	retainedRecordMethodMax       = 32
 	retainedRecordProviderTextMax = 512
-	retainedRecordErrorMsgMax     = 512
-	retainedRecordRequestMetaMax  = 512
+	// RetainedErrorMsgMax bounds a stored provider error message. It is
+	// exported because the SSE analyzer pins the same bound while a stream is
+	// running; an operator must be able to read a quota or tier explanation
+	// rather than a preview-sized stub.
+	RetainedErrorMsgMax          = 512
+	retainedRecordRequestMetaMax = 512
 	// retainedRecordConversationMax is the proxy's 512-byte declared-session
 	// bound plus the two-byte s:/k: namespace prefix.
 	retainedRecordConversationMax = 514
@@ -102,7 +106,7 @@ func retainRecordTextFields(r *Record) {
 	retainTextField(&r.FinishReason, retainedRecordProviderTextMax)
 	retainTextField(&r.ErrorType, retainedRecordProviderTextMax)
 	retainTextField(&r.ErrorCode, retainedRecordProviderTextMax)
-	retainTextField(&r.ErrorMsg, retainedRecordErrorMsgMax)
+	retainTextField(&r.ErrorMsg, RetainedErrorMsgMax)
 	retainTextField(&r.Client, RetainedClientMax)
 	retainTextField(&r.UserAgent, RetainedUserAgentMax)
 	retainTextField(&r.ClientIP, RetainedClientIPMax)
@@ -197,7 +201,7 @@ func retainedToolNames(in []string) []string {
 // retainAttemptText bounds one attempt's provider/error metadata in place and
 // reports whether a field changed. Attempt order is untouched.
 func retainAttemptText(a *RetryAttempt) bool {
-	changed := retainTextField(&a.ErrorMsg, retainedRecordErrorMsgMax)
+	changed := retainTextField(&a.ErrorMsg, RetainedErrorMsgMax)
 	if retainTextField(&a.ErrorType, retainedRecordProviderTextMax) {
 		changed = true
 	}

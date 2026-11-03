@@ -500,14 +500,14 @@ func TestAnalyzeNonStreamBodyErrorEnvelope(t *testing.T) {
 // TestAnalyzeNonStreamBodyErrorBounds pins the shared TruncatePreview bound on
 // an arbitrary provider message.
 func TestAnalyzeNonStreamBodyErrorBounds(t *testing.T) {
-	msg := strings.Repeat("x", PreviewMaxBytes+40)
+	msg := strings.Repeat("x", RetainedErrorMsgMax+40)
 	body := `{"error":{"type":"server_error","message":"` + msg + `"}}`
 	got := AnalyzeNonStreamBody([]byte(body), nil, nil, false)
-	if got.ErrorMsg != TruncatePreview(msg) {
-		t.Fatalf("error message = %q, want the bounded %q", got.ErrorMsg, TruncatePreview(msg))
+	if got.ErrorMsg != retainRecordText(msg, RetainedErrorMsgMax) {
+		t.Fatalf("error message = %q, want the bounded %q", got.ErrorMsg, retainRecordText(msg, RetainedErrorMsgMax))
 	}
-	if !strings.HasSuffix(got.ErrorMsg, "…") || len(got.ErrorMsg) > PreviewMaxBytes+len("…") {
-		t.Fatalf("error message is not bounded at the rune-safe preview limit: %q", got.ErrorMsg)
+	if !strings.HasSuffix(got.ErrorMsg, "…") {
+		t.Fatalf("over-bound error message is not marked truncated: %q", got.ErrorMsg)
 	}
 }
 

@@ -648,11 +648,14 @@ func ParseErrorComponents(raw json.RawMessage) (typ, code, msg string) {
 // ParseErrorMembers decodes the three independent members of an error value.
 // A wrong-typed member (a gateway that nests a detail object under message, a
 // numeric type, a boolean code) is ignored so its valid siblings survive. Code
-// accepts a JSON string or a bare number. The message is bounded.
+// accepts a JSON string or a bare number. The message is bounded by the same
+// record-retention bound the finalized record uses, not the smaller preview
+// bound: an operator must be able to read the provider's reason (a quota or
+// tier message often explains itself) instead of a 120-byte stub.
 func ParseErrorMembers(typeRaw, codeRaw, messageRaw json.RawMessage) (typ, code, msg string) {
 	typ = rawErrorString(typeRaw)
 	code = rawErrorCode(codeRaw)
-	msg = TruncatePreview(rawErrorString(messageRaw))
+	msg = retainRecordText(rawErrorString(messageRaw), RetainedErrorMsgMax)
 	return typ, code, msg
 }
 
