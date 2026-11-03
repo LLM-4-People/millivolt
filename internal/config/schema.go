@@ -60,8 +60,8 @@ func num(v float64) *float64 { return &v }
 func Categories() []Category {
 	return []Category{
 		{ID: "server", Label: "Server", Help: "Bind address, database, and ring depth restart to apply. shutdown_timeout applies at the next SIGINT/SIGTERM."},
-		{ID: "request", Label: "Request", Help: "Inbound body cap, tool-call history bound, SSRF allowlist, optional body-preview, and debug-capture retention."},
-		{ID: "upstream", Label: "Upstream", Help: "Connection pool, header timeout, and stream keepalives."},
+		{ID: "request", Label: "Request", Help: "Inbound body cap, tool-call history bound, SSRF allowlist, optional body-preview, token-refresh response cap, and debug-capture retention."},
+		{ID: "upstream", Label: "Upstream", Help: "Connection pool, header timeout, stream keepalives, model-discovery budgets and response-buffer bounds."},
 		{ID: "queue", Label: "Queue & retry", Help: "Per-key concurrency, transparent 429/5xx retry, and quality re-asks."},
 		{ID: "storm", Label: "Error storm protection", Help: "Bounded recovery queues for affected providers or exact model names. Hot-reloads; policy changes clear observations and wake waiters. Banner visibility changes do not reset protection."},
 		{ID: "quota", Label: "Quota pause", Help: "Provider-wide reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits): surface it immediately, park the provider behind a recovery gate, or hold it until an operator resumes. OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior."},

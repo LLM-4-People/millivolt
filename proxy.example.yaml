@@ -107,8 +107,8 @@ response_write_timeout: 10m
 go_memory_limit: 0B
 
 # ---- Request ----
-# Inbound body cap, tool-call history bound, SSRF allowlist, optional body-preview, and
-# debug-capture retention.
+# Inbound body cap, tool-call history bound, SSRF allowlist, optional body-preview,
+# token-refresh response cap, and debug-capture retention.
 # Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected
 # with 413.
 # Hot-reload: yes.
@@ -173,7 +173,8 @@ auto_token_refresh: true
 token_response_max: 1MiB
 
 # ---- Upstream ----
-# Connection pool, header timeout, and stream keepalives.
+# Connection pool, header timeout, stream keepalives, model-discovery budgets and
+# response-buffer bounds.
 # How long to wait for upstream response headers. Streaming bodies are not subject to
 # this. Transient header timeouts are retried.
 # Hot-reload: yes.
