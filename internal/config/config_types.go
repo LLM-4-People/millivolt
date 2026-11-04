@@ -214,9 +214,11 @@ type Config struct {
 	// are answered 503 with Retry-After instead of buffering. 0 = unlimited.
 	MaxInflightRequests int `yaml:"max_inflight_requests" json:"max_inflight_requests"`
 	// MaxInflightBodyBytes is the process-wide budget for buffered inbound
-	// bodies. Admission reserves the declared Content-Length (or the configured
-	// request cap for chunked bodies) and refuses a request that would exceed
-	// this budget, before reading it. 0 = unlimited.
+	// bodies. Admission reserves one bounded speculative read hint, then charges
+	// the delta as bytes actually arrive, and refuses a request whose next read
+	// would exceed this budget. A declared Content-Length never reserves
+	// capacity the client does not send, so idle connections cannot hold the
+	// budget. 0 = unlimited.
 	MaxInflightBodyBytes ByteSize `yaml:"max_inflight_body_bytes" json:"max_inflight_body_bytes"`
 	// MaxInflightResponseBytes is the process-wide budget for whole-document
 	// upstream response buffers: translated non-streaming documents, model

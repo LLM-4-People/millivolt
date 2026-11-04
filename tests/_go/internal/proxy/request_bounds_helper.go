@@ -28,5 +28,5 @@ func readTestRequest(r *http.Request, maxBytes int64, preview bool) (body []byte
 }
 
 func readTestHint(r *http.Request, maxBytes int64, preview bool, hintMax int64) (body []byte, rec *metrics.Record, err error) {
-	return readRequestHint(r, maxBytes, preview, hintMax, testRequestConfig)
+	return readRequestHint(r, maxBytes, preview, hintMax, nil, testRequestConfig)
 }

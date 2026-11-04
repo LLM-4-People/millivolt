@@ -1052,7 +1052,9 @@ from base URLs remain below both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB), and `max_inflight_response_bytes` its budget
+body budget (default 256 MiB; admission reserves one bounded read hint and then
+charges the bytes actually read, so a declared length alone never holds budget),
+and `max_inflight_response_bytes` its budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
 (at most 1 MiB plus one 32 KiB chunk), and model discovery. Requests above

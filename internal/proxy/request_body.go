@@ -58,14 +58,21 @@ func releaseRequestBodyScratch(buf []byte) {
 }
 
 // readRequest preserves the exact body for forwarding/retries and extracts
-// routing + observability metadata once. Direct callers use the 1 MiB
-// speculative guardrail; the proxy passes the admitted upload size so a
-// declared body can be read once in place instead of prefix + copy.
+// routing + observability metadata once, with no body-budget charging.
 func readRequest(r *http.Request, maxBytes int64, preview bool, cfg *config.Config) (body []byte, rec *metrics.Record, err error) {
-	return readRequestHint(r, maxBytes, preview, requestReadHintMax, cfg)
+	return readRequestHint(r, maxBytes, preview, requestReadHintMax, nil, cfg)
 }
 
-func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int64, cfg *config.Config) (body []byte, rec *metrics.Record, err error) {
+// readRequestHint reads one inbound body. charge, when set, is called with each
+// chunk actually read and refuses (returns false) once the process-wide body
+// budget would be crossed; the declared Content-Length is never reserved up
+// front, so an idle connection cannot hold budget it has not used.
+//
+// hintMax bounds the allocation the declared length may trigger. It stays at
+// the speculative read hint rather than the declared size: a 32 MiB
+// declaration with no bytes behind it must not allocate 32 MiB. A genuinely
+// large body grows through the bounded scratch and is copied once.
+func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int64, charge func(int64) bool, cfg *config.Config) (body []byte, rec *metrics.Record, err error) {
 	rec = new(metrics.Record)
 	if r.Body == nil {
 		rec.Start = time.Now()
@@ -75,7 +82,11 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 	if hintMax <= 0 {
 		hintMax = requestReadHintMax
 	}
-	body, err = readRequestBody(r.Body, r.ContentLength, maxBytes, hintMax)
+	var src io.Reader = r.Body
+	if charge != nil {
+		src = &chargedReader{r: r.Body, charge: charge}
+	}
+	body, err = readRequestBody(src, r.ContentLength, maxBytes, hintMax)
 	if err != nil {
 		return nil, nil, err
 	}

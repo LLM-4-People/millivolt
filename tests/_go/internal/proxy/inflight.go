@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -263,5 +264,84 @@ func TestResponseBufferBudgetHotReload(t *testing.T) {
 	p.Reload(next)
 	if got := p.respBudget.limit.Load(); got != int64(2*config.MaxInflightResponseBytesMin) {
 		t.Fatalf("reloaded response budget = %d, want %d", got, 2*config.MaxInflightResponseBytesMin)
+	}
+}
+
+// TestInflightBodyBudgetChargesBytesNotDeclarations pins the admission rule that
+// replaced up-front declaration reserving. With a 256 MiB budget and a 32 MiB
+// per-request cap, the old owner reserved each request's declared length, so
+// eight idle connections declaring 32 MiB and sending nothing consumed the whole
+// budget and every other client was refused. Charging bytes as they arrive keeps
+// the heap bound while leaving an idle declaration cheap.
+func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
+	const budget = 256 << 20
+	const declared = 32 << 20
+	const hint = 1 << 20
+
+	var l inflightLimiter
+	l.set(10000, budget)
+
+	// Eight idle requests that declare 32 MiB but send nothing must not exhaust
+	// the budget: only their speculative hints are charged.
+	reservations := make([]*bodyReservation, 0, 8)
+	for range 8 {
+		r, ok := l.acquireBody(min(declared, hint))
+		if !ok {
+			t.Fatalf("idle request %d was refused: an idle declaration must not consume budget", len(reservations))
+		}
+		reservations = append(reservations, r)
+	}
+	if got := l.bytes.Load(); got != 8*hint {
+		t.Fatalf("charged %d bytes for eight idle declarations, want %d", got, 8*hint)
+	}
+	// The budget is still available for real traffic.
+	next, ok := l.acquireBody(hint)
+	if !ok {
+		t.Fatal("a further request was refused while every idle request had sent nothing")
+	}
+	next.release()
+	for _, r := range reservations {
+		r.release()
+	}
+	if got := l.bytes.Load(); got != 0 {
+		t.Fatalf("byte counter = %d after release, want 0", got)
+	}
+
+	// A request that really uploads is charged for what it sends, and the
+	// budget still refuses a body that would cross it.
+	var small inflightLimiter
+	small.set(10000, 300)
+	r, ok := small.acquireBody(100)
+	if !ok {
+		t.Fatal("initial speculative reservation refused")
+	}
+	if !r.chargeRead(100) {
+		t.Fatal("bytes within the speculative reservation were charged twice")
+	}
+	if got := small.bytes.Load(); got != 100 {
+		t.Fatalf("bytes = %d after reading the reserved 100, want 100", got)
+	}
+	if !r.chargeRead(150) {
+		t.Fatal("reading to the budget was refused")
+	}
+	if got := small.bytes.Load(); got != 250 {
+		t.Fatalf("bytes = %d after reading 250 total, want 250", got)
+	}
+	if r.chargeRead(100) {
+		t.Fatal("a read past the budget was admitted")
+	}
+	if got := small.bytes.Load(); got != 250 {
+		t.Fatalf("bytes = %d after a refused read, want the unchanged 250", got)
+	}
+	r.release()
+	if got := small.bytes.Load(); got != 0 {
+		t.Fatalf("bytes = %d after release, want 0", got)
+	}
+
+	// A refused read surfaces as the retryable budget error, not as a body-cap
+	// overflow, so the handler can answer 503 with Retry-After rather than 413.
+	body := &chargedReader{r: bytes.NewReader(make([]byte, 10)), charge: func(int64) bool { return false }}
+	if _, err := io.ReadAll(body); !errors.Is(err, errBodyBudget) {
+		t.Fatalf("refused read error = %v, want errBodyBudget", err)
 	}
 }

@@ -340,9 +340,11 @@ max_queue_size: 1024
 #   type: int · range 0..1000000 · default 10000
 max_inflight_requests: 10000
 
-# Process-wide budget for buffered inbound request bodies. Admission reserves the declared
-# Content-Length, or the request-body cap for chunked bodies, and refuses with 503 before
-# reading when the budget would be exceeded. 0 = unlimited. Hot-reloads.
+# Process-wide budget for buffered inbound request bodies. Admission reserves one bounded
+# speculative read hint, then charges the delta as bytes actually arrive, refusing with
+# 503 when the next read would exceed the budget. A declared Content-Length never reserves
+# capacity the client does not send, so idle connections cannot hold the budget. 0 =
+# unlimited. Hot-reloads.
 # Hot-reload: yes.
 #   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
 max_inflight_body_bytes: 256MiB

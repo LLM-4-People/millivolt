@@ -518,20 +518,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// inference client-wire override is present; every other early sink
 	// follows the client protocol.
 	envelope := envelopeProtocol(r)
-	// Reserve the declared upload now. A chunked body has no length yet, so it
-	// reserves the configured request cap; admission therefore bounds both the
-	// handler set and the heap those bodies can occupy before routing.
-	reserve := int64(0)
+	// Reserve one request slot plus a bounded speculative body amount, then
+	// charge the budget as bytes actually arrive. Reserving the declared
+	// Content-Length up front let an idle connection hold budget it never used:
+	// eight clients declaring 32 MiB each exhausted the default 256 MiB budget
+	// and denied inference to every other client. The speculative start is one
+	// read hint, so admission still bounds the handler set, and a body that
+	// really is large is charged while it is read.
+	speculative := int64(0)
 	if r.Body != nil && r.Body != http.NoBody {
-		reserve = r.ContentLength
-		if reserve <= 0 {
-			reserve = int64(s.cfg().MaxRequestBytes)
-		}
-		if maxBody := int64(s.cfg().MaxRequestBytes); reserve > maxBody {
-			reserve = maxBody
-		}
+		speculative = min(max(r.ContentLength, 0), requestReadHintMax)
 	}
-	if !s.inflight.acquire(reserve) {
+	reservation, ok := s.inflight.acquireBody(speculative)
+	if !ok {
 		// Refuse before buffering a body: over the process-wide bound, heap is
 		// what a client would otherwise control. The directive writer above
 		// carries the no-retry header like every other error sink.
@@ -540,7 +539,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"proxy is at its in-flight request limit")
 		return
 	}
-	defer s.inflight.release(reserve)
+	defer reservation.release()
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
 		writeProtocolHTTPError(w, envelope, http.StatusBadRequest, typeInvalidRequestError, err.Error())
@@ -572,12 +571,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, reserve, s.cfg())
+	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, requestReadHintMax, reservation.chargeRead, s.cfg())
 	if err != nil {
 		status := http.StatusBadRequest
 		var overflow *http.MaxBytesError
 		if errors.As(err, &overflow) {
 			status = http.StatusRequestEntityTooLarge
+		} else if errors.Is(err, errBodyBudget) {
+			status = http.StatusServiceUnavailable
+			w.Header().Set("Retry-After", "1")
 		}
 		writeProtocolHTTPError(w, t.inbound, status, typeInvalidRequestError, err.Error())
 		return
