@@ -1013,6 +1013,13 @@ a grant refills a saturated provider concurrency cap. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
+**Drain queued** releases requests the scheduler has parked for the selected
+provider, or for the model/client named in the menu fields, without waiting for
+a limit window, pause hold or retry pacing to open. Each released request
+answers with a retryable 503 and is recorded as `queue_drained`, never as a
+provider error; a request already exchanging bytes with the provider finishes
+normally.
+
 Anti-burst is opt-in and scoped to each provider+key group. With `anti_burst`
 enabled and a concurrency target of at least 2, a group starts at one
 concurrent request and gains allowance linearly until it reaches the provider's
