@@ -134,8 +134,13 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	if rec.Body.Len() != 0 {
 		t.Fatalf("HEAD / leaked %d body bytes", rec.Body.Len())
 	}
-	if rec.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" {
-		t.Fatal("dashboard must deny framing")
+	if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") ||
+		!strings.Contains(got, "object-src 'none'") || !strings.Contains(got, "base-uri 'none'") ||
+		!strings.Contains(got, "form-action 'self'") {
+		t.Fatalf("dashboard CSP = %q", got)
+	}
+	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("dashboard hardening headers = %v", rec.Header())
 	}
 	if rec.Header().Get("ETag") != "" || rec.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatal("HEAD / must not cache dynamic bootstrap state")

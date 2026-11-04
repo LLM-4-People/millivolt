@@ -424,11 +424,18 @@ function derive(data) {
   }
   const codes = [...codeSeen].sort((x, y) => x - y);
   const statuses = liveOpts.concat(codes);
+  // A persisted status is only meaningful when it is one the ring can
+  // produce: a browser-side value is untrusted markup input, so it must never
+  // become an option label it did not come from. Both positions are escaped
+  // like every sibling option builder.
   if (filters.status && !statuses.some(s => String(s) === String(filters.status))) statuses.push(filters.status);
   const statusKey = statuses.join('|') + '|' + filters.status;
   let statusHtml = _statusHtml;
   if (_statusHtmlKey !== statusKey) {
-    statusHtml = `<option value="">all status</option>` + statuses.map(s => `<option value="${s}" ${String(s)===filters.status?'selected':''}>${s}</option>`).join('');
+    statusHtml = `<option value="">all status</option>` + statuses.map(s => {
+      const text = escapeHtml(String(s));
+      return `<option value="${text}" ${String(s)===filters.status?'selected':''}>${text}</option>`;
+    }).join('');
     _statusHtml = statusHtml;
     _statusHtmlKey = statusKey;
   }

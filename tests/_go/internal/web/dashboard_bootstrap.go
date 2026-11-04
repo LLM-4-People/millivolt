@@ -76,8 +76,12 @@ func TestDashboardBootstrapMatchesEndpoint(t *testing.T) {
 		req.Header.Set("If-None-Match", staticForTest(dashboardIndexPath).etag)
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
-		if res.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" {
-			t.Fatal("dashboard GET/HEAD must deny framing")
+		if got := res.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") ||
+			!strings.Contains(got, "object-src 'none'") {
+			t.Fatalf("dashboard CSP = %q", got)
+		}
+		if res.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Fatalf("dashboard documents must be nosniff: %v", res.Header())
 		}
 		if res.Code != http.StatusOK || res.Header().Get("ETag") != "" || res.Header().Get("Cache-Control") != "private, no-store" {
 			t.Fatalf("dynamic HTML status=%d headers=%v", res.Code, res.Header())
