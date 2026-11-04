@@ -18,6 +18,20 @@ func wakeTimerState(w *wakeTimer) (*time.Timer, uint64) {
 	return w.timer, w.generation
 }
 
+// windowState is a comparable fingerprint of a strictWindow's live state, so a
+// test can assert that a no-op policy write did not reset the request budget
+// (strictWindow itself holds a stamp slice and is not comparable). It reads
+// under no lock: callers pass a gate they already hold or quiesced.
+func windowState(w *strictWindow) string {
+	if w == nil || !w.enabled {
+		return "off"
+	}
+	return strconv.FormatBool(w.enabled) + "|" + strconv.FormatInt(w.count, 10) + "|" +
+		w.window.String() + "|" + strconv.Itoa(len(w.stamps)) + "|" +
+		strconv.Itoa(w.head) + "|" + strconv.Itoa(w.filled) + "|" +
+		w.interval.String() + "|" + w.next.String()
+}
+
 func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
@@ -31,7 +45,7 @@ func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 		}
 		s.armThrottleDrain(initial.Provider, time.Hour)
 		defer g.wake.stop()
-		req, kick := g.req, s.kickC()
+		req, kick := windowState(&g.req), s.kickC()
 		// currentCap reads the live gate's policy the way ListThrottles does
 		// (the gate is re-looked-up: a clear deletes it and a restore builds
 		// a new one).
@@ -51,7 +65,7 @@ func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 				t.Fatal("identical effective cap counted as a policy change")
 			}
 			current, _ := wakeTimerState(&g.wake)
-			if currentCap() != initial || g.req != req || g.inFlight != 1 || s.kickC() != kick || current != timer {
+			if currentCap() != initial || windowState(&g.req) != req || g.inFlight != 1 || s.kickC() != kick || current != timer {
 				t.Fatal("no-op changed metadata, occupancy, bucket state or wakeups")
 			}
 		}

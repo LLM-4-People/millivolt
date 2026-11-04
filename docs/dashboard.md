@@ -290,7 +290,12 @@ headers are redacted. No debug session was enabled for this screenshot.
 
 Limits sets provider-wide request, token and concurrency budgets, plus an
 opt-in anti-burst ramp that grows each provider+key group's allowance from one
-to the concurrency target. These limits are distinct from key-scoped scheduling
+to the concurrency target. The request budget is a strict sliding window: no
+window of the configured length admits more than the configured count, so a
+`100 per 1m` policy stays at or below 100 in any rolling minute instead of
+spending a whole burst and refilling through the same span. The token budget
+refills continuously and can go into debt on an oversized reservation. These
+limits are distinct from key-scoped scheduling
 and upstream rate-limit observations. The menu shows the selected provider's
 configured controls and active policies, including the anti-burst checkbox and
 ramp select, and its count line names the policy source and adds an anti-burst

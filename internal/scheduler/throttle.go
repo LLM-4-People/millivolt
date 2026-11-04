@@ -75,7 +75,8 @@ type Throttle struct {
 }
 
 // ThrottleInfo is Throttle plus live occupancy, for GET /admin/throttle
-// and the dashboard. Remaining values are the token-bucket fill (0..cap).
+// and the dashboard. ReqRemaining is the admits still available inside the
+// trailing request window (0..capacity); TokRemaining is the token-bucket fill.
 type ThrottleInfo struct {
 	Throttle
 	InFlight     int     `json:"in_flight"`
@@ -84,6 +85,169 @@ type ThrottleInfo struct {
 	TokRemaining float64 `json:"tokens_remaining"`
 	ReqCapacity  float64 `json:"requests_capacity"`
 	TokCapacity  float64 `json:"tokens_capacity"`
+}
+
+// maxWindowSlots bounds the memory a strictWindow may hold for its admitted
+// stamps: one time.Time per slot, so 65536 slots is 1 MB. A configured count
+// above this ceiling switches the limiter to even spacing, which is the same
+// policy in O(1) memory (see strictWindow). Internal, not a config knob.
+const maxWindowSlots = 65536
+
+// strictWindow enforces a request budget as a SLIDING half-open window over
+// the trailing Window: at most Count admits in any span (now-Window, now]. No
+// window of the configured length ever contains more than Count admits, which
+// is what a provider counting requests per rolling minute actually checks; a
+// refilling bucket is allowed to emit its whole capacity and then refill
+// continuously, so it can exceed Count inside one provider window (capacity in
+// the first instant plus Count refilled over the same span).
+//
+// It keeps the stamps of the admits still inside the trailing window, so an
+// idle provider banks nothing and a busy one cannot trade future allowance for
+// a present burst. Slots are preallocated at the configured count. A count
+// above maxWindowSlots is enforced by even spacing instead - the minimum-gap
+// schedule admits one request every Window/Count and, being half-open, also
+// never puts more than Count admits in any window of length Window.
+//
+// The two modes share one API, one policy and one window definition; new()
+// picks the representation from the count alone, so no caller branches on it.
+type strictWindow struct {
+	enabled bool
+	count   int64
+	window  time.Duration
+	// Sliding-log mode (count <= maxWindowSlots): stamps holds admitted
+	// instants in arrival order, head is the next write index and filled is
+	// how many slots hold a live stamp.
+	stamps []time.Time
+	head   int
+	filled int
+	// Pacing mode (count > maxWindowSlots): interval is Window/Count and next
+	// is the earliest instant the next admit may use.
+	interval time.Duration
+	next     time.Time
+}
+
+// paced reports whether this budget is enforced by even spacing.
+func (w *strictWindow) paced() bool {
+	return w.enabled && w.interval > 0
+}
+
+func (w *strictWindow) reset(count int64, window time.Duration, now time.Time) {
+	if count <= 0 || window <= 0 {
+		*w = strictWindow{}
+		return
+	}
+	w.enabled = true
+	w.count = count
+	w.window = window
+	w.stamps = nil
+	w.head = 0
+	w.filled = 0
+	w.interval = 0
+	w.next = time.Time{}
+	if count > maxWindowSlots {
+		// Spacing must satisfy the same half-open invariant the sliding log
+		// enforces, and the rule is exact rather than approximate: admits are
+		// spaced by at least interval, so a window of length Window holds at
+		// most floor(Window/interval)+1 of them. That stays at or below Count
+		// exactly when interval > Window/Count, which one extra nanosecond on
+		// the integer quotient guarantees unconditionally.
+		w.interval = window/time.Duration(count) + 1
+		w.next = now
+		return
+	}
+	w.stamps = make([]time.Time, count)
+}
+
+// prune drops the stamps that have aged out of the trailing window. It is the
+// only place the log forgets, so every reader sees the same window contents.
+// The window is half-open, (now-Window, now]: a stamp exactly Window old is
+// outside it, which is what keeps Count admits from pairing with a Count+1th
+// at the shared boundary.
+func (w *strictWindow) prune(now time.Time) {
+	if !w.enabled || w.paced() {
+		return
+	}
+	cutoff := now.Add(-w.window)
+	for w.filled > 0 {
+		oldest := w.stamps[(w.head-w.filled+len(w.stamps))%len(w.stamps)]
+		if oldest.After(cutoff) {
+			break
+		}
+		w.filled--
+	}
+}
+
+// waitFor reports how long until one more admit fits inside the trailing
+// window, and whether the budget blocks right now. A zero wait with false
+// means admit immediately.
+func (w *strictWindow) waitFor(now time.Time) (time.Duration, bool) {
+	if !w.enabled {
+		return 0, false
+	}
+	if w.paced() {
+		if now.Before(w.next) {
+			return w.next.Sub(now), true
+		}
+		return 0, false
+	}
+	w.prune(now)
+	if int64(w.filled) < w.count {
+		return 0, false
+	}
+	// Full: the next admit becomes legal when the oldest live stamp leaves.
+	oldest := w.stamps[(w.head-w.filled+len(w.stamps))%len(w.stamps)]
+	d := oldest.Add(w.window).Sub(now)
+	if d < 0 {
+		d = 0
+	}
+	return d, true
+}
+
+// admit records one admitted request at now. Callers must have checked
+// waitFor first; admit never refuses.
+func (w *strictWindow) admit(now time.Time) {
+	if !w.enabled {
+		return
+	}
+	if w.paced() {
+		if w.next.Before(now) {
+			w.next = now
+		}
+		w.next = w.next.Add(w.interval)
+		return
+	}
+	w.prune(now)
+	w.stamps[w.head] = now
+	w.head = (w.head + 1) % len(w.stamps)
+	if w.filled < len(w.stamps) {
+		w.filled++
+	}
+}
+
+// remaining reports the admits still available inside the trailing window.
+// Pacing mode holds no stamps, so it reports the whole budget when the next
+// slot is already legal and nothing until then; the count there is large
+// enough that the figure is a readiness signal rather than a gauge.
+func (w *strictWindow) remaining(now time.Time) float64 {
+	if !w.enabled {
+		return 0
+	}
+	if w.paced() {
+		if now.Before(w.next) {
+			return 0
+		}
+		return float64(w.count)
+	}
+	w.prune(now)
+	return float64(w.count - int64(w.filled))
+}
+
+// capacity reports the configured budget for display.
+func (w *strictWindow) capacity() float64 {
+	if !w.enabled {
+		return 0
+	}
+	return float64(w.count)
 }
 
 // bucket is a token bucket (capacity = limit, refill = limit/window).
@@ -188,7 +352,7 @@ type providerGate struct {
 	throttle Throttle
 	inFlight int
 	reserved int64 // sum of in-flight token reservations (stats only)
-	req      bucket
+	req      strictWindow
 	tok      bucket
 	tokEpoch uint64 // increments when the token dimension is enabled/disabled
 	wake     wakeTimer
@@ -213,22 +377,21 @@ func (g *providerGate) resetBuckets(l Limit, now time.Time) {
 // blocked reports whether this gate refuses a request estimated at est
 // tokens right now, and how long until the blocking dimension could admit
 // (0 when the concurrency cap blocks: that waits for a release, not a
-// timer). The caller must hold g.mu: the bucket refills it performs are
-// the same mutations an admitting caller then relies on. tryAdmit applies
-// its reservation only after this returns false.
+// timer). The caller must hold g.mu: the window prune and the token bucket
+// refill it performs are the same mutations an admitting caller then relies
+// on. tryAdmit applies its reservation only after this returns false.
 func (g *providerGate) blocked(est int64) (bool, time.Duration) {
 	if !g.throttle.Limit.Active() {
 		return false, 0
 	}
 	now := time.Now()
-	g.req.refill(now)
 	g.tok.refill(now)
 	lim := g.throttle.Limit
 	if lim.Concurrency > 0 && g.inFlight >= lim.Concurrency {
 		return true, 0 // wait for release, not a timer
 	}
-	if g.req.enabled && g.req.tokens < 1 {
-		return true, g.req.waitFor(1)
+	if wait, blocked := g.req.waitFor(now); blocked {
+		return true, wait
 	}
 	if g.tok.enabled {
 		need := float64(est)
@@ -272,9 +435,7 @@ func (g *providerGate) tryAdmit(est int64) (ok bool, lease admission, wait time.
 		reserved = est
 	}
 	g.inFlight++
-	if g.req.enabled {
-		g.req.tokens--
-	}
+	g.req.admit(time.Now())
 	if reserved > 0 {
 		g.tok.tokens -= float64(reserved)
 		g.reserved += reserved
@@ -286,13 +447,10 @@ func (g *providerGate) snapshot(queued int) ThrottleInfo {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := time.Now()
-	g.req.refill(now)
 	g.tok.refill(now)
 	info := ThrottleInfo{Throttle: g.throttle, InFlight: g.inFlight, Queued: queued}
-	if g.req.enabled {
-		info.ReqRemaining = g.req.tokens
-		info.ReqCapacity = g.req.capacity
-	}
+	info.ReqRemaining = g.req.remaining(now)
+	info.ReqCapacity = g.req.capacity()
 	if g.tok.enabled {
 		info.TokRemaining = g.tok.tokens
 		info.TokCapacity = g.tok.capacity

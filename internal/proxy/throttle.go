@@ -751,7 +751,8 @@ func parseRampDuration(s string) (time.Duration, error) {
 // queued even though actual usage was tiny. Actual usage is charged at
 // settlement (`settleTokens`), so the bucket still enforces the window and can
 // go into debt on a real burst; the documented contract is a token budget that
-// permits bursts, not strict fixed-window quota enforcement.
+// permits oversized reservations, while the request budget is a strict sliding
+// window.
 func estimateTokens(rec *metrics.Record) int64 {
 	if rec == nil {
 		return 0

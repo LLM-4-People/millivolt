@@ -257,8 +257,10 @@ type SetThrottleOutput struct {
 }
 
 // throttleNote states the enforcement semantics honestly.
-const throttleNote = "these are provider-wide budgets that permit bursts and oversized requests; they are not strict fixed-window quota enforcement, " +
-	"and anti_burst only ramps a fresh provider+key group up to the concurrency target rather than capping bursts outright"
+const throttleNote = "the request budget is a strict sliding window: no window of the configured length admits more than the configured count, " +
+	"so an idle provider banks nothing and a busy one cannot spend future allowance as a present burst. The token budget is a refilled bucket " +
+	"that permits oversized reservations by going into debt. anti_burst only ramps a fresh provider+key group up to the concurrency target " +
+	"rather than capping concurrency bursts outright"
 
 // The bands the proxy enforces on a provider limit (internal/proxy/throttle.go
 // maxLimit* and min/maxLimitWindow). Applying them here turns a typo into a
@@ -291,8 +293,10 @@ var setThrottleDescription = fmt.Sprintf("Set one provider's budgets across all 
 	"The provider is checked against the proxy's known-provider vocabulary, because writing a limit for an "+
 	"unknown one would add that name to the proxy's vocabulary permanently, and the known names are offered "+
 	"instead. That check FAILS OPEN: when the vocabulary cannot be read or is empty, an unknown name is "+
-	"accepted rather than refusing every name. These budgets permit bursts and oversized requests; they are "+
-	"not strict fixed-window quota enforcement.",
+	"accepted rather than refusing every name. The request budget is a strict sliding window over the configured "+
+	"length: no window of that length admits more than the configured count, so setting 100 per 1m really does stay "+
+	"at or below 100 in any rolling minute. The token budget is a refilled bucket that permits an oversized "+
+	"reservation by going into debt.",
 	maxLimitConcurrency, maxLimitRequests, maxLimitTokens, minLimitWindow, int(maxLimitWindow/time.Hour),
 	minLimitWindow, int(maxLimitWindow/time.Hour))
 

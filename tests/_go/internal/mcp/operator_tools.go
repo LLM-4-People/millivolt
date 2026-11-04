@@ -192,7 +192,7 @@ func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 			t.Fatalf("an omitted dimension must be omitted so it keeps its value: %v", body)
 		}
 	}
-	if len(out.KnownProviders) != 2 || !strings.Contains(out.Note, "not strict fixed-window") {
+	if len(out.KnownProviders) != 2 || !strings.Contains(out.Note, "strict sliding window") {
 		t.Fatalf("throttle output = %+v", out)
 	}
 	if !strings.Contains(out.Note, "anti_burst") {

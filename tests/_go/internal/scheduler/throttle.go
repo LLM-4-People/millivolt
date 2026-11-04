@@ -535,6 +535,135 @@ func TestPerKeyCapStillAppliesUnderProviderThrottle(t *testing.T) {
 	}
 }
 
+// TestRequestWindowIsStrictNotABucket pins the request budget's enforcement
+// shape: no window of the configured length ever admits more than the
+// configured count. A refilling token bucket satisfies "Count per Window" as an
+// average while allowing Count in one instant plus the Count refilled over the
+// same span, so a provider counting a fixed or rolling minute sees up to twice
+// the configured limit (the observed 101/100 and the 110/104/115 wall-clock
+// minutes behind it). The window must instead admit exactly Count and then
+// refuse until the oldest admit leaves the trailing window.
+func TestRequestWindowIsStrictNotABucket(t *testing.T) {
+	const count = 5
+	const window = 100 * time.Millisecond
+	s := New(Options{})
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Requests: count, ReqWindow: window}})
+	ctx := context.Background()
+
+	// Spend the whole budget at once, the way a burst arrives.
+	for i := range count {
+		r, err := s.AcquireWith(ctx, fmt.Sprintf("p|k%d", i), 0, WaiterHooks{Provider: "p"})
+		if err != nil {
+			t.Fatalf("admit %d inside the budget: %v", i, err)
+		}
+		r(0)
+	}
+	// The next admit must wait out the trailing window. A bucket would admit
+	// it as soon as one token refilled (a tenth of the way through the window).
+	start := time.Now()
+	r, err := s.AcquireWith(ctx, "p|overflow", 0, WaiterHooks{Provider: "p"})
+	if err != nil {
+		t.Fatalf("admit after the window rolled: %v", err)
+	}
+	elapsed := time.Since(start)
+	r(0)
+	if elapsed < window/2 {
+		t.Fatalf("admit %d returned after %v; a strict window must wait out %v",
+			count+1, elapsed, window)
+	}
+
+	// The observable the dashboard renders is the trailing-window allowance,
+	// never a refilling fill: after a full burst it reads 0, not a positive
+	// trickle that would let the next request through.
+	s.SetThrottle(Throttle{Provider: "p2", Limit: Limit{Requests: 4, ReqWindow: time.Minute}})
+	for i := range 4 {
+		r, err := s.AcquireWith(ctx, fmt.Sprintf("p2|k%d", i), 0, WaiterHooks{Provider: "p2"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r(0)
+	}
+	infos := s.ListThrottles()
+	for _, inf := range infos {
+		if inf.Provider != "p2" {
+			continue
+		}
+		if inf.ReqRemaining != 0 || inf.ReqCapacity != 4 {
+			t.Fatalf("exhausted window reports remaining %v capacity %v, want 0/4",
+				inf.ReqRemaining, inf.ReqCapacity)
+		}
+	}
+}
+
+// TestRequestWindowBankedIdleTimeDoesNotBurst pins the other half: an idle
+// provider banks nothing. A bucket fills to its capacity while unused and then
+// spends the whole fill at once on top of the trailing window's own allowance;
+// a sliding window admits no faster because the provider was quiet.
+func TestRequestWindowBankedIdleTimeDoesNotBurst(t *testing.T) {
+	var w strictWindow
+	now := time.Now()
+	w.reset(3, time.Minute, now)
+	// Idle for ten windows: still exactly three admits, not a doubled fill.
+	now = now.Add(10 * time.Minute)
+	if got := w.remaining(now); got != 3 {
+		t.Fatalf("idle window remaining = %v, want 3 (no banking)", got)
+	}
+	for range 3 {
+		if _, blocked := w.waitFor(now); blocked {
+			t.Fatal("idle window refused an admit inside its own budget")
+		}
+		w.admit(now)
+	}
+	if _, blocked := w.waitFor(now); !blocked {
+		t.Fatal("window admitted a fourth request after banking idle time")
+	}
+	// The blocked wait is bounded by the oldest stamp leaving the window.
+	wait, _ := w.waitFor(now)
+	if wait != time.Minute {
+		t.Fatalf("wait after a same-instant burst = %v, want %v", wait, time.Minute)
+	}
+}
+
+// TestRequestWindowPacedModeMatchesSlidingMode pins the large-count
+// representation: above maxWindowSlots the budget is enforced by even spacing,
+// which must obey the same invariant (no window of the configured length holds
+// more than the configured count) without allocating a stamp per slot.
+func TestRequestWindowPacedModeMatchesSlidingMode(t *testing.T) {
+	const count = maxWindowSlots + 1000
+	var w strictWindow
+	start := time.Now()
+	w.reset(count, time.Minute, start)
+	if !w.paced() || len(w.stamps) != 0 {
+		t.Fatalf("large count retained %d stamps (paced=%v), want O(1) pacing",
+			len(w.stamps), w.paced())
+	}
+	// Drive 3*count admits and check every trailing one-minute window. The
+	// interval is 1m/count, so the sample step is well below it.
+	step := time.Minute / time.Duration(count) / 4
+	var admitted []time.Time
+	now := start
+	for range 3 * count {
+		if wait, blocked := w.waitFor(now); blocked {
+			now = now.Add(wait)
+		}
+		w.admit(now)
+		admitted = append(admitted, now)
+		now = now.Add(step)
+	}
+	for i := range admitted {
+		// Count the admits strictly after this one's window start. lo stops on
+		// the first stamp that has already left the window, so it is not part
+		// of the count: the span is admitted[lo+1..i], which is i-lo entries.
+		lo := i
+		for lo >= 0 && !admitted[lo].Before(admitted[i].Add(-time.Minute)) {
+			lo--
+		}
+		if n := i - lo; int64(n) > count {
+			t.Fatalf("paced window holds %d admits in one minute, want <= %d", n, count)
+		}
+	}
+}
+
 // TestBucketWaitClampedToCeiling pins the overflow guard in bucket.waitFor.
 // A legal 1-token/24h cap plus one settled huge usage leaves a debt whose
 // exact refill time (200001 tokens at 1/86400 tokens/s, roughly 547 years)

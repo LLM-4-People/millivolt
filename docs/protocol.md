@@ -121,9 +121,11 @@ caps and preserves the stored pair. The ramp is inert unless `anti_burst` is
 true, the concurrency target is at least 2 and `ramp_duration` is above 0, and
 its duration uses that same window grammar. Malformed limit values reject the
 request without applying any of its limit headers. The Limits menu shows the
-policy and its source. Rates use continuously
-refilled budgets, not strict fixed-window quotas; see
-[Pause and Limits](operations.md#pause-and-limits) for charging and burst behavior.
+policy and its source. Request rates are strict sliding windows over the
+configured length, so no window ever admits more than the configured count;
+token rates remain continuously refilled budgets. See
+[Pause and Limits](operations.md#pause-and-limits) for charging and window
+behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
 valid, unique case-insensitively, and not reserved control, framing

@@ -1131,20 +1131,26 @@ body has the `request_body_read_timeout` budget, SSE writes have the
 `sse_write_progress_timeout` per-event progress bound, and an upstream body
 that stops sending for `upstream_stream_idle_timeout` is canceled.
 
-Request and token budgets start full when enabled and refill continuously at
-the configured count/window rate. Request budget is charged once per proxy
-admission, not again for each absorbed upstream retry. Token admission reserves
-the captured prompt characters divided by four, then settles against final
-reported usage. The client's output ceiling (`max_tokens` and its spellings) is
-deliberately not reserved: it is a ceiling, not expected usage, and reserving it
-would turn the budget into a worst-case concurrency cap. A reservation larger
-than the bucket's entire capacity can proceed while credit is positive, putting
-the bucket into debt that refill or usage settlement can repay. These controls
-permit bursts and oversized requests; they are not strict fixed-window provider
-quota enforcement. A token budget therefore also sets the sustained average
-rate: 500K tokens per 6h refills at about 23 tokens/s, so once the initial
-budget is spent, later requests wait for refill unless actual usage settles
-lower than the reservation.
+Request budgets are strict sliding windows: at most the configured count is
+admitted in any trailing window of the configured length, so an idle provider
+banks nothing and a busy one cannot spend future allowance as a present burst.
+Charging the window is what makes the limit match a provider that counts
+requests per rolling or fixed minute; a refilling budget could emit the whole
+count in one instant and then refill through the same span, which is how a
+`100 per minute` setting reached a provider's `101/100`. Each admitted request
+is charged once, at proxy admission, not again for each absorbed upstream retry.
+A count above 65536 is enforced by even spacing at the same ceiling instead of
+one timestamp per slot, so the memory a window holds stays bounded. Token
+budgets remain refilling buckets: prompt tokens are reserved from the captured
+characters divided by four and then settled against final reported usage, and a
+reservation larger than the whole capacity may proceed while credit is
+positive, leaving debt that refill or settlement repays. The client's output
+ceiling (`max_tokens` and its spellings) is deliberately not reserved: it is a
+ceiling, not expected usage, and reserving it would turn the token budget into
+a worst-case concurrency cap. A token budget therefore also sets the sustained
+average rate: 500K tokens per 6h refills at about 23 tokens/s, so once the
+initial budget is spent, later requests wait for refill unless actual usage
+settles lower than the reservation.
 
 ### Error storm protection
 
