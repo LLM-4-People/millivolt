@@ -81,8 +81,6 @@ on:
       - 'requirements-docs.txt'
       - '.github/workflows/docs.yml'
       - '.github/workflows/pages.yml'
-      - '.github/workflows/dependency-review.yml'
-      - '.github/workflows/security.yml'
   pull_request:
     # `closed` is the release trigger for a merged promotion. The other types
     # preserve the normal pull-request gate. The job conditions below ignore
@@ -458,7 +456,6 @@ jobs:
       DOCS_PATH_PATTERNS: >-
         docs/** site-src/** scripts/build_site.py requirements-docs.txt LICENSE
         *.md .github/workflows/docs.yml .github/workflows/pages.yml
-        .github/workflows/dependency-review.yml .github/workflows/security.yml
     steps:
       - name: Require every gate
         # A skipped gate job must fail the gate except for the deliberate
