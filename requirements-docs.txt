@@ -2,5 +2,12 @@
 # dependency update cannot silently change heading anchors or HTML output.
 Markdown==3.11.2
 
+# python-markdown passes raw HTML, `attr_list` attribute blocks and arbitrary
+# link schemes through unchanged. Every rendered document crosses one
+# sanitizer at the build choke point, backed by the same Rust ammonia engine as
+# the `nh3` crate. A stdlib filter here would be a hand-rolled HTML parser at a
+# security boundary; this pin is deliberate, and requirements-dev.txt inherits it.
+nh3==0.3.7
+
 # Workflow policy checks use the same pinned parser in docs CI.
 PyYAML==6.0.3
