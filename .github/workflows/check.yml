@@ -558,16 +558,41 @@ jobs:
           # A closed-event required job is itself in progress. Ignore
           # incomplete check runs and require the latest completed reviewed
           # `required` check to be green.
+          #
+          # The check run must belong to the canonical check.yml testing run
+          # for this exact commit. A check-runs listing is commit-wide, so any
+          # other workflow run on the same commit (including a candidate
+          # workflow that renamed one of its own jobs to `required`) would
+          # otherwise satisfy this proof: the run's path, event, branch and
+          # suite id are all mandatory selectors here.
+          runs="$(gh api --paginate --slurp \
+            "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" |
+            jq -c '{workflow_runs: [.[].workflow_runs[]]}')"
+          suite="$(printf '%s' "$runs" | jq -r --arg sha "$HEAD_SHA" '
+            [ .workflow_runs[]
+              | select(.path == ".github/workflows/check.yml")
+              | select(.event == "push" or .event == "workflow_dispatch")
+              | select(.head_branch == "testing")
+              | select(.head_sha == $sha)
+            ]
+            | sort_by(.created_at, .id)
+            | last
+            | if . == null then "" else (.check_suite_id // "") end')"
+          if [ -z "$suite" ]; then
+            echo "::error::The reviewed head $HEAD_SHA has no canonical check.yml testing gate run, so no required check can be trusted."
+            exit 1
+          fi
           latest_required="$(gh api --paginate --slurp \
             "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" |
-            jq -r '
+            jq -r --argjson suite "$suite" '
               [.[].check_runs[]
+                | select(.check_suite.id == $suite)
                 | select(.name == "required" and .status == "completed")]
               | sort_by(.completed_at // .started_at // "", .id)
               | last
               | if . == null then "" else (.conclusion // "") end')"
           if [ "$latest_required" != "success" ]; then
-            echo "::error::The reviewed head $HEAD_SHA has no successful required check (latest completed: ${latest_required:-missing})."
+            echo "::error::The reviewed head $HEAD_SHA has no successful required check in the canonical testing suite $suite (latest completed: ${latest_required:-missing})."
             exit 1
           fi
 
