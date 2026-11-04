@@ -20,6 +20,14 @@ import (
 // remoteIP returns the client's IP (host part of RemoteAddr), honoring
 // X-Forwarded-For when the proxy sits behind another proxy. The returned value
 // is bounded at this owner so every caller and consumer shares the same cap.
+//
+// The header is trusted as given, so the value is only as good as the hop that
+// wrote it: a directly reachable caller can claim any address. That is
+// acceptable because this field is diagnostic, never authoritative - the
+// operator gate's brute-force limiter keys on the socket address
+// (cmd/proxy/operator.go), not on this value, and every renderer escapes it.
+// A deployment that needs a verified client address must not rely on it; see
+// SECURITY.md.
 func remoteIP(r *http.Request) string {
 	ip := ""
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
