@@ -389,6 +389,14 @@ def promotion_suite_errors(run: str) -> list[str]:
         # gate of its own.
         'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do',
         'if [ -z "$parent" ]; then',
+        # "Empty" must be decided by tree identity, never by an absent file
+        # list: the commit API reports a merge's diff against a base rather than
+        # against its first parent, so a file-list test could call a
+        # code-bearing merge empty and walk past its gate.
+        'parent_tree="$(gh api "repos/$REPO/commits/$parent" --jq \'.commit.tree.sha // ""\')"',
+        '[ "$tree" = "$parent_tree" ]',
+        'has the same tree as $parent',
+        'reports no changed file; its delta cannot be classified',
         'is truncated, so its delta cannot be classified',
         'has no canonical check.yml testing gate run and changes code',
     ):

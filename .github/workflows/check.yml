@@ -612,9 +612,21 @@ jobs:
             fi
             commit="$(gh api "repos/$REPO/commits/$gated")"
             parent="$(printf '%s' "$commit" | jq -r '.parents[0].sha // ""')"
+            tree="$(printf '%s' "$commit" | jq -r '.commit.tree.sha // ""')"
             if [ -z "$parent" ]; then
               echo "::error::The reviewed commit $gated has no canonical check.yml testing gate run, is not empty, and has no parent, so no required check can be trusted."
               exit 1
+            fi
+            # "Empty" is decided by tree identity, not by an absent file list.
+            # A tree comparison is authoritative for every commit shape: a merge
+            # that introduces changes has a different tree even though the commit
+            # API reports its diff against a base rather than against its first
+            # parent, so a code-bearing merge can never be mistaken for empty.
+            parent_tree="$(gh api "repos/$REPO/commits/$parent" --jq '.commit.tree.sha // ""')"
+            if [ -n "$tree" ] && [ "$tree" = "$parent_tree" ]; then
+              echo "The reviewed commit $gated has the same tree as $parent; inheriting its gate."
+              gated="$parent"
+              continue
             fi
             # The commit API caps the file list, so a truncated list cannot
             # prove the delta is docs-only. Treat it as code.
@@ -624,9 +636,8 @@ jobs:
             fi
             files="$(printf '%s' "$commit" | jq -r '(.files // [])[].filename')"
             if [ -z "$files" ]; then
-              echo "The reviewed commit $gated changes no file against its first parent; inheriting the gate of $parent."
-              gated="$parent"
-              continue
+              echo "::error::The reviewed commit $gated has no gate, differs from its first parent, and reports no changed file; its delta cannot be classified."
+              exit 1
             fi
             non_docs=""
             while IFS= read -r path; do
