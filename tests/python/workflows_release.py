@@ -507,6 +507,19 @@ def check_release(checks: dict, errors: list[str]) -> None:
             errors.append(f"workflows self-check: removing the missing-release guard {needle} must fail")
     tag_push = steps(publish)[tag_push_index] if tag_push_index >= 0 else {}
     tag_push_run = str(tag_push.get("run", ""))
+    # The release token must not appear in a git argument: an argv is readable
+    # by every process on the runner. It reaches git through a credential
+    # helper, and the empty `credential.helper=` first clears the inherited
+    # chain so git cannot fall through to a stored credential.
+    if "x-access-token:" in tag_push_run:
+        errors.append("check.yml: the release token must not be embedded in the push URL")
+    for needle in (
+        "git -c credential.helper= \\",
+        'credential.helper=\'!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f\'',
+        '"https://github.com/${REPO}.git"',
+    ):
+        if needle not in tag_push_run:
+            errors.append(f"check.yml: the verified tag push is missing {needle}")
     if '"v$RELEASE_VERSION"' not in tag_push_run:
         errors.append("check.yml: the release workflow must push the verified tag")
     if "skip != 'true'" not in str(tag_push.get("if", "")):

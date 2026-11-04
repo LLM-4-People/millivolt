@@ -1215,7 +1215,15 @@ jobs:
           # contains the promotion merge; the release workflow never pushes
           # main. A failed build leaves no public release.
           #
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "v$RELEASE_VERSION"
+          # The token reaches git through a credential helper that reads the
+          # environment, never through the push URL: an argument is visible in
+          # the process command line to every process on the runner. The empty
+          # `credential.helper=` first is load-bearing: it clears the inherited
+          # helper chain so git cannot fall through to a stored credential, and
+          # the inline helper holds no secret outside this process environment.
+          git -c credential.helper= \
+            -c credential.helper='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
+            push "https://github.com/${REPO}.git" "v$RELEASE_VERSION"
       - name: Create the GitHub release
         if: steps.cut.outputs.skip != 'true'
         env:
