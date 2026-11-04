@@ -124,10 +124,12 @@ max_request_bytes: 32MiB
 #   type: int · range 1..10000 · default 1024
 request_tool_calls_max: 1024
 
-# SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
-# operator). Each entry must be an absolute URL whose prefix is literally lowercase
-# http:// or https://, with a lowercase hostname, no userinfo, query, fragment or trailing
-# slash, and a port after a hostname in 1..65535.
+# SSRF allowlist of upstream base URLs. Empty allows any target (single trusted operator).
+# An entry admits only the same scheme, host and port once the scheme's default port is
+# filled in, plus that entry's path and its children, so a port-less entry does not admit
+# other ports on the host. Each entry must be an absolute URL whose prefix is literally
+# lowercase http:// or https://, with a lowercase hostname, no userinfo, query, fragment
+# or trailing slash, and a port after a hostname in 1..65535.
 # Hot-reload: yes.
 #   type: list of string
 allowed_base_urls: []

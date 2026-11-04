@@ -1012,3 +1012,52 @@ func TestReloadDoesNotMutateLiveSnapshot(t *testing.T) {
 		t.Errorf("new AllowedBaseURLs = %q, want b.example.com", s.cfg().AllowedBaseURLs[0])
 	}
 }
+
+// TestAllowedBaseURLAuthorityMatch pins the allowlist matcher's authority rule.
+// The pre-fix matcher was a plain byte prefix with a boundary byte set that
+// included ":", so a port-less entry also admitted every port on that host: an
+// entry for http://10.0.0.5 reached :9200, silently widening the operator's
+// least-privilege intent. The authority must now match after the scheme's
+// default port is filled in.
+func TestAllowedBaseURLAuthorityMatch(t *testing.T) {
+	cases := []struct {
+		name   string
+		entry  string
+		base   string
+		allows bool
+	}{
+		{"portless entry, same host and scheme", "https://api.example.com", "https://api.example.com/v1", true},
+		{"portless entry admits the explicit default port", "https://api.example.com", "https://api.example.com:443/v1", true},
+		{"portless entry rejects another port", "https://api.example.com", "https://api.example.com:8443/v1", false},
+		{"portless http entry rejects another port", "http://10.0.0.5", "http://10.0.0.5:9200/_search", false},
+		{"portless http entry admits the default port", "http://10.0.0.5", "http://10.0.0.5:80/v1", true},
+		{"explicit port admits only itself", "http://10.0.0.5:8000", "http://10.0.0.5:8000/v1", true},
+		{"explicit port rejects another port", "http://10.0.0.5:8000", "http://10.0.0.5:9000/v1", false},
+		{"scheme must match", "https://api.example.com", "http://api.example.com/v1", false},
+		{"host must match exactly", "https://api.example.com", "https://api.example.com.evil/v1", false},
+		{"userinfo cannot ride a prefix", "https://api.example.com", "https://api.example.com@evil.example/v1", false},
+		{"path prefix admits children", "https://api.example.com/v1", "https://api.example.com/v1/chat", true},
+		{"path prefix admits itself", "https://api.example.com/v1", "https://api.example.com/v1", true},
+		{"path prefix rejects a sibling", "https://api.example.com/v1", "https://api.example.com/v2", false},
+		{"path prefix rejects a longer segment", "https://api.example.com/v1", "https://api.example.com/v10", false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := allowed(test.base, []string{test.entry}); got != test.allows {
+				t.Fatalf("allowed(%q, [%q]) = %v, want %v", test.base, test.entry, got, test.allows)
+			}
+		})
+	}
+	// Any entry in the list admits the request; an unrelated list does not.
+	if !allowed("https://b.example/v1", []string{"https://a.example", "https://b.example"}) {
+		t.Fatal("a matching entry in a multi-entry allowlist must admit the request")
+	}
+	if allowed("https://c.example/v1", []string{"https://a.example", "https://b.example"}) {
+		t.Fatal("an allowlist with no matching entry must deny the request")
+	}
+	// The registration the config validator enforces: an empty allowlist means
+	// unrestricted, which is the caller's check, not this matcher's.
+	if allowed("https://anything.example/x", nil) {
+		t.Fatal("an empty allowlist must not implicitly admit")
+	}
+}

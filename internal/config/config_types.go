@@ -121,14 +121,15 @@ type Config struct {
 	// original request is proxied. Hot-reloads.
 	TokenResponseMaxBytes ByteSize `yaml:"token_response_max" json:"token_response_max"`
 
-	// AllowedBaseURLs is an optional allowlist of upstream base URL prefixes.
-	// When non-empty, only targets matching one of these prefixes are accepted;
-	// this mitigates SSRF if the proxy is reachable by untrusted clients. Empty
-	// (default) allows any target, appropriate for a single trusted operator.
-	// Each entry must be an absolute http:// or https:// URL with a non-empty
-	// host (validated on load): the runtime matcher is a plain prefix match,
-	// so a scheme-less typo like "api.openai.com" would load cleanly and then
-	// silently deny every request.
+	// AllowedBaseURLs is an optional allowlist of upstream base URLs. When
+	// non-empty, only targets whose scheme, host and port equal an entry, and
+	// whose path falls under that entry's path, are accepted; this mitigates
+	// SSRF if the proxy is reachable by untrusted clients. Empty (default)
+	// allows any target, appropriate for a single trusted operator. Each entry
+	// must be an absolute http:// or https:// URL with a non-empty host
+	// (validated on load): the runtime matcher compares the authority exactly
+	// after filling in the scheme's default port, so a port-less entry admits
+	// the default port only, never every port on that host.
 	AllowedBaseURLs []string `yaml:"allowed_base_urls" json:"allowed_base_urls"`
 
 	// CaptureBodyPreview enables storing a short preview of the last user

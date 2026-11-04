@@ -41,8 +41,11 @@ operator credential as a Bearer header and refuses a session cookie alone with
 
 `X-Proxy-Base-URL` selects an HTTP(S) destination. An unrestricted caller can
 therefore make the proxy contact destinations reachable from its host.
-`allowed_base_urls` constrains accepted URL prefixes; use trusted destinations
-and appropriate egress controls. This is not a DNS/IP isolation sandbox.
+`allowed_base_urls` constrains accepted upstream targets: an entry admits the
+same scheme, host and port (with the scheme's default port filled in) and that
+entry's path and its children. A port-less entry therefore admits the default
+port only, not every port on that host. Use trusted destinations and
+appropriate egress controls. This is not a DNS/IP isolation sandbox.
 The proxy does not follow upstream redirects.
 
 Ordinary metrics group credentials by SHA256 rather than retaining the raw key.

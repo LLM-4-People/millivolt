@@ -78,8 +78,9 @@ func (c *Config) Validate() error {
 	if err != nil || portErr != nil || n < 0 || n > 65535 || strings.ContainsAny(host, " /?#@\t\r\n") {
 		return fmt.Errorf("listen: must be host:port with a numeric port in 0..65535")
 	}
-	// allowed_base_urls entries are byte-prefix-matched against request base
-	// URLs at runtime (internal/proxy), which are trailing-slash-trimmed and
+	// allowed_base_urls entries are matched against request base URLs at
+	// runtime (internal/proxy) on scheme, host and port, plus a path prefix;
+	// request base URLs are trailing-slash-trimmed and
 	// can never carry userinfo, query, or fragment (the proxy rejects those
 	// at the request boundary). A scheme-less entry like "api.openai.com"
 	// would load cleanly and then silently deny every request - and so would

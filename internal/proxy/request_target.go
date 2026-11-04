@@ -331,10 +331,47 @@ func providerFromURL(u *url.URL) string {
 	return host
 }
 
+// baseAuthority returns the canonical scheme://host:port authority of a base
+// URL, with the scheme's default port filled in, plus its path. Both sides of
+// an allowlist comparison are already validated (lowercase scheme and host, no
+// userinfo/query/fragment), and the host keeps its bytes so the documented
+// byte-sensitive match still holds.
+func baseAuthority(raw string) (authority, rest string) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw, ""
+	}
+	port := u.Port()
+	if port == "" {
+		port = defaultPort(u.Scheme)
+	}
+	return u.Scheme + "://" + net.JoinHostPort(u.Hostname(), port), u.EscapedPath()
+}
+
+func defaultPort(scheme string) string {
+	if scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+// allowed reports whether base falls under one allowlist entry.
+//
+// The authority must match exactly once the scheme's default port is filled
+// in, so a port-less entry admits only the default port rather than every port
+// on that host. A plain prefix match silently widened the operator's intent:
+// an entry for http://10.0.0.5 also reached :9200. Path prefixes remain
+// supported: an entry may name a path and admits that path and its children.
 func allowed(base string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(base, p) && (len(base) == len(p) ||
-			base[len(p)] == '/' || base[len(p)] == '?' || base[len(p)] == ':') {
+	baseAuth, baseRest := baseAuthority(base)
+	for _, prefix := range prefixes {
+		prefixAuth, prefixRest := baseAuthority(prefix)
+		if baseAuth != prefixAuth {
+			continue
+		}
+		if prefixRest == "" || baseRest == prefixRest ||
+			strings.HasPrefix(baseRest, prefixRest+"/") ||
+			strings.HasPrefix(baseRest, prefixRest+"?") {
 			return true
 		}
 	}

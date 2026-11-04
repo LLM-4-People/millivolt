@@ -124,7 +124,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Most Chat tool calls across the whole message history of one inbound request, including the deprecated per-message function_call shape. Anthropic tool_use and Responses function_call history are bounded by their protocol collection limits instead. Real agent turns replay a handful; raise it only for clients that resend unusually long tool loops, because every call is materialized in memory during translation.",
 			Kind: KindInt, HotReload: true, Min: num(RequestToolCallsMin), Max: num(RequestToolCallsBandMax)},
 		{Key: "allowed_base_urls", Category: "request", Label: "Allowed base URLs",
-			Help: "SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted operator). Each entry must be an absolute URL whose prefix is literally lowercase http:// or https://, with a lowercase hostname, no userinfo, query, fragment or trailing slash, and a port after a hostname in 1..65535.",
+			Help: "SSRF allowlist of upstream base URLs. Empty allows any target (single trusted operator). An entry admits only the same scheme, host and port once the scheme's default port is filled in, plus that entry's path and its children, so a port-less entry does not admit other ports on the host. Each entry must be an absolute URL whose prefix is literally lowercase http:// or https://, with a lowercase hostname, no userinfo, query, fragment or trailing slash, and a port after a hostname in 1..65535.",
 			Kind: KindStrings, HotReload: true},
 		{Key: "capture_body_preview", Category: "request", Label: "Capture body preview",
 			Help: "Store a short bounded preview of the last user prompt / response in metrics. Off by default so content is not persisted.",
