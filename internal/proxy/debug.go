@@ -131,9 +131,11 @@ func (s *Server) attachDebugPersist(p pausePersist) {
 	now := time.Now()
 	kept := sessions[:0]
 	for _, d := range sessions {
-		s.pause.clients.seed(d.Clients)
-		s.pause.providers.seed(d.Providers)
-		s.pause.models.seed(canonicalModelList(d.Models))
+		// A debug session names its scope explicitly, so those names are
+		// operator intent and must never be displaced by later traffic.
+		s.pause.clients.pin(d.Clients)
+		s.pause.providers.pin(d.Providers)
+		s.pause.models.pin(canonicalModelList(d.Models))
 		if !d.Until.IsZero() && now.After(d.Until) {
 			continue
 		}

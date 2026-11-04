@@ -169,9 +169,28 @@ type pauseRuntime struct {
 // models): the names an operator can scope a future hold or debug session
 // to. Empty names are never recorded; the model set stores canonical names,
 // so callers canonicalize before add/seed.
+//
+// Every name is either observed (taken from live traffic) or pinned (named by
+// an operator document: a hold scope or a debug session). The distinction is
+// load-bearing, not bookkeeping. Client labels and model ids are chosen by the
+// caller, so an unauthenticated peer can submit thousands of distinct ones; a
+// first-wins cap let it fill the whole vocabulary and permanently hide the
+// operator's own names, after which a "new clients" hold classified real
+// clients as new and parked them. Observed names are therefore evicted oldest
+// first, while pinned names are never evicted: operator intent outranks
+// whatever traffic arrives later.
 type nameSet struct {
-	mu       sync.Mutex
-	names    map[string]struct{}
+	mu     sync.Mutex
+	names  map[string]struct{}
+	pinned map[string]struct{}
+	// seq is the current generation of each stored name, and order lists
+	// unpinned names by insertion. An entry whose seq no longer matches is
+	// stale (evicted then re-added, or since pinned) and is skipped while
+	// looking for the oldest live observed name; skipped entries are dropped as
+	// the head advances, so the slice stays proportional to the stored set.
+	seq      map[string]uint64
+	order    []nameEntry
+	next     uint64
 	revision uint64
 	sorted   []string
 	// sortedRevision is the revision the cached sorted view was built from.
@@ -180,40 +199,42 @@ type nameSet struct {
 	sortedRevision uint64
 }
 
-// nameSetMax bounds one operator-known vocabulary. These lists exist for
-// operator convenience; model names are client-controlled, so an unbounded set
-// is a process-lifetime memory leak. New names beyond the cap are not retained
-// (early names win; the operator can still use exact live values).
-const nameSetMax = 4096
-
-// add records one observed name. revision advances only when the stored set
-// changes, so duplicate observations keep the cached sorted view valid.
-func (n *nameSet) add(name string) {
-	if name == "" {
-		return
-	}
-	n.mu.Lock()
-	if n.names == nil {
-		n.names = make(map[string]struct{})
-	}
-	if _, exists := n.names[name]; exists || len(n.names) >= nameSetMax {
-		n.mu.Unlock()
-		return
-	}
-	n.names[name] = struct{}{}
-	n.revision++
-	n.mu.Unlock()
+type nameEntry struct {
+	seq  uint64
+	name string
 }
 
-// seed bulk-records a restored list (durable-store lists, restored holds and
-// sessions). revision advances once when any name is newly stored.
+// nameSetMax bounds one operator-known vocabulary. These lists exist for
+// operator convenience; model names are client-controlled, so an unbounded set
+// is a process-lifetime memory leak. Observed names past the cap displace the
+// oldest observed name rather than being dropped, so the vocabulary tracks what
+// is actually in use instead of freezing on whatever arrived first.
+const nameSetMax = 4096
+
+// add records one observed (unpinned, evictable) name. revision advances only
+// when the stored set changes, so duplicate observations keep the cached sorted
+// view valid.
+func (n *nameSet) add(name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.insertLocked(name, false)
+}
+
+// pin records operator-chosen names that must survive any later traffic. A
+// name already stored is only re-marked, which does not change the vocabulary.
+func (n *nameSet) pin(names []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, name := range names {
+		n.insertLocked(name, true)
+	}
+}
+
+// seed bulk-records an observed list (durable history). revision advances once
+// when any name is newly stored.
 func (n *nameSet) seed(names []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.names == nil {
-		n.names = make(map[string]struct{})
-	}
-	changed := false
 	for _, name := range names {
 		if name == "" {
 			continue
@@ -222,14 +243,79 @@ func (n *nameSet) seed(names []string) {
 			continue
 		}
 		if len(n.names) >= nameSetMax {
-			continue
+			return
 		}
-		n.names[name] = struct{}{}
-		changed = true
+		n.storeLocked(name, false)
 	}
-	if changed {
+}
+
+// insertLocked stores name if absent, pinning it when pin is set. A name at the
+// cap displaces the oldest observed name; when every stored name is pinned the
+// new one is dropped, because an operator's documented scope outranks it.
+func (n *nameSet) insertLocked(name string, pin bool) {
+	if name == "" {
+		return
+	}
+	if _, exists := n.names[name]; exists {
+		if pin {
+			n.promoteLocked(name)
+		}
+		return
+	}
+	if len(n.names) >= nameSetMax && !n.evictLocked() {
+		return
+	}
+	n.storeLocked(name, pin)
+}
+
+// promoteLocked moves an already-stored observed name to pinned. It advances the
+// name's generation so its eviction-order entry becomes stale: without that the
+// entry stays live and eviction could still drop a name an operator has since
+// scoped a hold or debug session to.
+func (n *nameSet) promoteLocked(name string) {
+	if _, pinned := n.pinned[name]; pinned {
+		return
+	}
+	n.next++
+	n.seq[name] = n.next
+	n.pinned[name] = struct{}{}
+}
+
+// evictLocked drops the oldest observed name and reports whether one was free.
+func (n *nameSet) evictLocked() bool {
+	for len(n.order) > 0 {
+		entry := n.order[0]
+		n.order = n.order[1:]
+		if n.seq[entry.name] != entry.seq {
+			continue // stale: evicted, re-added, or pinned since
+		}
+		delete(n.names, entry.name)
+		delete(n.seq, entry.name)
 		n.revision++
+		return true
 	}
+	return false
+}
+
+// storeLocked adds one name to the maps and, when observed, to the eviction
+// order. Every store advances the revision, pinned or observed: the revision
+// owns the cached sorted view, so a pinned-only insertion that skipped it would
+// leave the vocabulary unreadable until some later observed name arrived.
+func (n *nameSet) storeLocked(name string, pin bool) {
+	if n.names == nil {
+		n.names = make(map[string]struct{})
+		n.pinned = make(map[string]struct{})
+		n.seq = make(map[string]uint64)
+	}
+	n.names[name] = struct{}{}
+	n.next++
+	n.seq[name] = n.next
+	n.revision++
+	if pin {
+		n.pinned[name] = struct{}{}
+		return
+	}
+	n.order = append(n.order, nameEntry{seq: n.next, name: name})
 }
 
 // list returns the known names in lexicographic order. The sorted view is
@@ -302,9 +388,12 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 		holds := decodePause(raw)
 		kept := holds[:0]
 		for _, h := range holds {
-			s.pause.clients.seed(h.Clients)
+			// A hold's scope is operator intent, so those names are pinned;
+			// KnownAtNew is the observed vocabulary snapshot the hold compared
+			// against, so it seeds like history.
+			s.pause.clients.pin(h.Clients)
 			s.pause.clients.seed(h.KnownAtNew)
-			s.pause.providers.seed(h.Providers)
+			s.pause.providers.pin(h.Providers)
 			if !toSchedHold(h).Active() {
 				continue
 			}

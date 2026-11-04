@@ -994,6 +994,16 @@ an indefinite hold needs an explicit resume. Existing holds can be edited in
 place or resumed individually, while Resume all clears all holds. Overlapping
 scopes are rejected instead of silently replacing a different hold.
 
+The known client/provider/model vocabularies (the pause and debug pickers, and
+the snapshot a New-clients hold compares against) are bounded at 4096 names per
+dimension. Client labels and model ids come from the request, so they are
+evictable: past the cap the oldest observed name makes room for the newest,
+which keeps the list tracking live traffic. Names an operator documents - a
+hold scope or a debug session - are pinned and are never evicted by later
+traffic, so a flood of distinct labels cannot hide the client you scoped a hold
+to. When a full vocabulary is entirely pinned, a new observed name is dropped
+rather than displacing operator intent.
+
 Limits applies to a provider across all clients and keys, independently of the
 per-key concurrency/queue settings. Choose concurrency, requests per window,
 tokens per window and the optional anti-burst ramp, then Apply; Clear removes
