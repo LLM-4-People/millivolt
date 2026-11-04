@@ -55,6 +55,27 @@ arbitrary text: request/response bodies, URLs, error messages, model names or
 user-supplied labels can contain sensitive data. Preview capture and Debug
 capture are opt-in, but enabling them can persist that data.
 
+## Client identity is a claim, not an authentication
+
+`X-Proxy-Client` (and the classified client derived from SDK and user-agent
+headers when it is absent) is chosen by the caller. Nothing verifies it: a
+request that sends another client's label is treated as that client by every
+feature that scopes on client - `request_overrides` (so it inherits that
+client's header and token-ceiling rules), `sub_conversations` (so it gets that
+client's field mapping and strip list), Debug capture sessions, pause holds
+including the "new clients" comparison, and the Cursor parked-run scope. The
+recorded client, and therefore dashboard grouping and the `client` filter, also
+follow the claim.
+
+Treat client scoping as a way to separate your own tools and traffic, not as a
+security boundary between mutually untrusted parties. A proxy reachable by
+someone who should not act as another client needs that separation enforced
+outside these labels: distinct `allowed_base_urls`, distinct upstream
+credentials per caller, or a separate proxy instance. Credential-class header
+names are refused in `request_overrides` and redacted in retained data, so a
+claimed label cannot by itself move an upstream secret; the exposure it does
+create is the policy attached to the label, not the credential behind it.
+
 Token-refresh handback responses contain credentials in the error body for the client to adopt.
 Do not publish them, browser exports, databases, backups, local config,
 login-script output or screenshots containing private history.

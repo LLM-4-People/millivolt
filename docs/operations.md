@@ -206,6 +206,16 @@ anything. There is no model-rule canonicalization, regex or wildcard broadening.
 All matching rules apply in list order, and for the same header or body field
 the later rule wins.
 
+The client label is a claim, not an authenticated identity. The caller chooses
+it, and the proxy never verifies it, so a request presenting another client's
+label is treated as that client here and by every other client-scoped feature
+(sub-conversations, Debug sessions, pause holds, the Cursor parked-run scope).
+See [client identity](../SECURITY.md#client-identity-is-a-claim-not-an-authentication)
+for what that means for a listener reachable by parties you do not trust. What
+it cannot do is move a credential: credential-class header names are refused at
+load and skipped at send, so the exposure is the policy attached to the label,
+not the secret behind it.
+
 Header rules are the operator's last word on the upstream wire: the resolved
 merge applies after client-forwarded values, configured provider headers and
 the client's `X-Proxy-Headers` map, so a matching override wins over all of
@@ -1013,6 +1023,11 @@ hold scope or a debug session - are pinned and are never evicted by later
 traffic, so a flood of distinct labels cannot hide the client you scoped a hold
 to. When a full vocabulary is entirely pinned, a new observed name is dropped
 rather than displacing operator intent.
+
+A hold scopes on the caller's claimed client label, so it separates your own
+tools from each other, not trusted callers from untrusted ones; a caller that
+sends another client's label is parked, or not parked, as that client. See
+[client identity](../SECURITY.md#client-identity-is-a-claim-not-an-authentication).
 
 Limits applies to a provider across all clients and keys, independently of the
 per-key concurrency/queue settings. Choose concurrency, requests per window,
