@@ -58,10 +58,11 @@ dependent fix. Keep unrelated user changes out of the commit. A push still
 waits for the full push gate on the exact commit being pushed.
 
 A commit subject also feeds the generated release notes: every subject whose
-type is not one of `build`, `chore`, `ci`, `deps`, `doc`, `docs`, `refactor`,
-`release`, `style`, `test` or `tests` becomes a Highlight on the release that
-first contains it, and internal types are folded under "Other changes". Write
-the subject for an operator reading the release page.
+type is not one of `build`, `brand`, `checks`, `chore`, `ci`, `deps`, `doc`,
+`docs`, `merge`, `refactor`, `release`, `style`, `test`, `tests`, `tooling` or
+`version` becomes a Highlight on the release that first contains it, and
+internal types are folded under "Other changes". Write the subject for an
+operator reading the release page.
 
 Completed feature pushes to `testing` publish only the moving development image.
 All pull requests to `testing`, all code-bearing pushes to `testing`, manually
