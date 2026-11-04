@@ -67,46 +67,45 @@ func (l *inflightLimiter) release(bodyBytes int64) {
 var errBodyBudget = errors.New("proxy is at its in-flight body budget")
 
 // bodyReservation is one in-flight request's share of the buffered-body
-// budget. It starts at a bounded speculative amount and charges the delta as
-// bytes actually arrive, so the budget follows the heap actually held rather
-// than a declared length.
+// budget. It reserves no body capacity up front and charges the delta as bytes
+// actually arrive, so the budget follows the heap actually held rather than a
+// declared length.
 //
 // Reserving the full declared Content-Length up front let an idle connection
 // hold budget it never used: eight clients declaring 32 MiB each exhausted the
 // default 256 MiB budget and denied inference to every other client, while the
 // separate request-count bound implies tolerance for thousands of clients.
+// Reserving even one read hint per socket kept a smaller version of the same
+// lever (256 sockets at the default budget, and one socket when
+// max_request_bytes was configured small), so the reservation starts at zero.
 type bodyReservation struct {
 	l       *inflightLimiter
 	charged int64
 	read    int64
 }
 
-// acquireBody reserves one request slot plus a bounded speculative body
-// amount. A refusal backs the slot out, so a rejected request leaks nothing.
-func (l *inflightLimiter) acquireBody(speculative int64) (*bodyReservation, bool) {
-	speculative = max(speculative, 0)
-	if !l.acquire(speculative) {
+// acquireBody reserves one request slot and no body bytes. A refusal backs the
+// slot out, so a rejected request leaks nothing.
+func (l *inflightLimiter) acquireBody() (*bodyReservation, bool) {
+	if !l.acquire(0) {
 		return nil, false
 	}
-	return &bodyReservation{l: l, charged: speculative}, true
+	return &bodyReservation{l: l}, true
 }
 
-// chargeRead charges the budget for n bytes just read. The speculative
-// reservation already covers the first bytes, so only the growth beyond it is
-// charged. A refusal leaves the counter unchanged; the caller aborts the read
-// and releases the whole reservation on return.
+// chargeRead charges the budget for n bytes just read. A refusal leaves the
+// counter unchanged; the caller aborts the read and releases the whole
+// reservation on return.
 func (r *bodyReservation) chargeRead(n int64) bool {
 	if n <= 0 {
 		return true
 	}
 	r.read += n
-	if r.read <= r.charged {
-		return true
-	}
 	delta := r.read - r.charged
 	total := r.l.bytes.Add(delta)
 	if limit := r.l.byteLimit.Load(); limit > 0 && total > limit {
 		r.l.bytes.Add(-delta)
+		r.read = r.charged
 		return false
 	}
 	r.charged = r.read
@@ -117,21 +116,27 @@ func (r *bodyReservation) release() { r.l.release(r.charged) }
 
 // chargedReader charges every byte it delivers to the body reservation, so a
 // declared length never reserves capacity the client does not send.
+//
+// A refusal is recorded rather than returned: the read is already bounded by
+// the per-request cap, so letting it finish proves whether this request is
+// definitively over `max_request_bytes`. That distinction owns the status: an
+// over-cap body answers 413, which a retry can never change, while only a body
+// that fits the cap may answer the retryable 503. Refusing immediately would
+// report an unrelated capacity 503 for a request that is simply too large.
 type chargedReader struct {
 	r      io.Reader
 	charge func(int64) bool
+	// refused records that a chunk could not be charged. The read continues so
+	// the cap owner can take precedence; at most cap+1 bytes go uncharged.
+	refused bool
 }
 
 func (c *chargedReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	if n > 0 && c.charge != nil && !c.charge(int64(n)) {
-		return 0, errBodyBudget
+	if n > 0 && c.charge != nil && !c.refused && !c.charge(int64(n)) {
+		c.refused = true
 	}
 	return n, err
-}
-
-func (c *chargedReader) Close() error {
-	return c.r.(io.Closer).Close()
 }
 
 // responseBufferBudget is the process-wide byte budget for whole-document
