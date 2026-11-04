@@ -43,8 +43,16 @@ func writeOperatorState(w http.ResponseWriter, state map[string]any, persistErr 
 func (s *Server) persistOperatorDoc(prefix string, doc any, save func(context.Context, []byte) error) error {
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
-	return s.persistOperatorDocCtx(ctx, prefix, doc, 0, save)
+	return s.persistOperatorDocCtx(ctx, prefix, doc, operatorPersistDocMaxBytes, save)
 }
+
+// operatorPersistDocMaxBytes is the one size bound for every persisted
+// operator document (throttle, pause, debug). Each vocabulary is already
+// bounded per entry (a 255-byte label, 4096 entries), so a document at this
+// cap is a bug rather than normal operator state: refusing it keeps the
+// previous good document in place instead of writing an unbounded blob that
+// every boot then re-reads.
+const operatorPersistDocMaxBytes = 8 << 20
 
 // persistOperatorDocCtx is the context-aware half shared by synchronous
 // operator edits and the coalescing throttle writer. maxBytes <= 0 means no

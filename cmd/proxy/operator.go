@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	stdlibpath "path"
 	"strconv"
 	"strings"
 	"sync"
@@ -404,6 +405,25 @@ func (l *authLimiter) success(ip string) {
 // then does an active lockout deny wrong-guess traffic. Denied HTML
 // entrypoints get the login page; every other denial is JSON, no-store,
 // identical in shape.
+// nonCanonicalPath reports whether a decoded path uses a spelling the mux
+// would clean or redirect before dispatching: a duplicated separator or a dot
+// segment. A single trailing separator is canonical for a subtree route
+// (/metrics/pprof/), so it is preserved rather than stripped.
+func nonCanonicalPath(path string) bool {
+	clean := strings.TrimSuffix(path, "/")
+	if clean == "" {
+		clean = "/"
+	}
+	cleaned := strings.TrimSuffix(stdlibpath.Clean(clean), "/")
+	if cleaned == "" {
+		cleaned = "/"
+	}
+	if path == clean {
+		return stdlibpath.Clean(clean) != clean
+	}
+	return cleaned+"/" != path || stdlibpath.Clean(clean) != clean
+}
+
 func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler {
 	sameOrigin := http.NewCrossOriginProtection().Handler(next)
 	mint := func(w http.ResponseWriter, r *http.Request) {
@@ -415,9 +435,8 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			log.Printf("operator gate: mint session cookie: %v", err)
 			return
 		}
-		// The cookie rides on every authenticated response: force
-		// no-store so no cache retains a Set-Cookie body.
-		w.Header().Set("Cache-Control", "no-store")
+		// The gate already forced no-store for this admitted response, so a
+		// cache can never retain the Set-Cookie body.
 		http.SetCookie(w, cookie)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +451,15 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			next.ServeHTTP(w, r)
 			return
 		}
-		if !gatedPath(r.URL.Path) {
+		// Gate on the canonical form of the path, not the literal spelling.
+		// The mux cleans duplicate slashes and dot segments itself and answers
+		// a non-canonical operator path with a 307 to the clean one before any
+		// handler runs, which told an unauthenticated caller the operator route
+		// table and skipped the gate and its same-origin check for that hop.
+		// Resolve the spelling first, then refuse every non-canonical spelling
+		// of an owned namespace outright.
+		decoded := strings.ReplaceAll(r.URL.Path, `\`, "/")
+		if !gatedPath(decoded) && !gatedPath(stdlibpath.Clean(decoded)) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -441,8 +468,10 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		// inference. The owned namespace is reserved absolutely: refuse it
 		// here, at the single gate, before the plane state or any credential
 		// is consulted. A raw backslash is caught too, because EscapedPath
-		// re-encodes it to %5C.
-		if encodedSeparator(r.URL.EscapedPath()) {
+		// re-encodes it to %5C. A duplicated slash or dot segment is refused
+		// for the same reason: it is a non-canonical spelling of the same
+		// namespace, and the mux would redirect instead of denying.
+		if encodedSeparator(r.URL.EscapedPath()) || nonCanonicalPath(decoded) {
 			denyOperator(w, http.StatusNotFound, "reserved operator namespace")
 			return
 		}
@@ -451,6 +480,11 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			return
 		}
 		ip := clientIP(r)
+		// Every admitted operator response is unretainable, whichever
+		// credential admitted it: the gate is the one owner so a handler cannot
+		// forget it, and a cookie-authenticated /metrics/query or pprof response
+		// is no more cacheable than its Bearer twin.
+		w.Header().Set("Cache-Control", "no-store")
 		// A verified credential is admission, not a guess: both the session
 		// cookie and a correct Bearer pass before the throttle and clear the
 		// budget, so a lockout can never lock the operator out of their own

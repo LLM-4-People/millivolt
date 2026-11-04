@@ -88,8 +88,8 @@ func TestThrottleHeaderPersistenceCoalescesBurst(t *testing.T) {
 	if saves != 1 {
 		t.Fatalf("4096 coalesced changes produced %d writes, want 1", saves)
 	}
-	if len(raw) > throttlePersistDocMaxBytes || max > throttlePersistDocMaxBytes {
-		t.Fatalf("persisted document = %d bytes, cap %d", len(raw), throttlePersistDocMaxBytes)
+	if len(raw) > operatorPersistDocMaxBytes || max > operatorPersistDocMaxBytes {
+		t.Fatalf("persisted document = %d bytes, cap %d", len(raw), operatorPersistDocMaxBytes)
 	}
 	if bytes != int64(len(raw)) {
 		t.Fatalf("total persisted bytes = %d, want one %d-byte document", bytes, len(raw))
@@ -668,7 +668,7 @@ func TestThrottleProviderLabelBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, raw, _, max := store.stats()
-	if max > throttlePersistDocMaxBytes {
+	if max > operatorPersistDocMaxBytes {
 		t.Fatalf("persisted document exceeded cap: %d", max)
 	}
 	items := decodeThrottles(raw)

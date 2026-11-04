@@ -327,3 +327,88 @@ func TestMetricsPprofRoutesServeOnlyThroughTheOperatorGate(t *testing.T) {
 		t.Fatalf("inference catch-all saw %v, want nothing", upstreamHits)
 	}
 }
+
+// TestOperatorNonCanonicalSpellingsDenied pins the canonical-spelling rule at
+// the gate. The mux cleans duplicate slashes and dot segments and answers a
+// non-canonical operator path with a 307 to the clean one before any handler
+// runs, so an unauthenticated caller could enumerate the operator route table
+// and the gate's same-origin check never ran for that hop. Every spelling that
+// the mux would redirect must be refused by the gate itself.
+func TestOperatorNonCanonicalSpellingsDenied(t *testing.T) {
+	const token = "operator-fixture-credential"
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	gated := protectOperatorRequests(next, newOperatorGate(token))
+	open := protectOperatorRequests(next, newOperatorGate(token))
+	openHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	open = protectOperatorRequests(openHandler, newOperatorGate(token))
+
+	for _, spelling := range []string{
+		"//admin/pause",
+		"/.//admin/pause",
+		"///admin/pause",
+		"//admin//pause",
+		"/admin/./pause",
+		"/dash//js/core.js",
+		"//metrics/bootstrap",
+		"//metrics/query",
+		"//session",
+		"//mcp",
+		"/metrics/../admin/pause",
+	} {
+		for method := range map[string]struct{}{http.MethodGet: {}, http.MethodPost: {}} {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(method, "http://proxy.example"+spelling, nil)
+			r.URL.Path = spelling
+			r.URL.RawPath = ""
+			gated.ServeHTTP(w, r)
+			if w.Code != http.StatusNotFound {
+				t.Errorf("%s %s: status=%d want 404 (non-canonical operator spelling must be refused, not redirected)", method, spelling, w.Code)
+			}
+			if loc := w.Header().Get("Location"); loc != "" {
+				t.Errorf("%s %s: Location=%q; the gate must deny, never redirect", method, spelling, loc)
+			}
+		}
+	}
+
+	// The canonical spellings still work, and a non-canonical inference path
+	// is untouched (the mux owns its own redirect there).
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/pause", nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+	gated.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("canonical admin path with a credential: status=%d want 204", w.Code)
+	}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodGet, "http://proxy.example//v1/models", nil)
+	r.URL.Path = "//v1/models"
+	open.ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("non-canonical inference path must pass through: status=%d want 204", w.Code)
+	}
+
+	// Admission must mark the response unretainable whichever credential was
+	// used: a cookie-authenticated /metrics/query is no more cacheable than a
+	// Bearer one.
+	handshake := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "http://proxy.example/metrics/bootstrap", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	gated.ServeHTTP(handshake, request)
+	var cookie *http.Cookie
+	for _, c := range handshake.Result().Cookies() {
+		cookie = c
+	}
+	if cookie == nil {
+		t.Fatal("an admitted Bearer request minted no session cookie")
+	}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest(http.MethodGet, "http://proxy.example/metrics/query?q=SELECT%201", nil)
+	r.AddCookie(cookie)
+	gated.ServeHTTP(w, r)
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("cookie-authenticated read: Cache-Control=%q want no-store", got)
+	}
+	if w.Code != http.StatusNoContent {
+		t.Errorf("cookie-authenticated read: status=%d want 204", w.Code)
+	}
+}

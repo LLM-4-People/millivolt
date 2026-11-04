@@ -190,3 +190,47 @@ func TestLoadFileStrictFailsClosed(t *testing.T) {
 		t.Fatalf("strict good load = %+v dropped=%v err=%v", cfg.MaxRetries, dropped, err)
 	}
 }
+
+// TestAllowedBaseURLDiagnosticRedactsSecrets pins the one owner of a rejected
+// allowlist entry's diagnostic. The error reaches the process log and the
+// /admin/reload response body, so an entry carrying userinfo must never echo
+// its credential, and a query, fragment or path must not be reflected either.
+func TestAllowedBaseURLDiagnosticRedactsSecrets(t *testing.T) {
+	credential := "s3cr3t-userinfo"
+	cases := []struct {
+		name  string
+		entry string
+		leaks []string
+	}{
+		{"userinfo", "https://user:" + credential + "@api.example.com", []string{credential, "user:"}},
+		{"userinfo with dead forms", "http://user:" + credential + "@api.example.com/v1?q=" + credential, []string{credential, "user:"}},
+		{"query secret", "https://api.example.com?api_key=" + credential, []string{credential}},
+		{"fragment secret", "https://api.example.com#fragment-" + credential, []string{credential}},
+		{"uppercase scheme with secret path", "HTTPS://api.example.com/" + credential, []string{credential}},
+		{"unparsable", "://" + credential, []string{credential}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			c := Default()
+			c.AllowedBaseURLs = []string{test.entry}
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("entry %q was accepted", test.entry)
+			}
+			for _, leak := range test.leaks {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatalf("diagnostic leaks %q: %v", leak, err)
+				}
+			}
+			if !strings.Contains(err.Error(), "allowed_base_urls") {
+				t.Fatalf("diagnostic does not name the key: %v", err)
+			}
+		})
+	}
+	// A valid entry still loads, and its diagnostic path is unused.
+	c := Default()
+	c.AllowedBaseURLs = []string{"https://api.example.com"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid entry rejected: %v", err)
+	}
+}

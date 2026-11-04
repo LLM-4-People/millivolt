@@ -49,15 +49,12 @@ const (
 // already refuses a new header-created gate past 4096 entries; combined with
 // this label bound it also bounds the persisted document.
 //
-// throttlePersistDocMaxBytes is a final safety net. The gate count is bounded
-// at 4096 and a provider label at 255 bytes; with every per-entry field at its
-// own maximum and label bytes that need no JSON escaping, one document stays
-// well under this cap, and the anti-burst pair adds at most 56 bytes per entry.
-// A document at the cap is a bug, not normal operator state, so refusing it
-// keeps the dirty generation retrying rather than writing an unbounded blob.
+// throttleProviderLabelMaxBytes bounds one provider label. The document bound
+// itself is shared with every other operator document
+// (operatorPersistDocMaxBytes): the gate count is bounded at 4096 and a label
+// at 255 bytes, and the anti-burst pair adds at most 56 bytes per entry.
 const (
 	throttleProviderLabelMaxBytes = 255
-	throttlePersistDocMaxBytes    = 8 << 20
 
 	throttlePersistDebounce = 250 * time.Millisecond
 	throttlePersistRetryMin = 100 * time.Millisecond
@@ -498,7 +495,7 @@ func (s *Server) waitThrottleRetry(backoff *time.Duration) bool {
 
 func (s *Server) writeThrottleSnap(ctx context.Context, p throttlePersist, items []persistedThrottle) error {
 	return s.persistOperatorDocCtx(ctx, "throttle",
-		persistedThrottleDoc{Throttles: items}, throttlePersistDocMaxBytes, p.SaveThrottle)
+		persistedThrottleDoc{Throttles: items}, operatorPersistDocMaxBytes, p.SaveThrottle)
 }
 
 // FlushThrottles persists the latest policy within the bounded storage

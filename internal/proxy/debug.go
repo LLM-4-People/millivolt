@@ -541,7 +541,10 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 			providers = sanitizeNameList(body.Providers)
 		}
 		if body.Models != nil {
-			models = body.Models
+			// Models are a matching vocabulary like clients and providers:
+			// run them through the shared sanitizer so an unbounded name can
+			// never be persisted as operator state.
+			models = canonicalModelList(body.Models)
 		}
 		snap = persistedDebug{
 			Clients: clients, Providers: providers, Models: models, Duration: dur,
