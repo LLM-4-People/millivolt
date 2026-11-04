@@ -989,9 +989,13 @@ jobs:
     # serialized, so the first run creates the tag and release while the next
     # run sees the tag guard and skips. It must never cancel an in-flight
     # publish, or two runs could pass the check before either creates the tag.
+    # queue: max keeps more than one pending run: the default single-slot queue
+    # replaces a pending release with the next one, so back-to-back promotion
+    # and tag events could drop a version without a tag or release.
     concurrency:
       group: release
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
       packages: write
@@ -1006,22 +1010,26 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # A merged PR event's github.sha is the PR merge ref, not the
-          # reviewed merge commit on main. Release exactly the event payload's
-          # merge commit; branch and tag pushes keep their ref.
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.ref }}
+          # Release the event's own commit, never the current tip of a branch.
+          # A merged PR's github.sha is the PR merge ref, so it uses the
+          # reviewed merge commit; a branch or tag push uses github.sha. An
+          # explicit ref disables the action's commit pinning (it checks out
+          # `origin/<ref>`), so a queued release run would otherwise read a
+          # newer VERSION and tag a commit this event never reviewed.
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
           persist-credentials: false
           fetch-depth: 0
           fetch-tags: true
       - name: Verify release target
-        if: github.event_name == 'pull_request'
+        # Unconditional: the checkout must be the event's commit for every
+        # event type, not only a merged PR.
         env:
-          EXPECTED: ${{ github.event.pull_request.merge_commit_sha }}
+          EXPECTED: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
         run: |
           set -euo pipefail
           actual="$(git rev-parse HEAD)"
           if [ "$actual" != "$EXPECTED" ]; then
-            echo "::error::Release checkout is $actual, expected merged commit $EXPECTED."
+            echo "::error::Release checkout is $actual, expected the event commit $EXPECTED."
             exit 1
           fi
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -1040,23 +1048,35 @@ jobs:
             # the commit even when the tag object is annotated.
             version="${GITHUB_REF_NAME#v}"
             revision="$(git rev-parse HEAD)"
+            # A release tag is the one path that names a version directly, so
+            # prove it names a reviewed commit on main before building or
+            # publishing: the promotion gate is the only review this repository
+            # relies on, and a tag on a side branch would bypass it (and move
+            # the latest-release pointer).
+            if ! git rev-parse -q --verify origin/main >/dev/null; then
+              echo "::error::Cannot verify that $GITHUB_REF_NAME is on main: origin/main is missing from the checkout."
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$revision" origin/main; then
+              echo "::error::Release tag $GITHUB_REF_NAME points at $revision, which is not contained in main. Release tags must name a reviewed promotion merge, never a side-branch commit."
+              exit 1
+            fi
           else
             file_version="$(tr -d '\r\n' < VERSION)"
             if git rev-parse -q --verify "refs/tags/v$file_version" >/dev/null; then
               tagged_revision="$(git rev-list -n1 "v$file_version")"
-              if [ "$tagged_revision" = "$(git rev-parse HEAD)" ]; then
-                # A tag at HEAD is the idempotency key. A missing release means
-                # a previous publish failed after the tag became public; this
-                # job must not report success for an unrepaired release, move
-                # the tag or republish images.
-                if ! gh release view "v$file_version" >/dev/null 2>&1; then
-                  echo "::error::VERSION v$file_version is tagged at HEAD but its GitHub release is missing. A previous publish failed after tagging. Verify the image and tag, then create the release from the existing tag (gh release create v$file_version --verify-tag --generate-notes). This job does not move the tag or republish images."
-                  exit 1
-                fi
+              # A tag without its GitHub release means a previous publish
+              # failed after the tag became public. Fail even when main has
+              # moved on: otherwise every later run reports a benign skip and
+              # the release stays missing for good.
+              if ! gh release view "v$file_version" >/dev/null 2>&1; then
+                echo "::error::VERSION v$file_version is tagged at $tagged_revision but its GitHub release is missing. A previous publish failed after tagging. This job does not move the tag or republish images; create the release from the existing tag and carry over the generated notes from the failed run's log."
+                exit 1
               fi
               # Dependabot security merges reach main without a VERSION bump.
               # They stay unreleased until the next versioned promotion.
               echo "VERSION v$file_version is already tagged at $tagged_revision; no release is needed."
+              echo "tag_revision=$tagged_revision" >> "$GITHUB_OUTPUT"
               skip=true
             else
               # A promotion PR owns the version bump. Tag its merge commit
@@ -1170,29 +1190,62 @@ jobs:
           set -euo pipefail
           # Notes come from the real commit log since the previous release
           # tag (push-based work has no PRs for --generate-notes to list).
-          previous="$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')"
+          # The base is the nearest ancestor tag, not the second-newest tag by
+          # version sort: a prerelease sorts above its own release, so a
+          # positional pick made the release compare with itself and lose every
+          # commit. A stable cut prefers the last stable ancestor, while a
+          # prerelease cut compares with the previous prerelease.
+          # v$RELEASE_VERSION^ excludes the tag this run just created.
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude "v$RELEASE_VERSION" "v$RELEASE_VERSION^" 2>/dev/null || true)"
+          else
+            previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' --exclude "v$RELEASE_VERSION" "v$RELEASE_VERSION^" 2>/dev/null || true)"
+            [ -n "$previous" ] || previous="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude "v$RELEASE_VERSION" "v$RELEASE_VERSION^" 2>/dev/null || true)"
+          fi
           if [ -n "$previous" ]; then
             subjects="$(git log --no-merges --no-decorate --format='%s' "$previous..v$RELEASE_VERSION")"
+            # A real release always contains at least the VERSION bump, so an
+            # empty range can only mean the base was chosen wrong. Never
+            # publish a receipt that claims an empty release.
+            if [ -z "$subjects" ]; then
+              echo "::error::No commits between $previous and v$RELEASE_VERSION; refusing to publish release notes for an empty range."
+              exit 1
+            fi
           else
-            subjects="$(git log --no-merges --no-decorate --format='%s')"
+            subjects=""
           fi
-          subjects="$(printf '%s\n' "$subjects" | awk '{ if ($0 ~ /^bump version to /) next; if (seen[$0]++) next; print }')"
+          # Normalize before classifying: strip CR and surrounding whitespace,
+          # drop every version-bump spelling in the history, and count repeated
+          # subjects instead of dropping a distinct commit that happens to
+          # repeat an earlier subject.
+          subjects="$(printf '%s\n' "$subjects" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | awk '
+            !NF { next }
+            tolower($0) ~ /^bump version( to |: )/ { next }
+            tolower($0) ~ /^bump .+ from .+ to / { next }
+            { if (count[$0]++) next; order[++n] = $0 }
+            END { for (i = 1; i <= n; i++) { s = order[i]; if (count[s] > 1) s = s " (" count[s] " commits)"; print s } }
+          ')"
           # A subject is internal only when its conventional type says so.
           # This repository writes behaviour commits as "scope: summary" (for
           # example "queue: let the operator drain parked requests"), so
           # selecting only feat/fix/perf prefixes collapsed real changes into
           # the folded list and reported "maintenance only" for releases that
           # shipped features. Anything not recognizably internal is a
-          # highlight, so an unfamiliar prefix errs toward showing it.
-          internal_types='^(build|chore|ci|deps|doc|docs|refactor|release|style|test|tests)(\(|!|:)'
-          highlights="$(printf '%s\n' "$subjects" | grep -Ev "$internal_types" || true)"
-          internal="$(printf '%s\n' "$subjects" | grep -E "$internal_types" || true)"
+          # highlight, so an unfamiliar prefix errs toward showing it. The
+          # match is case-insensitive and byte-oriented: `Tests:` is internal
+          # too, and one invalid byte must not turn grep into a binary match
+          # that blanks both lists.
+          internal_types='^(build|brand|checks|chore|ci|deps|doc|docs|merge|refactor|release|style|test|tests|tooling|version)(\(|!|:)'
+          highlights="$(printf '%s\n' "$subjects" | LC_ALL=C grep -aEiv "$internal_types" || true)"
+          internal="$(printf '%s\n' "$subjects" | LC_ALL=C grep -aEi "$internal_types" || true)"
           {
             echo "## Highlights"
             if [ -n "$highlights" ]; then
               printf '%s\n' "$highlights" | sed 's/^/- /'
-            else
+            elif [ -n "$previous" ]; then
               echo "- Maintenance and internal changes only."
+            else
+              echo "- Initial release."
             fi
             echo
             echo "## Compatibility"
@@ -1237,8 +1290,16 @@ jobs:
           } > release-notes.md
           flags=(--verify-tag --title "millivolt $RELEASE_VERSION" --notes-file release-notes.md)
           if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          gh release view "v$RELEASE_VERSION" >/dev/null 2>&1 || \
+          if gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
+            # A published release is the idempotency success state. A draft is
+            # not: nothing reaches users, so report it instead of a receipt.
+            if [ "$(gh release view "v$RELEASE_VERSION" --json isDraft -q .isDraft)" = "true" ]; then
+              echo "::error::Release v$RELEASE_VERSION exists as a draft. Publish or delete it before re-running; this job will not report a receipt for an unpublished release."
+              exit 1
+            fi
+          else
             gh release create "v$RELEASE_VERSION" "${flags[@]}"
+          fi
 
       - name: Summarize the release
         # The run summary is the release receipt. It must describe both a
@@ -1247,6 +1308,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.cut.outputs.version }}
           RELEASE_DIGEST: ${{ steps.image.outputs.digest }}
+          TAG_REVISION: ${{ steps.cut.outputs.tag_revision }}
         run: |
           {
             if [ "${{ job.status }}" != "success" ]; then
@@ -1256,7 +1318,11 @@ jobs:
             elif [ "${{ steps.cut.outputs.skip }}" = "true" ]; then
               echo "### No release cut"
               echo
-              echo "VERSION is already tagged; no image or release was published."
+              if [ -n "${TAG_REVISION:-}" ]; then
+                echo "VERSION is already tagged at \`${TAG_REVISION}\`; no image or release was published."
+              else
+                echo "VERSION is already tagged; no image or release was published."
+              fi
             elif [ -n "${RELEASE_VERSION:-}" ]; then
               echo "### millivolt ${RELEASE_VERSION}"
               echo
