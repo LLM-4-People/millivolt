@@ -367,6 +367,28 @@ def check_job_graph(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: pull_request path filters would leave required pending")
 
 
+def promotion_suite_errors(run: str) -> list[str]:
+    """Return the missing suite-scoping needles for a merged-promotion proof.
+
+    The reviewed `required` check must belong to the canonical check.yml
+    testing run for the reviewed commit. A commit-wide check-runs listing also
+    carries every other workflow run on the same commit, so the canonical run
+    selector, the suite id and its presence guard are all load-bearing.
+    """
+    errors = []
+    for needle in (
+        'select(.path == ".github/workflows/check.yml")',
+        'select(.event == "push" or .event == "workflow_dispatch")',
+        'select(.head_branch == "testing")',
+        'select(.head_sha == $sha)',
+        'if [ -z "$suite" ]; then',
+        'select(.check_suite.id == $suite)',
+    ):
+        if needle not in run:
+            errors.append(f"check.yml: merged promotion proof is missing {needle}")
+    return errors
+
+
 def check_promotion(checks: dict, errors: list[str]) -> None:
     jobs = checks.get("jobs") or {}
     required_job = jobs.get("required") or {}
@@ -399,6 +421,12 @@ def check_promotion(checks: dict, errors: list[str]) -> None:
             'gh api "repos/$REPO/git/commits/$MERGE_SHA"',
             '.parents[].sha',
             'compare/$MERGE_SHA...main',
+            'actions/runs?head_sha=$HEAD_SHA&per_page=100',
+            'select(.path == ".github/workflows/check.yml")',
+            'select(.event == "push" or .event == "workflow_dispatch")',
+            'select(.head_branch == "testing")',
+            'select(.head_sha == $sha)',
+            'select(.check_suite.id == $suite)',
             'check-runs?filter=all&per_page=100',
             '.name == "required" and .status == "completed"',
             'latest_required" != "success"',
@@ -408,6 +436,23 @@ def check_promotion(checks: dict, errors: list[str]) -> None:
         ):
             if needle not in merged_run:
                 errors.append(f"check.yml: merged promotion validation is missing {needle}")
+        # The reviewed `required` check must come from the canonical check.yml
+        # suite: a commit-wide check-runs listing also carries every other
+        # workflow run on the same commit, so a candidate workflow that renamed
+        # one of its own jobs to `required` would otherwise forge this proof.
+        # Prove the guard is load-bearing by dropping each half.
+        for label, mutated in (
+            ("the suite selector", merged_run.replace(
+                '| select(.check_suite.id == $suite)\n', '', 1)),
+            ("the missing-suite guard", merged_run.replace(
+                'if [ -z "$suite" ]; then', 'if false; then', 1)),
+            ("the canonical-run selector", merged_run.replace(
+                '| select(.path == ".github/workflows/check.yml")\n', '', 1)),
+        ):
+            if mutated == merged_run:
+                errors.append(f"workflows self-check: cannot remove {label} from the merged proof")
+            elif not promotion_suite_errors(mutated):
+                errors.append(f"workflows self-check: removing {label} from the merged proof must fail")
         for label, mutated_if in (
             ("dropping the merged flag", merged_if.replace(
                 "github.event.pull_request.merged == true", "true")),

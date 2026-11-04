@@ -186,6 +186,9 @@ def release_notes_errors() -> list[str]:
     })
     # Everything after the notes file is the gh release call, which the scratch
     # repository cannot run.
+    # The comparison owner is exercised by cmd/release's own tests; the body
+    # test only needs the notes text, so the tag query becomes empty here.
+    notes = notes.replace("newest=\"$(git tag -l 'v*' | go run -mod=readonly ./cmd/release -newest)\"", 'newest=""')
     notes = notes.split("\nflags=(", 1)[0]
     if "} > release-notes.md" not in notes:
         return ["check.yml: could not isolate the release-notes body from its creation step"]
@@ -236,6 +239,128 @@ def release_notes_errors() -> list[str]:
     return errors
 
 
+def release_pipeline_errors() -> list[str]:
+    """Run the cut and release steps against scratch repositories.
+
+    Pins the three residual contracts: a failure after the tag became public is
+    repaired by a re-run (tag kept, release created), a tag whose release
+    already exists stays an idempotent skip, and an out-of-order release does
+    not move the latest-release pointer.
+    """
+    errors = []
+    cut = step_script("Cut the next version", {"${{ github.ref_type }}": "branch"})
+    notes = step_script("Create the GitHub release", {
+        "${{ steps.image.outputs.digest }}": "sha256:deadbeef",
+        "${{ github.repository }}": "LLM-4-People/millivolt",
+    })
+    # The comparison itself is pinned by cmd/release's own tests; here the step
+    # only has to wire the answer into the release flags.
+    notes = notes.replace("newest=\"$(git tag -l 'v*' | go run -mod=readonly ./cmd/release -newest)\"",
+                          'newest="$(cat NEWEST)"')
+
+    def shim(repo: Path, release_exists: bool) -> Path:
+        bin_dir = repo / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        calls = repo / "gh-calls"
+        script = bin_dir / "gh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'echo "$@" >> "{calls}"\n'
+            'if [ "$1" = "release" ] && [ "$2" = "view" ]; then exit '
+            + ("0" if release_exists else "1") + "; fi\n"
+            "exit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        return calls
+
+    def run(script: str, repo: Path, outputs: Path, version: str = "") -> subprocess.CompletedProcess:
+        env = {**os.environ, "PATH": f"{repo / 'bin'}:{os.environ['PATH']}",
+               "GITHUB_OUTPUT": str(outputs), "GITHUB_ENV": str(outputs) + ".env",
+               "GITHUB_REF_NAME": f"v{version}"}
+        env.pop("GITHUB_REF_TYPE", None)
+        if version:
+            env["RELEASE_VERSION"] = version
+        return subprocess.run(["bash", "-c", script], cwd=repo, text=True,
+                              capture_output=True, check=False, env=env)
+
+    def repo_with_tag(version: str, tag: bool, release_exists: bool) -> Path:
+        repo = Path(tempfile.mkdtemp())
+        git(repo, "init", "-q", ".")
+        git(repo, "config", "user.email", "release@example.com")
+        git(repo, "config", "user.name", "release")
+        (repo / "VERSION").write_text(version + "\n", encoding="utf-8")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", f"bump version to {version}")
+        if tag:
+            git(repo, "tag", "-a", f"v{version}", "-m", f"v{version}")
+        shim(repo, release_exists)
+        return repo
+
+    # A failed publish that left a public tag and no release is repaired by a
+    # re-run: the tag stays, the version is built again, the release is created.
+    repo = repo_with_tag("1.2.3", tag=True, release_exists=False)
+    outputs = repo / "out"
+    result = run(cut, repo, outputs)
+    fields = dict(line.split("=", 1) for line in outputs.read_text().splitlines() if "=" in line)
+    if result.returncode != 0:
+        errors.append(f"check.yml: a repairable missing release failed the cut step: {result.stderr.strip()}")
+    elif fields.get("repair") != "true" or fields.get("skip") != "false":
+        errors.append(f"check.yml: a missing release at HEAD must repair, not skip: {fields}")
+    elif fields.get("version") != "1.2.3":
+        errors.append(f"check.yml: repair must keep the tagged version, got {fields.get('version')!r}")
+
+    # A tag whose release exists stays an idempotent skip.
+    repo = repo_with_tag("1.2.3", tag=True, release_exists=True)
+    outputs = repo / "out"
+    result = run(cut, repo, outputs)
+    fields = dict(line.split("=", 1) for line in outputs.read_text().splitlines() if "=" in line)
+    if result.returncode != 0 or fields.get("skip") != "true" or fields.get("repair"):
+        errors.append(f"check.yml: a tagged, released version must skip: rc={result.returncode} {fields}")
+
+    # A missing release whose tag is no longer at the checkout cannot be
+    # repaired from here.
+    repo = repo_with_tag("1.2.3", tag=True, release_exists=False)
+    (repo / "later.txt").write_text("later\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "later work")
+    outputs = repo / "out"
+    result = run(cut, repo, outputs)
+    if result.returncode == 0:
+        errors.append("check.yml: a missing release for an older tag must fail, not skip")
+
+    # An out-of-order release must not become GitHub's latest release.
+    repo = repo_with_tag("1.1.0", tag=True, release_exists=False)
+    (repo / "NEWEST").write_text("1.2.0\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "backport fix")
+    git(repo, "tag", "-a", "v1.1.1", "-m", "v1.1.1")
+    calls = repo / "gh-calls"
+    if calls.exists():
+        calls.unlink()
+    outputs = repo / "out"
+    result = run(notes, repo, outputs, version="1.1.1")
+    if result.returncode != 0:
+        errors.append(f"check.yml: the release step failed for an older version: {result.stderr.strip()}")
+    elif "--latest=false" not in calls.read_text():
+        errors.append("check.yml: an older release must not move the latest pointer")
+
+    # The newest release keeps the default pointer.
+    repo = repo_with_tag("1.3.0", tag=False, release_exists=False)
+    (repo / "NEWEST").write_text("1.3.0\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "release work")
+    git(repo, "tag", "-a", "v1.3.0", "-m", "v1.3.0")
+    calls = repo / "gh-calls"
+    if calls.exists():
+        calls.unlink()
+    outputs = repo / "out"
+    result = run(notes, repo, outputs, version="1.3.0")
+    if result.returncode != 0:
+        errors.append(f"check.yml: the release step failed for the newest version: {result.stderr.strip()}")
+    elif "--latest=false" in calls.read_text():
+        errors.append("check.yml: the newest release must keep the latest pointer")
+    return errors
+
+
 def check_release(checks: dict, errors: list[str]) -> None:
     jobs = checks.get("jobs") or {}
     publish = jobs.get("publish") or {}
@@ -253,6 +378,33 @@ def check_release(checks: dict, errors: list[str]) -> None:
     publish_testing_missing = missing_needles(publish_testing_if, PUBLISH_TESTING_GUARD_NEEDLES)
     for needle in publish_testing_missing:
         errors.append(f"check.yml: publish-testing guard is missing {needle}")
+    # The testing image is published from the same reviewed tree and is the
+    # image a development deployment runs, so it carries the release image's
+    # SBOM, max provenance and artifact attestation. It is the one published
+    # image without them.
+    testing_image_index = named_step(publish_testing, "Publish testing image")
+    testing_attest_index = named_step(publish_testing, "Attest the testing image")
+    if testing_image_index < 0:
+        errors.append("check.yml: the testing image publish step must exist")
+    else:
+        testing_image = steps(publish_testing)[testing_image_index]
+        if testing_image.get("with", {}).get("sbom") is not True:
+            errors.append("check.yml: the testing image must include an SBOM")
+        if testing_image.get("with", {}).get("provenance") != "mode=max":
+            errors.append("check.yml: the testing image must include max provenance")
+        if testing_attest_index < 0:
+            errors.append("check.yml: the testing image must carry a GitHub artifact attestation")
+        elif not (testing_image_index < testing_attest_index):
+            errors.append("check.yml: the testing image attestation must follow the publish step")
+        else:
+            testing_attest = steps(publish_testing)[testing_attest_index]
+            if not str(testing_attest.get("uses", "")).startswith("actions/attest@"):
+                errors.append("check.yml: the testing image attestation must use actions/attest")
+            if (testing_attest.get("with") or {}).get("subject-digest") != \
+                    "${{ steps.image.outputs.digest }}":
+                errors.append("check.yml: the testing attestation must cover the published digest")
+            if (testing_attest.get("with") or {}).get("push-to-registry") is not True:
+                errors.append("check.yml: the testing attestation must be pushed to the registry")
     errors.extend(publish_guard_errors(publish_if, publish_testing_if))
     errors.extend(publish_concurrency_errors(publish.get("concurrency")))
     # Mutation proofs: a cancelling group, a renamed group and a missing flag
@@ -344,8 +496,8 @@ def check_release(checks: dict, errors: list[str]) -> None:
         'tagged_revision="$(git rev-list -n1 "v$file_version")"',
         'git merge-base --is-ancestor "$revision" origin/main',
         'gh release view "v$file_version"',
-        "GitHub release is missing",
-        "does not move the tag or republish images",
+        "repairing on this run",
+        "The release cannot be repaired from a newer commit",
         "exit 1",
     )
     for needle in missing_needles(cut_run, release_guard):
@@ -355,10 +507,25 @@ def check_release(checks: dict, errors: list[str]) -> None:
             errors.append(f"workflows self-check: removing the missing-release guard {needle} must fail")
     tag_push = steps(publish)[tag_push_index] if tag_push_index >= 0 else {}
     tag_push_run = str(tag_push.get("run", ""))
+    # The release token must not appear in a git argument: an argv is readable
+    # by every process on the runner. It reaches git through a credential
+    # helper, and the empty `credential.helper=` first clears the inherited
+    # chain so git cannot fall through to a stored credential.
+    if "x-access-token:" in tag_push_run:
+        errors.append("check.yml: the release token must not be embedded in the push URL")
+    for needle in (
+        "git -c credential.helper= \\",
+        'credential.helper=\'!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f\'',
+        '"https://github.com/${REPO}.git"',
+    ):
+        if needle not in tag_push_run:
+            errors.append(f"check.yml: the verified tag push is missing {needle}")
     if '"v$RELEASE_VERSION"' not in tag_push_run:
         errors.append("check.yml: the release workflow must push the verified tag")
     if "skip != 'true'" not in str(tag_push.get("if", "")):
         errors.append("check.yml: the tag push must honor the no-release guard")
+    if "repair != 'true'" not in str(tag_push.get("if", "")):
+        errors.append("check.yml: a repair run must not re-push the existing tag")
     release_step = steps(publish)[release_index] if release_index >= 0 else {}
     release_run = str(release_step.get("run", ""))
     for needle in (
@@ -406,6 +573,21 @@ def check_release(checks: dict, errors: list[str]) -> None:
             for subject in (internal_subject, "deps(go): bump golang.org/x/net", "test: pin the classifier"):
                 if subject not in other:
                     errors.append(f"check.yml: {subject!r} must stay under Other changes")
+    # The promotion VERSION gate and the latest-release decision share one
+    # comparison owner. A stray tag that is not a release version must be
+    # ignored (cmd/release -newest reports it), never fed to -newer-than, and
+    # the loop over every tag must not come back.
+    promotion = next((step for step in steps(jobs.get("required") or {})
+                      if step.get("name") == "Require an unreleased version for main promotions"), {})
+    promotion_run = str(promotion.get("run", ""))
+    if "-newest" not in promotion_run or 'git tag -l \'v*\'' not in promotion_run:
+        errors.append("check.yml: the promotion VERSION gate must compare against the newest release tag")
+    if 'while IFS= read -r tag' in promotion_run or '"${tag#v}"' in promotion_run:
+        errors.append("check.yml: the promotion VERSION gate must not compare raw tag names")
+    if 'newest="$(git tag -l \'v*\' | go run -mod=readonly ./cmd/release -newest)"' not in release_run:
+        errors.append("check.yml: the release step must ask cmd/release for the newest version")
+    if '--latest=false' not in release_run:
+        errors.append("check.yml: an older release must not move the latest pointer")
     summary_step = next((step for step in steps(publish)
                          if step.get("name") == "Summarize the release"), {})
     summary_run = str(summary_step.get("run", ""))
@@ -471,3 +653,4 @@ def check_release(checks: dict, errors: list[str]) -> None:
     if "value=main,enable=${{ github.ref == 'refs/heads/main' }}" in publish_text:
         errors.append("check.yml: main image must exclude prereleases")
     errors.extend(release_notes_errors())
+    errors.extend(release_pipeline_errors())

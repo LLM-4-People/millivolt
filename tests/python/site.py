@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
-                                performance_headline)
+                                markdown_engine, performance_headline, render_fragment, toc_html)
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
                            site_palette_errors, token_drift_errors)
@@ -232,6 +232,90 @@ def not_found_base_errors() -> list[str]:
                     errors.append(f"404.html at {base_url} is missing {needle}")
             if 'rel="canonical"' in text:
                 errors.append(f"404.html at {base_url} must not declare a canonical URL")
+    return errors
+
+
+def content_safety_errors() -> list[str]:
+    """Pin the docs content allowlist at the one render choke point.
+
+    python-markdown passes raw HTML, `attr_list` attribute blocks and arbitrary
+    link schemes through unchanged, so a docs contribution could otherwise ship
+    script to the published origin. Every case renders through
+    `render_fragment`, which is the real pipeline stage, so the test fails when
+    the sanitizer is dropped from the pipeline and not only when the sanitizer
+    itself is weakened.
+    """
+    errors = []
+    payloads = (
+        ("inline script", "<p>x</p><script>alert(1)</script>", ("<script",)),
+        ("img onerror", '<img src="https://example.test/a.png" alt="a" onerror="alert(1)">',
+         ("onerror",)),
+        ("svg onload", '<svg onload="alert(1)"></svg>', ("<svg", "onload")),
+        ("iframe srcdoc", '<iframe srcdoc="<script>alert(1)</script>"></iframe>',
+         ("<iframe", "<script")),
+        ("base href", '<base href="https://attacker.example/">', ("<base",)),
+        ("meta refresh", '<meta http-equiv="refresh" content="0;url=https://x">',
+         ("<meta", "http-equiv")),
+        ("form action", '<form action="https://attacker.example/steal"></form>', ("<form",)),
+        ("object data", '<object data="https://attacker.example/x"></object>', ("<object",)),
+        ("style block", "<style>body{display:none}</style>", ("<style",)),
+        ("attr_list onclick", '<p onclick="alert(1)">t</p>', ("onclick",)),
+        ("attr_list style", '<p style="position:fixed;inset:0">t</p>', ("position:fixed",)),
+        ("javascript link", '<a href="javascript:alert(1)">x</a>', ("javascript:",)),
+        ("case-folded javascript", '<a href="JaVaScRiPt:alert(1)">x</a>', ("javascript:",)),
+        ("data link", '<a href="data:text/html;base64,AAA">x</a>', ("data:text/html",)),
+        ("details ontoggle", '<details open ontoggle="alert(1)">d</details>', ("ontoggle",)),
+    )
+    with tempfile.TemporaryDirectory(prefix="millivolt-content-") as temp:
+        site = Path(temp) / "site"
+        site.mkdir()
+        source = Path(temp) / "fixture.md"
+        source.write_text("# fixture\n", encoding="utf-8")
+
+        def render(text: str) -> str:
+            return render_fragment(markdown_engine(), text, source, "docs/fixture.html", site)
+
+        for name, payload, banned in payloads:
+            output = render(payload)
+            lowered = output.lower()
+            for needle in banned:
+                if needle in lowered:
+                    errors.append(f"site: pipeline let {name} through: {output!r}")
+        # Positive cases: every construct the docs and landing actually use must
+        # survive, so the allowlist cannot be tightened into silent breakage.
+        kept = (
+            ('<table><thead><tr><th style="text-align: right;">n</th></tr></thead></table>',
+             '<th style="text-align: right;">'),
+            ("<p><kbd>01</kbd><sub>pre-1.0</sub></p>", "<kbd>01</kbd>"),
+            ("~~~sh\ngo run .\n~~~", 'class="language-sh"'),
+            ("## A heading\n\ntext\n", 'class="headerlink"'),
+            ('<a href="https://example.test/x">d</a>', 'href="https://example.test/x"'),
+            ("[q](#quickstart)", 'href="#quickstart"'),
+            ('<a href="mailto:a@b.c">m</a>', 'href="mailto:a@b.c"'),
+            ('<picture><source media="(min-width: 761px)" srcset="https://example.test/a.svg">'
+             '<img src="https://example.test/b.png" alt="x" width="800"></picture>', "<picture>"),
+        )
+        for payload, expected in kept:
+            if expected not in render(payload):
+                errors.append(f"site: pipeline dropped a legitimate construct: {payload!r}")
+    return errors
+
+
+def toc_escape_errors() -> list[str]:
+    """The table of contents must escape heading text a second time.
+
+    A heading written as `Looks safe &lt;svg onload=...&gt;` renders as inert
+    text in the article, because Markdown escapes it. The TOC builder strips
+    markup and unescapes character references, so re-emitting that value raw
+    turned the escaped text into a live element in the sidebar.
+    """
+    name = 'Looks safe &lt;svg onload="alert(document.domain)"&gt;'
+    rendered = toc_html([{"level": 2, "id": "looks-safe", "name": name, "children": []}])
+    errors = []
+    if "<svg" in rendered:
+        errors.append(f"site: table of contents emitted live markup: {rendered}")
+    if "&lt;svg" not in rendered:
+        errors.append(f"site: table of contents did not preserve the heading text: {rendered}")
     return errors
 
 
@@ -451,6 +535,8 @@ def check_site(site: Path) -> list[str]:
         errors.append("sitemap has no URLs")
     errors.extend(performance_page_errors(site, page_texts))
     errors.extend(not_found_base_errors())
+    errors.extend(content_safety_errors())
+    errors.extend(toc_escape_errors())
     return errors
 
 

@@ -514,3 +514,53 @@ func TestKnownSetsSeedFromRealRequest(t *testing.T) {
 		}
 	}
 }
+
+// TestOperatorDocumentBoundCoversEveryDocument pins the shared persisted-document
+// bound. Throttle had one; pause and debug passed 0, so an oversized operator
+// document was accepted, written, and re-read on every boot. The bound is now
+// enforced by the one wrapper every non-throttle document uses, and the
+// throttle writer passes the same constant.
+func TestOperatorDocumentBoundCoversEveryDocument(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	saved := 0
+	save := func(context.Context, []byte) error { saved++; return nil }
+	oversized := map[string]string{"k": strings.Repeat("x", operatorPersistDocMaxBytes+1)}
+	for _, prefix := range []string{"pause", "debug"} {
+		if err := p.persistOperatorDoc(prefix, oversized, save); err == nil {
+			t.Fatalf("%s: an oversized document was persisted", prefix)
+		}
+	}
+	if saved != 0 {
+		t.Fatalf("oversized documents reached the store %d times", saved)
+	}
+	if err := p.persistOperatorDoc("pause", map[string]string{"k": "v"}, save); err != nil {
+		t.Fatalf("a normal document was refused: %v", err)
+	}
+	if saved != 1 {
+		t.Fatalf("normal document saves = %d, want 1", saved)
+	}
+	if operatorPersistDocMaxBytes != 8<<20 {
+		t.Fatalf("document bound = %d, want the shared 8 MiB cap", operatorPersistDocMaxBytes)
+	}
+}
+
+// TestDebugModelsUseTheSharedVocabulary pins the debug session's model scope.
+// Clients and providers were sanitized; models were stored verbatim, so a
+// duplicate or padded model name became persisted operator state that the
+// matcher had to canonicalize on every request.
+func TestDebugModelsUseTheSharedVocabulary(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	store := testOperatorPersist{save: func([]byte) error { return nil }}
+	p.pause.persist, p.throttle.persist = store, store
+	state := operatorPost(t, p.HandleDebug,
+		`{"enabled":true,"models":["  m1  ","m1","","m2"]}`)
+	sessions, _ := state["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %v", state["sessions"])
+	}
+	first, _ := sessions[0].(map[string]any)
+	models, _ := first["models"].([]any)
+	if len(models) != 2 || models[0] != "m1" || models[1] != "m2" {
+		t.Fatalf("models = %v, want the trimmed unique [m1 m2]", models)
+	}
+}

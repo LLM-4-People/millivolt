@@ -2,10 +2,11 @@ package proxy
 
 import (
 	"errors"
-	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"io"
 	"net/http"
 	"sync/atomic"
 
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -58,6 +59,79 @@ func (l *inflightLimiter) release(bodyBytes int64) {
 		l.bytes.Add(-bodyBytes)
 	}
 	l.cur.Add(-1)
+}
+
+// errBodyBudget reports that the bytes a request is actually uploading would
+// cross the process-wide buffered-body budget. It is a retryable admission
+// refusal, distinct from the per-request size cap that answers 413.
+var errBodyBudget = errors.New("proxy is at its in-flight body budget")
+
+// bodyReservation is one in-flight request's share of the buffered-body
+// budget. It starts at a bounded speculative amount and charges the delta as
+// bytes actually arrive, so the budget follows the heap actually held rather
+// than a declared length.
+//
+// Reserving the full declared Content-Length up front let an idle connection
+// hold budget it never used: eight clients declaring 32 MiB each exhausted the
+// default 256 MiB budget and denied inference to every other client, while the
+// separate request-count bound implies tolerance for thousands of clients.
+type bodyReservation struct {
+	l       *inflightLimiter
+	charged int64
+	read    int64
+}
+
+// acquireBody reserves one request slot plus a bounded speculative body
+// amount. A refusal backs the slot out, so a rejected request leaks nothing.
+func (l *inflightLimiter) acquireBody(speculative int64) (*bodyReservation, bool) {
+	speculative = max(speculative, 0)
+	if !l.acquire(speculative) {
+		return nil, false
+	}
+	return &bodyReservation{l: l, charged: speculative}, true
+}
+
+// chargeRead charges the budget for n bytes just read. The speculative
+// reservation already covers the first bytes, so only the growth beyond it is
+// charged. A refusal leaves the counter unchanged; the caller aborts the read
+// and releases the whole reservation on return.
+func (r *bodyReservation) chargeRead(n int64) bool {
+	if n <= 0 {
+		return true
+	}
+	r.read += n
+	if r.read <= r.charged {
+		return true
+	}
+	delta := r.read - r.charged
+	total := r.l.bytes.Add(delta)
+	if limit := r.l.byteLimit.Load(); limit > 0 && total > limit {
+		r.l.bytes.Add(-delta)
+		return false
+	}
+	r.charged = r.read
+	return true
+}
+
+func (r *bodyReservation) release() { r.l.release(r.charged) }
+
+// chargedReader charges every byte it delivers to the body reservation, so a
+// declared length never reserves capacity the client does not send.
+type chargedReader struct {
+	r      io.Reader
+	charge func(int64) bool
+}
+
+func (c *chargedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if n > 0 && c.charge != nil && !c.charge(int64(n)) {
+		return 0, errBodyBudget
+	}
+	return n, err
+}
+
+func (c *chargedReader) Close() error {
+	return c.r.(io.Closer).Close()
 }
 
 // responseBufferBudget is the process-wide byte budget for whole-document

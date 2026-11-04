@@ -283,6 +283,9 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
+// dashboardCSP is the single owner of the dashboard document's policy.
+const dashboardCSP = "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'"
+
 // Handler serves the cached dashboard shell with the canonical bootstrap
 // payload already present, avoiding a post-script round trip before first
 // paint. The shell's static asset version stays immutable, but the response
@@ -299,7 +302,14 @@ func Handler(agg *AggAPI) http.Handler {
 			return
 		}
 		w.Header().Set("Cache-Control", "private, no-store")
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		// The shell is the one document that can host operator data, so it
+		// carries the whole policy: no framing, no plugins, no base/form
+		// retargeting, and no referrer for the explorer's location hash. The
+		// dashboard still uses authored inline handlers, so script-src is not
+		// claimed here; these directives hold today.
+		w.Header().Set("Content-Security-Policy", dashboardCSP)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Add("Vary", "Accept-Encoding")
 		if r.Method == http.MethodHead {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")

@@ -33,6 +33,44 @@ func ValidURLPort(port string) bool {
 // nonsense like a negative count, a negative duration, or a zero idle-per-host
 // pool that Go would silently turn into 2) - they are not meant to second-guess
 // a deliberate operator choice within a sane band.
+// redactedBaseURL is the single owner of how a rejected allowed_base_urls
+// entry appears in a diagnostic. The raw entry can carry userinfo (a
+// credential), a query, a fragment or a path, and this error reaches the
+// process log and the /admin/reload response body. Echo only the scheme and
+// authority, plus a bare "/" (which is not a secret and is what the
+// trailing-slash rule is about), and name what was withheld. An entry that
+// does not parse is reported by length so a hostile string is never reflected.
+func redactedBaseURL(entry string) string {
+	u, err := url.Parse(entry)
+	if err != nil || u.Scheme == "" || u.Hostname() == "" {
+		return fmt.Sprintf("an entry of %d bytes", len(entry))
+	}
+	host := u.Hostname()
+	if port := u.Port(); port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	redacted := u.Scheme + "://" + host
+	var withheld []string
+	if u.User != nil {
+		withheld = append(withheld, "userinfo")
+	}
+	if u.Path != "" && u.Path != "/" {
+		withheld = append(withheld, "path")
+	} else if u.Path == "/" {
+		redacted += "/"
+	}
+	if u.RawQuery != "" || strings.Contains(entry, "?") {
+		withheld = append(withheld, "query")
+	}
+	if u.Fragment != "" || strings.Contains(entry, "#") {
+		withheld = append(withheld, "fragment")
+	}
+	if len(withheld) > 0 {
+		redacted += " (" + strings.Join(withheld, ", ") + " withheld)"
+	}
+	return redacted
+}
+
 func (c *Config) Validate() error {
 	// strings / addresses
 	host, port, err := net.SplitHostPort(c.Listen)
@@ -40,8 +78,9 @@ func (c *Config) Validate() error {
 	if err != nil || portErr != nil || n < 0 || n > 65535 || strings.ContainsAny(host, " /?#@\t\r\n") {
 		return fmt.Errorf("listen: must be host:port with a numeric port in 0..65535")
 	}
-	// allowed_base_urls entries are byte-prefix-matched against request base
-	// URLs at runtime (internal/proxy), which are trailing-slash-trimmed and
+	// allowed_base_urls entries are matched against request base URLs at
+	// runtime (internal/proxy) on scheme, host and port, plus a path prefix;
+	// request base URLs are trailing-slash-trimmed and
 	// can never carry userinfo, query, or fragment (the proxy rejects those
 	// at the request boundary). A scheme-less entry like "api.openai.com"
 	// would load cleanly and then silently deny every request - and so would
@@ -56,39 +95,39 @@ func (c *Config) Validate() error {
 	for _, entry := range c.AllowedBaseURLs {
 		u, err := url.Parse(entry)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("allowed_base_urls: %q must be an absolute http:// or https:// URL", entry)
+			return fmt.Errorf("allowed_base_urls: %s must be an absolute http:// or https:// URL", redactedBaseURL(entry))
 		}
 		// The runtime prefix match is byte-sensitive, so an entry that only
 		// parses after url.Parse folds the scheme to lowercase could match
 		// only a client base URL spelled with the same uppercase scheme.
 		if !strings.HasPrefix(entry, "http://") && !strings.HasPrefix(entry, "https://") {
-			return fmt.Errorf("allowed_base_urls: %q must start with lowercase http:// or https://: the runtime prefix match is byte-sensitive", entry)
+			return fmt.Errorf("allowed_base_urls: %s must start with lowercase http:// or https://: the runtime prefix match is byte-sensitive", redactedBaseURL(entry))
 		}
 		if !ValidURLPort(u.Port()) {
-			return fmt.Errorf("allowed_base_urls: %q must use a port between 1 and 65535", entry)
+			return fmt.Errorf("allowed_base_urls: %s must use a port between 1 and 65535", redactedBaseURL(entry))
 		}
 		// "http://:8080" parses with a port but no hostname. No request base
 		// URL can be hostless (the request boundary rejects it), so the entry
 		// could never match; fail closed at load instead of accepting a dead
 		// allowlist rule.
 		if u.Hostname() == "" {
-			return fmt.Errorf("allowed_base_urls: %q must name a host: a port without a hostname can never match a request base URL", entry)
+			return fmt.Errorf("allowed_base_urls: %s must name a host: a port without a hostname can never match a request base URL", redactedBaseURL(entry))
 		}
 		if u.User != nil {
-			return fmt.Errorf("allowed_base_urls: %q must not carry userinfo: a request base URL never does, and the entry persists credentials in the config", entry)
+			return fmt.Errorf("allowed_base_urls: %s must not carry userinfo: a request base URL never does, and the entry persists credentials in the config", redactedBaseURL(entry))
 		}
 		if strings.Contains(entry, "?") {
-			return fmt.Errorf("allowed_base_urls: %q must not carry a query: a request base URL never does, so the entry can never match", entry)
+			return fmt.Errorf("allowed_base_urls: %s must not carry a query: a request base URL never does, so the entry can never match", redactedBaseURL(entry))
 		}
 		if strings.Contains(entry, "#") {
-			return fmt.Errorf("allowed_base_urls: %q must not carry a fragment: a request base URL never does, so the entry can never match", entry)
+			return fmt.Errorf("allowed_base_urls: %s must not carry a fragment: a request base URL never does, so the entry can never match", redactedBaseURL(entry))
 		}
 		if strings.HasSuffix(entry, "/") {
-			return fmt.Errorf("allowed_base_urls: %q must not end in \"/\": request base URLs are trailing-slash-trimmed, so the entry can never match", entry)
+			return fmt.Errorf("allowed_base_urls: %s must not end in \"/\": request base URLs are trailing-slash-trimmed, so the entry can never match", redactedBaseURL(entry))
 		}
 		if u.Host != strings.ToLower(u.Host) {
-			return fmt.Errorf("allowed_base_urls: %q: host must be lowercase (the runtime prefix match is byte-sensitive); use %q",
-				entry, u.Scheme+"://"+strings.ToLower(u.Host)+u.EscapedPath())
+			return fmt.Errorf("allowed_base_urls: %s: host must be lowercase (the runtime prefix match is byte-sensitive); use %q",
+				redactedBaseURL(entry), u.Scheme+"://"+strings.ToLower(u.Host)+u.EscapedPath())
 		}
 	}
 	// counts / sizes (>= 0; 0 means "unlimited" only where documented)

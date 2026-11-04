@@ -402,6 +402,13 @@ func Open(path string, opts Options) (*Store, error) {
 	params.Add("_pragma", "journal_mode(WAL)")
 	params.Add("_pragma", "synchronous(NORMAL)")
 	params.Add("_pragma", "journal_size_limit(67108864)")
+	// secure_delete overwrites freed cell content instead of leaving it in the
+	// main database file. Purge and TTL expiry claim the data is gone, and
+	// without this a deleted row stays readable in a freed page (a copy of the
+	// live file taken with ordinary file tools would recover it). It is a
+	// safety invariant of the deletion contract, not an operator choice, so it
+	// has no config knob.
+	params.Add("_pragma", "secure_delete(1)")
 	// Take the write lock at BEGIN for every explicit transaction. A deferred
 	// BEGIN would establish a read snapshot before insertBatch compares its
 	// totals witness, so a restart-handoff writer committing in that window

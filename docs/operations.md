@@ -1052,7 +1052,9 @@ from base URLs remain below both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB), and `max_inflight_response_bytes` its budget
+body budget (default 256 MiB; admission reserves one bounded read hint and then
+charges the bytes actually read, so a declared length alone never holds budget),
+and `max_inflight_response_bytes` its budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
 (at most 1 MiB plus one 32 KiB chunk), and model discovery. Requests above
@@ -1501,7 +1503,13 @@ The gated query route (`GET /metrics/query?q=`, above) and the [MCP](mcp.md)
 `query` tool both take exactly one `SELECT` with no statement separator, and
 results are bounded by `storage_query_max_rows` and
 `storage_query_max_bytes`; an over-budget result is an error on the route, so
-keep wide scans behind a `started_at` window or a `LIMIT`. Column meanings
+keep wide scans behind a `started_at` window or a `LIMIT`. The statement gate
+also denies the read-only capabilities SQLite exposes outside ordinary tables
+and columns: `ATTACH`, `DETACH`, `PRAGMA`, `LOAD_EXTENSION`, the
+`sqlite_dbpage` and `dbstat` table-valued functions, the whole result-bearing
+`pragma_*` family and the `readfile`/`writefile` functions. Those would read
+raw pages, page statistics or the absolute database path, which is not part of
+this console's surface. Column meanings
 come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
 relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
 calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,

@@ -124,10 +124,12 @@ max_request_bytes: 32MiB
 #   type: int · range 1..10000 · default 1024
 request_tool_calls_max: 1024
 
-# SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
-# operator). Each entry must be an absolute URL whose prefix is literally lowercase
-# http:// or https://, with a lowercase hostname, no userinfo, query, fragment or trailing
-# slash, and a port after a hostname in 1..65535.
+# SSRF allowlist of upstream base URLs. Empty allows any target (single trusted operator).
+# An entry admits only the same scheme, host and port once the scheme's default port is
+# filled in, plus that entry's path and its children, so a port-less entry does not admit
+# other ports on the host. Each entry must be an absolute URL whose prefix is literally
+# lowercase http:// or https://, with a lowercase hostname, no userinfo, query, fragment
+# or trailing slash, and a port after a hostname in 1..65535.
 # Hot-reload: yes.
 #   type: list of string
 allowed_base_urls: []
@@ -338,9 +340,11 @@ max_queue_size: 1024
 #   type: int · range 0..1000000 · default 10000
 max_inflight_requests: 10000
 
-# Process-wide budget for buffered inbound request bodies. Admission reserves the declared
-# Content-Length, or the request-body cap for chunked bodies, and refuses with 503 before
-# reading when the budget would be exceeded. 0 = unlimited. Hot-reloads.
+# Process-wide budget for buffered inbound request bodies. Admission reserves one bounded
+# speculative read hint, then charges the delta as bytes actually arrive, refusing with
+# 503 when the next read would exceed the budget. A declared Content-Length never reserves
+# capacity the client does not send, so idle connections cannot hold the budget. 0 =
+# unlimited. Hot-reloads.
 # Hot-reload: yes.
 #   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
 max_inflight_body_bytes: 256MiB

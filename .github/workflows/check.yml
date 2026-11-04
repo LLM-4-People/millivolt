@@ -81,8 +81,6 @@ on:
       - 'requirements-docs.txt'
       - '.github/workflows/docs.yml'
       - '.github/workflows/pages.yml'
-      - '.github/workflows/dependency-review.yml'
-      - '.github/workflows/security.yml'
   pull_request:
     # `closed` is the release trigger for a merged promotion. The other types
     # preserve the normal pull-request gate. The job conditions below ignore
@@ -458,7 +456,6 @@ jobs:
       DOCS_PATH_PATTERNS: >-
         docs/** site-src/** scripts/build_site.py requirements-docs.txt LICENSE
         *.md .github/workflows/docs.yml .github/workflows/pages.yml
-        .github/workflows/dependency-review.yml .github/workflows/security.yml
     steps:
       - name: Require every gate
         # A skipped gate job must fail the gate except for the deliberate
@@ -558,16 +555,41 @@ jobs:
           # A closed-event required job is itself in progress. Ignore
           # incomplete check runs and require the latest completed reviewed
           # `required` check to be green.
+          #
+          # The check run must belong to the canonical check.yml testing run
+          # for this exact commit. A check-runs listing is commit-wide, so any
+          # other workflow run on the same commit (including a candidate
+          # workflow that renamed one of its own jobs to `required`) would
+          # otherwise satisfy this proof: the run's path, event, branch and
+          # suite id are all mandatory selectors here.
+          runs="$(gh api --paginate --slurp \
+            "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" |
+            jq -c '{workflow_runs: [.[].workflow_runs[]]}')"
+          suite="$(printf '%s' "$runs" | jq -r --arg sha "$HEAD_SHA" '
+            [ .workflow_runs[]
+              | select(.path == ".github/workflows/check.yml")
+              | select(.event == "push" or .event == "workflow_dispatch")
+              | select(.head_branch == "testing")
+              | select(.head_sha == $sha)
+            ]
+            | sort_by(.created_at, .id)
+            | last
+            | if . == null then "" else (.check_suite_id // "") end')"
+          if [ -z "$suite" ]; then
+            echo "::error::The reviewed head $HEAD_SHA has no canonical check.yml testing gate run, so no required check can be trusted."
+            exit 1
+          fi
           latest_required="$(gh api --paginate --slurp \
             "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" |
-            jq -r '
+            jq -r --argjson suite "$suite" '
               [.[].check_runs[]
+                | select(.check_suite.id == $suite)
                 | select(.name == "required" and .status == "completed")]
               | sort_by(.completed_at // .started_at // "", .id)
               | last
               | if . == null then "" else (.conclusion // "") end')"
           if [ "$latest_required" != "success" ]; then
-            echo "::error::The reviewed head $HEAD_SHA has no successful required check (latest completed: ${latest_required:-missing})."
+            echo "::error::The reviewed head $HEAD_SHA has no successful required check in the canonical testing suite $suite (latest completed: ${latest_required:-missing})."
             exit 1
           fi
 
@@ -934,10 +956,14 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --tags --force origin
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            go run -mod=readonly ./cmd/release -newer-than "${tag#v}" >/dev/null
-          done < <(git tag -l 'v*')
+          # One owner compares versions: cmd/release validates SemVer precedence
+          # and ignores a tag that is not a release version (a vendor tag, a
+          # typo such as v1.0) after naming it, so such a tag can never block a
+          # promotion. VERSION must still be newer than the newest real release.
+          newest="$(git tag -l 'v*' | go run -mod=readonly ./cmd/release -newest)"
+          if [ -n "$newest" ]; then
+            go run -mod=readonly ./cmd/release -newer-than "$newest" >/dev/null
+          fi
       - name: Summarize the main promotion
         if: success() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
@@ -1065,19 +1091,26 @@ jobs:
             file_version="$(tr -d '\r\n' < VERSION)"
             if git rev-parse -q --verify "refs/tags/v$file_version" >/dev/null; then
               tagged_revision="$(git rev-list -n1 "v$file_version")"
-              # A tag without its GitHub release means a previous publish
-              # failed after the tag became public. Fail even when main has
-              # moved on: otherwise every later run reports a benign skip and
-              # the release stays missing for good.
-              if ! gh release view "v$file_version" >/dev/null 2>&1; then
-                echo "::error::VERSION v$file_version is tagged at $tagged_revision but its GitHub release is missing. A previous publish failed after tagging. This job does not move the tag or republish images; create the release from the existing tag and carry over the generated notes from the failed run's log."
+              if gh release view "v$file_version" >/dev/null 2>&1; then
+                # Dependabot security merges reach main without a VERSION bump.
+                # They stay unreleased until the next versioned promotion.
+                echo "VERSION v$file_version is already tagged at $tagged_revision; no release is needed."
+                echo "tag_revision=$tagged_revision" >> "$GITHUB_OUTPUT"
+                skip=true
+              elif [ "$tagged_revision" = "$(git rev-parse HEAD)" ]; then
+                # A tag without its GitHub release means a previous publish
+                # failed after the tag became public. Repair it on this run:
+                # rebuild and re-attest the same version, leave the tag where
+                # it is, and create the missing release. A re-run is the
+                # operator's explicit request, so republishing is intended.
+                echo "Tag v$file_version is at HEAD without its GitHub release; repairing on this run."
+                version="$file_version"
+                revision="$(git rev-parse HEAD)"
+                echo "repair=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::error::VERSION v$file_version is tagged at $tagged_revision but its GitHub release is missing, and the tag is not at this commit. The release cannot be repaired from a newer commit; check out $tagged_revision and re-run there."
                 exit 1
               fi
-              # Dependabot security merges reach main without a VERSION bump.
-              # They stay unreleased until the next versioned promotion.
-              echo "VERSION v$file_version is already tagged at $tagged_revision; no release is needed."
-              echo "tag_revision=$tagged_revision" >> "$GITHUB_OUTPUT"
-              skip=true
             else
               # A promotion PR owns the version bump. Tag its merge commit
               # exactly as reviewed; the release workflow never creates a
@@ -1172,7 +1205,7 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
       - name: Push verified tag
-        if: steps.cut.outputs.skip != 'true' && github.ref_type != 'tag'
+        if: steps.cut.outputs.skip != 'true' && steps.cut.outputs.repair != 'true' && github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1181,7 +1214,16 @@ jobs:
           # The image exists before the tag becomes public. Main already
           # contains the promotion merge; the release workflow never pushes
           # main. A failed build leaves no public release.
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "v$RELEASE_VERSION"
+          #
+          # The token reaches git through a credential helper that reads the
+          # environment, never through the push URL: an argument is visible in
+          # the process command line to every process on the runner. The empty
+          # `credential.helper=` first is load-bearing: it clears the inherited
+          # helper chain so git cannot fall through to a stored credential, and
+          # the inline helper holds no secret outside this process environment.
+          git -c credential.helper= \
+            -c credential.helper='!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
+            push "https://github.com/${REPO}.git" "v$RELEASE_VERSION"
       - name: Create the GitHub release
         if: steps.cut.outputs.skip != 'true'
         env:
@@ -1288,8 +1330,19 @@ jobs:
               echo "**Full changelog:** https://github.com/LLM-4-People/millivolt/compare/${previous}...v${RELEASE_VERSION}"
             fi
           } > release-notes.md
+          # The newest release version decides the latest-release pointer.
+          # GitHub makes every newly published release "latest" by default, so
+          # a backport cut after a newer version would move the site's download
+          # link backwards. cmd/release owns the comparison and ignores tags
+          # that are not release versions.
+          newest="$(git tag -l 'v*' | go run -mod=readonly ./cmd/release -newest)"
           flags=(--verify-tag --title "millivolt $RELEASE_VERSION" --notes-file release-notes.md)
-          if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+          elif [ -n "$newest" ] && [ "$newest" != "$RELEASE_VERSION" ]; then
+            echo "Release $RELEASE_VERSION is older than $newest; it will not move the latest-release pointer."
+            flags+=(--latest=false)
+          fi
           if gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
             # A published release is the idempotency success state. A draft is
             # not: nothing reaches users, so report it instead of a receipt.
@@ -1355,6 +1408,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1369,11 +1425,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish testing image
+        id: image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          # The testing image is built from the same reviewed tree as a release
+          # and is the image a development deployment runs, so it carries the
+          # same SBOM and max-mode provenance instead of being the one
+          # published image a verifier cannot attest.
+          sbom: true
+          provenance: mode=max
           tags: ghcr.io/llm-4-people/millivolt:testing
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
@@ -1387,3 +1450,12 @@ jobs:
             type=gha,scope=millivolt-container-linux-amd64
             type=gha,scope=millivolt-container-linux-arm64
           cache-to: type=gha,mode=min,scope=millivolt-publish-testing-multiarch,ignore-error=true
+      - name: Attest the testing image
+        # Same artifact attestation as a release, against the testing digest.
+        # A dev deployment can then verify what it runs with `gh attestation
+        # verify oci://ghcr.io/llm-4-people/millivolt:testing`.
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/llm-4-people/millivolt
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true

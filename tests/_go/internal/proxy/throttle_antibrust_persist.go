@@ -156,8 +156,8 @@ func TestThrottlePersistDocumentBoundWithRampFields(t *testing.T) {
 	}
 
 	on := build(true)
-	if len(on) >= throttlePersistDocMaxBytes {
-		t.Fatalf("maximal document with ramp fields = %d bytes, cap %d", len(on), throttlePersistDocMaxBytes)
+	if len(on) >= operatorPersistDocMaxBytes {
+		t.Fatalf("maximal document with ramp fields = %d bytes, cap %d", len(on), operatorPersistDocMaxBytes)
 	}
 	if grow := len(on) - len(build(false)); grow > gates*56 {
 		t.Fatalf("anti-burst pair grew the document by %d bytes, allowance %d", grow, gates*56)

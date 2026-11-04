@@ -584,3 +584,72 @@ func TestExportFailureNeverClosesIncompleteJSONArray(t *testing.T) {
 		t.Fatalf("unexpected partial export %q", got)
 	}
 }
+
+// TestPurgeLeavesNoRowContentInFreedPages pins the deletion contract against
+// the database file itself. Purge and TTL expiry tell the operator the data is
+// gone, but SQLite's default secure_delete=0 leaves the cell content in a
+// freed page, so a copy of the live file taken with ordinary file tools
+// recovers it. The writer enables secure_delete as a safety invariant, and
+// this test reads the pages back through sqlite_dbpage: the route-level query
+// gate denies that function to operators, and this package-level handle is the
+// only way to observe the page image at all.
+func TestPurgeLeavesNoRowContentInFreedPages(t *testing.T) {
+	const marker = "CARRIES-DELETED-PAYLOAD-0123456789"
+	opts := testOpts
+	opts.FlushInterval = time.Hour
+	s := openPurgeTestStore(t, opts)
+	b := metrics.NewBuffer(4)
+	rec := s.Recorder(b)
+	rec.Record(&metrics.Record{ID: marker, Provider: "neutral.example", Model: "n", Start: time.Now(), StatusCode: 200, ErrorMsg: marker})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Clear(t.Context(), nil, b); err != nil {
+		t.Fatal(err)
+	}
+	// Checkpoint so the pages are in the main file rather than the WAL: the
+	// open file is what a copied database would contain.
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	var hits int
+	if err := s.rdb.QueryRow("SELECT COUNT(*) FROM sqlite_dbpage WHERE instr(data, ?) > 0", marker).Scan(&hits); err != nil {
+		t.Fatalf("scan pages: %v", err)
+	}
+	if hits != 0 {
+		t.Fatalf("purged row content survived in %d page(s); secure_delete must overwrite freed cells", hits)
+	}
+	// The row itself is genuinely gone and the store still reads normally.
+	if n, err := s.CountWhere(t.Context(), PurgeFilter{}); err != nil || n != 0 {
+		t.Fatalf("rows after purge = %d, %v", n, err)
+	}
+	s.Record(&metrics.Record{ID: "after-purge", Provider: "neutral.example", Model: "n", Start: time.Now(), StatusCode: 200})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountWhere(t.Context(), PurgeFilter{}); err != nil || n != 1 {
+		t.Fatalf("post-purge write = %d, %v", n, err)
+	}
+}
+
+// TestWriterConnectionEnablesSecureDelete pins the pragma on every writer
+// connection, not only the one that happened to run a statement first: a
+// pooled connection opened later must still overwrite freed cells.
+func TestWriterConnectionEnablesSecureDelete(t *testing.T) {
+	s := openPurgeTestStore(t, testOpts)
+	for i := range sqliteWriterConns + 2 {
+		conn, err := s.db.Conn(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mode int
+		if err := conn.QueryRowContext(t.Context(), "PRAGMA secure_delete").Scan(&mode); err != nil {
+			conn.Close()
+			t.Fatalf("connection %d: read secure_delete: %v", i, err)
+		}
+		conn.Close()
+		if mode != 1 {
+			t.Fatalf("connection %d: secure_delete = %d, want 1", i, mode)
+		}
+	}
+}

@@ -186,7 +186,7 @@ function formatDetail(r) {
       (r.attachments ? r.attachments + ' attachment' + (r.attachments > 1 ? 's' : '') : '')
     : '';
   const conversationRow = (label, id) => id
-    ? detailHtmlRow(label, vt(escapeHtml(shortId('conversation', id)), id), id, {copy: id, copyLabel: label + ' id'})
+    ? detailHtmlRow(label, vt(shortId('conversation', id), id), id, {copy: id, copyLabel: label + ' id'})
     : null;
   S.push(detailSection('Conversation', [
     conversationRow('conversation', r.conversation_id),

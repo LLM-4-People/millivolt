@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import markdown
+import nh3
 from markdown.extensions.toc import TocExtension
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -165,6 +166,86 @@ def plain_text(fragment: str) -> str:
 
 def strip_html(fragment: str) -> str:
     return SPACE.sub(" ", html.unescape(TAG.sub("", fragment))).strip()
+
+
+# Content allowlist for one rendered document. The article body is the one
+# place author Markdown becomes HTML, and python-markdown passes raw HTML
+# through unsanitized, so the builder declares what a document may contain and
+# drops everything else. The set is measured from the current artifact: these
+# are the tags the pipeline and the Markdown extensions actually emit.
+CONTENT_TAGS = frozenset({
+    "a", "blockquote", "br", "code", "dd", "dl", "dt", "em", "figcaption",
+    "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "img", "kbd", "li",
+    "ol", "p", "picture", "pre", "source", "strong", "sub", "sup", "table",
+    "tbody", "td", "th", "thead", "tr", "ul",
+})
+# Attributes the pipeline owns or the extensions add. `style` and `class` are
+# value-restricted below rather than dropped: table alignment and the fenced
+# code language marker are both produced by Markdown itself.
+CONTENT_ATTRIBUTES = {
+    "a": {"class", "href", "rel", "target", "title"},
+    "code": {"class"},
+    "h1": {"id"}, "h2": {"id"}, "h3": {"id"},
+    "h4": {"id"}, "h5": {"id"}, "h6": {"id"},
+    "img": {"alt", "decoding", "height", "loading", "src", "width"},
+    "source": {"media", "srcset", "type"},
+    "td": {"style"},
+    "th": {"style"},
+}
+# The only classes the builder emits. The TOC permalink anchor and the fenced
+# code language marker are the two producers.
+CONTENT_CLASSES = frozenset({"headerlink"}) | {
+    f"language-{name}" for name in (
+        "bash", "console", "css", "csv", "diff", "dockerfile", "go", "html",
+        "http", "ini", "javascript", "json", "jsonc", "makefile", "markdown",
+        "nginx", "powershell", "promql", "python", "sh", "sql", "text",
+        "toml", "xml", "yaml",
+    )
+}
+# The one inline style the pipeline needs: table column alignment, which
+# Markdown emits for its `| ---: |` syntax.
+CONTENT_TEXT_ALIGN = re.compile(r"\s*text-align\s*:\s*(?:left|right|center)\s*;?\s*")
+# Schemes a document link or image may use. Relative paths, fragments and
+# protocol-relative URLs carry no scheme and are admitted by the sanitizer;
+# `data:` is not, because a document has no reason to inline one and the
+# pipeline's own image handling rejects it.
+CONTENT_URL_SCHEMES = frozenset({"http", "https", "mailto", "tel"})
+
+
+def _content_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
+    """Return the attribute value, or None to drop it.
+
+    This is the value-level half of the content allowlist: the tag and
+    attribute names are already restricted by CONTENT_TAGS and
+    CONTENT_ATTRIBUTES, and this stops a permitted attribute from carrying
+    something the builder never emits.
+    """
+    if attribute == "class":
+        parts = value.split()
+        return value if parts and set(parts) <= CONTENT_CLASSES else None
+    if attribute == "style":
+        return value.strip() if CONTENT_TEXT_ALIGN.fullmatch(value) else None
+    return value
+
+
+def sanitize_content(content: str) -> str:
+    """Sanitize one rendered document at the single render choke point.
+
+    Every doc page flows from `md.convert`, so this is the lowest common path
+    and no page can bypass it. python-markdown passes raw HTML, `attr_list`
+    attribute blocks and `javascript:`-style link targets through unchanged;
+    this admits only the declared element, attribute and URL-scheme set. The
+    pipeline's own post-processing (link rewriting, image dimensions) runs
+    after this and only ever adds build-owned values.
+    """
+    return nh3.clean(
+        content,
+        tags=CONTENT_TAGS,
+        attributes=CONTENT_ATTRIBUTES,
+        attribute_filter=_content_attribute_filter,
+        url_schemes=CONTENT_URL_SCHEMES,
+        link_rel=None,
+    )
 
 
 def summarize(text: str, width: int = 158) -> str:
@@ -384,15 +465,9 @@ def enhance_images_with_root(content: str, output: str, site_root: Path) -> str:
     return re.sub(r"<img\b[^>]*>", replace, content)
 
 
-def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, str, str, list[dict]]:
-    text = source.read_text(encoding="utf-8")
-    if source.name == "LICENSE":
-        title = "MIT License"
-        content = '<h1 id="mit-license">MIT License</h1><pre class="license-text">' + html.escape(text) + "</pre>"
-        return title, "MIT license terms for millivolt.", content, []
-    heading = HEADING.search(text)
-    title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
-    md = markdown.Markdown(
+def markdown_engine() -> markdown.Markdown:
+    """The one Markdown configuration for every rendered document."""
+    return markdown.Markdown(
         extensions=[
             "extra",
             "sane_lists",
@@ -407,9 +482,36 @@ def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, st
         ],
         output_format="html5",
     )
+
+
+def render_fragment(
+    md: markdown.Markdown, text: str, source: Path, output: str, site_root: Path
+) -> str:
+    """Render one document through the whole content pipeline.
+
+    This is the single owner of the order: convert, sanitize, rewrite the
+    repository URLs a browser needs, then add build-owned image dimensions.
+    The sanitizer runs first because everything after it only adds values this
+    builder itself produces; running it later would discard those additions and
+    let a rewrite turn an admitted URL into something the allowlist never saw.
+    """
     content = md.convert(text)
+    content = sanitize_content(content)
     content = rewrite_content_urls(content, source, output)
     content = enhance_images_with_root(content, output, site_root)
+    return content
+
+
+def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, str, str, list[dict]]:
+    text = source.read_text(encoding="utf-8")
+    if source.name == "LICENSE":
+        title = "MIT License"
+        content = '<h1 id="mit-license">MIT License</h1><pre class="license-text">' + html.escape(text) + "</pre>"
+        return title, "MIT license terms for millivolt.", content, []
+    heading = HEADING.search(text)
+    title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
+    md = markdown_engine()
+    content = render_fragment(md, text, source, output, site_root)
     first_paragraph = PARAGRAPH.search(content)
     description = plain_text(first_paragraph.group(1)) if first_paragraph else title
     description = summarize(description)
@@ -426,9 +528,14 @@ def toc_html(tokens: list[dict]) -> str:
             if level not in (2, 3):
                 continue
             nested = render(node.get("children", []))
+            # strip_html() unescapes character references, so its result is
+            # display text and never markup. Escape it again: a heading like
+            # "Looks safe &lt;svg onload=...&gt;" is inert in the article but
+            # would otherwise become a live element in the table of contents.
+            label = html.escape(strip_html(node["name"]))
             result.append(
                 f'<li class="toc-level-{level}"><a href="#{attr_escape(node["id"])}">'
-                f'{strip_html(node["name"])}</a>{nested}</li>'
+                f'{label}</a>{nested}</li>'
             )
         if not result:
             return ""

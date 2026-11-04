@@ -153,8 +153,11 @@ DOCS_PATH_SAMPLES = (
     ("requirements-docs.txt", True),
     (".github/workflows/docs.yml", True),
     (".github/workflows/pages.yml", True),
-    (".github/workflows/dependency-review.yml", True),
-    (".github/workflows/security.yml", True),
+    # security.yml runs govulncheck against the dependency graph and
+    # dependency-review.yml runs a third-party action on pull-request code, so
+    # neither is docs-only: a change there must pass the full gate.
+    (".github/workflows/dependency-review.yml", False),
+    (".github/workflows/security.yml", False),
     (".github/workflows/check.yml", False),
     ("scripts/check.sh", False),
     ("scripts/dev.sh", False),

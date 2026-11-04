@@ -411,7 +411,7 @@ const pct2 = (a, b) => b ? pctCap(a, b, 2) : '-';
 // vt wraps a display value in a span whose title carries the full text, so a
 // value that ellipsizes (overflow: hidden + text-overflow: ellipsis) is always
 // fully recoverable on hover. Use for any value that can exceed its container.
-const vt = (display, full) => `<span class="vt" title="${escapeHtml(String(full ?? display))}">${display}</span>`;
+const vt = (display, full) => `<span class="vt" title="${escapeHtml(String(full ?? display))}">${escapeHtml(String(display))}</span>`;
 const $ = id => document.getElementById(id);
 
 // ---------- focus preservation across repaints ----------
