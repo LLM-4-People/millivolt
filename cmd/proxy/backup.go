@@ -184,7 +184,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	body := http.MaxBytesReader(w, r.Body, cap)
 	defer body.Close()
-	uploadPath, err := stageRestoreUpload(uploadDir, body, cap)
+	uploadFile, err := stageRestoreUpload(uploadDir, body, cap)
 	if err != nil {
 		// The endpoint's existing upload contract answers 413 for an over-cap
 		// body and for a client that disappears mid-upload; local staging
@@ -198,12 +198,18 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	uploadPath := uploadFile.Name()
 	defer func() {
+		if err := uploadFile.Close(); err != nil {
+			log.Printf("restore: close staged upload %s: %v", uploadPath, err)
+		}
 		if err := os.Remove(uploadPath); err != nil && !os.IsNotExist(err) {
 			log.Printf("restore: remove staged upload %s: %v", uploadPath, err)
 		}
 	}()
-	arch, err := backup.DecodeFileSelected(decodeDir, uploadPath, decodeDatabase)
+	// Decode the staged descriptor, never its path: the bytes validated are
+	// then exactly the bytes this handler wrote.
+	arch, err := backup.DecodeFileReader(decodeDir, uploadFile, decodeDatabase)
 	if err != nil {
 		// Without a live store there is no volume for a decoded database
 		// member; keep the endpoint's existing storage-disabled answer while a
@@ -463,35 +469,38 @@ func (e *restoreUploadReadError) Error() string { return e.err.Error() }
 func (e *restoreUploadReadError) Unwrap() error { return e.err }
 
 // stageRestoreUpload copies the bounded request body into one private file and
-// returns its path. The handler owns the file and removes it on every path. On
-// error this owner removes its staging file and returns no path.
-func stageRestoreUpload(dir string, body io.Reader, limit int64) (string, error) {
+// returns it open and rewound, with its path owned by the caller for removal.
+// The handler decodes that same descriptor rather than re-opening the path: a
+// second writer with access to the staging directory could otherwise rename a
+// different archive into place between the write and the decode, and every
+// admission check would then run on the substitute. On error this owner
+// removes its staging file and returns no handle.
+func stageRestoreUpload(dir string, body io.Reader, limit int64) (*os.File, error) {
 	if limit <= 0 {
-		return "", fmt.Errorf("backup size limit is invalid")
+		return nil, fmt.Errorf("backup size limit is invalid")
 	}
 	f, err := os.CreateTemp(dir, backup.RestoreUploadStagingPattern)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	path := f.Name()
 	committed := false
 	defer func() {
-		_ = f.Close()
 		if !committed {
-			_ = os.Remove(path)
+			_ = f.Close()
+			_ = os.Remove(f.Name())
 		}
 	}()
 	if err := f.Chmod(0o600); err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := copyRestoreUpload(f, body, limit); err != nil {
-		return "", err
+		return nil, err
 	}
-	if err := f.Close(); err != nil {
-		return "", err
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
 	}
 	committed = true
-	return path, nil
+	return f, nil
 }
 
 // copyRestoreUpload streams the body in bounded chunks and refuses the chunk

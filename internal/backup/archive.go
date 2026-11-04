@@ -731,14 +731,6 @@ func decodeLimited(raw []byte, maxPayload int64) (Archive, error) {
 // error the decoder removes the decoded file and its staging directory and
 // returns no Archive.
 func DecodeFile(stageDir, path string) (Archive, error) {
-	return DecodeFileSelected(stageDir, path, true)
-}
-
-// DecodeFileSelected is DecodeFile with an explicit database selection. When
-// keepDatabase is false, a declared database member is stream-discarded while
-// the outer payload hash and framing are still checked, so a config-only
-// restore or preview needs no live database volume and no SQLite staging.
-func DecodeFileSelected(stageDir, path string, keepDatabase bool) (Archive, error) {
 	if path == "" {
 		return Archive{}, fmt.Errorf("backup path is required")
 	}
@@ -747,7 +739,22 @@ func DecodeFileSelected(stageDir, path string, keepDatabase bool) (Archive, erro
 		return Archive{}, fmt.Errorf("open backup: %w", err)
 	}
 	defer f.Close()
-	return decodeFileSelected(stageDir, f, payloadMax, keepDatabase)
+	return decodeFileSelected(stageDir, f, payloadMax, true)
+}
+
+// DecodeFileReader validates an archive read from an already-open stream, with
+// the same rules as DecodeFile and an explicit database selection. When
+// keepDatabase is false, a declared database member is stream-discarded while
+// the outer payload hash and framing are still checked, so a config-only
+// restore or preview needs no live database volume and no SQLite staging.
+//
+// A caller that staged the upload itself passes the descriptor it wrote
+// instead of a path, so the bytes decoded are exactly the bytes it wrote:
+// re-opening a path lets a second writer with access to that directory rename
+// a different file into place between the write and the decode, and every
+// admission check would then run on the substitute.
+func DecodeFileReader(stageDir string, src io.Reader, keepDatabase bool) (Archive, error) {
+	return decodeFileSelected(stageDir, src, payloadMax, keepDatabase)
 }
 
 func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, error) {

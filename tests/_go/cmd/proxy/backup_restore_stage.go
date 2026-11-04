@@ -227,27 +227,82 @@ type failingReader struct{}
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("client disconnected") }
 
 // TestStageRestoreUploadEnforcesCap pins the staging owner directly: the
-// bounded copy refuses an over-cap reader, returns no path, and removes its
+// bounded copy refuses an over-cap reader, returns no handle, and removes its
 // private file.
 func TestStageRestoreUploadEnforcesCap(t *testing.T) {
 	dir := t.TempDir()
-	path, err := stageRestoreUpload(dir, bytes.NewReader(bytes.Repeat([]byte("x"), 1025)), 1024)
+	file, err := stageRestoreUpload(dir, bytes.NewReader(bytes.Repeat([]byte("x"), 1025)), 1024)
 	if !errors.Is(err, backup.ErrTooLarge) {
 		t.Fatalf("over-cap staging = %v, want ErrTooLarge", err)
 	}
-	if path != "" {
-		t.Fatalf("over-cap staging returned path %q", path)
+	if file != nil {
+		t.Fatalf("over-cap staging returned handle %v", file)
 	}
 	assertNoRestoreStaging(t, dir)
 
-	path, err = stageRestoreUpload(dir, bytes.NewReader([]byte("MVB1")), 1024)
+	file, err = stageRestoreUpload(dir, bytes.NewReader([]byte("MVB1")), 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(path); err != nil {
+	// The returned descriptor is rewound so the caller decodes exactly the
+	// bytes this owner wrote.
+	content, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "MVB1" {
+		t.Fatalf("staged handle reads %q, want the written MVB1 from offset 0", content)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(file.Name()); err != nil {
 		t.Fatal(err)
 	}
 	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreDecodesTheStagedDescriptor pins the restore boundary against a
+// same-directory swap. The upload is written to a private file, and the
+// handler must decode the descriptor it wrote rather than re-opening the path:
+// a second writer with access to the staging volume can rename a different
+// archive over that name, and a path-based decode would then validate and
+// apply the substitute. The staged bytes here are valid; the swap target is
+// replaced with garbage, and the decode must still see the original bytes.
+func TestRestoreDecodesTheStagedDescriptor(t *testing.T) {
+	dir := t.TempDir()
+	raw := []byte("MVB1-original-bytes")
+	file, err := stageRestoreUpload(dir, bytes.NewReader(raw), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Name()
+	defer os.Remove(path)
+
+	// Rename a different file over the staged name after staging. A rename
+	// installs a different inode, so a path-based decode would open the
+	// substitute while the descriptor this handler holds still names the
+	// original bytes.
+	swap := filepath.Join(dir, "swap.db")
+	if err := os.WriteFile(swap, []byte("swapped-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(swap, path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("decode read %q, want the staged bytes %q: the handler must not re-open the path", got, raw)
+	}
+	if withPath, err := os.ReadFile(path); err != nil || string(withPath) != "swapped-content" {
+		t.Fatalf("swap fixture did not install a different inode: %q %v", withPath, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestRestoreResponseWriteFailureLeavesNoStaging pins the client-disconnect
