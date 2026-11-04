@@ -378,6 +378,33 @@ def check_release(checks: dict, errors: list[str]) -> None:
     publish_testing_missing = missing_needles(publish_testing_if, PUBLISH_TESTING_GUARD_NEEDLES)
     for needle in publish_testing_missing:
         errors.append(f"check.yml: publish-testing guard is missing {needle}")
+    # The testing image is published from the same reviewed tree and is the
+    # image a development deployment runs, so it carries the release image's
+    # SBOM, max provenance and artifact attestation. It is the one published
+    # image without them.
+    testing_image_index = named_step(publish_testing, "Publish testing image")
+    testing_attest_index = named_step(publish_testing, "Attest the testing image")
+    if testing_image_index < 0:
+        errors.append("check.yml: the testing image publish step must exist")
+    else:
+        testing_image = steps(publish_testing)[testing_image_index]
+        if testing_image.get("with", {}).get("sbom") is not True:
+            errors.append("check.yml: the testing image must include an SBOM")
+        if testing_image.get("with", {}).get("provenance") != "mode=max":
+            errors.append("check.yml: the testing image must include max provenance")
+        if testing_attest_index < 0:
+            errors.append("check.yml: the testing image must carry a GitHub artifact attestation")
+        elif not (testing_image_index < testing_attest_index):
+            errors.append("check.yml: the testing image attestation must follow the publish step")
+        else:
+            testing_attest = steps(publish_testing)[testing_attest_index]
+            if not str(testing_attest.get("uses", "")).startswith("actions/attest@"):
+                errors.append("check.yml: the testing image attestation must use actions/attest")
+            if (testing_attest.get("with") or {}).get("subject-digest") != \
+                    "${{ steps.image.outputs.digest }}":
+                errors.append("check.yml: the testing attestation must cover the published digest")
+            if (testing_attest.get("with") or {}).get("push-to-registry") is not True:
+                errors.append("check.yml: the testing attestation must be pushed to the registry")
     errors.extend(publish_guard_errors(publish_if, publish_testing_if))
     errors.extend(publish_concurrency_errors(publish.get("concurrency")))
     # Mutation proofs: a cancelling group, a renamed group and a missing flag
