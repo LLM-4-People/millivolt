@@ -170,24 +170,30 @@ type pauseRuntime struct {
 // to. Empty names are never recorded; the model set stores canonical names,
 // so callers canonicalize before add/seed.
 //
-// Every name is either observed (taken from live traffic) or pinned (named by
-// an operator document: a hold scope or a debug session). The distinction is
-// load-bearing, not bookkeeping. Client labels and model ids are chosen by the
-// caller, so an unauthenticated peer can submit thousands of distinct ones; a
-// first-wins cap let it fill the whole vocabulary and permanently hide the
-// operator's own names, after which a "new clients" hold classified real
-// clients as new and parked them. Observed names are therefore evicted oldest
-// first, while pinned names are never evicted: operator intent outranks
-// whatever traffic arrives later.
+// Two classes are tracked, and the distinction is load-bearing rather than
+// bookkeeping. Observed names come from live traffic and are evictable; client
+// labels and model ids are chosen by the caller, so an unauthenticated peer can
+// submit thousands of distinct ones. Pinned names are the scopes of the operator
+// documents that currently exist (a hold or a debug session) and are never
+// evicted by traffic: operator intent outranks whatever arrives later.
+//
+// Pins are derived, not accumulated. syncNamePins recomputes them from the live
+// document set on every change, so removing a hold releases its names. An
+// append-only pin set would let retired documents pin forever, and a saturated
+// set would then freeze the vocabulary - which is the same "operator's own
+// names are unlistable" failure this design exists to prevent.
 type nameSet struct {
 	mu     sync.Mutex
 	names  map[string]struct{}
 	pinned map[string]struct{}
-	// seq is the current generation of each stored name, and order lists
-	// unpinned names by insertion. An entry whose seq no longer matches is
-	// stale (evicted then re-added, or since pinned) and is skipped while
-	// looking for the oldest live observed name; skipped entries are dropped as
-	// the head advances, so the slice stays proportional to the stored set.
+	// seq is each stored name's current generation, and order lists observed
+	// names oldest-first by last observation. An entry whose generation no
+	// longer matches is stale (re-observed, pinned, or evicted and re-added) and
+	// is skipped as the head advances, so the slice stays proportional to the
+	// stored set.
+	// pins holds each document family's scoped names, so the pinned set is a
+	// derived union rather than an append-only record of every scope ever seen.
+	pins     map[string]map[string]struct{}
 	seq      map[string]uint64
 	order    []nameEntry
 	next     uint64
@@ -207,87 +213,147 @@ type nameEntry struct {
 // nameSetMax bounds one operator-known vocabulary. These lists exist for
 // operator convenience; model names are client-controlled, so an unbounded set
 // is a process-lifetime memory leak. Observed names past the cap displace the
-// oldest observed name rather than being dropped, so the vocabulary tracks what
-// is actually in use instead of freezing on whatever arrived first.
+// least recently observed name rather than being dropped, so the vocabulary
+// tracks what is actually in use instead of freezing on whatever arrived first.
 const nameSetMax = 4096
 
-// add records one observed (unpinned, evictable) name. revision advances only
-// when the stored set changes, so duplicate observations keep the cached sorted
-// view valid.
+// add records one observed (evictable) name. A repeat observation refreshes its
+// position, so a continuously active client outlives a flood of one-shot labels
+// that arrived after it. revision advances only when the stored set changes.
 func (n *nameSet) add(name string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	n.insertLocked(name, false)
+	n.observeLocked(name)
 }
 
-// pin records operator-chosen names that must survive any later traffic. A
-// name already stored is only re-marked, which does not change the vocabulary.
-func (n *nameSet) pin(names []string) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	for _, name := range names {
-		n.insertLocked(name, true)
-	}
-}
-
-// seed bulk-records an observed list (durable history). revision advances once
-// when any name is newly stored.
+// seed bulk-records durable history. It records observed names with the same
+// evicting policy as add: storage returns its lists in name order, so a
+// first-wins seed would make boot-time vocabulary an incidental property of a
+// SQL ORDER BY instead of what is in use.
 func (n *nameSet) seed(names []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, name := range names {
-		if name == "" {
-			continue
-		}
-		if _, exists := n.names[name]; exists {
-			continue
-		}
-		if len(n.names) >= nameSetMax {
-			return
-		}
-		n.storeLocked(name, false)
+		n.observeLocked(name)
 	}
 }
 
-// insertLocked stores name if absent, pinning it when pin is set. A name at the
-// cap displaces the oldest observed name; when every stored name is pinned the
-// new one is dropped, because an operator's documented scope outranks it.
-func (n *nameSet) insertLocked(name string, pin bool) {
+// ensureMapsLocked lazily creates the three maps so a zero nameSet is usable.
+func (n *nameSet) ensureMapsLocked() {
+	if n.names == nil {
+		n.names = make(map[string]struct{})
+	}
+	if n.pinned == nil {
+		n.pinned = make(map[string]struct{})
+	}
+	if n.seq == nil {
+		n.seq = make(map[string]uint64)
+	}
+}
+
+// setPins replaces one document family's contribution to the pinned
+// vocabulary: "pause" for every hold's scope, "debug" for every session's.
+// Each family owns one entry, so removing a hold releases its names on the next
+// sync without a second release path, and a retired document can never pin
+// forever. The names come from the live documents, never accumulated.
+//
+// Names that cannot be stored because the whole vocabulary is already pinned are
+// returned so the caller can log them; silent truncation is what made the
+// original defect invisible.
+func (n *nameSet) setPins(source string, names []string) (dropped []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.ensureMapsLocked()
+	clean := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if name != "" {
+			clean[name] = struct{}{}
+		}
+	}
+	if n.pins == nil {
+		n.pins = make(map[string]map[string]struct{})
+	}
+	if len(clean) == 0 {
+		delete(n.pins, source)
+	} else {
+		n.pins[source] = clean
+	}
+	want := make(map[string]struct{})
+	for _, set := range n.pins {
+		for name := range set {
+			want[name] = struct{}{}
+		}
+	}
+	// Release first, so a name that only changed families becomes available.
+	for name := range n.pinned {
+		if _, keep := want[name]; keep {
+			continue
+		}
+		delete(n.pinned, name)
+		n.bumpLocked(name)
+		n.order = append(n.order, nameEntry{seq: n.seq[name], name: name})
+	}
+	// Acquire in sorted order so an over-cap operator scope truncates
+	// deterministically instead of by map iteration.
+	for _, name := range slices.Sorted(maps.Keys(want)) {
+		if _, isPinned := n.pinned[name]; isPinned {
+			continue
+		}
+		if _, stored := n.names[name]; !stored {
+			if len(n.names) >= nameSetMax && !n.evictLocked() {
+				dropped = append(dropped, name)
+				continue
+			}
+			n.names[name] = struct{}{}
+			n.revision++
+		}
+		n.bumpLocked(name)
+		n.pinned[name] = struct{}{}
+	}
+	n.compactLocked()
+	return dropped
+}
+
+// observeLocked records name as observed traffic, refreshing an existing
+// observed name's position and an absent one at the newest position.
+func (n *nameSet) observeLocked(name string) {
 	if name == "" {
 		return
 	}
-	if _, exists := n.names[name]; exists {
-		if pin {
-			n.promoteLocked(name)
+	if _, stored := n.names[name]; stored {
+		if _, isPinned := n.pinned[name]; isPinned {
+			return // pinned names stay pinned; their position is irrelevant
 		}
+		n.bumpLocked(name)
+		n.order = append(n.order, nameEntry{seq: n.seq[name], name: name})
+		n.compactLocked()
 		return
 	}
+	n.ensureMapsLocked()
 	if len(n.names) >= nameSetMax && !n.evictLocked() {
 		return
 	}
-	n.storeLocked(name, pin)
+	n.names[name] = struct{}{}
+	n.revision++
+	n.bumpLocked(name)
+	n.order = append(n.order, nameEntry{seq: n.seq[name], name: name})
 }
 
-// promoteLocked moves an already-stored observed name to pinned. It advances the
-// name's generation so its eviction-order entry becomes stale: without that the
-// entry stays live and eviction could still drop a name an operator has since
-// scoped a hold or debug session to.
-func (n *nameSet) promoteLocked(name string) {
-	if _, pinned := n.pinned[name]; pinned {
-		return
-	}
+// bumpLocked assigns name a new generation, invalidating any older order entry
+// that still names it.
+func (n *nameSet) bumpLocked(name string) {
 	n.next++
 	n.seq[name] = n.next
-	n.pinned[name] = struct{}{}
 }
 
-// evictLocked drops the oldest observed name and reports whether one was free.
+// evictLocked drops the least recently observed name and reports whether one was
+// free. Pinned names have no live order entry, so they can never be chosen.
 func (n *nameSet) evictLocked() bool {
 	for len(n.order) > 0 {
 		entry := n.order[0]
 		n.order = n.order[1:]
 		if n.seq[entry.name] != entry.seq {
-			continue // stale: evicted, re-added, or pinned since
+			continue // stale: re-observed, pinned, or already evicted
 		}
 		delete(n.names, entry.name)
 		delete(n.seq, entry.name)
@@ -297,25 +363,31 @@ func (n *nameSet) evictLocked() bool {
 	return false
 }
 
-// storeLocked adds one name to the maps and, when observed, to the eviction
-// order. Every store advances the revision, pinned or observed: the revision
-// owns the cached sorted view, so a pinned-only insertion that skipped it would
-// leave the vocabulary unreadable until some later observed name arrived.
-func (n *nameSet) storeLocked(name string, pin bool) {
-	if n.names == nil {
-		n.names = make(map[string]struct{})
-		n.pinned = make(map[string]struct{})
-		n.seq = make(map[string]uint64)
-	}
-	n.names[name] = struct{}{}
-	n.next++
-	n.seq[name] = n.next
-	n.revision++
-	if pin {
-		n.pinned[name] = struct{}{}
+// compactLocked rebuilds the order list when stale entries outnumber the live
+// ones, so a hot name that keeps being re-observed cannot grow it without
+// bound.
+func (n *nameSet) compactLocked() {
+	if len(n.order) <= 2*len(n.names)+64 {
 		return
 	}
-	n.order = append(n.order, nameEntry{seq: n.next, name: name})
+	entries := make([]nameEntry, 0, len(n.names))
+	for name := range n.names {
+		if _, isPinned := n.pinned[name]; isPinned {
+			continue
+		}
+		entries = append(entries, nameEntry{seq: n.seq[name], name: name})
+	}
+	slices.SortFunc(entries, func(a, b nameEntry) int {
+		switch {
+		case a.seq < b.seq:
+			return -1
+		case a.seq > b.seq:
+			return 1
+		default:
+			return 0
+		}
+	})
+	n.order = entries
 }
 
 // list returns the known names in lexicographic order. The sorted view is
@@ -388,12 +460,10 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 		holds := decodePause(raw)
 		kept := holds[:0]
 		for _, h := range holds {
-			// A hold's scope is operator intent, so those names are pinned;
 			// KnownAtNew is the observed vocabulary snapshot the hold compared
-			// against, so it seeds like history.
-			s.pause.clients.pin(h.Clients)
+			// against, so it seeds like history. The hold's own scope is derived
+			// as a pin by syncNamePins once the documents are installed.
 			s.pause.clients.seed(h.KnownAtNew)
-			s.pause.providers.pin(h.Providers)
 			if !toSchedHold(h).Active() {
 				continue
 			}
@@ -589,6 +659,50 @@ func (s *Server) applyHolds(holds []persistedPause) error {
 	return s.commitPause()
 }
 
+// syncNamePins recomputes every pinned vocabulary from the live operator
+// documents: each hold's scope and each debug session's scope. It is the single
+// derivation owner, called whenever either document set changes, so a removed
+// document releases its names instead of pinning them for the process lifetime.
+// Names that could not be stored because the vocabulary is entirely pinned are
+// logged, never dropped silently.
+// firstN returns at most n entries, for a bounded log line.
+func firstN(in []string, n int) []string {
+	if len(in) <= n {
+		return in
+	}
+	return in[:n]
+}
+
+func (s *Server) syncNamePins() {
+	s.pause.mu.Lock()
+	var holdClients, holdProviders []string
+	for _, h := range s.pause.holds {
+		holdClients = append(holdClients, h.Clients...)
+		holdProviders = append(holdProviders, h.Providers...)
+	}
+	s.pause.mu.Unlock()
+
+	s.debug.mu.Lock()
+	var debugClients, debugProviders, debugModels []string
+	for _, d := range s.debug.sessions {
+		debugClients = append(debugClients, d.Clients...)
+		debugProviders = append(debugProviders, d.Providers...)
+		debugModels = append(debugModels, canonicalModelList(d.Models)...)
+	}
+	s.debug.mu.Unlock()
+
+	var dropped []string
+	dropped = append(dropped, s.pause.clients.setPins("pause", holdClients)...)
+	dropped = append(dropped, s.pause.clients.setPins("debug", debugClients)...)
+	dropped = append(dropped, s.pause.providers.setPins("pause", holdProviders)...)
+	dropped = append(dropped, s.pause.providers.setPins("debug", debugProviders)...)
+	dropped = append(dropped, s.pause.models.setPins("debug", debugModels)...)
+	if len(dropped) > 0 {
+		log.Printf("pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
+			len(dropped), strings.Join(firstN(dropped, 8), ", "))
+	}
+}
+
 // editPersisted owns the read/merge/check/commit transaction for both adding
 // and editing a hold. An edit cannot restore stale omitted fields over another
 // editor's scope, deadline or queue cap. edit must not perform response I/O.
@@ -685,6 +799,11 @@ func (s *Server) finishPauseLocked() ([]persistedPause, uint64) {
 func (s *Server) commitPause() error {
 	snap, gen := s.finishPauseLocked()
 	s.pause.mu.Unlock()
+	// Every accepted hold mutation passes through here - create, edit, resume,
+	// expiry and restore - so this is the one place pins are derived. Doing it
+	// per handler instead would leave the removal and expiry paths pinning a
+	// scope that no longer exists.
+	s.syncNamePins()
 	return s.persistLatest(snap, gen)
 }
 

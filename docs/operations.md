@@ -1017,12 +1017,16 @@ scopes are rejected instead of silently replacing a different hold.
 The known client/provider/model vocabularies (the pause and debug pickers, and
 the snapshot a New-clients hold compares against) are bounded at 4096 names per
 dimension. Client labels and model ids come from the request, so they are
-evictable: past the cap the oldest observed name makes room for the newest,
-which keeps the list tracking live traffic. Names an operator documents - a
-hold scope or a debug session - are pinned and are never evicted by later
-traffic, so a flood of distinct labels cannot hide the client you scoped a hold
-to. When a full vocabulary is entirely pinned, a new observed name is dropped
-rather than displacing operator intent.
+evictable: past the cap the least recently observed name makes room for the
+newest, so a client that keeps sending requests outlives a burst of one-shot
+labels that arrived after it. Names an operator documents - a hold scope or a
+debug session - are pinned and are never evicted by later traffic, so a flood
+of distinct labels cannot hide the client you scoped a hold to. Pins are
+derived from the documents that exist, not accumulated: resuming a hold or
+ending a debug session releases its names back to ordinary eviction. When a
+full vocabulary is entirely pinned, a new observed name is dropped rather than
+displacing operator intent, and a scope that cannot be listed is named in the
+log instead of disappearing silently.
 
 A hold scopes on the caller's claimed client label, so it separates your own
 tools from each other, not trusted callers from untrusted ones; a caller that
