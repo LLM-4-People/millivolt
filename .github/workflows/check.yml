@@ -934,10 +934,14 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --tags --force origin
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            go run -mod=readonly ./cmd/release -newer-than "${tag#v}" >/dev/null
-          done < <(git tag -l 'v*')
+          # One owner compares versions: cmd/release validates SemVer precedence
+          # and ignores a tag that is not a release version (a vendor tag, a
+          # typo such as v1.0) after naming it, so such a tag can never block a
+          # promotion. VERSION must still be newer than the newest real release.
+          newest="$(git tag -l 'v*' | go run -mod=readonly ./cmd/release -newest)"
+          if [ -n "$newest" ]; then
+            go run -mod=readonly ./cmd/release -newer-than "$newest" >/dev/null
+          fi
       - name: Summarize the main promotion
         if: success() && github.event_name == 'pull_request' && github.event.action != 'closed' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
@@ -1065,19 +1069,26 @@ jobs:
             file_version="$(tr -d '\r\n' < VERSION)"
             if git rev-parse -q --verify "refs/tags/v$file_version" >/dev/null; then
               tagged_revision="$(git rev-list -n1 "v$file_version")"
-              # A tag without its GitHub release means a previous publish
-              # failed after the tag became public. Fail even when main has
-              # moved on: otherwise every later run reports a benign skip and
-              # the release stays missing for good.
-              if ! gh release view "v$file_version" >/dev/null 2>&1; then
-                echo "::error::VERSION v$file_version is tagged at $tagged_revision but its GitHub release is missing. A previous publish failed after tagging. This job does not move the tag or republish images; create the release from the existing tag and carry over the generated notes from the failed run's log."
+              if gh release view "v$file_version" >/dev/null 2>&1; then
+                # Dependabot security merges reach main without a VERSION bump.
+                # They stay unreleased until the next versioned promotion.
+                echo "VERSION v$file_version is already tagged at $tagged_revision; no release is needed."
+                echo "tag_revision=$tagged_revision" >> "$GITHUB_OUTPUT"
+                skip=true
+              elif [ "$tagged_revision" = "$(git rev-parse HEAD)" ]; then
+                # A tag without its GitHub release means a previous publish
+                # failed after the tag became public. Repair it on this run:
+                # rebuild and re-attest the same version, leave the tag where
+                # it is, and create the missing release. A re-run is the
+                # operator's explicit request, so republishing is intended.
+                echo "Tag v$file_version is at HEAD without its GitHub release; repairing on this run."
+                version="$file_version"
+                revision="$(git rev-parse HEAD)"
+                echo "repair=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "::error::VERSION v$file_version is tagged at $tagged_revision but its GitHub release is missing, and the tag is not at this commit. The release cannot be repaired from a newer commit; check out $tagged_revision and re-run there."
                 exit 1
               fi
-              # Dependabot security merges reach main without a VERSION bump.
-              # They stay unreleased until the next versioned promotion.
-              echo "VERSION v$file_version is already tagged at $tagged_revision; no release is needed."
-              echo "tag_revision=$tagged_revision" >> "$GITHUB_OUTPUT"
-              skip=true
             else
               # A promotion PR owns the version bump. Tag its merge commit
               # exactly as reviewed; the release workflow never creates a
@@ -1172,7 +1183,7 @@ jobs:
           subject-digest: ${{ steps.image.outputs.digest }}
           push-to-registry: true
       - name: Push verified tag
-        if: steps.cut.outputs.skip != 'true' && github.ref_type != 'tag'
+        if: steps.cut.outputs.skip != 'true' && steps.cut.outputs.repair != 'true' && github.ref_type != 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -1288,8 +1299,19 @@ jobs:
               echo "**Full changelog:** https://github.com/LLM-4-People/millivolt/compare/${previous}...v${RELEASE_VERSION}"
             fi
           } > release-notes.md
+          # The newest release version decides the latest-release pointer.
+          # GitHub makes every newly published release "latest" by default, so
+          # a backport cut after a newer version would move the site's download
+          # link backwards. cmd/release owns the comparison and ignores tags
+          # that are not release versions.
+          newest="$(git tag -l 'v*' | go run -mod=readonly ./cmd/release -newest)"
           flags=(--verify-tag --title "millivolt $RELEASE_VERSION" --notes-file release-notes.md)
-          if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+          elif [ -n "$newest" ] && [ "$newest" != "$RELEASE_VERSION" ]; then
+            echo "Release $RELEASE_VERSION is older than $newest; it will not move the latest-release pointer."
+            flags+=(--latest=false)
+          fi
           if gh release view "v$RELEASE_VERSION" >/dev/null 2>&1; then
             # A published release is the idempotency success state. A draft is
             # not: nothing reaches users, so report it instead of a receipt.
