@@ -943,21 +943,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	queueStart := time.Now()
 	release, err := s.scheduler.AcquireWith(ctx, groupKey, maxConc, hooks)
 	if err != nil {
-		if errors.Is(err, scheduler.ErrQueueDrained) {
-			// Operator flow control: the queued request was released before it
-			// could send. Answer retryably; this is not a provider failure and
-			// must not look like one in the record.
-			rec.ErrorType = "queue_drained"
-			rec.ErrorMsg = err.Error()
-			w.Header().Set("Retry-After", "1")
-			writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "queued request released by the operator; retry", http.StatusServiceUnavailable, s.retryAfterHeader())
-			return
-		}
+		// A cancellation outranks a drain: the client that went away is
+		// recorded as a client abort, never as an operator release.
 		if errors.Is(ctx.Err(), context.Canceled) {
 			// Covers both the client's own disconnect and a keepalive write
 			// failure that proved the socket is gone (pacer.onGone). A
 			// DeadlineExceeded stays a proxy-side failure below.
 			markClientGone(rec)
+			return
+		}
+		if s.writeQueueDrainedError(w, rec, t.inbound, err) {
 			return
 		}
 		rec.ErrorType = "queue_full"

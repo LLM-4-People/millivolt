@@ -8,11 +8,14 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -79,4 +82,51 @@ func drainScopeLabel(scope scheduler.DrainScope) string {
 	default:
 		return "all queued requests"
 	}
+}
+
+// queueDrainedType is the record error type for a request an operator drain
+// released. It is distinct from queue_full: the operator asked for the request
+// to leave the queue, and the client may retry immediately.
+const queueDrainedType = "queue_drained"
+
+// queueDrainedMessage is the single client-facing sentence for a released
+// request.
+const queueDrainedMessage = "queued request released by the operator; retry"
+
+// isQueueDrained reports whether err is the scheduler's operator-drain release.
+func isQueueDrained(err error) bool {
+	return errors.Is(err, scheduler.ErrQueueDrained)
+}
+
+// queueDrainedRecord stamps the released-by-operator outcome on rec. It is
+// flow control, so the record never carries a provider error type or code.
+func queueDrainedRecord(rec *metrics.Record, err error) {
+	if rec.StatusCode == 0 {
+		rec.StatusCode = http.StatusServiceUnavailable
+	}
+	rec.ErrorType = queueDrainedType
+	rec.ErrorMsg = err.Error()
+}
+
+// writeQueueDrainedError answers an uncommitted response whose request an
+// operator drain released: retryable 503 with Retry-After. It reports whether
+// err was a drain release at all.
+func (s *Server) writeQueueDrainedError(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, err error) bool {
+	if !isQueueDrained(err) {
+		return false
+	}
+	queueDrainedRecord(rec, err)
+	writeClientErrorHdr(w, rec, inbound, "rate_limit_error", queueDrainedMessage, http.StatusServiceUnavailable, s.retryAfterHeader())
+	return true
+}
+
+// queueDrainedStreamError is the in-band spelling for a response whose status
+// line is already committed: a released request still reaches the client as a
+// retryable error event instead of a silent close.
+func queueDrainedStreamError(rec *metrics.Record, err error) (typ, msg string, ok bool) {
+	if !isQueueDrained(err) {
+		return "", "", false
+	}
+	queueDrainedRecord(rec, err)
+	return "rate_limit_error", queueDrainedMessage, true
 }

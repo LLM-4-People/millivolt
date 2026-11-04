@@ -46,9 +46,14 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 	old.Body.Close()
 	next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
 	if err != nil {
-		clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
+		clientGone, stormQueue, drained := s.classifyResendFailure(r, rec, err)
 		switch {
 		case clientGone:
+			return nil, nil, false
+		case drained:
+			// The operator released this parked re-send: answer retryably, the
+			// same contract as the fresh-send epilogue.
+			s.writeQueueDrainedError(w, rec, t.inbound, err)
 			return nil, nil, false
 		case stormQueue:
 			// Already classified: the sink owner stamps the record and writes
@@ -606,9 +611,18 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		// holds ("a retry is a new send and waits").
 		next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
 		if err != nil {
-			clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
+			clientGone, stormQueue, drained := s.classifyResendFailure(r, rec, err)
 			switch {
 			case clientGone:
+				return
+			case drained:
+				// The status line is committed: the release goes in-band as a
+				// retryable error event.
+				if typ, msg, ok := queueDrainedStreamError(rec, err); ok {
+					if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
+						markClientGone(rec)
+					}
+				}
 				return
 			case stormQueue:
 				// The status line is committed (applyUpstream ran before this

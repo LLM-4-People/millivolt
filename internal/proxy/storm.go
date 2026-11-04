@@ -218,9 +218,10 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 }
 
 // writeTransportFailure renders the shared epilogue when a fresh upstream
-// send failed with no HTTP response: an operator storm-queue rejection
-// (rate_limit_error + Retry-After) wins when it applies, otherwise the client
-// receives the canonical upstream_unreachable 502. The generic doWithRetry
+// send failed with no HTTP response: an operator drain release (retryable 503)
+// and an operator storm-queue rejection (rate_limit_error + Retry-After) win
+// when they apply, otherwise the client receives the canonical
+// upstream_unreachable 502. The generic doWithRetry
 // epilogue and the cursor bidi open - whose five-statement blocks were
 // byte-identical - both route through here, so the two can never drift. The
 // relay's quality re-send epilogues do NOT join - each surface sinks the
@@ -230,6 +231,9 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 // line is already committed, so it emits the same upstream_unreachable
 // classification in-band on the SSE socket (relay_stream.go).
 func (s *Server) writeTransportFailure(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, err error) {
+	if s.writeQueueDrainedError(w, rec, inbound, err) {
+		return
+	}
 	if s.writeStormQueueError(w, rec, inbound, err) {
 		return
 	}
