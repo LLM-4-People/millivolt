@@ -200,11 +200,23 @@ func TestRequestOverridesForbiddenHeaders(t *testing.T) {
 // denied, and x-api-key - the Anthropic credential slot - passed validation.
 // Every credential-class spelling is now refused in both lists.
 func TestRequestOverridesRejectsCredentialNames(t *testing.T) {
-	// spellings the old literal set missed, plus the ones it had
+	// Every spelling below was confirmed reachable through valid config at some
+	// point: the first group by the literal-only set, the second by the earlier
+	// substring vocabulary, which keyed off the marker a name happened to spell
+	// rather than the header's role.
 	names := []string{
 		"x-api-key", "api-key", "x-goog-api-key", "x-session-token",
 		"x-auth-token", "client-secret", "x-amz-security-token",
 		"anthropic-api-key", "X-API-KEY",
+		// Role words the substring set missed: vendor credential spellings that
+		// carry no common marker.
+		"x-auth-key", "x-auth", "x-authentication", "x-amz-credential",
+		"x-functions-key", "x-subscription-key", "x-session-key", "x-shared-key",
+		"x-client-key", "x-service-key", "x-master-key", "x-encryption-key",
+		"x-private-key", "private_key", "x-key",
+		"x-password", "password", "x-passphrase",
+		"x-credential", "x-credentials", "bearer", "x-jwt", "jwt",
+		"x-signature", "x-hub-signature",
 	}
 	for _, name := range names {
 		for _, field := range []string{"headers", "remove_headers"} {
@@ -223,13 +235,21 @@ func TestRequestOverridesRejectsCredentialNames(t *testing.T) {
 			}
 		}
 	}
-	// Ordinary headers and the rate-limit accounting exemptions still pass. The
+	// Ordinary headers, the rate-limit accounting exemptions, and the
+	// identifier/counter shapes must still pass: the vocabulary is
+	// deny-by-default, so an over-blocked legitimate rule is its own defect. The
 	// x-proxy-limit-tokens budget header is intentionally absent: it carries the
 	// control prefix, which the override grammar denies as its own channel even
 	// though the retention vocabulary keeps it visible (it names a budget, not a
 	// secret).
-	for _, name := range []string{"user-agent", "x-lab-mode", "x-ratelimit-remaining-tokens",
-		"anthropic-ratelimit-tokens-limit", "accept-encoding"} {
+	for _, name := range []string{
+		"user-agent", "x-lab-mode", "accept-encoding", "anthropic-version",
+		"openai-beta", "x-stainless-lang", "x-request-id", "x-api-version",
+		"x-key-id", "x-idempotency-key", "cache-key",
+		"x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens",
+		"anthropic-ratelimit-tokens-limit", "x-prompt-tokens", "x-token-count",
+		"x-total-tokens", "x-tokenizer",
+	} {
 		if reason, forbidden := ForbiddenOverrideHeader(name); forbidden {
 			t.Fatalf("ForbiddenOverrideHeader(%q) denied a non-credential name (reason %q)", name, reason)
 		}

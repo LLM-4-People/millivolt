@@ -230,15 +230,20 @@ header lists. Protocol and framing names (`host`, `content-type`,
 `proxy-authenticate`, `proxy-connection`, `trailer`, `upgrade`) and the whole
 `x-proxy-` control prefix belong to the proxy and the transport. Credential
 names belong to whoever issued the secret: `authorization`, `cookie`,
-`proxy-authorization`, and every spelling the shared credential vocabulary
-classifies - `api-key`, `x-api-key`, `secret`- and `token`-bearing names, with
-the `x-ratelimit-*` and `anthropic-ratelimit-*` accounting counters exempt
-because they are numbers, not keys. That breadth is deliberate. An override
+`proxy-authorization`, and every name the shared credential vocabulary
+classifies. That vocabulary judges the header's *role*, not a list of vendor
+spellings: `auth`/`authorization`, `api-key`, `secret`, `password`,
+`credential`, `bearer`, `jwt`, `signature`, `cookie`, `key` and `token` are all
+credential-class wherever they appear, so `x-auth-key`, `x-amz-credential`,
+`x-functions-key` and `x-subscription-key` are refused along with `x-api-key`.
+Names that mention a key or a token but carry an identifier or a measurement
+stay admitted: `x-key-id`, `idempotency-key`, `cache-key`, `x-prompt-tokens`,
+`x-token-count`, and the `x-ratelimit-*` and `anthropic-ratelimit-*` families.
+That breadth is deliberate. An override
 value is operator-supplied and is stamped onto a request whose destination the
 caller chooses with `X-Proxy-Base-URL`, so a secret in any unclassified header
-name would be delivered to that caller's host; only the exact names cannot be
-enumerated in advance, which is why the check is deny-by-default rather than a
-list of vendor spellings. The same vocabulary drives capture and debug
+name would be delivered to that caller's host; vendor spellings cannot be
+enumerated in advance, which is why the check keys on role rather than a list. The same vocabulary drives capture and debug
 redaction, so a stored capture never keeps a header the wire carried. At
 runtime the target's configured auth header is skipped as well, so a rule that
 predates this check, or a future grammar slip, still cannot move a credential.

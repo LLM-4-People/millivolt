@@ -44,9 +44,13 @@ var forbiddenOverrideHeaders = map[string]string{
 // only the three literal entries above: an override value is an
 // operator-supplied secret candidate stamped onto a request whose destination
 // the caller chooses, so a vendor spelling such as x-api-key or
-// x-session-token must be refused at load rather than leaked at send time.
+// x-auth-key must be refused at load rather than leaked at send time.
+//
+// The name is trimmed here as well as by normalizeOverrideHeaders, so this
+// grammar owner answers the same way for any caller and cannot be defeated by
+// a caller that forgets to trim first.
 func ForbiddenOverrideHeader(name string) (reason string, forbidden bool) {
-	lower := strings.ToLower(name)
+	lower := strings.ToLower(strings.TrimSpace(name))
 	if reason = forbiddenOverrideHeaders[lower]; reason != "" {
 		return reason, true
 	}

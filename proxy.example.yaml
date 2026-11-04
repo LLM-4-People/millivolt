@@ -910,20 +910,24 @@ provider_aliases: {}
 # or replaces upstream headers (names are canonicalized, values must be non-empty
 # single-line), remove_headers deletes them, and body sets max_tokens /
 # max_completion_tokens (1..1000000) on a Chat Completions or Anthropic client body.
-# Credential and protocol headers are rejected at load: authorization, cookie,
-# proxy-authorization, every credential-class spelling (api-key, x-api-key, secret- and
-# token-bearing names, with the x-ratelimit-* and anthropic-ratelimit-* accounting
-# families exempt), the protocol and framing names (host, content-type, content-length,
-# transfer-encoding and the rest), and the whole x-proxy- control prefix. The override
-# applies after provider headers and the client's X-Proxy-Headers map and wins over both,
-# with two enforced exceptions: the target's resolved auth header and Authorization are
-# never set or removed by an override, and Accept-Encoding and Range are stripped after
-# the override merge because the transport owns them. It covers inference sends only,
-# never model discovery or token refresh. Body rewrites apply to Chat Completions or
-# Anthropic client bodies before translation, whatever the target (a Responses client body
-# is not rewritten), and re-stamp the recorded request cap; the Cursor bridge reads no
-# body fields, so body is skipped for cursor targets while header rules still apply. An
-# empty list leaves every request untouched. Hot-reloads.
+# Credential and protocol headers are rejected at load. Credential class is judged by
+# role, not by a list of vendor spellings: any name carrying authorization/auth, api-key,
+# secret, password, credential, bearer, jwt, signature, cookie, key or token is refused,
+# so x-auth-key, x-amz-credential, x-functions-key and x-subscription-key are covered.
+# Identifier and accounting shapes stay admitted: key-id, cache-key, idempotency-key, and
+# the token counters (x-prompt-tokens, x-token-count) plus the x-ratelimit-* and
+# anthropic-ratelimit-* families. Protocol and framing names (host, content-type,
+# content-length, transfer-encoding and the rest) and the whole x-proxy- control prefix
+# are refused as well. The override applies after provider headers and the client's
+# X-Proxy-Headers map and wins over both, with two enforced exceptions: the target's
+# resolved auth header and Authorization are never set or removed by an override, and
+# Accept-Encoding and Range are stripped after the override merge because the transport
+# owns them. It covers inference sends only, never model discovery or token refresh. Body
+# rewrites apply to Chat Completions or Anthropic client bodies before translation,
+# whatever the target (a Responses client body is not rewritten), and re-stamp the
+# recorded request cap; the Cursor bridge reads no body fields, so body is skipped for
+# cursor targets while header rules still apply. An empty list leaves every request
+# untouched. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
 request_overrides: []
