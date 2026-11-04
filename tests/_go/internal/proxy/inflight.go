@@ -580,8 +580,6 @@ func TestOversizedBodyStillAnswers413UnderBudgetPressure(t *testing.T) {
 
 	// Leave only 512 bytes of budget, so an over-cap body would certainly
 	// cross it if its bytes were charged.
-	var parked inflightLimiter
-	_ = parked
 	if !s.inflight.acquire(int64(cfg.MaxInflightBodyBytes) - 512) {
 		t.Fatal("could not park budget for the fixture")
 	}
