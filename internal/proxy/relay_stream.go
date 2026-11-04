@@ -26,7 +26,7 @@ import (
 // region is replaced with an in-band OpenAI error chunk the client treats as
 // a retryable failure. The withholding is what makes that work: SDKs treat
 // the finish chunk as the stream's end, so an error written after it would be
-// ignored. The hold is bounded by terminalHoldMax (past it the stream
+// ignored. The hold is bounded by holdMax (past it the stream
 // commits to verbatim relay - no degenerate stream has a large "terminal"
 // region), and every non-held byte is written through immediately, so the hot
 // path only ever reserves one event's worth of bytes.
@@ -61,6 +61,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		return rescueNone
 	}
+	// One snapshot for the whole stream: a concurrent reload must not change
+	// the hold decision midway through a terminal region, and the accepted
+	// source-line bound must match the scanner in this loop.
+	holdMax := int(s.cfg().StreamTerminalHoldMax)
+	eventMax := int(s.cfg().StreamEventMaxBytes)
 	var (
 		lineBuf bytes.Buffer // partial line + current chunk bytes not yet consumed
 		out     bytes.Buffer // released bytes awaiting one client write
@@ -94,10 +99,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		deferredFinish bool
 		buf            [4096]byte
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
-		// the terminalHoldMax overflow): the stream then COMMITS to verbatim
+		// the holdMax overflow): the stream then COMMITS to verbatim
 		// relay - no degenerate classification may substitute anything (a
-		// stream with a >64KiB terminal region is not one of the degenerate
-		// classes, and the client already saw the finish-reason bytes).
+		// terminal region larger than the configured hold is not one of the
+		// degenerate classes, and the client already saw the finish-reason
+		// bytes).
 		holdAborted bool
 		// rescueRequested carries the rescue decision out of finishHold
 		// (which returns only client-gone).
@@ -417,7 +423,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					continue
 				}
 				if len(eventName) > 0 {
-					if len(eventName)+len(eventBody)+len(line)+2 > terminalHoldMax {
+					if len(eventName)+len(eventBody)+len(line)+2 > holdMax {
 						// Past the bound, commit to verbatim relay: feed and
 						// release every buffered line, and never substitute.
 						eventBody = append(eventBody, line...)
@@ -581,7 +587,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// Retain a partial line for the next read: the hold owns only
 				// complete lines already seen by the analyzer. TCP/read chunk
 				// boundaries must never discard a terminal usage event.
-				if len(hold)+lineBuf.Len() > terminalHoldMax {
+				if len(hold)+lineBuf.Len() > holdMax {
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
 					if _, werr := writeCounted(w, rec, hold); werr != nil {
@@ -594,13 +600,13 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					holding = false
 					holdAborted = true
 				}
-			} else if len(eventName) > 0 && lineBuf.Len() > sseScannerBufMax {
+			} else if len(eventName) > 0 && lineBuf.Len() > eventMax {
 				// A newline-free giant inside a buffered terminal event:
 				// commit its bytes verbatim, exactly like a hold overflow.
 				eventBody = append(eventBody, lineBuf.Bytes()...)
 				abandonEventBuffer(now)
 				lineBuf.Reset()
-			} else if lineBuf.Len() > sseScannerBufMax {
+			} else if lineBuf.Len() > eventMax {
 				// Safety guardrail: a newline-free (or one giant) stream from a
 				// buggy or hostile upstream must not grow lineBuf without bound.
 				// A newline-free chunk never enters the line loop above, so the

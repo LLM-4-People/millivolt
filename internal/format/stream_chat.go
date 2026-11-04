@@ -84,6 +84,7 @@ type ChatStreamDecoder struct {
 	toolArgBytes   int
 	toolIDs        map[string]struct{}
 	openToolBlocks int
+	toolBlocksMax  int
 	open           []int
 
 	finishSeen    bool
@@ -104,6 +105,7 @@ func NewChatStreamDecoder(r io.Reader) *ChatStreamDecoder {
 		toolBlocks:     map[int]int{},
 		toolArguments:  map[int]*strings.Builder{},
 		toolIDs:        map[string]struct{}{},
+		toolBlocksMax:  StreamToolCallsMax,
 	}
 }
 
@@ -361,8 +363,10 @@ func (d *ChatStreamDecoder) toolCall(chatIndex int, id, typ, name, args string) 
 			return err
 		}
 		d.openToolBlocks++
-		if d.openToolBlocks > toolBlocksMax {
-			return fmt.Errorf("chat stream exceeds %d concurrent tool calls", toolBlocksMax)
+		if d.openToolBlocks > d.toolBlocksMax {
+			// Chat carries no per-call close event, so this counts distinct
+			// tool calls in one response rather than concurrent open blocks.
+			return fmt.Errorf("chat stream exceeds %d tool calls", d.toolBlocksMax)
 		}
 		irIndex = d.nextIndex
 		id, err := d.commitToolID(id, irIndex)

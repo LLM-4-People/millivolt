@@ -107,12 +107,22 @@ response_write_timeout: 10m
 go_memory_limit: 0B
 
 # ---- Request ----
-# Inbound body cap, SSRF allowlist, optional body-preview, and debug-capture retention.
+# Inbound body cap, tool-call history bound, SSRF allowlist, optional body-preview,
+# token-refresh response cap, and debug-capture retention.
 # Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected
 # with 413.
 # Hot-reload: yes.
 #   type: bytes · range 1KiB..1GiB · default 32MiB
 max_request_bytes: 32MiB
+
+# Most Chat tool calls across the whole message history of one inbound request, including
+# the deprecated per-message function_call shape. Anthropic tool_use and Responses
+# function_call history are bounded by their protocol collection limits instead. Real
+# agent turns replay a handful; raise it only for clients that resend unusually long tool
+# loops, because every call is materialized in memory during translation.
+# Hot-reload: yes.
+#   type: int · range 1..10000 · default 1024
+request_tool_calls_max: 1024
 
 # SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
 # operator). Each entry must be an absolute URL whose prefix is literally lowercase
@@ -158,8 +168,15 @@ debug_store_max_bytes: 512MiB
 #   type: bool · default true
 auto_token_refresh: true
 
+# Token-endpoint response read during transparent credential refresh. Past it the refresh
+# fails open and the original request is proxied unchanged.
+# Hot-reload: yes.
+#   type: bytes · range 4KiB..16MiB · default 1MiB
+token_response_max: 1MiB
+
 # ---- Upstream ----
-# Connection pool, header timeout, and stream keepalives.
+# Connection pool, header timeout, stream keepalives, model-discovery budgets and
+# response-buffer bounds.
 # How long to wait for upstream response headers. Streaming bodies are not subject to
 # this. Transient header timeouts are retried.
 # Hot-reload: yes.
@@ -202,6 +219,53 @@ models_discovery_max_bytes: 8MiB
 # Hot-reload: yes.
 #   type: int · range 1..1000 · default 100
 models_discovery_max_pages: 100
+
+# Model entries one discovery request may retain across every page and enrichment source.
+# The byte budget alone cannot bound the decoded map cost of a compact catalog, so a
+# source past this count fails closed instead of returning a partial list. Raise it for
+# providers that publish unusually large catalogs.
+# Hot-reload: yes.
+#   type: int · range 100..1000000 · default 10000
+models_discovery_max_entries: 10000
+
+# Whole buffered non-streaming upstream response a cross-protocol translation may read,
+# and the translated document it may write back. Past it the request fails with 502
+# response_too_large rather than relaying a prefix that breaks the translated shape.
+# Hot-reload: yes.
+#   type: bytes · range 4KiB..1GiB · default 32MiB
+translated_response_max_bytes: 32MiB
+
+# Upstream response headers the proxy accepts. Past it the request fails as a transport
+# error. The upstream client is rebuilt on reload, so new requests use the new value while
+# in-flight streams keep the client they started on.
+# Hot-reload: yes.
+#   type: bytes · range 4KiB..64MiB · default 1MiB
+upstream_response_header_max: 1MiB
+
+# Prefix of a non-streaming response body kept for usage and cost parsing. Larger
+# documents still relay in full; their accounting may be incomplete. This is a capture
+# cap, not a forwarding cap, and it is per in-flight non-streaming request outside
+# max_inflight_response_bytes.
+# Hot-reload: yes.
+#   type: bytes · range 16KiB..64MiB · default 1MiB
+non_stream_capture_max: 1MiB
+
+# Bytes withheld at the end of a relayed SSE stream while the relay decides between
+# verbatim release and an in-band degenerate-error substitution. Past it the hold is
+# abandoned and the bytes are released verbatim. A single complete event line can exceed
+# it by up to stream_event_max_bytes. Raise it only if a legitimate terminal region is
+# larger than the default.
+# Hot-reload: yes.
+#   type: bytes · range 4KiB..1MiB · default 64KiB
+stream_terminal_hold_max: 64KiB
+
+# Largest SSE event accepted on the passthrough relay and by every translated stream
+# decoder: a single line, and the accumulated data of a multi-line event. The translated
+# frame buffer is derived from this value, so both bounds move together. The floor is the
+# built-in accepted size; raise it only for providers that emit larger events.
+# Hot-reload: yes.
+#   type: bytes · range 2MiB..16MiB · default 2MiB
+stream_event_max_bytes: 2MiB
 
 # Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.
 # Hot-reload: yes.
@@ -556,12 +620,21 @@ sub_conversations:
     strip: true
 
 # ---- Format translation ----
-# Cross-protocol translation policy, Anthropic defaults and Cursor agent.v1 bridging.
+# Cross-protocol translation policy, streamed tool-call bound, Anthropic defaults and
+# Cursor agent.v1 bridging.
 # Injected into translated Anthropic requests when the client sent none of max_tokens,
 # max_completion_tokens or max_output_tokens.
 # Hot-reload: yes.
 #   type: int (tokens) · range 1..1000000 · default 4096
 anthropic_default_max_tokens: 4096
+
+# Most tool calls one translated response stream may carry: concurrent open blocks for
+# Anthropic and Responses, distinct calls for Chat (its stream has no per-call close
+# event). A stream past the bound ends with a translation_error. Raise it only for
+# providers that emit unusually large parallel tool batches.
+# Hot-reload: yes.
+#   type: int · range 1..10000 · default 1024
+stream_tool_calls_max: 1024
 
 # What a cross-protocol translation does when the target cannot represent a client field.
 # warn (default) drops optional fields and reports them in X-Proxy-Warnings; reject fails

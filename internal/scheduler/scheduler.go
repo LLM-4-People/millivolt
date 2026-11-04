@@ -95,6 +95,101 @@ type Scheduler struct {
 	// throttle writers take throttleMu -> gate/group mutexes. Reading through
 	// an immutable replacement removes that inversion entirely.
 	gateSnap atomic.Pointer[map[string]*providerGate]
+
+	// drainSeq publishes one monotonic generation per operator drain and
+	// drainTickets remembers the most recent drains with their scopes. A
+	// waiter snapshots the generation when it parks and, after every wake,
+	// asks whether any drain issued since then matches it, so a matching
+	// ticket releases it with ErrQueueDrained. Every field empty drains every
+	// parked waiter.
+	drainMu      sync.Mutex
+	drainSeq     atomic.Uint64
+	drainTickets atomic.Pointer[[]drainTicket]
+}
+
+// DrainScope selects parked waiters to release. An empty field matches every
+// value; all-empty drains the whole queue.
+type DrainScope struct {
+	Provider string
+	Model    string
+	Client   string
+}
+
+func (scope DrainScope) matches(provider, model, client string) bool {
+	if scope.Provider != "" && scope.Provider != provider {
+		return false
+	}
+	if scope.Model != "" && scope.Model != model {
+		return false
+	}
+	if scope.Client != "" && scope.Client != client {
+		return false
+	}
+	return true
+}
+
+// drainTicketHistory bounds how many operator drains stay readable. A parked
+// waiter re-reads the ticket set on every wake, so the history only has to
+// cover drains that land between one wake and the next - a waiter that sleeps
+// through eight consecutive operator drains is outside that window. Keeping a
+// short history rather than only the latest scope is what stops a wider drain
+// from being lost when a narrower one lands before the woken waiter runs.
+const drainTicketHistory = 8
+
+// drainTicket is one published operator drain: the generation it owns and the
+// scope it selected.
+type drainTicket struct {
+	seq   uint64
+	scope DrainScope
+}
+
+// DrainQueue releases every parked waiter matching scope - admission waiters
+// and send-gate waiters holding a slot - and returns the drain generation. It
+// is operator flow control, not a provider failure: waiters return
+// ErrQueueDrained and the proxy answers them with a retryable 503. In-flight
+// requests are never cancelled (matching pause semantics): a request already
+// exchanging bytes with the provider finishes normally.
+func (s *Scheduler) DrainQueue(scope DrainScope) uint64 {
+	s.drainMu.Lock()
+	seq := s.drainSeq.Add(1)
+	kept := make([]drainTicket, 0, drainTicketHistory)
+	kept = append(kept, drainTicket{seq: seq, scope: scope})
+	if prev := s.drainTickets.Load(); prev != nil {
+		for _, ticket := range *prev {
+			if len(kept) == drainTicketHistory {
+				break
+			}
+			kept = append(kept, ticket)
+		}
+	}
+	s.drainTickets.Store(&kept)
+	s.drainMu.Unlock()
+	// Closing the policy kick wakes every admission and send-gate waiter; each
+	// re-reads the ticket set at the top of its loop.
+	s.pauseMu.Lock()
+	s.kickPolicyLocked()
+	s.pauseMu.Unlock()
+	s.drainAll()
+	return seq
+}
+
+// queueDrained reports whether a drain issued after this waiter parked matches
+// it. snapshot is the generation the waiter read when it started waiting, so a
+// drain that ran before it parked can never release it.
+func (s *Scheduler) queueDrained(snapshot uint64, provider, model, client string) bool {
+	if s.drainSeq.Load() <= snapshot {
+		return false
+	}
+	tickets := s.drainTickets.Load()
+	if tickets == nil {
+		return false
+	}
+	for _, ticket := range *tickets {
+		if ticket.seq > snapshot && ticket.scope.matches(provider, model, client) {
+			return true
+		}
+	}
+	return false
 }
 
 // New builds a Scheduler. All Options are taken as-is - defaults are owned by
@@ -218,6 +313,10 @@ var (
 	// ErrQueueFull is returned when the group queue or a pause's MaxQueued
 	// cap is exhausted. The proxy maps this to HTTP 429.
 	ErrQueueFull = errorString("queue full")
+	// ErrQueueDrained is returned when an operator releases a parked waiter,
+	// either by draining the queue or by lowering a cap below current demand.
+	// The proxy maps it to a retryable 503 distinct from a provider failure.
+	ErrQueueDrained = errorString("queued request drained by operator")
 	// ErrGroupLimit is returned when a brand-new group would exceed the
 	// process-wide group bound. Existing keys are unaffected.
 	ErrGroupLimit = errorString("scheduler group limit reached")

@@ -96,6 +96,13 @@ target cannot consume them:
   merging them would corrupt genuinely distinct summary and content text.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
+- A Responses `max_tool_calls` request field has no cross-protocol equivalent.
+  A native Responses relay forwards it byte for byte, so the provider still
+  caps its own tool calls. A translated request drops it with a
+  `max_tool_calls` warning and `translation_loss: reject` turns that loss into
+  a 400 before any upstream send. The translated turn therefore has no
+  provider tool-call cap unless the client also sets one the target protocol
+  understands.
 - A Responses item `phase` is a wire hint with no target equivalent. A
   non-streaming request or response records one `input.phase` or `output.phase`
   warning. A translated stream keeps one `output.phase` warning only in the
@@ -331,9 +338,10 @@ until that bound expires. A non-200 status that forbids a response body (1xx,
 whose error body the client cannot receive. Pre-commit failures (routing,
 request validation, translation, or an oversized translated body) answer in the
 client protocol's own error envelope. Non-streaming translation reads the complete upstream 200
-body and the translated document under a fixed 32 MiB cap each; exceeding
-either fails closed with 502 `response_too_large` before any client bytes. The
-cap is an internal safety constant, not a configurable limit.
+body and the translated document under `translated_response_max_bytes` each
+(default 32 MiB); exceeding either fails closed with 502 `response_too_large`
+before any client bytes. Translation buffers the whole document, so the
+setting also bounds one in-flight translation's memory.
 
 Streaming translation is event-driven and bounded. Each target encoder owns its
 protocol's ordering invariants: Anthropic opens a block before any delta and
@@ -566,7 +574,7 @@ multi-line event assembly still has limits; fixture coverage is not a blanket
 protocol-conformance claim.
 
 Native model discovery translates and completes supported paginated lists under
-the shared discovery time/byte/page budget. Optional enrichment fills missing
+the shared discovery time/byte/page/entry budget. Optional enrichment fills missing
 fields without replacing upstream-owned values; it draws from the same
 discovery entry budget and degrades to the base list when the remainder cannot
 hold its metadata source.

@@ -98,6 +98,40 @@ func (c *Config) Validate() error {
 	if err := checkByteSize("max_request_bytes", c.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
 		return err
 	}
+	if err := checkByteSize("translated_response_max_bytes", c.TranslatedResponseMaxBytes, TranslatedResponseMaxBytesMin, TranslatedResponseMaxBytesMax); err != nil {
+		return err
+	}
+	// A translated response without a Content-Length reserves the whole cap
+	// against the process-wide response budget before reading. A cap above the
+	// budget can never be acquired, so reject the configuration instead of
+	// failing every such translation with a 503 later.
+	if c.MaxInflightResponseBytes != 0 && int64(c.TranslatedResponseMaxBytes) > int64(c.MaxInflightResponseBytes) {
+		return fmt.Errorf("translated_response_max_bytes (%s) cannot exceed max_inflight_response_bytes (%s)",
+			FormatByteSize(int64(c.TranslatedResponseMaxBytes)), FormatByteSize(int64(c.MaxInflightResponseBytes)))
+	}
+	if err := checkByteSize("upstream_response_header_max", c.UpstreamResponseHeaderMax, UpstreamResponseHeaderMaxMin, UpstreamResponseHeaderMaxMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("non_stream_capture_max", c.NonStreamCaptureMax, NonStreamCaptureMaxMin, NonStreamCaptureMaxMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("stream_terminal_hold_max", c.StreamTerminalHoldMax, StreamTerminalHoldMaxMin, StreamTerminalHoldMaxMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("stream_event_max_bytes", c.StreamEventMaxBytes, StreamEventMaxBytesMin, StreamEventMaxBytesMax); err != nil {
+		return err
+	}
+	if err := checkByteSize("token_response_max", c.TokenResponseMaxBytes, TokenResponseMaxMin, TokenResponseMaxMax); err != nil {
+		return err
+	}
+	if c.RequestToolCallsMax < RequestToolCallsMin || c.RequestToolCallsMax > RequestToolCallsBandMax {
+		return errRange("request_tool_calls_max",
+			strconv.Itoa(RequestToolCallsMin), strconv.Itoa(RequestToolCallsBandMax), strconv.Itoa(c.RequestToolCallsMax))
+	}
+	if c.StreamToolCallsMax < StreamToolCallsMin || c.StreamToolCallsMax > StreamToolCallsBandMax {
+		return errRange("stream_tool_calls_max",
+			strconv.Itoa(StreamToolCallsMin), strconv.Itoa(StreamToolCallsBandMax), strconv.Itoa(c.StreamToolCallsMax))
+	}
 	if c.MemoryLimit != 0 {
 		if err := checkByteSize("go_memory_limit", c.MemoryLimit, MemoryLimitMin, MemoryLimitMax); err != nil {
 			return err
@@ -481,6 +515,7 @@ func validateModelsDiscovery(c *Config) error {
 		{"models_discovery_timeout", int64(c.ModelsDiscoveryTimeout), int64(ModelsDiscoveryTimeoutMin), int64(ModelsDiscoveryTimeoutMax)},
 		{"models_discovery_max_bytes", int64(c.ModelsDiscoveryMaxBytes), ModelsDiscoveryMaxBytesMin, ModelsDiscoveryMaxBytesMax},
 		{"models_discovery_max_pages", int64(c.ModelsDiscoveryMaxPages), ModelsDiscoveryMaxPagesMin, ModelsDiscoveryMaxPagesMax},
+		{"models_discovery_max_entries", int64(c.ModelsDiscoveryMaxEntries), ModelsDiscoveryMaxEntriesMin, ModelsDiscoveryMaxEntriesMax},
 	} {
 		if limit.value < limit.min || limit.value > limit.max {
 			if limit.key == "models_discovery_timeout" {

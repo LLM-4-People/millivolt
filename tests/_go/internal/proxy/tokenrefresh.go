@@ -223,7 +223,7 @@ func TestRefreshDeviceFlowGrant(t *testing.T) {
 	m := newMockTokenServer(t, 200, `{"access_token":"fresh-access","refresh_token":"fresh-rt","expires_in":3600}`)
 	withMockTokenEndpoint(t, m.srv)
 	tg := &target{provider: "x.ai", baseURL: "https://api.x.ai/v1"}
-	fresh, err := refreshAccessToken(t.Context(), tg, "rt-1")
+	fresh, err := refreshAccessToken(t.Context(), tg, "rt-1", int64(config.Default().TokenResponseMaxBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestRefreshExchangesOnTargetHost(t *testing.T) {
 	}))
 	defer upstream.Close()
 	tg := &target{provider: "cursor.sh", baseURL: upstream.URL}
-	fresh, err := refreshAccessToken(t.Context(), tg, "cursor-rt")
+	fresh, err := refreshAccessToken(t.Context(), tg, "cursor-rt", int64(config.Default().TokenResponseMaxBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestRefreshExchangesOnTargetHost(t *testing.T) {
 }
 
 func TestRefreshUnknownProviderRejected(t *testing.T) {
-	_, err := refreshAccessToken(t.Context(), &target{provider: "127.0.0.1:1", baseURL: "http://127.0.0.1:1"}, "rt")
+	_, err := refreshAccessToken(t.Context(), &target{provider: "127.0.0.1:1", baseURL: "http://127.0.0.1:1"}, "rt", int64(config.Default().TokenResponseMaxBytes))
 	if err == nil || !strings.Contains(err.Error(), "no token refresh mechanism") {
 		t.Errorf("err = %v, want provider-deny error", err)
 	}
@@ -537,10 +537,10 @@ func TestExchangeTokenResponseSizeBoundary(t *testing.T) {
 			}
 			t.Run(mechanism.provider+"/"+name, func(t *testing.T) {
 				body := tokenResponse(t, mechanism.accessField, mechanism.refreshField, "fixture-access", "")
-				body += strings.Repeat(" ", tokenRespMax-len(body)+extra)
+				body += strings.Repeat(" ", int(config.Default().TokenResponseMaxBytes)-len(body)+extra)
 				f := newTokenRefreshFixture(t, mechanism.provider, http.StatusOK, body)
 				tg := &target{provider: mechanism.provider, baseURL: f.baseURL}
-				fresh, err := refreshAccessToken(t.Context(), tg, "client-rt")
+				fresh, err := refreshAccessToken(t.Context(), tg, "client-rt", int64(config.Default().TokenResponseMaxBytes))
 				if extra == 0 {
 					if err != nil || fresh.access != "fixture-access" {
 						t.Errorf("valid response at byte limit rejected: %v", err)

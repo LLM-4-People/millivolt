@@ -43,9 +43,6 @@ const (
 	// expiry risk; it cannot guarantee validity throughout a long generation.
 	// Internal safety margin, not user-tunable.
 	jwtRefreshMargin = 60 * time.Second
-	// tokenRespMax bounds how much of a token-endpoint response is read.
-	// Safety guardrail, not user-tunable.
-	tokenRespMax = 1 << 20
 	// tokenHTTPTimeout bounds one token-endpoint exchange (a small JSON
 	// request/response, never an LLM stream). Internal guardrail, not
 	// user-tunable.
@@ -175,12 +172,12 @@ func jwtExpiring(token string, now time.Time) bool {
 // The provider label is derived from the base URL (never client-supplied), so
 // the switch is on the same identity the dashboard groups by; unknown
 // providers are rejected here and the caller passes the original key through.
-func refreshAccessToken(ctx context.Context, t *target, refreshToken string) (refreshedTokens, error) {
+func refreshAccessToken(ctx context.Context, t *target, refreshToken string, maxBytes int64) (refreshedTokens, error) {
 	switch t.provider {
 	case "x.ai":
-		return refreshXAI(ctx, refreshToken)
+		return refreshXAI(ctx, refreshToken, maxBytes)
 	case "cursor.sh":
-		return refreshCursor(ctx, t.baseURL, refreshToken)
+		return refreshCursor(ctx, t.baseURL, refreshToken, maxBytes)
 	default:
 		return refreshedTokens{}, fmt.Errorf("no token refresh mechanism for provider %q", t.provider)
 	}
@@ -189,18 +186,18 @@ func refreshAccessToken(ctx context.Context, t *target, refreshToken string) (re
 // exchangeToken POSTs a prepared token-endpoint request and decodes the
 // response through pick. Non-200, oversize, unparsable, and access-less
 // responses are all "exchange failed" - never partial success.
-func exchangeToken(req *http.Request, pick func([]byte) (access, refresh string, err error)) (refreshedTokens, error) {
+func exchangeToken(req *http.Request, maxBytes int64, pick func([]byte) (access, refresh string, err error)) (refreshedTokens, error) {
 	resp, err := tokenHTTPClient.Do(req)
 	if err != nil {
 		return refreshedTokens{}, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, tokenRespMax+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return refreshedTokens{}, err
 	}
-	if len(body) > tokenRespMax {
-		return refreshedTokens{}, fmt.Errorf("token endpoint response exceeds %d bytes", tokenRespMax)
+	if int64(len(body)) > maxBytes {
+		return refreshedTokens{}, fmt.Errorf("token endpoint response exceeds %d bytes", maxBytes)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return refreshedTokens{}, fmt.Errorf("token endpoint returned HTTP %d", resp.StatusCode)
@@ -217,7 +214,7 @@ func exchangeToken(req *http.Request, pick func([]byte) (access, refresh string,
 
 // refreshXAI owns the OAuth refresh_token grant against auth.x.ai, not the
 // client-facing handback policy shared by all inference refresh mechanisms.
-func refreshXAI(ctx context.Context, refreshToken string) (refreshedTokens, error) {
+func refreshXAI(ctx context.Context, refreshToken string, maxBytes int64) (refreshedTokens, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
@@ -228,7 +225,7 @@ func refreshXAI(ctx context.Context, refreshToken string) (refreshedTokens, erro
 		return refreshedTokens{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	return exchangeToken(req, func(body []byte) (string, string, error) {
+	return exchangeToken(req, maxBytes, func(body []byte) (string, string, error) {
 		var out struct {
 			AccessToken  string `json:"access_token"`
 			RefreshToken string `json:"refresh_token"`
@@ -244,7 +241,7 @@ func refreshXAI(ctx context.Context, refreshToken string) (refreshedTokens, erro
 // auth/exchange_user_api_key endpoint on the SAME host the client targets -
 // the refresh token rides as a Bearer header on an empty JSON body (the same
 // exchange Cursor's own CLI login performs; not an OAuth grant flow).
-func refreshCursor(ctx context.Context, baseURL, refreshToken string) (refreshedTokens, error) {
+func refreshCursor(ctx context.Context, baseURL, refreshToken string, maxBytes int64) (refreshedTokens, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(baseURL, "/")+"/auth/exchange_user_api_key", strings.NewReader("{}"))
 	if err != nil {
@@ -252,7 +249,7 @@ func refreshCursor(ctx context.Context, baseURL, refreshToken string) (refreshed
 	}
 	req.Header.Set("Authorization", "Bearer "+refreshToken)
 	req.Header.Set("Content-Type", "application/json")
-	return exchangeToken(req, func(body []byte) (string, string, error) {
+	return exchangeToken(req, maxBytes, func(body []byte) (string, string, error) {
 		var out struct {
 			AccessToken  string `json:"accessToken"`
 			RefreshToken string `json:"refreshToken"`
@@ -288,7 +285,7 @@ func (s *Server) refreshKeyIfExpired(r *http.Request, t *target, key string) (st
 		defer cancel()
 	}
 	access, refresh, err := s.tokenRefresh.do(ctx, tokenRefreshKey(t, refreshToken), func(exchangeCtx context.Context) (string, string, error) {
-		pair, err := refreshAccessToken(exchangeCtx, t, refreshToken)
+		pair, err := refreshAccessToken(exchangeCtx, t, refreshToken, int64(s.cfg().TokenResponseMaxBytes))
 		return pair.access, pair.refresh, err
 	})
 	if err != nil || access == "" {

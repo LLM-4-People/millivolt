@@ -49,13 +49,31 @@ type sseEvent struct {
 // sseReader parses SSE frames with a bounded line and event size. It accepts
 // comment lines, multi-line data fields, and an optional event name.
 type sseReader struct {
-	scanner *bufio.Scanner
+	r        io.Reader
+	scanner  *bufio.Scanner
+	eventMax int
 }
 
 func newSSEReader(r io.Reader) *sseReader {
-	s := bufio.NewScanner(r)
-	s.Buffer(make([]byte, 0, sseLineBufInit), sseLineBufMax)
-	return &sseReader{scanner: s}
+	return &sseReader{r: r, eventMax: StreamEventMaxBytes}
+}
+
+// setEventMax applies the configured accepted-event bound before the first
+// read. Zero keeps the direct-library default.
+func (r *sseReader) setEventMax(n int) {
+	if n > 0 {
+		r.eventMax = n
+	}
+}
+
+// scan creates the line scanner on first use so a caller can apply the
+// configured line bound after construction.
+func (r *sseReader) scan() *bufio.Scanner {
+	if r.scanner == nil {
+		r.scanner = bufio.NewScanner(r.r)
+		r.scanner.Buffer(make([]byte, 0, sseLineBufInit), r.eventMax)
+	}
+	return r.scanner
 }
 
 func (r *sseReader) Next() (*sseEvent, error) {
@@ -63,8 +81,9 @@ func (r *sseReader) Next() (*sseEvent, error) {
 		ev   sseEvent
 		data bytes.Buffer
 	)
-	for r.scanner.Scan() {
-		line := r.scanner.Bytes()
+	scanner := r.scan()
+	for scanner.Scan() {
+		line := scanner.Bytes()
 		if len(line) == 0 {
 			if ev.Name == "" && data.Len() == 0 {
 				continue
@@ -86,12 +105,12 @@ func (r *sseReader) Next() (*sseEvent, error) {
 		if data.Len() > 0 {
 			data.WriteByte('\n')
 		}
-		if data.Len()+len(payload) > sseLineBufMax {
-			return nil, errors.New("sse event exceeds the line limit")
+		if data.Len()+len(payload) > r.eventMax {
+			return nil, errors.New("sse event exceeds the event limit")
 		}
 		data.Write(payload)
 	}
-	if err := r.scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 	if data.Len() > 0 || ev.Name != "" {

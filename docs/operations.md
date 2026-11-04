@@ -89,13 +89,13 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Settings category | Configuration area |
 | --- | --- |
 | Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
-| Request | Upload bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
-| Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
+| Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
+| Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap, upstream response-header cap and SSE event/hold bounds. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
-| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), Cursor parked-run lifetime and heartbeat. |
+| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call bounds, and Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
 | Backup | Size cap for one Settings backup download or restore upload. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
@@ -107,6 +107,34 @@ unitless numbers with the unit in the schema label when it is not obvious.
 The table is a navigation aid, not another source of default values.
 [Schema](../internal/config/schema.go), configuration validation and generated
 YAML remain authoritative when a setting is added or changed.
+
+### Guardrails that are not settings
+
+Every numeric guard is classified when it is added. A value becomes a setting
+when an operator can reasonably need a different number for legitimate traffic.
+It stays an internal constant when changing it independently would break an
+invariant, encode a protocol maximum, or only tune an internal heuristic.
+
+| Family | Examples | Why it stays internal |
+| --- | --- | --- |
+| Protocol maxima | Chat `stop` list of 4 | The wire defines the practical maximum; a longer list is clamped to it with an approximation warning. |
+| Derived frame bounds | `NativeStreamFrameMax(eventMax)`, `ResponsesStreamFrameMaxBytes`, the proxy's translated frame buffer | Computed from the accepted source-event and retained-byte bounds plus the JSON escape expansion. A separate value could under-size a scanner, turning a valid frame into a translation error, or over-size it and defeat the retention bound. |
+| Recursion and canonicalization budgets | Anthropic nested block depth 16, tool-argument canonical depth 64, separator budget, canonical byte cap | They select a safe fallback (the raw-byte fingerprint) or cap decoder recursion. They are algorithm facts, not wire acceptance. |
+| Diagnostic echo bounds | 128-byte warning echo, 512-byte identity and provider-text retention, header echo caps | A request-sized diagnostic or identifier must never multiply across a stream or a stored row. Raising them cannot admit a request that is otherwise rejected; it only grows logs and frames. |
+| Record retention | Retained tool names (64), tool-call ids (1024), path/method/model/error caps, capture header caps | They bound the ring, pending snapshots and durable rows. Counts still count past the bound; only identities stop being retained. |
+| Metrics-only truncation | Non-streaming choice cap, SSE analyzer event buffer | The non-streaming choice cap never changes relayed bytes. The SSE analyzer cap can affect classification for events split across that bound, as the protocol limits note; raising it cannot admit a request that is otherwise rejected. |
+| Cursor run and store budgets | Parked run count, per-run pending call/byte caps, blob store caps, aggregate store budget | They bound per-run and process memory for a bridge whose counts come from live tool batches, not operator intent. The per-run and aggregate caps are coupled. |
+| Internal heuristic thresholds | Quality retry spool, error-body capture, discovery output allowance, storage sweep batch sizes, log scan and chart/explorer budgets | They decide whether an internal heuristic runs or how much work one pass may do. Changing them changes diagnostics or performance, not what a client may send or receive. |
+
+The operator-facing bounds are settings: `request_tool_calls_max`,
+`stream_tool_calls_max`, `translated_response_max_bytes`,
+`models_discovery_max_entries`, `non_stream_capture_max`,
+`stream_terminal_hold_max`, `stream_event_max_bytes`, `token_response_max` and
+`upstream_response_header_max`. `non_stream_capture_max` trades accounting
+accuracy for memory and never changes relayed bytes. A new guard must be
+classified in this table when it is added, and a guard that becomes
+operator-facing moves to the settings schema instead of keeping a parallel
+constant.
 
 ### Saving settings safely
 
@@ -816,6 +844,7 @@ both.
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
 | `GET/POST /admin/throttle` | Inspect/provider-limit updates. POST requires provider and accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge; `clear:true` removes policy. |
+| `POST /admin/queue/drain` | Release parked requests without waiting for their limit, pause hold or retry window, covering both the admission queue and the send gate. Requires exactly one scope: `all:true`, `provider`, `model` or `client`. Released requests answer with a retryable 503, never a provider error; a request already exchanging bytes with the provider finishes normally. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
@@ -984,6 +1013,13 @@ a grant refills a saturated provider concurrency cap. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
+**Drain queued** releases requests the scheduler has parked for the selected
+provider, or for the model/client named in the menu fields, without waiting for
+a limit window, pause hold or retry pacing to open. Each released request
+answers with a retryable 503 and is recorded as `queue_drained`, never as a
+provider error; a request already exchanging bytes with the provider finishes
+normally.
+
 Anti-burst is opt-in and scoped to each provider+key group. With `anti_burst`
 enabled and a concurrency target of at least 2, a group starts at one
 concurrent request and gains allowance linearly until it reaches the provider's
@@ -1049,12 +1085,17 @@ that stops sending for `upstream_stream_idle_timeout` is canceled.
 Request and token budgets start full when enabled and refill continuously at
 the configured count/window rate. Request budget is charged once per proxy
 admission, not again for each absorbed upstream retry. Token admission reserves
-an estimate from captured prompt characters divided by four plus a positive
-captured output limit, then settles against final reported usage. A reservation
-larger than the bucket's entire capacity can proceed while credit is positive,
-putting the bucket into debt that refill or usage settlement can repay. These
-controls permit bursts and oversized requests; they are not strict fixed-window
-provider quota enforcement.
+the captured prompt characters divided by four, then settles against final
+reported usage. The client's output ceiling (`max_tokens` and its spellings) is
+deliberately not reserved: it is a ceiling, not expected usage, and reserving it
+would turn the budget into a worst-case concurrency cap. A reservation larger
+than the bucket's entire capacity can proceed while credit is positive, putting
+the bucket into debt that refill or usage settlement can repay. These controls
+permit bursts and oversized requests; they are not strict fixed-window provider
+quota enforcement. A token budget therefore also sets the sustained average
+rate: 500K tokens per 6h refills at about 23 tokens/s, so once the initial
+budget is spent, later requests wait for refill unless actual usage settles
+lower than the reservation.
 
 ### Error storm protection
 
@@ -1790,9 +1831,9 @@ storage guarantees.
 - Non-streaming usage/cost inspection keeps a bounded prefix, so larger valid
   responses can forward completely without complete accounting.
 - Optional non-streaming translation reads the complete upstream 200 body and
-  the translated document under a fixed 32 MiB cap each. Exceeding either
-  fails closed with 502 `response_too_large` before any client bytes; the cap
-  is an internal safety constant, not a setting, and discovery budgets do not
+  the translated document under the configured `translated_response_max_bytes`
+  each (default 32 MiB). Exceeding either fails closed with 502
+  `response_too_large` before any client bytes; discovery budgets do not
   bound the path.
 - General multi-line SSE accounting/native event assembly remains incomplete;
   some split terminal/content shapes can affect classification, not just metrics.

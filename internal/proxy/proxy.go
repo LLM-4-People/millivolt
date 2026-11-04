@@ -66,55 +66,33 @@ const (
 	// capture the provider's error detail for metrics; the body itself is
 	// still relayed to the client in full. Safety guardrail, not user-tunable.
 	maxErrBodyBytes = 64 * 1024
-	// sseScannerBufInit sizes SSE scanner buffers; sseScannerBufMax bounds one
-	// source event line on the passthrough relay. The small initial buffer
-	// fits the ordinary chunk and grows on demand, so a stream that never
-	// exceeds it retains 4 KiB instead of 64. Safety guardrail, not
-	// user-tunable.
+	// sseScannerBufInit sizes SSE scanner buffers; the accepted source-event
+	// line bound is config.StreamEventMaxBytes. The small initial buffer fits
+	// the ordinary chunk and grows on demand, so a stream that never exceeds it
+	// retains 4 KiB instead of the configured maximum.
 	sseScannerBufInit = 4 * 1024
-	sseScannerBufMax  = 1024 * 1024
-	// translatedFrameBufMax bounds one translated SSE frame line. The
-	// translated scanner consumes the frames the format translator emits, so
-	// it takes the translator's own output bound: the accepted source-line
-	// bound plus JSON re-encoding and retained-identity expansion. Keeping
-	// that fact with the translator means every source line it accepts has a
-	// relayable frame instead of failing a legitimate chunk as
-	// translation_error. Safety guardrail, not user-tunable.
-	translatedFrameBufMax = max(providerformat.NativeStreamFrameMaxBytes,
-		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
-	// nonStreamCaptureMax bounds the prefix of a non-streaming response body
-	// kept for usage/cost parsing. Documents exceeding this capture can have
-	// unavailable accounting; their original bytes are still relayed in full.
-	// Safety guardrail, not user-tunable.
-	nonStreamCaptureMax = 1 << 20 // 1 MiB
 	// nonStreamGrowInit / nonStreamChunk size the incremental non-stream
 	// relay buffer (initial capture prefix / read chunk). Guardrails, not tunables.
 	nonStreamGrowInit = 64 * 1024
 	nonStreamChunk    = 32 * 1024
-	// maxResponseHeaderBytes is the abusive-upstream header cap on the
-	// outbound client. Safety guardrail, not user-tunable.
-	maxResponseHeaderBytes = 1 << 20 // 1 MiB
 	// qualitySpoolMax bounds the pre-write spool of a non-streaming 200 kept
 	// for degenerate-outcome verification. Degenerate bodies are tiny (empty
 	// JSON shells); a body past this cap is clearly not degenerate and is
 	// committed to verbatim relay. Safety guardrail, not user-tunable.
 	qualitySpoolMax = 1 << 20 // 1 MiB
-	// terminalHoldMax bounds the bytes withheld at the end of a relayed SSE
-	// stream (from the first terminal-candidate event onward) while the relay
-	// decides between verbatim release and substituting an in-band degenerate
-	// error. Past the cap the hold is abandoned: no terminal region this large
-	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
-	terminalHoldMax = 64 * 1024
-	// maxTranslateBodyBytes caps the buffered read of a translated
-	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool
-	// prefixes above, translation needs the WHOLE document, so this is a
-	// hard fail-closed cap, not a graceful prefix: past it the body cannot be
-	// translated, and relaying it verbatim would break the translated-shape
-	// contract, so the read fails closed as a 502 (nothing has been written
-	// to the client yet on that path). Sized at the request-side default
-	// scale (max_request_bytes). Safety guardrail, not user-tunable.
-	maxTranslateBodyBytes = 32 << 20 // 32 MiB
 )
+
+// translatedFrameBufMax bounds one translated SSE frame line for the configured
+// accepted source-line bound. The translated scanner consumes the frames the
+// format translator emits, so it takes the translator's own output bound: the
+// accepted source-line bound plus JSON re-encoding and retained-identity
+// expansion. Keeping that fact with the translator means every source line it
+// accepts has a relayable frame instead of failing a legitimate chunk as a
+// translation_error.
+func translatedFrameBufMax(eventMax int) int {
+	return max(providerformat.NativeStreamFrameMax(eventMax),
+		providerformat.ResponsesStreamFrameMaxBytes+2*1024)
+}
 
 // isNonRetryableQuotaErr is the proxy-local spelling of the canonical quota
 // predicate (metrics owns the vocabulary, next to ParseErrorEnvelope): a 429
@@ -423,7 +401,7 @@ func newUpstreamClient(cfg *config.Config) *http.Client {
 		MaxConnsPerHost:        cfg.MaxConnsPerHost,
 		IdleConnTimeout:        cfg.IdleConnTimeout,
 		ResponseHeaderTimeout:  cfg.UpstreamTimeout, // 0 = no header-arrival cap
-		MaxResponseHeaderBytes: maxResponseHeaderBytes,
+		MaxResponseHeaderBytes: int64(cfg.UpstreamResponseHeaderMax),
 		DialContext:            upstreamDialer(cfg).DialContext,
 		TLSHandshakeTimeout:    cfg.UpstreamTLSHandshakeTimeout,
 		// Without a cache every new HTTPS connection (idle expiry, reload)
@@ -594,7 +572,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, reserve)
+	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, reserve, s.cfg())
 	if err != nil {
 		status := http.StatusBadRequest
 		var overflow *http.MaxBytesError
@@ -747,7 +725,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// for the KV channel).
 	if t.translate && t.format != "cursor" {
 		req, translated, warnings, err := providerformat.TranslateRequestBetweenIR(
-			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
+			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue,
+			providerformat.RequestLimits{ToolCallsMax: s.cfg().RequestToolCallsMax})
 		if err != nil {
 			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 			return
@@ -778,7 +757,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
-			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview, s.cfg()); err != nil {
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
 			}
@@ -854,7 +833,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	state := &stormRequestState{rec: rec, format: t.format}
-	ctx := context.WithValue(r.Context(), stormContextKey{}, state)
+	ctx, cancelCtx := context.WithCancel(context.WithValue(r.Context(), stormContextKey{}, state))
+	defer cancelCtx()
 	defer func() {
 		s.finishStormResponse(ctx, false)
 	}()
@@ -893,6 +873,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var pacer *ssePacer
 	if stream {
 		pacer = s.newSSEPacerFor(w)
+		// A keepalive that cannot be written means the client is gone. Cancel
+		// the request context so a parked queue wait (or a send gate wait)
+		// unwinds instead of staying queued until a provider timer fires.
+		pacer.onGone = cancelCtx
 		w = pacer
 		pacer.Arm()
 	}
@@ -910,6 +894,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hooks := scheduler.WaiterHooks{
 		Client:    rec.Client,
 		Provider:  rec.Provider,
+		Model:     rec.Model,
 		EstTokens: estimateTokens(rec),
 		OnWait: func() {
 			if stream {
@@ -947,7 +932,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if t.format != "cursor" {
 		_, err = s.waitStormGate(ctx, hooks, true)
 		if err != nil {
-			if r.Context().Err() != nil {
+			if errors.Is(ctx.Err(), context.Canceled) {
 				markClientGone(rec)
 				return
 			}
@@ -958,8 +943,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	queueStart := time.Now()
 	release, err := s.scheduler.AcquireWith(ctx, groupKey, maxConc, hooks)
 	if err != nil {
-		if r.Context().Err() == context.Canceled {
+		// A cancellation outranks a drain: the client that went away is
+		// recorded as a client abort, never as an operator release.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			// Covers both the client's own disconnect and a keepalive write
+			// failure that proved the socket is gone (pacer.onGone). A
+			// DeadlineExceeded stays a proxy-side failure below.
 			markClientGone(rec)
+			return
+		}
+		if s.writeQueueDrainedError(w, rec, t.inbound, err) {
 			return
 		}
 		rec.ErrorType = "queue_full"
@@ -994,7 +987,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// "client closed request" (never an error, matching the broken-pipe
 		// stream classification). A nil request context (e.g. our own request
 		// deadline) is a real proxy-side failure: 502 upstream_unreachable.
-		if r.Context().Err() == context.Canceled {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			// Covers both the client's own disconnect and a keepalive write
+			// failure that proved the socket is gone (pacer.onGone). A
+			// DeadlineExceeded stays a proxy-side failure below.
 			markClientGone(rec)
 			return
 		}

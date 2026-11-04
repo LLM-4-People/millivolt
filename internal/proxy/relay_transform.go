@@ -94,6 +94,11 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 		// Stream translation: convert Anthropic SSE -> OpenAI SSE, while
 		// feeding the transformed stream through the metrics analyzer.
 		if t.translate {
+			// One snapshot for the whole stream: the translator's accepted
+			// source-line bound and the relay scanner's frame bound must agree
+			// even if a reload lands while this stream is running.
+			eventMax := int(s.cfg().StreamEventMaxBytes)
+			frameMax := translatedFrameBufMax(eventMax)
 			pr, pw := io.Pipe()
 			tracked := &translatedStreamWriter{dst: pw, terminal: terminalFrameFor(t.inbound)}
 			costKeys := s.costKeysFor(rec.Provider)
@@ -125,12 +130,17 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}
-				}, providerformat.StreamOptions{IncludeUsage: t.streamIncludeUsage, FallbackModel: rec.Model})
+				}, providerformat.StreamOptions{
+					IncludeUsage:  t.streamIncludeUsage,
+					FallbackModel: rec.Model,
+					ToolBlocksMax: s.cfg().StreamToolCallsMax,
+					EventMaxBytes: eventMax,
+				})
 				pw.CloseWithError(translationErr)
 			}()
 			// Re-run the SSE analyzer over the transformed stream.
 			resetTurnMetrics(rec)
-			s.streamBodyTranslated(ctx, w, pr, rec, flusher, t.inbound)
+			s.streamBodyTranslated(ctx, w, pr, rec, flusher, t.inbound, frameMax)
 			// Close both ends of upstream work on early client failure, then
 			// join before reading source accounting or finalizing the record.
 			pr.Close()
@@ -211,7 +221,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 // A scanner error here is the transformer's failure propagated through the
 // pipe: a genuine translation/upstream error - unless the client disconnected,
 // in which case the loop above already exited via a failed write to w.
-func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, flusher http.Flusher, inbound ir.Protocol) {
+func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, flusher http.Flusher, inbound ir.Protocol, frameMax int) {
 	if flusher == nil {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
 			markStreamErr(ctx, rec, err)
@@ -219,7 +229,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, sseScannerBufInit), translatedFrameBufMax)
+	scanner.Buffer(make([]byte, 0, sseScannerBufInit), frameMax)
 	a := s.translatedAnalyzer()
 	// Frames are accumulated until their blank-line terminator, then written
 	// and flushed once: the transformer always emits "data: ...\n\n", so this

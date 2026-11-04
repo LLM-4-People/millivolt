@@ -51,6 +51,16 @@ type Config struct {
 	// will buffer to discover routing metadata. Larger bodies are rejected.
 	MaxRequestBytes ByteSize `yaml:"max_request_bytes" json:"max_request_bytes"`
 
+	// RequestToolCallsMax bounds the aggregate Chat tool calls across every
+	// message of one inbound request: tool_calls members plus the deprecated
+	// per-message function_call shape, before translation materializes each as
+	// a typed call and, on an Anthropic or Cursor target, a content block.
+	// Anthropic tool_use and Responses function_call history are bounded by
+	// their protocol collection limits instead. Real agent history carries a
+	// handful per turn; raising it admits longer replayed tool loops at the
+	// cost of more transient memory per request. Hot-reloads.
+	RequestToolCallsMax int `yaml:"request_tool_calls_max" json:"request_tool_calls_max"`
+
 	// UpstreamTimeout is the maximum time to wait for an upstream response's
 	// headers. Streaming bodies are not subject to this timeout (only header
 	// arrival), so long generations are unaffected. Zero disables the cap.
@@ -65,6 +75,51 @@ type Config struct {
 	ModelsDiscoveryTimeout  time.Duration `yaml:"models_discovery_timeout" json:"models_discovery_timeout"`
 	ModelsDiscoveryMaxBytes ByteSize      `yaml:"models_discovery_max_bytes" json:"models_discovery_max_bytes"`
 	ModelsDiscoveryMaxPages int           `yaml:"models_discovery_max_pages" json:"models_discovery_max_pages"`
+	// ModelsDiscoveryMaxEntries bounds the model entries one discovery request
+	// may retain across every primary page and enrichment source. The raw-byte
+	// budget alone cannot bound discovery memory: a compact 8 MiB body of
+	// {"id":"x"} objects holds over 600k entries, and one decoded map per entry
+	// costs hundreds of MiB. Exceeding it fails closed, never a partial list.
+	// Raise it for providers that publish unusually large catalogs. Hot-reloads
+	// for new discovery requests.
+	ModelsDiscoveryMaxEntries int `yaml:"models_discovery_max_entries" json:"models_discovery_max_entries"`
+
+	// TranslatedResponseMaxBytes caps the whole buffered read of a translated
+	// non-streaming upstream response, and the translated document written
+	// back. Translation needs the complete document, so this fails closed with
+	// 502 response_too_large instead of relaying a prefix. Raise it when
+	// translating unusually large provider responses. Hot-reloads.
+	TranslatedResponseMaxBytes ByteSize `yaml:"translated_response_max_bytes" json:"translated_response_max_bytes"`
+
+	// UpstreamResponseHeaderMax bounds the upstream response headers the proxy
+	// accepts. Past it the request fails as a transport error. Hot-reloads for
+	// new requests: the upstream client is rebuilt on reload and in-flight
+	// streams keep the client they started on.
+	UpstreamResponseHeaderMax ByteSize `yaml:"upstream_response_header_max" json:"upstream_response_header_max"`
+
+	// NonStreamCaptureMax bounds the prefix of a non-streaming response body
+	// kept for usage/cost parsing. Larger documents still relay in full; their
+	// accounting may be incomplete. Hot-reloads.
+	NonStreamCaptureMax ByteSize `yaml:"non_stream_capture_max" json:"non_stream_capture_max"`
+
+	// StreamTerminalHoldMax bounds the bytes withheld at the end of a relayed
+	// SSE stream while the relay decides between verbatim release and an
+	// in-band degenerate-error substitution. Past it the hold is abandoned and
+	// the bytes are released verbatim. Hot-reloads for new streams.
+	StreamTerminalHoldMax ByteSize `yaml:"stream_terminal_hold_max" json:"stream_terminal_hold_max"`
+
+	// StreamEventMaxBytes bounds one SSE event on both the passthrough relay
+	// and every translated stream decoder: a single line, and the accumulated
+	// data of a multi-line event. The translated frame buffer is derived from
+	// it, so an event the decoder accepts always has a relayable target frame.
+	// The floor is the built-in accepted size; raise it only for providers that
+	// emit larger events. Hot-reloads for new streams.
+	StreamEventMaxBytes ByteSize `yaml:"stream_event_max_bytes" json:"stream_event_max_bytes"`
+
+	// TokenResponseMaxBytes bounds a token-endpoint response read during
+	// transparent credential refresh. Past it the refresh fails open and the
+	// original request is proxied. Hot-reloads.
+	TokenResponseMaxBytes ByteSize `yaml:"token_response_max" json:"token_response_max"`
 
 	// AllowedBaseURLs is an optional allowlist of upstream base URL prefixes.
 	// When non-empty, only targets matching one of these prefixes are accepted;
@@ -316,6 +371,13 @@ type Config struct {
 	// when the client sent none of max_tokens, max_completion_tokens or
 	// max_output_tokens (Anthropic requires max_tokens).
 	AnthropicDefaultMaxTokens int `yaml:"anthropic_default_max_tokens" json:"anthropic_default_max_tokens"`
+	// StreamToolCallsMax bounds the tool blocks one translated response stream
+	// may track: concurrent open blocks for Anthropic and Responses, distinct
+	// calls for Chat (its stream has no per-call close event). A stream past
+	// the bound ends with a translation_error. Loops that fan out many parallel
+	// calls in one turn can raise it; each extra block retains provider bytes
+	// until it closes. Hot-reloads for new streams.
+	StreamToolCallsMax int `yaml:"stream_tool_calls_max" json:"stream_tool_calls_max"`
 	// TranslationLoss selects what a cross-protocol translation does when the
 	// target cannot represent a client field: warn (default) drops optional
 	// fields and reports them in X-Proxy-Warnings; reject fails the request

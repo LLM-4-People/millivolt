@@ -87,6 +87,8 @@ type waiter struct {
 	pausedAt  time.Time       // when the current hold began while this waiter was queued
 	client    string
 	provider  string
+	model     string
+	drainSeq  uint64
 	holdID    string
 	holding   bool
 	onHold    func()
@@ -112,6 +114,7 @@ type waiter struct {
 type WaiterHooks struct {
 	Client       string
 	Provider     string
+	Model        string
 	EstTokens    int64
 	OnWait       func()
 	OnHold       func()
@@ -199,8 +202,9 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	// a grant relies on drain's non-blocking send and phantom-slot reconciliation.
 	w := &waiter{
 		ch: make(chan struct{}, 1), enqueued: enqueued, ctx: ctx,
-		client: hooks.Client, provider: hooks.Provider,
-		onHold: hooks.OnHold, onUnhold: hooks.OnUnhold,
+		client: hooks.Client, provider: hooks.Provider, model: hooks.Model,
+		drainSeq: g.sched.drainSeq.Load(),
+		onHold:   hooks.OnHold, onUnhold: hooks.OnUnhold,
 		estTokens: hooks.EstTokens,
 	}
 	if h := g.sched.matchingHold(w.client, w.provider); h != nil {
@@ -251,6 +255,12 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	}
 
 	for {
+		// An operator drain releases this waiter before it can be granted.
+		// Checked first so a drain racing a grant still wins for queued work.
+		if g.sched.queueDrained(w.drainSeq, w.provider, w.model, w.client) {
+			g.removeWaiter(w)
+			return nil, ErrQueueDrained
+		}
 		// Snapshot kick before the hold predicate. Select evaluates channel
 		// operands once on entry; AddHold close-and-replaces kick, so a
 		// post-predicate kickC() can miss the close (lost wakeup).

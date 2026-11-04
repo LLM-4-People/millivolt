@@ -1240,13 +1240,19 @@ func TestEncodedKnownRouteWithInFormatTranslation(t *testing.T) {
 // scanner bound must cover every frame the format encoders can legally emit.
 func TestTranslatedFrameBufCoversEncoderCaps(t *testing.T) {
 	for name, cap := range map[string]int{
-		"native stream":          providerformat.NativeStreamFrameMaxBytes,
+		"native stream":          providerformat.NativeStreamFrameMax(providerformat.StreamEventMaxBytes),
 		"responses stream":       providerformat.ResponsesStreamFrameMaxBytes,
 		"responses stream + pad": providerformat.ResponsesStreamFrameMaxBytes + 2*1024,
 	} {
-		if translatedFrameBufMax < cap {
-			t.Fatalf("translatedFrameBufMax = %d, want at least %s (%d)", translatedFrameBufMax, name, cap)
+		if translatedFrameBufMax(int(config.Default().StreamEventMaxBytes)) < cap {
+			t.Fatalf("translatedFrameBufMax(int(config.Default().StreamEventMaxBytes)) = %d, want at least %s (%d)", translatedFrameBufMax(int(config.Default().StreamEventMaxBytes)), name, cap)
 		}
+	}
+	// The derived frame bound must also cover the largest configurable event,
+	// so raising stream_event_max_bytes cannot under-size the relay scanner.
+	maxEvent := int(config.StreamEventMaxBytesMax)
+	if got, want := translatedFrameBufMax(maxEvent), providerformat.NativeStreamFrameMax(maxEvent); got < want {
+		t.Fatalf("translatedFrameBufMax(%d) = %d, want at least NativeStreamFrameMax (%d)", maxEvent, got, want)
 	}
 }
 

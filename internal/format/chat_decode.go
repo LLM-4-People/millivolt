@@ -16,10 +16,19 @@ import (
 )
 
 // DecodeChatRequest converts one Chat Completions request body into the
-// canonical request. The whole body must be valid UTF-8: a raw invalid byte is
-// rejected before the typed decode so the decoder's replacement rune cannot
-// expand a body-sized string.
+// canonical request with the direct-library safety bounds. The proxy calls
+// decodeChatRequest through DecodeRequest with the operator's configured
+// limits. The whole body must be valid UTF-8: a raw invalid byte is rejected
+// before the typed decode so the decoder's replacement rune cannot expand a
+// body-sized string.
 func DecodeChatRequest(body []byte) (*ir.Request, error) {
+	return decodeChatRequest(body, RequestLimits{ToolCallsMax: WireToolCallsMax})
+}
+
+func decodeChatRequest(body []byte, limits RequestLimits) (*ir.Request, error) {
+	if limits.ToolCallsMax < 1 {
+		return nil, errParseOpenAIBody(fmt.Errorf("tool-call bound must be positive, got %d", limits.ToolCallsMax))
+	}
 	if !utf8.Valid(body) {
 		return nil, errParseOpenAIBody(errors.New("request body is not valid UTF-8"))
 	}
@@ -71,15 +80,23 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	// proxy preflights the same aggregate so both paths accept the same body.
 	if len(bounds.Messages) > 0 {
 		var messages []struct {
-			ToolCalls json.RawMessage `json:"tool_calls"`
+			ToolCalls    json.RawMessage `json:"tool_calls"`
+			FunctionCall json.RawMessage `json:"function_call"`
 		}
 		if err := json.Unmarshal(bounds.Messages, &messages); err != nil {
 			return nil, errParseOpenAIBody(err)
 		}
 		total := 0
 		for i, message := range messages {
-			if err := addWireArray(&total, message.ToolCalls, fmt.Sprintf("messages[%d].tool_calls", i), WireToolCallsMax); err != nil {
+			if err := addWireArray(&total, message.ToolCalls, fmt.Sprintf("messages[%d].tool_calls", i), limits.ToolCallsMax); err != nil {
 				return nil, errParseOpenAIBody(err)
+			}
+			// The deprecated one-call shape materializes a typed call too.
+			if raw := bytes.TrimSpace(message.FunctionCall); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+				total++
+				if total > limits.ToolCallsMax {
+					return nil, errParseOpenAIBody(fmt.Errorf("messages[%d].function_call exceeds %d tool calls", i, limits.ToolCallsMax))
+				}
 			}
 		}
 	}

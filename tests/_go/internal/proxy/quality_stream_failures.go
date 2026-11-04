@@ -364,8 +364,8 @@ func TestResponsesAPIStreamHealthy(t *testing.T) {
 }
 
 // TestStreamTerminalHoldOverflowCommit: a terminal region grown past the
-// terminalHoldMax guardrail commits to verbatim relay - the hold is abandoned
-// (no degenerate stream has a 64KiB+ "terminal" region), so every byte
+// stream terminal hold guardrail commits to verbatim relay - the hold is abandoned
+// (no degenerate stream has a terminal region that large), so every byte
 // reaches the client exactly.
 func TestStreamTerminalHoldOverflowCommit(t *testing.T) {
 	bigComment := ":" + strings.Repeat("x", 70*1024) + "\n"

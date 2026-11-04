@@ -369,9 +369,9 @@ func TestAllowedBaseURLs(t *testing.T) {
 }
 
 // TestParseErrorBodyBounded pins two invariants: (1) the provider's error
-// message is bounded via metrics.TruncatePreview (it can echo user content, so
-// it must never be stored unbounded), and (2) an oversized body truncated
-// mid-token still yields a classifiable signature, not a blank one.
+// message is bounded by the shared record-retention bound (it can echo user
+// content, so it must never be stored unbounded), and (2) an oversized body
+// truncated mid-token still yields a classifiable signature, not a blank one.
 func TestParseErrorBodyBounded(t *testing.T) {
 	// A huge error message is truncated to the preview bound.
 	big := `{"error":{"type":"invalid_request_error","message":"` + strings.Repeat("x", 5000) + `"}}`
@@ -379,8 +379,8 @@ func TestParseErrorBodyBounded(t *testing.T) {
 	if typ != "invalid_request_error" {
 		t.Errorf("typ = %q", typ)
 	}
-	if len(msg) > metrics.PreviewMaxBytes+len("…") {
-		t.Errorf("msg len %d exceeds preview bound", len(msg))
+	if len(msg) > metrics.RetainedErrorMsgMax+len("…") {
+		t.Errorf("msg len %d exceeds the error-message bound", len(msg))
 	}
 
 	// A body that doesn't parse (e.g. truncated mid-token) still yields a
@@ -389,8 +389,8 @@ func TestParseErrorBodyBounded(t *testing.T) {
 	if typ2 == "" {
 		t.Error("unparseable error body yielded a blank error type")
 	}
-	if len(msg2) > metrics.PreviewMaxBytes+len("…") {
-		t.Errorf("fallback msg len %d exceeds preview bound", len(msg2))
+	if len(msg2) > metrics.RetainedErrorMsgMax+len("…") {
+		t.Errorf("fallback msg len %d exceeds the error-message bound", len(msg2))
 	}
 }
 
@@ -509,7 +509,7 @@ func TestParseLLMRequestCapturesNonContentParams(t *testing.T) {
 		"messages": [{"role":"user","content":"secret message content"}]
 	}`)
 	var rec metrics.Record
-	parseLLMRequest(body, &rec, false)
+	parseTestRequest(body, &rec, false)
 
 	// The shared parser extracts routing and non-content parameters together.
 	if rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != 512 {
@@ -556,7 +556,7 @@ func TestParseLLMRequestCapturesNonContentParams(t *testing.T) {
 
 func TestParseLLMRequestCapturesReasoningEffortAndVerbosity(t *testing.T) {
 	var rec metrics.Record
-	parseLLMRequest([]byte(`{"reasoning_effort":"high","verbosity":"low","messages":[{"role":"user","content":"hi"}]}`), &rec, false)
+	parseTestRequest([]byte(`{"reasoning_effort":"high","verbosity":"low","messages":[{"role":"user","content":"hi"}]}`), &rec, false)
 	if rec.ReqReasoningEffort != "high" {
 		t.Errorf("effort = %q", rec.ReqReasoningEffort)
 	}
@@ -565,13 +565,13 @@ func TestParseLLMRequestCapturesReasoningEffortAndVerbosity(t *testing.T) {
 	}
 
 	var rec2 metrics.Record
-	parseLLMRequest([]byte(`{"reasoning":{"effort":"xhigh"},"messages":[{"role":"user","content":"hi"}]}`), &rec2, false)
+	parseTestRequest([]byte(`{"reasoning":{"effort":"xhigh"},"messages":[{"role":"user","content":"hi"}]}`), &rec2, false)
 	if rec2.ReqReasoningEffort != "xhigh" {
 		t.Errorf("nested effort = %q", rec2.ReqReasoningEffort)
 	}
 
 	var rec3 metrics.Record
-	parseLLMRequest([]byte(`{"reasoning_effort":"drop this because spaces","verbosity":"also not ok!","messages":[{"role":"user","content":"secret"}]}`), &rec3, false)
+	parseTestRequest([]byte(`{"reasoning_effort":"drop this because spaces","verbosity":"also not ok!","messages":[{"role":"user","content":"secret"}]}`), &rec3, false)
 	if rec3.ReqReasoningEffort != "" || rec3.ReqVerbosity != "" {
 		t.Errorf("rejected tokens leaked: %q %q", rec3.ReqReasoningEffort, rec3.ReqVerbosity)
 	}
@@ -650,7 +650,7 @@ func TestParseLLMRequestMeasuresPromptComposition(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record
-			parseLLMRequest([]byte(tc.body), &rec, false)
+			parseTestRequest([]byte(tc.body), &rec, false)
 			if rec.CharsSystem != tc.wantCharsSystem {
 				t.Errorf("CharsSystem = %d, want %d", rec.CharsSystem, tc.wantCharsSystem)
 			}

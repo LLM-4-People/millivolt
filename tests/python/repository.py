@@ -779,7 +779,7 @@ class PublishedContracts(unittest.TestCase):
             "one `output.phase` warning",
             "no client header or stored record carries it",
             "`output.<type>` warning",
-            "fixed 32 MiB cap each",
+            "`translated_response_max_bytes` each (default 32 MiB)",
             # Round 8 verification follow-up: each corrected claim is pinned so
             # the docs cannot drift back to the stronger behavior.
             "rejected before the upstream send on a translated request",
@@ -861,11 +861,10 @@ class PublishedContracts(unittest.TestCase):
 
     def test_operations_known_limits_pin_translation_cap_and_strict_backup_read(self):
         operations = re.sub(r"\s+", " ", self.read("docs/operations.md"))
-        self.assertIn("fixed 32 MiB cap each", operations)
+        self.assertIn("`translated_response_max_bytes` each (default 32 MiB)", operations)
         self.assertIn("restored from the streamed chunk count", operations)
         self.assertIn("up to 1,024 distinct indexes", operations)
         self.assertIn("502 `response_too_large`", operations)
-        self.assertIn("internal safety constant, not a setting", operations)
         self.assertIn(
             "same strict, bounded reader used by config reload and restore, not the boot repair path",
             operations,
@@ -873,9 +872,8 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("same strict, bounded reader as boot and restore", operations)
 
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
-        self.assertIn("fixed 32 MiB cap each", adapters)
+        self.assertIn("`translated_response_max_bytes` each (default 32 MiB)", adapters)
         self.assertIn("502 `response_too_large`", adapters)
-        self.assertIn("internal safety constant, not a configurable limit", adapters)
 
 
 if __name__ == "__main__":

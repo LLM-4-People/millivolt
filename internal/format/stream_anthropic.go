@@ -81,6 +81,7 @@ type AnthropicStreamDecoder struct {
 	messageDeltaSent    bool
 
 	openToolBlocks   int
+	toolBlocksMax    int
 	toolInitialBytes int
 	toolInitial      map[int]int
 	// toolStartNonEmpty records tool blocks whose content_block_start carried
@@ -115,6 +116,7 @@ type AnthropicStreamDecoder struct {
 func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *AnthropicStreamDecoder {
 	return &AnthropicStreamDecoder{
 		r:                 newSSEReader(r),
+		toolBlocksMax:     StreamToolCallsMax,
 		skipped:           map[int]bool{},
 		observe:           observe,
 		toolInitial:       map[int]int{},
@@ -241,7 +243,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 				d.openToolBlocks++
-				if d.openToolBlocks > toolBlocksMax {
+				if d.openToolBlocks > d.toolBlocksMax {
 					return nil, errNativeToolBlocks
 				}
 				d.toolInitial[ev.Index] = len(block.Input)

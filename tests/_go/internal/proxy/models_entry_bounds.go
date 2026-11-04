@@ -299,7 +299,7 @@ func TestModelsDiscoveryEnvelopeShapes(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			entries, constructed, err := unwrapEntries([]byte(tc.body), modelsDiscoveryMaxEntries, tc.keys...)
+			entries, constructed, err := unwrapEntries([]byte(tc.body), config.Default().ModelsDiscoveryMaxEntries, tc.keys...)
 			if err != nil {
 				t.Fatalf("unwrapEntries error = %v, want none", err)
 			}
@@ -373,8 +373,8 @@ func TestModelsDiscoveryEntryLimitBoundary(t *testing.T) {
 		entries    int
 		wantStatus int
 	}{
-		{"at limit", modelsDiscoveryMaxEntries, http.StatusOK},
-		{"over limit", modelsDiscoveryMaxEntries + 1, http.StatusBadGateway},
+		{"at limit", config.Default().ModelsDiscoveryMaxEntries, http.StatusOK},
+		{"over limit", config.Default().ModelsDiscoveryMaxEntries + 1, http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := compactModelList(tc.entries)
@@ -517,7 +517,7 @@ func TestModelsDiscoveryOutputLimitFailsClosedBeforeCommit(t *testing.T) {
 // materializes one map per model, so an over-budget unary response fails with
 // bounded allocation.
 func TestModelsDiscoveryCursorEntryLimitFailsBeforeMapConstruction(t *testing.T) {
-	raw := cursorModelsBody(modelsDiscoveryMaxEntries + 1)
+	raw := cursorModelsBody(config.Default().ModelsDiscoveryMaxEntries + 1)
 	p := New(config.Default(), metrics.Noop{})
 	p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return modelHTTPResponse(r, raw), nil
@@ -540,9 +540,9 @@ func TestModelsDiscoveryCursorEntryLimitFailsBeforeMapConstruction(t *testing.T)
 	// the maps costs about 9.6 MiB; the preflight parse stays under 6 MiB.
 	const allocBound = 8 << 20
 	if alloc > allocBound {
-		t.Fatalf("cursor entry-limit rejection allocated %d bytes for %d entries, want <= %d", alloc, modelsDiscoveryMaxEntries+1, allocBound)
+		t.Fatalf("cursor entry-limit rejection allocated %d bytes for %d entries, want <= %d", alloc, config.Default().ModelsDiscoveryMaxEntries+1, allocBound)
 	}
-	t.Logf("cursor entry-limit rejection: entries=%d alloc=%d", modelsDiscoveryMaxEntries+1, alloc)
+	t.Logf("cursor entry-limit rejection: entries=%d alloc=%d", config.Default().ModelsDiscoveryMaxEntries+1, alloc)
 }
 
 // cursorModelsBody builds a raw GetUsableModelsResponse carrying n ModelDetails
@@ -580,8 +580,8 @@ func TestModelsDiscoveryAnthropicAggregateEntryLimit(t *testing.T) {
 		wantStatus int
 		wantCalls  int
 	}{
-		{"aggregate at limit", modelsDiscoveryMaxEntries / 2, http.StatusOK, 2},
-		{"aggregate over limit", modelsDiscoveryMaxEntries/2 + 1, http.StatusBadGateway, 2},
+		{"aggregate at limit", config.Default().ModelsDiscoveryMaxEntries / 2, http.StatusOK, 2},
+		{"aggregate over limit", config.Default().ModelsDiscoveryMaxEntries/2 + 1, http.StatusBadGateway, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := New(config.Default(), metrics.Noop{})

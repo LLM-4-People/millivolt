@@ -159,26 +159,29 @@ func markStreamErr(ctx context.Context, rec *metrics.Record, err error) {
 // classifyResendFailure runs the shared failure policy of the two relay
 // quality re-send loops (serveNonStreaming, streamBodyWithRetry): the LOCAL
 // client's own cancellation is markClientGone (never an upstream error), an
-// operator storm-queue rejection is reported for the caller's per-surface
-// sink (which owns the record stamp), and the genuine transport default
-// stamps the record trio - 502 + upstream_unreachable + transport text -
-// ahead of the caller's sink. The wire sinks stay per-surface (see
-// writeTransportFailure, the fresh-send twin): the non-streaming loop's
-// status line is still open, so it answers with an api_error JSON http.Error;
-// the streaming loop's status line is already committed, so it emits
-// in-band on the SSE socket.
-func (s *Server) classifyResendFailure(r *http.Request, rec *metrics.Record, err error) (clientGone, stormQueue bool) {
+// operator drain release and an operator storm-queue rejection are reported
+// for the caller's per-surface sink (which owns the record stamp), and the
+// genuine transport default stamps the record trio - 502 +
+// upstream_unreachable + transport text - ahead of the caller's sink. The wire
+// sinks stay per-surface (see writeTransportFailure, the fresh-send twin): the
+// non-streaming loop's status line is still open, so it answers with an
+// api_error JSON http.Error; the streaming loop's status line is already
+// committed, so it emits in-band on the SSE socket.
+func (s *Server) classifyResendFailure(r *http.Request, rec *metrics.Record, err error) (clientGone, stormQueue, drained bool) {
 	if r.Context().Err() == context.Canceled {
 		markClientGone(rec)
-		return true, false
+		return true, false, false
+	}
+	if isQueueDrained(err) {
+		return false, false, true
 	}
 	if isStormQueueRejection(err) {
-		return false, true
+		return false, true, false
 	}
 	rec.StatusCode = http.StatusBadGateway
 	rec.ErrorType = typeUpstreamUnreachable
 	rec.ErrorMsg = transportErrText(err)
-	return false, false
+	return false, false, false
 }
 
 // nonStreamBody relays a non-streaming response verbatim while capturing the
@@ -187,8 +190,11 @@ func (s *Server) classifyResendFailure(r *http.Request, rec *metrics.Record, err
 // by the LOCAL client disconnecting (ctx canceled by the client's close) is
 // recorded as a client disconnect, never as an upstream failure.
 func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record) {
+	// One snapshot per response: a reload must not change the capture bound
+	// midway through this body.
+	captureMax := int(s.cfg().NonStreamCaptureMax)
 	// Read into a single buffer; on EOF, parse usage from the captured bytes.
-	buf := make([]byte, 0, nonStreamGrowInit)
+	buf := make([]byte, 0, min(nonStreamGrowInit, captureMax))
 	chunk := make([]byte, nonStreamChunk)
 	for {
 		n, err := body.Read(chunk)
@@ -202,9 +208,7 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 			}
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
-			if len(buf)+n <= nonStreamCaptureMax {
-				buf = append(buf, chunk[:n]...)
-			}
+			buf = appendCapturePrefix(buf, chunk[:n], captureMax)
 		}
 		if err != nil {
 			if err != io.EOF {
@@ -320,6 +324,17 @@ func analyzeNonStreamBytes(buf []byte, rec *metrics.Record, usageKeys map[string
 		return
 	}
 	applyNonStreamAnalysis(rec, nonStreamAnalysis(buf, usageKeys, costKeys, preview))
+}
+
+// appendCapturePrefix appends at most maxBytes-len(buf) bytes of chunk, so a
+// read chunk larger than a small configured cap still contributes a true
+// prefix instead of being skipped whole.
+func appendCapturePrefix(buf, chunk []byte, maxBytes int) []byte {
+	if maxBytes <= 0 || len(buf) >= maxBytes {
+		return buf
+	}
+	take := min(len(chunk), maxBytes-len(buf))
+	return append(buf, chunk[:take]...)
 }
 
 // applyNonStreamAnalysis is the single owner that writes one non-stream

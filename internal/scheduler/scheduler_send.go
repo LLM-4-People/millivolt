@@ -131,6 +131,9 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 	g := s.groupFor(key, 0)
 	holding := false
 	parked := false
+	// Snapshot the drain generation before the first predicate: only a drain
+	// issued while this send is parked may release it.
+	drainFrom := s.drainSeq.Load()
 	defer func() {
 		if parked {
 			g.mu.Lock()
@@ -147,6 +150,12 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 		}
 	}()
 	for {
+		// An operator drain releases a parked send gate before its pacing
+		// window, hold or probe turn opens. Checked first so a drain racing a
+		// grant still wins for parked work.
+		if s.queueDrained(drainFrom, hooks.Provider, hooks.Model, hooks.Client) {
+			return own, ErrQueueDrained
+		}
 		// Snapshot both kick channels before the predicates (lost-wakeup).
 		kick := s.kickC()
 		sendKick := g.sendKickC()

@@ -41,7 +41,7 @@ func TestTranslatedStreamRequestsUsage(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, out, _, err := TranslateRequestBetweenIR(tc.inbound, ir.Chat, []byte(tc.body), 0, "")
+			_, out, _, err := TranslateRequestBetweenIR(tc.inbound, ir.Chat, []byte(tc.body), 0, "", testRequestLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -71,7 +71,7 @@ func TestTranslatedNonStreamRequestsNoUsageOption(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, out, _, err := TranslateRequestBetweenIR(tc.inbound, ir.Chat, []byte(tc.body), 0, "")
+			_, out, _, err := TranslateRequestBetweenIR(tc.inbound, ir.Chat, []byte(tc.body), 0, "", testRequestLimits())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +84,7 @@ func TestTranslatedNonStreamRequestsNoUsageOption(t *testing.T) {
 
 func TestDirectChatKeepsUsagePreference(t *testing.T) {
 	_, out, _, err := TranslateRequestBetweenIR(ir.Chat, ir.Chat,
-		[]byte(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`), 0, "")
+		[]byte(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`), 0, "", testRequestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestDirectChatKeepsUsagePreference(t *testing.T) {
 	}
 
 	_, out, _, err = TranslateRequestBetweenIR(ir.Chat, ir.Chat,
-		[]byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`), 0, "")
+		[]byte(`{"model":"m","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`), 0, "", testRequestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

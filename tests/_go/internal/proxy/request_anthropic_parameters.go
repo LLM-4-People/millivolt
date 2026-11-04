@@ -51,7 +51,7 @@ func TestRequestParametersUnderstandAnthropicSpellings(t *testing.T) {
 	t.Run("native anthropic", func(t *testing.T) {
 		var rec metrics.Record
 		body := anthropicParameterBody(`{"type":"tool","name":"f","disable_parallel_tool_use":true}`)
-		if err := parseLLMRequest([]byte(body), &rec, false); err != nil {
+		if err := parseTestRequest([]byte(body), &rec, false); err != nil {
 			t.Fatal(err)
 		}
 		assertAnthropicParameters(t, &rec)
@@ -69,7 +69,7 @@ func TestRequestParametersUnderstandAnthropicSpellings(t *testing.T) {
 			t.Fatal(err)
 		}
 		var rec metrics.Record
-		if err := parseGeneratedLLMRequest(translated, &rec, false); err != nil {
+		if err := parseGeneratedLLMRequest(translated, &rec, false, testConfig()); err != nil {
 			t.Fatal(err)
 		}
 		assertAnthropicParameters(t, &rec)
@@ -81,7 +81,7 @@ func TestRequestParametersUnderstandAnthropicSpellings(t *testing.T) {
 			`"parallel_tool_calls":false,"reasoning_effort":"high",` +
 			`"response_format":{"type":"json_schema"},"service_tier":"priority","metadata":{"a":"b"}}`
 		var rec metrics.Record
-		if err := parseLLMRequest([]byte(body), &rec, false); err != nil {
+		if err := parseTestRequest([]byte(body), &rec, false); err != nil {
 			t.Fatal(err)
 		}
 		if rec.ReqStop != 1 || rec.ReqToolChoice != "tool:f" {
@@ -102,7 +102,7 @@ func TestRequestParametersUnderstandAnthropicSpellings(t *testing.T) {
 	t.Run("anthropic any maps to required", func(t *testing.T) {
 		var rec metrics.Record
 		body := anthropicParameterBody(`{"type":"any","disable_parallel_tool_use":false}`)
-		if err := parseLLMRequest([]byte(body), &rec, false); err != nil {
+		if err := parseTestRequest([]byte(body), &rec, false); err != nil {
 			t.Fatal(err)
 		}
 		if rec.ReqToolChoice != "required" {
@@ -122,7 +122,7 @@ func TestRequestParametersUnderstandAnthropicSpellings(t *testing.T) {
 		} {
 			var rec metrics.Record
 			body := anthropicParameterBody(choice)
-			if err := parseLLMRequest([]byte(body), &rec, false); err != nil {
+			if err := parseTestRequest([]byte(body), &rec, false); err != nil {
 				t.Fatalf("malformed tool_choice %s failed the parse: %v", choice, err)
 			}
 			if rec.ReqToolChoice != "" || rec.ReqParallelTools != nil {

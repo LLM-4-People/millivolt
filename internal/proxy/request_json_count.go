@@ -429,6 +429,21 @@ func countRequestMessageToolCalls(data []byte, start, budget int) (int, int, boo
 				return total, 0, true
 			}
 			i = next
+		} else if requestKeyEqual(key, "function_call") {
+			// The deprecated one-call shape materializes a typed call like a
+			// tool_calls member. A non-null value counts even if malformed,
+			// because the decode still allocates it before rejecting the body.
+			next := metrics.SkipJSONValue(data, i)
+			if next < 0 {
+				return 0, 0, false
+			}
+			if !bytes.Equal(bytes.TrimSpace(data[i:next]), []byte("null")) {
+				total++
+				if total > budget {
+					return total, 0, true
+				}
+			}
+			i = next
 		} else {
 			next := metrics.SkipJSONValue(data, i)
 			if next < 0 {

@@ -14,16 +14,17 @@ import (
 )
 
 const (
-	// sseLineBufInit / sseLineBufMax bound a single SSE event line while
-	// scanning an upstream Anthropic stream (initial buffer / hard cap). The
-	// small initial buffer fits the ordinary event and grows on demand, so a
-	// stream that never exceeds it retains 4 KiB instead of 2 MiB. The 2 MiB
-	// cap admits a 1 MiB answer repeated in a terminal response.completed
-	// frame plus its JSON envelope; the decoder's retained-text and overall
-	// response bounds remain the separate authority on total body size.
-	// Safety guardrail against pathological lines, not user-tunable.
+	// sseLineBufInit / StreamEventMaxBytes bound one SSE event while scanning
+	// an upstream stream (initial buffer / hard default): a single line, and
+	// the accumulated data of a multi-line event. The small initial buffer
+	// fits the ordinary event and grows on demand, so a stream that never
+	// exceeds it retains 4 KiB instead of 2 MiB. The user setting is
+	// config.StreamEventMaxBytes; the proxy passes it through StreamOptions.
 	sseLineBufInit = 4 * 1024
-	sseLineBufMax  = 2 * 1024 * 1024
+
+	// StreamEventMaxBytes is the direct-library default for one accepted source
+	// event: a single line and the accumulated data of a multi-line event.
+	StreamEventMaxBytes = 2 * 1024 * 1024
 
 	// nativeIdentityMaxBytes bounds provider-controlled identity strings
 	// (message id/model and tool-call id/name) at the translation boundary
@@ -51,28 +52,28 @@ const (
 	// or error keys). Provider-controlled text inside those objects is
 	// counted separately.
 	nativeStreamFrameEnvelopeMax = 2 * 1024
-
-	// NativeStreamFrameMaxBytes bounds one SSE data line emitted by
-	// StreamToOpenAI from a source line the translator accepts. The scanner
-	// admits at most sseLineBufMax bytes per source line; re-encoding a
-	// decoded string or retained raw tool input can at most triple each
-	// source byte, and the retained message id/model are echoed into every
-	// chunk, each bounded at nativeIdentityMaxBytes and escaped to at most
-	// wireJSONDecodedByteMax bytes per byte. The envelope headroom covers the
-	// fixed chunk skeleton around those values. The proxy's translated relay
-	// sizes its line scanner from this bound, so every accepted source frame
-	// relays instead of failing as a translation_error. Safety guardrail, not
-	// user-tunable.
-	NativeStreamFrameMaxBytes = wireJSONSourceByteMax*sseLineBufMax +
-		2*wireJSONDecodedByteMax*nativeIdentityMaxBytes + nativeStreamFrameEnvelopeMax
 )
+
+// NativeStreamFrameMax bounds one SSE data line emitted by StreamToOpenAI from
+// a source line the translator accepts at eventMax bytes. Re-encoding a decoded
+// string or retained raw tool input can at most triple each source byte, and
+// the retained message id/model are echoed into every chunk, each bounded at
+// nativeIdentityMaxBytes and escaped to at most wireJSONDecodedByteMax bytes
+// per byte. The envelope headroom covers the fixed chunk skeleton around those
+// values. The proxy sizes its translated relay scanner from this bound for the
+// same configured line limit, so every accepted source frame relays instead of
+// failing as a translation_error.
+func NativeStreamFrameMax(eventMax int) int {
+	return wireJSONSourceByteMax*eventMax +
+		2*wireJSONDecodedByteMax*nativeIdentityMaxBytes + nativeStreamFrameEnvelopeMax
+}
 
 var (
 	// errNativeIdentityTooLong is the stable fail-closed reason for an
 	// over-bound provider identity field.
 	errNativeIdentityTooLong = errors.New("anthropic: identity field exceeds limit")
 	// errNativeToolBlocks is the stable fail-closed reason for opening more
-	// concurrent tool blocks than toolBlocksMax.
+	// concurrent tool blocks than StreamToolCallsMax.
 	errNativeToolBlocks = errors.New("anthropic: concurrent tool block limit exceeded")
 	// errNativeToolInitialBytes is the stable fail-closed reason for retaining
 	// more initial tool input than toolInitialBytesMax across open blocks.

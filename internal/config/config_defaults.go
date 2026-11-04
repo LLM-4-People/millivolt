@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/format"
 )
 
 // RequestOverridesMax bounds the request_overrides list (internal
@@ -47,6 +49,31 @@ const (
 	// Inbound body band (Validate, overlay, Schema).
 	MaxRequestBytesMin = 1024
 	MaxRequestBytesMax = 1 << 30
+	// Model discovery entry band and translated-response body band (Validate,
+	// overlay, Schema).
+	ModelsDiscoveryMaxEntriesMin  = 100
+	ModelsDiscoveryMaxEntriesMax  = 1_000_000
+	TranslatedResponseMaxBytesMin = 4 << 10
+	TranslatedResponseMaxBytesMax = 1 << 30
+	// Upstream response buffers (Validate, overlay, Schema).
+	UpstreamResponseHeaderMaxMin = 4 << 10
+	UpstreamResponseHeaderMaxMax = 64 << 20
+	NonStreamCaptureMaxMin       = 16 << 10
+	NonStreamCaptureMaxMax       = 64 << 20
+	StreamTerminalHoldMaxMin     = 4 << 10
+	StreamTerminalHoldMaxMax     = 1 << 20
+	StreamEventMaxBytesMin       = 2 << 20
+	StreamEventMaxBytesMax       = 16 << 20
+	TokenResponseMaxMin          = 4 << 10
+	TokenResponseMaxMax          = 16 << 20
+	// Tool-call bands (Validate, overlay, Schema). The ceiling matches the
+	// fixed top-level collection bound: a larger value could never be reached
+	// through a bounded request or a bounded translated stream, and it would
+	// only widen the per-request amplification an operator can authorize.
+	RequestToolCallsMin     = 1
+	RequestToolCallsBandMax = 10_000
+	StreamToolCallsMin      = 1
+	StreamToolCallsBandMax  = 10_000
 	// Soft runtime memory-limit band (Validate, overlay, Schema). The floor
 	// rejects limits below a fresh process's own documented footprint
 	// (~20 MiB idle), which could only force continuous collection; the
@@ -153,11 +180,19 @@ func Default() *Config {
 		RestartDrainTimeout: 10 * time.Minute,
 		MemoryLimit:         0, // 0 = auto cgroup ceiling, else unbounded; GOMEMLIMIT wins
 
-		MaxRequestBytes:         32 << 20, // 32 MiB
-		UpstreamTimeout:         5 * time.Minute,
-		ModelsDiscoveryTimeout:  30 * time.Second,
-		ModelsDiscoveryMaxBytes: 8 << 20,
-		ModelsDiscoveryMaxPages: 100,
+		MaxRequestBytes:            32 << 20, // 32 MiB
+		RequestToolCallsMax:        format.WireToolCallsMax,
+		UpstreamTimeout:            5 * time.Minute,
+		ModelsDiscoveryTimeout:     30 * time.Second,
+		ModelsDiscoveryMaxBytes:    8 << 20,
+		ModelsDiscoveryMaxPages:    100,
+		ModelsDiscoveryMaxEntries:  10_000,
+		TranslatedResponseMaxBytes: 32 << 20,
+		UpstreamResponseHeaderMax:  1 << 20,
+		NonStreamCaptureMax:        1 << 20,
+		StreamTerminalHoldMax:      64 << 10,
+		StreamEventMaxBytes:        format.StreamEventMaxBytes,
+		TokenResponseMaxBytes:      1 << 20,
 
 		MaxConnsPerHost:     512,
 		MaxIdleConns:        512,
@@ -223,6 +258,7 @@ func Default() *Config {
 		ConversationMaxOpen: 64,
 
 		AnthropicDefaultMaxTokens:  4096,
+		StreamToolCallsMax:         format.StreamToolCallsMax,
 		TranslationLoss:            TranslationLossWarn,
 		CursorDefaultContextWindow: 0, // 0 = omit; let the client use its own default
 		CursorParkTTL:              3 * time.Hour,

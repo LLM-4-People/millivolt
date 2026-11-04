@@ -81,7 +81,7 @@ func TestRequestExpansionRejectedBeforeTypedDecode(t *testing.T) {
 	var rec metrics.Record
 	var err error
 	alloc := proxyContentAllocDelta(func() {
-		err = parseLLMRequest(body, &rec, false)
+		err = parseTestRequest(body, &rec, false)
 	})
 	if err == nil || !strings.Contains(err.Error(), "UTF-8") {
 		t.Fatalf("parseLLMRequest error = %v, want the expansion rejection", err)
@@ -118,7 +118,7 @@ func TestRequestStringExpansionRejectedInEveryStringField(t *testing.T) {
 				t.Fatal("fixture is not valid JSON under encoding/json")
 			}
 			var rec metrics.Record
-			err := parseLLMRequest(body, &rec, false)
+			err := parseTestRequest(body, &rec, false)
 			if err == nil || !strings.Contains(err.Error(), "UTF-8") {
 				t.Fatalf("parseLLMRequest error = %v, want the expansion rejection", err)
 			}
@@ -136,14 +136,14 @@ func TestRequestSmallInvalidUTF8WithinAllowanceAccepted(t *testing.T) {
 		t.Fatal("fixture is not valid JSON under encoding/json")
 	}
 	var rec metrics.Record
-	if err := parseLLMRequest(body, &rec, false); err != nil {
+	if err := parseTestRequest(body, &rec, false); err != nil {
 		t.Fatalf("small invalid value parse = %v, want accepted", err)
 	}
 	if want := len("a\ufffdb"); rec.CharsUser != want {
 		t.Fatalf("CharsUser = %d, want the standard decoder's %d-byte replacement length", rec.CharsUser, want)
 	}
 	var previewRec metrics.Record
-	if err := parseLLMRequest(body, &previewRec, true); err != nil {
+	if err := parseTestRequest(body, &previewRec, true); err != nil {
 		t.Fatalf("small invalid value preview parse = %v, want accepted", err)
 	}
 	if want := metrics.TruncatePreview("a\ufffdb"); previewRec.PromptPreview != want {
@@ -192,7 +192,7 @@ func TestRequestStringExpansionAllowanceBoundary(t *testing.T) {
 				t.Fatal("fixture is not valid JSON under encoding/json")
 			}
 			var rec metrics.Record
-			err := parseLLMRequest(body, &rec, false)
+			err := parseTestRequest(body, &rec, false)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -237,7 +237,7 @@ func TestRequestInvalidUTF8MalformedJSONPassesThrough(t *testing.T) {
 		t.Fatal("fixture is unexpectedly valid JSON")
 	}
 	var rec metrics.Record
-	if err := parseLLMRequest(body, &rec, false); err != nil {
+	if err := parseTestRequest(body, &rec, false); err != nil {
 		t.Fatalf("malformed body parse = %v, want passthrough", err)
 	}
 
@@ -380,7 +380,7 @@ func TestRequestValidUnicodeAndEscapesAccepted(t *testing.T) {
 				t.Fatal("fixture is not valid JSON")
 			}
 			var rec metrics.Record
-			if err := parseLLMRequest(body, &rec, true); err != nil {
+			if err := parseTestRequest(body, &rec, true); err != nil {
 				t.Fatalf("parseLLMRequest error = %v, want accepted", err)
 			}
 			if rec.CharsUser != len(tc.want) || rec.PromptPreview != tc.want {

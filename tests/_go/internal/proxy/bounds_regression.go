@@ -55,14 +55,10 @@ func TestParseRetryAfterClamped(t *testing.T) {
 }
 
 // TestMaxRequestOutputTokensBound pins the trust-boundary rejection of a
-// hostile client token cap. The decoded max_tokens feeds estimateTokens at
-// Acquire time with no range check anywhere: MaxInt64 wraps the estimate
-// negative so the scheduler's need <= 0 branch skips the reservation, and a
-// huge finite value exceeds any configured capacity so the need > capacity
-// branch admits the request and debits the provider-wide token bucket by
-// the attacker-chosen amount, token-blocking every other client for the
-// in-flight window. max_tokens and max_completion_tokens both decode into
-// the same ReqMaxTokens (preferring max_completion_tokens, like the
+// hostile client token cap. The cap reaches the upstream wire and the record;
+// an attacker-chosen value must never become a provider instruction or leak
+// into a translated re-decode. max_tokens and max_completion_tokens both decode
+// into the same ReqMaxTokens (preferring max_completion_tokens, like the
 // Anthropic translator), so one bound rejects both spellings - including a
 // both-fields body whose max_completion_tokens the translator would have
 // carried into the translated re-decode past a max_tokens-only check.
@@ -176,9 +172,9 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 // the document cannot be translated, and relaying it verbatim would break the
 // translated-shape contract, so the read fails closed as 502 (nothing has been
 // written to the client yet on that path - the status line is committed only
-// after a successful translation). The 32 MiB ceiling (proxy.go's
-// maxTranslateBodyBytes, the request-side default scale) is pinned literally
-// here: silent drift of that constant must fail this test.
+// after a successful translation). The default translated_response_max_bytes
+// (32 MiB) is pinned literally here: silent drift of the default must fail this
+// test.
 func TestTranslatedResponseBodyBounded(t *testing.T) {
 	const wantCapBytes = 32 << 20
 	// A valid Anthropic 200 body whose single text block pads the framed
@@ -319,5 +315,25 @@ func TestMaxLimitWindowMirrorsSchedulerRetryHint(t *testing.T) {
 	if maxLimitWindow != scheduler.MaxRetryHint {
 		t.Fatalf("maxLimitWindow = %v, want scheduler.MaxRetryHint (%v)",
 			maxLimitWindow, scheduler.MaxRetryHint)
+	}
+}
+
+// TestRetryHintFromBody pins the reset-in-message fallback: a 429 whose only
+// reset hint is an RFC3339 instant in the message (for example
+// "membership rpm limit exceeded: 101/100 resets 2026-11-03T23:11:00Z") must
+// pace the retry instead of exhausting the ladder in seconds.
+func TestRetryHintFromBody(t *testing.T) {
+	reset := time.Now().Add(90 * time.Second).UTC().Format(time.RFC3339)
+	body := []byte(`{"error":{"code":"tier_limit_exceeded","message":"membership rpm limit exceeded: 101/100 resets ` + reset + `"}}`)
+	got := retryHintFromBody(body)
+	if got < 60*time.Second || got > 2*time.Minute {
+		t.Fatalf("retryHintFromBody = %v, want about 90s", got)
+	}
+	if got := retryHintFromBody([]byte(`{"error":{"message":"no reset here"}}`)); got != 0 {
+		t.Fatalf("body without a reset = %v, want 0", got)
+	}
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if got := retryHintFromBody([]byte("resets " + past)); got != 0 {
+		t.Fatalf("past reset = %v, want 0", got)
 	}
 }

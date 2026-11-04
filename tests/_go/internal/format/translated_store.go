@@ -15,7 +15,7 @@ import (
 
 func translatedRequestDoc(t *testing.T, inbound, outbound ir.Protocol, body string) map[string]any {
 	t.Helper()
-	_, out, _, err := TranslateRequestBetweenIR(inbound, outbound, []byte(body), 0, "")
+	_, out, _, err := TranslateRequestBetweenIR(inbound, outbound, []byte(body), 0, "", testRequestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestTranslatedResponsesDefaultsToStoreFalse(t *testing.T) {
 	if _, ok := doc["store"]; ok {
 		t.Fatalf("Responses->Chat body gained store: %v", doc)
 	}
-	req, _, warnings, err := TranslateRequestBetweenIR(ir.Responses, ir.Chat, []byte(`{"model":"m","input":"hi"}`), 0, "")
+	req, _, warnings, err := TranslateRequestBetweenIR(ir.Responses, ir.Chat, []byte(`{"model":"m","input":"hi"}`), 0, "", testRequestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

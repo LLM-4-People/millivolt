@@ -2,7 +2,7 @@ package format
 
 // Regression tests for the aggregate retained-initial budget on open Anthropic
 // tool_use blocks. Each content_block_start may carry up to one SSE line
-// (sseLineBufMax) of input JSON that the translator retains until the block
+// (StreamEventMaxBytes) of input JSON that the translator retains until the block
 // stops; 1024 open blocks used to retain ~1 GiB. The budget fails the
 // translation closed before an open start can push the retained total over
 // its bound, while ordinary starts, deltas and stop-released blocks are

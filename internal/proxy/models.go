@@ -35,14 +35,6 @@ import (
 )
 
 const (
-	// modelsDiscoveryMaxEntries bounds the model entries one discovery request
-	// may retain across every primary page and enrichment source. A compact
-	// 8 MiB body of {"id":"x"} objects holds over 600k entries, and one
-	// decoded map per entry costs hundreds of MiB; real provider catalogs are
-	// far smaller. The raw-byte budget alone therefore cannot bound discovery
-	// memory. Internal safety guardrail, not user-tunable; exceeding it fails
-	// closed, never a partial list.
-	modelsDiscoveryMaxEntries = 10_000
 	// modelsDiscoveryOutputEntryAllowance is the per-entry headroom added to
 	// the configured discovery byte cap when deriving the rendered-list bound.
 	// Normalization adds canonical fields that upstream bytes do not carry
@@ -54,17 +46,17 @@ const (
 )
 
 // modelsDiscoveryOutputLimit derives the rendered-list byte bound from the
-// configured aggregate discovery byte cap. Valid UTF-8 JSON strings re-encode
-// to no more bytes than their escaped upstream spelling, so the configured cap
-// plus the entry-normalization allowance is the authoritative derived bound;
-// malformed UTF-8 can expand during re-encoding and still fails closed here.
-// The limit is captured with the rest of the discovery budget.
-func modelsDiscoveryOutputLimit(maxBytes int64) int {
-	return int(maxBytes) + modelsDiscoveryMaxEntries*modelsDiscoveryOutputEntryAllowance
+// configured aggregate discovery byte and entry caps. Valid UTF-8 JSON strings
+// re-encode to no more bytes than their escaped upstream spelling, so the
+// configured cap plus the entry-normalization allowance is the authoritative
+// derived bound; malformed UTF-8 can expand during re-encoding and still fails
+// closed here. The limit is captured with the rest of the discovery budget.
+func modelsDiscoveryOutputLimit(maxBytes int64, maxEntries int) int {
+	return int(maxBytes) + maxEntries*modelsDiscoveryOutputEntryAllowance
 }
 
 // errModelsDiscoveryEntries is the stable fail-closed reason for a discovery
-// source carrying more entries than modelsDiscoveryMaxEntries.
+// source carrying more entries than config.ModelsDiscoveryMaxEntries.
 var errModelsDiscoveryEntries = errors.New("model discovery entry limit exceeded")
 
 // modelsDiscovery is one request-scoped budget, shared across every primary
@@ -78,8 +70,8 @@ type modelsDiscovery struct {
 	// through consumeEntries before emitting the constructed list.
 	entriesLeft int
 	// outputLimit is the rendered-list byte bound derived from the configured
-	// discovery byte cap (modelsDiscoveryOutputLimit). It is captured once so
-	// a hot reload cannot raise a request that already read its inputs.
+	// discovery byte and entry caps (modelsDiscoveryOutputLimit). It is captured
+	// once so a hot reload cannot raise a request that already read its inputs.
 	outputLimit int
 	// releaseResponse holds the process-wide reservation for the page
 	// currently being decoded. Pagination releases it before the next fetch,
@@ -88,7 +80,7 @@ type modelsDiscovery struct {
 }
 
 // consumeEntries debits the discovery-wide entry budget and fails closed when
-// a source would push the retained list past modelsDiscoveryMaxEntries.
+// a source would push the retained list past config.ModelsDiscoveryMaxEntries.
 func (d *modelsDiscovery) consumeEntries(n int) error {
 	if n > d.entriesLeft {
 		return errModelsDiscoveryEntries
@@ -111,7 +103,7 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 	ctx, cancel := context.WithTimeout(r.Context(), cfg.ModelsDiscoveryTimeout)
 	defer cancel()
 	r = r.WithContext(ctx)
-	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages, entriesLeft: modelsDiscoveryMaxEntries, outputLimit: modelsDiscoveryOutputLimit(int64(cfg.ModelsDiscoveryMaxBytes))}
+	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages, entriesLeft: cfg.ModelsDiscoveryMaxEntries, outputLimit: modelsDiscoveryOutputLimit(int64(cfg.ModelsDiscoveryMaxBytes), cfg.ModelsDiscoveryMaxEntries)}
 	defer d.releaseResponseBuffer()
 	key = s.resolveKeyTransparent(r, t, key)
 	switch t.format {
@@ -511,7 +503,8 @@ func jsonNumber(v any) (float64, bool) {
 // entries join by "id"; a mapped output field only fills entries that do not
 // already carry it (the upstream's own value always wins). The metadata source
 // draws from the discovery-wide entry budget that the primary list already
-// debited, so it can never hide a second 10,000-entry catalog. Any failure -
+// debited, so it can never hide a second catalog past the configured entry
+// budget. Any failure -
 // fetch, status, shape, or an insufficient remaining entry budget - degrades
 // to the unenriched base list: enrichment is a completeness win, never a hard
 // dependency.

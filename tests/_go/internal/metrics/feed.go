@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -423,33 +424,73 @@ func TestHandleStreamRecordEventsCarryID(t *testing.T) {
 	}
 }
 
+// gatedWriter holds the handler's first Write until the test releases it, so a
+// burst can be queued while the stream loop provably has not started consuming.
+// Without that gate the assertion races the scheduler: batching is only
+// observable when events are already queued, so a producer that loses the race
+// legitimately yields one write per event.
+//
+// It also counts record frames as they stream, because the handler may split a
+// large burst across several writes at its batch-byte cap. The invariant under
+// test is that the write count stays far below the frame count, not an exact
+// batch boundary.
+type gatedWriter struct {
+	*httptest.ResponseRecorder
+	n       atomic.Int64
+	frames  atomic.Int64
+	once    sync.Once
+	ready   chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedWriter) Write(p []byte) (int, error) {
+	g.n.Add(1)
+	g.frames.Add(int64(strings.Count(string(p), "event: record")))
+	g.once.Do(func() {
+		close(g.ready)
+		<-g.release
+	})
+	return g.ResponseRecorder.Write(p)
+}
+
 // TestHandleStreamBatchesReadyEvents pins the many-subscriber write path: a
-// burst of ready events is coalesced into a handful of writes/flushes, not one
-// per event, while every record frame still reaches the client in order.
+// burst already queued when the stream loop starts consuming is coalesced into
+// a handful of writes/flushes, not one per event, while every record frame
+// still reaches the client in order.
 func TestHandleStreamBatchesReadyEvents(t *testing.T) {
+	const records = 50
 	b := NewBuffer(256)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil).WithContext(ctx)
-	w := &countingWriter{ResponseRecorder: httptest.NewRecorder()}
+	w := &gatedWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		ready:            make(chan struct{}),
+		release:          make(chan struct{}),
+	}
 	done := make(chan struct{})
 	go func() {
 		b.HandleStream(w, req)
 		close(done)
 	}()
-	waitFor(t, func() bool { return w.n.Load() >= 1 }, "snapshot write")
-	for i := 0; i < 50; i++ {
+	// The snapshot write blocks inside Write, after the handler subscribed and
+	// before it enters the event loop: every record queued now is waiting when
+	// consumption begins.
+	<-w.ready
+	for i := 0; i < records; i++ {
 		b.Record(record(fmt.Sprintf("batch-%02d", i)))
 	}
-	time.Sleep(50 * time.Millisecond)
+	close(w.release)
+	// Wait for every frame, then stop the stream. Canceling earlier would cut
+	// the drain short and make the frame count look like a lost batch.
+	waitFor(t, func() bool { return w.frames.Load() >= records }, "all record frames")
 	cancel()
 	<-done
-	out := w.Body.String()
-	if got := strings.Count(out, "event: record"); got != 50 {
-		t.Fatalf("record frames = %d, want 50", got)
+	if got := w.frames.Load(); got != records {
+		t.Fatalf("record frames = %d, want %d", got, records)
 	}
-	if writes := w.n.Load(); writes > 10 {
-		t.Fatalf("50 batched events used %d writes, want a handful (per-event writes regressed)", writes)
+	if writes := w.n.Load(); writes > 5 {
+		t.Fatalf("%d queued events used %d writes, want a handful (per-event writes regressed)", records, writes)
 	}
 }
 

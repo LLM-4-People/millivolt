@@ -92,7 +92,7 @@ func TestTranslatedInBandErrorSurvivesClientDisconnect(t *testing.T) {
 	w := &failAfterFirstWrite{hdr: http.Header{}}
 	stream := "data: {\"error\":{\"message\":\"upstream exploded\",\"type\":\"api_error\",\"code\":\"server_error\"}}\n\n" +
 		"data: [DONE]\n\n"
-	s.streamBodyTranslated(context.Background(), w, strings.NewReader(stream), rec, w, ir.Chat)
+	s.streamBodyTranslated(context.Background(), w, strings.NewReader(stream), rec, w, ir.Chat, translatedFrameBufMax(int(config.Default().StreamEventMaxBytes)))
 
 	if !rec.ClientDisconnected || rec.StatusCode != metrics.StatusClientClosedRequest {
 		t.Fatalf("disconnect accounting = disconnected %v status %d, want true/499", rec.ClientDisconnected, rec.StatusCode)

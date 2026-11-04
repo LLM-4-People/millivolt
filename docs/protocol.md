@@ -193,8 +193,9 @@ value differ from the bytes the upstream reads. A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
 entries in a `messages`, `tools`, `functions`, `input`, `stop`,
 `stop_sequences` or `modalities` array, more than 10,000 members in a
-`metadata` or `stream_options` object, more than 1,024 aggregate
-`tool_calls` members across every message, more than 10,000 distinct top-level
+`metadata` or `stream_options` object, more than `request_tool_calls_max`
+aggregate `tool_calls` members across every message (default 1,024), more than
+10,000 distinct top-level
 members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
 top-level objects. Those preflight bounds apply to native and translated
 requests alike. A translated request also passes through its protocol codec,
@@ -379,6 +380,11 @@ Provider Retry-After/reset hints are a floor on the wait, not a replacement
 for adaptive exponential backoff. A long hint is not clamped by the ordinary
 adaptive cap and can therefore outlast it. A short hint does not reset the
 doubling, so a 1s "retry shortly" cannot re-hammer a struggling upstream.
+When a 429 carries no header hint but its bounded error body contains an
+RFC3339 reset instant (for example "... resets 2026-11-03T23:11:00Z"), that
+instant is used as the same bounded hint: a provider-specific code such as
+`tier_limit_exceeded` then waits for its window instead of exhausting the
+retry budget in seconds and surfacing to the client.
 
 A finalized request retains its absorbed attempts and final outcome in one
 record. Every retried or final attempt stores the same upstream-response
@@ -480,13 +486,14 @@ translates native formats, completes supported pagination, and optionally
 enriches missing fields. Unrecognized successful list bodies remain verbatim;
 primary discovery budget/errors fail explicitly, while optional enrichment can
 fall back to the complete base list. Discovery can apply limit headers without
-consuming an inference slot. Its time/byte/page limits are configuration-owned.
+consuming an inference slot. Its time/byte/page/entry limits are
+configuration-owned.
 
-Primary and enrichment entries share one 10,000-entry discovery budget;
-enrichment degrades to the base list when the remaining budget cannot hold its
-metadata source. The rendered list is bounded by
+Primary and enrichment entries share one `models_discovery_max_entries` budget
+(default 10,000); enrichment degrades to the base list when the remaining
+budget cannot hold its metadata source. The rendered list is bounded by
 `models_discovery_max_bytes` plus a fixed per-entry normalization allowance
-(512 bytes for each of the 10,000 entries) and is encoded without HTML escaping,
+(512 bytes for each configured entry) and is encoded without HTML escaping,
 so literal `<`, `>`, and `&` keep their wire size. A rendered list past that
 derived bound fails closed before any response bytes are written.
 

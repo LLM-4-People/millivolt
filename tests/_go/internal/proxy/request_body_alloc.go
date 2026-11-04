@@ -164,7 +164,7 @@ func TestRequestBodyAllocationBounds(t *testing.T) {
 func TestRequestBodyChunkedOwnsPostUploadStart(t *testing.T) {
 	body := requestAllocBody(1 << 20)
 	reader := &requestTimedReader{Reader: bytes.NewReader(body)}
-	got, rec, err := readRequest(&http.Request{Body: io.NopCloser(reader), ContentLength: -1}, 2<<20, false)
+	got, rec, err := readTestRequest(&http.Request{Body: io.NopCloser(reader), ContentLength: -1}, 2<<20, false)
 	if err != nil || !bytes.Equal(got, body) {
 		t.Fatalf("len=%d err=%v", len(got), err)
 	}
@@ -182,7 +182,7 @@ func TestRequestBodyChunkedOwnsPostUploadStart(t *testing.T) {
 func TestRequestBodyChunkedMaxBytesTypedLimit(t *testing.T) {
 	body := requestAllocBody(4096)
 	reader := &requestTestBody{Reader: bytes.NewReader(body)}
-	_, _, err := readRequest(&http.Request{Body: reader, ContentLength: -1}, 1024, false)
+	_, _, err := readTestRequest(&http.Request{Body: reader, ContentLength: -1}, 1024, false)
 	var overflow *http.MaxBytesError
 	if !errors.As(err, &overflow) || overflow.Limit != 1024 {
 		t.Fatalf("err = %T %v, want MaxBytesError(1024)", err, err)
@@ -277,7 +277,7 @@ func BenchmarkRequestBodyAllocReadRequestDeclared16(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		rc := &requestTestBody{Reader: bytes.NewReader(body)}
-		got, _, err := readRequestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
+		got, _, err := readTestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
 		if err != nil || len(got) != len(body) {
 			b.Fatalf("len=%d err=%v", len(got), err)
 		}
@@ -291,7 +291,7 @@ func BenchmarkRequestBodyAllocReadRequestChunked16(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		rc := &requestTestBody{Reader: bytes.NewReader(body)}
-		got, _, err := readRequestHint(&http.Request{Body: rc, ContentLength: -1}, 32<<20, false, 32<<20)
+		got, _, err := readTestHint(&http.Request{Body: rc, ContentLength: -1}, 32<<20, false, 32<<20)
 		if err != nil || len(got) != len(body) {
 			b.Fatalf("len=%d err=%v", len(got), err)
 		}
@@ -305,7 +305,7 @@ func BenchmarkRequestBodyAllocParseSingle16(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		var rec metrics.Record
-		if err := parseLLMRequest(body, &rec, false); err != nil {
+		if err := parseTestRequest(body, &rec, false); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -318,7 +318,7 @@ func BenchmarkRequestBodyAllocParseMessages16(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		var rec metrics.Record
-		if err := parseLLMRequest(body, &rec, false); err != nil {
+		if err := parseTestRequest(body, &rec, false); err != nil {
 			b.Fatal(err)
 		}
 		if rec.TurnsUser == 0 {
@@ -330,7 +330,7 @@ func BenchmarkRequestBodyAllocParseMessages16(b *testing.B) {
 func TestRequestBodyAllocMessageBodyShape(t *testing.T) {
 	body := requestAllocMessageBody(16 << 20)
 	var rec metrics.Record
-	if err := parseLLMRequest(body, &rec, false); err != nil {
+	if err := parseTestRequest(body, &rec, false); err != nil {
 		t.Fatal(err)
 	}
 	if rec.TurnsUser == 0 || rec.Model != "m" {

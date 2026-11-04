@@ -161,3 +161,28 @@ func TestPacerKeepalivesRearmWriteDeadline(t *testing.T) {
 		t.Fatalf("keepalives = %d after 750ms at a 10ms interval, want >= 30 (the pacer stopped early)", got)
 	}
 }
+
+// failingWriter models a client socket that is already gone: the keepalive
+// write fails, which must cancel the request context so a queued wait unwinds.
+type failingWriter struct{ http.ResponseWriter }
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errClientGone }
+
+var errClientGone = &clientGoneError{}
+
+type clientGoneError struct{}
+
+func (*clientGoneError) Error() string { return "client gone" }
+
+func TestPacerKeepaliveFailureCancelsRequest(t *testing.T) {
+	p := newSSEPacer(failingWriter{ResponseWriter: httptest.NewRecorder()}, 10*time.Millisecond, 0)
+	gone := make(chan struct{})
+	p.onGone = func() { close(gone) }
+	p.Start()
+	select {
+	case <-gone:
+	case <-time.After(time.Second):
+		t.Fatal("a failed keepalive write did not cancel the request")
+	}
+	p.Stop()
+}
