@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import subprocess
+import tempfile
+from pathlib import Path
 
 from .workflows_support import (
     WORKFLOWS,
@@ -78,6 +82,8 @@ def publish_concurrency_errors(concurrency) -> list[str]:
         errors.append("check.yml: publish concurrency group must be release")
     if concurrency.get("cancel-in-progress") is not False:
         errors.append("check.yml: publish concurrency must set cancel-in-progress: false")
+    if concurrency.get("queue") != "max":
+        errors.append("check.yml: publish concurrency must set queue: max, or a pending release is replaced")
     return errors
 
 
@@ -133,6 +139,100 @@ def main_push_errors(text: str) -> list[str]:
                     break
             if line_has_error:
                 break
+    return errors
+
+
+def git(repo: Path, *arguments: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *arguments], check=True, text=True,
+                   capture_output=True)
+
+
+def step_script(step_name: str, replacements: dict[str, str]) -> str:
+    """Return one step's shell body, dedented, with expressions substituted.
+
+    The release steps run on a runner; executing the extracted body against a
+    scratch repository is the only check that pins what the generated notes
+    actually say, rather than the wording of the code that writes them.
+    """
+    text = (WORKFLOWS / "check.yml").read_text(encoding="utf-8")
+    marker = f"- name: {step_name}"
+    if marker not in text:
+        raise AssertionError(f"check.yml: no step named {step_name}")
+    body = text.split(marker, 1)[1].split("run: |", 1)[1]
+    lines = []
+    for line in body.splitlines():
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line[10:] if line.startswith("          ") else "")
+    script = "\n".join(lines).rstrip() + "\n"
+    for expression, value in replacements.items():
+        script = script.replace(expression, value)
+    return script
+
+
+def release_notes_errors() -> list[str]:
+    """Run the real release-notes step against a scratch repository.
+
+    Pins the behaviour, not the source: a stable release lists the commits
+    since the last stable tag even when its own prerelease tag exists, folded
+    internal types stay out of Highlights, version-bump subjects never appear,
+    a repeated subject is counted instead of dropping a distinct commit, and
+    the changelog link starts at the tag the notes actually list.
+    """
+    errors = []
+    notes = step_script("Create the GitHub release", {
+        "${{ steps.image.outputs.digest }}": "sha256:deadbeef",
+        "${{ github.repository }}": "LLM-4-People/millivolt",
+    })
+    # Everything after the notes file is the gh release call, which the scratch
+    # repository cannot run.
+    notes = notes.split("\nflags=(", 1)[0]
+    if "} > release-notes.md" not in notes:
+        return ["check.yml: could not isolate the release-notes body from its creation step"]
+    with tempfile.TemporaryDirectory() as scratch:
+        repo = Path(scratch)
+
+        def commit(subject: str, version: str = "") -> None:
+            if version:
+                (repo / "VERSION").write_text(version, encoding="utf-8")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-q", "--allow-empty", "-m", subject)
+
+        git(repo, "init", "-q", ".")
+        git(repo, "config", "user.email", "release@example.com")
+        git(repo, "config", "user.name", "release")
+        commit("feat: first widget", "1.0.0\n")
+        git(repo, "tag", "-a", "v1.0.0", "-m", "v1.0.0")
+        commit("queue: drain parked requests")
+        commit("docs: describe the drain")
+        commit("queue: drain parked requests")
+        commit("bump version to 1.1.0", "1.1.0\n")
+        git(repo, "tag", "-a", "v1.1.0-rc1", "-m", "v1.1.0-rc1")
+        commit("fix: honour the reset instant")
+        git(repo, "tag", "-a", "v1.1.0", "-m", "v1.1.0")
+        result = subprocess.run(["bash", "-c", notes], cwd=repo, text=True,
+                                capture_output=True, check=False,
+                                env={**os.environ, "RELEASE_VERSION": "1.1.0"})
+        if result.returncode != 0:
+            return [f"check.yml: the release-notes step failed on a scratch repository: {result.stderr.strip()}"]
+        body = (repo / "release-notes.md").read_text(encoding="utf-8")
+        highlights, _, other = body.partition("Other changes")
+        for needle, where, label in (
+            ("fix: honour the reset instant", highlights, "a fix after the prerelease tag"),
+            ("queue: drain parked requests (2 commits)", highlights, "a repeated subject counted once"),
+            ("## Highlights", highlights, "the Highlights heading"),
+        ):
+            if needle not in where:
+                errors.append(f"check.yml: release notes lost {label}")
+        for needle in ("docs: describe the drain", "test:", "bump version to 1.1.0", "bump version to"):
+            if needle in highlights:
+                errors.append(f"check.yml: release notes promoted {needle!r} to Highlights")
+        if "docs: describe the drain" not in other:
+            errors.append("check.yml: release notes dropped the folded docs subject")
+        if "compare/v1.0.0...v1.1.0" not in body:
+            errors.append("check.yml: the changelog link must start at the last stable tag, not the prerelease")
+        if "compare/v1.1.0-rc1" in body:
+            errors.append("check.yml: a stable release must not compare against its own prerelease")
     return errors
 
 
@@ -194,15 +294,17 @@ def check_release(checks: dict, errors: list[str]) -> None:
     publish_checkout = next((step for step in steps(publish)
                              if str(step.get("uses", "")).startswith("actions/checkout@")), {})
     publish_ref = " ".join(str((publish_checkout.get("with") or {}).get("ref", "")).split())
-    if "github.event.pull_request.merge_commit_sha" not in publish_ref:
-        errors.append("check.yml: merged-PR publish checkout must use the event merge commit")
-    if "github.ref" not in publish_ref:
-        errors.append("check.yml: branch and tag publish checkout must keep the pushed ref")
+    if publish_ref != "${{ github.event.pull_request.merge_commit_sha || github.sha }}":
+        errors.append("check.yml: publish checkout must pin the event commit, never a branch tip")
     verify_target = next((step for step in steps(publish)
                           if step.get("name") == "Verify release target"), {})
+    if "if" in verify_target:
+        errors.append("check.yml: the release target check must run for every event, not only a merged PR")
+    if (verify_target.get("env") or {}).get("EXPECTED") != "${{ github.event.pull_request.merge_commit_sha || github.sha }}":
+        errors.append("check.yml: the release target check must compare against the event commit")
     verify_run = str(verify_target.get("run", ""))
     if "git rev-parse HEAD" not in verify_run or '!= "$EXPECTED"' not in verify_run:
-        errors.append("check.yml: merged-PR publish must verify the checked-out merge commit")
+        errors.append("check.yml: publish must verify the checked-out commit")
 
     image_index = named_step(publish, "Publish verified multi-platform image")
     tag_push_index = named_step(publish, "Push verified tag")
@@ -240,6 +342,7 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: the cut step must read the GitHub release with GH_TOKEN")
     release_guard = (
         'tagged_revision="$(git rev-list -n1 "v$file_version")"',
+        'git merge-base --is-ancestor "$revision" origin/main',
         'gh release view "v$file_version"',
         "GitHub release is missing",
         "does not move the tag or republish images",
@@ -268,6 +371,41 @@ def check_release(checks: dict, errors: list[str]) -> None:
     ):
         if needle not in release_run:
             errors.append(f"check.yml: release notes are missing {needle}")
+    # Highlights are chosen by an internal-type rule, not by a feat/fix/perf
+    # prefix: this repository writes behaviour commits as "scope: summary"
+    # ("queue: let the operator drain parked requests"), and the prefix rule
+    # reported "Maintenance and internal changes only" for the feature release
+    # 0.4.10. The real classifier lines run here against a fixture, so the
+    # behaviour is pinned rather than the wording of the comment above them.
+    classifier = tuple(
+        line.strip() for line in release_run.splitlines()
+        if line.strip().startswith(("internal_types=", "highlights=", "internal="))
+    )
+    behaviour, internal_subject = "queue: let the operator drain parked requests", "docs: describe the drain"
+    if len(classifier) != 3:
+        errors.append("check.yml: release notes must classify subjects in exactly one place")
+    else:
+        script = "\n".join((
+            "set -eu",
+            'subjects="$(cat)"',
+            *classifier,
+            'printf "HIGHLIGHTS\\n%s\\nOTHER\\n%s\\n" "$highlights" "$internal"',
+        ))
+        fixture = "\n".join((behaviour, internal_subject, "deps(go): bump golang.org/x/net",
+                             "test: pin the classifier", ""))
+        result = subprocess.run(["bash", "-c", script], input=fixture,
+                                text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            errors.append(f"check.yml: the release classifier failed on a subject fixture: {result.stderr.strip()}")
+        else:
+            highlights, _, other = result.stdout.partition("OTHER\n")
+            if behaviour not in highlights:
+                errors.append("check.yml: a scope-only behaviour commit is not a highlight")
+            if internal_subject in highlights:
+                errors.append("check.yml: a docs commit was promoted to Highlights")
+            for subject in (internal_subject, "deps(go): bump golang.org/x/net", "test: pin the classifier"):
+                if subject not in other:
+                    errors.append(f"check.yml: {subject!r} must stay under Other changes")
     summary_step = next((step for step in steps(publish)
                          if step.get("name") == "Summarize the release"), {})
     summary_run = str(summary_step.get("run", ""))
@@ -332,3 +470,4 @@ def check_release(checks: dict, errors: list[str]) -> None:
         errors.append("check.yml: release image references must use lowercase GHCR paths")
     if "value=main,enable=${{ github.ref == 'refs/heads/main' }}" in publish_text:
         errors.append("check.yml: main image must exclude prereleases")
+    errors.extend(release_notes_errors())
