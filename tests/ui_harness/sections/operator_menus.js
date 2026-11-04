@@ -379,6 +379,37 @@ module.exports = async function operatorMenus(H) {
       w.applyThrottleState({ ok: true, active: false, known_providers: ['provider-a'], throttles: [] });
       check('removing every limits row clears the container', d.getElementById('lim-holds').textContent === '');
 
+      // A bare Drain must cover the queue, not the Limits provider select:
+      // that select always holds the first known provider, and a provider
+      // with queued work can have no limit row. The menu line reports the
+      // scheduler total so the scope of the action is visible.
+      w.applyThrottleState({ ok: true, active: true, known_providers: ['provider-a', 'queued-provider'],
+        throttles: [{ provider: 'provider-a', source: 'ui', concurrency: 2, in_flight: 0, queued: 0 }] });
+      w.applyPauseState({ ok: true, paused: false, holds: [], known_clients: [],
+        known_providers: ['provider-a', 'queued-provider'], queued: 4 });
+      w.syncLimitsMenuState();
+      check('the limits queue line reports the scheduler total, not the selected provider row',
+        d.getElementById('lim-provider').value === 'provider-a' &&
+        d.getElementById('lim-drain-count').textContent === 'queued 4 overall' &&
+        d.getElementById('lim-count').textContent === 'set in UI');
+      w.operatorError('throttle', 'stale failure');
+      state.drainCalls.length = 0;
+      await w.drainLimitsQueue();
+      check('a bare Drain posts the all scope even though the provider select holds a value',
+        JSON.stringify(state.drainCalls) === JSON.stringify([{ all: true }]));
+      check('a successful Drain clears the previous count-line error',
+        d.getElementById('lim-count').textContent !== 'stale failure');
+      d.getElementById('lim-drain-client').value = 'client-a';
+      await w.drainLimitsQueue();
+      check('a client-scoped Drain posts only that client',
+        JSON.stringify(state.drainCalls[1]) === JSON.stringify({ client: 'client-a' }) &&
+        d.getElementById('lim-drain-client').value === '');
+      d.getElementById('lim-drain-model').value = 'model-a';
+      await w.drainLimitsQueue();
+      check('a model-scoped Drain posts only that model',
+        JSON.stringify(state.drainCalls[2]) === JSON.stringify({ model: 'model-a' }) &&
+        d.getElementById('lim-drain-model').value === '');
+
       w.applyPauseState({ ok: true, paused: false, holds: [], known_clients: [], known_providers: [] });
       w.resetPauseMenuForm();
       w.hideHdrMenu('pause-menu');

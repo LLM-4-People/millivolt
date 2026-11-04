@@ -120,6 +120,7 @@ const state = {
   },
   restartState: { restarted: false, postCount: 0, statusGate: null, postGate: null, status: {} },
   cfgFetches: 0,
+  drainCalls: [],
   sseHandlers: {},
   initialFetches: [],
   failures: [],
@@ -179,6 +180,10 @@ const pageOptions = {
         return state.restartState.statusGate ? state.restartState.statusGate.then(() => response) : Promise.resolve(response);
       }
       if (u.includes('/admin/pause')) return Promise.resolve({ json: async () => ({ ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 }) });
+      if (u.includes('/admin/queue/drain')) {
+        state.drainCalls.push(opts && opts.body ? JSON.parse(opts.body) : null);
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, drained_through: state.drainCalls.length }) });
+      }
       if (u.includes('/admin/debug')) return Promise.resolve({ json: async () => ({ ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' }) });
       if (u.includes('/admin/throttle')) return Promise.resolve({ json: async () => ({ ok: true, throttles: [], known_providers: ['p'], active: false }) });
       if (u.includes('/admin/config')) { state.cfgFetches++; return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(cfgDoc)) }); }
