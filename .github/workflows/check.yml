@@ -1177,8 +1177,16 @@ jobs:
             subjects="$(git log --no-merges --no-decorate --format='%s')"
           fi
           subjects="$(printf '%s\n' "$subjects" | awk '{ if ($0 ~ /^bump version to /) next; if (seen[$0]++) next; print }')"
-          highlights="$(printf '%s\n' "$subjects" | grep -E '^(feat|fix|perf)(\(|!|:)' || true)"
-          internal="$(printf '%s\n' "$subjects" | grep -Ev '^(feat|fix|perf)(\(|!|:)' || true)"
+          # A subject is internal only when its conventional type says so.
+          # This repository writes behaviour commits as "scope: summary" (for
+          # example "queue: let the operator drain parked requests"), so
+          # selecting only feat/fix/perf prefixes collapsed real changes into
+          # the folded list and reported "maintenance only" for releases that
+          # shipped features. Anything not recognizably internal is a
+          # highlight, so an unfamiliar prefix errs toward showing it.
+          internal_types='^(build|chore|ci|deps|doc|docs|refactor|release|style|test|tests)(\(|!|:)'
+          highlights="$(printf '%s\n' "$subjects" | grep -Ev "$internal_types" || true)"
+          internal="$(printf '%s\n' "$subjects" | grep -E "$internal_types" || true)"
           {
             echo "## Highlights"
             if [ -n "$highlights" ]; then

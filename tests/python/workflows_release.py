@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 
 from .workflows_support import (
     WORKFLOWS,
@@ -268,6 +269,41 @@ def check_release(checks: dict, errors: list[str]) -> None:
     ):
         if needle not in release_run:
             errors.append(f"check.yml: release notes are missing {needle}")
+    # Highlights are chosen by an internal-type rule, not by a feat/fix/perf
+    # prefix: this repository writes behaviour commits as "scope: summary"
+    # ("queue: let the operator drain parked requests"), and the prefix rule
+    # reported "Maintenance and internal changes only" for the feature release
+    # 0.4.10. The real classifier lines run here against a fixture, so the
+    # behaviour is pinned rather than the wording of the comment above them.
+    classifier = tuple(
+        line.strip() for line in release_run.splitlines()
+        if line.strip().startswith(("internal_types=", "highlights=", "internal="))
+    )
+    behaviour, internal_subject = "queue: let the operator drain parked requests", "docs: describe the drain"
+    if len(classifier) != 3:
+        errors.append("check.yml: release notes must classify subjects in exactly one place")
+    else:
+        script = "\n".join((
+            "set -eu",
+            'subjects="$(cat)"',
+            *classifier,
+            'printf "HIGHLIGHTS\\n%s\\nOTHER\\n%s\\n" "$highlights" "$internal"',
+        ))
+        fixture = "\n".join((behaviour, internal_subject, "deps(go): bump golang.org/x/net",
+                             "test: pin the classifier", ""))
+        result = subprocess.run(["bash", "-c", script], input=fixture,
+                                text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            errors.append(f"check.yml: the release classifier failed on a subject fixture: {result.stderr.strip()}")
+        else:
+            highlights, _, other = result.stdout.partition("OTHER\n")
+            if behaviour not in highlights:
+                errors.append("check.yml: a scope-only behaviour commit is not a highlight")
+            if internal_subject in highlights:
+                errors.append("check.yml: a docs commit was promoted to Highlights")
+            for subject in (internal_subject, "deps(go): bump golang.org/x/net", "test: pin the classifier"):
+                if subject not in other:
+                    errors.append(f"check.yml: {subject!r} must stay under Other changes")
     summary_step = next((step for step in steps(publish)
                          if step.get("name") == "Summarize the release"), {})
     summary_run = str(summary_step.get("run", ""))
