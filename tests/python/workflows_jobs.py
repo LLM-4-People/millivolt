@@ -383,6 +383,22 @@ def promotion_suite_errors(run: str) -> list[str]:
         'select(.head_sha == $sha)',
         'if [ -z "$suite" ]; then',
         'select(.check_suite.id == $suite)',
+        # The reviewed head may be an empty merge or a docs/site-only push,
+        # neither of which starts a run. The walk must stay bounded, must
+        # refuse a truncated file list, and must refuse a code delta with no
+        # gate of its own.
+        'for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do',
+        'if [ -z "$parent" ]; then',
+        # "Empty" must be decided by tree identity, never by an absent file
+        # list: the commit API reports a merge's diff against a base rather than
+        # against its first parent, so a file-list test could call a
+        # code-bearing merge empty and walk past its gate.
+        'parent_tree="$(gh api "repos/$REPO/commits/$parent" --jq \'.commit.tree.sha // ""\')"',
+        '[ "$tree" = "$parent_tree" ]',
+        'has the same tree as $parent',
+        'reports no changed file; its delta cannot be classified',
+        'is truncated, so its delta cannot be classified',
+        'has no canonical check.yml testing gate run and changes code',
     ):
         if needle not in run:
             errors.append(f"check.yml: merged promotion proof is missing {needle}")
@@ -421,7 +437,7 @@ def check_promotion(checks: dict, errors: list[str]) -> None:
             'gh api "repos/$REPO/git/commits/$MERGE_SHA"',
             '.parents[].sha',
             'compare/$MERGE_SHA...main',
-            'actions/runs?head_sha=$HEAD_SHA&per_page=100',
+            'actions/runs?head_sha=$gated&per_page=100',
             'select(.path == ".github/workflows/check.yml")',
             'select(.event == "push" or .event == "workflow_dispatch")',
             'select(.head_branch == "testing")',

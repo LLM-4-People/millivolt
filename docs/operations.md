@@ -206,6 +206,16 @@ anything. There is no model-rule canonicalization, regex or wildcard broadening.
 All matching rules apply in list order, and for the same header or body field
 the later rule wins.
 
+The client label is a claim, not an authenticated identity. The caller chooses
+it, and the proxy never verifies it, so a request presenting another client's
+label is treated as that client here and by every other client-scoped feature
+(sub-conversations, Debug sessions, pause holds, the Cursor parked-run scope).
+See [client identity](../SECURITY.md#client-identity-is-a-claim-not-an-authentication)
+for what that means for a listener reachable by parties you do not trust. What
+it cannot do is move a credential: credential-class header names are refused at
+load and skipped at send, so the exposure is the policy attached to the label,
+not the secret behind it.
+
 Header rules are the operator's last word on the upstream wire: the resolved
 merge applies after client-forwarded values, configured provider headers and
 the client's `X-Proxy-Headers` map, so a matching override wins over all of
@@ -214,16 +224,31 @@ the exception: the client header maps (`X-Proxy-Headers` and an
 `X-Proxy-Auth-Header` naming one) reject them with a 400 before any send, and
 configured provider headers or request-override values are stripped from the
 final upstream request, so the transport keeps its own gzip negotiation and
-never sends a partial range. Credential and protocol names (`authorization`, `cookie`,
-`proxy-authorization`, `host`, `content-type`, `content-length`,
-`transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
-`proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control
-prefix are rejected at load in both header lists, and the client header maps
-reject `content-length` before any send so the transport keeps ownership of
-message framing; at runtime the target's configured auth header is skipped
-even if one slips through, so credentials stay at their owner. The fixed list cannot know a provider's configured
-auth header, so a rule naming the target's (for example `x-api-key`) passes
-config validation and is denied at send time by the runtime belt. Header
+never sends a partial range. Two header classes are rejected at load in both
+header lists. Protocol and framing names (`host`, `content-type`,
+`content-length`, `transfer-encoding`, `te`, `connection`, `keep-alive`,
+`proxy-authenticate`, `proxy-connection`, `trailer`, `upgrade`) and the whole
+`x-proxy-` control prefix belong to the proxy and the transport. Credential
+names belong to whoever issued the secret: `authorization`, `cookie`,
+`proxy-authorization`, and every name the shared credential vocabulary
+classifies. That vocabulary judges the header's *role*, not a list of vendor
+spellings: `auth`/`authorization`, `api-key`, `secret`, `password`,
+`credential`, `bearer`, `jwt`, `signature`, `cookie`, `key` and `token` are all
+credential-class wherever they appear, so `x-auth-key`, `x-amz-credential`,
+`x-functions-key` and `x-subscription-key` are refused along with `x-api-key`.
+Names that mention a key or a token but carry an identifier or a measurement
+stay admitted: `x-key-id`, `idempotency-key`, `cache-key`, `x-prompt-tokens`,
+`x-token-count`, and the `x-ratelimit-*` and `anthropic-ratelimit-*` families.
+That breadth is deliberate. An override
+value is operator-supplied and is stamped onto a request whose destination the
+caller chooses with `X-Proxy-Base-URL`, so a secret in any unclassified header
+name would be delivered to that caller's host; vendor spellings cannot be
+enumerated in advance, which is why the check keys on role rather than a list. The same vocabulary drives capture and debug
+redaction, so a stored capture never keeps a header the wire carried. At
+runtime the target's configured auth header is skipped as well, so a rule that
+predates this check, or a future grammar slip, still cannot move a credential.
+The client header maps reject `content-length` before any send so the transport
+keeps ownership of message framing. Header
 names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
 
@@ -994,6 +1019,25 @@ an indefinite hold needs an explicit resume. Existing holds can be edited in
 place or resumed individually, while Resume all clears all holds. Overlapping
 scopes are rejected instead of silently replacing a different hold.
 
+The known client/provider/model vocabularies (the pause and debug pickers, and
+the snapshot a New-clients hold compares against) are bounded at 4096 names per
+dimension. Client labels and model ids come from the request, so they are
+evictable: past the cap the least recently observed name makes room for the
+newest, so a client that keeps sending requests outlives a burst of one-shot
+labels that arrived after it. Names an operator documents - a hold scope or a
+debug session - are pinned and are never evicted by later traffic, so a flood
+of distinct labels cannot hide the client you scoped a hold to. Pins are
+derived from the documents that exist, not accumulated: resuming a hold or
+ending a debug session releases its names back to ordinary eviction. When a
+full vocabulary is entirely pinned, a new observed name is dropped rather than
+displacing operator intent, and a scope that cannot be listed is named in the
+log instead of disappearing silently.
+
+A hold scopes on the caller's claimed client label, so it separates your own
+tools from each other, not trusted callers from untrusted ones; a caller that
+sends another client's label is parked, or not parked, as that client. See
+[client identity](../SECURITY.md#client-identity-is-a-claim-not-an-authentication).
+
 Limits applies to a provider across all clients and keys, independently of the
 per-key concurrency/queue settings. Choose concurrency, requests per window,
 tokens per window and the optional anti-burst ramp, then Apply; Clear removes
@@ -1052,9 +1096,9 @@ from base URLs remain below both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB; admission reserves one bounded read hint and then
-charges the bytes actually read, so a declared length alone never holds budget),
-and `max_inflight_response_bytes` its budget
+body budget (default 256 MiB; admission charges the bytes actually read, so a
+declared length alone holds no budget), and `max_inflight_response_bytes` its
+budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
 (at most 1 MiB plus one 32 KiB chunk), and model discovery. Requests above

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -80,38 +81,16 @@ func capBytes(b []byte, limit int64) debugBody {
 	return sanitizeDebugBody(b, n, trunc)
 }
 
+// redactHeaderName reports whether a header name must not be retained verbatim
+// in ordinary metrics or a debug capture. The target's own auth header is
+// always credential-class for this request; every other name defers to the
+// shared CredentialHeaderName vocabulary, so the retention boundary and the
+// request-overrides load gate cannot drift apart on what counts as a secret.
 func redactHeaderName(name, authHeader string) bool {
 	if authHeader != "" && strings.EqualFold(name, authHeader) {
 		return true
 	}
-	n := strings.ToLower(name)
-	switch n {
-	case "authorization", "proxy-authorization", "x-api-key", "api-key",
-		"cookie", "set-cookie", "x-proxy-refresh-token", "x-proxy-access-token",
-		"x-proxy-key", "x-proxy-headers":
-		return true
-	}
-	if strings.Contains(n, "authorization") || strings.Contains(n, "api-key") {
-		return true
-	}
-	if strings.Contains(n, "secret") {
-		return true
-	}
-	// "token" deny-by-default with explicit accounting exemptions: the
-	// OpenAI x-ratelimit-* and Anthropic anthropic-ratelimit-* families
-	// carry token-budget counters, not credentials, and the client queue
-	// control headers x-proxy-limit-requests/-concurrency/-tokens are not
-	// secrets. Every other token-bearing name stays redacted. The ratelimit
-	// exemptions are prefix-wide, so a token-named header under them (e.g.
-	// x-ratelimit-token) is retained; accepted residual, since the upstream
-	// already holds the credential and any header name can carry data.
-	if strings.Contains(n, "token") &&
-		!strings.HasPrefix(n, "x-ratelimit") &&
-		!strings.HasPrefix(n, "anthropic-ratelimit") &&
-		n != "x-proxy-limit-tokens" {
-		return true
-	}
-	return strings.Contains(n, "key") && strings.Contains(n, "api")
+	return config.CredentialHeaderName(name)
 }
 
 // captureHeaders is the record-retention boundary, separate from transparent

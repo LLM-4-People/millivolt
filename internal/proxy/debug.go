@@ -131,9 +131,6 @@ func (s *Server) attachDebugPersist(p pausePersist) {
 	now := time.Now()
 	kept := sessions[:0]
 	for _, d := range sessions {
-		s.pause.clients.seed(d.Clients)
-		s.pause.providers.seed(d.Providers)
-		s.pause.models.seed(canonicalModelList(d.Models))
 		if !d.Until.IsZero() && now.After(d.Until) {
 			continue
 		}
@@ -370,6 +367,9 @@ func (s *Server) finishDebugLocked() ([]persistedDebug, uint64) {
 func (s *Server) commitDebug() error {
 	snap, gen := s.finishDebugLocked()
 	s.debug.mu.Unlock()
+	// The single choke point for every accepted debug mutation, expiry
+	// included, so a removed session releases its pinned scope.
+	s.syncNamePins()
 	return s.persistDebugLatest(snap, gen)
 }
 

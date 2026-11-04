@@ -340,11 +340,11 @@ max_queue_size: 1024
 #   type: int · range 0..1000000 · default 10000
 max_inflight_requests: 10000
 
-# Process-wide budget for buffered inbound request bodies. Admission reserves one bounded
-# speculative read hint, then charges the delta as bytes actually arrive, refusing with
-# 503 when the next read would exceed the budget. A declared Content-Length never reserves
-# capacity the client does not send, so idle connections cannot hold the budget. 0 =
-# unlimited. Hot-reloads.
+# Process-wide budget for buffered inbound request bodies. Admission charges the bytes
+# actually read and refuses with 503 when the next read would exceed the budget. A
+# declared Content-Length reserves nothing, so an idle connection cannot hold the budget.
+# Bytes past max_request_bytes are not charged: that body is answered 413 by the cap
+# owner. 0 = unlimited. Hot-reloads.
 # Hot-reload: yes.
 #   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
 max_inflight_body_bytes: 256MiB
@@ -910,17 +910,24 @@ provider_aliases: {}
 # or replaces upstream headers (names are canonicalized, values must be non-empty
 # single-line), remove_headers deletes them, and body sets max_tokens /
 # max_completion_tokens (1..1000000) on a Chat Completions or Anthropic client body.
-# Credential and protocol headers (such as authorization, cookie, host, content-type, and
-# the whole x-proxy- control prefix) are rejected at load. The override applies after
-# provider headers and the client's X-Proxy-Headers map and wins over both, with two
-# enforced exceptions: the target's resolved auth header and Authorization are never set
-# or removed by an override, and Accept-Encoding and Range are stripped after the override
-# merge because the transport owns them. It covers inference sends only, never model
-# discovery or token refresh. Body rewrites apply to Chat Completions or Anthropic client
-# bodies before translation, whatever the target (a Responses client body is not
-# rewritten), and re-stamp the recorded request cap; the Cursor bridge reads no body
-# fields, so body is skipped for cursor targets while header rules still apply. An empty
-# list leaves every request untouched. Hot-reloads.
+# Credential and protocol headers are rejected at load. Credential class is judged by
+# role, not by a list of vendor spellings: any name carrying authorization/auth, api-key,
+# secret, password, credential, bearer, jwt, signature, cookie, key or token is refused,
+# so x-auth-key, x-amz-credential, x-functions-key and x-subscription-key are covered.
+# Identifier and accounting shapes stay admitted: key-id, cache-key, idempotency-key, and
+# the token counters (x-prompt-tokens, x-token-count) plus the x-ratelimit-* and
+# anthropic-ratelimit-* families. Protocol and framing names (host, content-type,
+# content-length, transfer-encoding and the rest) and the whole x-proxy- control prefix
+# are refused as well. The override applies after provider headers and the client's
+# X-Proxy-Headers map and wins over both, with two enforced exceptions: the target's
+# resolved auth header and Authorization are never set or removed by an override, and
+# Accept-Encoding and Range are stripped after the override merge because the transport
+# owns them. It covers inference sends only, never model discovery or token refresh. Body
+# rewrites apply to Chat Completions or Anthropic client bodies before translation,
+# whatever the target (a Responses client body is not rewritten), and re-stamp the
+# recorded request cap; the Cursor bridge reads no body fields, so body is skipped for
+# cursor targets while header rules still apply. An empty list leaves every request
+# untouched. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
 request_overrides: []

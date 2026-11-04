@@ -68,6 +68,10 @@ func readRequest(r *http.Request, maxBytes int64, preview bool, cfg *config.Conf
 // budget would be crossed; the declared Content-Length is never reserved up
 // front, so an idle connection cannot hold budget it has not used.
 //
+// The per-request cap owns the status when both apply: an over-cap body is
+// answered 413 and a budget refusal only applies to a body that fits. A
+// refusal is therefore reported after the cap check, never during the read.
+//
 // hintMax bounds the allocation the declared length may trigger. It stays at
 // the speculative read hint rather than the declared size: a 32 MiB
 // declaration with no bytes behind it must not allocate 32 MiB. A genuinely
@@ -83,8 +87,10 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 		hintMax = requestReadHintMax
 	}
 	var src io.Reader = r.Body
+	var charged *chargedReader
 	if charge != nil {
-		src = &chargedReader{r: r.Body, charge: charge}
+		charged = &chargedReader{r: r.Body, charge: charge}
+		src = charged
 	}
 	body, err = readRequestBody(src, r.ContentLength, maxBytes, hintMax)
 	if err != nil {
@@ -92,6 +98,11 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 	}
 	if int64(len(body)) > maxBytes {
 		return nil, nil, &http.MaxBytesError{Limit: maxBytes}
+	}
+	// Only a body that fits the cap can be a capacity refusal: a retry of an
+	// over-cap request can never succeed, so the cap answer above wins.
+	if charged != nil && charged.refused {
+		return nil, nil, errBodyBudget
 	}
 	// The inbound body size: one assignment on the bytes already in hand -
 	// no second read, no timing change (Start below still excludes upload).

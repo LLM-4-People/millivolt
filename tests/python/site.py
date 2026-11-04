@@ -265,6 +265,17 @@ def content_safety_errors() -> list[str]:
         ("case-folded javascript", '<a href="JaVaScRiPt:alert(1)">x</a>', ("javascript:",)),
         ("data link", '<a href="data:text/html;base64,AAA">x</a>', ("data:text/html",)),
         ("details ontoggle", '<details open ontoggle="alert(1)">d</details>', ("ontoggle",)),
+        # ammonia scheme-checks URL attributes, not the comma-separated
+        # srcset candidate list, so the value filter owns that check.
+        ("srcset javascript", '<picture><source srcset="javascript:alert(1)">'
+         '<img src="https://example.test/a.png" alt="a"></picture>', ("javascript:",)),
+        ("srcset data", '<picture><source srcset="data:image/svg+xml;base64,AAA">'
+         '<img src="https://example.test/a.png" alt="a"></picture>', ("data:image",)),
+        # The builder owns target/rel: an author-supplied pair must not survive
+        # to be re-emitted before the builder's rewrite (which only matched an
+        # anchor whose href came first).
+        ("author target and rel", '<a target="_blank" href="https://example.test/">x</a>'
+         '<a rel="opener" href="https://example.test/">y</a>', ('rel="opener"',)),
     )
     with tempfile.TemporaryDirectory(prefix="millivolt-content-") as temp:
         site = Path(temp) / "site"
@@ -292,12 +303,52 @@ def content_safety_errors() -> list[str]:
             ('<a href="https://example.test/x">d</a>', 'href="https://example.test/x"'),
             ("[q](#quickstart)", 'href="#quickstart"'),
             ('<a href="mailto:a@b.c">m</a>', 'href="mailto:a@b.c"'),
-            ('<picture><source media="(min-width: 761px)" srcset="https://example.test/a.svg">'
-             '<img src="https://example.test/b.png" alt="x" width="800"></picture>', "<picture>"),
+            ('<picture><source media="(min-width: 761px)" srcset="https://example.test/a.svg 1x, '
+             'https://example.test/b.svg 2x"><img src="https://example.test/b.png" alt="x" width="800">'
+             '</picture>', 'srcset="https://example.test/a.svg 1x, https://example.test/b.svg 2x"'),
         )
         for payload, expected in kept:
             if expected not in render(payload):
                 errors.append(f"site: pipeline dropped a legitimate construct: {payload!r}")
+    return errors
+
+
+def performance_headline_escape_errors() -> list[str]:
+    """The landing headline values are the one doc-derived sink outside the
+    sanitizer.
+
+    The landing page is assembled from `site-src/templates/landing.html`, not
+    from `md.convert`, so `sanitize_content` never sees it. `perf_*` comes from
+    a table cell in `docs/performance.md`, which is author-controlled Markdown:
+    before the fix that cell was interpolated raw and a payload with an
+    `onerror` handler executed on the published landing page. Pin the escaping
+    by driving the real extractor over a poisoned canonical page.
+    """
+    import scripts.build_site as build_site
+
+    original = build_site.DOCS
+    errors = []
+    with tempfile.TemporaryDirectory(prefix="millivolt-perf-") as temp:
+        docs = Path(temp) / "docs"
+        docs.mkdir()
+        (docs / "performance.md").write_text(
+            "| Label | A | B | C |\n"
+            '| amd64 runtime image | 1 | <img src="https://e.test/x.png" '
+            'onerror="window.__pwned=1">PAWNED | note |\n'
+            "| Idle process, empty SQLite | 1 | 2 MiB | note |\n"
+            "| 128 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 114 MiB | note |\n"
+            "| 48 | 1 | 2 | 14166 | 4 |\n",
+            encoding="utf-8")
+        build_site.DOCS = docs
+        try:
+            headline = build_site.performance_headline()
+        finally:
+            build_site.DOCS = original
+    for key, value in headline.items():
+        if "<" in value or "onerror" in value.lower():
+            errors.append(f"site: {key} reaches the landing template as markup: {value!r}")
+    if "PAWNED" not in headline.get("perf_image", ""):
+        errors.append("site: the poisoned cell's text did not survive as escaped display text")
     return errors
 
 
@@ -534,6 +585,7 @@ def check_site(site: Path) -> list[str]:
     if "<loc>" not in sitemap:
         errors.append("sitemap has no URLs")
     errors.extend(performance_page_errors(site, page_texts))
+    errors.extend(performance_headline_escape_errors())
     errors.extend(not_found_base_errors())
     errors.extend(content_safety_errors())
     errors.extend(toc_escape_errors())

@@ -690,41 +690,41 @@ func TestRequestOverridesHeaderPrecedenceLast(t *testing.T) {
 }
 
 // TestRequestOverridesAuthHeaderRuntimeSkip pins the credential safety belt:
-// a rule naming the target's configured auth header - set or remove, and
-// x-api-key is NOT in the config forbidden set, so this is reachable through
-// valid config - and a rule naming literal Authorization (which only a
-// future grammar slip could produce; constructed directly here without
-// Validate) are both skipped at runtime. The extracted upstream key keeps
-// its owner.
+// a rule naming the target's configured auth header or any credential-class
+// name is skipped at runtime even when it was constructed without Validate -
+// the shape an already-persisted config file or a future grammar slip
+// produces. The load gate (TestRequestOverridesRejectsCredentialNames) is the
+// first layer; this belt keeps the extracted upstream key at its owner when
+// something reaches the send stage anyway.
 func TestRequestOverridesAuthHeaderRuntimeSkip(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		rule     config.RequestOverride
-		validate bool
+		name string
+		rule config.RequestOverride
 	}{
 		{"set names the target auth header", config.RequestOverride{
 			Client:  "ov-client",
 			Headers: map[string]string{"X-Api-Key": "evil-key"},
-		}, true},
+		}},
 		{"remove names the target auth header", config.RequestOverride{
 			Client:        "ov-client",
 			RemoveHeaders: []string{"X-Api-Key"},
-		}, true},
-		{"set names authorization (future grammar slip)", config.RequestOverride{
+		}},
+		{"set names authorization", config.RequestOverride{
 			Client:  "ov-client",
 			Headers: map[string]string{"Authorization": "Bearer evil"},
-		}, false},
+		}},
+		{"set names a vendor credential spelling", config.RequestOverride{
+			Client:  "ov-client",
+			Headers: map[string]string{"X-Session-Token": "operator-secret"},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
 			defer upstream.Close()
 			cfg := config.Default()
 			cfg.RequestOverrides = []config.RequestOverride{tc.rule}
-			if tc.validate {
-				if err := cfg.Validate(); err != nil {
-					t.Fatal(err)
-				}
-			}
+			// Deliberately not validated: the belt exists for the case where a
+			// credential-class rule reached the send stage anyway.
 			srv := httptest.NewServer(New(cfg, metrics.Noop{}))
 			defer srv.Close()
 
@@ -746,6 +746,9 @@ func TestRequestOverridesAuthHeaderRuntimeSkip(t *testing.T) {
 			}
 			if got := hdrs[0].Get("Authorization"); got != "" {
 				t.Errorf("Authorization = %q, want absent (the belt skips it; buildUpstreamRequest never forwards it)", got)
+			}
+			if got := hdrs[0].Get("X-Session-Token"); got != "" {
+				t.Errorf("X-Session-Token = %q, want the credential-class rule skipped", got)
 			}
 		})
 	}

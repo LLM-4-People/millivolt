@@ -183,7 +183,7 @@ CONTENT_TAGS = frozenset({
 # value-restricted below rather than dropped: table alignment and the fenced
 # code language marker are both produced by Markdown itself.
 CONTENT_ATTRIBUTES = {
-    "a": {"class", "href", "rel", "target", "title"},
+    "a": {"class", "href", "title"},
     "code": {"class"},
     "h1": {"id"}, "h2": {"id"}, "h3": {"id"},
     "h4": {"id"}, "h5": {"id"}, "h6": {"id"},
@@ -225,7 +225,37 @@ def _content_attribute_filter(tag: str, attribute: str, value: str) -> str | Non
         return value if parts and set(parts) <= CONTENT_CLASSES else None
     if attribute == "style":
         return value.strip() if CONTENT_TEXT_ALIGN.fullmatch(value) else None
+    if attribute == "srcset":
+        # ammonia scheme-checks URL attributes like `src` and `href`, not
+        # `srcset`: it is a comma-separated candidate list. Check every
+        # candidate here, or a `javascript:`/`data:` candidate would ride a
+        # permitted attribute past the scheme allowlist.
+        candidates = [part.strip() for part in value.split(",") if part.strip()]
+        if not candidates:
+            return None
+        for candidate in candidates:
+            url = candidate.split()[0]
+            if not _content_url_allowed(url):
+                return None
+        return value
     return value
+
+
+def _content_url_allowed(url: str) -> bool:
+    """Report whether a document URL may be emitted.
+
+    Relative paths, fragments and protocol-relative URLs are admitted (the
+    sanitizer's own URL handling and the build's rewrite stage bound them);
+    anything carrying a scheme must be in CONTENT_URL_SCHEMES.
+    """
+    if not url or url.startswith(("#", "//")):
+        return True
+    scheme, separator, _rest = url.partition(":")
+    if not separator:
+        return True
+    if not scheme:
+        return False
+    return scheme.lower() in CONTENT_URL_SCHEMES
 
 
 def sanitize_content(content: str) -> str:
@@ -633,6 +663,11 @@ def performance_headline() -> dict[str, str]:
     The performance page owns every published number. Parsing labelled table
     rows keeps the landing cards from becoming a second source; a renamed or
     removed row fails the build instead of silently drifting.
+
+    Each value is escaped here because these cells are the one doc-derived text
+    that does not travel through `sanitize_content`: the landing page is built
+    from the template, not from `md.convert`. A table cell is author-controlled
+    Markdown text, so it must never reach the template as markup.
     """
     page = DOCS / "performance.md"
     if not page.is_file():
@@ -654,11 +689,16 @@ def performance_headline() -> dict[str, str]:
     sustained = cells("48")
     if len(image) < 3 or len(idle) < 3 or len(fast) < 8 or len(sustained) < 4:
         raise BuildError("docs/performance.md table rows are missing headline cells")
+    # Display text only: strip any inline Markdown/HTML the cell carries, then
+    # escape what remains.
+    def display(cell: str) -> str:
+        return html.escape(strip_html(cell))
+
     return {
-        "perf_image": image[2],
-        "perf_idle": idle[2],
-        "perf_loaded": fast[7],
-        "perf_rps": sustained[3],
+        "perf_image": display(image[2]),
+        "perf_idle": display(idle[2]),
+        "perf_loaded": display(fast[7]),
+        "perf_rps": display(sustained[3]),
     }
 
 

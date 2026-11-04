@@ -3,10 +3,10 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -271,33 +271,35 @@ func TestResponseBufferBudgetHotReload(t *testing.T) {
 // replaced up-front declaration reserving. With a 256 MiB budget and a 32 MiB
 // per-request cap, the old owner reserved each request's declared length, so
 // eight idle connections declaring 32 MiB and sending nothing consumed the whole
-// budget and every other client was refused. Charging bytes as they arrive keeps
-// the heap bound while leaving an idle declaration cheap.
+// budget and every other client was refused. Reserving even one read hint per
+// socket kept a smaller version of the same lever, so admission now reserves no
+// body bytes at all and charges only what is read.
 func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 	const budget = 256 << 20
-	const declared = 32 << 20
-	const hint = 1 << 20
 
 	var l inflightLimiter
 	l.set(10000, budget)
 
-	// Eight idle requests that declare 32 MiB but send nothing must not exhaust
-	// the budget: only their speculative hints are charged.
-	reservations := make([]*bodyReservation, 0, 8)
-	for range 8 {
-		r, ok := l.acquireBody(min(declared, hint))
+	// Any number of idle requests must not consume the budget, because nothing
+	// is charged until bytes arrive.
+	reservations := make([]*bodyReservation, 0, 64)
+	for i := range 64 {
+		r, ok := l.acquireBody()
 		if !ok {
-			t.Fatalf("idle request %d was refused: an idle declaration must not consume budget", len(reservations))
+			t.Fatalf("idle request %d was refused: an idle declaration must not consume budget", i)
 		}
 		reservations = append(reservations, r)
 	}
-	if got := l.bytes.Load(); got != 8*hint {
-		t.Fatalf("charged %d bytes for eight idle declarations, want %d", got, 8*hint)
+	if got := l.bytes.Load(); got != 0 {
+		t.Fatalf("charged %d bytes for 64 idle requests, want 0", got)
 	}
-	// The budget is still available for real traffic.
-	next, ok := l.acquireBody(hint)
+	// The budget is still fully available for real traffic.
+	next, ok := l.acquireBody()
 	if !ok {
 		t.Fatal("a further request was refused while every idle request had sent nothing")
+	}
+	if !next.chargeRead(4096) {
+		t.Fatal("a real 4 KiB upload was refused behind idle requests")
 	}
 	next.release()
 	for _, r := range reservations {
@@ -307,19 +309,19 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 		t.Fatalf("byte counter = %d after release, want 0", got)
 	}
 
-	// A request that really uploads is charged for what it sends, and the
-	// budget still refuses a body that would cross it.
+	// A request that really uploads is charged for exactly what it sends, and
+	// the budget still refuses a body that would cross it.
 	var small inflightLimiter
 	small.set(10000, 300)
-	r, ok := small.acquireBody(100)
+	r, ok := small.acquireBody()
 	if !ok {
-		t.Fatal("initial speculative reservation refused")
+		t.Fatal("initial reservation refused")
 	}
 	if !r.chargeRead(100) {
-		t.Fatal("bytes within the speculative reservation were charged twice")
+		t.Fatal("reading to the budget was refused")
 	}
 	if got := small.bytes.Load(); got != 100 {
-		t.Fatalf("bytes = %d after reading the reserved 100, want 100", got)
+		t.Fatalf("bytes = %d after reading 100, want 100", got)
 	}
 	if !r.chargeRead(150) {
 		t.Fatal("reading to the budget was refused")
@@ -333,15 +335,266 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 	if got := small.bytes.Load(); got != 250 {
 		t.Fatalf("bytes = %d after a refused read, want the unchanged 250", got)
 	}
+	// A refused read must not be double-counted on the next successful one.
+	if !r.chargeRead(50) {
+		t.Fatal("a read that fits the remaining budget was refused")
+	}
+	if got := small.bytes.Load(); got != 300 {
+		t.Fatalf("bytes = %d after a retried read, want 300 (no double charge)", got)
+	}
 	r.release()
 	if got := small.bytes.Load(); got != 0 {
 		t.Fatalf("bytes = %d after release, want 0", got)
 	}
 
-	// A refused read surfaces as the retryable budget error, not as a body-cap
-	// overflow, so the handler can answer 503 with Retry-After rather than 413.
-	body := &chargedReader{r: bytes.NewReader(make([]byte, 10)), charge: func(int64) bool { return false }}
-	if _, err := io.ReadAll(body); !errors.Is(err, errBodyBudget) {
-		t.Fatalf("refused read error = %v, want errBodyBudget", err)
+	// The reader records a refusal instead of returning it, so the cap owner
+	// decides the status: the read still completes and reports the flag.
+	refused := &chargedReader{
+		r:      bytes.NewReader(make([]byte, 10)),
+		charge: func(int64) bool { return false },
+	}
+	if _, err := io.ReadAll(refused); err != nil {
+		t.Fatalf("a refused read must not error out of the reader: %v", err)
+	}
+	if !refused.refused {
+		t.Fatal("a refused charge was not recorded")
+	}
+	// A read that is chargeable leaves the flag clear.
+	fine := &chargedReader{
+		r:      bytes.NewReader(make([]byte, 10)),
+		charge: func(int64) bool { return true },
+	}
+	if _, err := io.ReadAll(fine); err != nil || fine.refused {
+		t.Fatalf("a chargeable read reported refused=%v err=%v", fine.refused, err)
+	}
+}
+
+// stalledBody blocks on its first Read until released (or its context is
+// cancelled), so a test can hold one request inside admission without sending
+// any bytes. Close is what an HTTP client disconnect does.
+type stalledBody struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	sent    bool
+}
+
+func newStalledBody() *stalledBody {
+	return &stalledBody{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *stalledBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.EOF
+	}
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	b.sent = true
+	return copy(p, `{"model":"m","messages":[]}`), nil
+}
+
+func (b *stalledBody) Close() error { return nil }
+
+// TestInflightBudgetThroughTheHandler pins the admission rule at the level that
+// actually matters. The unit test below exercises the reservation type; this
+// one drives ServeHTTP, so it fails if the handler reserves a declared length
+// again, if it stops passing the charge function, or if the refusal stops
+// mapping to 503 with Retry-After.
+//
+// The pre-fix handler reserved each request's declared Content-Length, so N
+// idle sockets declaring max_request_bytes each exhausted the budget and every
+// other client was refused. Here two stalled requests declare 1 MiB and send
+// nothing; a healthy request must still be admitted and succeed.
+func TestInflightBudgetThroughTheHandler(t *testing.T) {
+	upstream, _ := mockUpstream(t, false)
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.MaxInflightBodyBytes = config.MaxInflightBodyBytesMin // 1 MiB
+	cfg.MaxRequestBytes = 1 << 20
+	s := New(cfg, metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: upstream.URL}})
+
+	// Hold two requests inside admission. Each declares 1 MiB (the whole
+	// budget) and has delivered no body bytes.
+	stalled := make([]*stalledBody, 2)
+	done := make(chan struct{}, len(stalled))
+	for i := range stalled {
+		body := newStalledBody()
+		stalled[i] = body
+		r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", body)
+		r.ContentLength = 1 << 20
+		r.Header.Set("Authorization", "Bearer sk-test")
+		r.Header.Set("X-Proxy-Base-URL", upstream.URL)
+		go func() {
+			defer func() { done <- struct{}{} }()
+			s.ServeHTTP(httptest.NewRecorder(), r)
+		}()
+	}
+	for i, body := range stalled {
+		select {
+		case <-body.entered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("stalled request %d never entered the body read", i)
+		}
+	}
+
+	// Nothing has been charged, so the whole budget is available.
+	if got := s.inflight.bytes.Load(); got != 0 {
+		t.Fatalf("idle declarations charged %d bytes, want 0", got)
+	}
+	healthy := httptest.NewRecorder()
+	hr := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
+		strings.NewReader(`{"model":"healthy","messages":[{"role":"user","content":"hi"}]}`))
+	hr.Header.Set("Authorization", "Bearer sk-test")
+	hr.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	s.ServeHTTP(healthy, hr)
+	if healthy.Code != http.StatusOK {
+		t.Fatalf("healthy request status = %d, want 200 while idle requests hold no budget (body %s)",
+			healthy.Code, healthy.Body.String())
+	}
+
+	// Release the stalled requests; every charge must be returned.
+	for _, body := range stalled {
+		close(body.release)
+	}
+	for range stalled {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("a stalled request never returned")
+		}
+	}
+	if got := s.inflight.bytes.Load(); got != 0 {
+		t.Fatalf("body budget after release = %d, want 0", got)
+	}
+	if got := s.inflight.cur.Load(); got != 0 {
+		t.Fatalf("request slots after release = %d, want 0", got)
+	}
+
+	// A body that crosses the budget mid-upload is refused with 503 and
+	// Retry-After, in a retryable error class, and the charge is returned.
+	cfg2 := config.Default()
+	cfg2.MaxInflightBodyBytes = config.MaxInflightBodyBytesMin // 1 MiB
+	cfg2.MaxRequestBytes = 2 << 20
+	s2 := New(cfg2, metrics.Noop{})
+	s2.client.Store(&http.Client{Transport: rewriteTransport{target: upstream.URL}})
+
+	// Park the whole budget behind one live read.
+	parked := newFillBody(int64(cfg2.MaxInflightBodyBytes))
+	parkedReq := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", parked)
+	parkedReq.ContentLength = int64(cfg2.MaxInflightBodyBytes) + 1
+	parkedReq.Header.Set("Authorization", "Bearer sk-test")
+	parkedReq.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	parkedDone := make(chan struct{})
+	go func() {
+		defer close(parkedDone)
+		s2.ServeHTTP(httptest.NewRecorder(), parkedReq)
+	}()
+	select {
+	case <-parked.filled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parked request never filled the budget")
+	}
+	// The charge is applied after Read returns, so wait for it rather than for
+	// the fill signal alone: filling and charging are two steps.
+	limit := int64(cfg2.MaxInflightBodyBytes)
+	charged := time.Now().Add(5 * time.Second)
+	for s2.inflight.bytes.Load() < limit {
+		if time.Now().After(charged) {
+			t.Fatalf("parked request charged %d of %d budget bytes", s2.inflight.bytes.Load(), limit)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	over := httptest.NewRecorder()
+	overReq := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
+		strings.NewReader(`{"model":"over","messages":[{"role":"user","content":"hi"}]}`))
+	overReq.Header.Set("Authorization", "Bearer sk-test")
+	overReq.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	s2.ServeHTTP(over, overReq)
+	if over.Code != http.StatusServiceUnavailable {
+		t.Fatalf("over-budget request status = %d, want 503 (body %s)", over.Code, over.Body.String())
+	}
+	if got := over.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("over-budget Retry-After = %q, want 1", got)
+	}
+	if !strings.Contains(over.Body.String(), "api_error") {
+		t.Fatalf("over-budget error type is not a retryable class: %s", over.Body.String())
+	}
+	close(parked.release)
+	<-parkedDone
+	if got := s2.inflight.bytes.Load(); got != 0 {
+		t.Fatalf("body budget after the refused request = %d, want 0", got)
+	}
+}
+
+// fillBody delivers n bytes, signals filled, then blocks until release. It lets
+// a test hold the process-wide body budget without an unbounded body.
+type fillBody struct {
+	remaining int64
+	filled    chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func newFillBody(n int64) *fillBody {
+	return &fillBody{remaining: n, filled: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *fillBody) Read(p []byte) (int, error) {
+	if b.remaining > 0 {
+		n := int64(len(p))
+		if n > b.remaining {
+			n = b.remaining
+		}
+		b.remaining -= n
+		if b.remaining == 0 {
+			b.once.Do(func() { close(b.filled) })
+		}
+		for i := range p[:n] {
+			p[i] = 'x'
+		}
+		return int(n), nil
+	}
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *fillBody) Close() error { return nil }
+
+// TestOversizedBodyStillAnswers413UnderBudgetPressure pins the status
+// precedence. A body that is definitively over max_request_bytes must answer
+// 413 even when the process-wide body budget is nearly exhausted: the cap is a
+// property of this request, while the budget is transient load. Charging the
+// over-cap bytes first would report an unrelated 503 (and invite a retry that
+// can never succeed), so bytes past the cap are not charged.
+func TestOversizedBodyStillAnswers413UnderBudgetPressure(t *testing.T) {
+	upstream, _ := mockUpstream(t, false)
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.MaxInflightBodyBytes = config.MaxInflightBodyBytesMin // 1 MiB
+	cfg.MaxRequestBytes = 1024                                // legal minimum
+	s := New(cfg, metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: upstream.URL}})
+
+	// Leave only 512 bytes of budget, so an over-cap body would certainly
+	// cross it if its bytes were charged.
+	if !s.inflight.acquire(int64(cfg.MaxInflightBodyBytes) - 512) {
+		t.Fatal("could not park budget for the fixture")
+	}
+
+	// 4 KiB body against a 1 KiB cap: definitively too large.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"`+strings.Repeat("x", 4096)+`"}]}`))
+	r.Header.Set("Authorization", "Bearer sk-test")
+	r.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-cap body under budget pressure status = %d, want 413 (body %s)", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("413 must not carry Retry-After, got %q", got)
 	}
 }

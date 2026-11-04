@@ -139,13 +139,18 @@ func applyOverrideHeaders(h http.Header, ov *resolvedOverride, authHeader string
 	}
 }
 
-// overrideHeaderAuthOwned reports whether an override header name is the
-// credential slot for this target: literal Authorization, or the target's
-// configured auth header (X-Proxy-Auth-Header, e.g. Anthropic's x-api-key).
-// Case-insensitive, like HTTP header names.
+// overrideHeaderAuthOwned reports whether an override header name is
+// credential-class for this target: the credential slot the request names
+// (Authorization, or the target's configured auth header such as
+// Anthropic's x-api-key) plus every name the shared CredentialHeaderName
+// vocabulary classifies as secret-bearing. Case-insensitive, like HTTP header
+// names. This is the send-stage belt behind the load gate: an already-persisted
+// rule or a future grammar slip still cannot stamp an operator secret onto a
+// request whose destination the caller chose.
 func overrideHeaderAuthOwned(name, authHeader string) bool {
 	return strings.EqualFold(name, "Authorization") ||
-		(authHeader != "" && strings.EqualFold(name, authHeader))
+		(authHeader != "" && strings.EqualFold(name, authHeader)) ||
+		config.CredentialHeaderName(name)
 }
 
 // overrideRequestBody rewrites an OpenAI-wire request body through the

@@ -518,18 +518,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// inference client-wire override is present; every other early sink
 	// follows the client protocol.
 	envelope := envelopeProtocol(r)
-	// Reserve one request slot plus a bounded speculative body amount, then
-	// charge the budget as bytes actually arrive. Reserving the declared
-	// Content-Length up front let an idle connection hold budget it never used:
-	// eight clients declaring 32 MiB each exhausted the default 256 MiB budget
-	// and denied inference to every other client. The speculative start is one
-	// read hint, so admission still bounds the handler set, and a body that
-	// really is large is charged while it is read.
-	speculative := int64(0)
-	if r.Body != nil && r.Body != http.NoBody {
-		speculative = min(max(r.ContentLength, 0), requestReadHintMax)
-	}
-	reservation, ok := s.inflight.acquireBody(speculative)
+	// Reserve one request slot and charge the body budget as bytes actually
+	// arrive. Reserving the declared Content-Length up front let an idle
+	// connection hold budget it never used: eight clients declaring 32 MiB each
+	// exhausted the default 256 MiB budget and denied inference to every other
+	// client. Reserving even one read hint per socket kept a smaller version of
+	// the same lever, so the reservation starts at zero and only real bytes
+	// count.
+	reservation, ok := s.inflight.acquireBody()
 	if !ok {
 		// Refuse before buffering a body: over the process-wide bound, heap is
 		// what a client would otherwise control. The directive writer above
@@ -577,11 +573,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var overflow *http.MaxBytesError
 		if errors.As(err, &overflow) {
 			status = http.StatusRequestEntityTooLarge
-		} else if errors.Is(err, errBodyBudget) {
+		}
+		errorType := typeInvalidRequestError
+		if errors.Is(err, errBodyBudget) {
+			// A budget refusal is a retryable capacity answer, not a
+			// client-fault class; the type has to say so or the proxy's own
+			// taxonomy would mark its Retry-After permanent.
 			status = http.StatusServiceUnavailable
+			errorType = typeAPIError
 			w.Header().Set("Retry-After", "1")
 		}
-		writeProtocolHTTPError(w, t.inbound, status, typeInvalidRequestError, err.Error())
+		writeProtocolHTTPError(w, t.inbound, status, errorType, err.Error())
 		return
 	}
 	// Hold the inbound body size readRequest captured: the rewrite engine

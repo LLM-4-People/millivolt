@@ -552,47 +552,6 @@ jobs:
             esac
           fi
 
-          # A closed-event required job is itself in progress. Ignore
-          # incomplete check runs and require the latest completed reviewed
-          # `required` check to be green.
-          #
-          # The check run must belong to the canonical check.yml testing run
-          # for this exact commit. A check-runs listing is commit-wide, so any
-          # other workflow run on the same commit (including a candidate
-          # workflow that renamed one of its own jobs to `required`) would
-          # otherwise satisfy this proof: the run's path, event, branch and
-          # suite id are all mandatory selectors here.
-          runs="$(gh api --paginate --slurp \
-            "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" |
-            jq -c '{workflow_runs: [.[].workflow_runs[]]}')"
-          suite="$(printf '%s' "$runs" | jq -r --arg sha "$HEAD_SHA" '
-            [ .workflow_runs[]
-              | select(.path == ".github/workflows/check.yml")
-              | select(.event == "push" or .event == "workflow_dispatch")
-              | select(.head_branch == "testing")
-              | select(.head_sha == $sha)
-            ]
-            | sort_by(.created_at, .id)
-            | last
-            | if . == null then "" else (.check_suite_id // "") end')"
-          if [ -z "$suite" ]; then
-            echo "::error::The reviewed head $HEAD_SHA has no canonical check.yml testing gate run, so no required check can be trusted."
-            exit 1
-          fi
-          latest_required="$(gh api --paginate --slurp \
-            "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=all&per_page=100" |
-            jq -r --argjson suite "$suite" '
-              [.[].check_runs[]
-                | select(.check_suite.id == $suite)
-                | select(.name == "required" and .status == "completed")]
-              | sort_by(.completed_at // .started_at // "", .id)
-              | last
-              | if . == null then "" else (.conclusion // "") end')"
-          if [ "$latest_required" != "success" ]; then
-            echo "::error::The reviewed head $HEAD_SHA has no successful required check in the canonical testing suite $suite (latest completed: ${latest_required:-missing})."
-            exit 1
-          fi
-
           # Preserve the docs/site-only release-free policy. The PR file list
           # is authoritative for what the reviewed change touched; include a
           # rename's previous path so a code-to-docs rename cannot hide code.
@@ -609,6 +568,111 @@ jobs:
             done
             return 1
           }
+
+          # A closed-event required job is itself in progress. Ignore
+          # incomplete check runs and require the latest completed reviewed
+          # `required` check to be green.
+          #
+          # The check run must belong to the canonical check.yml testing run
+          # for the reviewed commit. A check-runs listing is commit-wide, so any
+          # other workflow run on the same commit (including a candidate
+          # workflow that renamed one of its own jobs to `required`) would
+          # otherwise satisfy this proof: the run's path, event, branch and
+          # suite id are all mandatory selectors here.
+          #
+          # The reviewed head usually IS the gated commit. It may also be a
+          # commit that started no run at all, for two reasons only:
+          #   - an empty merge, most often "Merge origin/main into testing"
+          #     after main moved. GitHub starts no workflow for a push that
+          #     changes no file, and the tree is the first parent's tree.
+          #   - a docs/site-only push, which check.yml's paths-ignore family
+          #     deliberately skips, so the closest gated ancestor covers it.
+          # The walk therefore steps to the first parent while the commit is
+          # empty or entirely docs/site-only, and fails closed on any code
+          # change that has no gate of its own. The PR file list still governs
+          # the docs_only release decision below.
+          gated="$HEAD_SHA"
+          suite=""
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            runs="$(gh api --paginate --slurp \
+              "repos/$REPO/actions/runs?head_sha=$gated&per_page=100" |
+              jq -c '{workflow_runs: [.[].workflow_runs[]]}')"
+            suite="$(printf '%s' "$runs" | jq -r --arg sha "$gated" '
+              [ .workflow_runs[]
+                | select(.path == ".github/workflows/check.yml")
+                | select(.event == "push" or .event == "workflow_dispatch")
+                | select(.head_branch == "testing")
+                | select(.head_sha == $sha)
+              ]
+              | sort_by(.created_at, .id)
+              | last
+              | if . == null then "" else (.check_suite_id // "") end')"
+            if [ -n "$suite" ]; then
+              break
+            fi
+            commit="$(gh api "repos/$REPO/commits/$gated")"
+            parent="$(printf '%s' "$commit" | jq -r '.parents[0].sha // ""')"
+            tree="$(printf '%s' "$commit" | jq -r '.commit.tree.sha // ""')"
+            if [ -z "$parent" ]; then
+              echo "::error::The reviewed commit $gated has no canonical check.yml testing gate run, is not empty, and has no parent, so no required check can be trusted."
+              exit 1
+            fi
+            # "Empty" is decided by tree identity, not by an absent file list.
+            # A tree comparison is authoritative for every commit shape: a merge
+            # that introduces changes has a different tree even though the commit
+            # API reports its diff against a base rather than against its first
+            # parent, so a code-bearing merge can never be mistaken for empty.
+            parent_tree="$(gh api "repos/$REPO/commits/$parent" --jq '.commit.tree.sha // ""')"
+            if [ -n "$tree" ] && [ "$tree" = "$parent_tree" ]; then
+              echo "The reviewed commit $gated has the same tree as $parent; inheriting its gate."
+              gated="$parent"
+              continue
+            fi
+            # The commit API caps the file list, so a truncated list cannot
+            # prove the delta is docs-only. Treat it as code.
+            if [ "$(printf '%s' "$commit" | jq -r '(.files // []) | length')" -ge 300 ]; then
+              echo "::error::The reviewed commit $gated has no gate and its file list is truncated, so its delta cannot be classified; it needs its own full gate."
+              exit 1
+            fi
+            files="$(printf '%s' "$commit" | jq -r '(.files // [])[].filename')"
+            if [ -z "$files" ]; then
+              echo "::error::The reviewed commit $gated has no gate, differs from its first parent, and reports no changed file; its delta cannot be classified."
+              exit 1
+            fi
+            non_docs=""
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              if ! is_docs_path "$path"; then
+                non_docs="${non_docs}${path}"$'\n'
+              fi
+            done <<< "$files"
+            if [ -n "$non_docs" ]; then
+              echo "::error::The reviewed commit $gated has no canonical check.yml testing gate run and changes code, so it needs its own full gate:"
+              printf '%s' "$non_docs"
+              exit 1
+            fi
+            echo "The reviewed commit $gated changes only docs/site paths; inheriting the gate of $parent."
+            gated="$parent"
+          done
+          if [ -z "$suite" ]; then
+            echo "::error::No canonical check.yml testing gate run was found within 20 commits of $HEAD_SHA."
+            exit 1
+          fi
+          echo "The reviewed head $HEAD_SHA is covered by the canonical testing gate run at $gated."
+          latest_required="$(gh api --paginate --slurp \
+            "repos/$REPO/commits/$gated/check-runs?filter=all&per_page=100" |
+            jq -r --argjson suite "$suite" '
+              [.[].check_runs[]
+                | select(.check_suite.id == $suite)
+                | select(.name == "required" and .status == "completed")]
+              | sort_by(.completed_at // .started_at // "", .id)
+              | last
+              | if . == null then "" else (.conclusion // "") end')"
+          if [ "$latest_required" != "success" ]; then
+            echo "::error::The reviewed head $HEAD_SHA has no successful required check in the canonical testing suite $suite at $gated (latest completed: ${latest_required:-missing})."
+            exit 1
+          fi
+
           files="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)')"
           docs_only=true
