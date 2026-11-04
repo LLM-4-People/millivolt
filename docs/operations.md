@@ -1057,12 +1057,15 @@ a grant refills a saturated provider concurrency cap. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
-**Drain queued** releases requests the scheduler has parked for the selected
-provider, or for the model/client named in the menu fields, without waiting for
-a limit window, pause hold or retry pacing to open. Each released request
-answers with a retryable 503 and is recorded as `queue_drained`, never as a
-provider error; a request already exchanging bytes with the provider finishes
-normally.
+**Drain queued** releases every request the scheduler has parked, or only the
+model/client named in the menu fields, without waiting for a limit window, pause
+hold or retry pacing to open. The provider selector scopes limits only: a
+provider can hold queued work without a limit row (for example, send-gate waits
+behind an upstream 429), so it never narrows the drain. The line above the
+buttons shows the total parked count. Each released request answers with a
+retryable 503 and is recorded as `queue_drained`, never as a provider error; a
+request already exchanging bytes with the provider finishes normally. The API
+also accepts a `provider` scope for scripted drains.
 
 Anti-burst is opt-in and scoped to each provider+key group. With `anti_burst`
 enabled and a concurrency target of at least 2, a group starts at one

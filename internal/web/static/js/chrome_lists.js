@@ -472,6 +472,7 @@ function syncLimitsMenuState() {
   }
   fillLimitPolicy();
   updateLimitCount();
+  updateQueueDrainCount();
   renderLimitHolds();
   updateLimitsApplyEnabled();
   _limitsMenuSig = limitsMenuStructuralSig();
@@ -514,6 +515,18 @@ function updateLimitCount() {
   } else {
     count.textContent = '';
   }
+}
+
+// updateQueueDrainCount owns the queue total beside the drain fields. It is
+// the same scheduler count the footer shows (admission waiters plus send-gate
+// waiters), not the selected provider's row, so the operator can see what a
+// drain without a model/client scope will release.
+function updateQueueDrainCount() {
+  const el = $('lim-drain-count');
+  if (!el) return;
+  const queued = Number(pauseState.queued) || 0;
+  const text = queued > 0 ? 'queued ' + queued + ' overall' : 'queue empty';
+  if (el.textContent !== text) el.textContent = text;
 }
 
 function updateLimitsApplyEnabled() {
@@ -562,26 +575,29 @@ function clearLimitsMenu() {
   return mutateOperator('throttle', { provider, clear: true }, onLimitProviderChange);
 }
 
-// drainLimitsQueue releases requests the scheduler has parked. Scope
-// precedence: an explicit model or client field, else the selected provider,
-// else every queued request. It is operator flow control: released requests
-// answer with a retryable 503 and never count as provider failures.
+// drainLimitsQueue releases requests the scheduler has parked. The provider
+// select scopes provider limits, not the queue: it always holds the first
+// known provider, and a provider with queued work may have no limit row at
+// all (for example an upstream 429 pacing window). Drain therefore covers
+// every queued request unless the model or client field narrows it. It is
+// operator flow control: released requests answer with a retryable 503 and
+// never count as provider failures.
 async function drainLimitsQueue() {
   if (operatorState.throttle.busy) return;
-  const provider = $('lim-provider') ? $('lim-provider').value : '';
   const model = $('lim-drain-model') ? $('lim-drain-model').value.trim() : '';
   const client = $('lim-drain-client') ? $('lim-drain-client').value.trim() : '';
   if (model && client) {
     operatorError('throttle', 'drain either a model or a client, not both');
     return;
   }
-  const body = model ? { model } : client ? { client } : provider ? { provider } : { all: true };
+  const body = model ? { model } : client ? { client } : { all: true };
   operatorState.throttle.busy = true;
   operatorState.throttle.sync();
   try {
     await operatorJsonBody('/admin/queue/drain', {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
     }, 'could not drain the queue');
+    operatorCountClear('throttle');
     if ($('lim-drain-model')) $('lim-drain-model').value = '';
     if ($('lim-drain-client')) $('lim-drain-client').value = '';
   } catch (err) {
@@ -590,6 +606,9 @@ async function drainLimitsQueue() {
     operatorState.throttle.busy = false;
     operatorState.throttle.sync();
     syncLimitsMenuState();
+    // The drain response reports a generation, not a count; pull the operator
+    // state once so the queue line and footer drop without waiting a poll.
+    fetchBootstrap('none');
   }
 }
 
@@ -651,6 +670,7 @@ function limitsMenuStructuralSig() {
 // fields are untouched unless the apply gate saw a structural change.
 function refreshLimitsMenuDisplay() {
   updateLimitCount();
+  updateQueueDrainCount();
   renderLimitHolds();
 }
 
@@ -715,6 +735,7 @@ function setFooterLive(live) {
 }
 
 function refreshFooterState() {
+  updateQueueDrainCount();
   const dot = $('f-live'), state = $('f-state');
   const holding = pauseActive();
   const debugging = debugActive();
