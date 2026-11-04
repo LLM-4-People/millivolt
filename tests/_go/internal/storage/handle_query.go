@@ -144,3 +144,40 @@ func TestValidateQueryDeniesAttach(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateQueryDeniesReadOnlyCapabilityFunctions pins the second half of
+// the query contract: SQLite exposes raw pages and the whole result-bearing
+// PRAGMA family as ordinary table-valued functions, so a SELECT-only,
+// keyword-filtered statement can still read bytes a purge removed
+// (sqlite_dbpage), page statistics (dbstat) or the absolute database path
+// (pragma_database_list). Measured against modernc.org/sqlite v1.61.0, which
+// registers sqlite_dbpage, dbstat and the pragma_* modules as builtins.
+func TestValidateQueryDeniesReadOnlyCapabilityFunctions(t *testing.T) {
+	for _, q := range []string{
+		"SELECT data FROM sqlite_dbpage WHERE pgno = 2",
+		"SELECT pgno, data FROM sqlite_dbpage",
+		"SELECT count(*) FROM dbstat",
+		"SELECT * FROM pragma_table_info('requests')",
+		"SELECT name, file FROM pragma_database_list",
+		"SELECT * FROM pragma_compile_options",
+		"SELECT * FROM pragma_function_list",
+		"SELECT * FROM pragma_module_list",
+		"SELECT readfile('/etc/passwd')",
+		"SELECT writefile('/tmp/x', 'y')",
+	} {
+		if err := validateQuery(q); err == nil {
+			t.Errorf("validateQuery(%q) = nil, want rejection", q)
+		}
+	}
+	// The recipe surface stays open: ordinary tables, aggregates and the
+	// documented column set are unaffected.
+	for _, q := range []string{
+		"SELECT started_at, model FROM requests LIMIT 10",
+		"SELECT COUNT(*) AS n, SUM(cost) AS total FROM requests WHERE started_at > 0",
+		"SELECT conversation_id, COUNT(*) FROM requests GROUP BY conversation_id",
+	} {
+		if err := validateQuery(q); err != nil {
+			t.Errorf("validateQuery(%q) = %v, want nil", q, err)
+		}
+	}
+}

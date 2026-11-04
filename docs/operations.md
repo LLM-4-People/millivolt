@@ -1501,7 +1501,13 @@ The gated query route (`GET /metrics/query?q=`, above) and the [MCP](mcp.md)
 `query` tool both take exactly one `SELECT` with no statement separator, and
 results are bounded by `storage_query_max_rows` and
 `storage_query_max_bytes`; an over-budget result is an error on the route, so
-keep wide scans behind a `started_at` window or a `LIMIT`. Column meanings
+keep wide scans behind a `started_at` window or a `LIMIT`. The statement gate
+also denies the read-only capabilities SQLite exposes outside ordinary tables
+and columns: `ATTACH`, `DETACH`, `PRAGMA`, `LOAD_EXTENSION`, the
+`sqlite_dbpage` and `dbstat` table-valued functions, the whole result-bearing
+`pragma_*` family and the `readfile`/`writefile` functions. Those would read
+raw pages, page statistics or the absolute database path, which is not part of
+this console's surface. Column meanings
 come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
 relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
 calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,

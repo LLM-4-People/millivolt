@@ -222,6 +222,14 @@ func queryEngineLimit(err error) bool {
 // So ATTACH (and other schema/mutation keywords that can ride a SELECT-leading
 // string) are denied here explicitly - the real choke point the driver can't
 // provide (modernc.org/sqlite exposes no authorizer hook).
+//
+// A keyword filter alone is not enough, because SQLite also exposes read-only
+// capabilities as ordinary table-valued functions that never spell a denied
+// keyword: sqlite_dbpage returns raw database pages, dbstat returns page
+// statistics, and every result-bearing PRAGMA is reachable as pragma_<name>
+// (pragma_database_list returns the absolute live database path). Those are
+// denied by name below. The engine provides no authorizer hook, so the names
+// are the boundary; docs/operations.md states the accepted surface.
 func validateQuery(q string) error {
 	t := strings.TrimSpace(q)
 	if t == "" {
@@ -246,6 +254,19 @@ func validateQuery(q string) error {
 	up := strings.ToUpper(t)
 	for _, kw := range []string{"ATTACH", "DETACH", "PRAGMA", "LOAD_EXTENSION"} {
 		if containsWord(up, kw) {
+			return errNotSelect
+		}
+	}
+	// Table-valued functions the keyword filter cannot see. sqlite_dbpage
+	// returns raw pages, so it would hand back the bytes a purge removed
+	// (secure_delete is on, but a caller must not rely on the page image being
+	// gone); dbstat summarizes those pages; and the pragma_ prefix is the whole
+	// result-bearing PRAGMA family, whose pragma_database_list discloses the
+	// absolute database path. A bare substring is deliberate: these names have
+	// no legitimate column spelling, and a false positive is a refused query,
+	// never a widened one.
+	for _, fn := range []string{"SQLITE_DBPAGE", "DBSTAT", "PRAGMA_", "READFILE", "WRITEFILE"} {
+		if strings.Contains(up, fn) {
 			return errNotSelect
 		}
 	}
