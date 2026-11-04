@@ -39,6 +39,12 @@ var forbiddenOverrideHeaders = map[string]string{
 // with the reason the rejection message explains. Both lists of a rule
 // share the grammar: deleting a credential or framing header is as
 // breaking as rewriting it.
+//
+// Credential ownership uses the shared CredentialHeaderName vocabulary, not
+// only the three literal entries above: an override value is an
+// operator-supplied secret candidate stamped onto a request whose destination
+// the caller chooses, so a vendor spelling such as x-api-key or
+// x-session-token must be refused at load rather than leaked at send time.
 func ForbiddenOverrideHeader(name string) (reason string, forbidden bool) {
 	lower := strings.ToLower(name)
 	if reason = forbiddenOverrideHeaders[lower]; reason != "" {
@@ -46,6 +52,9 @@ func ForbiddenOverrideHeader(name string) (reason string, forbidden bool) {
 	}
 	if strings.HasPrefix(lower, "x-proxy-") {
 		return "control", true
+	}
+	if CredentialHeaderName(lower) {
+		return "credential", true
 	}
 	return "", false
 }

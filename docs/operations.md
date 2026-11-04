@@ -214,16 +214,26 @@ the exception: the client header maps (`X-Proxy-Headers` and an
 `X-Proxy-Auth-Header` naming one) reject them with a 400 before any send, and
 configured provider headers or request-override values are stripped from the
 final upstream request, so the transport keeps its own gzip negotiation and
-never sends a partial range. Credential and protocol names (`authorization`, `cookie`,
-`proxy-authorization`, `host`, `content-type`, `content-length`,
-`transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
-`proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control
-prefix are rejected at load in both header lists, and the client header maps
-reject `content-length` before any send so the transport keeps ownership of
-message framing; at runtime the target's configured auth header is skipped
-even if one slips through, so credentials stay at their owner. The fixed list cannot know a provider's configured
-auth header, so a rule naming the target's (for example `x-api-key`) passes
-config validation and is denied at send time by the runtime belt. Header
+never sends a partial range. Two header classes are rejected at load in both
+header lists. Protocol and framing names (`host`, `content-type`,
+`content-length`, `transfer-encoding`, `te`, `connection`, `keep-alive`,
+`proxy-authenticate`, `proxy-connection`, `trailer`, `upgrade`) and the whole
+`x-proxy-` control prefix belong to the proxy and the transport. Credential
+names belong to whoever issued the secret: `authorization`, `cookie`,
+`proxy-authorization`, and every spelling the shared credential vocabulary
+classifies - `api-key`, `x-api-key`, `secret`- and `token`-bearing names, with
+the `x-ratelimit-*` and `anthropic-ratelimit-*` accounting counters exempt
+because they are numbers, not keys. That breadth is deliberate. An override
+value is operator-supplied and is stamped onto a request whose destination the
+caller chooses with `X-Proxy-Base-URL`, so a secret in any unclassified header
+name would be delivered to that caller's host; only the exact names cannot be
+enumerated in advance, which is why the check is deny-by-default rather than a
+list of vendor spellings. The same vocabulary drives capture and debug
+redaction, so a stored capture never keeps a header the wire carried. At
+runtime the target's configured auth header is skipped as well, so a rule that
+predates this check, or a future grammar slip, still cannot move a credential.
+The client header maps reject `content-length` before any send so the transport
+keeps ownership of message framing. Header
 names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
 

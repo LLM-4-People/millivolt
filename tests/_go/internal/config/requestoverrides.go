@@ -192,6 +192,50 @@ func TestRequestOverridesForbiddenHeaders(t *testing.T) {
 	}
 }
 
+// TestRequestOverridesRejectsCredentialNames pins the load-boundary half of the
+// credential guard. A request_overrides header value is operator-supplied and is
+// stamped onto a request whose destination the CALLER chooses (X-Proxy-Base-URL,
+// unrestricted by default), so a secret placed in a non-denied header name is
+// delivered to the caller's host. Before this gate only three literal names were
+// denied, and x-api-key - the Anthropic credential slot - passed validation.
+// Every credential-class spelling is now refused in both lists.
+func TestRequestOverridesRejectsCredentialNames(t *testing.T) {
+	// spellings the old literal set missed, plus the ones it had
+	names := []string{
+		"x-api-key", "api-key", "x-goog-api-key", "x-session-token",
+		"x-auth-token", "client-secret", "x-amz-security-token",
+		"anthropic-api-key", "X-API-KEY",
+	}
+	for _, name := range names {
+		for _, field := range []string{"headers", "remove_headers"} {
+			c := Default()
+			if field == "headers" {
+				c.RequestOverrides = []RequestOverride{{Client: "opencode", Headers: map[string]string{name: "v"}}}
+			} else {
+				c.RequestOverrides = []RequestOverride{{Client: "opencode", RemoveHeaders: []string{name}}}
+			}
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("%s: credential-class header %q accepted; an operator secret could reach the caller's base URL", field, name)
+			}
+			if !strings.Contains(err.Error(), "credential-owned") {
+				t.Fatalf("%s %q: error = %q, want the credential-owned wording", field, name, err)
+			}
+		}
+	}
+	// Ordinary headers and the rate-limit accounting exemptions still pass. The
+	// x-proxy-limit-tokens budget header is intentionally absent: it carries the
+	// control prefix, which the override grammar denies as its own channel even
+	// though the retention vocabulary keeps it visible (it names a budget, not a
+	// secret).
+	for _, name := range []string{"user-agent", "x-lab-mode", "x-ratelimit-remaining-tokens",
+		"anthropic-ratelimit-tokens-limit", "accept-encoding"} {
+		if reason, forbidden := ForbiddenOverrideHeader(name); forbidden {
+			t.Fatalf("ForbiddenOverrideHeader(%q) denied a non-credential name (reason %q)", name, reason)
+		}
+	}
+}
+
 // TestRequestOverridesNormalize pins the normalization-before-judging
 // contract: a valid list comes back canonical - scope fields trimmed,
 // header names and values trimmed with names in HTTP canonical case, the
