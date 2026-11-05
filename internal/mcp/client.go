@@ -26,27 +26,35 @@ import (
 	"unicode/utf8"
 )
 
-// Route paths. This is the closed set of operator-plane endpoints this server
-// calls: a tool cannot name an arbitrary path, so no request can reach the
-// proxy's transparent inference catch-all, and no restore-adjacent route is
-// reachable.
+// Route is one documented operator-plane endpoint. This is the closed set of
+// routes the shared HTTP client may call: a caller cannot name an arbitrary
+// path, so no request can reach the proxy's transparent inference catch-all.
+// The MCP tool layer exposes a subset; the backup, restore, drain and health
+// routes exist for the operator command in cmd/mvctl. The paths are the
+// canonical set documented in docs/operations.md#operator-and-data-routes.
+type Route string
+
 const (
-	routeQuery        = "/metrics/query"
-	routeExplorer     = "/metrics/agg/explorer"
-	routeChart        = "/metrics/agg/chart"
-	routeLog          = "/metrics/agg/log"
-	routeBootstrap    = "/metrics/bootstrap"
-	routePrometheus   = "/metrics/prometheus"
-	routePause        = "/admin/pause"
-	routeThrottle     = "/admin/throttle"
-	routeQuota        = "/admin/quota"
-	routeDebug        = "/admin/debug"
-	routeDebugCapture = "/admin/debug/capture"
-	routeConfig       = "/admin/config"
-	routeReload       = "/admin/reload"
-	routeRestart      = "/admin/restart"
-	routePurge        = "/admin/purge"
-	routePurgeCount   = "/admin/purge/count"
+	RouteHealthz      Route = "/healthz"
+	RouteQuery        Route = "/metrics/query"
+	RouteExplorer     Route = "/metrics/agg/explorer"
+	RouteChart        Route = "/metrics/agg/chart"
+	RouteLog          Route = "/metrics/agg/log"
+	RouteBootstrap    Route = "/metrics/bootstrap"
+	RoutePrometheus   Route = "/metrics/prometheus"
+	RoutePause        Route = "/admin/pause"
+	RouteThrottle     Route = "/admin/throttle"
+	RouteQuota        Route = "/admin/quota"
+	RouteDebug        Route = "/admin/debug"
+	RouteDebugCapture Route = "/admin/debug/capture"
+	RouteConfig       Route = "/admin/config"
+	RouteReload       Route = "/admin/reload"
+	RouteRestart      Route = "/admin/restart"
+	RouteDrain        Route = "/admin/queue/drain"
+	RoutePurge        Route = "/admin/purge"
+	RoutePurgeCount   Route = "/admin/purge/count"
+	RouteBackup       Route = "/admin/backup"
+	RouteRestore      Route = "/admin/restore"
 )
 
 // MaxResponseBytes bounds one response body read. An internal guardrail
@@ -257,7 +265,7 @@ func failureExcerpt(body []byte, token string) string {
 	if overflow && len(collapseWhitespace(region)) < target {
 		// The full body's collapse cannot reach the target inside the scan
 		// cap, so redactForExcerpt would fail closed on it.
-		return redactionMarker
+		return RedactionMarker
 	}
 	decoded := region
 	if streamed, ok := streamedFailureText(bounded, target); ok {
@@ -389,8 +397,8 @@ func errorMessage(message string, status int) string {
 
 // getJSON performs one authenticated GET and decodes the JSON body into out.
 // A non-2xx status becomes an *APIError carrying the proxy's message.
-func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out any) error {
-	return c.doJSON(ctx, http.MethodGet, path, query, nil, out)
+func (c *Client) getJSON(ctx context.Context, route Route, query url.Values, out any) error {
+	return c.doJSON(ctx, http.MethodGet, route, query, nil, out)
 }
 
 // getJSONQuery performs one authenticated GET for a full-history read (the
@@ -398,31 +406,31 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 // Timeout is deliberately not imposed: it is usually shorter and would silently
 // cut the documented bound. The caller's context still cancels the call if the
 // caller goes away.
-func (c *Client) getJSONQuery(ctx context.Context, path string, query url.Values, out any) error {
+func (c *Client) getJSONQuery(ctx context.Context, route Route, query url.Values, out any) error {
 	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 	defer cancel()
-	_, err := c.doJSONWith(queryCtx, c.queryHTTP, http.MethodGet, path, query, nil, out, nil)
+	_, err := c.doJSONWith(queryCtx, c.queryHTTP, http.MethodGet, route, query, nil, out, nil)
 	return err
 }
 
 // postJSON performs one authenticated POST with a JSON body and decodes the
 // response into out. body is marshaled by the caller-owned request shapes; the
 // proxy applies its single strict administrative decoder to what arrives.
-func (c *Client) postJSON(ctx context.Context, path string, body any, out any) error {
-	return c.doJSON(ctx, http.MethodPost, path, nil, body, out)
+func (c *Client) postJSON(ctx context.Context, route Route, body any, out any) error {
+	return c.doJSON(ctx, http.MethodPost, route, nil, body, out)
 }
 
 // getText performs one authenticated GET and returns a bounded body without
 // decoding, for the Prometheus exposition and the capture document (which the
 // tool sizes before decoding).
-func (c *Client) getText(ctx context.Context, path string, query url.Values) ([]byte, error) {
-	return c.getRaw(ctx, http.MethodGet, path, query)
+func (c *Client) getText(ctx context.Context, route Route, query url.Values) ([]byte, error) {
+	return c.getRaw(ctx, http.MethodGet, route, query)
 }
 
 // getRaw is the one bounded, authenticated body reader for a response the tool
 // does not decode itself.
-func (c *Client) getRaw(ctx context.Context, method, path string, query url.Values) ([]byte, error) {
-	resp, err := c.openRaw(ctx, method, path, query)
+func (c *Client) getRaw(ctx context.Context, method string, route Route, query url.Values) ([]byte, error) {
+	resp, err := c.openRaw(ctx, method, route, query)
 	if err != nil {
 		return nil, err
 	}
@@ -435,8 +443,8 @@ func (c *Client) getRaw(ctx context.Context, method, path string, query url.Valu
 // owns closing the returned body. It is the one failure-body reader for the
 // raw response paths: getRaw buffers the success body, and the streamed query
 // reader decodes it in place.
-func (c *Client) openRaw(ctx context.Context, method, path string, query url.Values) (*http.Response, error) {
-	resp, err := c.send(ctx, method, path, query, nil)
+func (c *Client) openRaw(ctx context.Context, method string, route Route, query url.Values) (*http.Response, error) {
+	resp, err := c.send(ctx, method, route, query, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -455,8 +463,8 @@ func (c *Client) openRaw(ctx context.Context, method, path string, query url.Val
 // header, the bounded read, the status check and the JSON decode. It discards
 // the status; a caller that must reason about a non-2xx status uses
 // doJSONTolerating.
-func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
-	_, err := c.doJSONTolerating(ctx, method, path, query, body, out, nil)
+func (c *Client) doJSON(ctx context.Context, method string, route Route, query url.Values, body any, out any) error {
+	_, err := c.doJSONTolerating(ctx, method, route, query, body, out, nil)
 	return err
 }
 
@@ -470,13 +478,13 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 // SUCCEEDED and invites a retry that then fails with 409. No other status on
 // any route is tolerated: a 409, a 401 and a 500 with no committed document all
 // stay errors.
-func (c *Client) doJSONTolerating(ctx context.Context, method, path string, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
-	return c.doJSONWith(ctx, c.http, method, path, query, body, out, tolerate)
+func (c *Client) doJSONTolerating(ctx context.Context, method string, route Route, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
+	return c.doJSONWith(ctx, c.http, method, route, query, body, out, tolerate)
 }
 
 // doJSONWith is the single request/response owner; httpClient selects the
 // deadline policy, the generic client or the query one.
-func (c *Client) doJSONWith(ctx context.Context, httpClient *http.Client, method, path string, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
+func (c *Client) doJSONWith(ctx context.Context, httpClient *http.Client, method string, route Route, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -485,7 +493,7 @@ func (c *Client) doJSONWith(ctx context.Context, httpClient *http.Client, method
 		}
 		payload = bytes.NewReader(encoded)
 	}
-	resp, err := c.sendWith(httpClient, ctx, method, path, query, payload)
+	resp, err := c.sendWith(httpClient, ctx, method, route, query, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -509,16 +517,23 @@ func (c *Client) doJSONWith(ctx context.Context, httpClient *http.Client, method
 
 // send builds and performs the authenticated request with the generic
 // deadline policy.
-func (c *Client) send(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
-	return c.sendWith(c.http, ctx, method, path, query, body)
+func (c *Client) send(ctx context.Context, method string, route Route, query url.Values, body io.Reader) (*http.Response, error) {
+	return c.sendWith(c.http, ctx, method, route, query, body)
 }
 
 // sendWith builds and performs the authenticated request with the given
 // deadline policy. The credential appears only in the Authorization header: it
 // is never placed in the URL, logged, or echoed into a tool result.
-func (c *Client) sendWith(httpClient *http.Client, ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
+func (c *Client) sendWith(httpClient *http.Client, ctx context.Context, method string, route Route, query url.Values, body io.Reader) (*http.Response, error) {
+	return c.sendStreamWith(httpClient, ctx, method, route, query, "", -1, body)
+}
+
+// sendStreamWith is the one request builder. contentType empty means the JSON
+// default for a non-nil body; contentLength -1 leaves the length unknown, as a
+// streamed JSON body has always been.
+func (c *Client) sendStreamWith(httpClient *http.Client, ctx context.Context, method string, route Route, query url.Values, contentType string, contentLength int64, body io.Reader) (*http.Response, error) {
 	endpoint := *c.base
-	endpoint.Path = path
+	endpoint.Path = string(route)
 	if len(query) > 0 {
 		endpoint.RawQuery = query.Encode()
 	}
@@ -527,8 +542,14 @@ func (c *Client) sendWith(httpClient *http.Client, ctx context.Context, method, 
 		return nil, fmt.Errorf("build request: %v", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+c.token)
-	if body != nil {
+	switch {
+	case contentType != "":
+		request.Header.Set("Content-Type", contentType)
+	case body != nil:
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if contentLength >= 0 {
+		request.ContentLength = contentLength
 	}
 	// The credential is not a cookie: the proxy also mints a session cookie on
 	// a successful Bearer, and reusing that cookie would silently outlive a
@@ -540,10 +561,26 @@ func (c *Client) sendWith(httpClient *http.Client, ctx context.Context, method, 
 		if errors.Is(err, errRedirectRefused) {
 			return nil, errRedirectRefused
 		}
-		return nil, fmt.Errorf("reach millivolt at %s: %v", c.base.String(), redactCredential(err.Error(), c.token))
+		return nil, &transportError{
+			message: fmt.Sprintf("reach millivolt at %s: %s", c.base.String(), redactCredential(err.Error(), c.token)),
+			cause:   err,
+		}
 	}
 	return resp, nil
 }
+
+// transportError carries the redacted message an operator or model may read
+// while preserving the underlying failure for errors.Is. Error() returns only
+// the redacted text, so a wrapped *url.Error cannot leak the credential
+// through the chain; Unwrap is what lets a cancelled watch request map to exit
+// 130 instead of a generic failure.
+type transportError struct {
+	message string
+	cause   error
+}
+
+func (e *transportError) Error() string { return e.message }
+func (e *transportError) Unwrap() error { return e.cause }
 
 // readBody reads a bounded body and reports an explicit error instead of a
 // truncated document when the budget is exceeded.
@@ -562,7 +599,7 @@ func readBody(body io.Reader) ([]byte, error) {
 // outcomes, shared by readBody and the streaming query reader so a bounded
 // response cannot drift between the buffered and streamed paths.
 func readFailure(err error) error {
-	return fmt.Errorf("read millivolt response: %v", err)
+	return &transportError{message: "read millivolt response: " + err.Error(), cause: err}
 }
 
 func readBudgetExceeded() error {
@@ -619,10 +656,11 @@ func (b *boundedBody) drain() error {
 	return err
 }
 
-// redactionMarker replaces every credential form removed from model-visible
+// RedactionMarker replaces every credential form removed from model-visible
 // text. It stays visible on purpose: silent removal leaves an operator
-// wondering why the proxy's own message changed.
-const redactionMarker = "[redacted]"
+// wondering why the proxy's own message changed. Exported so a command-line
+// caller prints the same marker instead of inventing a second spelling.
+const RedactionMarker = "[redacted]"
 
 // truncationMarker ends an excerpt cut at the byte budget. Its length is part
 // of the published bound (the model-visible text runs up to this marker past
@@ -692,7 +730,7 @@ func redactForExcerpt(message, token string) string {
 	}
 	region, complete, _ := excerptRegion(message, excerptTarget(token))
 	if !complete {
-		return redactionMarker
+		return RedactionMarker
 	}
 	redacted := redactCredential(region, token)
 	redacted = collapseWhitespace(redacted)
@@ -1183,7 +1221,7 @@ func applySpans(message string, spans []rawSpan) string {
 			span.start = last
 		}
 		out.WriteString(message[last:span.start])
-		out.WriteString(redactionMarker)
+		out.WriteString(RedactionMarker)
 		last = span.end
 	}
 	out.WriteString(message[last:])
@@ -1231,7 +1269,7 @@ func redactCredential(message, token string) string {
 	for _, view := range credentialViews(message, false) {
 		scanView(token, windows, &view, &spans)
 		if view.incomplete() {
-			return redactionMarker
+			return RedactionMarker
 		}
 	}
 	if stripped := strings.Join(strings.Fields(token), ""); stripped != "" {
@@ -1242,7 +1280,7 @@ func redactCredential(message, token string) string {
 		for _, view := range credentialViews(message, true) {
 			scanView(stripped, strippedWindows, &view, &spans)
 			if view.incomplete() {
-				return redactionMarker
+				return RedactionMarker
 			}
 		}
 	}

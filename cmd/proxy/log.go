@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -132,7 +133,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 	// requests cannot fall through to inference (HandleQuery owns both
 	// cases). It is operator-gated like every /metrics route: gatedPath
 	// gates the whole namespace, read surfaces included.
-	mux.HandleFunc("/metrics/query", store.HandleQuery)
+	mux.HandleFunc(string(mcp.RouteQuery), store.HandleQuery)
 	mux.HandleFunc("/metrics/export", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodGet) {
 			return
@@ -192,7 +193,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 	// /metrics namespace. The operator credential gates both planes alike
 	// (gatedPath gates /metrics too), so the split is action vs read, never
 	// open-read vs gated.
-	mux.HandleFunc("/admin/purge", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(string(mcp.RoutePurge), func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}
@@ -232,7 +233,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
-	mux.HandleFunc("/admin/purge/count", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(string(mcp.RoutePurgeCount), func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}

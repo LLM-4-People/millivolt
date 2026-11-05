@@ -152,6 +152,8 @@ func TestSetPauseValidation(t *testing.T) {
 	}{
 		{"bad duration", SetPauseInput{Paused: true, All: true, Duration: stringPtr("2m")}, "15m, 1h, 6h, 12h, 24h"},
 		{"negative cap", SetPauseInput{Paused: true, All: true, MaxQueued: &negative}, "max_queued must be >= 0"},
+		{"resume with scope", SetPauseInput{Paused: false, All: true}, "resume carries only hold_id"},
+		{"resume with duration", SetPauseInput{Paused: false, Duration: stringPtr("1h")}, "resume carries only hold_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := service.setPause(ctx, tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -624,6 +626,12 @@ func TestSetThrottleRefusesAnUnknownProvider(t *testing.T) {
 	}
 	if len(proxy.requestsFor(http.MethodGet, throttlePath)) != 0 {
 		t.Fatal("a refused provider must not read the current policy")
+	}
+	// A malformed body is a usage error and must win over the vocabulary guard,
+	// matching the order the command validates in.
+	if _, err := service.setThrottle(ctx, SetThrottleInput{Provider: "locla", Concurrency: throttleIntPtr(-1)}); err == nil ||
+		!strings.Contains(err.Error(), "concurrency must be 0..") {
+		t.Fatalf("body validation order = %v, want the concurrency error", err)
 	}
 	// A known provider is accepted; a clear is checked too, since the proxy
 	// records the name on that path as well.
@@ -1376,7 +1384,7 @@ func TestPurgeFilterWireShape(t *testing.T) {
 		Provider: "p", Model: "m", Client: "c", ConversationID: "cv", ErrorType: "e",
 		StatusCode: 429, HasError: true, HasDebug: true, BeforeMs: 2000, AfterMs: 1000,
 	}
-	document := full.document()
+	document := full.Document()
 	if len(document) != 10 {
 		t.Fatalf("every field must reach the proxy: %v", document)
 	}
@@ -1384,11 +1392,11 @@ func TestPurgeFilterWireShape(t *testing.T) {
 		t.Fatalf("the debug filter is named debug on the wire: %v", document)
 	}
 	// Zero values are absence, not a constraint.
-	empty := (PurgeFilterInput{}).document()
+	empty := (PurgeFilterInput{}).Document()
 	if len(empty) != 0 {
 		t.Fatalf("an empty filter must serialize to nothing, got %v", empty)
 	}
-	if !(PurgeFilterInput{}).isEmpty() {
+	if !(PurgeFilterInput{}).IsEmpty() {
 		t.Fatal("an empty filter must be recognized as the delete-everything command")
 	}
 	for _, partial := range []PurgeFilterInput{
@@ -1396,7 +1404,7 @@ func TestPurgeFilterWireShape(t *testing.T) {
 		{ErrorType: "e"}, {StatusCode: 1}, {HasError: true}, {HasDebug: true},
 		{BeforeMs: 1}, {AfterMs: 1},
 	} {
-		if partial.isEmpty() {
+		if partial.IsEmpty() {
 			t.Fatalf("%+v constrains something and must not read as empty", partial)
 		}
 	}
@@ -1437,3 +1445,50 @@ func throttleIntPtr(value int) *int { return &value }
 func throttleInt64Ptr(value int64) *int64 { return &value }
 
 func throttleBoolPtr(value bool) *bool { return &value }
+
+func TestSetThrottleTrimsTheProviderOnTheWire(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	proxy.json(http.MethodPost, throttlePath, `{"ok":true,"throttles":[],"known_providers":["local"]}`)
+	service := newTestService(t, proxy, Limits{})
+	concurrency := 2
+	if _, err := service.setThrottle(context.Background(), SetThrottleInput{Provider: " local ", Concurrency: &concurrency}); err != nil {
+		t.Fatal(err)
+	}
+	body := decodeBody(t, proxy.requestsFor(http.MethodPost, throttlePath)[0])
+	if body["provider"] != "local" {
+		t.Fatalf("provider = %q, want the trimmed name", body["provider"])
+	}
+}
+
+func TestCaptureDurationVocabularyMatchesSchemaTags(t *testing.T) {
+	tagOf := func(value any, field string) string {
+		structField, ok := reflect.TypeOf(value).FieldByName(field)
+		if !ok {
+			t.Fatalf("%T has no field %s", value, field)
+		}
+		return structField.Tag.Get("jsonschema")
+	}
+	for _, field := range []struct {
+		name string
+		tag  string
+	}{
+		{"AuditStartInput.Duration", tagOf(AuditStartInput{}, "Duration")},
+		{"SetPauseInput.Duration", tagOf(SetPauseInput{}, "Duration")},
+	} {
+		if !strings.Contains(field.tag, CaptureDurationOptions) {
+			t.Errorf("%s tag = %q, want the shared %q vocabulary", field.name, field.tag, CaptureDurationOptions)
+		}
+	}
+	for _, duration := range captureDurations {
+		if err := validateCaptureDuration(duration); err != nil {
+			t.Errorf("validateCaptureDuration(%q) = %v", duration, err)
+		}
+		if !strings.Contains(CaptureDurationHelp, duration) {
+			t.Errorf("CaptureDurationHelp %q omits %q", CaptureDurationHelp, duration)
+		}
+	}
+	if err := validateCaptureDuration("30m"); err == nil {
+		t.Fatal("validateCaptureDuration accepted a value outside the shared list")
+	}
+}

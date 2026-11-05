@@ -33,6 +33,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
@@ -52,12 +53,11 @@ var ErrSnapshotStaging = errors.New("snapshot staging directory is required")
 var ErrTooLarge = errors.New("backup exceeds backup_max_bytes")
 
 const (
-	magic          = "MVB1"
 	archiveVersion = 1
 	flagConfig     = 1 << 0
 	flagDatabase   = 1 << 1
 	knownFlags     = flagConfig | flagDatabase
-	headerSize     = 4 + 1 + 1 + 2 + 8 + sha256.Size
+	headerSize     = len(params.Magic) + 1 + 1 + 2 + 8 + sha256.Size
 
 	memberConfig   uint8 = 1
 	memberDatabase uint8 = 2
@@ -312,7 +312,7 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 	if err := writeAll(f, placeholder[:]); err != nil {
 		return "", 0, fmt.Errorf("stage backup: %w", err)
 	}
-	cap := &capWriter{w: f, limit: maxArchiveBytes - headerSize}
+	cap := &capWriter{w: f, limit: maxArchiveBytes - int64(headerSize)}
 	if cap.limit < 0 {
 		return "", 0, ErrTooLarge
 	}
@@ -478,7 +478,7 @@ func writeAll(w io.Writer, b []byte) error {
 // finalized Created (a zero time is never encoded).
 func buildHeader(a Archive, sum [sha256.Size]byte) []byte {
 	out := make([]byte, 0, headerSize)
-	out = append(out, magic...)
+	out = append(out, params.Magic...)
 	out = append(out, archiveVersion, a.flags(), 0, 0)
 	out = binary.BigEndian.AppendUint64(out, uint64(a.Created.Unix()))
 	out = append(out, sum[:]...)
@@ -669,7 +669,7 @@ func checkPayloadHash(got []byte, want [sha256.Size]byte) error {
 	return nil
 }
 
-// Decode admits an archive only when magic, version, zstd checksum, and the
+// Decode admits an archive only when Magic, version, zstd checksum, and the
 // outer SHA-256 all match. Uncompressed members cannot exceed the Schema
 // maximum for backup_max_bytes, so a small frame cannot expand without bound.
 // It does not apply config or open SQLite. It is the byte-buffered wrapper over
@@ -971,7 +971,7 @@ func parseHeader(raw []byte) (archiveHeader, error) {
 	if len(raw) < headerSize {
 		return archiveHeader{}, fmt.Errorf("backup is truncated")
 	}
-	if string(raw[:4]) != magic {
+	if string(raw[:len(params.Magic)]) != params.Magic {
 		return archiveHeader{}, fmt.Errorf("not a millivolt backup")
 	}
 	if raw[4] != archiveVersion {

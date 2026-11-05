@@ -118,6 +118,38 @@ type AuditStartOutput struct {
 // so the effect is never implicit.
 const auditConfirmStart = "start capture"
 
+// Document renders the POST /admin/debug start/edit body. Only a dimension that
+// was actually named is sent: an omitted scope is preserved on an edit and
+// rejected on a create, whereas an explicit empty array is a different
+// document.
+func (in AuditStartInput) Document() (map[string]any, error) {
+	if in.SessionID == "" && len(in.Clients) == 0 && len(in.Providers) == 0 && len(in.Models) == 0 {
+		return nil, fmt.Errorf("at least one of clients, providers or models is required; a capture session has no unrestricted all-traffic scope")
+	}
+	if in.Duration != nil {
+		if err := validateCaptureDuration(*in.Duration); err != nil {
+			return nil, err
+		}
+	}
+	body := map[string]any{"enabled": true}
+	if in.SessionID != "" {
+		body["id"] = in.SessionID
+	}
+	if in.Clients != nil {
+		body["clients"] = in.Clients
+	}
+	if in.Providers != nil {
+		body["providers"] = in.Providers
+	}
+	if in.Models != nil {
+		body["models"] = in.Models
+	}
+	if in.Duration != nil {
+		body["duration"] = *in.Duration
+	}
+	return body, nil
+}
+
 // AuditStart starts or edits one capture session. It refuses when durable
 // storage is off: the proxy would accept the session, report success, and never
 // store a document, so a silent no-op is worse than a refusal. It also refuses a
@@ -131,13 +163,9 @@ func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditSta
 	if in.Confirm != auditConfirmStart {
 		return nil, fmt.Errorf("confirm must be %q: capture stores full request and response bodies and is sensitive", auditConfirmStart)
 	}
-	if in.SessionID == "" && len(in.Clients) == 0 && len(in.Providers) == 0 && len(in.Models) == 0 {
-		return nil, fmt.Errorf("at least one of clients, providers or models is required; a capture session has no unrestricted all-traffic scope")
-	}
-	if in.Duration != nil {
-		if err := validateCaptureDuration(*in.Duration); err != nil {
-			return nil, err
-		}
+	body, err := in.Document()
+	if err != nil {
+		return nil, err
 	}
 	before, err := s.client.debug(ctx)
 	if err != nil {
@@ -153,25 +181,6 @@ func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditSta
 	if !storage.Enabled {
 		return nil, fmt.Errorf("durable storage is disabled on this proxy (db_path is empty), so nothing could ever be captured: " +
 			"a session would start, report success, and store no documents. Start the proxy with a db_path first")
-	}
-	body := map[string]any{"enabled": true}
-	if in.SessionID != "" {
-		body["id"] = in.SessionID
-	}
-	// Only send a dimension that was actually named: an omitted scope is
-	// preserved on an edit and rejected on a create, whereas an explicit empty
-	// array is a different document.
-	if in.Clients != nil {
-		body["clients"] = in.Clients
-	}
-	if in.Providers != nil {
-		body["providers"] = in.Providers
-	}
-	if in.Models != nil {
-		body["models"] = in.Models
-	}
-	if in.Duration != nil {
-		body["duration"] = *in.Duration
 	}
 	status, err := s.client.postDebug(ctx, body)
 	if err != nil {
@@ -234,6 +243,16 @@ type AuditStopOutput struct {
 // auditConfirmStopAll is the literal required to clear every session.
 const auditConfirmStopAll = "stop every capture session"
 
+// Document renders the POST /admin/debug stop body. An empty session id is the
+// stop-every-session form the caller must confirm separately.
+func (in AuditStopInput) Document() map[string]any {
+	body := map[string]any{"enabled": false}
+	if in.SessionID != "" {
+		body["id"] = in.SessionID
+	}
+	return body
+}
+
 // AuditStop stops one session, or every session when StopAll carries the exact
 // confirmation token. Stopping never deletes stored captures.
 func (s *Service) auditStop(ctx context.Context, in AuditStopInput) (*AuditStopOutput, error) {
@@ -247,10 +266,9 @@ func (s *Service) auditStop(ctx context.Context, in AuditStopInput) (*AuditStopO
 	case in.SessionID == "":
 		return nil, fmt.Errorf("session_id is required to stop one session, or stop_all must be %q to stop every session", auditConfirmStopAll)
 	}
-	body := map[string]any{"enabled": false}
+	body := in.Document()
 	stopped := "all"
 	if in.SessionID != "" {
-		body["id"] = in.SessionID
 		stopped = in.SessionID
 	}
 	status, err := s.client.postDebug(ctx, body)
@@ -407,7 +425,7 @@ func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) 
 	}
 	values := url.Values{}
 	values.Set("id", in.RecordID)
-	raw, err := s.client.getRaw(ctx, http.MethodGet, routeDebugCapture, values)
+	raw, err := s.client.getRaw(ctx, http.MethodGet, RouteDebugCapture, values)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +450,7 @@ func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) 
 // It is the single owner of the POST /admin/debug body and the response shape.
 func (c *Client) postDebug(ctx context.Context, body map[string]any) (*debugStatus, error) {
 	var status debugStatus
-	if err := c.postJSON(ctx, routeDebug, body, &status); err != nil {
+	if err := c.postJSON(ctx, RouteDebug, body, &status); err != nil {
 		return nil, err
 	}
 	return &status, nil
@@ -538,13 +556,24 @@ func firstSessionID(sessions []debugSession) string {
 
 // validateCaptureDuration applies the proxy's session-duration allowlist so a
 // typo is a clear message instead of a 400.
+// CaptureDurationOptions is the one list of explicit session durations. The
+// validator, the human help and (through a contract test) the schema tags all
+// derive from it, so a new value cannot land on one surface only.
+const CaptureDurationOptions = "15m, 1h, 6h, 12h, 24h"
+
+var (
+	captureDurations = strings.Split(CaptureDurationOptions, ", ")
+	// CaptureDurationHelp adds the until-stopped spelling shared by pause and
+	// debug commands.
+	CaptureDurationHelp = CaptureDurationOptions + ", or empty for until stopped"
+)
+
 func validateCaptureDuration(duration string) error {
 	if duration == "" {
 		return nil
 	}
-	switch duration {
-	case "15m", "1h", "6h", "12h", "24h":
+	if slices.Contains(captureDurations, duration) {
 		return nil
 	}
-	return fmt.Errorf("duration must be 15m, 1h, 6h, 12h, 24h, or empty for until stopped")
+	return fmt.Errorf("duration must be %s", CaptureDurationHelp)
 }

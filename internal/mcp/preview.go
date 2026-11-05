@@ -49,11 +49,11 @@ type previewToken struct {
 }
 
 // canonicalFilter is the exact byte string a filter is bound by. It comes from
-// the same document() the outgoing request is built from and is encoded by
+// the same Document() the outgoing request is built from and is encoded by
 // encoding/json, which sorts map keys, so two equal filters always produce the
 // same bytes and two different filters cannot.
 func canonicalFilter(filter PurgeFilterInput) ([]byte, error) {
-	return json.Marshal(filter.document())
+	return json.Marshal(filter.Document())
 }
 
 // previewClaims is what a verified token carries. The filter stays as its

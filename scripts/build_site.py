@@ -87,6 +87,7 @@ NAV_GROUPS = (
             ("Adapters", "docs/adapters.html", "docs/adapters.md"),
             ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
             ("MCP server", "docs/mcp.html", "docs/mcp.md"),
+            ("Operator CLI", "docs/cli.html", "docs/cli.md"),
             ("Security", "security.html", "SECURITY.md"),
         ),
     ),

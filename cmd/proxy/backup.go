@@ -19,23 +19,17 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 func registerBackupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/admin/backup", handleBackup)
-	mux.HandleFunc("/admin/restore", handleRestore)
+	mux.HandleFunc(string(mcp.RouteBackup), handleBackup)
+	mux.HandleFunc(string(mcp.RouteRestore), handleRestore)
 }
-
-// The two mutating routes' consumed query-key sets: the duplicate gate and
-// the unknown-key gate read the same list, so a future key cannot widen one
-// gate without the other.
-var (
-	backupQueryKeys  = []string{"config", "database"}
-	restoreQueryKeys = []string{"inspect", "config", "database", "config_mode", "database_mode"}
-)
 
 const (
 	// restoreUploadBuffer bounds the streaming upload copy, so the request body
@@ -52,7 +46,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, backupQueryKeys...); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -60,7 +54,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// silently select the default, broader action (?CONFIG=1 would broaden
 	// the archive the same way). The gate order is parse error, duplicates,
 	// unknown keys, then the value grammar.
-	if err := adminjson.UnknownQueryKey(q, backupQueryKeys...); err != nil {
+	if err := adminjson.UnknownQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -126,7 +120,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, restoreQueryKeys...); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -135,11 +129,11 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// real restore where ?inspect=1 previews; ?CONFIG_MODE=merge would
 	// silently become the replace default). The gate order is parse error,
 	// duplicates, unknown keys, then the value grammar.
-	if err := adminjson.UnknownQueryKey(q, restoreQueryKeys...); err != nil {
+	if err := adminjson.UnknownQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inspect, err := queryFlag(q, "inspect")
+	inspect, err := queryFlag(q, backupparams.ParamInspect)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())
 		return
@@ -149,12 +143,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	configMode, err := parseRestoreMode(q, "config_mode")
+	configMode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbMode, err := parseRestoreMode(q, "database_mode")
+	dbMode, err := parseRestoreMode(q, backupparams.ParamDatabaseMode)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -294,7 +288,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			}
 			liveMu.Unlock()
 		}
-		if dbMode == "merge" {
+		if dbMode == backupparams.ModeMerge {
 			liveMu.Lock()
 			store = liveStore
 			liveMu.Unlock()
@@ -359,19 +353,19 @@ func appendRestartRequired(list []string, keys ...string) []string {
 }
 
 func parseBackupParts(q url.Values) (wantConfig, wantDB bool, err error) {
-	_, hasC := q["config"]
-	_, hasD := q["database"]
+	_, hasC := q[backupparams.ParamConfig]
+	_, hasD := q[backupparams.ParamDatabase]
 	if !hasC && !hasD {
-		return true, true, nil
+		return backupparams.DefaultConfig, backupparams.DefaultDatabase, nil
 	}
 	if hasC {
-		wantConfig, err = queryBool(q.Get("config"))
+		wantConfig, err = queryBool(q.Get(backupparams.ParamConfig))
 		if err != nil {
 			return false, false, fmt.Errorf("config: %w", err)
 		}
 	}
 	if hasD {
-		wantDB, err = queryBool(q.Get("database"))
+		wantDB, err = queryBool(q.Get(backupparams.ParamDatabase))
 		if err != nil {
 			return false, false, fmt.Errorf("database: %w", err)
 		}
@@ -383,14 +377,11 @@ func parseBackupParts(q url.Values) (wantConfig, wantDB bool, err error) {
 }
 
 func queryBool(v string) (bool, error) {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "1", "true":
-		return true, nil
-	case "0", "false":
-		return false, nil
-	default:
-		return false, fmt.Errorf("want 1 or 0")
+	value, err := backupparams.ParseBoolParam(v)
+	if err != nil {
+		return false, err
 	}
+	return value, nil
 }
 
 func queryFlag(q url.Values, key string) (bool, error) {
@@ -402,20 +393,16 @@ func queryFlag(q url.Values, key string) (bool, error) {
 
 func parseRestoreMode(q url.Values, key string) (string, error) {
 	if _, present := q[key]; !present {
-		return "replace", nil
+		return backupparams.DefaultRestoreMode, nil
 	}
-	switch strings.ToLower(strings.TrimSpace(q.Get(key))) {
-	case "":
-		// An explicit empty value is not the absent default: it names no mode,
-		// so accepting it would silently select the broader replace action.
-		return "", fmt.Errorf("%s: empty value; want merge or replace", key)
-	case "replace":
-		return "replace", nil
-	case "merge":
-		return "merge", nil
-	default:
-		return "", fmt.Errorf("%s: want merge or replace", key)
+	// An explicit empty value is not the absent default: it names no mode, so
+	// accepting it would silently select the broader replace action. The
+	// grammar owner reports that as the same "want merge or replace" error.
+	mode, err := backupparams.ParseRestoreMode(q.Get(key))
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", key, err)
 	}
+	return mode, nil
 }
 
 func backupCap() int64 {
@@ -652,7 +639,7 @@ func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 		}
 	}
 	next := incoming.Clone()
-	if mode == "merge" {
+	if mode == backupparams.ModeMerge {
 		if err := config.OverlayNonDefault(cur, incoming); err != nil {
 			return nil, err
 		}
@@ -899,7 +886,7 @@ func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, stor
 	if dbPath == "" {
 		return false, nil, storage.ErrStorageDisabled
 	}
-	if mode == "merge" {
+	if mode == backupparams.ModeMerge {
 		if store == nil {
 			return false, nil, storage.ErrStorageDisabled
 		}

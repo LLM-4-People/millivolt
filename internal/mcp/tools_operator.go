@@ -28,13 +28,13 @@ type OperatorStateInput struct{}
 // is deterministic. Each is independent: one failure is reported in Problems
 // while the rest still answer.
 var operatorStateReads = []struct {
-	name string
-	path string
+	name  string
+	route Route
 }{
-	{"pause", routePause},
-	{"throttle", routeThrottle},
-	{"quota", routeQuota},
-	{"restart", routeRestart},
+	{"pause", RoutePause},
+	{"throttle", RouteThrottle},
+	{"quota", RouteQuota},
+	{"restart", RouteRestart},
 }
 
 // OperatorState reads pause, limits, quota/storm and restart status together.
@@ -53,7 +53,7 @@ func (s *Service) operatorState(ctx context.Context, _ OperatorStateInput) (*Ope
 	var firstErr error
 	for _, read := range operatorStateReads {
 		var document map[string]any
-		if err := s.client.getJSON(ctx, read.path, nil, &document); err != nil {
+		if err := s.client.getJSON(ctx, read.route, nil, &document); err != nil {
 			out.Problems = append(out.Problems, read.name+": "+err.Error())
 			if firstErr == nil {
 				firstErr = fmt.Errorf("read %s: %v", read.name, err)
@@ -96,41 +96,61 @@ type SetPauseOutput struct {
 // cancellation it cannot deliver.
 const pauseNote = "a hold parks matching NEW sends and retries; in-flight requests are never cancelled, and excess waiting work can be refused"
 
-// SetPause creates, edits or resumes pause holds. In-flight requests always
-// finish; this never disconnects them.
-func (s *Service) setPause(ctx context.Context, in SetPauseInput) (*SetPauseOutput, error) {
+// Document renders the POST /admin/pause body. It is the one owner of that
+// request shape, shared by the MCP tool and the operator command. A resume
+// carries only the optional hold id; scope fields are meaningful only on a
+// create or edit and are refused by the proxy when paused is false.
+func (in SetPauseInput) Document() (map[string]any, error) {
 	body := map[string]any{"paused": in.Paused}
 	if in.HoldID != "" {
 		body["id"] = in.HoldID
 	}
-	if in.Paused {
-		if in.Duration != nil {
-			if err := validateCaptureDuration(*in.Duration); err != nil {
-				return nil, fmt.Errorf("duration: %v", err)
-			}
-			body["duration"] = *in.Duration
+	if !in.Paused {
+		// The proxy's resume clears every hold unless id names one; it has no
+		// scope-selective resume. Refuse a scope instead of silently dropping
+		// it, which would resume more traffic than the caller named.
+		if in.All || in.New || in.Clients != nil || in.Providers != nil ||
+			in.Duration != nil || in.MaxQueued != nil {
+			return nil, fmt.Errorf("a resume carries only hold_id; scope, duration and max_queued apply to a create or edit")
 		}
-		if in.All {
-			body["all"] = true
+		return body, nil
+	}
+	if in.Duration != nil {
+		if err := validateCaptureDuration(*in.Duration); err != nil {
+			return nil, fmt.Errorf("duration: %v", err)
 		}
-		if in.New {
-			body["new"] = true
+		body["duration"] = *in.Duration
+	}
+	if in.All {
+		body["all"] = true
+	}
+	if in.New {
+		body["new"] = true
+	}
+	if in.Clients != nil {
+		body["clients"] = in.Clients
+	}
+	if in.Providers != nil {
+		body["providers"] = in.Providers
+	}
+	if in.MaxQueued != nil {
+		if *in.MaxQueued < 0 {
+			return nil, fmt.Errorf("max_queued must be >= 0")
 		}
-		if in.Clients != nil {
-			body["clients"] = in.Clients
-		}
-		if in.Providers != nil {
-			body["providers"] = in.Providers
-		}
-		if in.MaxQueued != nil {
-			if *in.MaxQueued < 0 {
-				return nil, fmt.Errorf("max_queued must be >= 0")
-			}
-			body["max_queued"] = *in.MaxQueued
-		}
+		body["max_queued"] = *in.MaxQueued
+	}
+	return body, nil
+}
+
+// SetPause creates, edits or resumes pause holds. In-flight requests always
+// finish; this never disconnects them.
+func (s *Service) setPause(ctx context.Context, in SetPauseInput) (*SetPauseOutput, error) {
+	body, err := in.Document()
+	if err != nil {
+		return nil, err
 	}
 	var state map[string]any
-	if err := s.client.postJSON(ctx, routePause, body, &state); err != nil {
+	if err := s.client.postJSON(ctx, RoutePause, body, &state); err != nil {
 		return nil, err
 	}
 	out := &SetPauseOutput{State: object(state), Resumed: !in.Paused, Note: pauseNote}
@@ -328,87 +348,105 @@ func throttleWindow(raw string) (time.Duration, error) {
 	return window, nil
 }
 
-// SetThrottle merges supplied dimensions into one provider's limits. An omitted
-// dimension keeps its current value; 0 turns that dimension off.
-//
-// The provider name is checked against the operator's own known vocabulary
-// first. The proxy ADDS an unknown provider to that vocabulary when a limit is
-// set on it, so a typo would not fail - it would permanently pollute the set
-// every later validation and every discovery list is built from.
-func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThrottleOutput, error) {
+// throttleDocument is a validated request body plus the one merge case that
+// still needs a stored-count read.
+type throttleDocument struct {
+	body       map[string]any
+	windowOnly bool
+}
+
+// document renders the POST /admin/throttle body and reports whether the body
+// changes a window without restating its count. The proxy merges that case into
+// an existing policy, so the caller still has to prove the dimension already has
+// a count.
+func (in SetThrottleInput) document() (throttleDocument, error) {
 	provider := strings.TrimSpace(in.Provider)
 	if provider == "" {
-		return nil, fmt.Errorf("provider is required")
+		return throttleDocument{}, fmt.Errorf("provider is required")
 	}
-	body := map[string]any{"provider": in.Provider}
+	body := map[string]any{"provider": provider}
 	windowOnly := false
 	if in.Clear {
 		body["clear"] = true
-	} else {
-		if in.Concurrency != nil {
-			if *in.Concurrency < 0 || *in.Concurrency > maxLimitConcurrency {
-				return nil, fmt.Errorf("concurrency must be 0..%d", maxLimitConcurrency)
-			}
-			body["concurrency"] = *in.Concurrency
-		}
-		if in.Requests != nil {
-			if *in.Requests < 0 || *in.Requests > maxLimitRequests {
-				return nil, fmt.Errorf("requests must be 0..%d", maxLimitRequests)
-			}
-			body["requests"] = *in.Requests
-		}
-		if in.RequestWindow != "" {
-			if _, err := throttleWindow(in.RequestWindow); err != nil {
-				return nil, fmt.Errorf("request_window: %v", err)
-			}
-			body["request_window"] = in.RequestWindow
-		}
-		if in.Tokens != nil {
-			if *in.Tokens < 0 || *in.Tokens > maxLimitTokens {
-				return nil, fmt.Errorf("tokens must be 0..%d", maxLimitTokens)
-			}
-			body["tokens"] = *in.Tokens
-		}
-		if in.TokenWindow != "" {
-			if _, err := throttleWindow(in.TokenWindow); err != nil {
-				return nil, fmt.Errorf("token_window: %v", err)
-			}
-			body["token_window"] = in.TokenWindow
-		}
-		// The ramp duration's grammar, its 1s..24h band and the rule that an
-		// explicit on-ramp needs an active limit belong to the proxy
-		// (internal/proxy/throttle.go parseRampDuration and HandleThrottle). The
-		// value is forwarded verbatim and a 400 comes back through the ordinary
-		// error path; re-deriving the off spellings or the band here would be a
-		// second duration vocabulary that can disagree with the one enforcing it.
-		if in.AntiBurst != nil {
-			body["anti_burst"] = *in.AntiBurst
-		}
-		if in.RampDuration != nil {
-			body["ramp_duration"] = *in.RampDuration
-		}
-		// The proxy MERGES a supplied window into the provider's existing
-		// policy, so a window-only body is a real change when that dimension
-		// already has a count. It sets nothing only when the dimension has no
-		// count yet, and the proxy still answers 200, which reads as a
-		// successful change. Refuse exactly that case, mirroring the merge.
-		windowOnly = (in.RequestWindow != "" && in.Requests == nil) || (in.TokenWindow != "" && in.Tokens == nil)
-		if in.Concurrency == nil && in.Requests == nil && in.Tokens == nil &&
-			in.AntiBurst == nil && in.RampDuration == nil && !windowOnly {
-			return nil, fmt.Errorf("send concurrency, requests, tokens, anti_burst or ramp_duration: a body that names no dimension sets nothing")
-		}
+		return throttleDocument{body: body}, nil
 	}
-	// The known-provider guard runs BEFORE the window-only stored-count read.
-	// For an unknown provider the missing count is a symptom, not the cause:
-	// reporting "no request count yet" for a typo would hide the permanent
-	// vocabulary pollution this guard exists to prevent. The guard keeps its
-	// documented fail-open behavior on a debug-read error or an empty
-	// vocabulary.
-	if err := s.requireKnownProvider(ctx, provider); err != nil {
+	if in.Concurrency != nil {
+		if *in.Concurrency < 0 || *in.Concurrency > maxLimitConcurrency {
+			return throttleDocument{}, fmt.Errorf("concurrency must be 0..%d", maxLimitConcurrency)
+		}
+		body["concurrency"] = *in.Concurrency
+	}
+	if in.Requests != nil {
+		if *in.Requests < 0 || *in.Requests > maxLimitRequests {
+			return throttleDocument{}, fmt.Errorf("requests must be 0..%d", maxLimitRequests)
+		}
+		body["requests"] = *in.Requests
+	}
+	if in.RequestWindow != "" {
+		if _, err := throttleWindow(in.RequestWindow); err != nil {
+			return throttleDocument{}, fmt.Errorf("request_window: %v", err)
+		}
+		body["request_window"] = in.RequestWindow
+	}
+	if in.Tokens != nil {
+		if *in.Tokens < 0 || *in.Tokens > maxLimitTokens {
+			return throttleDocument{}, fmt.Errorf("tokens must be 0..%d", maxLimitTokens)
+		}
+		body["tokens"] = *in.Tokens
+	}
+	if in.TokenWindow != "" {
+		if _, err := throttleWindow(in.TokenWindow); err != nil {
+			return throttleDocument{}, fmt.Errorf("token_window: %v", err)
+		}
+		body["token_window"] = in.TokenWindow
+	}
+	// The ramp duration's grammar, its 1s..24h band and the rule that an
+	// explicit on-ramp needs an active limit belong to the proxy
+	// (internal/proxy/throttle.go parseRampDuration and HandleThrottle). The
+	// value is forwarded verbatim and a 400 comes back through the ordinary
+	// error path; re-deriving the off spellings or the band here would be a
+	// second duration vocabulary that can disagree with the one enforcing it.
+	if in.AntiBurst != nil {
+		body["anti_burst"] = *in.AntiBurst
+	}
+	if in.RampDuration != nil {
+		body["ramp_duration"] = *in.RampDuration
+	}
+	windowOnly = (in.RequestWindow != "" && in.Requests == nil) || (in.TokenWindow != "" && in.Tokens == nil)
+	if in.Concurrency == nil && in.Requests == nil && in.Tokens == nil &&
+		in.AntiBurst == nil && in.RampDuration == nil && !windowOnly {
+		return throttleDocument{}, fmt.Errorf("send concurrency, requests, tokens, anti_burst or ramp_duration: a body that names no dimension sets nothing")
+	}
+	return throttleDocument{body: body, windowOnly: windowOnly}, nil
+}
+
+// Document renders the POST /admin/throttle body for callers that do not need
+// the window-only flag. This is the one owner of the request shape.
+func (in SetThrottleInput) Document() (map[string]any, error) {
+	document, err := in.document()
+	return document.body, err
+}
+
+// PrepareThrottle validates one throttle request, guards the provider
+// vocabulary and performs the stored-count read a window-only change needs.
+// The command calls it before its preview; ApplyThrottle calls it again before
+// sending so a value that changed while the operator read the preview is
+// re-checked.
+func (c *Client) PrepareThrottle(ctx context.Context, in SetThrottleInput) (map[string]any, error) {
+	provider := strings.TrimSpace(in.Provider)
+	document, err := in.document()
+	if err != nil {
 		return nil, err
 	}
-	if windowOnly {
-		current, err := s.client.throttleLimit(ctx, provider)
+	// The body is validated first, then the provider vocabulary, then the
+	// stored count. A syntax error must win over an unknown-provider error, and
+	// a typo must win over the window-only "no count yet" symptom: writing a
+	// limit for an unknown name permanently adds it to the vocabulary.
+	if err := c.CheckKnownProvider(ctx, provider); err != nil {
+		return nil, err
+	}
+	if document.windowOnly {
+		current, err := c.throttleLimit(ctx, provider)
 		if err != nil {
 			return nil, fmt.Errorf("read the provider's current limits before a window-only change: %v", err)
 		}
@@ -419,8 +457,32 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 			return nil, fmt.Errorf("token_window: provider %q has no token count yet, so a window alone would set nothing; send tokens too", provider)
 		}
 	}
+	return document.body, nil
+}
+
+// ApplyThrottle sends one prepared POST /admin/throttle.
+func (c *Client) ApplyThrottle(ctx context.Context, in SetThrottleInput) (map[string]any, error) {
+	body, err := c.PrepareThrottle(ctx, in)
+	if err != nil {
+		return nil, err
+	}
 	var state map[string]any
-	if err := s.client.postJSON(ctx, routeThrottle, body, &state); err != nil {
+	if err := c.postJSON(ctx, RouteThrottle, body, &state); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+// SetThrottle merges supplied dimensions into one provider's limits. An omitted
+// dimension keeps its current value; 0 turns that dimension off.
+//
+// The provider name is checked against the operator's own known vocabulary
+// first. The proxy ADDS an unknown provider to that vocabulary when a limit is
+// set on it, so a typo would not fail - it would permanently pollute the set
+// every later validation and every discovery list is built from.
+func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThrottleOutput, error) {
+	state, err := s.client.ApplyThrottle(ctx, in)
+	if err != nil {
 		return nil, err
 	}
 	out := &SetThrottleOutput{State: object(state), KnownProviders: []string{}, Note: throttleNote}
@@ -431,31 +493,6 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 		out.Warning = warning
 	}
 	return out, nil
-}
-
-// requireKnownProvider refuses a provider name outside the operator's own
-// vocabulary, offering the known names. The proxy records the name on ANY
-// accepted throttle write, set or clear, so a typo would not fail - it would
-// permanently pollute the set every later validation and every discovery list
-// is built from.
-//
-// This is deliberately not a hard guard: it fails OPEN on a debug-read error
-// and on an empty vocabulary, so an unknown name may be accepted when the
-// vocabulary is unavailable. Refusing then would block a legitimate change on
-// an unrelated failure, and the output still reports the vocabulary the proxy
-// ended up with.
-func (s *Service) requireKnownProvider(ctx context.Context, provider string) error {
-	// GET /admin/debug is the one owner of the names an operator may scope to.
-	status, err := s.client.debug(ctx)
-	if err != nil {
-		return nil
-	}
-	known := list(status.KnownProviders)
-	if len(known) == 0 || slices.Contains(known, provider) {
-		return nil
-	}
-	return fmt.Errorf("provider %q is not one of the known providers, and writing a limit for it would add the name to the proxy's vocabulary permanently. "+
-		"Known providers: %s", provider, strings.Join(known, ", "))
 }
 
 // ResumeQuotaInput closes one provider's open retry-mode quota gate.
@@ -502,21 +539,27 @@ func openQuotaGates(state map[string]any) []string {
 	return open
 }
 
-// ResumeQuota closes an open retry-mode quota gate. A provider with no open gate
-// is a no-op state report: the gate may have recovered on its own.
-func (s *Service) resumeQuota(ctx context.Context, in ResumeQuotaInput) (*ResumeQuotaOutput, error) {
-	// Trim ONCE and use the trimmed value everywhere: the proxy compares the
-	// provider verbatim (internal/proxy/quotapause.go), so a padded name would
-	// reach a different gate than the response check below, and
-	// resume_quota(" local ") would report resumed=true while the real gate
-	// stayed open.
+// Document renders the POST /admin/quota body. It trims the provider once:
+// the proxy compares the name verbatim, so a padded name would reach a
+// different gate than a caller's later status read.
+func (in ResumeQuotaInput) Document() (map[string]any, error) {
 	provider := strings.TrimSpace(in.Provider)
 	if provider == "" {
 		return nil, fmt.Errorf("provider is required")
 	}
-	body := map[string]any{"provider": provider, "resume": true}
+	return map[string]any{"provider": provider, "resume": true}, nil
+}
+
+// ResumeQuota closes an open retry-mode quota gate. A provider with no open gate
+// is a no-op state report: the gate may have recovered on its own.
+func (s *Service) resumeQuota(ctx context.Context, in ResumeQuotaInput) (*ResumeQuotaOutput, error) {
+	body, err := in.Document()
+	if err != nil {
+		return nil, err
+	}
+	provider := body["provider"].(string)
 	var state map[string]any
-	if err := s.client.postJSON(ctx, routeQuota, body, &state); err != nil {
+	if err := s.client.postJSON(ctx, RouteQuota, body, &state); err != nil {
 		return nil, err
 	}
 	out := &ResumeQuotaOutput{State: object(state), Open: []string{}, Note: quotaNote}
@@ -579,12 +622,12 @@ const configNote = "patch with set_config by sending only the keys to change, pl
 	"a supplied list or map replaces that whole field, so read it here first. Keys equal to their default are still real settings. " +
 	"overrides names the keys the process pins outside the file: set_config strips them from a patch, so a key listed there will not change"
 
-// ConfigGet returns the live configuration document: the values, the running
-// overrides, the defaults, the per-key schema, the restart-required set and the
-// revision a revision-checked patch must echo.
-func (s *Service) configGet(ctx context.Context, _ ConfigGetInput) (*ConfigGetOutput, error) {
+// GetConfig reads GET /admin/config into the shared document every caller
+// decodes. The maps are normalized once here so a null map cannot reach a
+// caller as a typed nil.
+func (c *Client) GetConfig(ctx context.Context) (*ConfigGetOutput, error) {
 	var document ConfigGetOutput
-	if err := s.client.getJSON(ctx, routeConfig, nil, &document); err != nil {
+	if err := c.getJSON(ctx, RouteConfig, nil, &document); err != nil {
 		return nil, err
 	}
 	document.Values = object(document.Values)
@@ -594,8 +637,19 @@ func (s *Service) configGet(ctx context.Context, _ ConfigGetInput) (*ConfigGetOu
 	document.UsageFields = list(document.UsageFields)
 	document.ModelFields = list(document.ModelFields)
 	document.RestartRequired = list(document.RestartRequired)
-	document.Note = configNote
 	return &document, nil
+}
+
+// ConfigGet returns the live configuration document: the values, the running
+// overrides, the defaults, the per-key schema, the restart-required set and the
+// revision a revision-checked patch must echo.
+func (s *Service) configGet(ctx context.Context, _ ConfigGetInput) (*ConfigGetOutput, error) {
+	document, err := s.client.GetConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	document.Note = configNote
+	return document, nil
 }
 
 // SetConfigInput is a revision-checked partial patch of the config file.
@@ -637,18 +691,19 @@ type configPatch struct {
 // errors, so a model never mistakes a rejection for a save.
 var savedConfigStatuses = map[int]bool{http.StatusInternalServerError: true}
 
-// SetConfig applies a revision-checked partial patch. The proxy validates the
-// whole result before writing, strips CLI-overridden keys, and reports
-// restart-required keys; a failed reload still leaves the file written, and
-// that is reported as a save, not as an error.
-func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigOutput, error) {
+// SetConfig applies a revision-checked partial patch. This is the one owner of
+// the POST shape, the committed-500 tolerance and the redacted failure text.
+// The proxy validates the whole result before writing, strips CLI-overridden
+// keys, and reports restart-required keys; a failed reload still leaves the
+// file written, and that is reported as a save, not as an error.
+func (c *Client) SetConfig(ctx context.Context, in SetConfigInput) (*SetConfigOutput, error) {
 	if len(in.Values) == 0 {
 		return nil, fmt.Errorf("values must name at least one key to change")
 	}
 	revision := in.Revision
 	if revision == "" {
-		var current ConfigGetOutput
-		if err := s.client.getJSON(ctx, routeConfig, nil, &current); err != nil {
+		current, err := c.GetConfig(ctx)
+		if err != nil {
 			return nil, fmt.Errorf("read the current config revision before patching: %v", err)
 		}
 		revision = current.Revision
@@ -658,25 +713,30 @@ func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigO
 	}
 	body := map[string]any{"values": in.Values, "revision": revision}
 	var saved configPatch
-	status, err := s.client.doJSONTolerating(ctx, http.MethodPost, routeConfig, nil, body, &saved, savedConfigStatuses)
+	status, err := c.doJSONTolerating(ctx, http.MethodPost, RouteConfig, nil, body, &saved, savedConfigStatuses)
 	if err != nil {
 		return nil, err
 	}
 	if !saved.Saved {
 		// A tolerated status that reports no save is an ordinary failure whose
 		// .error text decoded into the same field; report it as one. The text
-		// is redacted like every other model-visible string on this path: the
+		// is redacted like every other caller-visible string on this path: the
 		// proxy's reload failure can quote the request, credential included.
-		return nil, &APIError{Status: status, Message: s.client.redact(errorMessage(saved.Error, status))}
+		return nil, &APIError{Status: status, Message: c.redact(errorMessage(saved.Error, status))}
 	}
 	out := &SetConfigOutput{
 		Saved: saved.Saved, RestartRequired: list(saved.RestartRequired),
-		Values: object(saved.Values), Error: s.client.redact(saved.Error),
+		Values: object(saved.Values), Error: c.redact(saved.Error),
 	}
 	if out.Error != "" {
 		out.Warning = "the config file was written but the reload failed: " + out.Error
 	}
 	return out, nil
+}
+
+// SetConfig is the MCP tool entry point over the shared client method.
+func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigOutput, error) {
+	return s.client.SetConfig(ctx, in)
 }
 
 // ReloadConfigInput takes no arguments.
@@ -695,7 +755,7 @@ func (s *Service) reloadConfig(ctx context.Context, _ ReloadConfigInput) (*Reloa
 		OK              bool     `json:"ok"`
 		RestartRequired []string `json:"restart_required"`
 	}
-	if err := s.client.postJSON(ctx, routeReload, nil, &payload); err != nil {
+	if err := s.client.postJSON(ctx, RouteReload, nil, &payload); err != nil {
 		return nil, err
 	}
 	return &ReloadConfigOutput{OK: payload.OK, RestartRequired: list(payload.RestartRequired)}, nil
@@ -738,17 +798,19 @@ func (f PurgeFilterInput) Validate() error {
 	return nil
 }
 
-// isEmpty reports whether the filter constrains nothing. An empty filter is the
-// delete-everything command, and this server refuses to send it.
-func (f PurgeFilterInput) isEmpty() bool {
+// IsEmpty reports whether the filter constrains nothing. An empty filter is the
+// delete-everything command, and the MCP server refuses to send it.
+func (f PurgeFilterInput) IsEmpty() bool {
 	return f.Provider == "" && f.Model == "" && f.Client == "" && f.ConversationID == "" &&
 		f.ErrorType == "" && f.StatusCode == 0 && !f.HasError && !f.HasDebug &&
 		f.BeforeMs == 0 && f.AfterMs == 0
 }
 
-// document renders the filter in the proxy's exact wire shape. Zero values are
+// Document renders the filter in the proxy's exact wire shape. Zero values are
 // omitted so the proxy reads them as "no constraint", never as a match on 0.
-func (f PurgeFilterInput) document() map[string]any {
+// This is the one owner of the purge request shape, shared with the operator
+// command; the tool-facing field "has_debug" maps to the proxy's "debug" here.
+func (f PurgeFilterInput) Document() map[string]any {
 	document := map[string]any{}
 	if f.Provider != "" {
 		document["provider"] = f.Provider
@@ -785,7 +847,7 @@ func (f PurgeFilterInput) document() map[string]any {
 
 func (f PurgeFilterInput) describe() string {
 	parts := []string{}
-	for key, value := range f.document() {
+	for key, value := range f.Document() {
 		parts = append(parts, fmt.Sprintf("%s=%v", key, value))
 	}
 	return strings.Join(parts, " ")
@@ -824,7 +886,7 @@ const purgePreviewWarning = "the preview authorizes this filter at this count, a
 // PurgePreview counts the rows a purge filter would delete, without deleting
 // anything, and issues the token that authorizes exactly that deletion.
 func (s *Service) purgePreview(ctx context.Context, in PurgePreviewInput) (*PurgePreviewOutput, error) {
-	if in.Filter.isEmpty() {
+	if in.Filter.IsEmpty() {
 		return nil, fmt.Errorf("filter must constrain at least one field; this server never previews or sends the delete-everything command")
 	}
 	if err := in.Filter.Validate(); err != nil {
@@ -833,7 +895,7 @@ func (s *Service) purgePreview(ctx context.Context, in PurgePreviewInput) (*Purg
 	var payload struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &payload); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &payload); err != nil {
 		return nil, err
 	}
 	token, err := s.previewToken.issue(in.Filter, payload.Count, time.Now())
@@ -902,7 +964,7 @@ func captureEffect(filter PurgeFilterInput) string {
 // filter to a real preview of it, and a filter that can never be empty. The
 // delete-everything command (a bodyless request) is never sent by this tool.
 func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error) {
-	if in.Filter.isEmpty() {
+	if in.Filter.IsEmpty() {
 		return nil, fmt.Errorf("filter must constrain at least one field: this server never sends the empty-body command that deletes ALL history")
 	}
 	if err := in.Filter.Validate(); err != nil {
@@ -921,7 +983,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	var current struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &current); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &current); err != nil {
 		return nil, fmt.Errorf("verify the reviewed count before deleting: %v", err)
 	}
 	if current.Count != reviewed {
@@ -930,7 +992,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 		return nil, fmt.Errorf("the row set for this filter no longer matches the one purge_preview reviewed, so the deletion is refused. " +
 			"Re-run purge_preview and confirm again against the count it reports")
 	}
-	if err := s.client.postJSON(ctx, routePurge, in.Filter.document(), nil); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurge, in.Filter.Document(), nil); err != nil {
 		return nil, err
 	}
 	out := &PurgeOutput{
@@ -941,7 +1003,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	var remaining struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &remaining); err == nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &remaining); err == nil {
 		out.Recount = &remaining.Count
 	}
 	return out, nil
