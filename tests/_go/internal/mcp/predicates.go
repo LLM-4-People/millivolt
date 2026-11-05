@@ -21,6 +21,12 @@ import (
 // The truth table runs every combination of final status, structured error type
 // and absorbed-attempt set through both sides on a real SQLite database. It is
 // the same shape as storage's TestPurgeFilterMatchRecordParity.
+//
+// error_type/error_code carry the provider's own spelling, because that is what
+// decides the class: a rate limit announced by a code on a non-429 status (a
+// gateway answering `tier_limit_exceeded` with 400) must answer the same on
+// both sides, so the corpus includes the class-relevant spellings rather than
+// one placeholder type.
 func TestHealthPredicatesMatchTheRecordTruthTable(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -31,54 +37,61 @@ func TestHealthPredicatesMatchTheRecordTruthTable(t *testing.T) {
 		id TEXT PRIMARY KEY,
 		status_code INTEGER NOT NULL,
 		error_type TEXT NOT NULL,
+		error_code TEXT NOT NULL,
 		attempts TEXT NOT NULL
 	)`); err != nil {
 		t.Fatal(err)
 	}
-	insert, err := db.Prepare(`INSERT INTO requests(id, status_code, error_type, attempts) VALUES (?, ?, ?, ?)`)
+	insert, err := db.Prepare(`INSERT INTO requests(id, status_code, error_type, error_code, attempts) VALUES (?, ?, ?, ?, ?)`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer insert.Close()
 
 	statuses := []int{0, 199, 200, 302, 400, 429, 499, 500, 502}
-	errorTypes := []string{"", "upstream_timeout"}
+	// Every error spelling the classifier treats specially, plus the empty and
+	// the generic case, so each class boundary is exercised against the SQL.
+	errorTypes := []string{"", "upstream_timeout", "rate_limit_error", "tier_limit_exceeded", "insufficient_quota"}
+	errorCodes := []string{"", "rate_limit_exceeded", "tier_limit_exceeded", "invalid_request_error"}
 	attemptSets := map[string][]metrics.RetryAttempt{
-		"none":         nil,
-		"attempt429":   {{StatusCode: 429}},
-		"attempt500":   {{StatusCode: 500}},
-		"attempt200":   {{StatusCode: 200}},
-		"retried5xxOn": {{StatusCode: 500}, {StatusCode: 200}},
-		"inBand429":    {{StatusCode: 429, InBand: true}},
-		"inBand500":    {{StatusCode: 500, InBand: true}},
+		"none":                 nil,
+		"attempt429":           {{StatusCode: 429}},
+		"attempt500":           {{StatusCode: 500}},
+		"attempt200":           {{StatusCode: 200}},
+		"retried5xxOn":         {{StatusCode: 500}, {StatusCode: 200}},
+		"inBand429":            {{StatusCode: 429, InBand: true}},
+		"inBand500":            {{StatusCode: 500, InBand: true}},
+		"attemptRateLimitCode": {{StatusCode: 400, ErrorCode: "tier_limit_exceeded"}},
 	}
 	isErrorSQL := "SELECT (" + predicates.IsError + ") = 1 FROM requests WHERE id = ?"
 	rateLimitedSQL := "SELECT (" + predicates.RateLimited + ") = 1 FROM requests WHERE id = ?"
 
 	for _, status := range statuses {
 		for _, errorType := range errorTypes {
-			for name, attempts := range attemptSets {
-				encoded, err := json.Marshal(attempts)
-				if err != nil {
-					t.Fatal(err)
-				}
-				record := &metrics.Record{StatusCode: status, ErrorType: errorType, Attempts: attempts}
-				id := strconv.Itoa(status) + "/" + errorType + "/" + name
-				if _, err := insert.Exec(id, status, errorType, string(encoded)); err != nil {
-					t.Fatal(err)
-				}
-				var gotError, gotLimited int
-				if err := db.QueryRow(isErrorSQL, id).Scan(&gotError); err != nil {
-					t.Fatalf("is_error SQL for %s: %v", id, err)
-				}
-				if err := db.QueryRow(rateLimitedSQL, id).Scan(&gotLimited); err != nil {
-					t.Fatalf("rate_limited SQL for %s: %v", id, err)
-				}
-				if want := record.IsError(); (gotError == 1) != want {
-					t.Errorf("is_error(%s) = %v, metrics.Record.IsError = %v", id, gotError == 1, want)
-				}
-				if want := record.HasRateLimit(); (gotLimited == 1) != want {
-					t.Errorf("rate_limited(%s) = %v, metrics.Record.HasRateLimit = %v", id, gotLimited == 1, want)
+			for _, errorCode := range errorCodes {
+				for name, attempts := range attemptSets {
+					encoded, err := json.Marshal(attempts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					record := &metrics.Record{StatusCode: status, ErrorType: errorType, ErrorCode: errorCode, Attempts: attempts}
+					id := strconv.Itoa(status) + "/" + errorType + "/" + errorCode + "/" + name
+					if _, err := insert.Exec(id, status, errorType, errorCode, string(encoded)); err != nil {
+						t.Fatal(err)
+					}
+					var gotError, gotLimited int
+					if err := db.QueryRow(isErrorSQL, id).Scan(&gotError); err != nil {
+						t.Fatalf("is_error SQL for %s: %v", id, err)
+					}
+					if err := db.QueryRow(rateLimitedSQL, id).Scan(&gotLimited); err != nil {
+						t.Fatalf("rate_limited SQL for %s: %v", id, err)
+					}
+					if want := record.IsError(); (gotError == 1) != want {
+						t.Errorf("is_error(%s) = %v, metrics.Record.IsError = %v", id, gotError == 1, want)
+					}
+					if want := record.HasRateLimit(); (gotLimited == 1) != want {
+						t.Errorf("rate_limited(%s) = %v, metrics.Record.HasRateLimit = %v", id, gotLimited == 1, want)
+					}
 				}
 			}
 		}

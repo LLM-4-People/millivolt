@@ -483,7 +483,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		// body, and a tarpit past the headers must not pin the send forever.
 		resp.Body = s.wrapUpstreamBody(resp.Body, upstreamCancel)
 		stopRead := context.AfterFunc(ctx, upstreamCancel)
-		retryable := cursorSendFailed(resp)
+		retryable, class := cursorOutcome(resp)
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)
 		if !retryable || !s.allowStormRetry(ctx, active) {
 			stopRead()
@@ -502,7 +502,10 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		upstreamCancel()
 		retryAfter := s.absorbHTTPRetry(state.rec, resp, errBody, t.authHeader)
 		state.rec.RetryAfterMs = int(retryAfter.Milliseconds())
-		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+		// The canonical class, not the status, decides the rate-limit flag, so
+		// a limit announced by a code on a non-429 status counts here too. 503
+		// keeps its documented scheduler-pacing meaning.
+		if class.IsRateLimit() || resp.StatusCode == http.StatusServiceUnavailable {
 			state.rec.RateLimited = true
 		}
 		s.publishUpdate(state.rec)
@@ -533,24 +536,28 @@ func (s *Server) cursorEndSend(groupKey string, own, failed bool) {
 	}
 }
 
-// cursorSendFailed reports whether this Cursor HTTP outcome should FailSend.
-// Quota 429s and non-retryable 4xx do not trip the group. The shared
-// quota429Peek classifies the bounded envelope; this transport's overflow
-// policy is applied here: an oversized 429 body is closed and re-wrapped as
-// only the truncated prefix (the cursor path synthesizes its own envelope for
-// the final error renderer), keeping normal retry semantics. The quota
-// pause never triggers here: cursor is not an OpenAI-wire target, so a
-// durable cursor 429 keeps its surface-immediately behavior.
-func cursorSendFailed(resp *http.Response) bool {
-	if resp.StatusCode == http.StatusTooManyRequests {
-		durable, _, _, errBody, leftOpen := quota429Peek(resp)
-		if leftOpen {
-			resp.Body.Close()
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(errBody))
-		return !durable
+// cursorOutcome classifies this Cursor HTTP response through the SAME canonical
+// classifier the generic relay uses, and re-wraps the body it consumed. Quota
+// conditions and non-retryable 4xx do not trip the group; a rate limit carried
+// by a non-429 status (a gateway answering `tier_limit_exceeded` with 400) is
+// retried exactly as it is on the generic wire, which a status-only test got
+// wrong. This transport's overflow policy is applied here: an oversized body is
+// closed and re-wrapped as only the captured prefix (the cursor path
+// synthesizes its own envelope for the final error renderer), keeping normal
+// retry semantics. The quota pause never triggers from here: cursor is not an
+// OpenAI-wire target, so a durable cursor 429 keeps its surface-immediately
+// behavior - it is simply not retried.
+func cursorOutcome(resp *http.Response) (retryable bool, class metrics.ErrorClass) {
+	if resp.StatusCode < 400 {
+		return false, metrics.ClassNone
 	}
-	return isRetryable(resp.StatusCode)
+	peeked, typ, code, leftOpen := peekErrorEnvelope(resp)
+	if leftOpen {
+		resp.Body.Close()
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(peeked))
+	class = metrics.Classify(metrics.ErrorFacts{Status: resp.StatusCode, Type: typ, Code: code})
+	return class.Retryable(), class
 }
 
 // openCursorRun opens a fresh agent.v1 Run stream for the given request body.
@@ -1159,7 +1166,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 			rec.ClientDisconnected = true
 			return
 		}
-		rec.ErrorType = "transform_error"
+		rec.ErrorType = metrics.TypeTransformError
 		msg := cursorTurnErrorText(result.Err)
 		rec.ErrorMsg = msg
 		writeRunJSONError(w, rec, errJSON(typeAPIError, msg), http.StatusBadGateway)

@@ -840,3 +840,23 @@ func TestStaticJSOnlyNamesTheOperatorVariableOwner(t *testing.T) {
 		t.Fatal("no static JS names the operator variable; the sign-in dialog must tell the operator which value to supply")
 	}
 }
+
+// TestRateLimitClassVocabularyMatchesJS pins entities.js RATE_LIMIT_CLASSES to
+// metrics.BuiltinRateLimitClassVocabulary(): the browser's record pills must
+// classify a rate limit by exactly the spellings the server does. The
+// vocabulary is a Go fact (a gateway can announce a rate limit with a 400, and
+// the client-side pill has to agree or the log and the aggregates disagree on
+// the same row), so the JS copy is a mirror, never an independent list. Only
+// the BUILT-INS are static: operator extensions
+// (rate_limit_error_classes) travel in the bootstrap payload at runtime.
+func TestRateLimitClassVocabularyMatchesJS(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/entities.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := jsStringList(t, src, "const RATE_LIMIT_CLASSES = ")
+	want := metrics.BuiltinRateLimitClassVocabulary()
+	if !slices.Equal(got, want) {
+		t.Fatalf("entities.js RATE_LIMIT_CLASSES disagrees with metrics.BuiltinRateLimitClassVocabulary():\n js  = %v\n go  = %v", got, want)
+	}
+}

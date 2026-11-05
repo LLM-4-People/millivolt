@@ -187,7 +187,7 @@ var errResponseBufferBudget = errors.New("proxy is at its in-flight response buf
 func writeResponseBufferBudget(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol) {
 	if rec != nil {
 		rec.StatusCode = http.StatusServiceUnavailable
-		rec.ErrorType = "response_buffer_budget"
+		rec.ErrorType = metrics.TypeResponseBudget
 		rec.ErrorMsg = errResponseBufferBudget.Error()
 	}
 	extra := http.Header{}

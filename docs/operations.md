@@ -1207,7 +1207,8 @@ quota exclusions, native handshakes and client-facing failures.
 Open Settings, select **Quota pause**, and choose the reaction to a 429 whose
 error envelope is a durable account condition - `insufficient_quota`,
 `insufficient_credits`, spend/hard limits, the recognized numeric billing codes
-(the classification is fixed; only the reaction is configurable):
+(the built-in classification is fixed and `quota_error_classes` may add
+spellings; only the reaction is configurable):
 
 - **off** (default): the 429 surfaces to the client immediately. Nothing is
   parked or retried.
@@ -1237,7 +1238,10 @@ the provider's next durable quota 429 re-arms it - while manual-mode holds
 persist like every operator pause. In-band occurrences (the same envelope
 inside a 200 stream) arm the pause the same way; that request already
 answered, so it is never parked. Translated Anthropic-format and Cursor
-upstreams keep the off behavior in every mode.
+upstreams keep the off behavior in every mode. The built-in vocabulary is
+fixed; `quota_error_classes` may add a gateway-specific spelling as a durable
+quota class (it may never move a built-in spelling between classes, and it
+re-reads stored history through the same vocabulary).
 
 ### Debug and preview capture
 

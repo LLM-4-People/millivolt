@@ -214,7 +214,7 @@ func stampNativeResponseError(rec *metrics.Record, e *ir.Error) {
 		case e.Type != "":
 			rec.ErrorType = e.Type
 		case e.Code != "":
-			rec.ErrorType = "provider_error"
+			rec.ErrorType = metrics.TypeProviderError
 		default:
 			rec.ErrorType = sse.TypeUpstreamError
 		}

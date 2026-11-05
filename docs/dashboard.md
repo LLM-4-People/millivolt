@@ -236,8 +236,10 @@ code surface with a line count, wrap toggle, copy action and expand/collapse
 control; a long single line scrolls inside that surface instead of widening the
 inspector. A final upstream failure appears as a bordered alert above the cards
 with its type, code, message and copy action, plus the HTTP status when the
-failure was an HTTP response. A typed rate limit is flow control, not an error:
-its reason, code and message stay visible in the rate-limit card. On narrow
+failure was an HTTP response. A rate limit the provider announced in its own
+type or code counts in the rate-limit card even when the status was not 429;
+a request that ended on one still appears as an alert, and a bare 429 stays
+the flow-control handshake it is. On narrow
 viewports the inspector fills the width, stacks each key above its value, keeps
 touch-sized copy and close targets, and respects the bottom safe area.
 

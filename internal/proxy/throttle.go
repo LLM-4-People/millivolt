@@ -806,15 +806,10 @@ func invalidateUsage(rec *metrics.Record, err error) {
 
 // localErrorType reports whether an error type was minted by the proxy rather
 // than parsed from a provider envelope. Provider classifications keep their
-// own code when usage is invalidated after the failure.
+// own code when usage is invalidated after the failure. The vocabulary is
+// owned by metrics (the classifier's owner) so the two cannot drift.
 func localErrorType(t string) bool {
-	switch t {
-	case "", "transform_error", errStreamRead, "response_too_large",
-		"response_buffer_budget", "queue_full", "storm_queue_full",
-		typeUpstreamUnreachable:
-		return true
-	}
-	return false
+	return metrics.IsLocalErrorType(t)
 }
 
 // HandleThrottle is GET/POST /admin/throttle. GET returns every active

@@ -127,7 +127,7 @@ func markClientGone(rec *metrics.Record) {
 // errStreamRead is the persisted error-type vocabulary member for a failure
 // reading or translating an upstream body stream: markStreamErr's record
 // stamp, and the in-band type the cursor turn error surface emits.
-const errStreamRead = "stream_read_error"
+const errStreamRead = metrics.TypeStreamReadError
 
 // markStreamErr classifies an error from an upstream body copy/scan loop: when
 // the LOCAL client disconnected (its request context canceled) the loop failed

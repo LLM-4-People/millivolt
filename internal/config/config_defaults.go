@@ -166,6 +166,20 @@ func quotaPauseModes() string {
 	return strings.Join([]string{QuotaPauseOff, QuotaPauseRetry, QuotaPauseManual}, ", ")
 }
 
+// Client error-class disclosure modes (ClientErrorClass values; exact
+// lowercase strings, deny by default).
+const (
+	// ClientErrorClassOff leaves relayed responses untouched.
+	ClientErrorClassOff = "off"
+	// ClientErrorClassHeader stamps X-Proxy-Error-Class and a class-derived
+	// X-Should-Retry on every error status before the status line commits.
+	ClientErrorClassHeader = "header"
+)
+
+func clientErrorClassModes() string {
+	return strings.Join([]string{ClientErrorClassOff, ClientErrorClassHeader}, ", ")
+}
+
 func heartbeatRange() string {
 	return FormatDuration(HeartbeatIntervalMin) + ".." + FormatDuration(HeartbeatIntervalMax)
 }
@@ -240,6 +254,7 @@ func Default() *Config {
 		StormStreamErrors:      true,
 
 		QuotaPauseMode:              QuotaPauseOff,
+		ClientErrorClass:            ClientErrorClassOff,
 		QuotaPauseRecoverySuccesses: 1,
 
 		AutoTokenRefresh: true,

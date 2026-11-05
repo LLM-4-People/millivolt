@@ -91,6 +91,23 @@ func seedPurgeStore(t *testing.T, s *Store) {
 			r.ClientDisconnected = true
 			return r
 		}(),
+		// A rate limit announced by a CODE on a non-429 status: providers
+		// commonly answer one with a 400 (tier_limit_exceeded). It is flow
+		// control, so it must NOT be purged as an error, and it must be
+		// reachable as a rate limit.
+		mk("rl-code", "beta", 400, "tier_limit_exceeded"),
+		// The same shape with an absorbed 5xx attempt: the upstream genuinely
+		// failed once, so it counts as an error despite the rate-limit class.
+		func() *metrics.Record {
+			r := mk("rl-code-5xx", "beta", 400, "tier_limit_exceeded")
+			r.Retries = 1
+			r.Attempts = []metrics.RetryAttempt{{StatusCode: 502, ErrorType: "provider_error", At: time.Now()}}
+			return r
+		}(),
+		// A durable quota code on a 429 is still a 429: the status governs,
+		// so it is a rate-limit event and not an error (the quota pause owns
+		// the durable reaction separately).
+		mk("quota-429", "beta", 429, "insufficient_quota"),
 	}
 	if err := s.insertBatch(recs); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -116,8 +133,8 @@ func TestClearEmptyFilterRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 10 {
-		t.Errorf("after rejected purge: %d rows, want 10 (nothing deleted)", n)
+	if n != 13 {
+		t.Errorf("after rejected purge: %d rows, want 13 (nothing deleted)", n)
 	}
 }
 
@@ -134,33 +151,37 @@ func TestClearFiltersRows(t *testing.T) {
 			name:     "by provider",
 			filter:   PurgeFilter{Provider: "alpha"},
 			wantGone: []string{"ok-1", "ok-2", "rl-1", "ret-5xx", "ret-429", "cancel-1", "cancel-5xx", "cancel-err"},
-			wantKept: []string{"err-2", "err-3"},
+			wantKept: []string{"err-2", "err-3", "rl-code", "rl-code-5xx", "quota-429"},
 		},
 		{
 			name:     "by status code",
 			filter:   PurgeFilter{StatusCode: 200},
 			wantGone: []string{"ok-1", "ok-2", "err-3", "ret-5xx", "ret-429"},
-			wantKept: []string{"rl-1", "err-2", "cancel-1", "cancel-5xx", "cancel-err"},
+			wantKept: []string{"rl-1", "err-2", "rl-code", "rl-code-5xx", "quota-429", "cancel-1", "cancel-5xx", "cancel-err"},
 		},
 		{
 			// HasError must match exactly the records IsError() flags - 429
-			// (rl-1), an absorbed 429 (ret-429), and a plain 499 client-close
-			// (cancel-1) are flow events, NOT errors; 500 (err-2), a structured
-			// error_type (err-3), an absorbed 5xx (ret-5xx), and the 499s that
+			// (rl-1), an absorbed 429 (ret-429), a plain 499 client-close
+			// (cancel-1), and a 429 carrying a durable quota code
+			// (quota-429, flow control by status with the quota pause owning
+			// its reaction) are NOT errors; 500 (err-2), a structured
+			// error_type (err-3), an absorbed 5xx (ret-5xx), the 499s that
 			// carry a failure - after an absorbed 5xx (cancel-5xx) or with the
 			// in-band error observed before the client left (cancel-err - the
-			// upstream still failed) - ARE. This pins the SQL predicate to the
+			// upstream still failed) - and the non-429 rate-limit rows
+			// (rl-code: the request failed, its own code says why; rl-code-5xx
+			// adds an absorbed 5xx) ARE. This pins the SQL predicate to the
 			// canonical Go one.
 			name:     "has error matches IsError",
 			filter:   PurgeFilter{HasError: true},
-			wantGone: []string{"err-2", "err-3", "ret-5xx", "cancel-5xx", "cancel-err"},
-			wantKept: []string{"ok-1", "ok-2", "rl-1", "ret-429", "cancel-1"},
+			wantGone: []string{"err-2", "err-3", "ret-5xx", "cancel-5xx", "cancel-err", "rl-code", "rl-code-5xx"},
+			wantKept: []string{"ok-1", "ok-2", "rl-1", "ret-429", "quota-429", "cancel-1"},
 		},
 		{
 			name:     "combined provider+status",
 			filter:   PurgeFilter{Provider: "alpha", StatusCode: 200},
 			wantGone: []string{"ok-1", "ok-2", "ret-5xx", "ret-429"},
-			wantKept: []string{"rl-1", "err-2", "err-3", "cancel-1", "cancel-5xx", "cancel-err"},
+			wantKept: []string{"rl-1", "err-2", "err-3", "rl-code", "rl-code-5xx", "quota-429", "cancel-1", "cancel-5xx", "cancel-err"},
 		},
 	}
 	for _, tc := range cases {
@@ -257,23 +278,23 @@ func TestExportWhereFiltersAndStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	seedPurgeStore(t, s) // 10 rows: see the purge tests for the fixture's shape
+	seedPurgeStore(t, s) // 13 rows: see the purge tests for the fixture's shape
 
-	// Full export: all 10 rows, valid JSON, records round-trip.
+	// Full export: all 13 rows, valid JSON, records round-trip.
 	var all bytes.Buffer
 	n, err := s.ExportWhere(t.Context(), PurgeFilter{}, &all)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 10 {
-		t.Errorf("full export = %d rows, want 10", n)
+	if n != 13 {
+		t.Errorf("full export = %d rows, want 13", n)
 	}
 	var recs []metrics.Record
 	if err := json.Unmarshal(all.Bytes(), &recs); err != nil {
 		t.Fatalf("export is not a JSON array of records: %v\n%s", err, all.String()[:min(len(all.String()), 200)])
 	}
-	if len(recs) != 10 {
-		t.Errorf("full export decoded %d records, want 10", len(recs))
+	if len(recs) != 13 {
+		t.Errorf("full export decoded %d records, want 13", len(recs))
 	}
 
 	// Filtered export: same predicate as CountWhere/MatchRecord.
@@ -302,8 +323,8 @@ func TestExportWhereFiltersAndStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 5 {
-		t.Errorf("errors export = %d rows, want 5 (err-2, err-3, ret-5xx, cancel-5xx, cancel-err)", n)
+	if n != 7 {
+		t.Errorf("errors export = %d rows, want 7 (err-2, err-3, ret-5xx, cancel-5xx, cancel-err, rl-code, rl-code-5xx)", n)
 	}
 
 	debugRec := &metrics.Record{

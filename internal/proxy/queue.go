@@ -87,7 +87,7 @@ func drainScopeLabel(scope scheduler.DrainScope) string {
 // queueDrainedType is the record error type for a request an operator drain
 // released. It is distinct from queue_full: the operator asked for the request
 // to leave the queue, and the client may retry immediately.
-const queueDrainedType = "queue_drained"
+const queueDrainedType = metrics.TypeQueueDrained
 
 // queueDrainedMessage is the single client-facing sentence for a released
 // request.

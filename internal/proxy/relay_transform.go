@@ -19,7 +19,7 @@ import (
 // failure after HTTP 200 was committed. The client receives the shared
 // upstream_error envelope; the translator's own error text stays in the
 // record, never on the wire.
-const translationErrorCode = "translation_error"
+const translationErrorCode = metrics.TypeTranslationError
 
 // translationErrorMessage is the non-sensitive client-facing text for a
 // failed streaming translation. It never echoes the translator's error or

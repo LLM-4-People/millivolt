@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 // sortedSet renders a name set in a stable order, so describe output does not
@@ -559,23 +560,25 @@ func RequestsColumnNames() []string {
 	return nil
 }
 
-// predicates are the health predicates, quoted exactly. They mirror the proxy's
-// metrics.Record.IsError and Record.HasRateLimit so a model's SQL and the
-// dashboard's counts can never disagree.
-var predicates = PredicateDoc{
-	IsError: `(
-  (status_code = 429 AND EXISTS (SELECT 1 FROM json_each(requests.attempts) WHERE json_extract(value, '$.status_code') >= 500))
-  OR (status_code = 499 AND (error_type != '' OR EXISTS (SELECT 1 FROM json_each(requests.attempts) WHERE json_extract(value, '$.status_code') >= 500)))
-  OR (status_code NOT IN (429, 499) AND (error_type != '' OR status_code >= 400))
-  OR (status_code < 400 AND EXISTS (SELECT 1 FROM json_each(requests.attempts) WHERE json_extract(value, '$.status_code') >= 500))
-)`,
-	RateLimited: `(status_code = 429 OR EXISTS (SELECT 1 FROM json_each(requests.attempts) WHERE json_extract(value, '$.status_code') = 429))`,
-	Note: "err_final counts distinct requests through is_error; rate_limit_requests counts distinct requests through rate_limited. " +
-		"A 429 alone is NOT an error: it is flow control. An absorbed 5xx in attempts IS an error even when a retry recovered. " +
-		"A 499 is a client abort unless error_type is set, which means the upstream had already failed in band. " +
-		"An in-band attempt entry records an upstream status a committed 200 could not relay; its 429 still counts as rate-limited, " +
-		"and the same request may also count as an error through its final error_type.",
-}
+// predicates are the health predicates, quoted exactly. They DELEGATE to
+// metrics, which owns one rendering of each predicate for both this published
+// document and the durable purge filter, so a model's SQL and the dashboard's
+// counts cannot disagree.
+var predicates = func() PredicateDoc {
+	return PredicateDoc{
+		IsError:     metrics.IsErrorSQL(),
+		RateLimited: metrics.HasRateLimitSQL(),
+		Note: "err_final counts distinct requests through is_error; rate_limit_requests counts distinct requests through rate_limited. " +
+			"A 429 alone is NOT an error: it is flow control. " +
+			"A response whose own type or code names a rate limit counts in rate_limit_requests even when its status is not 429 " +
+			"(providers commonly answer a rate limit with a 400 rather than a 429); when such a response is the final outcome of a non-429 status, " +
+			"the request still failed and also counts in err_final. " +
+			"A durable quota/billing class keeps its own reaction (quota_pause_mode); on a non-429 status it is an error and not a rate-limit event. " +
+			"An absorbed 5xx in attempts IS an error even when a retry recovered, including on a rate-limited request. " +
+			"A 499 is a client abort unless it carries a structured error_type, which means the upstream had already failed in band. " +
+			"An in-band attempt entry records an upstream status a committed 200 could not relay; its own rate-limit class still counts as rate-limited.",
+	}
+}()
 
 // The column reference above is curated rather than generated: it states the
 // meaning and unit an analysis needs, which DDL cannot. A new column is a

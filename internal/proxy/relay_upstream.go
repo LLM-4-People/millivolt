@@ -35,11 +35,11 @@ func parseErrorBody(b []byte) (typ, code, msg string) {
 	}
 	if json.Valid(b) {
 		// Decodable but null/empty error value: classify, no message.
-		return "provider_error", "", ""
+		return metrics.TypeProviderError, "", ""
 	}
 	// Unparseable (e.g. an oversized body truncated mid-token): keep a
 	// bounded raw prefix so the error is still classifiable.
-	return "provider_error", "", metrics.TruncatePreview(string(b))
+	return metrics.TypeProviderError, "", metrics.TruncatePreview(string(b))
 }
 
 // upstreamMeta is the per-response provider metadata read from response
@@ -189,28 +189,31 @@ func (b *prefixRemainderBody) Read(p []byte) (int, error) {
 
 func (b *prefixRemainderBody) Close() error { return b.rest.Close() }
 
-// quota429Peek is the single owner of the bounded durable-quota peek on a 429
-// response: it reads at most maxErrBodyBytes+1 bytes of the error body and
-// classifies the in-cap envelope through the canonical parser
-// (metrics.ParseErrorEnvelope + isNonRetryableQuotaErr). The caller arms the
-// shared upstream idle guard on resp.Body at receipt (doWithRetry and
-// openCursorHTTP), so a tarpit that sends headers and stalls cannot hold this
-// read past upstream_stream_idle_timeout. An in-cap body is closed and reported
-// together with its durable classification and the envelope's protocol tokens
-// (type, code - the quota-pause reason label); an overflowed body (longer than
-// maxErrBodyBytes) is deliberately left OPEN and unclassified
-// (durable=false, leftOpen=true) - the classification stays bounded by the
-// cap. Each transport then applies its own overflow policy at the call site:
-// the generic relay re-serves prefix + live remainder verbatim, the cursor
-// transport closes and re-wraps only the truncated prefix.
-func quota429Peek(resp *http.Response) (durable bool, typ, code string, peeked []byte, leftOpen bool) {
+// peekErrorEnvelope is the single owner of the bounded error-envelope read:
+// it captures at most maxErrBodyBytes+1 bytes and classifies the in-cap
+// envelope through the canonical parser (metrics.ParseErrorEnvelope). An
+// in-cap body is closed and reported together with the envelope's protocol
+// tokens (type, code); an overflowed body (longer than maxErrBodyBytes) is
+// deliberately left OPEN and unclassified so the caller's own overflow policy
+// can re-serve it verbatim (prefix + live remainder) or truncate it.
+//
+// Every transport is guarded externally: the caller arms the shared upstream
+// idle guard on resp.Body at receipt (doWithRetry and openCursorHTTP), so a
+// tarpit that sends headers and stalls cannot hold this read past
+// upstream_stream_idle_timeout.
+//
+// This is the classification gate for EVERY error status, not only 429: the
+// provider's own type/code is what distinguishes a rate limit carried by a 400
+// from a real client fault, so reading it only for 429 made identical conditions
+// behave differently depending on the status the provider happened to choose.
+func peekErrorEnvelope(resp *http.Response) (peeked []byte, typ, code string, leftOpen bool) {
 	peeked, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
 	if len(peeked) > maxErrBodyBytes {
-		return false, "", "", peeked, true
+		return peeked, "", "", true
 	}
 	resp.Body.Close()
 	typ, code, _ = metrics.ParseErrorEnvelope(peeked)
-	return isNonRetryableQuotaErr(typ, code), typ, code, peeked, false
+	return peeked, typ, code, false
 }
 
 // withSendTimeout derives the per-attempt upstream send context: the
@@ -405,11 +408,16 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 	retryAfter := parseRetryAfter(resp)
 	// Some providers carry the only reset hint in the message body
 	// ("... resets 2026-11-03T23:11:00Z") instead of a header. Without it the
-	// retry ladder burns its budget in seconds and surfaces a 429 that would
-	// have cleared, which is exactly how an unknown code such as
-	// tier_limit_exceeded reaches the client.
-	if retryAfter == 0 && resp.StatusCode == http.StatusTooManyRequests {
-		retryAfter = retryHintFromBody(errBody)
+	// retry ladder burns its budget in seconds and surfaces a limit error that
+	// would have cleared. The hint is read for ANY status the canonical
+	// classifier calls a rate limit, not only a 429: `tier_limit_exceeded`
+	// arrives as a 400 from some gateways and carries its reset instant only
+	// in the message.
+	if retryAfter == 0 {
+		typ, code, _ := parseErrorBody(errBody)
+		if outcomeClass(resp, typ, code).IsRateLimit() {
+			retryAfter = retryHintFromBody(errBody)
+		}
 	}
 	at := metrics.RetryAttempt{
 		StatusCode:   resp.StatusCode,

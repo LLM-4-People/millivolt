@@ -1,28 +1,97 @@
 // ---------- record classification (client-side log / pills) ----------
-// recordIsError mirrors the backend metrics.Record.IsError exactly (single
-// canonical definition, both sides): a request saw an upstream failure if it
-// has a structured error_type, or a final error status other than 429/499, or
-// an absorbed retry attempt that hit a 5xx. 429 (rate limit) is a flow event,
-// never an error. A plain 499 (local client closed the connection - its own
-// cancellation) is a flow event too, EXCEPT when it carries a structured
-// error_type: that observed the upstream's own failure (an in-band stream
-// error the client aborted around) and counts exactly like its 200 twin.
+// recordIsError and recordHasRateLimit mirror the backend
+// metrics.Record.IsError and metrics.Record.HasRateLimit exactly (single
+// canonical definition, both sides).
+//
+// The two answer different questions: IsError asks "did this request fail"
+// (a final 429 is flow control and a plain 499 is the client's own abort, so
+// neither is an error; a recorded structured error on any other status is),
+// and HasRateLimit asks "did it hit a rate limit", which is the CLASS, not
+// the status: a provider may announce one with a 400
+// (`tier_limit_exceeded`, `resource_exhausted`), and those count in the
+// rate-limit series whether or not the request also failed.
+//
+// The vocabulary below is owned by Go (metrics.rateLimitClasses) and published
+// to this file's mirror; TestRateLimitClassVocabularyMatchesJS in
+// tests/_go/internal/web/js_mirrors.go reddens on any drift. When the operator
+// installs rate_limit_error_classes extensions, the server publishes the
+// EFFECTIVE vocabulary in the bootstrap payload and
+// setRateLimitVocabulary replaces this list at runtime, so the browser cannot
+// disagree with the server about a row's class.
+const RATE_LIMIT_CLASSES = [
+  'membership_limit_exceeded',
+  'quota_exceeded',
+  'rate_limit',
+  'rate_limit_error',
+  'rate_limit_exceeded',
+  'ratelimiterror',
+  'requests_per_minute_exceeded',
+  'resource_exhausted',
+  'rpm_limit_exceeded',
+  'slow_down',
+  'tier_limit_exceeded',
+  'tokens_per_minute_exceeded',
+  'too_many_requests',
+  'too_many_requests_error',
+  'tpm_limit_exceeded',
+];
+
+// EFFECTIVE_RATE_LIMIT_CLASSES is the vocabulary classification actually uses:
+// the built-in mirror until the server publishes an operator-extended list.
+let EFFECTIVE_RATE_LIMIT_CLASSES = RATE_LIMIT_CLASSES;
+
+// setRateLimitVocabulary installs the server-published effective vocabulary
+// (bootstrap payload rate_limit_classes) or restores the built-in mirror when
+// the payload carries none (a reload that removed the extensions).
+function setRateLimitVocabulary(list) {
+  EFFECTIVE_RATE_LIMIT_CLASSES = (Array.isArray(list) && list.length) ? list : RATE_LIMIT_CLASSES;
+}
+
+// rateLimitClass reports whether an error type or code names a rate limit,
+// case-insensitively, matching metrics.IsRateLimitClass (built-ins plus any
+// operator extensions).
+function rateLimitClass(typ, code) {
+  const t = String(typ || '').trim().toLowerCase();
+  const c = String(code || '').trim().toLowerCase();
+  return EFFECTIVE_RATE_LIMIT_CLASSES.includes(t) || EFFECTIVE_RATE_LIMIT_CLASSES.includes(c);
+}
+
+// recordHasRateLimit mirrors metrics.Record.HasRateLimit: the final response,
+// the class, or any attempt.
+function recordHasRateLimit(r) {
+  if ((r.status_code || 0) === 429) return true;
+  if (rateLimitClass(r.error_type, r.error_code)) return true;
+  return (r.attempts || []).some(a =>
+    (a.status_code || 0) === 429 || rateLimitClass(a.error_type, a.error_code));
+}
+
+// recordOutcomeIsError mirrors metrics.OutcomeIsError: whether ONE observed
+// outcome (a final response, or a single absorbed retry attempt) is a genuine
+// failure on the health surface. The Go owner is the single source of truth;
+// its SQL twin (metrics.IsErrorSQL) and this mirror are pinned to it by the
+// health-predicate truth table and the corpus lockstep.
+//
+// The health surface asks "did this request fail", not "what kind of thing was
+// this": a final 429 is the flow-control handshake the client can retry and is
+// not an error, while a recorded structured error on any other status is a
+// failure even when its own type or code names a rate limit (recordHasRateLimit
+// counts those in the rate-limit series).
+function recordOutcomeIsError(status, typ, code) {
+  const s = status || 0;
+  const t = String(typ || '');
+  if (s === 429) return false;
+  if (s === 499) return t !== '';
+  return t !== '' || s >= 400;
+}
+
+// recordIsError mirrors metrics.Record.IsError: the final outcome through
+// recordOutcomeIsError, plus an absorbed 5xx from any attempt (the upstream
+// genuinely failed once, even if a later retry recovered).
 // Used for log scope and status pills;
 // every numeric surface renders the server-side aggregate (same definition in Go).
 function recordIsError(r) {
-  const s = r.status_code || 0;
-  if (s === 429 || s === 499) {
-    // A structured error on a 499 is a genuine provider failure.
-    if (s === 499 && r.error_type) return true;
-    // Flow events: only an absorbed 5xx from an earlier attempt makes one a
-    // genuine failure. The proxy creates only in-band 429 entries today; a
-    // synthetic in-band 5xx follows the same >= 500 rule as Go and the
-    // published SQL, so the predicates cannot disagree on any entry shape.
-    return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
-  }
-  if (r.error_type) return true;
-  if (s >= 400) return true;
-  return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
+  const absorbed5xx = (r.attempts || []).some(a => (a.status_code || 0) >= 500);
+  return recordOutcomeIsError(r.status_code, r.error_type, r.error_code) || absorbed5xx;
 }
 
 // ---------- explorer: entity-type visual registry ----------
@@ -305,17 +374,16 @@ function recordTools(r) {
 }
 
 // finalErrorEntry returns the record's client-visible failure, or null for a
-// clean completion, a rate limit or a plain client close. 429 and a status-less
-// 499 are flow events, not errors. A 499 carrying a structured error_type
-// observed the upstream's own failure (an in-band stream error the client
-// aborted around), exactly like its 200 twin. Genuine failures are a
-// structured error_type, or an error status other than 429/499; the status is
-// only the code fallback once a failure is established. The drawer banner and
-// the error-group enumerator share this one predicate.
+// clean completion, a rate limit or a plain client close. Genuine failures are
+// exactly the outcomes metrics.OutcomeIsError accepts (recordOutcomeIsError
+// mirrors it): a structured NON-rate-limit error (including on a 499, which
+// observed the upstream's own failure before the client aborted around it), or
+// any error status, with a rate-limit class on ANY status treated as flow
+// control. The status is only the code fallback once a failure is established.
+// The drawer banner and the error-group enumerator share this one predicate.
 function finalErrorEntry(r) {
+  if (!recordOutcomeIsError(r.status_code, r.error_type, r.error_code)) return null;
   const finStatus = r.status_code || 0;
-  if (finStatus === 429 || (finStatus === 499 && !r.error_type)) return null;
-  if (!r.error_type && finStatus < 400) return null;
   return {
     type: r.error_type || 'http_' + finStatus,
     code: r.error_code || (finStatus ? String(finStatus) : ''),
@@ -328,21 +396,20 @@ function finalErrorEntry(r) {
 // entries: the final (client-visible) failure plus each absorbed retry attempt.
 // forEachErrorEntry is its visitor form so a match can walk the same entries
 // without allocating one object per entry; both share the final-failure
-// predicate above.
+// predicate above, and the absorbed arm reads the same health predicate
+// (recordOutcomeIsError) the Go owner (web/aggregate.go errorEntries) reads, so
+// a rate limit announced by a code on a 400 is flow control on both sides.
 function forEachErrorEntry(r, visit) {
   const final = finalErrorEntry(r);
   if (final) visit(final.type, final.code, final.msg, false, final.at);
-  // Absorbed retry attempts: only genuine failures (a 5xx, or a structured
-  // error that isn't a rate limit). A 429 attempt is flow control, excluded.
+  // Absorbed retry attempts: only genuine failures the client never saw.
   // An in-band entry is the hidden status of the final failure, already
   // visited above, so it never adds a second entry.
   for (const a of (r.attempts || [])) {
     if (a.in_band) continue;
+    if (!recordOutcomeIsError(a.status_code, a.error_type, a.error_code)) continue;
     const as = a.status_code || 0;
-    if (as === 429) continue; // flow control
     const t = a.error_type || (as ? 'http_' + as : 'transport');
-    if (as < 500 && (t === 'transport' || t === 'rate_limit')) continue; // not a server failure
-    if (as < 400 && !a.error_type) continue; // no failure at all
     const code = a.error_code || (as ? String(as) : '');
     visit(t, code, a.error_msg, true, a.at || r.start);
   }

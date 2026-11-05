@@ -144,32 +144,41 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// transport read; Close stops the timer and releases the context.
 		resp.Body = s.wrapUpstreamBody(resp.Body, attemptCancel)
 
-		// A 429 is normally transient flow control, but a 429 can also be the
-		// provider announcing a durable account condition (quota/credits/spend
-		// limits) that waiting can never clear. Only the body's structured
-		// error type/code tells them apart, so the bounded envelope peek
-		// (quota429Peek) runs BEFORE the retry decision. With the quota pause
-		// armed for this target, a durable 429 instead parks the provider and
-		// this request: the attempt is absorbed, settleQuotaFailure opens the
-		// recovery gate (retry mode) or the provider hold (manual mode), and
-		// the next admission below waits out the pause - the loop re-sends
-		// until a send resolves 2xx and the queue drains. Unarmed targets
-		// surface the 429 immediately - no retry budget burned, no pacing of
-		// the group, the absorbed-attempt log stays clean (nothing was
-		// absorbed).
+		// A 429 can be transient flow control OR the provider announcing a
+		// durable account condition (quota/credits/spend limits) that waiting
+		// can never clear, and only the body's structured type/code tells them
+		// apart. The same body decides every other class on the response: a
+		// rate limit, a genuine client fault, or transient availability. So
+		// the bounded envelope is peeked ONCE here, before any decision, and
+		// the classification runs off it - a status-only test cannot tell a
+		// 400 that means "rate limit" from a 400 that means "malformed
+		// request", and treating them alike is what surfaced
+		// `tier_limit_exceeded` to clients unretried.
+		//
+		// With the quota pause armed for this target, a durable 429 parks the
+		// provider and this request: the attempt is absorbed,
+		// settleQuotaFailure opens the recovery gate (retry mode) or the
+		// provider hold (manual mode), and the next admission below waits out
+		// the pause - the loop re-sends until a send resolves 2xx and the
+		// queue drains. Unarmed targets surface the 429 immediately - no retry
+		// budget burned, no pacing of the group, the absorbed-attempt log
+		// stays clean (nothing was absorbed).
 		//
 		// This relay's overflow policy: a peek that OVERFLOWS the cap leaves
 		// the body open (peekLeftOpen), so the final relay can serve
-		// prefix + live remainder verbatim and an oversized 429 keeps normal
+		// prefix + live remainder verbatim and an oversized error keeps normal
 		// retry semantics.
 		var errBody []byte
 		peekLeftOpen := false
-		if resp.StatusCode == http.StatusTooManyRequests {
-			var durable bool
-			var quotaTyp, quotaCode string
-			durable, quotaTyp, quotaCode, errBody, peekLeftOpen = quota429Peek(resp)
-			if durable {
-				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, metrics.NonRetryableQuotaClass(quotaTyp, quotaCode), parseRetryAfter(resp)) {
+		var errTyp, errCode string
+		if resp.StatusCode >= 400 {
+			errBody, errTyp, errCode, peekLeftOpen = peekErrorEnvelope(resp)
+			// A 429 whose envelope names a durable account condition is the
+			// documented quota-pause trigger. The pause reacts to a 429; a
+			// durable code on another status still classifies as quota (so it
+			// is never retried) but does not open the provider gate.
+			if resp.StatusCode == http.StatusTooManyRequests && isNonRetryableQuotaErr(errTyp, errCode) {
+				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, metrics.NonRetryableQuotaClass(errTyp, errCode), parseRetryAfter(resp)) {
 					end(false)
 					// This response reaches the client: adopt this attempt's
 					// transport timing (the failed attempts before it never
@@ -199,12 +208,19 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			}
 		}
 
-		// Only retry transient conditions: 429 (rate limit) and any 5xx
-		// (upstream/server error). 4xx client errors are final. When retries
-		// are exhausted the last upstream response is surfaced verbatim, so
-		// the client sees the real error - retries are transparent, failures
-		// are not masked.
-		retryable := isRetryable(resp.StatusCode)
+		// Only retry transient conditions: a rate limit, an upstream/server
+		// failure, or a transport-level retryable error. The decision reads the
+		// provider's OWN type/code as well as the status, through the canonical
+		// classifier: some providers answer a rate limit with HTTP 400 (for
+		// example `tier_limit_exceeded` / `membership rpm limit exceeded`), and
+		// a status-only test surfaced those to the client unretried. When
+		// retries are exhausted the last upstream response is surfaced
+		// verbatim, so the client sees the real error - retries are
+		// transparent, failures are not masked. A durable quota/billing class
+		// is never retried by this ladder: the quota pause owns it.
+		class := outcomeClass(resp, errTyp, errCode)
+		durableQuota := class == metrics.ClassQuota
+		retryable := class.Retryable() && !durableQuota
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)
 		if state := stormState(ctx); state != nil && state.response == permit {
 			state.responseCtx = attemptCtx
@@ -218,7 +234,27 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			// keeps this attempt's dial/handshake/header-wait facts, and the
 			// absorbed attempts' traces died with their contexts.
 			timing.adopt(rec)
-			end(isRetryable(resp.StatusCode))
+			end(retryable)
+			// Stamp the parsed classification so the record, the live ring and
+			// the health predicates all read the SAME class the retry ladder
+			// just decided on. Without this a rate limit carried by a 400 is
+			// filed as a client error: it raises the error count and stays out
+			// of the rate-limit count, which is the opposite of what it is.
+			if errTyp != "" || errCode != "" {
+				rec.ErrorType, rec.ErrorCode = errTyp, errCode
+				if msg, _, _ := parseErrorBody(errBody); msg != "" {
+					rec.ErrorMsg = msg
+				}
+			}
+			switch {
+			case class.IsRateLimit():
+				rec.RateLimited = true
+			case class == metrics.ClassQuota:
+				// A durable account condition is not an error-storm event and
+				// not flow control: leave the storm evidence and the
+				// rate-limit flag alone, exactly as the 429 path does.
+				rec.RateLimited = false
+			}
 			if errBody != nil {
 				if peekLeftOpen {
 					// Oversized 429, budget exhausted: relay the COMPLETE body -
@@ -239,9 +275,9 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// full failure detail even though the client never sees it. The body is
 		// then discarded - it is never forwarded. Best-effort: a read failure
 		// just means less error detail for this absorbed attempt. (An in-cap
-		// 429 body was already captured+closed by the durable-quota peek above;
-		// an OVERSIZED 429's peek left the body open, so close it here - the
-		// remainder is discarded with the rest of the attempt.)
+		// error body was already captured+closed by the envelope peek above; an
+		// OVERSIZED one left the body open, so close it here - the remainder is
+		// discarded with the rest of the attempt.)
 		if errBody == nil {
 			errBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
 			resp.Body.Close()
@@ -256,10 +292,12 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// that preceded the final (e.g. 200) outcome.
 		retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader)
 		s.publishUpdate(rec)
-		// 429/503 are genuine rate limits; other 5xx are transient upstream
-		// errors. Record the distinction so the dashboard doesn't mislabel a
-		// 502 as a rate limit.
-		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+		// The canonical class decides the rate-limit flag, so a rate limit
+		// announced by a code on a non-429 status is counted exactly like a
+		// 429. 503 keeps its documented scheduler-pacing meaning (a provider
+		// shedding load), which is broader than the health predicate
+		// Record.HasRateLimit; a plain 502 stays unlabelled.
+		if class.IsRateLimit() || resp.StatusCode == http.StatusServiceUnavailable {
 			rec.RateLimited = true
 		}
 		rec.ErrorType = ""
@@ -272,12 +310,16 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 	}
 }
 
-// isRetryable reports whether a status is a transient condition worth
-// retrying transparently. Provider-agnostic: 429 (Too Many Requests) and any
-// 5xx (upstream/server error: 500, 502, 503, 504, …) are retried; 4xx client
-// errors and 2xx/3xx are final.
-func isRetryable(code int) bool {
-	return code == 429 || (code >= 500 && code <= 599)
+// outcomeClass is the canonical classification of one received HTTP response,
+// including its parsed provider envelope. It is the ONE call site that turns
+// status + type + code into a class; the retry ladder, storm observation and
+// the record all read its result instead of re-deriving it.
+func outcomeClass(resp *http.Response, typ, code string) metrics.ErrorClass {
+	return metrics.Classify(metrics.ErrorFacts{
+		Status: resp.StatusCode,
+		Type:   typ,
+		Code:   code,
+	})
 }
 
 // isRetryableTransportErr reports whether a client.Do transport error (no

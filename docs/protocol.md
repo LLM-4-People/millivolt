@@ -266,6 +266,30 @@ body-text driven) keep their own policy, and mid-stream SSE errors never
 auto-retry in official SDKs and cannot carry new headers. Success responses
 are untouched, and the setting hot-reloads for new responses.
 
+One classifier owns every error decision: the retry ladder, the storm
+observer, the health counts and the client-facing class all read the same
+canonical class (`rate_limit`, `quota`, `unavailable`, `unreachable`,
+`timeout`, `content`, `client_error`, `proxy`, `canceled`, `upstream`),
+computed from the status AND the provider's own structured type/code - never
+message text. A rate limit announced by a non-429 status (a gateway
+answering `tier_limit_exceeded` or `resource_exhausted` with a 400) is
+therefore retried, counted in the rate-limit series (and, because the request
+still failed, in the error rate), and labeled `rate_limit` instead of
+`client_error`. With
+`client_error_class: header` every error status the relay returns also
+carries `X-Proxy-Error-Class: <class>` and a class-derived
+`X-Should-Retry: true|false` before the status line commits (the body is
+never rewritten; relayed errors stay verbatim), while
+`suppress_client_retries` still wins with a flat `false`. Two settings extend
+the built-in vocabularies with gateway-specific spellings, additively:
+`rate_limit_error_classes` and `quota_error_classes` (plus the existing
+`retryable_error_classes` for in-band transient errors). Entries are matched
+case-insensitively against the parsed envelope's type and code; validation
+rejects a spelling that names a built-in of a different class, so a built-in
+classification can never be moved or weakened. Reload applies to new
+classifications and the published predicates re-read stored history through
+the same effective vocabulary.
+
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion
