@@ -1,6 +1,6 @@
 """Chart canvas, overview, layout, table and content-fit checks."""
 
-from .support import require
+from .support import pick_chart_control, require
 
 
 async def chart_checks(page, screenshot, results, layout_checks):
@@ -8,7 +8,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
     for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
         await page.set_viewport_size(viewport)
         for pct in ('50', '95', '99'):
-            await page.select_option('#chart-pct', pct)
+            await pick_chart_control(page, '#chart-pct', pct)
             # Sparse gate first: one measured bucket (the old
             # singleton case) must paint the waiting blank, never
             # a stranded lone point. Then a five-bucket measured
@@ -91,7 +91,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
     # way.
     state = await page.evaluate('''async () => {
         const full = window.__fullChart;
-        const idx = ['50','95','99'].indexOf(document.getElementById('chart-pct').value);
+        const idx = CHART_PCTS.indexOf(chartView.pct);
         const measured = full.buckets.filter(b => Number.isFinite(b.tps?.[idx]) && Number.isFinite(b.ttft?.[idx]) && Number.isFinite(b.dec?.[idx]));
         chartAgg = {...full};
         renderChart();
@@ -135,7 +135,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
     # 750px lock floor) lock one screen - the short windows
     # shorten the tile and spark, never the card; 390 stacks
     # and scrolls - all show all 5.
-    await page.select_option('#chart-preset', 'overview')
+    await pick_chart_control(page, '#chart-preset', 'overview')
     for viewport in ({'width': 1440, 'height': 1000}, {'width': 2560, 'height': 1440},
                      {'width': 1366, 'height': 768}, {'width': 1366, 'height': 750},
                      {'width': 390, 'height': 844}):
@@ -256,7 +256,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
     # The metrics menu must never be cropped by the window's
     # bottom edge: on a short viewport (the stacked scrolling
     # layout, the card head sits low) opening it flips the menu
-    # above its trigger (setMetricsMenuOpen + syncMetricsMenuEdge)
+    # above its trigger (the shared menu foundation's placement)
     # so every row stays reachable.
     await page.set_viewport_size({'width': 1280, 'height': 585})
     menu_edge = await page.evaluate("""async () => {
@@ -281,8 +281,8 @@ async def chart_checks(page, screenshot, results, layout_checks):
     require(menu_edge['open'] and menu_edge['rows'] == 5 and menu_edge['fits'], menu_edge)
     results.append({'menu_edge': menu_edge})
     # Restore the saved-view expectations the reload check pins.
-    await page.select_option('#chart-preset', 'latency')
-    await page.select_option('#chart-pct', '99')
+    await pick_chart_control(page, '#chart-preset', 'latency')
+    await pick_chart_control(page, '#chart-pct', '99')
     # The layout adapts by viewport size: wide-AND-tall viewports
     # keep the locked one-screen instrument - the ENTIRE page
     # shows without scrolling (inner regions scroll, the page
@@ -387,6 +387,11 @@ async def chart_checks(page, screenshot, results, layout_checks):
     table_shift = []
     for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
         await page.set_viewport_size(viewport)
+        # Focus-visible is modality-driven: establish keyboard interaction so
+        # the probe's programmatic link focus exercises the ring a real Tab
+        # user sees. The menu controls above are clicked with the pointer, so
+        # without this the probe would read a pointer-modality focus.
+        await page.keyboard.press('Tab')
         state = await page.evaluate("""async () => {
             const box = document.getElementById('tbl-requests');
             const table = box.querySelector('table');

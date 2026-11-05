@@ -6,6 +6,10 @@ module.exports = [
   require('./sections/selection_drawer'),
   require('./sections/logs_menu'),
   require('./sections/model_canon'),
+  // The foundation section asserts a document with no built .mn-menu panels:
+  // the chart-head choiceMenus (chart_render and later sections) build their
+  // panels lazily on first open, so this section runs before them.
+  require('./sections/menu_foundation'),
   require('./sections/menus_scroll'),
   require('./sections/archive_pages'),
   require('./sections/archive_scale'),
@@ -32,4 +36,5 @@ module.exports = [
   require('./sections/regressions_b'),
   require('./sections/regressions_c'),
   require('./sections/drawer_redesign'),
+  require('./sections/timeframe'),
 ];

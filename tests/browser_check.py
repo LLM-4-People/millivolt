@@ -23,7 +23,7 @@ from .browser_fixture import BODY, BODY_429, BODY_HEAD, BODY_TAIL, DEV_DIR, Upst
 from .browser_log import log_checks
 from .browser_storm import storm_checks as run_storm_checks
 from .browser_theme import theme_checks
-from .support import DOCS_CAPTURE_VIEWPORT, operator_headers, operator_signin, require
+from .support import DOCS_CAPTURE_VIEWPORT, operator_headers, operator_signin, pick_chart_control, require
 
 
 def target(value):
@@ -146,7 +146,7 @@ async def check(base, screenshot):
                 # rewrite chartAgg with trimmed buckets, but the Overview
                 # period-total assertions need every request-bearing bucket.
                 await page.evaluate('window.__fullChart = chartAgg')
-                await page.select_option('#chart-preset', 'latency')
+                await pick_chart_control(page, '#chart-preset', 'latency')
                 await page.wait_for_function('chartAgg && chartAgg.tps_p.some(v => v != null)')
                 results = []
                 layout_checks = []
@@ -181,8 +181,8 @@ async def check(base, screenshot):
 
                 await page.reload(wait_until='domcontentloaded')
                 await page.wait_for_function('chartAgg && explorerAgg && lastData')
-                require(await page.locator('#chart-preset').input_value() == 'latency', 'saved chart preset lost')
-                require(await page.locator('#chart-pct').input_value() == '99', 'saved chart percentile lost')
+                require(await page.evaluate('chartView.preset') == 'latency', 'saved chart preset lost')
+                require(await page.evaluate('chartView.pct') == 99, 'saved chart percentile lost')
                 storm_checks = []
                 await run_storm_checks(page, errors, storm_checks)
                 require(not errors, errors)

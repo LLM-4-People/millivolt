@@ -145,9 +145,17 @@ module.exports = async function chartRender(H) {
   legDec().click();
   const pctControl = d.getElementById('chart-pct');
   check('the percentile control names the plotted metrics without a second owner', pctControl.getAttribute('aria-label') === 'Percentile' && pctControl.title.includes('speed, latency and decode'));
-  pctControl.value = '99';
-  pctControl.dispatchEvent(new w.Event('change', { bubbles: true }));
-  check('the percentile dropdown updates every plotted line together', w.eval('chartView.pct === 99 && chartData()[1][0] === 300 && chartData()[2][0] === 30 && chartData()[3][0] === 210'));
+  // The control is a choiceMenu on the shared foundation: its trigger opens
+  // the Percentile panel and the p99 row picks the value for every plotted
+  // line. Drive the real control, not the setter.
+  pctControl.click();
+  const pctMenu = [...d.querySelectorAll('.mn-menu')].find(menu => menu.getAttribute('aria-label') === 'Percentile');
+  check('the percentile trigger opens its choice menu with the stored selection checked',
+    !!pctMenu && !pctMenu.hidden &&
+    pctMenu.querySelector('.mn-item[data-mn-id="99"]').getAttribute('aria-checked') === 'false' &&
+    pctMenu.querySelector('.mn-item[data-mn-id="95"]').getAttribute('aria-checked') === 'true');
+  pctMenu.querySelector('.mn-item[data-mn-id="99"]').click();
+  check('the percentile control updates every plotted line together', w.eval('chartView.pct === 99 && chartData()[1][0] === 300 && chartData()[2][0] === 30 && chartData()[3][0] === 210'));
   w.eval(`upOpts(640, 210).hooks.setCursor[0]({data: chartData(), cursor: {idx: 0, left: 100}, bbox: {width: 640}})`);
   check('hover shows one value per plotted metric with no percentile duplication',
     [...d.querySelectorAll('#chart-hover .chart-hover-row')].map(el => el.textContent).join() === 'speed300 tok/s,latency30ms,decode210ms' &&
@@ -216,15 +224,15 @@ module.exports = async function chartRender(H) {
     w.setChartPct('42');
     check('setChartPct rejects unlisted percentiles without touching the view',
       w.eval('chartView.pct') === 99 && savedView().pct === 99);
-    // GAP-C pin: the window select's setChartWindow caller. No jsdom row
+    // GAP-C pin: the window control's setChartWindow caller. No jsdom row
     // drove #chart-window (mutation-proven: swapping the body to
     // commitChartView or dropping its validation left npm green), so the
-    // window dropdown's real handler could be dropped or broken without
-    // reddening anything. setChartWindow deliberately diverges from
-    // commitChartView (a window change needs new server-computed buckets):
-    // a valid switch must persist the merged view, issue a window-keyed
-    // chart fetch, and apply the fetched payload; an unlisted window is
-    // denied by default - no persist, no fetch.
+    // control's real handler could be dropped or broken without reddening
+    // anything. setChartWindow deliberately diverges from commitChartView (a
+    // window change needs new server-computed buckets): a valid, available
+    // switch must persist the merged view, issue a window-keyed chart fetch,
+    // and apply the fetched payload; an unknown token is denied by default -
+    // no persist, no fetch.
     const chartFetchURLs = () => state.initialFetches.filter(u => u.includes('/metrics/agg/chart'));
     const fetchesBeforeWindow = chartFetchURLs().length;
     w.setChartWindow('15');
@@ -238,45 +246,46 @@ module.exports = async function chartRender(H) {
       await settleUntil(() => w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms));
     const fetchesBeforeReject = chartFetchURLs().length;
     w.setChartWindow('bogus');
-    check('setChartWindow rejects unlisted windows without persisting or fetching',
+    check('setChartWindow rejects unknown tokens without persisting or fetching',
       w.eval('chartView.window') === '15' && savedView().window === '15' &&
         chartFetchURLs().length === fetchesBeforeReject);
   }
 
-  // W43 pin: the real chart select wirings in live.js. The rows above prove
-  // setChartWindow and setChartPreset behave as functions, but no row drove
-  // the dropdown elements themselves (mutation-proven: dropping either
-  // select's addEventListener line left every suite green), so a dead select
-  // could ship without reddening anything. Drive the real selects through
-  // change events. The window path must persist, fetch and apply; a preset
-  // change deliberately re-renders from the live payload with no refetch
-  // (commitChartView's contract - only a window switch needs new buckets).
+  // W43 pin: the real chart control wirings on the shared foundation. The
+  // rows above prove setChartWindow and setChartPreset behave as functions,
+  // but no row drove the control elements themselves (mutation-proven:
+  // dropping either wiring left every suite green), so a dead control could
+  // ship without reddening anything. Drive the real timeframe chip and the
+  // real preset menu row. The window path must persist, fetch and apply; a
+  // preset change deliberately re-renders from the live payload with no
+  // refetch (commitChartView's contract - only a window switch needs new
+  // buckets).
   {
     const savedView = () => JSON.parse(w.eval('storage.get("dash.chart")') || 'null');
     const chartFetchURLs = () => state.initialFetches.filter(u => u.includes('/metrics/agg/chart'));
     // '60', not another '15': the chart request gate dedupes a re-issued
     // 'reuse' key (requestGate in core.js), so repeating the window the
     // previous block just fetched would issue no fetch at all.
-    const windowSelect = d.getElementById('chart-window');
+    const windowChip = d.querySelector('#chart-window-panel [data-tf="60"]');
     const fetchesBeforeWindowWiring = chartFetchURLs().length;
     // The W41 rows above already fetched and applied this same chartPayload,
     // so chartAgg starts equal to it: without a delta the apply check below
     // passes against the stale W41 state even if the wiring never fetches
-    // or never applies anything (mutation-proven: a dropped window listener
+    // or never applies anything (mutation-proven: a dropped window wiring
     // left it green). Bump now_ms with a unique delta so only applying the
     // window drive's own fetched payload can satisfy it.
     state.chartPayload.now_ms += 4000;
-    windowSelect.value = '60';
-    windowSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
-    check('the window dropdown wiring persists the merged view and issues the window-keyed fetch',
+    check('the timeframe chip is selectable for the stored-history extent', !!windowChip && !windowChip.disabled);
+    windowChip.click();
+    check('the timeframe chip wiring persists the merged view and issues the window-keyed fetch',
       w.eval('chartView.window') === '60' &&
         savedView() && savedView().window === '60' && savedView().pct === 99 &&
         savedView().preset === 'latency' &&
         chartFetchURLs().length === fetchesBeforeWindowWiring + 1 &&
         chartFetchURLs().at(-1).includes('window=60'));
-    check('the window dropdown wiring applies the fetched window payload',
+    check('the timeframe chip wiring applies the fetched window payload',
       await settleUntil(() => w.eval('chartAgg && chartAgg.now_ms') === state.chartPayload.now_ms));
-    const presetSelect = d.getElementById('chart-preset');
+    const presetTrigger = d.getElementById('chart-preset');
     const fetchesBeforePresetWiring = chartFetchURLs().length;
     // The no-refetch conjunct below is otherwise masked by the chart request
     // gate's dedupe: a regressed setChartPreset that called fetchChart()
@@ -288,9 +297,13 @@ module.exports = async function chartRender(H) {
     // like with like; no later row reads chartView.window before test 11f
     // re-seeds the view wholesale.
     w.eval("chartView.window = '30'");
-    presetSelect.value = 'traffic';
-    presetSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
-    check('the preset dropdown wiring persists the merged view and re-renders without a refetch',
+    presetTrigger.click();
+    const presetMenu = [...d.querySelectorAll('.mn-menu')].find(menu => menu.getAttribute('aria-label') === 'Metric');
+    check('the preset trigger opens its choice menu with the stored selection checked',
+      !!presetMenu && !presetMenu.hidden &&
+      presetMenu.querySelector('.mn-item[data-mn-id="latency"]').getAttribute('aria-checked') === 'true');
+    presetMenu.querySelector('.mn-item[data-mn-id="traffic"]').click();
+    check('the preset menu wiring persists the merged view and re-renders without a refetch',
       w.eval('chartView.preset') === 'traffic' &&
         savedView() && savedView().preset === 'traffic' &&
         savedView().window === w.eval('chartView.window') &&
@@ -561,11 +574,14 @@ module.exports = async function chartRender(H) {
   // no per-preset mapping), garbage JSON keeps the defaults, and every field
   // validates independently against its owner list.
   const CHART_DEFAULTS = { window: 'all', pct: 95, preset: 'traffic', hidden: {} };
-  check('chart range control comes from the one curated range registry',
-    [...d.querySelectorAll('#chart-window option')].map(o => o.value).join(',') === w.eval('CHART_WINDOWS.map(([v]) => v).join(",")'));
+  check('chart timeframe chips come from the one curated timeframe registry',
+    [...d.querySelectorAll('#chart-window-panel .mn-chip')].map(c => c.dataset.tf).join(',') === w.eval('TIMEFRAMES.map(f => f.token).join(",")'));
   check('chart offers all history plus short, daily, weekly, monthly and yearly ranges',
     ['all', '15', '60', '360', '1440', '10080', '43200', '129600', '525600'].every(v =>
-      [...d.querySelectorAll('#chart-window option')].some(o => o.value === v)));
+      d.querySelector(`#chart-window-panel [data-tf="${v}"]`) !== null));
+  check('chart offers the calendar presets as their own chip group',
+    ['today', 'yesterday', 'week', 'month'].every(v =>
+      d.querySelector(`#chart-window-panel [data-tf="${v}"]`) !== null));
   check('multi-day bucket durations use the shared duration formatter', w.eval('fmtDur(1209600000)') === '14d');
   w.eval(`
     storage.set('dash.chart', JSON.stringify({ window: '60', pct: 99, preset: 'cost', hidden: ['req'] }));

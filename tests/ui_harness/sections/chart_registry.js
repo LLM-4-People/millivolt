@@ -4,11 +4,18 @@ module.exports = async function chartRegistry(H) {
   const {check, d, fire, mkRec, observerFixture, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
-  // ---- test 12: chart preset registry - ids unique, dropdown follows ----
+  // ---- test 12: chart preset registry - ids unique, menu follows ----
   const presetIds = w.eval('CHART_PRESETS.map(p => p.id)');
   check('CHART_PRESETS ids are unique', new Set(presetIds).size === presetIds.length);
-  const presetOpts = [...d.querySelectorAll('#chart-preset option')].map(o => o.value);
-  check('#chart-preset has no duplicate options', new Set(presetOpts).size === presetOpts.length && presetOpts.length === presetIds.length);
+  const presetTrigger = d.getElementById('chart-preset');
+  let presetMenu = [...d.querySelectorAll('.mn-menu')].find(menu => menu.getAttribute('aria-label') === 'Metric');
+  if (!presetMenu) {
+    presetTrigger.click();
+    presetMenu = [...d.querySelectorAll('.mn-menu')].find(menu => menu.getAttribute('aria-label') === 'Metric');
+  }
+  const presetRows = [...presetMenu.querySelectorAll('.mn-item')].map(row => row.dataset.mnId);
+  check('#chart-preset has no duplicate options', new Set(presetRows).size === presetRows.length && presetRows.length === presetIds.length);
+  w.menuCloseAll();
 
   // ---- test 12b: the derive cache invalidates on a filter change - the
   // filter-set identity rides the memo key, so narrowing the status dropdown

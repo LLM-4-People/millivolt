@@ -671,3 +671,78 @@
     .theme-mode { width: 100%; }
     .theme-hint { display: none; }
   }
+
+  /* Shared menu foundation (js/menu.js): the one panel language for the
+     dashboard's menu-like surfaces. Anchor placement is JS-owned (fixed
+     coordinates under the trigger, flipping above it near the window edge,
+     clamped inside the viewport); sheet placement is CSS-owned through
+     [data-placement="sheet"] and scrimmed by .mn-scrim. Conversions compose
+     the body blocks below instead of restyling each surface. */
+  .mn {
+    position: fixed; z-index: 110; display: flex; flex-direction: column;
+    width: min(var(--mn-w, 340px), calc(100vw - 16px)); max-width: none;
+    max-height: min(76dvh, calc(100dvh - 24px));
+    background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
+    box-shadow: var(--shadow-menu); font-family: var(--mono); color: var(--text);
+    opacity: 0; transform: translateY(-4px);
+    transition: opacity .16s ease-out, transform .16s ease-out;
+  }
+  .mn-on { opacity: 1; transform: none; }
+  .mn[data-placement="sheet"] {
+    left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    top: auto; max-height: min(78dvh, calc(100dvh - 24px)); border-radius: 12px;
+  }
+  .mn-scrim { position: fixed; inset: 0; z-index: 95; background: rgba(var(--veil-rgb), .35); }
+  .mn-hd { padding: 10px 12px 0; }
+  .mn-title { font-size: 11px; font-weight: 600; }
+  .mn-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .mn-body {
+    padding: 10px 12px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin;
+    display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0;
+  }
+  .mn-sec { display: flex; flex-direction: column; gap: 6px; }
+  .mn-sec-h { font-size: 9px; color: var(--muted); letter-spacing: .05em; text-transform: none; }
+  .mn-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px;
+    padding: 5px 8px; border: 0; border-radius: 7px; background: none; color: var(--text);
+    font: 11px var(--mono); text-align: left; cursor: pointer;
+  }
+  .mn-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+  .mn-item:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+  .mn-item[aria-checked="false"] { color: var(--muted); }
+  .mn-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
+  .mn-item[disabled] { opacity: .45; cursor: default; }
+  .mn-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mn-chip {
+    display: inline-flex; align-items: center; justify-content: center; min-height: 26px;
+    padding: 0 10px; border: 1px solid var(--border2); border-radius: 7px;
+    background: var(--panel2); color: var(--muted); font: 10.5px var(--mono); cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+  }
+  .mn-chip:hover { color: var(--text); border-color: var(--accent); }
+  .mn-chip:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+  .mn-chip[aria-pressed="true"] {
+    color: var(--text); border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .mn-chip:disabled { opacity: .45; cursor: default; }
+  .mn-chip:disabled:hover { color: var(--muted); border-color: var(--border2); background: var(--panel2); }
+  .mn-note { font-size: 10px; color: var(--muted); line-height: 1.5; }
+  .mn-ft { padding: 10px 12px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+  .mn-actions { display: flex; gap: 8px; justify-content: space-between; width: 100%; }
+  .mn-rail {
+    position: relative; height: 6px; border-radius: 3px;
+    border: 1px solid var(--border); background: var(--tick-strip); overflow: hidden;
+  }
+  .mn-rail-fill {
+    position: absolute; top: 0; bottom: 0;
+    background: color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 2px;
+  }
+  @media (max-width: 800px) {
+    .mn-item { min-height: var(--tap); }
+    .mn-chip { min-height: 38px; padding: 0 12px; }
+  }
+  @media (hover: none), (pointer: coarse) {
+    .mn-item { min-height: var(--tap); }
+    .mn-chip { min-height: var(--tap); padding: 0 14px; }
+  }

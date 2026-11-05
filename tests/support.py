@@ -18,6 +18,20 @@ def require(value, message):
         raise RuntimeError(message)
 
 
+async def pick_chart_control(page, trigger, value):
+    """Pick one value from a chart-head control.
+
+    The preset, percentile and timeframe controls are buttons that open a
+    shared menu-foundation panel appended to the body: choice rows carry
+    data-mn-id and timeframe chips carry data-tf. One owner of that
+    interaction, so every browser suite drives the real control the same way.
+    """
+    await page.click(trigger)
+    row = (f'.mn-on [data-tf="{value}"]' if trigger == '#chart-window'
+           else f'.mn-on [data-mn-id="{value}"]')
+    await page.click(row)
+
+
 def operator_token():
     """The gated dashboard needs the same MILLIVOLT_OPERATOR_TOKEN the target
     instance was started with."""

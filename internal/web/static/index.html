@@ -70,8 +70,10 @@ try {
 <script defer src="/dash/js/chrome_lists.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_settings.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_operator.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/menu.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_menus.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_restart.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/timeframe.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chart.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/entities.js?v=__DASHBOARD_VERSION__"></script>
 <!-- The log modules load in one dependency order: the archive window and its
@@ -385,12 +387,12 @@ try {
     <div class="card traffic-card">
       <div class="card-hd"><h2>Timeline</h2>
         <div class="chart-controls">
-          <select id="chart-preset" aria-label="Chart metric" title="Chart metric"></select>
-          <select id="chart-window" aria-label="Chart time window" title="Chart time window"></select>
-          <select id="chart-pct" aria-label="Percentile" title="Percentile applied to speed, latency and decode" hidden></select>
+          <button type="button" id="chart-preset" class="chart-trigger" aria-haspopup="true" aria-expanded="false" aria-label="Chart metric" title="Chart metric"><span id="chart-preset-label"></span></button>
+          <button type="button" id="chart-window" class="chart-trigger" aria-expanded="false" aria-controls="chart-window-panel" aria-label="Chart time window" title="Chart time window"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 5.1V8l2.1 1.5"/></svg><span id="chart-window-label"></span></button>
+          <button type="button" id="chart-pct" class="chart-trigger" aria-haspopup="true" aria-expanded="false" aria-label="Percentile" title="Percentile applied to speed, latency and decode" hidden><span id="chart-pct-label"></span></button>
           <div class="metrics-pick" id="chart-metrics" hidden>
             <button type="button" id="chart-metrics-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="chart-metrics-menu" aria-label="Summary metrics"></button>
-            <div class="metrics-menu" id="chart-metrics-menu" role="menu" aria-label="Summary metrics" hidden></div>
+            <div class="mn metrics-menu" id="chart-metrics-menu" role="menu" aria-label="Summary metrics" hidden></div>
           </div>
         </div>
       </div>

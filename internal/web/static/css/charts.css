@@ -156,49 +156,38 @@
   .chart-hover-time { color: var(--muted); font-size: 10px; margin-bottom: 7px; }
   .chart-hover-row { display: flex; justify-content: space-between; gap: 20px; line-height: 1.8; }
   .chart-controls { display: flex; gap: 6px; margin-left: auto; align-items: center; }
-  .chart-controls select {
-    background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
-    font-size: 11px; padding: 4px 10px; border-radius: 7px; cursor: pointer;
-    font-family: var(--mono); transition: all .15s;
-  }
-  .chart-controls select:hover { color: var(--text); border-color: var(--accent); }
-  .chart-controls select:focus-visible, #traffic-legend button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  /* The summary metrics picker: the trigger matches the row's select
-     language (panel2 fill, hairline border, hover accent; height pinned to
-     the native select box the row's shared font and padding produce) so the
-     control reads as one of the chart controls, with the registry chevron
-     flipping open. The menu mirrors the provider picker's panel - absolute
-     under the trigger, mono rows - but with no fixed width floor: the
-     provider menu's min-width exists for its input row, and this menu has
-     only rows, so it shrink-wraps its longest entry. Rows carry a
-     fixed-width check slot - checked rows keep the accent check and full
-     text, unchecked rows dim to muted, so the current selection reads at a
-     glance. */
-  .metrics-pick { position: relative; }
-  #chart-metrics-btn {
+  /* Chart-head triggers: the preset, window and percentile buttons share the
+     metrics picker's language (panel2 fill, hairline border, hover accent;
+     height pinned to the native select box the row's shared font and padding
+     produced) and carry the selected label; the window trigger adds its
+     clock glyph. Open state reads through the accent border, synced by the
+     menu foundation's aria-expanded. */
+  #chart-metrics-btn,
+  .chart-trigger {
     display: inline-flex; align-items: center; gap: 6px;
     background: var(--panel2); border: 1px solid var(--border2); color: var(--muted);
     font: 11px var(--mono); padding: 4px 10px; height: 24px; border-radius: 7px; cursor: pointer;
     transition: all .15s;
   }
-  #chart-metrics-btn:hover { color: var(--text); border-color: var(--accent); }
-  #chart-metrics-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  #chart-metrics-btn svg { width: 9px; height: 9px; stroke: currentColor; fill: none; stroke-width: 1.5; }
-  #chart-metrics-btn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
+  #chart-metrics-btn:hover,
+  .chart-trigger:hover { color: var(--text); border-color: var(--accent); }
+  #chart-metrics-btn:focus-visible,
+  .chart-trigger:focus-visible,
+  #traffic-legend button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #chart-metrics-btn svg,
+  #chart-window svg { width: 9px; height: 9px; stroke: currentColor; fill: none; stroke-width: 1.5; }
+  #chart-metrics-btn[aria-expanded="true"],
+  .chart-trigger[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
   #chart-metrics-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
   #chart-metrics-btn .mp-count { color: var(--muted); font-variant-numeric: tabular-nums; }
-  /* Fixed, not absolute: the menu lives in the card head, and the card's
-     overflow: hidden clipped any menu taller than the card's remaining
-     space. Fixed placement escapes every ancestor clip; chart.js's
-     syncMetricsMenuEdge owns the coordinates (right-aligned to the
-     trigger, flipping above it near the window's bottom edge), so this
-     rule positions nothing beyond keeping an unplaced menu offscreen. */
-  .metrics-menu {
-    position: fixed; top: -9999px; right: auto; z-index: 40;
-    padding: 8px; display: flex; flex-direction: column; gap: 2px;
-    background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: var(--shadow-menu); font-family: var(--mono);
-  }
+  /* The summary metrics picker: the trigger matches the chart triggers',
+     and the panel is a foundation .mn panel (dashboard.css owns placement,
+     the box and the open transition). It keeps only its rows' layout and
+     shrink-wraps instead of taking the shell's default width. Rows carry a
+     fixed-width check slot - checked rows keep the accent check and full
+     text, unchecked rows dim to muted, so the current selection reads at a
+     glance. */
+  .metrics-menu { width: auto; padding: 8px; gap: 2px; }
   .metrics-row {
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     font: 11px var(--mono); color: var(--text); background: none; border: none;
@@ -219,12 +208,12 @@
       gap: 8px;
       grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr));
     }
-    /* The picker trigger is a chart control: it takes the selects' mobile
+    /* The picker trigger is a chart control: it takes the triggers' mobile
        treatment (6px inline padding), drops its count chip (the menu rows
        carry the state; the aria-label keeps the full truth) and, like the
        card header above it, lets the row wrap - the narrowest phones get
        the trigger on its own line instead of an overflow. */
-    .chart-controls select, #chart-metrics-btn { padding-inline: 6px; }
+    .chart-trigger, #chart-metrics-btn { padding-inline: 6px; }
     .chart-controls { flex-wrap: wrap; }
     .metrics-pick .mp-count { display: none; }
   }
