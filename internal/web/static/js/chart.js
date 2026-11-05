@@ -35,7 +35,7 @@ const CHART_SPARK_W = 72, CHART_SPARK_H = 32;
 // CHART_TILE_PCT selects the summary tiles' SPARKLINE percentile only: the
 // timing tile's value is the server's period average (ttft_stat / tps_stat),
 // never this percentile - it reaches the tile solely as the per-bucket spark
-// lines. The preset keeps only the time-range control, no percentile
+// lines. The preset keeps only the timeframe control, no percentile
 // selector and no visible pXX label anywhere; the tooltip's ordinal text
 // derives from this constant, and its index into the server's [p50, p95,
 // p99] wire triple derives from the CHART_PCTS owner, so the sparks and the
