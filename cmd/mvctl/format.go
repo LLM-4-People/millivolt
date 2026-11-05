@@ -115,7 +115,9 @@ func cyan(s string) string   { return paint(s, "36") }
 
 func strip(s string) string {
 	s = ansiRe.ReplaceAllString(s, "")
-	return stripSentinelRunes(styleStartRe.ReplaceAllString(s, ""))
+	s = styleStartRe.ReplaceAllString(s, "")
+	s = strings.ReplaceAll(s, styleEndMark, "")
+	return stripSentinelRunes(s)
 }
 func width(s string) int { return utf8.RuneCountInString(strip(s)) }
 

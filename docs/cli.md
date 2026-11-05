@@ -140,8 +140,8 @@ prints the reload error without inviting a retry that would fail with a stale
 revision.
 
 Credential-class provider header values are redacted from `config get`, `config
-diff` and the post-save document of `config set`, in human output and `--json`,
-using the shared header-name vocabulary. `--reveal` prints them. A historical
+diff`, the `config set` preview and its post-save document, in human output and
+`--json`, using the shared header-name vocabulary. `--reveal` prints them. A historical
 `last_reload` error is replaced by the redaction marker because a rejected value
 can be quoted there. Token counters, token windows and rate-limit values are
 measurements, not credentials, and are never redacted.
@@ -218,8 +218,9 @@ count; only `--yes` calls `/admin/purge`, and an unfiltered purge also needs
 `--all`. Before deleting, the command re-counts and refuses when the total
 changed since the preview. That compares counts, not row identities, and rows
 committed after the re-count are still deleted: the check catches a population
-change, not every concurrent insert. A missing, fractional, negative or non-finite count is a failure,
-never zero. A genuinely bodyless purge is the proxy's delete-everything form.
+change, not every concurrent insert. A missing, fractional, negative or
+non-finite count is a failure, never zero. A genuinely bodyless purge is the
+proxy's delete-everything form.
 
 `backup --out FILE` is required; there is no default path. `--config` and
 `--database` default to true (the command's settings surface) and are always
@@ -231,10 +232,10 @@ is a failed transfer, not a published archive. Backup and restore are bounded
 by cancellation, not by `--timeout`.
 
 `restore` defaults to `inspect=1`, which validates the archive without applying
-it; `--inspect` forces that mode even with `--yes`. `--yes` applies it. The member selection (`--config`, `--database`) and the
-mode (`--config-mode`, `--database-mode`; `merge` or `replace`) are always sent
-explicitly, and both the inspect and apply output name the selected members and
-modes. The default mode is `replace`, the proxy's documented default, so the
+it; `--inspect` forces that mode even with `--yes`. `--yes` applies it. The
+member selection (`--config`, `--database`) and the mode (`--config-mode`,
+`--database-mode`; `merge` or `replace`) are always sent explicitly, and both
+the inspect and apply output name the selected members and modes. The default mode is `replace`, the proxy's documented default, so the
 preview names the broader action instead of hiding it. An inspect document's
 archived provider headers are redacted; `--reveal` prints them. The apply
 response's `restart_required` keys are called out in the output.

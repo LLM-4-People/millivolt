@@ -162,6 +162,12 @@ func TestTableKeepsSemanticColorAndStripsUntrustedEscapes(t *testing.T) {
 	if strings.ContainsRune(sanitized, styleStart) || strings.ContainsRune(sanitized, styleEnd) || strings.Contains(sanitized, "\x1b") {
 		t.Fatalf("a foreign sentinel was rendered as an escape: %q", sanitized)
 	}
+	if got := width(green("200")); got != 3 {
+		t.Fatalf("width of a styled cell = %d, want 3", got)
+	}
+	if got := width("a" + green("b") + "c"); got != 3 {
+		t.Fatalf("width of mixed styled text = %d, want 3", got)
+	}
 }
 
 func TestShortFlagsComeFromTheRegistry(t *testing.T) {

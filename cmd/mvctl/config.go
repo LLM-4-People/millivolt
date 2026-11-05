@@ -191,11 +191,16 @@ func configSet(ctx *Context) (Result, error) {
 		}
 		values[key] = value
 	}
-	preview := heading("config change preview") + "\n" + prettyJSON(values)
-	if result, proceed, err := guarded(ctx, "save the live configuration", values); !proceed {
+	reveal := ctx.Flags.Bool("reveal", false)
+	previewValues := values
+	if !reveal {
+		previewValues = redactConfigValues(values)
+	}
+	preview := heading("config change preview") + "\n" + prettyJSON(previewValues)
+	if result, proceed, err := guarded(ctx, "save the live configuration", previewValues); !proceed {
 		result.Pretty = preview + "\n\n" + result.Pretty
 		if data, ok := result.Data.(map[string]any); ok {
-			data["values"] = values
+			data["values"] = previewValues
 			data["revision"] = view.Document.Revision
 		}
 		return result, err
@@ -206,7 +211,6 @@ func configSet(ctx *Context) (Result, error) {
 	if err != nil {
 		return Result{Code: exitFailure}, err
 	}
-	reveal := ctx.Flags.Bool("reveal", false)
 	document := map[string]any{
 		"saved":            out.Saved,
 		"restart_required": out.RestartRequired,

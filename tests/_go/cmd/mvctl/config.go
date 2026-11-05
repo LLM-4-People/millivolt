@@ -259,3 +259,18 @@ func TestConfigGetKeepsAnEmptyReloadErrorEmpty(t *testing.T) {
 		t.Fatalf("successful reload error = %v, want empty", reload["error"])
 	}
 }
+
+func TestConfigSetPreviewRedactsProviderHeaders(t *testing.T) {
+	fixture := newProxy(t, map[string]http.HandlerFunc{
+		"/admin/config": jsonHandler(t, configJSON),
+	})
+	patch := `providers={"p":{"headers":{"Authorization":"Bearer secret-value","X-Trace":"visible"}}}`
+	code, stdout, _ := runCLI(t, "--url", fixture.url(), "config", "set", patch, "--json")
+	if code != 0 || strings.Contains(stdout, "secret-value") || !strings.Contains(stdout, "[redacted]") {
+		t.Fatalf("config set preview = %d, %q", code, stdout)
+	}
+	code, stdout, _ = runCLI(t, "--url", fixture.url(), "config", "set", patch, "--json", "--reveal")
+	if code != 0 || !strings.Contains(stdout, "secret-value") {
+		t.Fatalf("config set preview --reveal = %d, %q", code, stdout)
+	}
+}
