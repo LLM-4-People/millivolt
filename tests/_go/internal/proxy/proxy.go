@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,7 +41,10 @@ func TestJoinUpstreamURL(t *testing.T) {
 	}
 }
 
-type capturedRequest struct {
+// capturedSnapshot is one immutable request capture. Assertions take a
+// snapshot instead of reading the recording fields, so a later request cannot
+// race the assertion.
+type capturedSnapshot struct {
 	path          string
 	authHeader    string
 	apiKeyHeader  string
@@ -48,16 +52,38 @@ type capturedRequest struct {
 	body          string
 }
 
+// capturedRequest records the last request its fixture upstream saw. The
+// handler can run concurrently (the inflight tests send overlapping requests),
+// so both the record and the snapshot are synchronized.
+type capturedRequest struct {
+	mu   sync.Mutex
+	data capturedSnapshot
+}
+
+func (c *capturedRequest) record(r *http.Request, body []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.data = capturedSnapshot{
+		path:          r.URL.Path,
+		authHeader:    r.Header.Get("Authorization"),
+		apiKeyHeader:  r.Header.Get("x-api-key"),
+		versionHeader: r.Header.Get("anthropic-version"),
+		body:          string(body),
+	}
+}
+
+func (c *capturedRequest) snapshot() capturedSnapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data
+}
+
 func mockUpstream(t *testing.T, stream bool) (*httptest.Server, *capturedRequest) {
 	t.Helper()
 	captured := &capturedRequest{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		captured.path = r.URL.Path
-		captured.authHeader = r.Header.Get("Authorization")
-		captured.apiKeyHeader = r.Header.Get("x-api-key")
-		captured.versionHeader = r.Header.Get("anthropic-version")
-		captured.body = string(body)
+		captured.record(r, body)
 		if stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(200)
@@ -76,6 +102,40 @@ func mockUpstream(t *testing.T, stream bool) (*httptest.Server, *capturedRequest
 		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}`))
 	}))
 	return srv, captured
+}
+
+// TestCapturedRequestConcurrentAccess pins the fixture's concurrency contract:
+// one upstream can receive overlapping requests, and the capture must not race
+// between their handler goroutines. It is a fixture self-test because the race
+// detector cannot distinguish test code from production code in the report.
+func TestCapturedRequestConcurrentAccess(t *testing.T) {
+	upstream, captured := mockUpstream(t, false)
+	defer upstream.Close()
+
+	const requests = 32
+	var wg sync.WaitGroup
+	for i := 0; i < requests; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, upstream.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+			if err != nil {
+				t.Errorf("create fixture request: %v", err)
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Errorf("fixture request: %v", err)
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+	if gotCapture := captured.snapshot(); gotCapture.path != "/v1/chat/completions" {
+		t.Errorf("captured path = %q, want /v1/chat/completions", gotCapture.path)
+	}
 }
 
 func proxyServer(t *testing.T) *httptest.Server {
@@ -108,11 +168,12 @@ func TestPassthroughStreaming(t *testing.T) {
 	if got != want {
 		t.Fatalf("stream body mismatch:\n got %q\nwant %q", got, want)
 	}
-	if captured.authHeader != "Bearer sk-test-key" {
-		t.Errorf("upstream Authorization = %q, want %q", captured.authHeader, "Bearer sk-test-key")
+	gotCapture := captured.snapshot()
+	if gotCapture.authHeader != "Bearer sk-test-key" {
+		t.Errorf("upstream Authorization = %q, want %q", gotCapture.authHeader, "Bearer sk-test-key")
 	}
-	if captured.path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q", captured.path)
+	if gotCapture.path != "/v1/chat/completions" {
+		t.Errorf("upstream path = %q", gotCapture.path)
 	}
 	// The wire-size trio on a plain identity stream: the request body size,
 	// the summed SSE frame bytes the relay wrote, and no auto-decompress.
@@ -170,17 +231,18 @@ func TestAnthropicStyleAuthRewrite(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if captured.apiKeyHeader != "sk-ant-key" {
-		t.Errorf("upstream x-api-key = %q, want %q", captured.apiKeyHeader, "sk-ant-key")
+	gotCapture := captured.snapshot()
+	if gotCapture.apiKeyHeader != "sk-ant-key" {
+		t.Errorf("upstream x-api-key = %q, want %q", gotCapture.apiKeyHeader, "sk-ant-key")
 	}
-	if captured.versionHeader != "2023-06-01" {
-		t.Errorf("upstream anthropic-version = %q, want %q", captured.versionHeader, "2023-06-01")
+	if gotCapture.versionHeader != "2023-06-01" {
+		t.Errorf("upstream anthropic-version = %q, want %q", gotCapture.versionHeader, "2023-06-01")
 	}
-	if captured.path != "/messages" {
-		t.Errorf("upstream path = %q, want /messages", captured.path)
+	if gotCapture.path != "/messages" {
+		t.Errorf("upstream path = %q, want /messages", gotCapture.path)
 	}
-	if captured.authHeader != "" {
-		t.Errorf("Authorization leaked upstream: %q", captured.authHeader)
+	if gotCapture.authHeader != "" {
+		t.Errorf("Authorization leaked upstream: %q", gotCapture.authHeader)
 	}
 }
 
@@ -200,8 +262,8 @@ func TestExplicitKeyHeader(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if captured.authHeader != "Bearer sk-secret" {
-		t.Errorf("upstream Authorization = %q, want %q", captured.authHeader, "Bearer sk-secret")
+	if gotCapture := captured.snapshot(); gotCapture.authHeader != "Bearer sk-secret" {
+		t.Errorf("upstream Authorization = %q, want %q", gotCapture.authHeader, "Bearer sk-secret")
 	}
 }
 
@@ -239,8 +301,8 @@ func TestBodyPreserved(t *testing.T) {
 	received, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	if captured.body != body {
-		t.Errorf("request body mutated:\n got %q\nwant %q", captured.body, body)
+	if gotCapture := captured.snapshot(); gotCapture.body != body {
+		t.Errorf("request body mutated:\n got %q\nwant %q", gotCapture.body, body)
 	}
 	// The non-streaming wire sizes: the inbound request body and the
 	// completion JSON the relay spooled and wrote verbatim.
@@ -290,8 +352,8 @@ func TestLowercaseBearer(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if captured.authHeader != "Bearer sk-lower" {
-		t.Errorf("upstream Authorization = %q, want %q", captured.authHeader, "Bearer sk-lower")
+	if gotCapture := captured.snapshot(); gotCapture.authHeader != "Bearer sk-lower" {
+		t.Errorf("upstream Authorization = %q, want %q", gotCapture.authHeader, "Bearer sk-lower")
 	}
 }
 
@@ -316,8 +378,8 @@ func TestHopByHopHeadersStripped(t *testing.T) {
 
 	// The mock does not capture hop-by-hop headers directly; verify the
 	// response is well-formed and body intact (headers dropped upstream).
-	if captured.body != `{"model":"m"}` {
-		t.Errorf("body mutated: %q", captured.body)
+	if gotCapture := captured.snapshot(); gotCapture.body != `{"model":"m"}` {
+		t.Errorf("body mutated: %q", gotCapture.body)
 	}
 }
 
