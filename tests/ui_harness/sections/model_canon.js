@@ -372,7 +372,10 @@ module.exports = async function modelCanon(H) {
   }
   check('settings button exists', !!d.getElementById('btn-settings') && !!d.getElementById('settings-sheet'));
   check('settings sheet has category rail and live snapshot', !!d.getElementById('settings-rail') && !!d.getElementById('settings-live'));
-  check('settings close matches drawer', (d.getElementById('btn-settings-close') || {}).textContent.includes('esc'));
+  const settingsClose = d.getElementById('btn-settings-close');
+  check('settings close names its action and matches the drawer hint',
+    !!settingsClose && settingsClose.getAttribute('aria-label') === 'close settings' &&
+    !!settingsClose.querySelector('.d-key') && settingsClose.querySelector('.d-key').textContent === 'esc');
   {
     const doc = {
       writable: true,
