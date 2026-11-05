@@ -437,7 +437,7 @@
     .st-sheet { border-radius: 12px; }
     .st-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .st-side { border-right: none; border-bottom: 1px solid var(--border); }
-    .st-rail { flex-direction: row; flex-wrap: wrap; max-height: 96px; }
+    .st-rail { flex-direction: row; flex-wrap: wrap; max-height: 152px; }
     .st-rail-item { width: auto; }
     .st-live { display: none; }
     .st-row { grid-template-columns: 1fr; gap: 6px; }
@@ -453,4 +453,13 @@
     .ro-head-actions button { min-height: 24px; }
     .ro-rule .ro-scope, .ro-rule .ro-body { grid-template-columns: minmax(0, 1fr); }
     .ro-rule-body { padding-inline: 8px; }
+  }
+  /* Touch sizing for the settings surfaces and the provider picker: rows,
+     chips, the custom label field and the sheet actions take the full target
+     wherever the pointer is coarse or the viewport is narrow. */
+  @media (max-width: 800px), (hover: none), (pointer: coarse) {
+    .prov-menu-item { min-height: var(--tap); padding: 0 9px; }
+    .prov-menu-custom input, .prov-menu-custom .btn { min-height: var(--tap); }
+    .st-rail-item { min-height: var(--tap); }
+    .st-actions .btn { min-height: var(--tap); }
   }
