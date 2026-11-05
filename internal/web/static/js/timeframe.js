@@ -207,7 +207,15 @@ function buildTimeframeControl(trigger, labelEl, onPick) {
   rail.appendChild(fill);
   const note = document.createElement('div');
   note.className = 'mn-note';
-  coverage.append(rail, note);
+  // The ceiling line is the visible explanation a phone needs: a disabled
+  // chip's title is hover-only and a disabled button cannot take focus, so
+  // the panel states the rule once, in text, whenever any window is gated.
+  const ceiling = document.createElement('div');
+  ceiling.className = 'mn-ceiling';
+  ceiling.id = panel.id + '-ceiling';
+  ceiling.textContent = 'disabled windows need more stored history';
+  ceiling.hidden = true;
+  coverage.append(rail, note, ceiling);
   body.appendChild(coverage);
 
   const chips = new Map();
@@ -232,8 +240,10 @@ function buildTimeframeControl(trigger, labelEl, onPick) {
       row.appendChild(chip);
     }
     body.appendChild(sec);
+    return row;
   };
-  addGroup('zoom', TIMEFRAMES.filter(frame => frame.kind !== 'range'));
+  const zoomRow = addGroup('zoom', TIMEFRAMES.filter(frame => frame.kind !== 'range'));
+  zoomRow.setAttribute('aria-describedby', ceiling.id);
   addGroup('calendar', TIMEFRAMES.filter(frame => frame.kind === 'range'));
 
   let selected = 'all';
@@ -255,12 +265,15 @@ function buildTimeframeControl(trigger, labelEl, onPick) {
     const now = Date.now();
     const shown = tfAvailable(selected, now) ? selected : 'all';
     const resolved = tfResolve(shown, now);
+    let capped = false;
     for (const [token, chip] of chips) {
       const available = tfAvailable(token, now);
+      if (!available) capped = true;
       chip.disabled = !available;
       chip.setAttribute('aria-pressed', token === shown ? 'true' : 'false');
       chip.title = chipTitle(tfEntry(token), available, now);
     }
+    ceiling.hidden = !capped;
     if (labelEl) labelEl.textContent = resolved.label;
     const cov = tfCoverage(shown, now);
     if (!cov) {

@@ -749,6 +749,7 @@
   .mn-chip:disabled { opacity: .45; cursor: default; }
   .mn-chip:disabled:hover { color: var(--muted); border-color: var(--border2); background: var(--panel2); }
   .mn-note { font-size: 10px; color: var(--muted); line-height: 1.5; }
+  .mn-ceiling { font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
   .mn-ft { padding: 10px 12px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
   .mn-actions { display: flex; gap: 8px; justify-content: space-between; width: 100%; }
   .mn-rail {

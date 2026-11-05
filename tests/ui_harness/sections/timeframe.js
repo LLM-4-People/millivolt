@@ -119,6 +119,7 @@ module.exports = async function timeframe(H) {
   const chip = token => panel.querySelector(`[data-tf="${token}"]`);
   const fill = panel.querySelector('.mn-rail-fill');
   const note = panel.querySelector('.mn-note');
+  const ceiling = panel.querySelector('.mn-ceiling');
   try {
     check('the control builds a Timeframe group panel on the foundation shell',
       panel.classList.contains('mn') && panel.getAttribute('role') === 'group' &&
@@ -139,6 +140,9 @@ module.exports = async function timeframe(H) {
       chip('360').disabled && chip('360').title === 'only ' + w.eval('fmtDur(3 * 3600000 + 12 * 60000)') + ' of history is stored' &&
       !chip('180').disabled && !chip('60').disabled && !chip('all').disabled &&
       chip('60').title === 'last 1 hour');
+    check('a gated ladder shows the visible ceiling line and describes the group',
+      !ceiling.hidden && ceiling.textContent === 'disabled windows need more stored history' &&
+      panel.querySelector('.mn-chips').getAttribute('aria-describedby') === ceiling.id);
     ctrl.sync('180');
     check('the selected chip is pressed and the trigger label resolves short',
       chip('180').getAttribute('aria-pressed') === 'true' && chip('all').getAttribute('aria-pressed') === 'false' &&
@@ -177,6 +181,10 @@ module.exports = async function timeframe(H) {
         Math.abs(parseFloat(fill.style.width) - wantWidth) < 0.01 &&
         /^yesterday · since \S+ \d{1,2}$/.test(note.textContent);
     })());
+
+    w.eval(`tfSetExtent(${Date.now() - 400 * 86400000})`);
+    ctrl.sync('all');
+    check('an extent that clears the ladder hides the ceiling line', ceiling.hidden);
 
     w.eval('tfSetExtent(0)');
     ctrl.sync('all');
