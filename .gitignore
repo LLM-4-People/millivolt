@@ -53,3 +53,6 @@ __pycache__/
 # Scraped research pages
 /docs_*.txt
 /grafana_com_.txt
+
+# Local design-tool session state; PRODUCT.md and DESIGN.md stay tracked
+/.impeccable/
