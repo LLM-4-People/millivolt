@@ -317,11 +317,11 @@ func main() {
 	// The liveness probe is the one open server route besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. Depth (storage, feeds) stays on the gated dashboard.
-	mux.HandleFunc("/healthz", handleHealthz)
+	mux.HandleFunc(string(mcp.RouteHealthz), handleHealthz)
 	// The SSE feed is not gzipped (it flushes event-by-event; every other
 	// dashboard route is buffered text and compresses).
 	mux.Handle("/metrics/live/stream", http.HandlerFunc(buf.HandleStream))
-	mux.Handle("/metrics/prometheus", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle(string(mcp.RoutePrometheus), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metrics.HandlePrometheus(w, r, buf)
 	}))
 	// Dashboard aggregates: every non-table metric surface is computed here
@@ -363,10 +363,10 @@ func main() {
 	// The agg endpoints are buffered dashboard JSON (log pages can be
 	// hundreds of KB) - gzip like every other buffered dashboard route.
 	aggGet := func(h http.HandlerFunc) http.Handler { return web.Gzip(h) }
-	mux.Handle("/metrics/agg/chart", aggGet(agg.HandleAggChart))
-	mux.Handle("/metrics/agg/explorer", aggGet(agg.HandleAggExplorer))
-	mux.Handle("/metrics/agg/log", aggGet(agg.HandleLogPage))
-	mux.Handle("/metrics/bootstrap", aggGet(agg.HandleBootstrap))
+	mux.Handle(string(mcp.RouteChart), aggGet(agg.HandleAggChart))
+	mux.Handle(string(mcp.RouteExplorer), aggGet(agg.HandleAggExplorer))
+	mux.Handle(string(mcp.RouteLog), aggGet(agg.HandleLogPage))
+	mux.Handle(string(mcp.RouteBootstrap), aggGet(agg.HandleBootstrap))
 	registerLogRoutes(mux, buf, store)
 	// Profiling evidence for CPU/RAM work: the standard handlers under the
 	// same operator gate as every /metrics route (pprof.go owns the mounting
@@ -375,12 +375,12 @@ func main() {
 
 	// Operator pause: in-flight requests finish, new ones queue until resume.
 	// The dashboard Pause/Resume button is the UI for this.
-	mux.Handle("/admin/pause", http.HandlerFunc(proxySrv.HandlePause))
-	mux.Handle("/admin/quota", http.HandlerFunc(proxySrv.HandleQuotaPause))
-	mux.Handle("/admin/throttle", http.HandlerFunc(proxySrv.HandleThrottle))
-	mux.Handle("/admin/queue/drain", http.HandlerFunc(proxySrv.HandleQueueDrain))
-	mux.Handle("/admin/debug", http.HandlerFunc(proxySrv.HandleDebug))
-	mux.Handle("/admin/debug/capture", web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))
+	mux.Handle(string(mcp.RoutePause), http.HandlerFunc(proxySrv.HandlePause))
+	mux.Handle(string(mcp.RouteQuota), http.HandlerFunc(proxySrv.HandleQuotaPause))
+	mux.Handle(string(mcp.RouteThrottle), http.HandlerFunc(proxySrv.HandleThrottle))
+	mux.Handle(string(mcp.RouteDrain), http.HandlerFunc(proxySrv.HandleQueueDrain))
+	mux.Handle(string(mcp.RouteDebug), http.HandlerFunc(proxySrv.HandleDebug))
+	mux.Handle(string(mcp.RouteDebugCapture), web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))
 
 	// Config hot-reload. POST re-reads the config file and hot-applies the
 	// reloadable subset with zero dropped requests (the listener never closes).
@@ -388,10 +388,10 @@ func main() {
 	// query timeout, HTTP server timeouts, history_size) stay at their boot
 	// consumers; reload still swaps the snapshot and reports them as
 	// restart_required (GET /admin/config effective shows the new values).
-	mux.Handle("/admin/config", adminConfigHandler())
+	mux.Handle(string(mcp.RouteConfig), adminConfigHandler())
 	registerBackupRoutes(mux)
 
-	mux.HandleFunc("/admin/reload", reloadHandler())
+	mux.HandleFunc(string(mcp.RouteReload), reloadHandler())
 
 	// Root serves the dashboard; web.DashPrefix is the allowlisted CSS/JS
 	// tree (a miss is 404 - never forwarded to the LLM proxy). Register
@@ -509,7 +509,7 @@ func main() {
 	// because the restarter computes eligibility at construction; the provider
 	// is read per bootstrap, never cached.
 	agg.Restart = rst.EligibilitySnapshot
-	mux.HandleFunc("/admin/restart", rst.handleRestart)
+	mux.HandleFunc(string(mcp.RouteRestart), rst.handleRestart)
 
 	// A handoff child refreshes the pid file it inherited (scripts/dev.sh
 	// stays authoritative across UI-triggered restarts), then tells the

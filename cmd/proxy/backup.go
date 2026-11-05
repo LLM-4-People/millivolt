@@ -19,14 +19,16 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 func registerBackupRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/admin/backup", handleBackup)
-	mux.HandleFunc("/admin/restore", handleRestore)
+	mux.HandleFunc(string(mcp.RouteBackup), handleBackup)
+	mux.HandleFunc(string(mcp.RouteRestore), handleRestore)
 }
 
 const (
@@ -44,7 +46,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, backup.BackupQueryKeys()...); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -52,7 +54,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// silently select the default, broader action (?CONFIG=1 would broaden
 	// the archive the same way). The gate order is parse error, duplicates,
 	// unknown keys, then the value grammar.
-	if err := adminjson.UnknownQueryKey(q, backup.BackupQueryKeys()...); err != nil {
+	if err := adminjson.UnknownQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -118,7 +120,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, backup.RestoreQueryKeys()...); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -127,11 +129,11 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// real restore where ?inspect=1 previews; ?CONFIG_MODE=merge would
 	// silently become the replace default). The gate order is parse error,
 	// duplicates, unknown keys, then the value grammar.
-	if err := adminjson.UnknownQueryKey(q, backup.RestoreQueryKeys()...); err != nil {
+	if err := adminjson.UnknownQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inspect, err := queryFlag(q, backup.ParamInspect)
+	inspect, err := queryFlag(q, backupparams.ParamInspect)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())
 		return
@@ -141,12 +143,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	configMode, err := parseRestoreMode(q, backup.ParamConfigMode)
+	configMode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbMode, err := parseRestoreMode(q, backup.ParamDatabaseMode)
+	dbMode, err := parseRestoreMode(q, backupparams.ParamDatabaseMode)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -286,7 +288,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			}
 			liveMu.Unlock()
 		}
-		if dbMode == backup.ModeMerge {
+		if dbMode == backupparams.ModeMerge {
 			liveMu.Lock()
 			store = liveStore
 			liveMu.Unlock()
@@ -351,19 +353,19 @@ func appendRestartRequired(list []string, keys ...string) []string {
 }
 
 func parseBackupParts(q url.Values) (wantConfig, wantDB bool, err error) {
-	_, hasC := q[backup.ParamConfig]
-	_, hasD := q[backup.ParamDatabase]
+	_, hasC := q[backupparams.ParamConfig]
+	_, hasD := q[backupparams.ParamDatabase]
 	if !hasC && !hasD {
-		return true, true, nil
+		return backupparams.DefaultConfig, backupparams.DefaultDatabase, nil
 	}
 	if hasC {
-		wantConfig, err = queryBool(q.Get(backup.ParamConfig))
+		wantConfig, err = queryBool(q.Get(backupparams.ParamConfig))
 		if err != nil {
 			return false, false, fmt.Errorf("config: %w", err)
 		}
 	}
 	if hasD {
-		wantDB, err = queryBool(q.Get(backup.ParamDatabase))
+		wantDB, err = queryBool(q.Get(backupparams.ParamDatabase))
 		if err != nil {
 			return false, false, fmt.Errorf("database: %w", err)
 		}
@@ -375,7 +377,7 @@ func parseBackupParts(q url.Values) (wantConfig, wantDB bool, err error) {
 }
 
 func queryBool(v string) (bool, error) {
-	value, err := backup.ParseBoolParam(v)
+	value, err := backupparams.ParseBoolParam(v)
 	if err != nil {
 		return false, err
 	}
@@ -391,12 +393,12 @@ func queryFlag(q url.Values, key string) (bool, error) {
 
 func parseRestoreMode(q url.Values, key string) (string, error) {
 	if _, present := q[key]; !present {
-		return backup.ModeReplace, nil
+		return backupparams.DefaultRestoreMode, nil
 	}
 	// An explicit empty value is not the absent default: it names no mode, so
 	// accepting it would silently select the broader replace action. The
 	// grammar owner reports that as the same "want merge or replace" error.
-	mode, err := backup.ParseRestoreMode(q.Get(key))
+	mode, err := backupparams.ParseRestoreMode(q.Get(key))
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", key, err)
 	}
@@ -637,7 +639,7 @@ func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 		}
 	}
 	next := incoming.Clone()
-	if mode == backup.ModeMerge {
+	if mode == backupparams.ModeMerge {
 		if err := config.OverlayNonDefault(cur, incoming); err != nil {
 			return nil, err
 		}
@@ -884,7 +886,7 @@ func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, stor
 	if dbPath == "" {
 		return false, nil, storage.ErrStorageDisabled
 	}
-	if mode == backup.ModeMerge {
+	if mode == backupparams.ModeMerge {
 		if store == nil {
 			return false, nil, storage.ErrStorageDisabled
 		}

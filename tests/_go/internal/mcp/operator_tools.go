@@ -1460,3 +1460,35 @@ func TestSetThrottleTrimsTheProviderOnTheWire(t *testing.T) {
 		t.Fatalf("provider = %q, want the trimmed name", body["provider"])
 	}
 }
+
+func TestCaptureDurationVocabularyMatchesSchemaTags(t *testing.T) {
+	tagOf := func(value any, field string) string {
+		structField, ok := reflect.TypeOf(value).FieldByName(field)
+		if !ok {
+			t.Fatalf("%T has no field %s", value, field)
+		}
+		return structField.Tag.Get("jsonschema")
+	}
+	for _, field := range []struct {
+		name string
+		tag  string
+	}{
+		{"AuditStartInput.Duration", tagOf(AuditStartInput{}, "Duration")},
+		{"SetPauseInput.Duration", tagOf(SetPauseInput{}, "Duration")},
+	} {
+		if !strings.Contains(field.tag, CaptureDurationOptions) {
+			t.Errorf("%s tag = %q, want the shared %q vocabulary", field.name, field.tag, CaptureDurationOptions)
+		}
+	}
+	for _, duration := range captureDurations {
+		if err := validateCaptureDuration(duration); err != nil {
+			t.Errorf("validateCaptureDuration(%q) = %v", duration, err)
+		}
+		if !strings.Contains(CaptureDurationHelp, duration) {
+			t.Errorf("CaptureDurationHelp %q omits %q", CaptureDurationHelp, duration)
+		}
+	}
+	if err := validateCaptureDuration("30m"); err == nil {
+		t.Fatal("validateCaptureDuration accepted a value outside the shared list")
+	}
+}

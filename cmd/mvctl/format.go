@@ -6,6 +6,8 @@ package main
 // operator command rewrite another line of the terminal.
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -21,35 +23,87 @@ var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*[A-Za-z]")
 
 // Styling is emitted as private-use sentinels, not raw ESC, so sanitizeCell can
 // remove untrusted control sequences without stripping the command's own
-// colors. render is the only place that turns a sentinel into an SGR sequence,
-// and it accepts only the digits-and-semicolons form paint produces.
+// colors. render is the only place that turns a sentinel into an SGR sequence.
+// The markers carry a per-process nonce, so a captured value cannot forge one
+// and turn its own text into an escape sequence.
 const (
 	styleStart = '\uE000'
 	styleEnd   = '\uE001'
 )
 
-var styleRe = regexp.MustCompile("\uE000[0-9;]*m")
+var (
+	styleNonce   = newStyleNonce()
+	styleStartRe = regexp.MustCompile(regexp.QuoteMeta(string(styleStart)+styleNonce) + `[0-9;]*m`)
+	styleEndMark = string(styleEnd) + styleNonce
+)
+
+func newStyleNonce() string {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		// Without a nonce paint cannot distinguish its own markers from
+		// untrusted text, so it stays off rather than weakening sanitization.
+		return ""
+	}
+	return hex.EncodeToString(raw[:])
+}
 
 var colorOn bool
 
 func setColor(on bool) { colorOn = on }
 
 func paint(s string, codes ...string) string {
-	if !colorOn || len(codes) == 0 {
+	if !colorOn || len(codes) == 0 || styleNonce == "" {
 		return s
 	}
-	return string(styleStart) + strings.Join(codes, ";") + "m" + s + string(styleEnd)
+	return string(styleStart) + styleNonce + strings.Join(codes, ";") + "m" + s + styleEndMark
 }
 
 // render converts the internal style sentinels to SGR sequences at the one
-// point text leaves for a terminal. A private-use sequence that does not match
-// the paint grammar is left alone, so untrusted text cannot become a cursor
-// movement or clear-screen escape.
+// point text leaves for a terminal. A marker without this process's nonce is
+// stripped, never interpreted, so untrusted text cannot become an escape.
 func render(s string) string {
-	s = styleRe.ReplaceAllStringFunc(s, func(match string) string {
-		return "\x1b[" + match[len(string(styleStart)):]
+	if styleNonce == "" {
+		return stripSentinelRunes(s)
+	}
+	s = styleStartRe.ReplaceAllStringFunc(s, func(match string) string {
+		return "\x1b[" + match[len(string(styleStart))+len(styleNonce):]
 	})
-	return strings.ReplaceAll(s, string(styleEnd), "\x1b[0m")
+	s = strings.ReplaceAll(s, styleEndMark, "\x1b[0m")
+	return stripSentinelRunes(s)
+}
+
+func stripSentinelRunes(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == styleStart || r == styleEnd {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// stripForeignStyles removes any sentinel that does not carry this process's
+// nonce while preserving the markers paint emitted.
+func stripForeignStyles(s string) string {
+	if styleNonce == "" {
+		return stripSentinelRunes(s)
+	}
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r != styleStart && r != styleEnd {
+			out.WriteString(s[i : i+size])
+			i += size
+			continue
+		}
+		rest := s[i+size:]
+		if strings.HasPrefix(rest, styleNonce) {
+			out.WriteString(s[i : i+size+len(styleNonce)])
+			i += size + len(styleNonce)
+			continue
+		}
+		i += size
+	}
+	return out.String()
 }
 
 func bold(s string) string   { return paint(s, "1") }
@@ -61,8 +115,7 @@ func cyan(s string) string   { return paint(s, "36") }
 
 func strip(s string) string {
 	s = ansiRe.ReplaceAllString(s, "")
-	s = styleRe.ReplaceAllString(s, "")
-	return strings.ReplaceAll(s, string(styleEnd), "")
+	return stripSentinelRunes(styleStartRe.ReplaceAllString(s, ""))
 }
 func width(s string) int { return utf8.RuneCountInString(strip(s)) }
 
@@ -70,6 +123,7 @@ func width(s string) int { return utf8.RuneCountInString(strip(s)) }
 // the proxy or a client supplied. Tabs and newlines become spaces so a table
 // stays one row per record.
 func sanitizeCell(s string) string {
+	s = stripForeignStyles(s)
 	s = ansiRe.ReplaceAllString(s, "")
 	return strings.Map(func(r rune) rune {
 		switch {

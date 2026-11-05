@@ -69,7 +69,7 @@ func cmdPurge(ctx *Context) (Result, error) {
 	}
 	var out map[string]any
 	if _, err := ctx.C.PostJSON(deleteCtx, mcp.RoutePurge, nil, deleteBody, &out, nil); err != nil {
-		return Result{Code: 1, Data: result.Data}, err
+		return Result{Code: exitFailure, Data: result.Data}, err
 	}
 	result.Pretty = preview + "\n\n" + green("history purged") + "\n" + prettyJSON(out)
 	result.Data = map[string]any{"preview": count, "filter": document, "applied": true, "result": out}

@@ -33,6 +33,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
@@ -52,13 +53,11 @@ var ErrSnapshotStaging = errors.New("snapshot staging directory is required")
 var ErrTooLarge = errors.New("backup exceeds backup_max_bytes")
 
 const (
-	// Magic is the four-byte prefix every millivolt archive starts with.
-	Magic          = "MVB1"
 	archiveVersion = 1
 	flagConfig     = 1 << 0
 	flagDatabase   = 1 << 1
 	knownFlags     = flagConfig | flagDatabase
-	headerSize     = len(Magic) + 1 + 1 + 2 + 8 + sha256.Size
+	headerSize     = len(params.Magic) + 1 + 1 + 2 + 8 + sha256.Size
 
 	memberConfig   uint8 = 1
 	memberDatabase uint8 = 2
@@ -479,7 +478,7 @@ func writeAll(w io.Writer, b []byte) error {
 // finalized Created (a zero time is never encoded).
 func buildHeader(a Archive, sum [sha256.Size]byte) []byte {
 	out := make([]byte, 0, headerSize)
-	out = append(out, Magic...)
+	out = append(out, params.Magic...)
 	out = append(out, archiveVersion, a.flags(), 0, 0)
 	out = binary.BigEndian.AppendUint64(out, uint64(a.Created.Unix()))
 	out = append(out, sum[:]...)
@@ -972,7 +971,7 @@ func parseHeader(raw []byte) (archiveHeader, error) {
 	if len(raw) < headerSize {
 		return archiveHeader{}, fmt.Errorf("backup is truncated")
 	}
-	if string(raw[:len(Magic)]) != Magic {
+	if string(raw[:len(params.Magic)]) != params.Magic {
 		return archiveHeader{}, fmt.Errorf("not a millivolt backup")
 	}
 	if raw[4] != archiveVersion {

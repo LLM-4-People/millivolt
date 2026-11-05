@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/LLM-4-People/millivolt/internal/backup"
+	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
@@ -31,8 +31,8 @@ func cmdBackup(ctx *Context) (Result, error) {
 		return exitUsage(err)
 	}
 	query := url.Values{
-		backup.ParamConfig:   {backup.BoolParam(wantConfig)},
-		backup.ParamDatabase: {backup.BoolParam(wantDatabase)},
+		backupparams.ParamConfig:   {backupparams.BoolParam(wantConfig)},
+		backupparams.ParamDatabase: {backupparams.BoolParam(wantDatabase)},
 	}
 	// Backup streams for as long as a large database snapshot takes. Only
 	// cancellation bounds it; the generic --timeout is deliberately not
@@ -69,7 +69,7 @@ func writeArchive(out string, body io.Reader, overwrite bool) (int64, error) {
 			_ = os.Remove(tmp)
 		}
 	}()
-	prefix := make([]byte, len(backup.Magic))
+	prefix := make([]byte, len(backupparams.Magic))
 	if _, err := io.ReadFull(body, prefix); err != nil {
 		_ = file.Close()
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -77,7 +77,7 @@ func writeArchive(out string, body io.Reader, overwrite bool) (int64, error) {
 		}
 		return 0, fmt.Errorf("read backup header: %w", err)
 	}
-	if !backup.HasMagic(prefix) {
+	if !backupparams.HasMagic(prefix) {
 		_ = file.Close()
 		return 0, errors.New("millivolt returned a body that is not a millivolt archive")
 	}
@@ -174,24 +174,24 @@ func cmdRestore(ctx *Context) (Result, error) {
 	if !info.Mode().IsRegular() {
 		return exitUsage(fmt.Errorf("%s is not a regular file", path))
 	}
-	prefix := make([]byte, len(backup.Magic))
+	prefix := make([]byte, len(backupparams.Magic))
 	if _, err := io.ReadFull(file, prefix); err != nil {
 		return exitUsage(fmt.Errorf("%s is too small to be a millivolt archive", path))
 	}
-	if !backup.HasMagic(prefix) {
+	if !backupparams.HasMagic(prefix) {
 		return exitUsage(fmt.Errorf("%s is not a millivolt archive", path))
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return Result{Code: exitFailure}, err
 	}
 	query := url.Values{
-		backup.ParamConfig:       {backup.BoolParam(wantConfig)},
-		backup.ParamDatabase:     {backup.BoolParam(wantDatabase)},
-		backup.ParamConfigMode:   {configMode},
-		backup.ParamDatabaseMode: {databaseMode},
+		backupparams.ParamConfig:       {backupparams.BoolParam(wantConfig)},
+		backupparams.ParamDatabase:     {backupparams.BoolParam(wantDatabase)},
+		backupparams.ParamConfigMode:   {configMode},
+		backupparams.ParamDatabaseMode: {databaseMode},
 	}
 	if inspect {
-		query.Set(backup.ParamInspect, backup.BoolParam(true))
+		query.Set(backupparams.ParamInspect, backupparams.BoolParam(true))
 	}
 	// The upload is the restore's long leg. It is bounded by cancellation,
 	// not by the generic request timeout.
@@ -222,14 +222,21 @@ func cmdRestore(ctx *Context) (Result, error) {
 	if restart, ok := out["restart_required"].([]any); ok && len(restart) > 0 {
 		pretty = yellow("Restore applied; restart required before every change takes effect.") + "\n" + selection + "\n" + prettyJSON(out)
 	}
-	return Result{Pretty: pretty, Data: map[string]any{"inspect": false, "applied": true, "result": out}}, nil
+	return Result{
+		Pretty: pretty,
+		Data: map[string]any{
+			"inspect": false, "applied": true,
+			"selection": restoreSelectionData(wantConfig, wantDatabase, configMode, databaseMode),
+			"result":    out,
+		},
+	}, nil
 }
 
 func restoreMode(ctx *Context, flag, fallback string) (string, error) {
 	if !ctx.Flags.Present(flag) {
 		return fallback, nil
 	}
-	mode, err := backup.ParseRestoreMode(ctx.Flags.String(flag, ""))
+	mode, err := backupparams.ParseRestoreMode(ctx.Flags.String(flag, ""))
 	if err != nil {
 		return "", fmt.Errorf("--%s: %w", flag, err)
 	}

@@ -21,7 +21,7 @@ func cmdThrottle(ctx *Context) (Result, error) {
 	}
 	switch sub {
 	case "show":
-		if err := ctx.rejectFlags("provider", "concurrency", "requests", "request-window", "tokens", "token-window", "anti-burst", "ramp-duration"); err != nil {
+		if err := ctx.rejectFlagsExcept(); err != nil {
 			return exitUsage(err)
 		}
 		return throttleShow(ctx)
@@ -67,7 +67,7 @@ func throttleChange(ctx *Context, sub string) (Result, error) {
 	}
 	throttle := mcp.SetThrottleInput{Provider: provider, Clear: sub == "clear"}
 	if sub == "clear" {
-		if err := ctx.rejectFlags("concurrency", "requests", "request-window", "tokens", "token-window", "anti-burst", "ramp-duration"); err != nil {
+		if err := ctx.rejectFlagsExcept("provider"); err != nil {
 			return exitUsage(err)
 		}
 	} else {
@@ -154,7 +154,7 @@ func cmdQuota(ctx *Context) (Result, error) {
 	}
 	switch sub {
 	case "show":
-		if err := ctx.rejectFlags("provider"); err != nil {
+		if err := ctx.rejectFlagsExcept(); err != nil {
 			return exitUsage(err)
 		}
 		reqCtx, cancel := ctx.bounded()
@@ -165,6 +165,9 @@ func cmdQuota(ctx *Context) (Result, error) {
 		}
 		return Result{Pretty: heading("quota / storm") + "\n" + prettyJSON(raw), Data: raw}, nil
 	case "resume":
+		if err := ctx.rejectFlagsExcept("provider"); err != nil {
+			return exitUsage(err)
+		}
 		provider := strings.TrimSpace(ctx.Flags.String("provider", ""))
 		if provider == "" {
 			return exitUsage(errors.New("--provider is required"))

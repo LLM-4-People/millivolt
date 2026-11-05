@@ -132,6 +132,10 @@ func TestRestoreStreamsExplicitSelection(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "restart required") {
 		t.Fatalf("apply = %d, %q", code, stdout)
 	}
+	code, stdout, _ = runCLI(t, "--url", fixture.url(), "restore", "--file", path, "--database-mode", "merge", "--yes", "--json")
+	if code != 0 || !strings.Contains(stdout, `"database_mode": "merge"`) || !strings.Contains(stdout, `"selection"`) {
+		t.Fatalf("apply --json did not name its selection: %d %q", code, stdout)
+	}
 	calls = fixture.callsFor("/admin/restore")
 	if strings.Contains(calls[len(calls)-1].Query, "inspect=1") {
 		t.Fatalf("apply query still inspects: %q", calls[len(calls)-1].Query)

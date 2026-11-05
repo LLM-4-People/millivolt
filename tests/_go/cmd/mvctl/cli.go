@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -156,6 +157,11 @@ func TestTableKeepsSemanticColorAndStripsUntrustedEscapes(t *testing.T) {
 	if strings.Contains(strip(tableOut), string(styleStart)) {
 		t.Fatalf("width accounting left a style sentinel visible: %q", tableOut)
 	}
+	foreign := string(styleStart) + "31mEVIL" + string(styleEnd)
+	sanitized := render(sanitizeCell(foreign))
+	if strings.ContainsRune(sanitized, styleStart) || strings.ContainsRune(sanitized, styleEnd) || strings.Contains(sanitized, "\x1b") {
+		t.Fatalf("a foreign sentinel was rendered as an escape: %q", sanitized)
+	}
 }
 
 func TestShortFlagsComeFromTheRegistry(t *testing.T) {
@@ -169,5 +175,48 @@ func TestShortFlagsComeFromTheRegistry(t *testing.T) {
 	code, stdout, _ = runCLI(t, "-h")
 	if code != 0 || !strings.Contains(stdout, "Usage: mvctl") {
 		t.Fatalf("-h = %d, %q", code, stdout)
+	}
+}
+
+func TestSubcommandsRejectFlagsTheyDoNotOwn(t *testing.T) {
+	fixture := newProxy(t, map[string]http.HandlerFunc{
+		"/admin/pause":    func(w http.ResponseWriter, _ *http.Request) { t.Error("pause received a flag it does not own") },
+		"/admin/quota":    func(w http.ResponseWriter, _ *http.Request) { t.Error("quota received a flag it does not own") },
+		"/admin/debug":    func(w http.ResponseWriter, _ *http.Request) { t.Error("debug received a flag it does not own") },
+		"/admin/throttle": func(w http.ResponseWriter, _ *http.Request) { t.Error("throttle received a flag it does not own") },
+		"/admin/config":   func(w http.ResponseWriter, _ *http.Request) { t.Error("config received a flag it does not own") },
+	})
+	for _, args := range [][]string{
+		{"pause", "show", "--max-queued", "1"},
+		{"quota", "show", "--provider", "p"},
+		{"debug", "show", "--id", "d"},
+		{"throttle", "show", "--provider", "p"},
+		{"config", "keys", "--reveal"},
+		{"config", "reload", "--reveal"},
+	} {
+		code, _, stderr := runCLI(t, append([]string{"--url", fixture.url()}, args...)...)
+		if code != 2 || !strings.Contains(stderr, "not valid for this subcommand") {
+			t.Errorf("%v = %d, stderr %q, want a subcommand flag refusal", args, code, stderr)
+		}
+	}
+}
+
+func TestDocsMatchExitCodesAndSettingsDefaults(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/cli.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	for _, code := range []int{exitOK, exitFailure, exitUsageCode, exitInterrupted} {
+		if !strings.Contains(doc, fmt.Sprintf("| %d |", code)) {
+			t.Errorf("docs/cli.md does not document exit code %d", code)
+		}
+	}
+	settings := defaultSettings()
+	if !strings.Contains(doc, fmt.Sprintf("default to %t", settings.BackupConfig)) {
+		t.Errorf("docs/cli.md does not state the backup membership default %t", settings.BackupConfig)
+	}
+	if !strings.Contains(doc, "default mode is `"+settings.RestoreConfigMode+"`") {
+		t.Errorf("docs/cli.md does not state the restore mode default %q", settings.RestoreConfigMode)
 	}
 }

@@ -9,7 +9,7 @@ package main
 import (
 	"time"
 
-	"github.com/LLM-4-People/millivolt/internal/backup"
+	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
@@ -65,13 +65,13 @@ func defaultSettings() settings {
 		WatchSamplesMax: 300,
 		WatchInterval:   shipped.DashPollInterval,
 
-		BackupConfig:   true,
-		BackupDatabase: true,
+		BackupConfig:   backupparams.DefaultConfig,
+		BackupDatabase: backupparams.DefaultDatabase,
 
-		RestoreConfig:   true,
-		RestoreDatabase: true,
+		RestoreConfig:   backupparams.DefaultConfig,
+		RestoreDatabase: backupparams.DefaultDatabase,
 
-		RestoreConfigMode:   backup.ModeReplace,
-		RestoreDatabaseMode: backup.ModeReplace,
+		RestoreConfigMode:   backupparams.DefaultRestoreMode,
+		RestoreDatabaseMode: backupparams.DefaultRestoreMode,
 	}
 }

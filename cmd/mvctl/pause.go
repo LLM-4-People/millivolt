@@ -22,7 +22,7 @@ func cmdPause(ctx *Context) (Result, error) {
 	}
 	switch sub {
 	case "show":
-		if err := ctx.rejectFlags("client", "provider", "duration", "id", "all", "new", "max-queued"); err != nil {
+		if err := ctx.rejectFlagsExcept(); err != nil {
 			return exitUsage(err)
 		}
 		return pauseShow(ctx)
@@ -119,7 +119,7 @@ func pauseOn(ctx *Context) (Result, error) {
 }
 
 func pauseOff(ctx *Context) (Result, error) {
-	if err := ctx.rejectFlags("client", "provider", "duration", "new", "max-queued"); err != nil {
+	if err := ctx.rejectFlagsExcept("id", "all"); err != nil {
 		return exitUsage(err)
 	}
 	id := ctx.Flags.String("id", "")
@@ -176,7 +176,7 @@ func cmdDebug(ctx *Context) (Result, error) {
 	}
 	switch sub {
 	case "show":
-		if err := ctx.rejectFlags("client", "provider", "model", "duration", "id", "all"); err != nil {
+		if err := ctx.rejectFlagsExcept(); err != nil {
 			return exitUsage(err)
 		}
 		reqCtx, cancel := ctx.bounded()
@@ -231,9 +231,6 @@ func debugOn(ctx *Context) (Result, error) {
 	if err != nil {
 		return exitUsage(fmt.Errorf("--model: %w", err))
 	}
-	if id == "" && len(clients) == 0 && len(providers) == 0 && len(models) == 0 {
-		return exitUsage(errors.New("debug on requires --client, --provider or --model; capture stores full bodies and has no unrestricted all-traffic scope"))
-	}
 	start := mcp.AuditStartInput{
 		SessionID: id, Clients: clients, Providers: providers, Models: models,
 	}
@@ -271,7 +268,7 @@ func debugOn(ctx *Context) (Result, error) {
 }
 
 func debugOff(ctx *Context) (Result, error) {
-	if err := ctx.rejectFlags("client", "provider", "model", "duration"); err != nil {
+	if err := ctx.rejectFlagsExcept("id", "all"); err != nil {
 		return exitUsage(err)
 	}
 	id := strings.TrimSpace(ctx.Flags.String("id", ""))

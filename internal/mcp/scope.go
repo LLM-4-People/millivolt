@@ -187,20 +187,34 @@ type pageCursor struct {
 	ID      string
 }
 
+// LogPageQuery renders the one /metrics/agg/log page grammar. A nil cursor
+// omits both cursor keys; a supplied pair sends before_id even when empty,
+// because an empty stored record id is a real keyset position. The command and
+// the MCP records tool share this builder.
+func LogPageQuery(limit int, beforeMs *int64, beforeID *string) url.Values {
+	values := url.Values{}
+	values.Set("limit", strconv.Itoa(limit))
+	if beforeMs != nil && beforeID != nil {
+		values.Set("before_ms", strconv.FormatInt(*beforeMs, 10))
+		values.Set("before_id", *beforeID)
+	}
+	return values
+}
+
 // recordsPage fetches one page. A nil before starts at durable newest; a
 // non-nil before is the paired keyset cursor, and its empty ID is still sent
 // explicitly. limit must already be inside the proxy's page band.
 func (c *Client) recordsPage(ctx context.Context, query url.Values, before *pageCursor, limit int) (*RecordsPage, error) {
-	values := url.Values{}
+	var beforeMs *int64
+	var beforeID *string
+	if before != nil {
+		beforeMs, beforeID = &before.StartMs, &before.ID
+	}
+	values := LogPageQuery(limit, beforeMs, beforeID)
 	for key, list := range query {
 		for _, value := range list {
 			values.Add(key, value)
 		}
-	}
-	values.Set("limit", strconv.Itoa(limit))
-	if before != nil {
-		values.Set("before_ms", strconv.FormatInt(before.StartMs, 10))
-		values.Set("before_id", before.ID)
 	}
 	var page RecordsPage
 	if err := c.getJSON(ctx, RouteLog, values, &page); err != nil {

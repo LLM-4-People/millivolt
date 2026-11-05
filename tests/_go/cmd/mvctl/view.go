@@ -61,6 +61,9 @@ func TestStatusAndOverview(t *testing.T) {
 	if code != 0 || !strings.Contains(human, "millivolt status") || !strings.Contains(human, "abcdef012345...") {
 		t.Fatalf("status = %d, %q", code, human)
 	}
+	if strings.Contains(human, "SECRET PREVIEW") || strings.Contains(human, "dash-secret") {
+		t.Fatalf("human status leaked a captured value or config secret: %q", human)
+	}
 	if strings.Contains(stdout, "SECRET PREVIEW") || strings.Contains(stdout, "dash-secret") {
 		t.Fatalf("status --json leaked a captured value or config secret: %q", stdout)
 	}
@@ -70,7 +73,8 @@ func TestStatusAndOverview(t *testing.T) {
 	}
 	code, stdout, _ = runCLI(t, "--url", fixture.url(), "overview", "--json")
 	if code != 0 || strings.Contains(stdout, "SECRET PREVIEW") || strings.Contains(stdout, "dash-secret") ||
-		strings.Contains(stdout, `"records"`) || strings.Contains(stdout, `"dash"`) {
+		strings.Contains(stdout, "Bearer secret") || strings.Contains(stdout, `"records"`) ||
+		strings.Contains(stdout, `"in_flight_records"`) || strings.Contains(stdout, `"dash"`) {
 		t.Fatalf("overview --json leaked the raw bootstrap: %q", stdout)
 	}
 }

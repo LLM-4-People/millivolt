@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +38,7 @@ func cmdStatus(ctx *Context) (Result, error) {
 	})
 	result := Result{Pretty: pretty, Data: bootstrapProjection(raw)}
 	if healthErr != nil {
-		result.Code = 1
+		result.Code = exitFailure
 		return result, fmt.Errorf("millivolt /healthz did not answer: %w", healthErr)
 	}
 	return result, nil
@@ -131,18 +130,17 @@ func cmdRequests(ctx *Context) (Result, error) {
 	if beforeSet && !(ctx.Flags.Present("before-ms") && ctx.Flags.Present("before-id")) {
 		return exitUsage(errors.New("--before-ms and --before-id must be passed together"))
 	}
-	query := url.Values{"limit": {strconv.Itoa(limit)}}
+	var beforeMs *int64
+	var beforeID *string
 	if beforeSet {
-		beforeMs := ctx.Flags.Int("before-ms", 0)
-		if beforeMs <= 0 {
+		value := ctx.Flags.Int("before-ms", 0)
+		if value <= 0 {
 			return exitUsage(errors.New("--before-ms must be greater than zero"))
 		}
-		// The id is an opaque keyset position, and the storage owner treats an
-		// empty id as a real cursor value rather than absence. Send it exactly
-		// as given; trimming could address a different record.
-		query.Set("before_ms", strconv.FormatInt(beforeMs, 10))
-		query.Set("before_id", ctx.Flags.String("before-id", ""))
+		id := ctx.Flags.String("before-id", "")
+		beforeMs, beforeID = &value, &id
 	}
+	query := mcp.LogPageQuery(limit, beforeMs, beforeID)
 	reqCtx, cancel := ctx.bounded()
 	defer cancel()
 	var page RequestPage

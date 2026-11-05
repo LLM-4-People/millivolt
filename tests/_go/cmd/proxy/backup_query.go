@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -245,31 +246,31 @@ func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
 		return rest[:end]
 	}
 	for name, want := range map[string]string{
-		"ParamInspect": backup.ParamInspect, "ParamConfig": backup.ParamConfig,
-		"ParamDatabase": backup.ParamDatabase, "ParamConfigMode": backup.ParamConfigMode,
-		"ParamDatabaseMode": backup.ParamDatabaseMode,
+		"ParamInspect": backupparams.ParamInspect, "ParamConfig": backupparams.ParamConfig,
+		"ParamDatabase": backupparams.ParamDatabase, "ParamConfigMode": backupparams.ParamConfigMode,
+		"ParamDatabaseMode": backupparams.ParamDatabaseMode,
 	} {
 		if want == "" {
 			t.Errorf("%s is empty", name)
 		}
 	}
-	if backup.ParamInspect != "inspect" || backup.ParamConfig != "config" ||
-		backup.ParamDatabase != "database" || backup.ParamConfigMode != "config_mode" ||
-		backup.ParamDatabaseMode != "database_mode" {
+	if backupparams.ParamInspect != "inspect" || backupparams.ParamConfig != "config" ||
+		backupparams.ParamDatabase != "database" || backupparams.ParamConfigMode != "config_mode" ||
+		backupparams.ParamDatabaseMode != "database_mode" {
 		t.Fatalf("query parameter constants changed: %q %q %q %q %q",
-			backup.ParamInspect, backup.ParamConfig, backup.ParamDatabase,
-			backup.ParamConfigMode, backup.ParamDatabaseMode)
+			backupparams.ParamInspect, backupparams.ParamConfig, backupparams.ParamDatabase,
+			backupparams.ParamConfigMode, backupparams.ParamDatabaseMode)
 	}
-	wantBackup := []string{backup.ParamConfig, backup.ParamDatabase}
-	wantRestore := []string{backup.ParamInspect, backup.ParamConfig, backup.ParamDatabase,
-		backup.ParamConfigMode, backup.ParamDatabaseMode}
+	wantBackup := []string{backupparams.ParamConfig, backupparams.ParamDatabase}
+	wantRestore := []string{backupparams.ParamInspect, backupparams.ParamConfig, backupparams.ParamDatabase,
+		backupparams.ParamConfigMode, backupparams.ParamDatabaseMode}
 	for _, set := range []struct {
 		name string
 		got  []string
 		want []string
 	}{
-		{"BackupQueryKeys", backup.BackupQueryKeys(), wantBackup},
-		{"RestoreQueryKeys", backup.RestoreQueryKeys(), wantRestore},
+		{"BackupQueryKeys", backupparams.BackupQueryKeys(), wantBackup},
+		{"RestoreQueryKeys", backupparams.RestoreQueryKeys(), wantRestore},
 	} {
 		if !slices.Equal(set.got, set.want) {
 			t.Errorf("%s = %v, want exactly %v", set.name, set.got, set.want)
@@ -278,17 +279,17 @@ func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
 		// not widen the grammar every other caller accepts.
 		if len(set.got) > 0 {
 			set.got[0] = "mutated"
-			if fresh := backup.BackupQueryKeys(); set.name == "BackupQueryKeys" && fresh[0] == "mutated" {
+			if fresh := backupparams.BackupQueryKeys(); set.name == "BackupQueryKeys" && fresh[0] == "mutated" {
 				t.Errorf("%s returns shared state; a caller can widen the accepted grammar", set.name)
 			}
-			if fresh := backup.RestoreQueryKeys(); set.name == "RestoreQueryKeys" && fresh[0] == "mutated" {
+			if fresh := backupparams.RestoreQueryKeys(); set.name == "RestoreQueryKeys" && fresh[0] == "mutated" {
 				t.Errorf("%s returns shared state; a caller can widen the accepted grammar", set.name)
 			}
 		}
 	}
 	for _, route := range []struct{ decl, list string }{
-		{"func handleBackup(", "backup.BackupQueryKeys"},
-		{"func handleRestore(", "backup.RestoreQueryKeys"},
+		{"func handleBackup(", "backupparams.BackupQueryKeys"},
+		{"func handleRestore(", "backupparams.RestoreQueryKeys"},
 	} {
 		body := region(route.decl)
 		calls := map[string]string{}

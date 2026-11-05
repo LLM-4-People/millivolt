@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LLM-4-People/millivolt/internal/backup"
+	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
@@ -24,11 +24,12 @@ type Result struct {
 // Context is one command invocation. C is nil only for commands that do not
 // talk to the proxy (url, a bare help or version).
 type Context struct {
-	Ctx   context.Context
-	G     Global
-	C     *mcp.Client
-	Args  []string
-	Flags flagValues
+	Ctx     context.Context
+	G       Global
+	C       *mcp.Client
+	Command *Command
+	Args    []string
+	Flags   flagValues
 }
 
 type Command struct {
@@ -190,10 +191,21 @@ func (c *Context) requireNoExtraArgs(usage string) error {
 
 func exitUsage(err error) (Result, error) { return Result{Code: exitUsageCode}, err }
 
-func (c *Context) rejectFlags(names ...string) error {
-	for _, name := range names {
-		if c.Flags.Present(name) {
-			return fmt.Errorf("--%s is not valid for this subcommand", name)
+// rejectFlagsExcept rejects every command flag that allowed does not name. It
+// fails closed: a flag added to the command is rejected by every subcommand
+// until that subcommand deliberately accepts it, instead of being parsed and
+// silently ignored.
+func (c *Context) rejectFlagsExcept(allowed ...string) error {
+	if c.Command == nil {
+		return nil
+	}
+	permitted := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		permitted[name] = true
+	}
+	for _, spec := range c.Command.Flags {
+		if c.Flags.Present(spec.name) && !permitted[spec.name] {
+			return fmt.Errorf("--%s is not valid for this subcommand", spec.name)
 		}
 	}
 	return nil
@@ -247,5 +259,5 @@ func restoreDatabaseModeFlag(defaults settings) flagSpec {
 }
 
 func backupModeUsage(fallback string) string {
-	return fmt.Sprintf("%s or %s (default %s)", backup.ModeMerge, backup.ModeReplace, fallback)
+	return fmt.Sprintf("%s or %s (default %s)", backupparams.ModeMerge, backupparams.ModeReplace, fallback)
 }

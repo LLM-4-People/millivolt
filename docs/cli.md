@@ -47,8 +47,10 @@ reported with the operator gate's own status. A non-loopback origin should use
 Human output is the default. `--json` (or `-j`) prints one JSON document, and
 command output is stable enough for a pipeline. Diagnostics go to stderr as
 `mvctl: ...`. After argument parsing, `--json` turns a command failure into
-`{"error": "..."}` on stdout so a caller can parse one stream; a usage error
-still goes to stderr and exits 2 because no JSON mode was established.
+`{"error": "..."}` on stdout so a caller can parse one stream. A usage error
+found before `--json` is parsed still goes to stderr and exits 2 because JSON
+mode is not established yet; after parsing, a usage error also follows
+`--json`.
 
 | Exit | Meaning |
 | --- | --- |
@@ -213,9 +215,10 @@ has not seen, because such a session reports enabled but captures nothing.
 usage error rather than an omitted constraint. `--all` cannot be combined with
 a filter. The command always calls `/admin/purge/count` first and prints the
 count; only `--yes` calls `/admin/purge`, and an unfiltered purge also needs
-`--all`. Before deleting, the command re-counts and refuses when the population
-changed since the preview, so the operator's confirmation cannot silently cover
-a larger set. A missing, fractional, negative or non-finite count is a failure,
+`--all`. Before deleting, the command re-counts and refuses when the total
+changed since the preview. That compares counts, not row identities, and rows
+committed after the re-count are still deleted: the check catches a population
+change, not every concurrent insert. A missing, fractional, negative or non-finite count is a failure,
 never zero. A genuinely bodyless purge is the proxy's delete-everything form.
 
 `backup --out FILE` is required; there is no default path. `--config` and
@@ -243,6 +246,8 @@ write `proxy.yaml` directly, does not add a listener, and does not keep a second
 copy of the proxy's routes, config schema, credential rules or backup grammar.
 Those facts stay with `internal/mcp`, `internal/config` and
 `internal/backup`. The command uses only the Go standard library and those
-repository packages. Because the shared backup grammar lives in
-`internal/backup`, the resulting binary transitively links that package's
-SQLite and zstd dependencies even though `mvctl` itself opens no database.
+repository packages. Because the shared operator client lives in
+`internal/mcp`, the resulting binary links the MCP Go SDK and its OAuth2 and
+jsonschema dependencies. The backup grammar and archive magic live in the
+dependency-free `internal/backup/params` leaf, so `mvctl` does not link SQLite
+or zstd and never opens a database.

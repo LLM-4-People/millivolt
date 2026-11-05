@@ -53,10 +53,11 @@ func runWithContext(baseCtx context.Context, argv []string, stdout, stderr io.Wr
 	}
 
 	cmdCtx := &Context{
-		Ctx:   baseCtx,
-		G:     inv.global,
-		Args:  inv.args,
-		Flags: inv.flags,
+		Ctx:     baseCtx,
+		G:       inv.global,
+		Command: inv.command,
+		Args:    inv.args,
+		Flags:   inv.flags,
 	}
 	if !inv.command.NoClient {
 		client, err := newOperatorClient(inv.global)

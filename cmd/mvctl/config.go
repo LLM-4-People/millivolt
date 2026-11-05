@@ -81,8 +81,8 @@ func configKeys(ctx *Context) (Result, error) {
 	if len(ctx.Args) > 2 {
 		return exitUsage(errors.New("usage: mvctl config keys [SUBSTRING]"))
 	}
-	if ctx.Flags.Present("reveal") {
-		return exitUsage(errors.New("--reveal is not valid for config keys"))
+	if err := ctx.rejectFlagsExcept(); err != nil {
+		return exitUsage(err)
 	}
 	view, err := fetchConfig(ctx)
 	if err != nil {
@@ -143,8 +143,8 @@ func configReload(ctx *Context) (Result, error) {
 	if len(ctx.Args) != 1 {
 		return exitUsage(errors.New("usage: mvctl config reload [--yes]"))
 	}
-	if ctx.Flags.Present("reveal") {
-		return exitUsage(errors.New("--reveal is not valid for config reload"))
+	if err := ctx.rejectFlagsExcept(); err != nil {
+		return exitUsage(err)
 	}
 	if result, proceed, err := guarded(ctx, "reload the live configuration", nil); !proceed {
 		return result, err
@@ -294,7 +294,7 @@ func redactConfigDocument(raw map[string]any, reveal bool) map[string]any {
 		for key, value := range reload {
 			clone[key] = value
 		}
-		if _, ok := clone["error"]; ok {
+		if message, ok := clone["error"].(string); ok && strings.TrimSpace(message) != "" {
 			clone["error"] = mcp.RedactionMarker
 		}
 		out["last_reload"] = clone

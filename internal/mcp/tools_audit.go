@@ -123,6 +123,9 @@ const auditConfirmStart = "start capture"
 // rejected on a create, whereas an explicit empty array is a different
 // document.
 func (in AuditStartInput) Document() (map[string]any, error) {
+	if in.SessionID == "" && len(in.Clients) == 0 && len(in.Providers) == 0 && len(in.Models) == 0 {
+		return nil, fmt.Errorf("at least one of clients, providers or models is required; a capture session has no unrestricted all-traffic scope")
+	}
 	if in.Duration != nil {
 		if err := validateCaptureDuration(*in.Duration); err != nil {
 			return nil, err
@@ -159,9 +162,6 @@ func (in AuditStartInput) Document() (map[string]any, error) {
 func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditStartOutput, error) {
 	if in.Confirm != auditConfirmStart {
 		return nil, fmt.Errorf("confirm must be %q: capture stores full request and response bodies and is sensitive", auditConfirmStart)
-	}
-	if in.SessionID == "" && len(in.Clients) == 0 && len(in.Providers) == 0 && len(in.Models) == 0 {
-		return nil, fmt.Errorf("at least one of clients, providers or models is required; a capture session has no unrestricted all-traffic scope")
 	}
 	body, err := in.Document()
 	if err != nil {
@@ -556,17 +556,23 @@ func firstSessionID(sessions []debugSession) string {
 
 // validateCaptureDuration applies the proxy's session-duration allowlist so a
 // typo is a clear message instead of a 400.
-// CaptureDurationHelp is the one spelling of the accepted session-duration
-// vocabulary. The pause and capture validators and the command-line help all
-// read it, so a new value cannot land in one surface only.
-const CaptureDurationHelp = "15m, 1h, 6h, 12h, 24h, or empty for until stopped"
+// CaptureDurationOptions is the one list of explicit session durations. The
+// validator, the human help and (through a contract test) the schema tags all
+// derive from it, so a new value cannot land on one surface only.
+const CaptureDurationOptions = "15m, 1h, 6h, 12h, 24h"
+
+var (
+	captureDurations = strings.Split(CaptureDurationOptions, ", ")
+	// CaptureDurationHelp adds the until-stopped spelling shared by pause and
+	// debug commands.
+	CaptureDurationHelp = CaptureDurationOptions + ", or empty for until stopped"
+)
 
 func validateCaptureDuration(duration string) error {
 	if duration == "" {
 		return nil
 	}
-	switch duration {
-	case "15m", "1h", "6h", "12h", "24h":
+	if slices.Contains(captureDurations, duration) {
 		return nil
 	}
 	return fmt.Errorf("duration must be %s", CaptureDurationHelp)

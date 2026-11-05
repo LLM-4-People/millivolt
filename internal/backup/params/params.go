@@ -1,4 +1,8 @@
-package backup
+// Package params owns the backup and restore query grammar shared by the HTTP
+// handlers and the operator command. It is deliberately dependency-free: a
+// reader that only needs a key name, boolean spelling, restore mode or the
+// archive magic does not link the encoder, SQLite or zstd.
+package params
 
 import (
 	"errors"
@@ -30,6 +34,15 @@ const (
 const (
 	ModeMerge   = "merge"
 	ModeReplace = "replace"
+)
+
+// Protocol defaults for an omitted query key. The HTTP handlers and the
+// command's settings surface both read these; the command still sends the
+// selected values explicitly so "both off" cannot fall back to "both on".
+const (
+	DefaultConfig      = true
+	DefaultDatabase    = true
+	DefaultRestoreMode = ModeReplace
 )
 
 // BackupQueryKeys and RestoreQueryKeys return the consumed query-key sets.
@@ -86,6 +99,11 @@ func ParseRestoreMode(value string) (string, error) {
 		return "", errInvalidRestoreMode
 	}
 }
+
+// Magic is the four-byte prefix every millivolt archive starts with. It lives
+// here with the rest of the archive grammar so a reader that only needs the
+// prefix does not link the encoder, SQLite or zstd.
+const Magic = "MVB1"
 
 // HasMagic reports whether prefix starts with the archive magic. It lets a
 // streaming download reject a captive portal or an HTML error page before the

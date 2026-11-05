@@ -125,6 +125,10 @@ func TestConfigReloadAndDiff(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "name") {
 		t.Fatalf("diff = %d, %q", code, stdout)
 	}
+	code, stdout, _ = runCLI(t, "--url", fixture.url(), "config", "diff", "--json")
+	if code != 0 || strings.Contains(stdout, "secret-value") || !strings.Contains(stdout, "[redacted]") {
+		t.Fatalf("config diff --json redaction = %d, %q", code, stdout)
+	}
 }
 
 func TestConfigKeysAndSingleValue(t *testing.T) {
@@ -232,5 +236,26 @@ func TestConfigGetRedactsLastReloadError(t *testing.T) {
 	code, stdout, _ = runCLI(t, "--url", fixture.url(), "config", "get", "--reveal", "--json")
 	if code != 0 || !strings.Contains(stdout, "secret-value") {
 		t.Fatalf("config get --reveal = %d, did not reveal the reload error: %q", code, stdout)
+	}
+}
+
+func TestConfigGetKeepsAnEmptyReloadErrorEmpty(t *testing.T) {
+	withReload := strings.Replace(configJSON, `"writable": true,`,
+		`"last_reload": {"ok": true, "error": "", "dropped_keys": []},
+  "writable": true,`, 1)
+	fixture := newProxy(t, map[string]http.HandlerFunc{
+		"/admin/config": jsonHandler(t, withReload),
+	})
+	code, stdout, _ := runCLI(t, "--url", fixture.url(), "config", "get", "--json")
+	if code != 0 {
+		t.Fatalf("config get = %d", code)
+	}
+	var document map[string]any
+	if err := json.Unmarshal([]byte(stdout), &document); err != nil {
+		t.Fatal(err)
+	}
+	reload := document["last_reload"].(map[string]any)
+	if reload["error"] != "" {
+		t.Fatalf("successful reload error = %v, want empty", reload["error"])
 	}
 }
