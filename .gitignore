@@ -1,6 +1,7 @@
 # Build artifacts (anchor command names so cmd/proxy stays includable)
 /proxy
 /stress
+/mvctl
 /bin/
 /dist/
 *.test
@@ -53,3 +54,6 @@ __pycache__/
 # Scraped research pages
 /docs_*.txt
 /grafana_com_.txt
+
+# Local design-tool session state; PRODUCT.md and DESIGN.md stay tracked
+/.impeccable/

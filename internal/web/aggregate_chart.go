@@ -31,8 +31,13 @@ type chartBucketJSON struct {
 }
 
 type chartPayload struct {
-	NowMs      int64             `json:"now_ms"`
-	FromMs     int64             `json:"from_ms"`   // CLOCK-ALIGNED window start (floored onto a ladder step)
+	NowMs  int64 `json:"now_ms"`
+	FromMs int64 `json:"from_ms"` // CLOCK-ALIGNED window start (floored onto a ladder step)
+	ToMs   int64 `json:"to_ms"`   // resolved EXCLUSIVE right edge: the serve clock for windows, the clock-clamped requested end for ranges
+	// DataFromMs is the earliest stored request start (unix ms) across ALL
+	// durable history, unscaled by the window or scope. 0 means storage holds
+	// no rows. The analytical projection's unscoped minimum is the one owner.
+	DataFromMs int64             `json:"data_from_ms"`
 	BucketMs   int64             `json:"bucket_ms"` // exact integer bucket width - single source of truth
 	TTFTP      []*float64        `json:"ttft_p"`    // period-wide [p50, p95, p99] (the totals strip)
 	TPSP       []*float64        `json:"tps_p"`
@@ -55,6 +60,13 @@ type bAcc struct {
 type chartFold struct {
 	from, step int64
 	count      int
+	// to is the EXCLUSIVE upper bound of an explicit range request; 0 on the
+	// window path, which keeps counting future-dated starts into the last
+	// bucket and reports the serve clock as the payload's to_ms.
+	to int64
+	// dataFrom is the projection's unscoped stored-history minimum, captured
+	// under the fold's projection lease (0 when no durable rows were read).
+	dataFrom   int64
 	buckets    []bAcc
 	cost       float64 // period totals behind cost_per_mtok (blended price)
 	costInOut  float64 // in+out of cost-REPORTING requests only
@@ -104,6 +116,11 @@ func (f *chartFold) prepareBound(p *projectionData) {
 	if p == nil {
 		return
 	}
+	// The projection's unscoped minimum serves every chart payload; capturing
+	// it here keeps both the bootstrap and chart surfaces reading one owner.
+	if p.hasStart {
+		f.dataFrom = p.minStart
+	}
 	f.membership = make([]uint8, len(p.rows))
 	f.orderSource = &p.metrics
 	f.recentFrom = p.metrics.recentFrom
@@ -137,6 +154,13 @@ func (f *chartFold) freezeOrder() {
 
 func (f *chartFold) fold(c *contrib) error {
 	if !scopedMatch(c, f.statusCode, f.fs) {
+		return nil
+	}
+	// An explicit range is [from, to): the aligned first bucket may reach
+	// before the requested start and the last may extend past the requested
+	// end, but no contribution outside the range is counted. The window path
+	// (to == 0) keeps its existing clamp-into-last-bucket behaviour.
+	if f.to > 0 && (c.start < f.from || c.start >= f.to) {
 		return nil
 	}
 	idx := int((c.start - f.from) / f.step)
@@ -240,13 +264,20 @@ func (f *chartFold) payload(now int64) chartPayload {
 		o.Dec = dec[i]
 		out[i] = o
 	}
-	return chartPayload{NowMs: now, FromMs: f.from, BucketMs: f.step,
+	to := f.to
+	if to == 0 {
+		// The window path's fold is unbounded on the right; its published
+		// right edge is the serve clock.
+		to = now
+	}
+	return chartPayload{NowMs: now, FromMs: f.from, ToMs: to, DataFromMs: f.dataFrom, BucketMs: f.step,
 		TTFTP: periodTTFT, TPSP: periodTPS, DecP: periodDec, TTFTStat: ttftStat, TPSStat: tpsStat,
 		CostPerMTk: metrics.ScaledRatio(f.cost, f.costInOut, 1e6), Buckets: out}
 }
 
 // chartWindowEdges floors the raw window start onto a clock-aligned ladder
-// step (HandleAggChart's bucket geometry).
+// step (HandleAggChart's bucket geometry). It serves both modes: the window
+// path passes the serve clock, the range path passes its resolved end.
 func chartWindowEdges(now, rawFrom int64) (from, step int64, count int) {
 	// Clock alignment: floor the raw window start onto a ladder step so the
 	// edges land on clock marks; flooring can add one partial bucket
@@ -264,13 +295,14 @@ func chartWindowEdges(now, rawFrom int64) (from, step int64, count int) {
 	return from, step, count
 }
 
-// HandleAggChart serves the traffic time series over the selected window,
-// SCOPED by the request log's filter set (f=dim:id explorer filters + s=
-// exact status code) - computed over ALL matching history, never the ring.
-// window is positive integer minutes (all = first in-scope request → now).
-// Bucket width is the smallest nice-ladder step that fits chartMaxBuckets
-// and the window start is floored onto a step boundary, so bucket t values
-// are clock-aligned START edges (t = from_ms + i*bucket_ms).
+// HandleAggChart serves the traffic time series over the selected window or
+// explicit range, SCOPED by the request log's filter set (f=dim:id explorer
+// filters + s= exact status code) - computed over ALL matching history, never
+// the ring. window is positive integer minutes (all = first in-scope request
+// → now) and is mutually exclusive with the from_ms/to_ms range pair. Bucket
+// width is the smallest nice-ladder step that fits chartMaxBuckets and the
+// span start is floored onto a step boundary, so bucket t values are clock-
+// aligned START edges (t = from_ms + i*bucket_ms).
 func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 	if !metrics.RejectUnlessGet(w, r) {
 		return
@@ -280,14 +312,26 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, "window", "s"); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, "window", "s", "from_ms", "to_ms"); err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	winMin, ok := windowParam(q)
+	fromMs, toMs, hasRange, ok := rangeParam(q)
 	if !ok {
-		adminjson.WriteError(w, http.StatusBadRequest, "invalid window")
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid range")
 		return
+	}
+	if hasRange && q.Has("window") {
+		adminjson.WriteError(w, http.StatusBadRequest, "window and from_ms/to_ms are mutually exclusive")
+		return
+	}
+	winMin := 0
+	if !hasRange {
+		winMin, ok = windowParam(q)
+		if !ok {
+			adminjson.WriteError(w, http.StatusBadRequest, "invalid window")
+			return
+		}
 	}
 	fs, statusCode, ok := parseScope(q)
 	if !ok {
@@ -297,13 +341,59 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := a.queryCtx(r)
 	defer cancel()
 
-	payload, err := a.chart(ctx, winMin, fs, statusCode, time.Now().UnixMilli())
+	now := time.Now().UnixMilli()
+	var payload chartPayload
+	if hasRange {
+		// The right edge clamps to THIS server's clock: a client whose clock
+		// runs ahead must still receive the (truncated) range, never a 400.
+		to := min(toMs, now)
+		if fromMs >= to {
+			adminjson.WriteError(w, http.StatusBadRequest, "invalid range")
+			return
+		}
+		payload, err = a.chartRange(ctx, fromMs, to, fs, statusCode, now)
+	} else {
+		payload, err = a.chart(ctx, winMin, fs, statusCode, now)
+	}
 	if err != nil {
 		log.Printf("agg chart: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "aggregate failed")
 		return
 	}
 	writeJSON(w, payload)
+}
+
+// rangeParam owns the API's explicit-range domain, the window domain's peer:
+// from_ms and to_ms arrive together or not at all as canonical decimal epoch
+// milliseconds. The pre-clamp ordering rule (0 < from_ms < to_ms) lives here;
+// the handler re-checks ordering after clamping the right edge to its clock.
+// q is the handler's one strict-parsed query (adminjson.StrictQuery); no
+// route parses the request twice.
+func rangeParam(q url.Values) (fromMs, toMs int64, hasRange, ok bool) {
+	hasFrom, hasTo := q.Has("from_ms"), q.Has("to_ms")
+	if !hasFrom && !hasTo {
+		return 0, 0, false, true
+	}
+	if !hasFrom || !hasTo {
+		return 0, 0, false, false // both or neither
+	}
+	fromMs, okFrom := epochMsParam(q.Get("from_ms"))
+	toMs, okTo := epochMsParam(q.Get("to_ms"))
+	if !okFrom || !okTo || fromMs <= 0 || toMs <= fromMs {
+		return 0, 0, false, false
+	}
+	return fromMs, toMs, true, true
+}
+
+// epochMsParam parses one canonical decimal epoch-millisecond value with the
+// same spelling strictness as windowParam: no sign, padding, exponent or
+// whitespace.
+func epochMsParam(v string) (int64, bool) {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || strconv.FormatInt(n, 10) != v {
+		return 0, false
+	}
+	return n, true
 }
 
 // windowParam owns the API's time-window domain: all history or positive

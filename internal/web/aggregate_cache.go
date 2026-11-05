@@ -199,9 +199,51 @@ func (a *AggAPI) chart(ctx context.Context, winMin int, fs []scopeFilter, status
 	}
 }
 
-// chartHit reuses a memoized chart only when the caller's clock produces the
-// exact bucket geometry. NowMs is request metadata within identical geometry;
-// cached slices remain immutable.
+// chartRange serves one explicit [fromMs, toMs) range whose right edge the
+// handler already clamped to the serve clock. The memo key carries both edges
+// plus the scope and the data revision, so a range can never collide with a
+// window of equal span, and an entry is reused only for the identical
+// resolved range: the clock can only advance a clamped end through a new key,
+// never through a stale hit.
+func (a *AggAPI) chartRange(ctx context.Context, fromMs, toMs int64, fs []scopeFilter, status string, now int64) (chartPayload, error) {
+	mcz := a.canonizer()
+	view := "range:" + strconv.FormatInt(fromMs, 10) + ":" + strconv.FormatInt(toMs, 10)
+	key, cacheable := a.aggregateKey(ctx, aggregateParams(view, fs, status), mcz.identity, false)
+	if !cacheable {
+		return a.chartRangeCold(ctx, mcz, key, false, fromMs, toMs, fs, status, now)
+	}
+	for {
+		cached, wait, flight := a.chartMemo.begin(key)
+		if cached != nil {
+			// The key pins both edges and the data revision, so the entry is
+			// the exact answer; only the per-request clock metadata changes.
+			p := cached.value.payload
+			p.NowMs = now
+			return p, nil
+		}
+		if flight != nil {
+			defer a.chartMemo.finish(flight)
+			return a.chartRangeCold(ctx, mcz, key, true, fromMs, toMs, fs, status, now)
+		}
+		if wait == nil {
+			// Another key owns the one flight slot: never wait behind it.
+			return a.chartRangeCold(ctx, mcz, key, true, fromMs, toMs, fs, status, now)
+		}
+		a.testWaitHook()
+		select {
+		case <-wait:
+			// Re-check the memo: the leader may have published, failed, or
+			// been canceled. Its error never becomes ours.
+			continue
+		case <-ctx.Done():
+			return chartPayload{}, ctx.Err()
+		}
+	}
+}
+
+// chartHit reuses a memoized window chart only when the caller's clock
+// produces the exact bucket geometry. NowMs and ToMs are request metadata
+// within identical geometry; cached slices remain immutable.
 func chartHit(cached *aggregateEntry[chartMemoPayload], winMin int, now int64) (chartPayload, bool) {
 	rawFrom := now - int64(winMin)*60000
 	if winMin == 0 {
@@ -217,7 +259,19 @@ func chartHit(cached *aggregateEntry[chartMemoPayload], winMin int, now int64) (
 		return chartPayload{}, false
 	}
 	p.NowMs = now
+	p.ToMs = now // a window's right edge is always the serve clock
 	return p, true
+}
+
+// chartEmpty reports a chart payload with no counted requests. The All
+// window's memo rule and every range memo share this predicate.
+func chartEmpty(p chartPayload) bool {
+	for _, b := range p.Buckets {
+		if b.Req > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // chartCold runs one uncached chart computation and publishes its result only
@@ -236,7 +290,13 @@ func (a *AggAPI) chartCold(ctx context.Context, mcz *modelCanonizer, key aggrega
 		}); err != nil {
 			return chartPayload{}, err
 		}
-		return a.storeChartResult(ctx, key, cacheable, winMin, rawFrom, now, fold.payload(now))
+		p := fold.payload(now)
+		empty := chartEmpty(p)
+		// An All minimum clamped to now despite matching future-dated rows
+		// may change as the clock catches them. Such unusual windows are not
+		// memoized.
+		return a.storeChartResult(ctx, key, cacheable, rawFrom < now || empty,
+			chartMemoPayload{payload: p, rawFrom: rawFrom, empty: empty})
 	}
 	rawFrom := now - int64(winMin)*60000
 	if winMin == 0 {
@@ -252,29 +312,40 @@ func (a *AggAPI) chartCold(ctx context.Context, mcz *modelCanonizer, key aggrega
 	if err := a.streamWindow(ctx, from, mcz, func(p *projectionData) { fold.prepare(p, mcz) }, fold.fold, freeze); err != nil {
 		return chartPayload{}, err
 	}
-	return a.storeChartResult(ctx, key, cacheable, winMin, rawFrom, now, fold.payload(now))
+	p := fold.payload(now)
+	return a.storeChartResult(ctx, key, cacheable, true, chartMemoPayload{payload: p, rawFrom: rawFrom, empty: chartEmpty(p)})
+}
+
+// chartRangeCold runs one uncached explicit-range fold. Geometry follows the
+// window path's clock alignment (chartWindowEdges with the range end as the
+// clock); the fold clips contributions at the range end, so a bucket may
+// extend past it but no request at or after to_ms is counted. Ring and
+// durable rows pass the same clip.
+func (a *AggAPI) chartRangeCold(ctx context.Context, mcz *modelCanonizer, key aggregateKey, cacheable bool, fromMs, toMs int64, fs []scopeFilter, status string, now int64) (chartPayload, error) {
+	a.testColdHook()
+	from, step, count := chartWindowEdges(toMs, fromMs)
+	fold := newChartFold(from, step, count, status, fs)
+	fold.to = toMs
+	freeze := func() error { fold.freezeOrder(); return nil }
+	if err := a.streamWindow(ctx, from, mcz, func(p *projectionData) { fold.prepare(p, mcz) }, fold.fold, freeze); err != nil {
+		return chartPayload{}, err
+	}
+	return a.storeChartResult(ctx, key, cacheable, true, chartMemoPayload{payload: fold.payload(now)})
 }
 
 // storeChartResult publishes a completed chart only when the data revision is
-// unchanged, then returns the payload. The caller computes the payload outside
-// the projection lease.
-func (a *AggAPI) storeChartResult(ctx context.Context, key aggregateKey, cacheable bool, winMin int, rawFrom, now int64, p chartPayload) (chartPayload, error) {
-	empty := true
-	for _, b := range p.Buckets {
-		if b.Req > 0 {
-			empty = false
-			break
-		}
-	}
-	// An All minimum clamped to now despite matching future-dated rows may
-	// change as the clock catches them. Such unusual windows are not memoized.
-	if cacheable && (winMin != 0 || rawFrom < now || empty) && a.aggregateUnchanged(ctx, key, false) {
-		a.chartMemo.put(key, chartMemoPayload{payload: p, rawFrom: rawFrom, empty: empty})
+// unchanged, then returns the payload. memo is the entry this payload would
+// become; publish is the caller's stability verdict (an All window clamped to
+// a future minimum moves as the clock catches the future rows and is never
+// retained). The caller computes the payload outside the projection lease.
+func (a *AggAPI) storeChartResult(ctx context.Context, key aggregateKey, cacheable, publish bool, memo chartMemoPayload) (chartPayload, error) {
+	if cacheable && publish && a.aggregateUnchanged(ctx, key, false) {
+		a.chartMemo.put(key, memo)
 	}
 	if err := ctx.Err(); err != nil {
 		return chartPayload{}, err
 	}
-	return p, nil
+	return memo.payload, nil
 }
 
 func (a *AggAPI) explorer(ctx context.Context, dim string, fs []scopeFilter, status string) (explorerPayload, error) {

@@ -31,13 +31,20 @@ active incident; the banner stays hidden until protection fires.
 ## Timelines
 
 The KPI band remains global. Explorer filters scope the timeline and request log
-together. The time-range dropdown runs from 15 minutes through one year and
-**All time**. It changes chart history, not the global KPI band.
+together. The timeframe control in the card head changes chart history, not the
+global KPI band. It offers a zoom ladder from one minute through one year plus
+**All time**, and the calendar presets today, yesterday, this week and this
+month. Its panel draws the stored coverage as a rail and disables any window
+wider than the stored history, so a selection can never promise more history
+than exists; **All time** means exactly the retained history, and a calendar
+preset clamps its start to the oldest stored request. The selection persists per
+browser.
 Legend controls show or hide individual series; hover a bucket for its precise
 values and time interval. Counts, sums and percentiles come from the server.
 A window with fewer than four plotted points paints a waiting message instead
 of the chart: one to three buckets are too few to read a trend, and the totals
-strip still tells the story until a fourth point arrives.
+strip still tells the story until a fourth point arrives. A span with no stored
+history says so; a span inside history with no requests says that instead.
 
 The **In-flight** KPI tile separates sending work from parked work. Its summary
 names two totals that fit the narrowest tile - active and queued - and the
@@ -69,7 +76,7 @@ range underneath. Each tile carries one sparkline; combined tiles draw one
 self-scaled line per metric half in exactly the half's color. Sparks span
 only traffic-bearing buckets - the same empty-bucket removal the plots
 apply - so window padding never squeezes the data into a corner. The
-metrics picker in the card head chooses what shows: one dropdown of
+metrics picker in the card head chooses what shows: one menu of
 checkable rows, checked metrics render and unchecked ones leave the band
 (it reflows), and the selection persists per browser like every chart
 view. Every selected tile always renders in both layouts: the band wraps
@@ -82,7 +89,7 @@ column floors at 572px so the 5-metric selection wraps into at most two
 rows. Every tile keeps one fixed size whatever it carries - spark or not,
 one share line or two, and the no-data skeleton swaps in without moving the
 card - and the band sits at its natural height at the top of the card.
-Only the time-range control applies. This preset has
+Only the timeframe control applies. This preset has
 no static capture yet; the gallery capture selects the plotted presets only,
 so no tiles capture exists.
 
@@ -158,7 +165,7 @@ dimensions, such as tools and errors, can overlap rather than partition requests
 | Conversations | Conversation IDs from explicit sessions, tracked body params (`k:` identities) or automatic grouping, with declared ancestry when resolvable. Selecting a conversation selects that leaf, not its descendants. |
 | Tools | Observed tool names; one request can belong to several tools. |
 | Time | Request start in the server's local timezone: weekday night 00:00-08:00, work 08:00-16:00, evening 16:00-24:00, or a single weekend group. This is separate from chart history range. |
-| Status | Coarse outcome classes and live states. The Requests dropdown instead selects exact HTTP codes or named live states. |
+| Status | Coarse outcome classes and live states. The Requests dropdown instead selects exact HTTP codes or named live states, grouped into live states and HTTP status; it stays a native select so the operating system picker is the touch affordance. |
 | Errors | Distinct observed error identities, including absorbed failures; one request can have several. HTTP 429 alone is not an error. |
 | Keys | SHA-256 hashes of upstream credentials, never raw keys. Labels show only an eight-hex-character prefix; identical short labels do not establish identical full hashes. |
 

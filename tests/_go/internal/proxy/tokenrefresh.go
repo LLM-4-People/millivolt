@@ -119,7 +119,7 @@ func tokenResponse(t *testing.T, accessField, refreshField, access, refresh stri
 }
 
 type capturedRefreshRequest struct {
-	capturedRequest
+	capturedSnapshot
 	refreshToken string
 }
 
@@ -150,8 +150,8 @@ func newTokenRefreshFixture(t *testing.T, provider string, status int, response 
 			t.Errorf("read fixture request: %v", err)
 		}
 		f.lastRelay.Store(&capturedRefreshRequest{
-			capturedRequest: capturedRequest{path: r.URL.Path, authHeader: r.Header.Get("Authorization"), body: string(body)},
-			refreshToken:    r.Header.Get("X-Proxy-Refresh-Token"),
+			capturedSnapshot: capturedSnapshot{path: r.URL.Path, authHeader: r.Header.Get("Authorization"), body: string(body)},
+			refreshToken:     r.Header.Get("X-Proxy-Refresh-Token"),
 		})
 		f.relays.Add(1)
 		w.Header().Set("Content-Type", "application/json")

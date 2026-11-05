@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -14,15 +15,19 @@ import (
 // a fresh page renders before the slower chart/explorer fetches land.
 type bootstrapPayload struct {
 	metrics.ObservedSnapshot
-	DashboardVersion string        `json:"dashboard_version"`
-	KPI              kpiPayload    `json:"kpi"`
-	Dash             any           `json:"dash,omitempty"`
-	Pause            any           `json:"pause,omitempty"`
-	Throttle         any           `json:"throttle,omitempty"`
-	Debug            any           `json:"debug,omitempty"`
-	Storm            any           `json:"storm,omitempty"`
-	Restart          any           `json:"restart,omitempty"`
-	Storage          storageSignal `json:"storage"`
+	DashboardVersion string `json:"dashboard_version"`
+	// DataFromMs is the earliest stored request start (unix ms) across ALL
+	// durable history, unscaled by any view or filter; 0 when storage holds
+	// no rows. The analytical projection's unscoped minimum owns it.
+	DataFromMs int64         `json:"data_from_ms"`
+	KPI        kpiPayload    `json:"kpi"`
+	Dash       any           `json:"dash,omitempty"`
+	Pause      any           `json:"pause,omitempty"`
+	Throttle   any           `json:"throttle,omitempty"`
+	Debug      any           `json:"debug,omitempty"`
+	Storm      any           `json:"storm,omitempty"`
+	Restart    any           `json:"restart,omitempty"`
+	Storage    storageSignal `json:"storage"`
 	// RateLimitClasses carries the EFFECTIVE rate-limit vocabulary (built-ins
 	// plus the operator's rate_limit_error_classes extensions) when extensions
 	// are installed, so the dashboard's client-side classification agrees with
@@ -72,10 +77,12 @@ func (a *AggAPI) storageSignal() storageSignal {
 // ring snapshot (full and capped on a fresh boot via SnapshotRequest;
 // a ?since=&feed= delta on tick/poll resumes), the global since-inception
 // KPI aggregate, the effective dashboard config, and the operator pause/
-// limit state when wired. In-memory only - no history scan. The client
-// filters the records at render (log scope is client-side), so the payload
-// takes no scope parameters. The traffic chart and explorer breakdown keep
-// their own endpoints (the slow full-history scans).
+// limit state when wired. The only durable read is the shared analytical
+// projection behind data_from_ms (materialized by the startup preload in the
+// steady state); every other section is in-memory. The client filters the
+// records at render (log scope is client-side), so the payload takes no scope
+// parameters. The traffic chart and explorer breakdown keep their own
+// endpoints (the slow full-history scans).
 func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if !metrics.RejectUnlessGet(w, r) {
 		return
@@ -98,7 +105,7 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 	switch fields {
 	case "":
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, a.bootstrap(a.buf.SnapshotRequest(q, r.Header)))
+		writeJSON(w, a.bootstrap(r.Context(), a.buf.SnapshotRequest(q, r.Header)))
 	case "storage":
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, bootstrapStoragePayload{Storage: a.storageSignal()})
@@ -119,10 +126,12 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 
 // bootstrap owns the initial HTML and live endpoint payload alike. A new
 // document always passes a full snapshot; endpoint resumes use the
-// buffer's existing feed/cursor trust boundary. No durable history scan.
-func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
+// buffer's existing feed/cursor trust boundary. The shared analytical
+// projection behind data_from_ms is the only durable read (the startup preload
+// materializes it before HTTP readiness); every other section is in-memory.
+func (a *AggAPI) bootstrap(ctx context.Context, snapshot metrics.Snapshot) bootstrapPayload {
 	observed := metrics.ObserveSnapshot(snapshot, a.ObserveModels(true, snapshot.Records, snapshot.InFlightRecords))
-	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardContentVersion()}
+	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardContentVersion(), DataFromMs: a.dataFromMs(ctx)}
 	// Operator rate-limit extensions ride the payload so the browser
 	// classifies the same rows the same way; the key stays absent when the
 	// built-ins alone apply.

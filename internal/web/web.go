@@ -318,7 +318,7 @@ func Handler(agg *AggAPI) http.Handler {
 		// Marshal's default HTML escaping is mandatory: records can contain
 		// </script>, HTML comments, and other untrusted provider/client text.
 		// An inert application/json script is parsed by the existing JS boot.
-		payload, err := json.Marshal(agg.bootstrap(agg.buf.SnapshotSince(0)))
+		payload, err := json.Marshal(agg.bootstrap(r.Context(), agg.buf.SnapshotSince(0)))
 		if err != nil {
 			log.Printf("dashboard: encode bootstrap: %v", err)
 			http.Error(w, "dashboard state unavailable", http.StatusInternalServerError)

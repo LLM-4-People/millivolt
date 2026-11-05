@@ -31,15 +31,21 @@ func (c *Client) querySQL(ctx context.Context, statement string) (rows, error) {
 		return nil, err
 	}
 	var out rows
-	if err := c.getJSON(ctx, routeQuery, values, &out); err != nil {
+	if err := c.getJSON(ctx, RouteQuery, values, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-// queryValues is the one owner of a SQL statement leaving this server: the
-// local pre-check plus the q parameter every SQL reader sends. The proxy
-// remains the authority on what runs.
+// QueryValues validates one SELECT-style statement and renders the
+// /metrics/query query string. It is the one owner of the q parameter, shared
+// by the MCP tools and the operator command; the proxy remains the authority
+// on what runs.
+func QueryValues(statement string) (url.Values, error) {
+	return queryValues(statement)
+}
+
+// queryValues is the private implementation behind QueryValues.
 func queryValues(statement string) (url.Values, error) {
 	if err := validateSelect(statement); err != nil {
 		return nil, err
@@ -81,7 +87,7 @@ func (c *Client) queryRows(ctx context.Context, statement string, rowLimit, byte
 	// openRaw owns the failure-body bound and the *APIError shape, so an
 	// oversized failure is the read-budget error rather than a partial proxy
 	// message exactly as the buffered path reports it.
-	resp, err := c.openRaw(ctx, http.MethodGet, routeQuery, values)
+	resp, err := c.openRaw(ctx, http.MethodGet, RouteQuery, values)
 	if err != nil {
 		return queryPage{}, err
 	}
@@ -326,7 +332,7 @@ func (c *Client) bootstrapFields(ctx context.Context, fields string) (*bootstrap
 		query = url.Values{"fields": {fields}}
 	}
 	var snapshot bootstrapSnapshot
-	if err := c.getJSON(ctx, routeBootstrap, query, &snapshot); err != nil {
+	if err := c.getJSON(ctx, RouteBootstrap, query, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
@@ -350,7 +356,7 @@ func (c *Client) modelRules(ctx context.Context) ([]config.ModelRuleExec, error)
 // debug reads the capture session state.
 func (c *Client) debug(ctx context.Context) (*debugStatus, error) {
 	var status debugStatus
-	if err := c.getJSON(ctx, routeDebug, nil, &status); err != nil {
+	if err := c.getJSON(ctx, RouteDebug, nil, &status); err != nil {
 		return nil, err
 	}
 	return &status, nil
@@ -374,7 +380,7 @@ func (c *Client) throttleLimit(ctx context.Context, provider string) (throttleLi
 			Tokens   int64  `json:"tokens"`
 		} `json:"throttles"`
 	}
-	if err := c.getJSON(ctx, routeThrottle, nil, &document); err != nil {
+	if err := c.getJSON(ctx, RouteThrottle, nil, &document); err != nil {
 		return throttleLimits{}, err
 	}
 	for _, entry := range document.Throttles {

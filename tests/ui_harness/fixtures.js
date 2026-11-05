@@ -42,11 +42,18 @@ const LIST = Array.from({ length: 30 }, (_, i) => mkRec('req' + String(i).padSta
 // Test 10's 80-record ring; test 10b restores it after the purge wipe.
 const BIG = Array.from({ length: 80 }, (_, i) => mkRec('big' + String(i).padStart(3, '0'), 200, 1800000000000 + i * 1000));
 
-// Bucket-math fixtures shared by the chart sections.
+// Bucket-math fixtures shared by the chart sections. CHART_DATA_FROM is the
+// stored-history floor every canned chart/bootstrap payload reports as
+// data_from_ms: far enough in the past (400 days) that the whole timeframe
+// vocabulary fits it against the harness clock, so a row driving any window
+// selects what it names. data_from_ms 0 (nothing stored at all) is exercised
+// by the tests that pin the no-history states.
 const CHART_FROM = 1800000000000;
 const BUCKET_MS = 120000;
+const CHART_DATA_FROM = Date.now() - 400 * 86400000;
 const mkChart = () => ({
-  from_ms: CHART_FROM, now_ms: CHART_FROM + 30 * BUCKET_MS, bucket_ms: BUCKET_MS,
+  from_ms: CHART_FROM, now_ms: CHART_FROM + 30 * BUCKET_MS, to_ms: CHART_FROM + 30 * BUCKET_MS,
+  data_from_ms: CHART_DATA_FROM, bucket_ms: BUCKET_MS,
   ttft_p: [null, null, null], tps_p: [null, null, null], dec_p: [null, null, null],
   buckets: Array.from({ length: 30 }, (_, i) => ({
     t: CHART_FROM + i * BUCKET_MS,
@@ -88,10 +95,12 @@ const cfgDoc = {
 
 
 // The traffic chart's stubbed payload: the REAL zero-traffic server shape
-// (HandleAggChart with an empty store + empty ring) - a clock-aligned
-// ZERO-FILLED buckets array (count >= 1, every req 0, all-null percentile
-// triples), never an empty one. Pinned server-side by
-// TestChartZeroTrafficPayloadShape; test 11g drives it end-to-end.
+// (HandleAggChart with a clock-aligned window) - a ZERO-FILLED buckets array
+// (count >= 1, every req 0, all-null percentile triples), never an empty one.
+// Pinned server-side by TestChartZeroTrafficPayloadShape; test 11g drives it
+// end-to-end. The payload advertises stored history (data_from_ms) so the
+// timeframe rows select real windows; the no-stored-history blank is
+// exercised by overriding data_from_ms to 0 (chart_e2e).
 const chartNow = Date.now();
 const chartStep = 120000; // the 60m window's ladder step (2m)
 const chartFrom = chartNow - 3600000 - ((chartNow - 3600000) % chartStep);
@@ -109,7 +118,7 @@ const state = {
   lastLogURL: '',
   logPageGate: null, // when set, log-page responses wait on this promise
   chartPayload: {
-    now_ms: chartNow, from_ms: chartFrom, bucket_ms: chartStep,
+    now_ms: chartNow, from_ms: chartFrom, to_ms: chartNow, data_from_ms: CHART_DATA_FROM, bucket_ms: chartStep,
     ttft_p: [null, null, null], tps_p: [null, null, null], dec_p: [null, null, null],
     ttft_stat: null, tps_stat: null,
     buckets: Array.from({ length: Math.ceil((chartNow - chartFrom) / chartStep) }, (_, i) => ({
@@ -237,6 +246,7 @@ const pageOptions = {
           // live cursor.
           seq: Math.max(bp.seq, window.eval('lastSeq')),
           feed_id: window.eval('feedId') || bp.feed_id, incremental: !!bsince,
+          data_from_ms: CHART_DATA_FROM,
           kpi: { requests: 30, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null },
           dashboard_version: TEST_DASHBOARD_VERSION,
           model_canon: {rules: []},

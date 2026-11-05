@@ -5,13 +5,13 @@ module.exports = async function chartE2e(H) {
   const state = H.state;
 
   // ---- test 11g: REAL zero-traffic chart payload end-to-end (live-verify
-  // follow-up). A fresh store + empty ring serves a CLOCK-ALIGNED
-  // ZERO-FILLED buckets array (the fetch stub's chartPayload mirrors
-  // HandleAggChart's exact empty-store shape - count >= 1, never []). On
-  // that shape the merged chart must show the BLANK, never mount an
-  // all-zero plot, for every preset. The legend and totals strip still
-  // render (they precede the mount gate), and 'no traffic yet' is
-  // CANVAS-PAINTED (drawBlank fillText), never DOM text. The jsdom size
+  // follow-up). The fetch stub's chartPayload mirrors HandleAggChart's
+  // clock-aligned ZERO-FILLED buckets array over a stored-history extent:
+  // count >= 1, never [], every req 0 while data_from_ms says history
+  // exists. On that shape the merged chart must show the BLANK, never mount
+  // an all-zero plot, for every preset. The legend and totals strip still
+  // render (they precede the mount gate), and the blank is CANVAS-PAINTED
+  // (drawBlank fillText), never DOM text. The jsdom size
   // guard is neutralized on the chart box for this block only, so the
   // empty gate is the only thing that can block a mount - without this,
   // a jsdom renderChart check passes vacuously behind clientWidth 0.
@@ -32,9 +32,16 @@ module.exports = async function chartE2e(H) {
     check('no uPlot mounts on the zero-traffic payload (blank, not an all-zero plot)',
       !box.querySelector('div.uplot') && w.eval('_up') === null);
     const blankMsgs = w.eval('window.__blankMsgs');
-    check("the blank is painted: 'no traffic yet' (canvas drawBlank, not DOM text)",
-      Array.isArray(blankMsgs) && blankMsgs.length >= 1 && blankMsgs.every(m => m === 'no traffic yet') &&
-      !box.textContent.includes('no traffic yet'));
+    check("the blank is painted: 'no requests in this window' (canvas drawBlank, not DOM text)",
+      Array.isArray(blankMsgs) && blankMsgs.length >= 1 && blankMsgs.every(m => m === 'no requests in this window') &&
+      !box.textContent.includes('no requests in this window'));
+    // The no-stored-history variant keeps its own message: data_from_ms 0
+    // means nothing was ever stored, so the window cannot be blamed.
+    w.eval('window.__blankMsgs.length = 0; chartAgg.data_from_ms = 0;');
+    w.renderChart();
+    check("a truly empty store keeps 'no traffic yet'",
+      w.eval('window.__blankMsgs').at(-1) === 'no traffic yet');
+    w.eval('chartAgg.data_from_ms = ' + JSON.stringify(state.chartPayload.data_from_ms) + ';');
     check('legend + totals still render ahead of the gate (the card stays alive)',
       [...d.querySelectorAll('#traffic-legend .leg-item')].map(b => b.dataset.series).join() === 'cost,req' &&
       d.getElementById('chart-totals').textContent.includes('cost'));

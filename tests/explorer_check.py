@@ -26,7 +26,8 @@ from playwright.async_api import async_playwright
 from scripts.backup_db import verify_docs_copy
 from . import browser_check as guards
 from .browser_check import require
-from .support import DOCS_CAPTURE_VIEWPORT, ROOT, operator_headers, operator_signin
+from .support import (DOCS_CAPTURE_VIEWPORT, ROOT, operator_headers, operator_signin,
+                      pick_chart_control)
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
 KEY = 'local-lineage-fixture-only'
@@ -252,7 +253,7 @@ async def capture_history(args):
             with tempfile.TemporaryDirectory(prefix='millivolt-docs-images-') as temporary:
                 staging = Path(temporary)
                 await page.goto(navigation(base, [], 'provider'), wait_until='domcontentloaded')
-                await page.select_option('#chart-window', 'all')
+                await pick_chart_control(page, '#chart-window', 'all')
                 await ready('provider')
                 await capture_image(page, staging / 'overview/dashboard.png')
                 # The natural-height desktop layout leaves room for the full
@@ -271,9 +272,9 @@ async def capture_history(args):
                 for preset, filename in (('traffic', 'traffic.png'), ('errors', 'errors.png'),
                                          ('tokens', 'tokens.png'), ('latency', 'speed-latency.png'),
                                          ('cost', 'cost.png')):
-                    await page.select_option('#chart-preset', preset)
+                    await pick_chart_control(page, '#chart-preset', preset)
                     if preset == 'latency':
-                        await page.select_option('#chart-pct', '95')
+                        await pick_chart_control(page, '#chart-pct', '95')
                     await ready('model')
                     await capture_image(page, staging / 'charts' / filename, '.traffic-card')
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // healthcheckTimeout bounds the probe well inside the Docker HEALTHCHECK
@@ -42,7 +43,7 @@ func runHealthcheck() int {
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"
 	}
-	target := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: "/healthz"}
+	target := url.URL{Scheme: "http", Host: net.JoinHostPort(host, port), Path: string(mcp.RouteHealthz)}
 	client := &http.Client{
 		Timeout:   healthcheckTimeout,
 		Transport: &http.Transport{Proxy: nil},

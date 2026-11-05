@@ -72,6 +72,11 @@
   }
   .req-status { margin-left: 8px; padding: 3px 8px; font-size: 10px; }
   select:hover, select:focus { border-color: var(--accent); outline: none; }
+  /* The status filter is a primary request-log control; on touch it takes the
+     full target instead of the dense desktop box. */
+  @media (max-width: 800px), (hover: none), (pointer: coarse) {
+    .req-status { min-height: var(--tap); padding: 0 10px; }
+  }
 
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }

@@ -217,10 +217,16 @@ func TestEncodeFileCompressedSizeWithinFactor(t *testing.T) {
 // TestEncodeFileAllocationBounded is the WS8 byte budget. The encoder level
 // dominates the retained/allocated encoder state: SpeedBestCompression
 // measured 77.1 MB/op and SpeedBetterCompression 44.9 MB/op for the same 2 MiB
-// config, with the same 14k allocations (the decode side of the self-check).
-// The 56 MiB (58,720,256 B) ceiling carries 32.9% headroom over the measured
-// 44,175,057 B/op, so a level or option change that reintroduces a heavyweight
-// encoder fails here.
+// config, so a level or option change that reintroduces a heavyweight encoder
+// fails the 56 MiB (58,720,256 B) ceiling. That ceiling carries 32.2% headroom
+// over the current 44.4 MB/op measurement (plain 44,331,504-44,332,831; race
+// 44,409,416-44,424,080).
+//
+// The allocation ceiling is 20,000, about 18% over the plain measurement
+// (16,950-16,956) and 15% over the race measurement (17,304-17,387). The race
+// detector inflates the count slightly, so one ceiling covers both modes. The
+// previous 17,000 ceiling sat below the race measurement and only 44
+// allocations above the plain one, so it failed without an encoder change.
 func TestEncodeFileAllocationBounded(t *testing.T) {
 	created := time.Unix(1_700_000_123, 0).UTC()
 	a := Archive{Created: created, Config: largeValidConfig(t, 2<<20)}
@@ -242,8 +248,8 @@ func TestEncodeFileAllocationBounded(t *testing.T) {
 	if bytes > 56<<20 {
 		t.Fatalf("EncodeFile allocates %d B/op, budget %d", bytes, 56<<20)
 	}
-	if allocs > 17000 {
-		t.Fatalf("EncodeFile allocates %d allocs/op, budget 17000", allocs)
+	if allocs > 20000 {
+		t.Fatalf("EncodeFile allocates %d allocs/op, budget 20000", allocs)
 	}
 	t.Logf("EncodeFile: %d B/op %d allocs/op", bytes, allocs)
 }

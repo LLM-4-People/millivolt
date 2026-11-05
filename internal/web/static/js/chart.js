@@ -11,21 +11,10 @@
 // the selected percentile,
 // and percentage rates (error rate, cache hit) render as % lines on
 // a pinned 0–100 right axis - never a % series on a count scale.
-// CHART_WINDOWS / CHART_PCTS are the single owners of the chart window and
-// percentile selects (values are strings matching the <select> values;
-// minutes, with all = first in-scope stored request→now). HTML options are filled from
-// these lists - never a second copy.
-const CHART_WINDOWS = [
-  ['all', 'All time'],
-  ['15', '15 minutes'],
-  ['60', '1 hour'],
-  ['360', '6 hours'],
-  ['1440', '24 hours'],
-  ['10080', '7 days'],
-  ['43200', '30 days'],
-  ['129600', '90 days'],
-  ['525600', '1 year'],
-];
+// TIMEFRAMES (timeframe.js) is the one owner of the chart window vocabulary
+// (durations as minute strings, all, and the calendar tokens); CHART_PCTS is
+// the one owner of the selectable percentiles. The control menus render from
+// these owners - never a second copy.
 const CHART_PCTS = [50, 95, 99];
 // Internal chart geometry: minimum readable tick spacing and restrained bars.
 const CHART_X_TICK_PX = 72;
@@ -46,7 +35,7 @@ const CHART_SPARK_W = 72, CHART_SPARK_H = 32;
 // CHART_TILE_PCT selects the summary tiles' SPARKLINE percentile only: the
 // timing tile's value is the server's period average (ttft_stat / tps_stat),
 // never this percentile - it reaches the tile solely as the per-bucket spark
-// lines. The preset keeps only the time-range control, no percentile
+// lines. The preset keeps only the timeframe control, no percentile
 // selector and no visible pXX label anywhere; the tooltip's ordinal text
 // derives from this constant, and its index into the server's [p50, p95,
 // p99] wire triple derives from the CHART_PCTS owner, so the sparks and the
@@ -105,15 +94,22 @@ const hm = t => {
   const d = new Date(t);
   return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
 };
+// chartWindowEnd is the payload's resolved window end: to_ms is the
+// exclusive right edge (the clock-clamped requested end for calendar views),
+// with now_ms as the fallback for a payload that predates the field. Span
+// math must read it, never now_ms: a yesterday range viewed at noon is a 24h
+// clock window, not a 36h one.
+const chartWindowEnd = () => chartAgg ? (chartAgg.to_ms ?? chartAgg.now_ms) : 0;
+
 // chartXTick labels a bottom-axis time tick. uPlot's default formatter reads
 // timestamps as seconds (ms values print as the year - 58598), so the x axis
 // owns its labels: day granularity across multiple days, and full years
 // whenever the viewed history crosses a calendar year.
 function chartSpansYears() {
-  return !!chartAgg && new Date(chartAgg.from_ms).getFullYear() !== new Date(chartAgg.now_ms).getFullYear();
+  return !!chartAgg && new Date(chartAgg.from_ms).getFullYear() !== new Date(chartWindowEnd()).getFullYear();
 }
 function chartXTick(t) {
-  const span = chartAgg ? (chartAgg.now_ms - chartAgg.from_ms) : 0;
+  const span = chartAgg ? (chartWindowEnd() - chartAgg.from_ms) : 0;
   // Alignment can extend a 24h range by one partial bucket; that is still
   // a clock-time view. Multi-day sub-day buckets keep both date and time.
   if (span > CHART_DAY_MS + (chartAgg?.bucket_ms || 0)) {
@@ -238,7 +234,7 @@ const chartRowBar = (id, rend) => (rend ? rend === 'bar' : !!chartSpec(id).bar);
 
 // Hidden series are per-preset: { presetId: [series ids] }.
 // An old flat array (previous shape) is discarded - fresh default.
-let chartView = { window: CHART_WINDOWS[0][0], pct: 95, preset: 'traffic', hidden: {} };
+let chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} };
 // localStorage key for the persisted chart view. One owner: the load and
 // save paths below reference the same constant.
 const CHART_VIEW_STORAGE_KEY = 'dash.chart';
@@ -257,12 +253,13 @@ function commitChartView() {
 }
 // loadChartView applies the persisted dash.chart payload onto chartView.
 // Deny by default: each field lands only when its saved shape validates
-// (window/pct/preset against their owner lists, hidden per-preset), so a
-// legacy or garbage payload can never smuggle in an unknown value.
+// (window against the TIMEFRAMES tokens, pct/preset against their owner
+// lists, hidden per-preset), so a legacy or garbage payload can never smuggle
+// in an unknown value.
 function loadChartView() {
   try {
     const saved = JSON.parse(storage.get(CHART_VIEW_STORAGE_KEY) || '{}');
-    if (CHART_WINDOWS.some(([v]) => v === String(saved.window))) chartView.window = String(saved.window);
+    if (tfEntry(saved.window)) chartView.window = String(saved.window);
     const p = Number(saved.pct);
     if (CHART_PCTS.includes(p)) chartView.pct = p;
     if (CHART_PRESETS.some(pr => pr.id === saved.preset)) chartView.preset = saved.preset;
@@ -932,6 +929,7 @@ function chartTotals() {
 
 function chartChromeSync() {
   summaryPickerSync();
+  chartControlsSync();
   const preset = activePreset();
   if (preset.tilesOnly) {
     // The summary has no axes, no percentile control and no cadence note:
@@ -950,8 +948,14 @@ function chartChromeSync() {
     ? (_plan?.preset.requireAll ? ' · unmeasured intervals omitted' : ' · empty intervals omitted')
     : '';
   const failed = !chartAgg && chartFailure === chartReqKey();
+  // The context row names the resolved selection, its bucket cadence, and -
+  // for all time - the stored coverage the payload reported.
+  const token = chartWindowToken();
+  const resolved = tfResolve(token, Date.now());
+  const history = token === 'all' && tfExtentFrom() > 0
+    ? ' · ' + fmtDur(Date.now() - tfExtentFrom()) + ' of history' : '';
   const context = failed ? 'chart unavailable - retrying'
-    : chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted : 'Waiting for traffic';
+    : chartAgg ? resolved.long + ' · ' + fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted + history : 'Waiting for traffic';
   updateSection('chart-context', context);
 }
 
@@ -1007,11 +1011,11 @@ function renderChart() {
     if (canMeasure && w >= CHART_MIN_W && h >= CHART_MIN_H) {
       const { ctx } = setupCanvas(box);
       ctx.clearRect(0, 0, w, h);
-      // Three honest blanks, in priority order: no traffic at all, traffic
-      // the preset cannot measure, or a window too sparse to fill the plot
-      // width. 'no traffic yet' would be false for the last two.
+      // Three honest blanks, in priority order: nothing stored at all,
+      // a window inside history with zero requests, traffic the preset
+      // cannot measure, or a window too sparse to fill the plot width.
       let msg;
-      if (chartIsEmpty()) msg = 'no traffic yet';
+      if (chartIsEmpty()) msg = !chartAgg.data_from_ms ? 'no traffic yet' : 'no requests in this window';
       else if (!data) msg = `no ${activePreset().label.toLowerCase()} samples yet`;
       else msg = 'not enough data points yet';
       drawBlank(ctx, msg);
@@ -1081,34 +1085,18 @@ function toggleSummaryMetric(id) {
 }
 
 // setMetricsMenuOpen is the one open-state writer for the summary metrics
-// picker (the prov-menu pattern): the menu's hidden flag and the trigger's
-// aria-expanded always move together. The menu is position: FIXED and
-// placed by syncMetricsMenuEdge from the trigger's live rect: absolute
-// placement inside the card let the card's overflow: hidden clip a menu
-// taller than the timeline card's remaining space, and it had no defense
-// against the window's bottom edge. Fixed placement escapes every
-// ancestor clip; it right-aligns to the trigger, flips above it when the
-// bottom edge would crop it, and re-anchors on resize and on any scroll
-// (page or inner region - fixed boxes do not follow scrolling ancestors).
-function syncMetricsMenuEdge() {
-  const menu = $('chart-metrics-menu');
-  const btn = $('chart-metrics-btn');
-  if (!menu || menu.hidden || !btn) return;
-  const br = btn.getBoundingClientRect();
-  const mr = menu.getBoundingClientRect();
-  menu.style.right = (innerWidth - br.right) + 'px';
-  menu.style.top = (br.bottom + 6 + mr.height > innerHeight - 8
-    ? br.top - 6 - mr.height : br.bottom + 6) + 'px';
-}
+// picker, now on the shared menu foundation: menu.js owns placement
+// (right-aligned to the trigger, flipped above it when the window's bottom
+// edge would crop it, re-anchored on resize and scroll), the one-open-menu
+// rule, dismissal and roving. The trigger's aria-expanded and the panel's
+// .mn-on state move with it. core.js's Escape path and chrome_menus.js's
+// outside-click path both call this name, so it stays the single entry.
 function setMetricsMenuOpen(open) {
   const menu = $('chart-metrics-menu');
-  if (!menu) return;
-  menu.hidden = !open;
-  // Offscreen until the placing rAF lands: no one-frame flash at a stale spot.
-  if (open) menu.style.top = '-9999px';
   const btn = $('chart-metrics-btn');
-  if (btn) btn.setAttribute('aria-expanded', String(!!open));
-  if (open) requestAnimationFrame(syncMetricsMenuEdge);
+  if (!menu || !btn) return;
+  if (open) menuOpen(btn, menu, { align: 'end', roving: true, initialFocus: 'item' });
+  else menuClose(menu);
 }
 
 // summaryPickerRows builds the menu's checkable rows from the preset's tile
@@ -1162,9 +1150,36 @@ function setChartPreset(v) {
   commitChartView();
 }
 
+// chartWindowToken is the effective chart window token: the stored selection
+// while it fits the known extent (or before any extent has been reported),
+// all time otherwise. An unusable stored selection is never rewritten in
+// dash.chart by this fallback; it applies to the current view only.
+function chartWindowToken() {
+  const token = chartView.window;
+  if (token === 'all') return 'all';
+  return tfAvailable(token, Date.now()) ? token : 'all';
+}
+
+// chartWindowSync mirrors the effective selection onto the timeframe
+// control's trigger label, chips, coverage rail and note. The control owns
+// the panel; chart.js only names the token the view is using.
+function chartWindowSync() {
+  chartTimeframe.sync(chartWindowToken());
+}
+
+// setChartWindow persists and fetches one timeframe pick. An unavailable
+// token cannot be used: the view falls back to all time (rendered and
+// fetched) and dash.chart keeps its prior selection.
 function setChartWindow(v) {
-  if (!CHART_WINDOWS.some(([val]) => val === v)) return;
-  chartView.window = v;
+  if (!tfResolve(v, Date.now())) return; // unknown token: deny by default
+  if (v !== 'all' && !tfAvailable(v, Date.now())) {
+    chartView.window = 'all';
+    chartWindowSync();
+    fetchChart();
+    return;
+  }
+  chartView.window = String(v);
+  chartWindowSync();
   saveChartView();
   fetchChart(); // buckets are server-computed per window
 }
@@ -1176,10 +1191,41 @@ function setChartPct(v) {
   commitChartView();
 }
 
+// The chart-head controls on the shared menu foundation: the preset and
+// percentile triggers are choiceMenus; the window trigger is the timeframe
+// control (timeframe.js), which owns its panel and coverage rail. The
+// triggers' visible labels are written by chartControlsSync below.
+const chartPresetMenu = choiceMenu($('chart-preset'), {
+  items: CHART_PRESETS.map(pr => ({ id: pr.id, label: pr.label })),
+  value: chartView.preset,
+  title: 'Metric',
+  onPick: setChartPreset,
+});
+const chartPctMenu = choiceMenu($('chart-pct'), {
+  items: CHART_PCTS.map(p => ({ id: String(p), label: 'p' + p })),
+  value: String(chartView.pct),
+  title: 'Percentile',
+  onPick: setChartPct,
+});
+const chartTimeframe = buildTimeframeControl($('chart-window'), $('chart-window-label'), setChartWindow);
+
+// chartControlsSync is the one writer of the three triggers' visible state:
+// the preset and percentile labels (the choiceMenus own row state and picks,
+// not the trigger text), the choiceMenus' stored values (a programmatic
+// preset/pct change must re-check the right row on the next open), and the
+// timeframe control's selection.
+function chartControlsSync() {
+  chartPresetMenu.sync({ value: chartView.preset });
+  chartPctMenu.sync({ value: String(chartView.pct) });
+  $('chart-preset-label').textContent = activePreset().label;
+  $('chart-pct-label').textContent = 'p' + chartView.pct;
+  chartWindowSync();
+}
+
 function fillChartControls() {
-  fillSelectPairs($('chart-preset'), CHART_PRESETS.map(pr => [pr.id, pr.label]), chartView.preset);
-  fillSelectPairs($('chart-window'), CHART_WINDOWS, chartView.window);
-  fillSelectPairs($('chart-pct'), CHART_PCTS.map(p => [String(p), 'p'+p]), String(chartView.pct));
+  chartPresetMenu.sync({ items: CHART_PRESETS.map(pr => ({ id: pr.id, label: pr.label })), value: chartView.preset });
+  chartPctMenu.sync({ value: String(chartView.pct) });
+  chartControlsSync();
 }
 
 function drawBlank(ctx, msg) {

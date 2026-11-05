@@ -192,6 +192,20 @@ module.exports = async function renderLive(H) {
         [...d.querySelectorAll('#xp-rail [data-xp-dim]')].map(n=>n.dataset.xpDim).join()===order.join());
       w.closeDimMenu();
       check('mobile picker closes without losing summary',trigger.getAttribute('aria-expanded')==='false' && trigger.querySelector('.rail-n').textContent===summary);
+      // Escape follows the shared menu foundation's focus rule: the close
+      // captures whether focus was inside the rail before hiding it and hands
+      // the trigger back its focus.
+      w.toggleDimMenu();
+      const railItem=d.querySelector('#xp-rail .xp-rail-item');
+      // The phone trigger is CSS-hidden at the harness's desktop width, and
+      // jsdom refuses to focus a display:none element. Show it for the probe
+      // so the assertion exercises the real focus target.
+      trigger.style.display='flex';
+      railItem.focus();
+      railItem.dispatchEvent(new w.KeyboardEvent('keydown', {key:'Escape', bubbles:true, cancelable:true}));
+      check('Escape closes the mobile picker and returns focus to its trigger',
+        trigger.getAttribute('aria-expanded')==='false' && d.activeElement===trigger);
+      trigger.style.removeProperty('display');
     } finally {w.getComputedStyle=originalStyle;w.__restoreExplorer=savedAgg;w.eval('explorerAgg=window.__restoreExplorer;delete window.__restoreExplorer');w.renderDimRail(w.explorerState());}
     const parent='s:parent"<neutral>',scope=[{dim:'client',id:'client'},{dim:'key',id:'hashed-key'},{dim:'conversation',id:parent}];
     const child=renderCard('conversation',{name:'s:child',conversation:{role:'sub',parent_id:parent,parent_in_scope:false,parent_scope:scope}});

@@ -237,7 +237,7 @@
   .pause-hold:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
   .pause-hold.editing { color: var(--warn); }
   .pause-hold button { min-width: 0; padding: 2px 8px; cursor: pointer; }
-  #pause-menu, #debug-menu { width: 360px; }
+  #pause-menu, #debug-menu { width: min(360px, calc(100vw - 16px)); }
   #btn-debug[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); }
   #btn-debug[aria-pressed="true"]:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) var(--halo), transparent); }
   #btn-settings[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
@@ -245,8 +245,8 @@
   #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent); }
   #btn-limits[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   #btn-limits[aria-pressed="true"]:hover { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
-  #limits-menu { width: 380px; }
-  #restart-menu { width: 340px; }
+  #limits-menu { width: min(380px, calc(100vw - 16px)); }
+  #restart-menu { width: min(340px, calc(100vw - 16px)); }
   .restart-description { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
   /* The header still opens the live progress menu while its action is disabled. */
   #btn-restart[data-busy] { color: var(--muted); border-color: var(--border2); background: var(--panel2); box-shadow: none; }
@@ -281,7 +281,12 @@
     /* 100% is the icon button, not the rail - add the leftover rail below
        the button, then the tick strip, then a 4px air gap. */
     top: calc(100% + (var(--rail-h) - var(--hdr-btn)) / 2 + var(--rail-tick) + 4px);
-    z-index: 40; width: 320px;
+    z-index: 40; width: min(320px, calc(100vw - 16px));
+    /* A header panel never runs past the window: the height is bounded by
+       both a comfortable share of the viewport and the space under the rail,
+       and the panel itself scrolls when its content is taller. */
+    max-height: min(70dvh, calc(100dvh - var(--rail-h) - 24px));
+    overflow-y: auto; overscroll-behavior: contain;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: var(--shadow-menu); padding: 12px; font-family: var(--mono);
   }
@@ -290,13 +295,29 @@
     .hdr-menu, #pause-menu, #debug-menu, #limits-menu, #restart-menu {
       position: static; width: 100%; top: auto; right: auto; margin-top: 4px;
       box-shadow: none;
+      /* The header flyout is the only vertical scroller on a narrow window:
+         a panel's own clamp would create a nested scroller on touch. */
+      max-height: none; overflow: visible; overscroll-behavior: auto;
     }
+    .pause-clients { max-height: none; overflow: visible; }
     .clear-opts { grid-template-columns: 1fr; }
   }
   .clear-menu-hd { font-size: 11px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
   .clear-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .clear-opts select, .clear-opts input { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
   #limits-menu .clear-opts input[type="checkbox"] { width: 14px; height: 14px; padding: 0; margin: 2px 0 0; }
+  @media (max-width: 800px), (hover: none), (pointer: coarse) {
+    /* Touch sizing inside the header panels only: every action, field and
+       checklist row reaches the shared 44px tap target while the desktop
+       dense layout stays untouched. */
+    .hdr-menu .btn,
+    .hdr-menu select,
+    .hdr-menu input:not([type="checkbox"]),
+    .hdr-menu .pause-check,
+    .hdr-menu .pause-hold button { min-height: var(--tap); }
+    .hdr-menu .pause-check input[type="checkbox"],
+    #limits-menu .clear-opts input[type="checkbox"] { width: 20px; height: 20px; }
+  }
   .clear-menu-ft { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
   .clear-count { display: block; font-size: 11px; color: var(--warn); min-height: 15px; margin-bottom: 8px; }
   /* Shared action row: the scoped action anchors LEFT, the "everything/all"
@@ -670,4 +691,80 @@
     .theme-mode-field { margin-left: 0; justify-items: stretch; }
     .theme-mode { width: 100%; }
     .theme-hint { display: none; }
+  }
+
+  /* Shared menu foundation (js/menu.js): the one panel language for the
+     dashboard's menu-like surfaces. Anchor placement is JS-owned (fixed
+     coordinates under the trigger, flipping above it near the window edge,
+     clamped inside the viewport); sheet placement is CSS-owned through
+     [data-placement="sheet"] and scrimmed by .mn-scrim. Conversions compose
+     the body blocks below instead of restyling each surface. */
+  .mn {
+    position: fixed; z-index: 110; display: flex; flex-direction: column;
+    width: min(var(--mn-w, 340px), calc(100vw - 16px)); max-width: none;
+    max-height: min(76dvh, calc(100dvh - 24px));
+    background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
+    box-shadow: var(--shadow-menu); font-family: var(--mono); color: var(--text);
+    opacity: 0; transform: translateY(-4px);
+    transition: opacity .16s ease-out, transform .16s ease-out;
+  }
+  .mn-on { opacity: 1; transform: none; }
+  .mn[data-placement="sheet"] {
+    left: 8px; right: 8px; width: auto; bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    top: auto; max-height: min(78dvh, calc(100dvh - 24px)); border-radius: 12px;
+  }
+  .mn-scrim { position: fixed; inset: 0; z-index: 95; background: rgba(var(--veil-rgb), .35); }
+  .mn-hd { padding: 10px 12px 0; }
+  .mn-title { font-size: 11px; font-weight: 600; }
+  .mn-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .mn-body {
+    padding: 10px 12px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin;
+    display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0;
+  }
+  .mn-sec { display: flex; flex-direction: column; gap: 6px; }
+  .mn-sec-h { font-size: 9px; color: var(--muted); letter-spacing: .05em; text-transform: none; }
+  .mn-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px;
+    padding: 5px 8px; border: 0; border-radius: 7px; background: none; color: var(--text);
+    font: 11px var(--mono); text-align: left; cursor: pointer;
+  }
+  .mn-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+  .mn-item:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+  .mn-item[aria-checked="false"] { color: var(--muted); }
+  .mn-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
+  .mn-item[disabled] { opacity: .45; cursor: default; }
+  .mn-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mn-chip {
+    display: inline-flex; align-items: center; justify-content: center; min-height: 26px;
+    padding: 0 10px; border: 1px solid var(--border2); border-radius: 7px;
+    background: var(--panel2); color: var(--muted); font: 10.5px var(--mono); cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+  }
+  .mn-chip:hover { color: var(--text); border-color: var(--accent); }
+  .mn-chip:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+  .mn-chip[aria-pressed="true"] {
+    color: var(--text); border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+  .mn-chip:disabled { opacity: .45; cursor: default; }
+  .mn-chip:disabled:hover { color: var(--muted); border-color: var(--border2); background: var(--panel2); }
+  .mn-note { font-size: 10px; color: var(--muted); line-height: 1.5; }
+  .mn-ceiling { font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+  .mn-ft { padding: 10px 12px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+  .mn-actions { display: flex; gap: 8px; justify-content: space-between; width: 100%; }
+  .mn-rail {
+    position: relative; height: 6px; border-radius: 3px;
+    border: 1px solid var(--border); background: var(--tick-strip); overflow: hidden;
+  }
+  .mn-rail-fill {
+    position: absolute; top: 0; bottom: 0;
+    background: color-mix(in srgb, var(--accent) 45%, transparent); border-radius: 2px;
+  }
+  @media (max-width: 800px) {
+    .mn-item { min-height: var(--tap); }
+    .mn-chip { min-height: 38px; padding: 0 12px; }
+  }
+  @media (hover: none), (pointer: coarse) {
+    .mn-item { min-height: var(--tap); }
+    .mn-chip { min-height: var(--tap); padding: 0 14px; }
   }

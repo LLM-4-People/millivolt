@@ -105,7 +105,19 @@ let chartKey = null;
 let chartFailure = null;
 function chartReqKey() {
   const scope = scopeQS();
-  return 'window=' + chartView.window + (scope ? '&' + scope : '');
+  return 'window=' + chartWindowToken() + (scope ? '&' + scope : '');
+}
+// chartQuery is the wire query for one chart fetch: the effective selection
+// resolved at request time (calendar tokens resolve against the stored extent
+// and the current clock), plus the log scope. chartReqKey deliberately stays
+// token-only, so a periodic refresh of a calendar window neither changes
+// identity nor clears the payload; the resolved pair rides only the URL.
+function chartQuery() {
+  const r = tfResolve(chartWindowToken(), Date.now());
+  const params = r.kind === 'range' ? 'from_ms=' + r.fromMs + '&to_ms=' + r.toMs
+    : r.kind === 'duration' ? 'window=' + r.minutes : 'window=all';
+  const scope = scopeQS();
+  return scope ? params + '&' + scope : params;
 }
 function markChartFailure(key) {
   chartFailure = key;
@@ -126,13 +138,20 @@ function fetchChart(mode = 'reuse') {
   }
   return chartRequest(q, (accept, signal) => {
     _lastChartFetch = Date.now();
-    operatorJson('/metrics/agg/chart?' + q, {signal})
+    operatorJson('/metrics/agg/chart?' + chartQuery(), {signal})
       .then(p => accept(p, true)).catch(() => accept(null, false));
   }, p => {
     // Hash state can change before its navigation event dispatches. Never
     // adopt a payload whose identity no longer matches the current view.
     if (q !== chartReqKey()) { fetchChart(); return; }
     if (!p || typeof p !== 'object') { markChartFailure(q); return; }
+    // The payload reports the stored-history extent the timeframe control
+    // gates on. An extent that no longer fits the selection (a purge moved
+    // data_from_ms forward, or a restored window was never inside history)
+    // re-issues under the effective token instead of adopting buckets the
+    // control no longer offers.
+    tfSetExtent(p.data_from_ms);
+    if (q !== chartReqKey()) { fetchChart(); return; }
     chartAgg = p;
     chartAgg.key = q;
     chartFailure = null;
@@ -423,19 +442,34 @@ function derive(data) {
     }
   }
   const codes = [...codeSeen].sort((x, y) => x - y);
-  const statuses = liveOpts.concat(codes);
+  // A persisted numeric status the current ring does not produce still
+  // belongs in the http status group; a non-numeric one keeps its own
+  // ungrouped option at the end so the control never loses its value.
+  let extraStatus = '';
+  if (filters.status && !liveOpts.some(s => String(s) === String(filters.status)) &&
+      !codes.some(s => String(s) === String(filters.status))) {
+    if (/^\d+$/.test(String(filters.status))) {
+      codes.push(filters.status);
+      codes.sort((x, y) => x - y);
+    } else {
+      extraStatus = String(filters.status);
+    }
+  }
   // A persisted status is only meaningful when it is one the ring can
   // produce: a browser-side value is untrusted markup input, so it must never
-  // become an option label it did not come from. Both positions are escaped
-  // like every sibling option builder.
-  if (filters.status && !statuses.some(s => String(s) === String(filters.status))) statuses.push(filters.status);
-  const statusKey = statuses.join('|') + '|' + filters.status;
+  // become an option label it did not come from. Every emitted value is
+  // escaped like every sibling option builder.
+  const statusKey = liveOpts.join('|') + '#' + codes.join('|') + '|' + extraStatus + '|' + filters.status;
   let statusHtml = _statusHtml;
   if (_statusHtmlKey !== statusKey) {
-    statusHtml = `<option value="">all status</option>` + statuses.map(s => {
+    const option = s => {
       const text = escapeHtml(String(s));
       return `<option value="${text}" ${String(s)===filters.status?'selected':''}>${text}</option>`;
-    }).join('');
+    };
+    statusHtml = `<option value="">all status</option>`;
+    if (liveOpts.length) statusHtml += `<optgroup label="live states">${liveOpts.map(option).join('')}</optgroup>`;
+    if (codes.length) statusHtml += `<optgroup label="http status">${codes.map(option).join('')}</optgroup>`;
+    if (extraStatus) statusHtml += option(extraStatus);
     _statusHtml = statusHtml;
     _statusHtmlKey = statusKey;
   }
@@ -840,16 +874,12 @@ function startStream(since, feed) {
 
 // Footer clock is managed by _armClock() below (visibility-aware: paused in
 // hidden tabs, resumed on return). Resize is rAF-gated to avoid per-frame
-// layout thrash. An open metrics menu re-anchors on the same gate - it is
-// fixed-positioned (it must escape the card's overflow clip), so shrinking
-// the window can never crop it. Any scroll re-anchors it too: a fixed box
-// does not follow its trigger through page or inner-region scrolling, and
-// the capture listener sees scrolls of every nested region.
+// layout thrash; an open menu re-anchors through the shared foundation
+// (menu.js owns resize/scroll placement for every panel).
 window.addEventListener('resize', () => {
   if (_resizeRaf) return;
   _resizeRaf = requestAnimationFrame(() => {
     _resizeRaf = 0;
-    syncMetricsMenuEdge();
     if (!lastData) return;
     // An existing plot needs only new pixel dimensions; recomputing the
     // payload, totals and legend on every resize frame was pure waste. Fall
@@ -858,7 +888,6 @@ window.addEventListener('resize', () => {
   });
 });
 let _resizeRaf = 0;
-window.addEventListener('scroll', () => syncMetricsMenuEdge(), true);
 
 // Visibility handling: stop the 5s tick + 1s clock while the tab is hidden
 // (SSE keeps state current; Chrome throttles background timers but doesn't
@@ -951,28 +980,23 @@ document.addEventListener('visibilitychange', () => {
 // / explorer refetch server aggregates with the same s=/f= set.
 $('f-status').addEventListener('change', doFilter);
 
-// Traffic chart controls: the preset dropdown (curated series combos -
-// populated from CHART_PRESETS, the single owner), window + percentile
-// selects. All restore their persisted values; the legend toggles series
+// Traffic chart controls: the three chart-head triggers own their menus (the
+// choiceMenus and the timeframe control wire their own clicks; chart.js
+// builds them from CHART_PRESETS / CHART_PCTS / TIMEFRAMES, the single
+// owners). All restore their persisted values; the legend toggles series
 // visibility (delegated on the container so updateSection's innerHTML swaps
 // never drop the listener); the view persists in dash.chart.
 fillChartControls();
-$('chart-preset').addEventListener('change', e => setChartPreset(e.target.value));
-$('chart-window').addEventListener('change', e => setChartWindow(e.target.value));
-$('chart-pct').addEventListener('change', e => setChartPct(e.target.value));
 $('traffic-legend').addEventListener('click', e => {
   const b = e.target.closest('.leg-item');
   if (b) toggleChartSeries(b.dataset.series);
 });
 // The summary metrics picker (the strip's tiles are plain readouts): the
-// trigger opens the menu, rows flip the same dash.chart hidden set through
-// toggleSummaryMetric, Escape and outside clicks close, and focus returns
-// to the trigger. Row clicks keep the menu open for multi-selection.
-$('chart-metrics-btn').addEventListener('click', () => {
-  const open = $('chart-metrics-menu').hidden;
-  setMetricsMenuOpen(open);
-  if (open) { const first = $('chart-metrics-menu').querySelector('.metrics-row'); if (first) first.focus(); }
-});
+// trigger toggles the foundation menu, rows flip the same dash.chart hidden
+// set through toggleSummaryMetric, and Escape and outside clicks close it
+// through menu.js (core.js and chrome_menus.js call setMetricsMenuOpen, the
+// single open-state writer). Row clicks keep the menu open for multi-select.
+$('chart-metrics-btn').addEventListener('click', () => setMetricsMenuOpen($('chart-metrics-menu').hidden));
 $('chart-metrics-menu').addEventListener('click', e => {
   const row = e.target.closest('.metrics-row');
   if (row) toggleSummaryMetric(row.dataset.metric);
@@ -1136,6 +1160,9 @@ function fetchBootstrap(mode, after) {
 function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
   applyDashValues(p.dash);
   applyModelCanon(p.model_canon, true);
+  // The bootstrap carries the stored-history extent the timeframe control
+  // gates its availability on; every accepted chart payload reports it again.
+  tfSetExtent(p.data_from_ms);
   if (p.kpi) {
     // The 5s poll usually returns the same aggregate; swapping it and
     // bumping the revision would re-run the whole derivation (and every

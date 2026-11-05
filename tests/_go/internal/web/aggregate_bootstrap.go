@@ -282,8 +282,11 @@ func TestBootstrapWireKeysStrict(t *testing.T) {
 		Incremental      bool            `json:"incremental"`
 		ModelCanon       json.RawMessage `json:"model_canon"`
 		DashboardVersion string          `json:"dashboard_version"`
-		KPI              json.RawMessage `json:"kpi"`
-		Storage          struct {
+		// No durable store is attached here, so the stored-history extent must
+		// read zero rather than a fabricated minimum.
+		DataFromMs int64           `json:"data_from_ms"`
+		KPI        json.RawMessage `json:"kpi"`
+		Storage    struct {
 			Enabled        bool   `json:"enabled"`
 			Dropped        uint64 `json:"dropped"`
 			TotalsDegraded bool   `json:"totals_degraded"`
@@ -339,6 +342,9 @@ func TestBootstrapWireKeysStrict(t *testing.T) {
 	}
 	if !hexRe16.MatchString(wire.DashboardVersion) {
 		t.Fatalf("dashboard_version = %q, want 16 lowercase hex (web.go etagHex width; live.js DASHBOARD_VERSION_RE mirrors it)", wire.DashboardVersion)
+	}
+	if wire.DataFromMs != 0 {
+		t.Fatalf("data_from_ms = %d with no durable store, want 0", wire.DataFromMs)
 	}
 	var canon struct {
 		Revision string `json:"revision"`

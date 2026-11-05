@@ -302,10 +302,21 @@
   .prov-top { position: relative; margin-left: auto; flex-shrink: 0; }
   .prov-top .btn { font-size: 10px; padding: 3px 10px; }
   .prov-menu {
-    position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
-    min-width: 290px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+    /* The shared menu foundation owns placement (anchored to the trigger,
+       clamped and flipped inside the settings sheet). The panel is a child of
+       the sheet while open, so the modal focus trap keeps it reachable; its
+       absolute containing block is the sheet's padding box. */
+    position: absolute; z-index: 110;
+    min-width: min(290px, calc(100vw - 32px)); max-width: calc(100vw - 32px);
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 12px; display: flex; flex-direction: column; gap: 10px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: var(--shadow-menu); font-family: var(--mono);
+  }
+  .prov-menu[data-placement="sheet"] {
+    left: 8px; right: 8px; width: auto; top: auto;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    max-height: min(78dvh, calc(100dvh - 24px));
   }
   .prov-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
   .prov-menu-list:empty::after { content: 'no providers to add'; font-size: 10px; color: var(--muted); padding: 3px 6px; }
@@ -426,17 +437,29 @@
     .st-sheet { border-radius: 12px; }
     .st-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .st-side { border-right: none; border-bottom: 1px solid var(--border); }
-    .st-rail { flex-direction: row; flex-wrap: wrap; max-height: 96px; }
+    .st-rail { flex-direction: row; flex-wrap: wrap; max-height: 152px; }
     .st-rail-item { width: auto; }
     .st-live { display: none; }
     .st-row { grid-template-columns: 1fr; gap: 6px; }
     .st-row:has(.st-switch) .st-ctl { align-items: flex-start; }
     .st-del-opts { grid-template-columns: 1fr; }
     .st-hd input[type="search"] { max-width: none; }
+    /* The sheet's own header controls are the way in and out of the modal;
+       they take the full touch target on a phone. */
+    .st-hd .btn, .st-hd input[type="search"] { min-height: var(--tap); }
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
     .ro-head-actions { justify-content: flex-start; }
     .ro-head-actions button { min-height: 24px; }
     .ro-rule .ro-scope, .ro-rule .ro-body { grid-template-columns: minmax(0, 1fr); }
     .ro-rule-body { padding-inline: 8px; }
+  }
+  /* Touch sizing for the settings surfaces and the provider picker: rows,
+     chips, the custom label field and the sheet actions take the full target
+     wherever the pointer is coarse or the viewport is narrow. */
+  @media (max-width: 800px), (hover: none), (pointer: coarse) {
+    .prov-menu-item { min-height: var(--tap); padding: 0 9px; }
+    .prov-menu-custom input, .prov-menu-custom .btn { min-height: var(--tap); }
+    .st-rail-item { min-height: var(--tap); }
+    .st-actions .btn { min-height: var(--tap); }
   }

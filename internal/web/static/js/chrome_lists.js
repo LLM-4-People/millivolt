@@ -67,11 +67,11 @@ const PAUSE_SCOPES = [
 // values, so every surface spells the same span the same way ('15 minutes',
 // never '15 min'). Surfaces keep their own value sets; only the wording
 // is shared. Ages beyond a day stay context-specific ('1 day', '1 week').
-// The chart's window register (CHART_WINDOWS in chart.js) is the documented
-// exclusion: its values are minute counts ('15', '60'), not these duration
-// keys, and the two files share no module - deriving its four matching
-// sub-day wordings would need a cross-file load-order dependency plus a
-// value-translation table, so those coincident spellings stay separate.
+// The chart's window register (TIMEFRAMES in timeframe.js) is the documented
+// exclusion: its values are minute counts ('15', '60') plus calendar tokens,
+// not these duration keys, and the two files share no module - deriving its
+// matching sub-day wordings would need a cross-file load-order dependency
+// plus a value-translation table, so those coincident spellings stay separate.
 const DURATION_LABELS = {
   '15m': '15 minutes', '1h': '1 hour', '6h': '6 hours',
   '12h': '12 hours', '24h': '24 hours',

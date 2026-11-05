@@ -246,9 +246,9 @@ module.exports = async function regressionsA(H) {
         w.fetchChart('invalidate');
         await settleUntil(() => w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 300);
         mode = 'hold';
-        const win = d.getElementById('chart-window');
-        win.value = '1440';
-        win.dispatchEvent(new w.Event('change', { bubbles: true }));
+        const win = d.querySelector('#chart-window-panel [data-tf="1440"]');
+        check('the 24h chip is selectable for the stored-history extent', !!win && !win.disabled);
+        win.click();
         await settleUntil(() => held.length === 1);
         check('a chart window change clears the old payload and paints the skeleton before the response',
           w.eval('chartAgg === null') &&

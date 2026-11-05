@@ -140,6 +140,28 @@ func (a *AggAPI) withProjectionBudget(ctx context.Context, budget projectionBudg
 	return fn(&a.projection.data)
 }
 
+// dataFromMs returns the earliest start (unix ms) across ALL durably stored
+// requests, or 0 when the projection holds no durable rows. The analytical
+// projection's unscoped minimum (projectionData.minStart) is the one owner;
+// this read refreshes it under the caller's context exactly like every
+// aggregate read, so a clear, purge or late completion already committed to
+// storage is reflected before the value is read. The refresh is best-effort:
+// when it fails the last published extent answers, because this informational
+// field must not take down the bootstrap payload, which otherwise never
+// touches durable storage. Without durable storage the value is always 0: the
+// ring is not stored history.
+func (a *AggAPI) dataFromMs(ctx context.Context) int64 {
+	if a.store != nil {
+		_ = a.projection.refresh(ctx, a.store, projectionInteractive)
+	}
+	a.projection.mu.RLock()
+	defer a.projection.mu.RUnlock()
+	if !a.projection.data.hasStart {
+		return 0
+	}
+	return a.projection.data.minStart
+}
+
 // noteChunkStart records a contribution's start in its block's maximum.
 // rowIndex is 1-based, matching contrib.rowIndex.
 func (d *projectionData) noteChunkStart(rowIndex uint32, start int64) {
