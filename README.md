@@ -237,7 +237,7 @@ vulnerabilities.
 | --- | --- | --- |
 | `01` | [Quickstart](#quickstart) · [container operation](docs/operations.md#containers) | First run, images, volumes, shutdown |
 | `02` | [Protocol](docs/protocol.md) · [adapters](docs/adapters.md) | Client setup, translation, compatibility |
-| `03` | [Operations](docs/operations.md) · [performance](docs/performance.md) · [reverse proxy](docs/reverse-proxy.md) | Day-to-day operation and measurements |
+| `03` | [Operations](docs/operations.md) · [operator CLI](docs/cli.md) · [performance](docs/performance.md) · [reverse proxy](docs/reverse-proxy.md) | Day-to-day operation and measurements |
 | `04` | [MCP server](docs/mcp.md) | The 22-tool operator API |
 | `05` | [Architecture](docs/architecture.md) | Ownership and invariants |
 | `06` | [Contributing](CONTRIBUTING.md) · [support](SUPPORT.md) · [security](SECURITY.md) | Development, help, reporting |
