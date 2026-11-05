@@ -204,6 +204,14 @@ module.exports = async function timeframe(H) {
     ctrl.open();
     check('opening the control shows the panel and syncs the expanded state',
       !panel.hidden && panel.classList.contains('mn-on') && trigger.getAttribute('aria-expanded') === 'true');
+    // A pick is a complete choice: the control closes and hands focus back to
+    // its trigger, exactly like the choice menus.
+    chip('15').click();
+    check('a pick closes the control and returns focus to its trigger',
+      panel.hidden && trigger.getAttribute('aria-expanded') === 'false' &&
+      picks.join() === '60,15' && d.activeElement === trigger);
+    ctrl.open();
+    check('the control reopens after a pick', !panel.hidden);
     ctrl.close();
     check('closing the control hides the panel again',
       panel.hidden && trigger.getAttribute('aria-expanded') === 'false');

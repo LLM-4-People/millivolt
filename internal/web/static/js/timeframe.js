@@ -286,6 +286,9 @@ function buildTimeframeControl(trigger, labelEl, onPick) {
     selected = token;
     paint();
     if (typeof onPick === 'function') onPick(token);
+    // One pick, one close: the chart the pick just fetched must not stay
+    // covered by the panel. menuClose hands focus back to the trigger.
+    close();
   }
 
   function sync(token) {
