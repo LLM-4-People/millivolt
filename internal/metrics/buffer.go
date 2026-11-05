@@ -744,8 +744,8 @@ func aggregateInto(records []*Record, samples []int64) *AggResult {
 		}
 		a.ProviderCounts[r.Provider]++
 		a.ByStatus[r.StatusCode]++
-		// TTFTMs == 0 means "absent" (no token ever arrived), not "0 ms":
-		// no-token requests must not dilute TTFT aggregates or percentiles.
+		// TTFTMs == 0 means "absent" (no measured send-to-token window), not
+		// "0 ms": those requests must not dilute TTFT aggregates or percentiles.
 		if r.TTFTMs > 0 {
 			a.TTFTSamples = append(a.TTFTSamples, r.TTFTMs)
 			// A rejected sum must leave the field fail-closed at 0; continuing

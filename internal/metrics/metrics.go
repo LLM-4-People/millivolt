@@ -159,7 +159,7 @@ type Record struct {
 	DebugSessionID string `json:"debug_session_id,omitempty"`
 
 	// Queueing/scheduler metadata.
-	QueueWaitMs int64 `json:"queue_wait_ms"`          // time spent in the scheduler queue before sending
+	QueueWaitMs int64 `json:"queue_wait_ms"`          // time parked at the admission queue (concurrency, pacing, provider cap, hold) plus error-storm gates; send-gate parking (retry pacing, Retry-After, backoff, probes) is not included
 	Retries     int   `json:"retries"`                // number of transparent upstream retries (429/5xx)
 	RateLimited bool  `json:"rate_limited,omitempty"` // scheduler wait or 429/503 pacing; HasRateLimit owns the exact 429 predicate
 	// Attempts records each transparently-retried upstream response (the ones
@@ -773,11 +773,14 @@ func IsNonRetryableQuotaErr(typ, code string) bool {
 }
 
 // TTFT returns the time to first token, or 0 if the response produced no
-// tokens (e.g. a pure error or empty completion). It is measured from the
-// adopted upstream attempt's send start - the first attempt for a clean
-// request, the successful attempt after retries - so every retry has its own
-// TTFT and the value never absorbs queueing, request parsing or retry
-// backoff. Duration still reflects total wall time.
+// tokens (e.g. a pure error or empty completion) or the request never sent an
+// upstream attempt (a parked cursor resume). It is measured from the adopted
+// upstream attempt's send start - the first attempt for a clean request, the
+// successful attempt after retries - so every retry has its own TTFT and the
+// value excludes proxy scheduler queueing, request parsing and retry backoff,
+// while the upstream transport window from request handoff (dial, TLS,
+// connection-pool wait, header wait) does count. Duration still reflects total
+// wall time.
 func (r *Record) TTFT() time.Duration {
 	if r.FirstTokenAt.IsZero() || r.FinalAttemptAt.IsZero() {
 		return 0

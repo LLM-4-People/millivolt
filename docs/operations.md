@@ -1473,9 +1473,12 @@ sensitive; do not publish request drawers from private history without review.
 Request duration starts after upload and includes metadata work, queue/hold/retry
 waits and response handling. TTFT is measured from the upstream attempt's own
 send start to the first token (reasoning or answer), so every retry has its own
-TTFT and the value excludes queueing, request parsing and retry backoff. A
-request that produced no token, and any non-streamed response, has no TTFT: the
-log shows a placeholder, not 0 ms, and aggregates skip it. Rows written before
+TTFT. The value excludes proxy scheduler queueing, request parsing and retry
+backoff, but it does span the upstream transport window from request handoff
+(dial, TLS, connection-pool wait, header wait). A request that produced no
+token, one that never sent an upstream attempt of its own (a parked cursor
+resume), and any non-streamed response have no TTFT: the log shows a
+placeholder, not 0 ms, and aggregates skip it. Rows written before
 0.3.34 stored `ttft_ms` anchored at request start (upload, queueing and retry
 backoff included) and were zeroed once by the boot repair, so they report TTFT
 as absent; their `started_at` and `first_token_at` timestamps remain, keeping

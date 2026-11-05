@@ -340,8 +340,9 @@ const fmtDur = ms => {
   if (a < 86400000) { const h = r2(a / 3600000); return h >= 24 ? neg + '1d' : neg + h + 'h'; }
   return neg + r2(a / 86400000) + 'd';
 };
-// fmtTTFT is TTFT's display owner. Server ttft_ms is 0 when no token arrived
-// or the response did not stream (absent), never a measured zero: sub-ms
+// fmtTTFT is TTFT's display owner. Server ttft_ms is 0 when no token arrived,
+// when the request never sent an upstream attempt (a parked cursor resume) or
+// when the response did not stream (absent), never a measured zero: sub-ms
 // positives are rounded up to 1ms.
 // fmtDur(0) stays "0ms" for real durations (axes, elapsed time).
 const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
