@@ -119,7 +119,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					rec.StatusCode = status
 					msg := fmt.Sprintf("upstream HTTP %d cannot carry an error body", resp.StatusCode)
 					if rec.ErrorType == "" {
-						rec.ErrorType = "upstream_error"
+						rec.ErrorType = metrics.TypeUpstreamError
 						rec.ErrorMsg = msg
 					}
 					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
@@ -133,7 +133,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					status = http.StatusBadGateway
 					rec.StatusCode = status
 					if rec.ErrorType == "" {
-						rec.ErrorType = "upstream_error"
+						rec.ErrorType = metrics.TypeUpstreamError
 						rec.ErrorMsg = "upstream error body could not be read"
 					}
 					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
@@ -233,7 +233,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// with a real 502 (the status line is still uncommitted here).
 			if int64(len(full)) > translateMax {
 				rec.StatusCode = http.StatusBadGateway
-				rec.ErrorType = "response_too_large"
+				rec.ErrorType = metrics.TypeResponseTooLarge
 				rec.ErrorMsg = "upstream translated body exceeds " + config.FormatByteSize(translateMax)
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
 					"upstream response too large to translate")
@@ -261,7 +261,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				// Keep a provider error already parsed from the upstream document;
 				// the translation failure must not overwrite its classification.
 				if rec.ErrorType == "" {
-					rec.ErrorType = "transform_error"
+					rec.ErrorType = metrics.TypeTransformError
 					rec.ErrorMsg = terr.Error()
 				}
 				if errors.Is(terr, metrics.ErrMetricRange) {
@@ -278,7 +278,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// byte reaches the client.
 			if int64(len(out)) > translateMax {
 				rec.StatusCode = http.StatusBadGateway
-				rec.ErrorType = "response_too_large"
+				rec.ErrorType = metrics.TypeResponseTooLarge
 				rec.ErrorMsg = "translated response exceeds " + config.FormatByteSize(translateMax)
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
 					"translated response too large")
@@ -294,7 +294,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				clientStatus = http.StatusBadGateway
 				rec.StatusCode = clientStatus
 				if rec.ErrorType == "" {
-					rec.ErrorType = "upstream_error"
+					rec.ErrorType = metrics.TypeUpstreamError
 					rec.ErrorMsg = "upstream returned an in-band error"
 				}
 			}

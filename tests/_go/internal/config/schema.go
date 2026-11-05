@@ -263,6 +263,10 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 			// An exact-match enum: alternate with another member.
 			return QuotaPauseRetry
 		}
+		if f.Key == "client_error_class" {
+			// An exact-match enum: alternate with another member.
+			return ClientErrorClassHeader
+		}
 		if f.Key == "translation_loss" {
 			// An exact-match enum: alternate with another member.
 			return TranslationLossReject
@@ -317,6 +321,12 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 		}
 		if f.Key == "retryable_error_classes" {
 			return []any{"model_warming_up"}
+		}
+		if f.Key == "rate_limit_error_classes" {
+			return []any{"gateway_throttle"}
+		}
+		if f.Key == "quota_error_classes" {
+			return []any{"account_depleted"}
 		}
 	case KindProviders:
 		return map[string]any{"neutral.example": map[string]any{"cost_keys": []any{"usage.cost"}}}

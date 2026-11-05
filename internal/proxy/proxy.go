@@ -102,108 +102,20 @@ func isNonRetryableQuotaErr(typ, code string) bool {
 	return metrics.IsNonRetryableQuotaErr(typ, code)
 }
 
-// retryableErrorClass is one entry in the built-in in-band retry vocabulary.
-// retryable authorizes a transparent re-send when the class matches the
-// envelope's type or code. overridesInvalidRequest additionally lets a
-// specific code authorize a re-send when the type is the generic
-// invalid_request_error wrapper; it never overrides authentication,
-// permission, not-found or too-large types.
-type retryableErrorClass struct {
-	retryable               bool
-	overridesInvalidRequest bool
-}
-
-// retryableUpstreamErrorClasses are the BUILT-IN in-band error type/code
-// strings that denote a TRANSIENT server-availability failure: the classes the
-// OpenAI API documents as retryable (500 server_error "retry your request",
-// the 503 overloaded/unavailable family "follow Retry-After, then retry",
-// request timeouts) plus the equivalent Anthropic and common-gateway
-// spellings. When a provider streams one of these inside its 200 SSE (or a
-// non-streaming 200 body) instead of the 5xx status the class implies, the
-// proxy may transparently re-send the request while nothing content-bearing
-// has been relayed - the same wire-safety contract as the truncation rescues.
-// Operator extensions to this vocabulary come from the
-// retryable_error_classes setting (Server.retryableUpstreamErrorClass); the
-// durable and client-fault classes are never re-sent:
-// rate_limit_error is flow control with no in-band Retry-After (the scheduler
-// owns pacing), nonRetryableRequestClasses and the durable quota/billing
-// classes (metrics.IsNonRetryableQuotaErr) are
-// permanent, and an unknown type fails closed to verbatim relay. A capacity
-// code may override the generic invalid_request_error wrapper when the
-// provider names the transient condition in the code.
-var retryableUpstreamErrorClasses = map[string]retryableErrorClass{
-	"server_error":              {retryable: true}, // OpenAI 500
-	"service_unavailable":       {retryable: true}, // OpenAI 503 type spelling
-	"service_unavailable_error": {retryable: true}, // OpenAI 503 type (current docs)
-	"server_is_overloaded":      {retryable: true}, // OpenAI 503 code
-	"api_error":                 {retryable: true}, // Anthropic 500 "unexpected error"
-	"internal_error":            {retryable: true}, // gateway spelling (OpenRouter and others)
-	"internal_server_error":     {retryable: true}, // gateway spelling
-	"overloaded_error":          {retryable: true}, // Anthropic 529
-	"timeout_error":             {retryable: true}, // Anthropic 540
-	// Gateway/vLLM capacity code sometimes wrapped in invalid_request_error;
-	// the message and code name a transient overload, not a malformed request.
-	"engine_overloaded": {retryable: true, overridesInvalidRequest: true},
-}
-
-// nonRetryableRequestClasses are the documented client-fault error types: the
-// request itself is wrong (malformed, unauthorized, forbidden, absent, too
-// large), so a re-send produces the identical failure. They deny even when a
-// co-occurring code string resembles a server class - the type is the
-// authoritative class field, and a provider mixing them is ambiguous, not
-// retryable. The one exception is the generic invalid_request_error wrapper:
-// a code explicitly marked overridesInvalidRequest names a capacity condition
-// that the wrapper obscures. Authentication, permission, not-found and
-// too-large types stay final. Unknown types deny by falling through (fail
-// closed); only this documented vocabulary needs an explicit deny because it
-// is the one set that could plausibly co-occur with a server-class code.
-var nonRetryableRequestClasses = map[string]bool{
-	"invalid_request_error": true,
-	"authentication_error":  true,
-	"permission_error":      true,
-	"not_found_error":       true,
-	"request_too_large":     true,
-}
-
 // retryableUpstreamErrorClass reports whether an in-band error's structured
-// type or code authorizes a transparent re-send. One precedence chain, fail
-// closed at every step:
-//  1. a durable quota/billing class (metrics.IsNonRetryableQuotaErr) never
-//     re-sends in-band - the quota pause (quota_pause_mode) owns the
-//     provider-wide reaction, and no operator extension may override a
-//     billing condition;
-//  2. the operator's retryable_error_classes extension list is authoritative:
-//     it may authorize any spelling the built-ins do not know, including a
-//     client-fault type a gateway mislabels;
-//  3. a documented client-fault type (nonRetryableRequestClasses) is final
-//     against the built-in vocabulary even when its code strings resemble a
-//     server class - the type is the authoritative class field, and a
-//     provider mixing them is ambiguous, not retryable. The generic
-//     invalid_request_error wrapper is the exception: a code explicitly
-//     marked overridesInvalidRequest (engine_overloaded) names a capacity
-//     condition, while authentication, permission, not-found and too-large
-//     types stay final;
-//  4. the built-in retryableUpstreamErrorClasses vocabulary (the OpenAI
-//     retry semantics) matches the type or the code.
-//
-// Unknown values stay false: verbatim relay, the client's to retry.
+// type or code authorizes a transparent re-send. It delegates to
+// metrics.InBandRetryable, the ONE composition of that decision: a durable
+// quota/billing condition never re-sends (the quota pause owns it), the
+// operator's retryable_error_classes extension outranks the built-in
+// client-fault deny, a documented client-fault type is final against the
+// built-in vocabulary (with the engine_overloaded capacity code overriding the
+// generic invalid_request_error wrapper), and the built-in transient
+// availability vocabulary matches either member. Rate-limit spellings stay
+// false on this path: an in-band rate limit carries no Retry-After and the
+// scheduler owns pacing. Unknown values stay false: verbatim relay, the
+// client's to retry.
 func (s *Server) retryableUpstreamErrorClass(typ, code string) bool {
-	typ, code = strings.ToLower(typ), strings.ToLower(code)
-	if isNonRetryableQuotaErr(typ, code) {
-		return false
-	}
-	for _, v := range s.cfg().RetryableErrorClasses {
-		if strings.EqualFold(v, typ) || strings.EqualFold(v, code) {
-			return true
-		}
-	}
-	if nonRetryableRequestClasses[typ] {
-		if typ != "invalid_request_error" {
-			return false
-		}
-		return retryableUpstreamErrorClasses[code].overridesInvalidRequest
-	}
-	return retryableUpstreamErrorClasses[typ].retryable || retryableUpstreamErrorClasses[code].retryable
+	return metrics.InBandRetryable(typ, code)
 }
 
 // target is the resolved upstream destination for one request.
@@ -368,6 +280,7 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 	if rec == nil {
 		rec = metrics.Noop{}
 	}
+	installClassExtensions(cfg)
 	s := &Server{
 		rec:        rec,
 		convos:     NewConversationTracker(cfg.ConversationIdleGap, cfg.ConversationMaxOpen),
@@ -381,6 +294,24 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 	s.inflight.set(cfg.MaxInflightRequests, int64(cfg.MaxInflightBodyBytes))
 	s.respBudget.set(int64(cfg.MaxInflightResponseBytes))
 	return s
+}
+
+// installClassExtensions publishes the operator's classification extension
+// lists to metrics, the owner of the vocabularies. It is the ONE place the
+// extensions are installed: every vocabulary predicate (Classify,
+// OutcomeIsError, IsRateLimitClass, IsRetryableClass, InBandRetryable,
+// NonRetryableQuotaClass, the published SQL and the dashboard vocabulary)
+// reads the installed value, so the retry ladder, the health counts and the
+// client-facing class cannot disagree about a spelling. Called on
+// construction and on every reload; the caller has passed through config
+// validation, which rejects entries that would move a built-in between
+// classes.
+func installClassExtensions(cfg *config.Config) {
+	metrics.InstallClassExtensions(metrics.ClassExtensions{
+		RateLimit: cfg.RateLimitErrorClasses,
+		Quota:     cfg.QuotaErrorClasses,
+		Retryable: cfg.RetryableErrorClasses,
+	})
 }
 
 // upstreamDialer is the single reader of the upstream dial timing settings.
@@ -447,7 +378,15 @@ func preserveUpstreamRedirect(*http.Request, []*http.Request) error {
 // HTTP server timeouts, history size) are NOT re-applied - they require a
 // restart and are the caller's responsibility to flag.
 func (s *Server) Reload(cfg *config.Config) {
-	// Swap the config snapshot first so subsequent reads see it.
+	// Publish the extension vocabularies from the new snapshot FIRST, so the
+	// vocabulary is never behind the config: every classification (retry
+	// ladder, health predicates, published SQL, dashboard) then answers from
+	// the same effective lists. The swap is atomic; an in-flight request may
+	// see the new vocabularies with the old snapshot for the microseconds
+	// between the two stores, which is the same best-effort window config
+	// reload has always had.
+	installClassExtensions(cfg)
+	// Swap the config snapshot so subsequent reads see it.
 	s.cfgSnap.Store(cfg)
 	// Swap the upstream transport for new requests; drain the old one's idle
 	// connections (in-flight streams on the old client are unaffected and finish
@@ -485,13 +424,53 @@ func (s *Server) Reload(cfg *config.Config) {
 type clientRetryDirective struct {
 	http.ResponseWriter
 	srv *Server
+	// rec is the request's record once the relay has created it, so the
+	// client error-class header is computed from the SAME facts the retry
+	// ladder, the health predicates and the record used. It stays nil for the
+	// pre-record sinks (validation, in-flight admission); those classify from
+	// the written status alone.
+	rec *metrics.Record
 }
 
 func (c *clientRetryDirective) WriteHeader(status int) {
-	if status >= 400 && c.srv.cfg().SuppressClientRetries {
-		c.Header().Set("X-Should-Retry", "false")
+	cfg := c.srv.cfg()
+	if status >= 400 {
+		if cfg.SuppressClientRetries {
+			c.Header().Set("X-Should-Retry", "false")
+		}
+		// client_error_class=header negotiates the canonical class: the one
+		// classifier decides, so a rate limit announced by a 400 is labeled
+		// rate_limit (and marked retryable for the SDKs) rather than filed as a
+		// client fault, and a durable quota block is labeled quota (and not
+		// retryable) rather than left looking transient. suppress_client_retries
+		// still wins: the operator's blunt directive overrides the class advice.
+		if cfg.ClientErrorClass == config.ClientErrorClassHeader {
+			class := metrics.Classify(clientErrorFacts(c.rec, status))
+			c.Header().Set("X-Proxy-Error-Class", class.String())
+			if !cfg.SuppressClientRetries {
+				c.Header().Set("X-Should-Retry", strconv.FormatBool(class.Retryable()))
+			}
+		}
 	}
 	c.ResponseWriter.WriteHeader(status)
+}
+
+// clientErrorFacts renders the evidence the client-facing class reads: the
+// written status (what the client actually receives, which may differ from the
+// recorded one when a body-forbidden upstream status fails closed to 502) plus
+// the record's structured error members when the relay has them. A proxy-minted
+// type is marked Local so a provider spelling can never be attributed to the
+// provider; an empty type is "no provider claim", not a local failure.
+func clientErrorFacts(rec *metrics.Record, status int) metrics.ErrorFacts {
+	if rec == nil {
+		return metrics.ErrorFacts{Status: status}
+	}
+	return metrics.ErrorFacts{
+		Status: status,
+		Type:   rec.ErrorType,
+		Code:   rec.ErrorCode,
+		Local:  rec.ErrorType != "" && metrics.IsLocalErrorType(rec.ErrorType),
+	}
 }
 
 func (c *clientRetryDirective) Flush() {
@@ -568,6 +547,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, requestReadHintMax, reservation.chargeRead, s.cfg())
+	// Attach the record to the retry/class directive writer (created above) so
+	// an error response can carry the canonical class computed from the same
+	// facts the relay recorded. Pre-record sinks keep it nil and classify from
+	// the written status alone.
+	if d, ok := w.(*clientRetryDirective); ok {
+		d.rec = rec
+	}
 	if err != nil {
 		status := http.StatusBadRequest
 		var overflow *http.MaxBytesError
@@ -761,6 +747,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
+			// The retry/class directive writer was attached to the ORIGINAL
+			// record; re-point it at the translated one, or an error response on
+			// this path would carry the class of an abandoned record.
+			if d, ok := w.(*clientRetryDirective); ok {
+				d.rec = rec
+			}
 			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview, s.cfg()); err != nil {
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
@@ -959,9 +951,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if s.writeQueueDrainedError(w, rec, t.inbound, err) {
 			return
 		}
-		rec.ErrorType = "queue_full"
+		rec.ErrorType = metrics.TypeQueueFull
 		rec.ErrorMsg = err.Error()
-		writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
+		writeClientErrorHdr(w, rec, t.inbound, metrics.TypeRateLimit, "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
 		return
 	}
 	rec.QueueWaitMs += time.Since(queueStart).Milliseconds()

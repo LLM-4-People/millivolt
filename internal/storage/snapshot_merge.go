@@ -391,6 +391,20 @@ func mergeAttachedTableWhere(ctx context.Context, db mergeConn, table, where str
 		if table == "requests" && col == "attempts" {
 			quoted = `CASE WHEN incoming."attempts" IS NULL OR incoming."attempts" = '' THEN 'null' ELSE incoming."attempts" END`
 		}
+		// Merge also closes the reintroduction gap for the pre-0.3.34 TTFT
+		// anchor: a backup merged after the live database completed the boot
+		// repair bypasses that repair's one-shot probe because meta is never
+		// merged. A row that would land with a positive ttft_ms and no
+		// adopted attempt - final_attempt_at 0, or the column absent from the
+		// backup so the live default 0 applies - lands zeroed, exactly like
+		// migrate's repair. Rows with a stamped attempt keep their value.
+		if table == "requests" && col == "ttft_ms" {
+			if _, ok := incoming["final_attempt_at"]; ok {
+				quoted = `CASE WHEN incoming."ttft_ms" > 0 AND COALESCE(incoming."final_attempt_at", 0) = 0 THEN 0 ELSE incoming."ttft_ms" END`
+			} else {
+				quoted = `CASE WHEN incoming."ttft_ms" > 0 THEN 0 ELSE incoming."ttft_ms" END`
+			}
+		}
 		selects[i] = quoted
 	}
 	list := quoteIdents(cols)

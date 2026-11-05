@@ -159,7 +159,7 @@ type Record struct {
 	DebugSessionID string `json:"debug_session_id,omitempty"`
 
 	// Queueing/scheduler metadata.
-	QueueWaitMs int64 `json:"queue_wait_ms"`          // time spent in the scheduler queue before sending
+	QueueWaitMs int64 `json:"queue_wait_ms"`          // time parked at the admission queue (concurrency, pacing, provider cap, hold) plus error-storm gates; send-gate parking (retry pacing, Retry-After, backoff, probes) is not included
 	Retries     int   `json:"retries"`                // number of transparent upstream retries (429/5xx)
 	RateLimited bool  `json:"rate_limited,omitempty"` // scheduler wait or 429/503 pacing; HasRateLimit owns the exact 429 predicate
 	// Attempts records each transparently-retried upstream response (the ones
@@ -405,21 +405,6 @@ func (r *Record) GenThroughput() float64 {
 	return float64(r.GenTokens-1) / d.Seconds()
 }
 
-// IsError is the single canonical definition of "this request saw an upstream
-// failure". A request counts when the upstream produced a genuine failure -
-// a 5xx response or a structured error - at ANY point: as the final outcome
-// OR as an absorbed retry attempt (the upstream still failed, even if a later
-// retry recovered). A 429 is flow control, not an error, and never counts -
-// neither as the final status nor as an absorbed attempt. The same holds for
-// a 499 WITHOUT a structured error: the LOCAL client closed the connection
-// (its own cancellation - a relay write failed on broken pipe), recorded as
-// ClientDisconnected. A 499 WITH a structured error is different: the error
-// was observed on the wire before or while the client left (a provider
-// in-band stream error, or a translation failure), so the upstream failure
-// must not vanish from the error rate - it counts exactly like its 200 twin
-// (the committed status line a client abort cannot rewrite). (503 is retried
-// as a rate limit but is still a server error, so it counts.)
-//
 // StatusClientClosedRequest is the status recorded when the LOCAL client
 // disconnected before the proxy delivered a final response (nginx's "client
 // closed request" convention). It is a flow event like 429 - IsError treats a
@@ -446,56 +431,94 @@ func absorbedServerFailure(attempts []RetryAttempt) bool {
 	return false
 }
 
+// IsError is the single canonical definition of "this request saw an upstream
+// failure". A request counts when the upstream produced a genuine failure -
+// a 5xx response or a structured error - at ANY point: as the final outcome
+// OR as an absorbed retry attempt (the upstream still failed, even if a later
+// retry recovered). A 429 is flow control, not an error, and never counts -
+// neither as the final status nor as an absorbed attempt. The same holds for
+// a 499 WITHOUT a structured error: the LOCAL client closed the connection
+// (its own cancellation - a relay write failed on broken pipe), recorded as
+// ClientDisconnected. A 499 WITH a structured error is different: the error
+// was observed on the wire before or while the client left (a provider
+// in-band stream error, or a translation failure), so the upstream failure
+// must not vanish from the error rate - it counts exactly like its 200 twin
+// (the committed status line a client abort cannot rewrite). (503 is retried
+// for scheduler pacing but is still a server error, so it counts; a
+// rate-limit spelling in its body changes the class and the rate-limit
+// series, never this answer.)
+//
 // Use it everywhere instead of re-deriving the predicate so the live counter,
-// the aggregates, and the dashboard never disagree. The purge SQL predicate
-// (storage/purge.go's HasError clause) must stay semantically identical to
-// this function.
+// the aggregates, and the dashboard never disagree. The arms live in
+// OutcomeIsError, and the SQL twin is metrics.IsErrorSQL, which the purge
+// filter and the MCP describe document both render from this package.
 func (r *Record) IsError() bool {
-	// A final 429 (rate limit) or 499 (local client closed the connection
-	// before a final outcome) is flow control/own-abort, not an error - even
-	// though the provider's error body may classify the 429 (ErrorType =
-	// rate_limit_error/provider_error). Rate limiting is surfaced separately
-	// through HasRateLimit; client disconnects via ClientDisconnected.
-	if r.StatusCode == 429 || r.StatusCode == StatusClientClosedRequest {
-		// A 499 carrying a structured error observed the upstream's failure
-		// before the client left (an in-band stream error on the committed
-		// 200, or a translation failure): the client aborted around a real
-		// provider failure, which counts exactly like the 200 twin. A plain
-		// 429 keeps its flow-control meaning even when its body classifies
-		// it.
-		if r.StatusCode == StatusClientClosedRequest && r.ErrorType != "" {
-			return true
-		}
-		// Still honor an absorbed 5xx from an earlier attempt (a request that
-		// saw a genuine server failure before the client gave up on it).
-		return absorbedServerFailure(r.Attempts)
-	}
-	// A structured error classified by the proxy (queue_full,
-	// upstream_unreachable, stream_read_error, transform_error, or the
-	// provider's parsed error type) is always a genuine failure.
-	if r.ErrorType != "" {
-		return true
-	}
-	// Final HTTP status: any error status (429/499 already excluded above).
-	if r.StatusCode >= 400 {
-		return true
-	}
-	// Absorbed retry attempts: a 5xx that a later retry masked still counts as
-	// an upstream failure (a 429 attempt is flow control and does not).
-	return absorbedServerFailure(r.Attempts)
+	return OutcomeIsError(r.StatusCode, r.ErrorType, r.ErrorCode) || absorbedServerFailure(r.Attempts)
 }
 
-// HasRateLimit reports whether this request received HTTP 429, as its final
+// OutcomeIsError reports whether one observed outcome - a final response, or a
+// single absorbed retry attempt - is a genuine failure on the health surface.
+// It is the single owner of the health arms: Record.IsError composes it with
+// the absorbed-5xx arm, and the dashboard's error explorer enumerates exactly
+// the outcomes it accepts. A structured error classified by the proxy
+// (queue_full, upstream_unreachable, stream_read_error, transform_error, or the
+// provider's parsed error type) is always a genuine failure.
+//
+// The health surface asks "did this request fail", not "what kind of thing was
+// this" - that second question belongs to Classify, and the two answer
+// differently in the two documented families:
+//
+//   - a final 429 is the flow-control handshake the client can retry, so it is
+//     not an error even when its body names a durable quota/billing condition
+//     (the class is ClassQuota there, and quota_pause_mode owns the reaction);
+//   - a rate-limit class on any OTHER status is a failure here even though the
+//     class itself reads as flow control: a provider answering 400
+//     `tier_limit_exceeded`, an in-band 429 behind a committed 200, or a 499
+//     carrying a rate-limit error the client aborted around has the class
+//     rate_limit AND counts in the error rate (HasRateLimit counts it too).
+//
+// The predicate reads the status and the error TYPE; a spelling carried only
+// in error_code (a shape the envelope parser does not produce - it pairs every
+// code with a type) can change the class but not this answer.
+//
+// Both are fixed answers, and the SQL twin (IsErrorSQL) and the JS mirror
+// (recordOutcomeIsError) are pinned to this one by the health-predicate truth
+// table and the corpus lockstep.
+func OutcomeIsError(status int, typ, code string) bool {
+	// A 429 is flow control by status: the provider is asking for a slower
+	// rate and the client can retry, so it is not a failure here. Rate
+	// limiting is surfaced separately through HasRateLimit.
+	if status == 429 {
+		return false
+	}
+	// A 499 is the local client's own abort, so it is not a failure - except
+	// when it carries a structured error, which observed the upstream's
+	// failure before the client left (an in-band stream error on the committed
+	// 200, or a translation failure): that counts exactly like the 200 twin.
+	if status == StatusClientClosedRequest {
+		return typ != ""
+	}
+	return typ != "" || status >= 400
+}
+
+// HasRateLimit reports whether this request hit a rate limit, as its final
 // response, a retried attempt, or an in-band entry whose committed 200 kept
 // the status line from the client. It counts an affected request once, not its
-// attempts. RateLimited is broader scheduler metadata (queue waits and 503
+// attempts.
+//
+// A rate limit is the CLASS, not the status: providers commonly answer one with
+// a 400 (`tier_limit_exceeded`, `resource_exhausted`), and a status-only test
+// left those out of the rate-limit series while reading them as plain client
+// faults. This is a different question from the health surface: on a non-429
+// status the same request also fails (OutcomeIsError), while a bare 429 is not
+// an error. RateLimited is broader scheduler metadata (queue waits and 503
 // pacing) and intentionally does not define this observer metric.
 func (r *Record) HasRateLimit() bool {
-	if r.StatusCode == 429 {
+	if r.StatusCode == 429 || IsRateLimitClass(r.ErrorType, r.ErrorCode) {
 		return true
 	}
 	for _, attempt := range r.Attempts {
-		if attempt.StatusCode == 429 {
+		if attempt.StatusCode == 429 || IsRateLimitClass(attempt.ErrorType, attempt.ErrorCode) {
 			return true
 		}
 	}
@@ -608,7 +631,7 @@ func rawErrorString(raw json.RawMessage) string {
 func ParseErrorValue(raw json.RawMessage) (typ, code, msg string) {
 	typ, code, msg = ParseErrorComponents(raw)
 	if typ == "" && (code != "" || msg != "") {
-		typ = "provider_error"
+		typ = TypeProviderError
 	}
 	return typ, code, msg
 }
@@ -722,7 +745,10 @@ var nonRetryableQuotaClasses = map[string]bool{
 // error's durable quota/billing condition: the matched type first, else the
 // matched code, lowercased - "" when neither matches. The returned token is
 // a vocabulary entry by construction, so it is the safe protocol label for
-// gate reasons and hold labels: never provider-controlled envelope text.
+// gate reasons and hold labels: never provider-controlled envelope text. The
+// built-in vocabulary is authoritative and the operator's
+// quota_error_classes extension adds to it (config validation rejects an
+// extension that names a built-in spelling of another class).
 func NonRetryableQuotaClass(typ, code string) string {
 	typ, code = strings.ToLower(typ), strings.ToLower(code)
 	if nonRetryableQuotaClasses[typ] {
@@ -730,6 +756,12 @@ func NonRetryableQuotaClass(typ, code string) string {
 	}
 	if nonRetryableQuotaClasses[code] {
 		return code
+	}
+	ext := installedClassExtensions().Quota
+	for _, v := range ext {
+		if v == typ || v == code {
+			return v
+		}
 	}
 	return ""
 }
@@ -741,11 +773,14 @@ func IsNonRetryableQuotaErr(typ, code string) bool {
 }
 
 // TTFT returns the time to first token, or 0 if the response produced no
-// tokens (e.g. a pure error or empty completion). It is measured from the
-// adopted upstream attempt's send start - the first attempt for a clean
-// request, the successful attempt after retries - so every retry has its own
-// TTFT and the value never absorbs queueing, request parsing or retry
-// backoff. Duration still reflects total wall time.
+// tokens (e.g. a pure error or empty completion) or the request never sent an
+// upstream attempt (a parked cursor resume). It is measured from the adopted
+// upstream attempt's send start - the first attempt for a clean request, the
+// successful attempt after retries - so every retry has its own TTFT and the
+// value excludes proxy scheduler queueing, request parsing and retry backoff,
+// while the upstream transport window from request handoff (dial, TLS,
+// connection-pool wait, header wait) does count. Duration still reflects total
+// wall time.
 func (r *Record) TTFT() time.Duration {
 	if r.FirstTokenAt.IsZero() || r.FinalAttemptAt.IsZero() {
 		return 0

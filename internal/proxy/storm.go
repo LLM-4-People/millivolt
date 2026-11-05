@@ -203,9 +203,9 @@ func (s *Server) stormQueueErrorRecord(rec *metrics.Record, err error) (typ, msg
 		return "", "", false
 	}
 	rec.StatusCode = http.StatusTooManyRequests
-	rec.ErrorType = "storm_queue_full"
+	rec.ErrorType = metrics.TypeStormQueueFull
 	rec.ErrorMsg = err.Error()
-	return "rate_limit_error", "error storm protection: " + err.Error(), true
+	return metrics.TypeRateLimit, "error storm protection: " + err.Error(), true
 }
 
 func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record, inbound ir.Protocol, err error) bool {

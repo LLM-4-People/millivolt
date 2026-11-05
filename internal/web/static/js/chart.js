@@ -161,7 +161,7 @@ const CHART_SERIES = [
   { id: 'req',     label: 'requests',   color: 'accent',  fmt: fmt,      bar: true },
   { id: 'err',     label: 'errors',     color: 'err',     fmt: fmt,      bar: true },
   { id: 'rl',      label: 'rate limited', color: 'rl',    fmt: fmt,
-    title: X429_COUNTING_RULE + '. A rate limit is not an error.' },
+    title: X429_COUNTING_RULE + '. A bare 429 is not an error; a non-429 status carrying the class also counts in the error rate.' },
   { id: 'inTok',   label: 'tokens in',  color: 'accent2', fmt: fmt,      bar: true },
   { id: 'outTok',  label: 'tokens out', color: 'ok',      fmt: fmt,      bar: true },
   { id: 'reason',  label: 'reasoning',  color: 'cyan',    fmt: fmt,      bar: true },
@@ -737,7 +737,7 @@ const TILE_TITLES = {
   req: 'Request count over the blended token volume (input plus output), as a pair.',
   tokens: 'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of all tokens and the cache hit share of input underneath.',
   cost: 'Spend over the viewed period in USD, with the server\'s blended per-Mtok price underneath (cost-reporting requests only).',
-  health: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.',
+  health: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A bare 429 is not an error: both are distinct affected requests.',
   timing: 'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
 };
 

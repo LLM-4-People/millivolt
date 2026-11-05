@@ -751,7 +751,8 @@ func parseRampDuration(s string) (time.Duration, error) {
 // queued even though actual usage was tiny. Actual usage is charged at
 // settlement (`settleTokens`), so the bucket still enforces the window and can
 // go into debt on a real burst; the documented contract is a token budget that
-// permits bursts, not strict fixed-window quota enforcement.
+// permits oversized reservations, while the request budget is a strict sliding
+// window.
 func estimateTokens(rec *metrics.Record) int64 {
 	if rec == nil {
 		return 0
@@ -805,15 +806,10 @@ func invalidateUsage(rec *metrics.Record, err error) {
 
 // localErrorType reports whether an error type was minted by the proxy rather
 // than parsed from a provider envelope. Provider classifications keep their
-// own code when usage is invalidated after the failure.
+// own code when usage is invalidated after the failure. The vocabulary is
+// owned by metrics (the classifier's owner) so the two cannot drift.
 func localErrorType(t string) bool {
-	switch t {
-	case "", "transform_error", errStreamRead, "response_too_large",
-		"response_buffer_budget", "queue_full", "storm_queue_full",
-		typeUpstreamUnreachable:
-		return true
-	}
-	return false
+	return metrics.IsLocalErrorType(t)
 }
 
 // HandleThrottle is GET/POST /admin/throttle. GET returns every active

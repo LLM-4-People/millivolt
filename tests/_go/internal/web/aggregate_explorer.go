@@ -419,12 +419,16 @@ func TestErrorEntriesSemantics(t *testing.T) {
 	if len(ents) != 1 || ents[0].typ != "provider_overloaded" {
 		t.Fatalf("in-band → %v", ents)
 	}
-	// Absorbed 429 skipped; a typed transport attempt kept; a bare <400 attempt
-	// skipped; a 401 and a typed 5xx kept (client recordErrorEntries parity).
+	// Absorbed 429 skipped; a status-0 typed attempt (dial_failed) kept, while
+	// a status-0 retry stamped with the transport marker (metrics.TypeTransport)
+	// is skipped as retry mechanics rather than an upstream error event; a bare
+	// <400 attempt skipped; a 401 and a typed 5xx kept (client
+	// recordErrorEntries parity).
 	r = &metrics.Record{StatusCode: 200, Attempts: []metrics.RetryAttempt{
 		{StatusCode: 429},
 		{StatusCode: 502, ErrorType: "upstream"},
 		{StatusCode: 0, ErrorType: "dial_failed"},
+		{StatusCode: 0, ErrorType: metrics.TypeTransport},
 		{StatusCode: 401},
 		{StatusCode: 302}, // bare <400 → skipped
 	}, Start: time.Now()}

@@ -273,8 +273,9 @@ type Config struct {
 
 	// RetryableErrorClasses extends the built-in retryable in-band error
 	// vocabulary (OpenAI server_error / service_unavailable family,
-	// api_error, overloaded_error, timeout_error, engine_overloaded and the
-	// common gateway spellings) with operator-supplied type or code strings:
+	// api_error, overloaded_error, the timeout spellings, engine_overloaded
+	// and the common gateway spellings bad_gateway / gateway_timeout /
+	// upstream_error) with operator-supplied type or code strings:
 	// a gateway that reports a transient failure under a custom spelling can
 	// be re-sent without a code change. The built-in engine_overloaded
 	// capacity code also overrides the generic invalid_request_error
@@ -286,6 +287,34 @@ type Config struct {
 	// validation rejects them at load. Reload applies to new rescue
 	// decisions.
 	RetryableErrorClasses []string `yaml:"retryable_error_classes" json:"retryable_error_classes"`
+
+	// RateLimitErrorClasses extends the built-in transient rate-limit
+	// vocabulary (rate_limit_error / rate_limit_exceeded / tier_limit_exceeded
+	// / resource_exhausted / rpm+tpm spellings and friends) with
+	// operator-supplied type or code strings: a gateway that announces its
+	// limit under a custom spelling is then retried transparently, counted in
+	// the rate-limit series, and classified as a rate limit in the
+	// client-facing class. Unlike a bare 429, a non-429 status carrying the
+	// class also counts as a failed request on the health surface. Matched
+	// case-insensitively against the parsed envelope's type and code fields,
+	// never message text. Additive only: validation rejects an entry that
+	// names a built-in spelling of a different class, and a durable
+	// quota/billing spelling is never accepted. Reload applies to new
+	// classifications and re-reads stored history through the same
+	// vocabulary.
+	RateLimitErrorClasses []string `yaml:"rate_limit_error_classes" json:"rate_limit_error_classes"`
+
+	// QuotaErrorClasses extends the built-in durable quota/billing vocabulary
+	// (insufficient_quota/credits, spend and hard limits, and the numeric
+	// business codes of some gateways) with operator-supplied type or code
+	// strings. A match is a durable account condition: the ordinary retry
+	// ladder never absorbs it, quota_pause_mode owns the reaction, and on the
+	// health surface it is an error. Matched case-insensitively against the
+	// parsed envelope's type and code fields, never message text. Additive
+	// only, like rate_limit_error_classes. Reload applies to new
+	// classifications and re-reads stored history through the same
+	// vocabulary.
+	QuotaErrorClasses []string `yaml:"quota_error_classes" json:"quota_error_classes"`
 
 	// SuppressClientRetries makes the proxy the clients' sole retry
 	// authority: while enabled, every error response the LLM relay returns
@@ -302,6 +331,23 @@ type Config struct {
 	// auto-retry in official SDKs and cannot carry new headers. Success
 	// responses are untouched. Reload applies to new responses.
 	SuppressClientRetries bool `yaml:"suppress_client_retries" json:"suppress_client_retries"`
+
+	// ClientErrorClass negotiates millivolt's canonical error class to clients
+	// on the LLM relay surface. "off" (the default) leaves every response
+	// exactly as the provider sent it. "header" stamps two response headers on
+	// every error status before the status line commits:
+	// `X-Proxy-Error-Class: <class>` - the canonical class of that failure:
+	// rate_limit, quota, unavailable, unreachable, timeout, content,
+	// client_error, proxy, canceled or upstream - and `X-Should-Retry:
+	// true|false` derived from the class, the header the official OpenAI SDKs
+	// read. A client can therefore tell a rate limit announced by a 400 from a
+	// genuine client fault, and a durable quota block from transient
+	// backpressure, without parsing provider-specific envelopes. The body is
+	// never rewritten: relayed errors stay verbatim. suppress_client_retries
+	// still wins while it is on (x-should-retry stays false on every error).
+	// Mid-stream SSE errors cannot carry new headers - the status line has
+	// already committed. Reload applies to new responses.
+	ClientErrorClass string `yaml:"client_error_class" json:"client_error_class"`
 
 	// Error storm protection observes eligible upstream attempts in a bounded
 	// rolling window and gates new sends by provider or exact recorded model.

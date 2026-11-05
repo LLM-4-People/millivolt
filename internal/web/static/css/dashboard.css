@@ -32,10 +32,11 @@
     /* Solid danger hover needs a touch more red than --err while keeping the
        page background readable as its label color. */
     --danger-hover: #ff8a8a;
-    /* Rate-limited (HTTP 429) throttle tone: one owner for the chart's
-       rate-limit series and the explorer's ×429 badge. Distinct from --err
-       (a rate limit is not an error) and --warn (the chart's cost/rate axis
-       color); line-vs-bar marks and tooltips keep them separable. */
+    /* Rate-limited throttle tone: one owner for the chart's rate-limit
+       series and the explorer's ×429 badge. Distinct from --err (a bare 429
+       is flow control, though a non-429 rate-limit class still counts as an
+       error) and --warn (the chart's cost/rate axis color); line-vs-bar
+       marks and tooltips keep them separable. */
     --rl: #ff9346;
     /* Header/footer instrument rails sit one step darker than --panel. */
     --rail: #100e0b;

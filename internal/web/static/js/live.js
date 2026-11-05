@@ -547,6 +547,10 @@ let _routedHash = null;
 
 function renderAll(data) {
   lastData = data;
+  // Operator-installed rate-limit extensions arrive with the payload; install
+  // them before any row is classified so the browser's pills and error groups
+  // agree with the server's aggregates.
+  setRateLimitVocabulary(data && data.rate_limit_classes);
   // Reset scroll against the old layout, before any DOM writes. Setting it
   // after inserting the table forces a complete synchronous table layout.
   resetLogWindow();

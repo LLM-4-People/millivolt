@@ -70,9 +70,11 @@ module.exports = async function w16Mirrors(H) {
       await loaded(isolated);
       await settleUntil(() => sw.eval('!!lastData'));
 
-      // recordIsError mirrors metrics.Record.IsError. The 24 rows mirror the
+      // recordIsError mirrors metrics.Record.IsError. The rows mirror the
       // semantics of tests/_go/internal/metrics/iserror_corpus.go (the Go
-      // suite owns the corpus); the JS predicate must agree on every row.
+      // suite owns the corpus, and the lockstep pin in
+      // tests/_go/internal/metrics/iserror_lockstep.go checks names, order and
+      // count); the JS predicate must agree on every row.
       const corpus = [
         ['final 200, no attempts', {status_code: 200}, false],
         ['final 429 rate limit', {status_code: 429, error_type: 'rate_limit_error'}, false],
@@ -98,12 +100,33 @@ module.exports = async function w16Mirrors(H) {
         ['cancel after429', {status_code: 499, attempts: [{status_code: 429}]}, false],
         ['final 499 with in-band error', {status_code: 499, error_type: 'api_error', error_code: 'internal_error'}, true],
         ['final 499 with in-band rate limit error', {status_code: 499, error_type: 'rate_limit_error'}, true],
+        ['final 499 with in-band error after an absorbed 429', {status_code: 499, error_type: 'api_error', error_code: 'internal_error', attempts: [{status_code: 429}]}, true],
         ['committed 200 with an in-band 429', {status_code: 200, error_type: 'rate_limit_error', attempts: [{status_code: 429, in_band: true}]}, true],
+        ['400 carrying a rate-limit code', {status_code: 400, error_type: 'tier_limit_exceeded', error_code: 'tier_limit_exceeded'}, true],
+        ['400 carrying a durable quota code', {status_code: 400, error_type: 'insufficient_quota'}, true],
+        ['400 client-fault type with a transient code', {status_code: 400, error_type: 'invalid_request_error', error_code: 'internal_error'}, true],
         ['synthetic in-band 500 counts as an absorbed failure', {status_code: 200, attempts: [{status_code: 500, in_band: true}]}, true],
       ];
       const errorMisses = corpus.filter(([, rec, want]) => sw.recordIsError(rec) !== want).map(([name]) => name);
-      check('recordIsError agrees with the 26-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
+      check('recordIsError agrees with the 30-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
+
+      // The built-in vocabulary mirror can be replaced at runtime by the
+      // effective vocabulary the server publishes with the bootstrap payload
+      // (rate_limit_classes, installed by setRateLimitVocabulary), so an
+      // operator's rate_limit_error_classes extension classifies identically
+      // in the browser and on the server. Passing no list restores the
+      // built-ins.
+      check('a published rate-limit vocabulary replaces the built-in mirror, and is restorable',
+        (() => {
+          const before = sw.recordHasRateLimit({status_code: 400, error_type: 'gateway_throttle'});
+          sw.setRateLimitVocabulary(['gateway_throttle']);
+          const extended = sw.recordHasRateLimit({status_code: 400, error_type: 'gateway_throttle'});
+          const unrelated = sw.recordHasRateLimit({status_code: 200, error_type: 'ordinary_error'});
+          sw.setRateLimitVocabulary(null);
+          const after = sw.recordHasRateLimit({status_code: 400, error_type: 'gateway_throttle'});
+          return before === false && extended === true && unrelated === false && after === false;
+        })());
 
       // statusClass mirrors contribStatusClass/statusClass in aggregate_status.go on
       // the boundary rows: 429 stays a 4xx class (never an error), 499 is its
@@ -141,11 +164,14 @@ module.exports = async function w16Mirrors(H) {
         sw.recordMatchesStatusFilter({status_code: 200}, '') === true);
 
       // recordErrorEntries mirrors errorEntries (aggregate.go): 429 and a
-      // plain 499 final produce no entry, a 499 carrying the provider's
-      // in-band error does (the client aborted around a real failure), an
+      // plain 499 final produce no entry, a 499 carrying a structured error
+      // does (the client aborted around a real upstream failure), an
       // in-band provider error on a 200 does, and
-      // absorbed attempts keep genuine failures (5xx, typed, 4xx) while
-      // skipping flow control and bare non-failures. In-band attempt entries
+      // absorbed attempts keep genuine failures (5xx, typed, 4xx, and a
+      // rate-limit code, which is a failure with a rate-limit cause) while
+      // skipping a bare 429, bare non-failures, and a transport retry
+      // (retry mechanics, not an upstream error event - the Go enumerator
+      // skips error_type 'transport' the same way). In-band attempt entries
       // are health evidence, never a second disclosure for the final failure,
       // including the synthetic in-band 5xx shape. errorKey mirrors the Go
       // type|code|msg identity the explorer error dimension filters by.
@@ -155,8 +181,10 @@ module.exports = async function w16Mirrors(H) {
           {status_code: 429},
           {status_code: 502, error_type: 'upstream'},
           {status_code: 0, error_type: 'dial_failed'},
+          {status_code: 0, error_type: 'transport'},
           {status_code: 401},
           {status_code: 302},
+          {status_code: 400, error_type: 'tier_limit_exceeded', error_code: 'tier_limit_exceeded'},
           {status_code: 429, in_band: true},
           {status_code: 500, in_band: true},
         ],
@@ -168,13 +196,21 @@ module.exports = async function w16Mirrors(H) {
           ['upstream', '502', true, '2026-09-14T00:00:00Z'],
           ['dial_failed', '', true, '2026-09-14T00:00:00Z'],
           ['http_401', '401', true, '2026-09-14T00:00:00Z'],
+          ['tier_limit_exceeded', 'tier_limit_exceeded', true, '2026-09-14T00:00:00Z'],
         ]));
       check('final 429 and a plain 499 produce no error entry (flow events)',
         sw.recordErrorEntries({status_code: 429, error_type: 'rate_limit_error'}).length === 0 &&
         sw.recordErrorEntries({status_code: 499}).length === 0);
+      check('a rate limit announced by a code on a 400 is a failure entry and a rate-limit event',
+        sw.recordErrorEntries({status_code: 400, error_type: 'tier_limit_exceeded', error_code: 'tier_limit_exceeded'}).length === 1 &&
+        sw.recordIsError({status_code: 400, error_type: 'tier_limit_exceeded', error_code: 'tier_limit_exceeded'}) === true &&
+        sw.recordHasRateLimit({status_code: 400, error_type: 'tier_limit_exceeded', error_code: 'tier_limit_exceeded'}) === true);
       check('a 499 carrying the provider in-band error produces an entry like its 200 twin',
         JSON.stringify(sw.recordErrorEntries({status_code: 499, error_type: 'api_error', error_code: 'internal_error', error_msg: 'temporarily unavailable'}).map(e => [e.type, e.code, e.msg])) ===
         JSON.stringify([['api_error', 'internal_error', 'temporarily unavailable']]));
+      check('the 499 final predicate reads its own type, not the attempt list',
+        JSON.stringify(sw.recordErrorEntries({status_code: 499, error_type: 'api_error', error_code: 'internal_error', attempts: [{status_code: 429}]}).map(e => [e.type, e.code, e.absorbed])) ===
+        JSON.stringify([['api_error', 'internal_error', false]]));
       check('an in-band provider error on a 200 is still a final error entry',
         JSON.stringify(sw.recordErrorEntries({status_code: 200, error_type: 'provider_overloaded', error_msg: 'x'}).map(e => [e.type, e.code, e.msg])) ===
         JSON.stringify([['provider_overloaded', '200', 'x']]));

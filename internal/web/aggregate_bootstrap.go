@@ -23,6 +23,13 @@ type bootstrapPayload struct {
 	Storm            any           `json:"storm,omitempty"`
 	Restart          any           `json:"restart,omitempty"`
 	Storage          storageSignal `json:"storage"`
+	// RateLimitClasses carries the EFFECTIVE rate-limit vocabulary (built-ins
+	// plus the operator's rate_limit_error_classes extensions) when extensions
+	// are installed, so the dashboard's client-side classification agrees with
+	// the server's. Omitted when the built-ins alone apply - the browser's
+	// static mirror (entities.js RATE_LIMIT_CLASSES) is then the answer, and
+	// the payload keeps its pinned shape.
+	RateLimitClasses []string `json:"rate_limit_classes,omitempty"`
 }
 
 type storageSignal struct {
@@ -116,6 +123,12 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	observed := metrics.ObserveSnapshot(snapshot, a.ObserveModels(true, snapshot.Records, snapshot.InFlightRecords))
 	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardContentVersion()}
+	// Operator rate-limit extensions ride the payload so the browser
+	// classifies the same rows the same way; the key stays absent when the
+	// built-ins alone apply.
+	if len(metrics.RateLimitExtensions()) > 0 {
+		payload.RateLimitClasses = metrics.RateLimitClassVocabulary()
+	}
 	payload.Storage = a.storageSignal()
 	if a.Dash != nil {
 		payload.Dash = a.Dash()

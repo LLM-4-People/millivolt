@@ -98,7 +98,7 @@ module.exports = async function renderLive(H) {
       check(`${dim} has one separate error/429 request tally`,
         card.querySelectorAll('.xp-node-err').length===1 && card.querySelector('.xp-node-err').textContent==='1 err' &&
         card.querySelectorAll('.xp-node-rate').length===1 && card.querySelector('.xp-node-rate').textContent==='2 ×429' &&
-        card.querySelector('.xp-node-rate').title==='Requests with final or retried HTTP 429; each request counted once' &&
+        card.querySelector('.xp-node-rate').title==='Requests with a final, retried or in-band rate limit (HTTP 429 or a recognized rate-limit type/code); each request counted once' &&
         card.querySelector('.xp-node-signals').textContent==='1 err · 2 ×429');
       for (const [name, counts, expected] of [
         ['zero', {err_final:0,rate_limit_requests:0}, ''],

@@ -1,5 +1,7 @@
 package sse
 
+import "github.com/LLM-4-People/millivolt/internal/metrics"
+
 // OpenAI-compatible wire envelopes shared by every path that synthesizes a
 // chat completion - streamed chunk or final document - for a client: the
 // Anthropic bridge (internal/format) and the Cursor bridge
@@ -9,9 +11,10 @@ package sse
 // stream, the Cursor bridge stamps per chunk - both policies survive.
 
 // TypeUpstreamError is the OpenAI error type for an upstream failure,
-// carried in-band on a stream or recorded on an attempt. One owner: every
-// emitter renders through this constant.
-const TypeUpstreamError = "upstream_error"
+// carried in-band on a stream or recorded on an attempt. The string is owned
+// by internal/metrics (the classifier's canonical vocabulary); this alias
+// makes every sse emitter read that one owner.
+const TypeUpstreamError = metrics.TypeUpstreamError
 
 // ErrorObject returns the client-facing OpenAI error object embedded in
 // envelopes: {"message":...,"type":...,"param":null,"code":...}. code is

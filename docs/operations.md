@@ -1131,20 +1131,26 @@ body has the `request_body_read_timeout` budget, SSE writes have the
 `sse_write_progress_timeout` per-event progress bound, and an upstream body
 that stops sending for `upstream_stream_idle_timeout` is canceled.
 
-Request and token budgets start full when enabled and refill continuously at
-the configured count/window rate. Request budget is charged once per proxy
-admission, not again for each absorbed upstream retry. Token admission reserves
-the captured prompt characters divided by four, then settles against final
-reported usage. The client's output ceiling (`max_tokens` and its spellings) is
-deliberately not reserved: it is a ceiling, not expected usage, and reserving it
-would turn the budget into a worst-case concurrency cap. A reservation larger
-than the bucket's entire capacity can proceed while credit is positive, putting
-the bucket into debt that refill or usage settlement can repay. These controls
-permit bursts and oversized requests; they are not strict fixed-window provider
-quota enforcement. A token budget therefore also sets the sustained average
-rate: 500K tokens per 6h refills at about 23 tokens/s, so once the initial
-budget is spent, later requests wait for refill unless actual usage settles
-lower than the reservation.
+Request budgets are strict sliding windows: at most the configured count is
+admitted in any trailing window of the configured length, so an idle provider
+banks nothing and a busy one cannot spend future allowance as a present burst.
+Charging the window is what makes the limit match a provider that counts
+requests per rolling or fixed minute; a refilling budget could emit the whole
+count in one instant and then refill through the same span, which is how a
+`100 per minute` setting reached a provider's `101/100`. Each admitted request
+is charged once, at proxy admission, not again for each absorbed upstream retry.
+A count above 65536 is enforced by even spacing at the same ceiling instead of
+one timestamp per slot, so the memory a window holds stays bounded. Token
+budgets remain refilling buckets: prompt tokens are reserved from the captured
+characters divided by four and then settled against final reported usage, and a
+reservation larger than the whole capacity may proceed while credit is
+positive, leaving debt that refill or settlement repays. The client's output
+ceiling (`max_tokens` and its spellings) is deliberately not reserved: it is a
+ceiling, not expected usage, and reserving it would turn the token budget into
+a worst-case concurrency cap. A token budget therefore also sets the sustained
+average rate: 500K tokens per 6h refills at about 23 tokens/s, so once the
+initial budget is spent, later requests wait for refill unless actual usage
+settles lower than the reservation.
 
 ### Error storm protection
 
@@ -1201,7 +1207,8 @@ quota exclusions, native handshakes and client-facing failures.
 Open Settings, select **Quota pause**, and choose the reaction to a 429 whose
 error envelope is a durable account condition - `insufficient_quota`,
 `insufficient_credits`, spend/hard limits, the recognized numeric billing codes
-(the classification is fixed; only the reaction is configurable):
+(the built-in classification is fixed and `quota_error_classes` may add
+spellings; only the reaction is configurable):
 
 - **off** (default): the 429 surfaces to the client immediately. Nothing is
   parked or retried.
@@ -1224,14 +1231,18 @@ The retry-mode gate shares the storm scheduler's parking, probes and pacing,
 so storm recovery settings configure it without storm protection being
 enabled. It surfaces in the storm banner as a quota incident with a
 **Resume now** action (`POST /admin/quota`); manual-mode holds appear on the
-pause surface with their reason and resume like any hold. A quota 429 is
-never marked as a rate limit, and quota re-sends never burn the transient
+pause surface with their reason and resume like any hold. A quota 429 never
+arms the rate-limit pacing trip (the rate-limit health series still counts the
+429 itself), and quota re-sends never burn the transient
 `max_retries` budget. The retry gate is in-memory - a restart drops it and
 the provider's next durable quota 429 re-arms it - while manual-mode holds
 persist like every operator pause. In-band occurrences (the same envelope
 inside a 200 stream) arm the pause the same way; that request already
 answered, so it is never parked. Translated Anthropic-format and Cursor
-upstreams keep the off behavior in every mode.
+upstreams keep the off behavior in every mode. The built-in vocabulary is
+fixed; `quota_error_classes` may add a gateway-specific spelling as a durable
+quota class (it may never move a built-in spelling between classes, and it
+re-reads stored history through the same vocabulary).
 
 ### Debug and preview capture
 
@@ -1428,8 +1439,9 @@ and first numbers, and a final upstream failure renders as an error alert above
 the groups. Only the selected group is shown; card headers collapse, and the
 active group and collapse choices survive live updates.
 
-A typed rate limit is flow control, not an error: its reason, code and message
-stay in the rate-limit card while the alert stays reserved for a final failure.
+A typed 429 is flow control, so its reason, code and message stay in the
+rate-limit card instead of the error alert; a rate limit carried by a non-429
+status is a final failure and renders the alert like any other.
 An in-band upstream response that arrived after a committed success is disclosed
 in Diagnostics rather than counted as a retry. Live pause and throttle state
 appear as explicit rows while a request is in flight.
@@ -1461,9 +1473,16 @@ sensitive; do not publish request drawers from private history without review.
 Request duration starts after upload and includes metadata work, queue/hold/retry
 waits and response handling. TTFT is measured from the upstream attempt's own
 send start to the first token (reasoning or answer), so every retry has its own
-TTFT and the value excludes queueing, request parsing and retry backoff. A
-request that produced no token, and any non-streamed response, has no TTFT: the
-log shows a placeholder, not 0 ms, and aggregates skip it. TPS is the single
+TTFT. The value excludes proxy scheduler queueing, request parsing and retry
+backoff, but it does span the upstream transport window from request handoff
+(dial, TLS, connection-pool wait, header wait). A request that produced no
+token, one that never sent an upstream attempt of its own (a parked cursor
+resume), and any non-streamed response have no TTFT: the log shows a
+placeholder, not 0 ms, and aggregates skip it. Rows written before
+0.3.34 stored `ttft_ms` anchored at request start (upload, queueing and retry
+backoff included) and were zeroed once by the boot repair, so they report TTFT
+as absent; their `started_at` and `first_token_at` timestamps remain, keeping
+`pre_token_ms` and decode windows usable. TPS is the single
 generation-speed measure: (generation tokens - 1) over the first-token to
 last-token window. Average TTFT and average TPS are the arithmetic means of
 those per-request samples. TPS is absent for fewer than two tokens, a
@@ -1489,9 +1508,13 @@ indexes can overstate the tool-call count without growing memory past the
 bound.
 
 Errors count affected requests with a genuine failure, including recovered
-upstream failures. HTTP 429 counts requests that encountered a final, retried or
-in-band 429 (a 429 whose status line a committed 200 could not relay); the two
-signals can overlap, but 429 alone is not an error. Client-local
+upstream failures. Rate limits count requests that saw a rate-limit class on
+the final, a retried or an in-band attempt: an HTTP 429, a 429 whose status
+line a committed 200 could not relay, or a provider spelling the classifier
+recognizes (such as `tier_limit_exceeded` on a 400); each request counts once.
+The two signals can overlap: a bare 429 is not an error, but a non-429 status
+that carries a rate-limit class failed the request and counts in both.
+Client-local
 cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
@@ -1594,8 +1617,11 @@ LIMIT 20
 
 `pre_token_ms` is the wait the caller felt, including queue and retry waits;
 `ttft_ms` is measured from the adopted upstream attempt's send start, so a
-retried request shows a small ttft beside a large `pre_token_ms`. `decode_ms` is
-the streaming window and `tail_ms` what remains after the last token, where a
+retried request shows a small ttft beside a large `pre_token_ms`. Rows written
+before 0.3.34 carry a start-anchored `ttft_ms` and were zeroed once by the
+boot repair, so their `ttft_ms` reads 0 (absent) while `pre_token_ms` and
+`decode_ms` stay usable from the stored timestamps. `decode_ms` is the
+streaming window and `tail_ms` what remains after the last token, where a
 millisecond of rounding noise is normal. A request that produced no token, or
 was not streamed, has nothing to decompose, hence the `first_token_at > 0` gate.
 
@@ -1770,6 +1796,24 @@ Reclaim them manually during a maintenance window: stop the proxy, run
 `sqlite3 /data/proxy.db 'VACUUM;'` (or any SQLite client) against `db_path`,
 and confirm `PRAGMA freelist_count` returns 0. The automatic pass is never
 retried on a later boot, so a failed attempt needs this manual step.
+
+Boot migrations also own a small set of one-shot data repairs for shapes older
+binaries could write but current writers never produce: an empty-string JSON
+document in `attempts` or `tool_names` is rewritten to the canonical `null`,
+and a positive `ttft_ms` with `final_attempt_at = 0` (the pre-0.3.34
+start-anchored TTFT, recorded with upload, queueing and retry backoff
+included) is reset to 0 because the original per-attempt anchor was never
+stored and cannot be recovered. Each repair has its own `meta` marker
+(`attempts_repaired`, `tool_names_repaired`, `ttft_anchor_repaired`): the
+marker is written after a clean probe or after the rewrite, later boots read
+one row instead of rescanning the table, and deleting the marker (or restoring
+a database that predates it) re-arms the probe. A repair that cannot run fails
+boot closed instead of serving history its own consumers would reject. The
+first boot after an upgrade that finds rows to rewrite may pause while it
+scans and rewrites them, and the totals rebuild follows: the rewrite advances
+the projection epoch, which invalidates the persisted totals document. The
+rewrite can transiently grow the WAL, so keep free space on the database
+volume as for any other large write.
 
 Enqueue is bounded and nonblocking. Overflow or write failures can lose durable
 records even when HTTP succeeds. Bootstrap's

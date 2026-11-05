@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -283,6 +284,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := validateQuotaPause(c); err != nil {
+		return err
+	}
+	if err := validateClientErrorClass(c); err != nil {
 		return err
 	}
 	// durations: negatives are always invalid. 0 is meaningful where documented
@@ -656,23 +660,65 @@ func validateStorm(c *Config) error {
 		}
 		seen[code] = true
 	}
-	// retryable_error_classes extends the built-in in-band retry vocabulary;
-	// matching is case-insensitive, so duplicates are compared that way too.
-	// A durable quota/billing class can never become retryable - waiting
-	// cannot restore credits - and is rejected here rather than silently
-	// denied at match time, so the operator gets the feedback at load.
-	classSeen := make(map[string]bool, len(c.RetryableErrorClasses))
-	for _, class := range c.RetryableErrorClasses {
-		if strings.TrimSpace(class) == "" {
-			return fmt.Errorf("retryable_error_classes: %q must not be empty or only whitespace", class)
-		}
-		lower := strings.ToLower(class)
-		if classSeen[lower] {
-			return fmt.Errorf("retryable_error_classes: duplicate %q", class)
-		}
-		classSeen[lower] = true
-		if metrics.IsNonRetryableQuotaErr(class, class) {
-			return fmt.Errorf("retryable_error_classes: %q is a durable quota/billing class and is never retryable", class)
+	// The operator extension lists extend the built-in classification
+	// vocabularies; matching is case-insensitive, so duplicates are compared
+	// that way too. A durable quota/billing class can never become retryable -
+	// waiting cannot restore credits - and an extension may never name a
+	// built-in spelling of a different class: the built-in classification
+	// stays authoritative and a list can only add. Both rules are enforced
+	// here rather than silently denied at match time, so the operator gets the
+	// feedback at load.
+	if err := validateErrorClassExtensions(c); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateErrorClassExtensions owns the three operator extension lists:
+// retryable_error_classes, rate_limit_error_classes and quota_error_classes.
+// Every entry must be a non-blank, case-insensitively unique spelling, no
+// spelling may appear in two lists (it would be ambiguous), and no entry may
+// name a built-in spelling of a different class: an extension adds, it never
+// moves a spelling between classes or weakens a built-in. The one documented
+// exception is retryable_error_classes, which stays authoritative over the
+// built-in client-fault deny (a gateway that mislabels a transient failure as
+// invalid_request_error can be opted back in); the rate-limit and quota lists
+// have no such override.
+func validateErrorClassExtensions(c *Config) error {
+	lists := []struct {
+		key   string
+		list  []string
+		class string
+		// alsoAllowed are additional built-in classes this list may name,
+		// overriding the default built-in deny.
+		alsoAllowed []string
+	}{
+		{"retryable_error_classes", c.RetryableErrorClasses, "retryable", []string{"client_error"}},
+		{"rate_limit_error_classes", c.RateLimitErrorClasses, "rate_limit", nil},
+		{"quota_error_classes", c.QuotaErrorClasses, "quota", nil},
+	}
+	seen := make(map[string]string)
+	for _, l := range lists {
+		for _, entry := range l.list {
+			if strings.TrimSpace(entry) == "" {
+				return fmt.Errorf("%s: %q must not be empty or only whitespace", l.key, entry)
+			}
+			lower := strings.ToLower(entry)
+			if prev, ok := seen[lower]; ok {
+				return fmt.Errorf("%s: %q already appears in %s; a spelling may belong to only one class", l.key, entry, prev)
+			}
+			seen[lower] = l.key
+			builtin := metrics.BuiltinClass(entry)
+			if builtin == "" || builtin == l.class || slices.Contains(l.alsoAllowed, builtin) {
+				// Unknown spellings are the point of an extension; a built-in
+				// of the same class, or one the list may override, is a no-op
+				// or the documented override.
+				continue
+			}
+			if builtin == "quota" {
+				return fmt.Errorf("%s: %q is a durable quota/billing class and is never retryable", l.key, entry)
+			}
+			return fmt.Errorf("%s: %q is a built-in %s class; extensions may only add spellings, never move a built-in between classes", l.key, entry, builtin)
 		}
 	}
 	return nil
@@ -693,4 +739,14 @@ func validateQuotaPause(c *Config) error {
 			strconv.Itoa(c.QuotaPauseRecoverySuccesses))
 	}
 	return nil
+}
+
+// validateClientErrorClass owns the client_error_class enum: exact lowercase
+// (deny by default), like quota_pause_mode.
+func validateClientErrorClass(c *Config) error {
+	switch c.ClientErrorClass {
+	case ClientErrorClassOff, ClientErrorClassHeader:
+		return nil
+	}
+	return fmt.Errorf("client_error_class: %q must be one of %s", c.ClientErrorClass, clientErrorClassModes())
 }

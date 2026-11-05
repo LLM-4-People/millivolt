@@ -90,6 +90,12 @@ func (c *Config) Clone() *Config {
 	if c.RetryableErrorClasses != nil {
 		out.RetryableErrorClasses = append([]string{}, c.RetryableErrorClasses...)
 	}
+	if c.RateLimitErrorClasses != nil {
+		out.RateLimitErrorClasses = append([]string{}, c.RateLimitErrorClasses...)
+	}
+	if c.QuotaErrorClasses != nil {
+		out.QuotaErrorClasses = append([]string{}, c.QuotaErrorClasses...)
+	}
 	if c.Providers != nil {
 		out.Providers = make(map[string]ProviderOverride, len(c.Providers))
 		for k, v := range c.Providers {

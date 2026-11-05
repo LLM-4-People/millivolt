@@ -56,7 +56,7 @@ func (a *Analyzer) recordStandaloneError(code, message json.RawMessage) {
 		a.setStreamError(TypeUpstreamError, "", "upstream response failed")
 		return
 	}
-	a.setStreamError("provider_error", codeString, msg)
+	a.setStreamError(metrics.TypeProviderError, codeString, msg)
 }
 
 // SetLocalFailure records a proxy-minted failure as an upstream_error with the

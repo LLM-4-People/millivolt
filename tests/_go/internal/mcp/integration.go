@@ -547,7 +547,7 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	if _, ok := limit["state"].(map[string]any); !ok {
 		t.Fatalf("set_throttle must report the resulting state: %v", limit)
 	}
-	if note := text(t, limit, "note"); !strings.Contains(note, "not strict fixed-window") {
+	if note := text(t, limit, "note"); !strings.Contains(note, "strict sliding window") {
 		t.Fatalf("set_throttle must state its enforcement semantics: %q", note)
 	}
 	live.invoke(t, "set_throttle", map[string]any{"provider": provider, "clear": true})

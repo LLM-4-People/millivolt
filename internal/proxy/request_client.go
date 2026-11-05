@@ -383,20 +383,20 @@ func firstNonEmpty(vals ...string) string {
 // typeInvalidRequestError is the OpenAI error type the request trust
 // boundaries stamp on client-side rejections (routing headers, body decode,
 // token caps). One constant owns the spelling across every 400 surface.
-const typeInvalidRequestError = "invalid_request_error"
+const typeInvalidRequestError = metrics.TypeInvalidRequest
 
 // typeAPIError is OpenAI's generic error type: the unclassified default for
 // upstream failures that carried no structured error envelope, and the type
 // the proxy's own 502 surfaces (translation, metadata, degenerate
 // completions) stamp. One constant owns the spelling across every 502
 // surface.
-const typeAPIError = "api_error"
+const typeAPIError = metrics.TypeAPIError
 
 // typeUpstreamUnreachable is the OpenAI error type for a transport-level
 // upstream failure: no HTTP response at all (connect refused/reset, DNS,
 // timeout awaiting headers). Shared by the send-failure epilogues and both
 // in-band relay variants so the classification cannot drift.
-const typeUpstreamUnreachable = "upstream_unreachable"
+const typeUpstreamUnreachable = metrics.TypeUpstreamUnreachable
 
 // upstreamErrorFields resolves the error type/message to surface for an
 // upstream 4xx/5xx whose captured envelope carried neither: the

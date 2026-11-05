@@ -422,17 +422,20 @@ func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 }
 
 // errorEntries is the Go mirror of the client's recordErrorEntries enumerator
-// (final entry + absorbed-attempt entries, 429 flow control excluded) - the
-// single owner of what counts as an error signature event.
+// (final entry + absorbed-attempt entries) - the single owner of what counts as
+// an error signature event. It reads the canonical health predicate
+// (metrics.OutcomeIsError) rather than re-deriving error-ness from the status,
+// so every entry names a real failure outcome: a bare 429 and a plain 499 are
+// flow events, while a request that failed around a rate limit (a provider
+// answering 400 `tier_limit_exceeded`, an in-band 429 behind a committed 200)
+// is an error entry AND counts in the rate-limit series. Entries are failure
+// EVENTS (per attempt); Record.IsError counts affected REQUESTS through its
+// absorbed-5xx arm, so a recovered typed or bare 4xx attempt can list here
+// without the request counting in the error KPI.
 func errorEntries(r *metrics.Record) []errEnt {
 	var out []errEnt
 	fin := r.StatusCode
-	// A final 429 is flow control and a plain final 499 is the client's own
-	// cancellation - neither produces an error-group entry. A 499 carrying a
-	// structured error_type, however, observed the upstream's own failure
-	// (an in-band stream error the client aborted around): it produces one
-	// exactly like its 200 twin.
-	if fin != 429 && !(fin == metrics.StatusClientClosedRequest && r.ErrorType == "") && (r.ErrorType != "" || fin >= 400) {
+	if metrics.OutcomeIsError(fin, r.ErrorType, r.ErrorCode) {
 		typ := r.ErrorType
 		if typ == "" {
 			typ = "http_" + strconv.Itoa(fin)
@@ -449,8 +452,15 @@ func errorEntries(r *metrics.Record) []errEnt {
 			// final error entry already owns this failure.
 			continue
 		}
+		if a.ErrorType == metrics.TypeTransport {
+			// A transport retry is retry mechanics, not an upstream error
+			// event: the aborted send produced no upstream response to
+			// disclose, and the request-level predicate counts absorbed
+			// attempts only at or above 500.
+			continue
+		}
 		as := a.StatusCode
-		if as == 429 {
+		if !metrics.OutcomeIsError(as, a.ErrorType, a.ErrorCode) {
 			continue
 		}
 		typ := a.ErrorType
@@ -460,12 +470,6 @@ func errorEntries(r *metrics.Record) []errEnt {
 			} else {
 				typ = "transport"
 			}
-		}
-		if as < 500 && (typ == "transport" || typ == "rate_limit") {
-			continue
-		}
-		if as < 400 && a.ErrorType == "" {
-			continue
 		}
 		code := a.ErrorCode
 		if code == "" && as != 0 {

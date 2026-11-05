@@ -121,9 +121,11 @@ caps and preserves the stored pair. The ramp is inert unless `anti_burst` is
 true, the concurrency target is at least 2 and `ramp_duration` is above 0, and
 its duration uses that same window grammar. Malformed limit values reject the
 request without applying any of its limit headers. The Limits menu shows the
-policy and its source. Rates use continuously
-refilled budgets, not strict fixed-window quotas; see
-[Pause and Limits](operations.md#pause-and-limits) for charging and burst behavior.
+policy and its source. Request rates are strict sliding windows over the
+configured length, so no window ever admits more than the configured count;
+token rates remain continuously refilled budgets. See
+[Pause and Limits](operations.md#pause-and-limits) for charging and window
+behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
 valid, unique case-insensitively, and not reserved control, framing
@@ -264,6 +266,32 @@ body-text driven) keep their own policy, and mid-stream SSE errors never
 auto-retry in official SDKs and cannot carry new headers. Success responses
 are untouched, and the setting hot-reloads for new responses.
 
+One classifier owns every error decision: the retry ladder, the storm
+observer, the health counts and the client-facing class all read the same
+canonical class (`rate_limit`, `quota`, `unavailable`, `unreachable`,
+`timeout`, `content`, `client_error`, `proxy`, `canceled`, `upstream`),
+computed from the status AND the provider's own structured type/code - never
+message text. A rate limit announced by a non-429 status (a gateway
+answering `tier_limit_exceeded` or `resource_exhausted` with a 400) is
+therefore retried, counted in the rate-limit series (and, because the request
+still failed, in the error rate), and labeled `rate_limit` instead of
+`client_error`. With
+`client_error_class: header` every error status the relay returns also
+carries `X-Proxy-Error-Class: <class>` and a class-derived
+`X-Should-Retry: true|false` before the status line commits (the body is
+never rewritten; relayed errors stay verbatim), while
+`suppress_client_retries` still wins with a flat `false`. Two settings extend
+the built-in vocabularies with gateway-specific spellings, additively:
+`rate_limit_error_classes` and `quota_error_classes` (plus the existing
+`retryable_error_classes` for in-band transient errors). Entries are matched
+case-insensitively against the parsed envelope's type and code; validation
+rejects a spelling that names a built-in of a different class, so a built-in
+classification can never be moved or weakened (the one exception is
+`retryable_error_classes` naming a built-in client-fault spelling, the
+documented override for a gateway that mislabels transient failures). Reload
+applies to new classifications, and the published predicates render per call,
+so they re-read stored history through the same effective vocabulary.
+
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion
@@ -300,11 +328,13 @@ relabelled `text/event-stream`: the upstream bytes are never converted into SSE
 frames, and the relay surfaces the non-SSE body as a truncated-stream error
 rather than translating it. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
-relayed: the error classes the OpenAI API documents as retryable (500
-`server_error`, the 503 overloaded/unavailable family, request timeouts, the
-equivalent Anthropic/gateway spellings, and the `engine_overloaded` capacity
-code) are dropped before the wire and the request re-sent, so the client never
-sees the failure. A specific capacity code overrides the generic
+relayed: the same availability and timeout vocabulary the status path treats
+as retryable (500 `server_error`, the 503 overloaded/unavailable family, the
+timeout spellings, the equivalent Anthropic/gateway spellings including
+`bad_gateway`, `gateway_timeout` and `upstream_error`, and the
+`engine_overloaded` capacity code) is dropped before the wire and the request
+re-sent, so the client never sees the failure. A specific capacity code
+overrides the generic
 `invalid_request_error` wrapper, because the code names a transient overload
 rather than a malformed request; authentication, permission, not-found and
 too-large types stay final. The

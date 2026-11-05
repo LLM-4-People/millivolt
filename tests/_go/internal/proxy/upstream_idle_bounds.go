@@ -139,10 +139,11 @@ func postHealthy(t *testing.T, proxyURL, upstreamURL, key string) int {
 
 // TestTarpitErrorBodyReleasesChunkedInflightBudget pins the HIGH regression:
 // a tarpit that answers 429/5xx headers and then stalls used to pin
-// quota429Peek's read (429) or the absorbed-attempt body drain (5xx) forever,
-// before the adopted-stream idle guard. Chunked requests reserve the full
-// 32 MiB request cap each, so eight stalled requests exhaust the default
-// 256 MiB inflight budget and a healthy request is refused with 503. Every
+// peekErrorEnvelope's read (any >= 400 response) or the absorbed-attempt body
+// drain (5xx) forever, before the adopted-stream idle guard. Chunked requests
+// reserve the full 32 MiB request cap each, so eight stalled requests exhaust
+// the default 256 MiB inflight budget and a healthy request is refused with
+// 503. Every
 // body read must instead honor the shared upstream_stream_idle_timeout, cancel
 // the attempt, release its reservation, and let the healthy request proceed.
 func TestTarpitErrorBodyReleasesChunkedInflightBudget(t *testing.T) {
@@ -158,7 +159,8 @@ func TestTarpitErrorBodyReleasesChunkedInflightBudget(t *testing.T) {
 			cfg.UpstreamStreamIdleTimeout = tarpitIdleBound
 			// One retry guarantees the 5xx drain path runs on the first
 			// attempt; the final attempt's body read is the second guarded
-			// read. A 429 runs quota429Peek on both attempts.
+			// read. Every >= 400 response runs peekErrorEnvelope on both
+			// attempts.
 			cfg.MaxRetries = 1
 			cfg.BaseBackoff = time.Millisecond
 			cfg.MaxBackoff = time.Millisecond

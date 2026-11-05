@@ -236,8 +236,10 @@ code surface with a line count, wrap toggle, copy action and expand/collapse
 control; a long single line scrolls inside that surface instead of widening the
 inspector. A final upstream failure appears as a bordered alert above the cards
 with its type, code, message and copy action, plus the HTTP status when the
-failure was an HTTP response. A typed rate limit is flow control, not an error:
-its reason, code and message stay visible in the rate-limit card. On narrow
+failure was an HTTP response. A rate limit the provider announced in its own
+type or code counts in the rate-limit card even when the status was not 429;
+a request that ended on one still appears as an alert, and a bare 429 stays
+the flow-control handshake it is. On narrow
 viewports the inspector fills the width, stacks each key above its value, keeps
 touch-sized copy and close targets, and respects the bottom safe area.
 
@@ -290,7 +292,12 @@ headers are redacted. No debug session was enabled for this screenshot.
 
 Limits sets provider-wide request, token and concurrency budgets, plus an
 opt-in anti-burst ramp that grows each provider+key group's allowance from one
-to the concurrency target. These limits are distinct from key-scoped scheduling
+to the concurrency target. The request budget is a strict sliding window: no
+window of the configured length admits more than the configured count, so a
+`100 per 1m` policy stays at or below 100 in any rolling minute instead of
+spending a whole burst and refilling through the same span. The token budget
+refills continuously and can go into debt on an oversized reservation. These
+limits are distinct from key-scoped scheduling
 and upstream rate-limit observations. The menu shows the selected provider's
 configured controls and active policies, including the anti-burst checkbox and
 ramp select, and its count line names the policy source and adds an anti-burst
