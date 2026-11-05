@@ -173,5 +173,5 @@
       box-shadow: var(--shadow-menu); padding: 8px;
     }
     .xp-rail.open { display: flex; }
-    .xp-rail-item { padding: 9px 10px; min-height: 40px; }
+    .xp-rail-item { padding: 9px 10px; min-height: var(--tap); }
   }

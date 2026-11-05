@@ -189,7 +189,16 @@ let lastRender = {}; // dirty-check hashes to avoid re-rendering unchanged secti
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (cancelSettingsOpen()) return;
-    if (closeDimMenu()) return;
+    const rail = $('xp-rail');
+    const focusInRail = !!rail && rail.contains(document.activeElement);
+    if (closeDimMenu()) {
+      // Mirror the shared menu foundation's focus rule: a close while focus
+      // was inside the rail hands it back to the picker trigger. An outside
+      // press leaves the pressed element's focus alone. Focus is captured
+      // before the close, while the rail is still displayed.
+      if (focusInRail) $('xp-dim-trigger')?.focus();
+      return;
+    }
     const metricsMenu = $('chart-metrics-menu');
     if (metricsMenu && !metricsMenu.hidden) {
       setMetricsMenuOpen(false);

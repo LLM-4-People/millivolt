@@ -38,7 +38,12 @@ function providersAddHTML() {
 // mapped are offered (deny by default - an already-added label can only be
 // re-added through the custom input, which the duplicate guard refuses).
 function syncProvMenuList(row) {
-  const list = row && row.querySelector('.prov-menu-list');
+  if (!row) return;
+  // A settings re-render replaced the row under an open picker: close the
+  // moved panel rather than leaving it bound to a detached row.
+  const open = document.querySelector('.prov-menu:not([hidden])');
+  if (open && open._provRow !== row) closeProvMenus();
+  const list = row.querySelector('.prov-menu-list');
   if (!list) return;
   const taken = new Set([...row.querySelectorAll('.st-prov .sp-label')].map(l => l.value.trim()));
   const known = (typeof pauseState === 'object' && pauseState && Array.isArray(pauseState[KNOWN_PROVIDERS_KEY])) ? pauseState[KNOWN_PROVIDERS_KEY] : [];
@@ -115,9 +120,11 @@ function addHeaderRow(sec) {
 }
 
 // provWrapFrom resolves the cards container for anything inside the
-// providers row (the picker lives in the title row, outside [data-kind]).
+// providers row. The picker is moved to the sheet root while open, so it
+// carries the row it belongs to instead of relying on live ancestry.
 function provWrapFrom(node) {
-  const row = node && node.closest('.st-row');
+  const menu = node && node.closest ? node.closest('.prov-menu') : null;
+  const row = (menu && menu._provRow) || (node && node.closest('.st-row'));
   return row ? row.querySelector('[data-kind="providers"]') : null;
 }
 
@@ -125,7 +132,10 @@ function addProviderLabel(label, node) {
   const wrap = provWrapFrom(node);
   if (!wrap) return;
   label = String(label || '').trim();
-  const menuInput = wrap.closest('.st-row').querySelector('.prov-new-label');
+  const menu = node && node.closest ? node.closest('.prov-menu') : null;
+  const menuInput = menu
+    ? menu.querySelector('.prov-new-label')
+    : wrap.closest('.st-row').querySelector('.prov-new-label');
   if (!label || !/^[A-Za-z0-9._-]+$/.test(label)) { flashBadInput(menuInput); return; }
   if ([...wrap.querySelectorAll('.sp-label')].some(l => l.value.trim() === label)) { flashBadInput(menuInput); return; }
   wrap.insertAdjacentHTML('beforeend', providerCardHTML(label, { cost_keys: [], usage_keys: {} }));
@@ -152,17 +162,74 @@ function toggleProvCollapse(card) {
   if (chev) chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 }
 
-// setProvMenuOpen is the one open-state writer for the provider picker
-// menus: the menu's visibility and its toggle's aria-expanded always move
-// together, on every open and close path.
-function setProvMenuOpen(menu, open) {
-  menu.hidden = !open;
-  const btn = menu.parentElement && menu.parentElement.querySelector('[data-prov-menu-toggle]');
-  if (btn) btn.setAttribute('aria-expanded', String(!!open));
+// The provider picker rides the shared menu foundation (js/menu.js): open,
+// close, placement, Escape dismissal, roving focus and the one-open-menu rule
+// all live there. While open the panel moves to the settings sheet's root
+// (still inside the modal, so the modal focus trap keeps it reachable) and
+// the foundation constrains it to that surface instead of the viewport, so
+// the sheet's transform and overflow can never clip it. The row link keeps
+// item clicks resolving the provider cards while the panel is moved.
+function openProvMenu(trigger, menu) {
+  const row = trigger.closest('.st-row');
+  const sheet = trigger.closest('#settings-sheet');
+  if (!row || !sheet || !menu.parentElement) return false;
+  syncProvMenuList(row);
+  menu._provHome = { parent: menu.parentElement, next: menu.nextSibling };
+  menu._provRow = row;
+  menu._provTrigger = trigger;
+  if (!menu.dataset.provWired) {
+    menu.dataset.provWired = '1';
+    menu.addEventListener('click', event => {
+      providersEditorClick(event);
+      event.stopPropagation();
+    });
+    // The custom-label Enter path used to bubble to #settings-fields; the
+    // open panel lives on the sheet root, so its own handler keeps the
+    // keyboard add action identical to the click one.
+    menu.addEventListener('keydown', event => {
+      if (event.key !== 'Enter' || !event.target.classList.contains('prov-new-label')) return;
+      event.preventDefault();
+      addProviderCard(event.target);
+    });
+  }
+  sheet.appendChild(menu);
+  return true;
 }
 
-function closeProvMenus(scope) {
-  (scope || document).querySelectorAll('.prov-menu:not([hidden])').forEach(m => setProvMenuOpen(m, false));
+function restoreProvMenu(menu) {
+  const home = menu._provHome;
+  menu._provHome = null;
+  menu._provRow = null;
+  menu._provTrigger = null;
+  if (!home || !home.parent || !home.parent.isConnected) { menu.remove(); return; }
+  home.parent.insertBefore(menu, home.next);
+}
+
+function toggleProvMenu(trigger, menu) {
+  if (menuIsOpen(menu)) { menuClose(menu); return; }
+  const sheet = trigger.closest('#settings-sheet');
+  if (!openProvMenu(trigger, menu)) return;
+  menuToggle(trigger, menu, {
+    align: 'start', roving: true, initialFocus: 'item',
+    container: sheet, scrim: false,
+    onClose: () => restoreProvMenu(menu),
+  });
+}
+
+function provMenuFor(trigger) {
+  if (!trigger) return null;
+  const top = trigger.closest('.prov-top');
+  const menu = top && top.querySelector('.prov-menu');
+  if (menu) return menu;
+  return [...document.querySelectorAll('.prov-menu:not([hidden])')]
+    .find(open => open._provTrigger === trigger) || null;
+}
+
+// closeProvMenus is the one close entry for the picker: the shared lifecycle
+// moves visibility, aria-expanded and focus back to the trigger together.
+function closeProvMenus() {
+  const menu = document.querySelector('.prov-menu:not([hidden])');
+  if (menu) menuClose(menu);
 }
 
 function roRemovalFocusTarget(container, removed, itemSelector, controlSelector, fallbackSelector) {
@@ -261,14 +328,11 @@ function providersEditorClick(e) {
   const hd = t.closest('.prov-hd');
   if (hd && !t.closest('.sp-label') && !t.closest('[data-prov-rm]')) { toggleProvCollapse(hd.closest('.st-prov')); return; }
   if (t.closest('[data-prov-menu-toggle]')) {
-    const menu = t.closest('.prov-top') && t.closest('.prov-top').querySelector('.prov-menu');
-    if (menu) {
-      // Re-sync the picker at open time: providers added or removed since the
-      // last render must be reflected (already-added ones never offered).
-      if (menu.hidden) syncProvMenuList(t.closest('.st-row'));
-      // The pre-flip hidden value is the new open state.
-      setProvMenuOpen(menu, menu.hidden);
-    }
+    const trigger = t.closest('[data-prov-menu-toggle]');
+    const menu = provMenuFor(trigger);
+    // The shared lifecycle re-syncs the picker at open time, so providers
+    // added or removed since the last render are never offered twice.
+    if (menu) toggleProvMenu(trigger, menu);
     return;
   }
   if (t.closest('.prov-menu')) {
@@ -318,7 +382,7 @@ function providersEditorClick(e) {
   }
   if (t.closest('[data-prov-add-header]')) { addHeaderRow(t.closest('.prov-sec')); const roW = t.closest('.ro-wrap'); if (roW) roDraftChanged(roW); return; }
   // Any click elsewhere in the editor closes a stray open add-menu.
-  closeProvMenus(t.closest('[data-kind="providers"]'));
+  closeProvMenus();
 }
 
 // One delegated wiring for the settings form (dirty tracking + provider

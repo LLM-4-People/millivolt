@@ -138,11 +138,11 @@ function wireSettingsDelegation() {
     if (e.target && e.target.id === 'btn-del-matching') { deleteMatching(); return; }
     providersEditorClick(e);
   });
-  // Clicks outside the add-menu close it (the menu lives in the sheet, but
-  // the veil/other panels are outside #settings-fields).
+  // Clicks outside the template add-menu close it (the menu lives in the
+  // sheet, but the veil/other panels are outside #settings-fields). The
+  // provider picker's dismissal is owned by the shared menu foundation.
   document.addEventListener('click', e => {
-    if (e.target.closest && (e.target.closest('.prov-menu') || e.target.closest('[data-prov-menu-toggle]') || e.target.closest('.ro-tpl-menu') || e.target.closest('[data-ro-add]'))) return;
-    closeProvMenus();
+    if (e.target.closest && (e.target.closest('.ro-tpl-menu') || e.target.closest('[data-ro-add]'))) return;
     closeRoTemplateMenus();
   });
 }

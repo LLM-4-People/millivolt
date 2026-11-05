@@ -442,19 +442,34 @@ function derive(data) {
     }
   }
   const codes = [...codeSeen].sort((x, y) => x - y);
-  const statuses = liveOpts.concat(codes);
+  // A persisted numeric status the current ring does not produce still
+  // belongs in the http status group; a non-numeric one keeps its own
+  // ungrouped option at the end so the control never loses its value.
+  let extraStatus = '';
+  if (filters.status && !liveOpts.some(s => String(s) === String(filters.status)) &&
+      !codes.some(s => String(s) === String(filters.status))) {
+    if (/^\d+$/.test(String(filters.status))) {
+      codes.push(filters.status);
+      codes.sort((x, y) => x - y);
+    } else {
+      extraStatus = String(filters.status);
+    }
+  }
   // A persisted status is only meaningful when it is one the ring can
   // produce: a browser-side value is untrusted markup input, so it must never
-  // become an option label it did not come from. Both positions are escaped
-  // like every sibling option builder.
-  if (filters.status && !statuses.some(s => String(s) === String(filters.status))) statuses.push(filters.status);
-  const statusKey = statuses.join('|') + '|' + filters.status;
+  // become an option label it did not come from. Every emitted value is
+  // escaped like every sibling option builder.
+  const statusKey = liveOpts.join('|') + '#' + codes.join('|') + '|' + extraStatus + '|' + filters.status;
   let statusHtml = _statusHtml;
   if (_statusHtmlKey !== statusKey) {
-    statusHtml = `<option value="">all status</option>` + statuses.map(s => {
+    const option = s => {
       const text = escapeHtml(String(s));
       return `<option value="${text}" ${String(s)===filters.status?'selected':''}>${text}</option>`;
-    }).join('');
+    };
+    statusHtml = `<option value="">all status</option>`;
+    if (liveOpts.length) statusHtml += `<optgroup label="live states">${liveOpts.map(option).join('')}</optgroup>`;
+    if (codes.length) statusHtml += `<optgroup label="http status">${codes.map(option).join('')}</optgroup>`;
+    if (extraStatus) statusHtml += option(extraStatus);
     _statusHtml = statusHtml;
     _statusHtmlKey = statusKey;
   }

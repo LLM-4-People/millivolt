@@ -9,12 +9,14 @@
 // Anchor panels are position: fixed and anchored under the trigger (left- or
 // right-aligned per opts.align, clamped to the viewport, flipping above the
 // trigger near the window's bottom edge, with the max-height clamped to the
-// space on the chosen side). Sheet panels hand their geometry to CSS through
-// [data-placement="sheet"] and dim the page behind the shared .mn-scrim. The
-// open panel re-anchors on resize and on any scroll through one throttled
-// frame, with the listener teardown owned here rather than re-armed per
-// open; the same sync flips the placement when the viewport crosses the
-// breakpoint.
+// space on the chosen side); opts.container measures and clamps against a
+// modal surface instead, for a panel whose containing block is that ancestor.
+// Sheet panels hand their geometry to CSS through [data-placement="sheet"] and
+// dim the page behind the shared .mn-scrim (opts.scrim:false for a menu that
+// already lives on a modal surface). The open panel re-anchors on resize and
+// on any scroll through one throttled frame, with the listener teardown owned
+// here rather than re-armed per open; the same sync flips the placement when
+// the viewport crosses the breakpoint.
 //
 // The shared class vocabulary (dashboard.css owns the styling, conversions
 // emit the markup): .mn (panel), .mn-on (open), .mn-scrim (sheet scrim),
@@ -58,6 +60,11 @@ function menuPlacement() {
 //   roving: enable arrow/Home/End/Enter/Space roving over MENU_ITEM_SELECTOR
 //   initialFocus: 'item' | 'panel' | 'none' (default 'item' when roving,
 //     else 'panel')
+//   container: an optional positioned ancestor whose padding box is the
+//     panel's containing block; anchor placement is then measured and clamped
+//     inside that surface instead of the viewport (a menu inside a modal)
+//   scrim: false suppresses the sheet scrim for a menu that already lives on
+//     a modal surface (default true)
 function menuOpen(trigger, panel, opts = {}) {
   if (!trigger || !panel) return false;
   if (menuOpenState) menuClose(menuOpenState.panel);
@@ -73,6 +80,8 @@ function menuOpen(trigger, panel, opts = {}) {
       onClose: typeof opts.onClose === 'function' ? opts.onClose : null,
       roving,
       initialFocus: opts.initialFocus || (roving ? 'item' : 'panel'),
+      container: opts.container && typeof opts.container.getBoundingClientRect === 'function' ? opts.container : null,
+      scrim: opts.scrim !== false,
     },
   };
   menuOpenState = state;
@@ -197,10 +206,10 @@ function choiceMenu(trigger, spec) {
 // ---------- placement ----------
 // menuPlace applies the geometry for the panel's current data-placement: the
 // sheet branch clears the inline anchor geometry and shows the scrim (CSS
-// owns the sheet box), the anchor branch computes fixed coordinates.
+// owns the sheet box), the anchor branch computes anchored coordinates.
 function menuPlace(state) {
   if (state.panel.dataset.placement === 'sheet') {
-    menuShowScrim(true);
+    menuShowScrim(!!state.opts.scrim);
     menuClearGeometry(state.panel);
     return;
   }
@@ -209,20 +218,30 @@ function menuPlace(state) {
 }
 
 // menuPlaceAnchor fixes the panel under the trigger: aligned per opts.align,
-// clamped to 8px from each viewport edge, flipped above the trigger when the
-// space below cannot hold the measured panel and the space above is larger,
-// and max-height clamped to the remaining space minus the 8px edge. The CSS
-// base max-height is re-read on every placement (inline first removed) so a
-// clamp cannot ratchet across resizes.
+// clamped to 8px from each edge, flipped above the trigger when the space
+// below cannot hold the measured panel and the space above is larger, and
+// max-height clamped to the remaining space minus the 8px edge. The CSS base
+// max-height is re-read on every placement (inline first removed) so a clamp
+// cannot ratchet across resizes. With opts.container the same math runs
+// against that surface's border box and the panel's left/top are expressed in
+// the container's padding box (its absolute containing block).
 function menuPlaceAnchor(state) {
   const panel = state.panel;
   // Clear a previous run's clamp before measuring: a short inline max-height
   // must not make the panel look like it fits below when it does not.
   panel.style.removeProperty('max-height');
+  const container = state.opts.container;
+  const base = container ? container.getBoundingClientRect() : null;
+  const originX = base ? base.left + container.clientLeft : 0;
+  const originY = base ? base.top + container.clientTop : 0;
+  const leftEdge = base ? base.left : 0;
+  const topEdge = base ? base.top : 0;
+  const rightEdge = base ? base.right : window.innerWidth;
+  const bottomEdge = base ? base.bottom : window.innerHeight;
   const rect = state.trigger.getBoundingClientRect();
   const own = panel.getBoundingClientRect();
-  const below = window.innerHeight - rect.bottom - MENU_GAP_PX;
-  const above = rect.top - MENU_GAP_PX;
+  const below = bottomEdge - rect.bottom - MENU_GAP_PX;
+  const above = rect.top - topEdge - MENU_GAP_PX;
   const flip = below < own.height + MENU_EDGE_PX && above > below;
   const top = flip ? rect.top - MENU_GAP_PX - own.height : rect.bottom + MENU_GAP_PX;
   const room = Math.max(0, (flip ? above : below) - MENU_EDGE_PX);
@@ -230,13 +249,13 @@ function menuPlaceAnchor(state) {
   panel.style.maxHeight = (Number.isFinite(styled) ? Math.min(styled, room) : room) + 'px';
   let left = state.opts.align === 'start' ? rect.left : rect.right - own.width;
   if (own.width) {
-    const right = Math.max(MENU_EDGE_PX, window.innerWidth - own.width - MENU_EDGE_PX);
-    left = Math.min(Math.max(left, MENU_EDGE_PX), right);
+    const right = Math.max(leftEdge + MENU_EDGE_PX, rightEdge - own.width - MENU_EDGE_PX);
+    left = Math.min(Math.max(left, leftEdge + MENU_EDGE_PX), right);
   } else {
-    left = Math.max(left, MENU_EDGE_PX);
+    left = Math.max(left, leftEdge + MENU_EDGE_PX);
   }
-  panel.style.left = Math.round(left) + 'px';
-  panel.style.top = Math.round(top) + 'px';
+  panel.style.left = Math.round(left - originX) + 'px';
+  panel.style.top = Math.round(top - originY) + 'px';
   panel.style.right = 'auto';
   panel.style.removeProperty('bottom');
 }

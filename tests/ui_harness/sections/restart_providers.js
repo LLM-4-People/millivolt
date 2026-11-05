@@ -215,10 +215,28 @@ module.exports = async function restartProviders(H) {
   }
   topBtn.click();
   check('add menu opens; already-added providers are not offered', !menu.hidden && !!menu.querySelector('[data-prov-pick="p"]') && !menu.querySelector('[data-prov-pick="epsilon.example"]'));
-  // setProvMenuOpen is the one open-state writer: the toggle's aria-expanded
-  // moves with the menu on every open and close path.
+  // The shared menu foundation owns the picker lifecycle. While open the
+  // panel moves to the sheet root: still inside the modal focus trap, but
+  // outside the scrolling field list, and placement is clamped to the sheet
+  // so the panel can never be clipped at its edge.
+  check('the open picker moves onto the settings sheet inside the modal',
+    menu.parentElement === d.getElementById('settings-sheet') &&
+    menu.classList.contains('mn-on') && menu.dataset.placement === 'anchor');
+  // menuOpen syncs the toggle's aria-expanded; the same lifecycle moves it on
+  // every open and close path.
   check('opening the provider picker couples aria-expanded on its toggle',
     topBtn.getAttribute('aria-expanded') === 'true');
+  // Escape is consumed by the open menu: the settings sheet stays open, the
+  // picker closes and focus returns to its trigger.
+  d.activeElement.dispatchEvent(new w.KeyboardEvent('keydown', {key: 'Escape', bubbles: true, cancelable: true}));
+  check('Escape closes only the provider picker and returns focus to its trigger',
+    menu.hidden && topBtn.getAttribute('aria-expanded') === 'false' &&
+    d.activeElement === topBtn && !d.getElementById('settings-sheet').hidden);
+  check('closing the picker returns it to its provider row',
+    menu.parentElement === prow.querySelector('.st-name .prov-top'));
+  topBtn.click();
+  check('reopening the picker moves it onto the sheet again',
+    !menu.hidden && menu.parentElement === d.getElementById('settings-sheet'));
   // Both provider-icon emitters carry the entity color through --ent, so
   // the icon and its glow ride the entity palette instead of a hardcoded
   // hex in the stylesheet.
@@ -243,12 +261,13 @@ module.exports = async function restartProviders(H) {
   check('add menu closes after adding', menu.hidden);
   check('closing the provider picker couples aria-expanded on its toggle',
     topBtn.getAttribute('aria-expanded') === 'false');
-  // The same writer serves the outside-dismiss path: reopening and closing
-  // through closeProvMenus keeps the pair together.
+  // The same lifecycle serves the outside-dismiss path: reopening and closing
+  // through closeProvMenus keeps the pair together and restores the row.
   topBtn.click();
-  w.closeProvMenus(prow);
+  w.closeProvMenus();
   check('closeProvMenus closes the picker and its aria-expanded together',
-    menu.hidden && topBtn.getAttribute('aria-expanded') === 'false');
+    menu.hidden && topBtn.getAttribute('aria-expanded') === 'false' &&
+    menu.parentElement === prow.querySelector('.st-name .prov-top'));
   const cards = [...prow.querySelectorAll('.st-prov')];
   check('each provider renders as its own section', cards.length === 2 && cards.every(c => c.querySelector('.prov-hd .prov-ic') && c.querySelector('.prov-body .prov-sec')));
   const margins = cards.map(c => w.getComputedStyle(c).marginBottom);
