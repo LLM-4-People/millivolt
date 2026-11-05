@@ -63,12 +63,16 @@ func numericFixture() ([]contrib, int64) {
 }
 
 // projectionFor interns the fixture exactly like a query would, so a fold sees
-// the same projected row shape production folds over.
+// the same projected row shape production folds over, including the unscoped
+// minimum the chart payload publishes as data_from_ms.
 func projectionFor(rows []contrib) *projectionData {
-	p := &projectionData{rows: rows}
+	p := &projectionData{rows: rows, hasStart: len(rows) > 0}
 	for i := range rows {
 		rows[i].rowIndex = uint32(i + 1)
 		p.dimensions.intern(&rows[i])
+		if i == 0 || rows[i].start < p.minStart {
+			p.minStart = rows[i].start
+		}
 		p.noteChunkStart(rows[i].rowIndex, rows[i].start)
 	}
 	p.metrics.append(rows, 0)
@@ -145,10 +149,12 @@ func foldGoldenProduct(t *testing.T) map[string]string {
 }
 
 // Captured from the pre-change implementation (base 0b28628, before the WS7
-// accumulator change). Byte equality here is the WS7 output contract: the fold
-// may stop re-validating its accumulator, but no published byte may move.
+// accumulator change); to_ms/data_from_ms were appended for the explicit
+// chart ranges and the stored-history extent. Byte equality here is the WS7
+// output contract: the fold may stop re-validating its accumulator, but no
+// other published byte may move.
 const (
-	chartFoldGolden    = `{"now_ms":1700000000000,"from_ms":1699999980000,"bucket_ms":60000,"ttft_p":[125,192.5,198.5],"tps_p":[11.5,18.874999999999996,19.775],"dec_p":[550,685,697],"ttft_stat":[135,90,200],"tps_stat":[12.75,8,20],"cost_per_mtok":8.695652173913045,"buckets":[{"t":1699999980000,"req":6,"err":2,"rl":1,"in":660,"out":205,"cache":55,"reason":16,"cost":0.007000000000000001,"ttft":[125,192.5,198.5],"tps":[11.5,18.874999999999996,19.775],"dec":[550,685,697]}]}`
+	chartFoldGolden    = `{"now_ms":1700000000000,"from_ms":1699999980000,"to_ms":1700000000000,"data_from_ms":1699999995000,"bucket_ms":60000,"ttft_p":[125,192.5,198.5],"tps_p":[11.5,18.874999999999996,19.775],"dec_p":[550,685,697],"ttft_stat":[135,90,200],"tps_stat":[12.75,8,20],"cost_per_mtok":8.695652173913045,"buckets":[{"t":1699999980000,"req":6,"err":2,"rl":1,"in":660,"out":205,"cache":55,"reason":16,"cost":0.007000000000000001,"ttft":[125,192.5,198.5],"tps":[11.5,18.874999999999996,19.775],"dec":[550,685,697]}]}`
 	explorerFoldGolden = `{"conversation_summary":{"main":0,"sub":0,"unresolved":0},"dim":"provider","total":6,"error_total":2,"rail":{"client":2,"conversation":0,"error":0,"key":0,"model":2,"provider":2,"status":3,"time":1,"tool":0},"groups":[{"name":"alpha","n":4,"cost":0.006500000000000001,"in":650,"out":200,"cache":55,"err_final":1,"rate_limit_requests":1,"tools":3,"cost_per_mtok":8.227848101265824,"ttft_p50":125,"ttft_p95":192.5,"tps_p50":11.5,"tps_p95":18.874999999999996,"err_events":0,"code":"","last_ms":0},{"name":"beta","n":2,"cost":0.0005,"in":10,"out":5,"cache":0,"err_final":1,"rate_limit_requests":0,"tools":0,"cost_per_mtok":33.333333333333336,"ttft_p50":null,"ttft_p95":null,"tps_p50":null,"tps_p95":null,"err_events":0,"code":"","last_ms":0}],"scope":{"matches":6,"errors":2}}`
 	kpiTotalsGolden    = `{"requests":6,"errors":2,"in_flight":0,"cost":0.007000000000000001,"cost_per_req":0.0017500000000000003,"cost_per_mtok":8.695652173913045,"input_tokens":660,"output_tokens":205,"cache_read_tokens":55,"reasoning_tokens":16,"avg_ttft_ms":135,"avg_tps":12.75}`
 )
