@@ -1,6 +1,7 @@
 # Build artifacts (anchor command names so cmd/proxy stays includable)
 /proxy
 /stress
+/mvctl
 /bin/
 /dist/
 *.test
