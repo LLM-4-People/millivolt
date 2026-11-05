@@ -118,7 +118,11 @@ jobs:
           github.event.pull_request.user.login == 'dependabot[bot]'))
     name: unit
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # The scheduler package's race pass is the longest shard task and has run
+    # for more than 18 minutes on a four-core runner. The 30-minute budget
+    # leaves room for setup and the rest of the shard without cancelling a
+    # healthy run; a hung test is still bounded.
+    timeout-minutes: 30
     env:
       GOTOOLCHAIN: local
       PYTHONDONTWRITEBYTECODE: "1"
