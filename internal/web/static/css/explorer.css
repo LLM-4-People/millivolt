@@ -64,7 +64,11 @@
   .xp-rail-item:hover, .st-rail-item:hover { background: var(--panel2); }
   .xp-rail-item.active, .st-rail-item.active { background: var(--panel2); border-color: var(--border2); }
   .xp-rail-item:focus-visible, .st-rail-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
-  .xp-rail-item .rail-n, .st-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .xp-rail-item .rail-n, .st-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; min-width: 90px; }
+  /* The 90px floor is the conversation summary's width (`1 main + 0 sub`)
+     with a little slack for font variation: it keeps the common summary on
+     one line, while a high-count summary wraps inside the same rail instead
+     of overflowing it. */
   /* Explorer family deviation: the active edge keys to the entity color and
      counts right-align (they sit alone at the row's end). */
   .xp-rail-item.active { border-left-color: var(--ent); }
