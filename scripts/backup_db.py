@@ -422,11 +422,12 @@ def verify_docs_copy(path):
                     and all(type(value) is int and 0 <= value < (1 << 63) for value in state[0]),
                     'unexpected projection state')
         metadata = dict(connection.execute('SELECT key, value FROM meta'))
-        require(set(metadata) <= {MARKER_KEY, 'attempts_repaired', 'tool_names_repaired', 'totals'}
+        require(set(metadata) <= {MARKER_KEY, 'attempts_repaired', 'tool_names_repaired',
+                                  'ttft_anchor_repaired', 'totals'}
                 and MARKER_KEY in metadata,
                 'missing provenance or unexpected operator metadata')
-        require(metadata.get('attempts_repaired', '1') == '1', 'unexpected migration metadata')
-        require(metadata.get('tool_names_repaired', '1') == '1', 'unexpected migration metadata')
+        for marker_key in ('attempts_repaired', 'tool_names_repaired', 'ttft_anchor_repaired'):
+            require(metadata.get(marker_key, '1') == '1', 'unexpected migration metadata')
         if 'totals' in metadata:
             # A live reader opened this publication and persisted its durable
             # aggregate. It is derived from the already-published rows, but its

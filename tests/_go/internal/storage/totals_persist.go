@@ -85,6 +85,85 @@ func TestPersistedTotalsSurviveReopenAndDetectExternalMutation(t *testing.T) {
 	}
 }
 
+// TestTTFTAnchorRepairForcesTotalsRebuild pins the boot repair's accounting
+// consequence. A legacy start-anchored row (ttft_ms > 0 with
+// final_attempt_at = 0) is zeroed by migrate; the rewrite advances the
+// projection epoch, so the persisted totals document no longer matches and
+// boot rebuilds it from rows instead of serving the pre-repair average. The
+// unrecoverable start-anchored sample must be excluded while a stamped row's
+// per-attempt sample survives.
+func TestTTFTAnchorRepairForcesTotalsRebuild(t *testing.T) {
+	path := testDatabase(t)
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.UnixMilli(1_700_000_200_000)
+	// Two rows through the writer, each with its adopted attempt stamped:
+	// "totals-anchored" is later rewritten to the legacy signature under a
+	// second handle, "totals-kept" keeps its 200ms sample.
+	rows := []*metrics.Record{
+		{ID: "totals-anchored", Provider: "p", Model: "m", StatusCode: 200,
+			Start: start, End: start.Add(time.Second), FinalAttemptAt: start,
+			FirstTokenAt: start.Add(100 * time.Millisecond), LastTokenAt: start.Add(time.Second)},
+		{ID: "totals-kept", Provider: "p", Model: "m", StatusCode: 200,
+			Start: start, End: start.Add(time.Second), FinalAttemptAt: start,
+			FirstTokenAt: start.Add(200 * time.Millisecond), LastTokenAt: start.Add(time.Second)},
+	}
+	for _, r := range rows {
+		metrics.FinalizeRecord(r)
+		s.Record(r)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Totals(); got.TTFTN != 2 || got.TTFTSum != 300 {
+		t.Fatalf("seed TTFT totals = %d samples / %d sum, want 2 / 300", got.TTFTN, got.TTFTSum)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second handle mutates authoritative rows while the store is closed:
+	// the first row acquires the legacy signature and the repair marker is
+	// deleted so the next boot probes again. The request trigger advances the
+	// epoch; boot must not trust the persisted document.
+	other, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Exec(`UPDATE requests SET ttft_ms = 900, final_attempt_at = 0 WHERE id = 'totals-anchored'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.Exec(`DELETE FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	var stored int64
+	if err := reopened.rdb.QueryRow(`SELECT ttft_ms FROM requests WHERE id = 'totals-anchored'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Fatalf("legacy ttft_ms after boot = %d, want 0", stored)
+	}
+	got := reopened.Totals()
+	if got.TTFTN != 1 || got.TTFTSum != 200 {
+		t.Fatalf("totals after repair = %d samples / %d sum, want only the stamped 200ms row", got.TTFTN, got.TTFTSum)
+	}
+	avg := got.AvgTTFT()
+	if avg == nil || *avg != 200 {
+		t.Fatalf("AvgTTFT after repair = %v, want 200 (rebuilt, start-anchored sample excluded)", avg)
+	}
+}
+
 // TestFullPurgePersistsZeroTotals pins the full-clear fast path: the durable
 // document is zeroed in the delete transaction, so a reopen never scans (or
 // resurrects) pre-purge aggregates.

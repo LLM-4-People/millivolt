@@ -1475,7 +1475,11 @@ waits and response handling. TTFT is measured from the upstream attempt's own
 send start to the first token (reasoning or answer), so every retry has its own
 TTFT and the value excludes queueing, request parsing and retry backoff. A
 request that produced no token, and any non-streamed response, has no TTFT: the
-log shows a placeholder, not 0 ms, and aggregates skip it. TPS is the single
+log shows a placeholder, not 0 ms, and aggregates skip it. Rows written before
+0.3.34 stored `ttft_ms` anchored at request start (upload, queueing and retry
+backoff included) and were zeroed once by the boot repair, so they report TTFT
+as absent; their `started_at` and `first_token_at` timestamps remain, keeping
+`pre_token_ms` and decode windows usable. TPS is the single
 generation-speed measure: (generation tokens - 1) over the first-token to
 last-token window. Average TTFT and average TPS are the arithmetic means of
 those per-request samples. TPS is absent for fewer than two tokens, a
@@ -1610,8 +1614,11 @@ LIMIT 20
 
 `pre_token_ms` is the wait the caller felt, including queue and retry waits;
 `ttft_ms` is measured from the adopted upstream attempt's send start, so a
-retried request shows a small ttft beside a large `pre_token_ms`. `decode_ms` is
-the streaming window and `tail_ms` what remains after the last token, where a
+retried request shows a small ttft beside a large `pre_token_ms`. Rows written
+before 0.3.34 carry a start-anchored `ttft_ms` and were zeroed once by the
+boot repair, so their `ttft_ms` reads 0 (absent) while `pre_token_ms` and
+`decode_ms` stay usable from the stored timestamps. `decode_ms` is the
+streaming window and `tail_ms` what remains after the last token, where a
 millisecond of rounding noise is normal. A request that produced no token, or
 was not streamed, has nothing to decompose, hence the `first_token_at > 0` gate.
 
@@ -1786,6 +1793,24 @@ Reclaim them manually during a maintenance window: stop the proxy, run
 `sqlite3 /data/proxy.db 'VACUUM;'` (or any SQLite client) against `db_path`,
 and confirm `PRAGMA freelist_count` returns 0. The automatic pass is never
 retried on a later boot, so a failed attempt needs this manual step.
+
+Boot migrations also own a small set of one-shot data repairs for shapes older
+binaries could write but current writers never produce: an empty-string JSON
+document in `attempts` or `tool_names` is rewritten to the canonical `null`,
+and a positive `ttft_ms` with `final_attempt_at = 0` (the pre-0.3.34
+start-anchored TTFT, recorded with upload, queueing and retry backoff
+included) is reset to 0 because the original per-attempt anchor was never
+stored and cannot be recovered. Each repair has its own `meta` marker
+(`attempts_repaired`, `tool_names_repaired`, `ttft_anchor_repaired`): the
+marker is written after a clean probe or after the rewrite, later boots read
+one row instead of rescanning the table, and deleting the marker (or restoring
+a database that predates it) re-arms the probe. A repair that cannot run fails
+boot closed instead of serving history its own consumers would reject. The
+first boot after an upgrade that finds rows to rewrite may pause while it
+scans and rewrites them, and the totals rebuild follows: the rewrite advances
+the projection epoch, which invalidates the persisted totals document. The
+rewrite can transiently grow the WAL, so keep free space on the database
+volume as for any other large write.
 
 Enqueue is bounded and nonblocking. Overflow or write failures can lose durable
 records even when HTTP succeeds. Bootstrap's

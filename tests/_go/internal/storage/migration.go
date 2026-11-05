@@ -484,3 +484,213 @@ func TestMigrateRepairProbeIsOneShot(t *testing.T) {
 		t.Fatal("repair marker absent after the re-armed probe")
 	}
 }
+
+// TestMigrateZeroesLegacyTTFTAnchors pins the one-time pre-0.3.34 TTFT-anchor
+// repair. Releases up to v0.3.33 stored ttft_ms anchored at request start
+// (upload, queueing and retry backoff included) and never stamped
+// final_attempt_at, so the signature is exactly "ttft_ms > 0 AND
+// final_attempt_at = 0" and the original per-attempt anchor cannot be
+// recovered: boot resets the value to 0 and records the one-shot marker. A row
+// whose adopted attempt is stamped (final_attempt_at > 0) keeps its value, and
+// a clean database only records the marker.
+func TestMigrateZeroesLegacyTTFTAnchors(t *testing.T) {
+	// Legacy schema: ttft_ms exists from the first binary but final_attempt_at
+	// only arrives with migrate's ALTER pass (default 0), which is exactly the
+	// production pre-0.3.34 shape.
+	legacyPath := filepath.Join(t.TempDir(), "legacy-ttft.db")
+	db0, err := sql.Open("sqlite", legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db0.Exec(oldRequestsSchema); err != nil {
+		t.Fatal(err)
+	}
+	insertLegacyRow(t, db0, "legacy-anchor", 200, 1_700_000_000_000)
+	if _, err := db0.Exec(`UPDATE requests SET ttft_ms = 1234, first_token_at = 1700000000321 WHERE id = 'legacy-anchor'`); err != nil {
+		t.Fatal(err)
+	}
+	db0.Close()
+
+	s, err := Open(legacyPath, testOpts)
+	if err != nil {
+		t.Fatalf("open after legacy schema: %v", err)
+	}
+	defer s.Close()
+	rows, err := s.Query(t.Context(), `SELECT ttft_ms, first_token_at FROM requests WHERE id = 'legacy-anchor'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("legacy rows = %d, want 1", len(rows))
+	}
+	if rows[0]["ttft_ms"] != int64(0) {
+		t.Errorf("legacy ttft_ms = %v, want 0 (start-anchored value is not a per-attempt TTFT)", rows[0]["ttft_ms"])
+	}
+	if rows[0]["first_token_at"] != int64(1_700_000_000_321) {
+		t.Errorf("legacy first_token_at = %v, want the stored timestamp (the repair zeroes ttft_ms only)", rows[0]["first_token_at"])
+	}
+	if v, err := s.LoadMeta(t.Context(), ttftAnchorRepairMetaKey); err != nil || v == "" {
+		t.Fatalf("ttft anchor repair marker = %q, %v; want written after the repairing boot", v, err)
+	}
+
+	// Current schema: the exact legacy signature is zeroed while a stamped
+	// adopted attempt is left byte-for-byte. The fixture builds the current
+	// schema directly, like the one-shot probe test below.
+	currentPath := filepath.Join(t.TempDir(), "current-ttft.db")
+	cdb, err := sql.Open("sqlite", currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cdb.Exec(schema); err != nil {
+		cdb.Close()
+		t.Fatal(err)
+	}
+	start := time.UnixMilli(1_700_000_100_000)
+	rawInsertRequest(t, cdb, "current-anchor", start)
+	rawInsertRequest(t, cdb, "current-stamped", start)
+	if _, err := cdb.Exec(`UPDATE requests SET ttft_ms = 900, first_token_at = ? WHERE id = 'current-anchor'`,
+		start.Add(900*time.Millisecond).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cdb.Exec(`UPDATE requests SET ttft_ms = 250, first_token_at = ?, final_attempt_at = ? WHERE id = 'current-stamped'`,
+		start.Add(250*time.Millisecond).UnixMilli(), start.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	cdb.Close()
+
+	cs, err := Open(currentPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	rows, err = cs.Query(t.Context(), `SELECT id, ttft_ms, final_attempt_at FROM requests ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]map[string]any{}
+	for _, row := range rows {
+		byID[row["id"].(string)] = row
+	}
+	if len(byID) != 2 {
+		t.Fatalf("current-schema rows = %d, want 2", len(byID))
+	}
+	if got := byID["current-anchor"]; got == nil || got["ttft_ms"] != int64(0) || got["final_attempt_at"] != int64(0) {
+		t.Errorf("current-anchor = %v, want ttft_ms 0 with final_attempt_at 0", got)
+	}
+	if got := byID["current-stamped"]; got == nil || got["ttft_ms"] != int64(250) || got["final_attempt_at"] != start.UnixMilli() {
+		t.Errorf("current-stamped = %v, want ttft_ms 250 and the stamped attempt untouched", got)
+	}
+	if v, err := cs.LoadMeta(t.Context(), ttftAnchorRepairMetaKey); err != nil || v == "" {
+		t.Fatalf("ttft anchor repair marker = %q, %v; want written after the repairing boot", v, err)
+	}
+
+	// Clean control: no row matches the signature, so the probe changes
+	// nothing and still records the marker. A current no-token row (ttft_ms 0
+	// with final_attempt_at 0) is the canonical clean shape.
+	cleanPath := filepath.Join(t.TempDir(), "clean-ttft.db")
+	cleandb, err := sql.Open("sqlite", cleanPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cleandb.Exec(schema); err != nil {
+		cleandb.Close()
+		t.Fatal(err)
+	}
+	rawInsertRequest(t, cleandb, "clean-no-token", start)
+	cleandb.Close()
+
+	clean, err := Open(cleanPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clean.Close()
+	rows, err = clean.Query(t.Context(), `SELECT ttft_ms FROM requests WHERE id = 'clean-no-token'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["ttft_ms"] != int64(0) {
+		t.Errorf("clean control rows = %v, want one row with ttft_ms 0", rows)
+	}
+	if v, err := clean.LoadMeta(t.Context(), ttftAnchorRepairMetaKey); err != nil || v == "" {
+		t.Fatalf("ttft anchor repair marker on a clean DB = %q, %v; want written after the clean probe", v, err)
+	}
+}
+
+// TestMigrateTTFTAnchorRepairProbeIsOneShot unit-pins the marker semantics of
+// the TTFT-anchor repair, straight against migrate: the unindexed full-table
+// probe runs only while the marker is absent. Once written, a row that
+// acquires the legacy signature afterwards is deliberately NOT re-repaired
+// (the probe is skipped); a database restored from a pre-marker backup
+// (marker absent) probes and repairs again.
+func TestMigrateTTFTAnchorRepairProbeIsOneShot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttft-probe.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(oldRequestsSchema); err != nil {
+		t.Fatal(err)
+	}
+	insertLegacyRow(t, db, "legacy-ttft", 200, 1_700_000_000_000)
+	if _, err := db.Exec(`UPDATE requests SET ttft_ms = 777`); err != nil {
+		t.Fatal(err)
+	}
+	// migrate's meta read assumes the schema pass already ran (Open order).
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	ttft := func() int64 {
+		var v int64
+		if err := db.QueryRow(`SELECT ttft_ms FROM requests WHERE id = 'legacy-ttft'`).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	marker := func() string {
+		var v string
+		if err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey).Scan(&v); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	// First migrate: the row already matches the signature (positive ttft_ms,
+	// final_attempt_at added as 0), so it is zeroed and the marker written.
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := ttft(); got != 0 {
+		t.Fatalf("ttft_ms after first migrate = %d, want 0", got)
+	}
+	if got := marker(); got == "" {
+		t.Fatal("repair marker absent after the repairing migrate")
+	}
+
+	// A legacy-signature row that appears AFTER the marker stays untouched:
+	// the probe is one-shot, later boots skip it entirely.
+	if _, err := db.Exec(`UPDATE requests SET ttft_ms = 555, final_attempt_at = 0 WHERE id = 'legacy-ttft'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := ttft(); got != 555 {
+		t.Fatalf("ttft_ms after a post-marker migrate = %d, want 555 (probe must be skipped)", got)
+	}
+
+	// The restored-backup edge: a database predating the marker carries no
+	// marker row, so the probe re-arms and repairs again.
+	if _, err := db.Exec(`DELETE FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	if got := ttft(); got != 0 {
+		t.Fatalf("ttft_ms after marker removal = %d, want 0 (probe must re-arm)", got)
+	}
+	if got := marker(); got == "" {
+		t.Fatal("repair marker absent after the re-armed probe")
+	}
+}

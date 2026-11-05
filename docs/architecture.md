@@ -231,9 +231,19 @@ The one writer owns transactions and incremental totals. Its insertion plan
 binds arbitrary values, using exact zero/empty literals only for absent scalar
 work, and preserves existing conflict/rollback semantics. Record columns,
 migration, scanner and request-parameter presence bits must evolve together;
-explicit zero/false is not absence. Provider-alias repair applies every pair in
-one transaction, in source-key order, so a later trigger or constraint failure
-rolls earlier label rewrites back instead of leaving history half-merged.
+explicit zero/false is not absence. Boot migrations also own one-shot data
+repairs for shapes current writers cannot produce: the empty-string
+`attempts`/`tool_names` document becomes the canonical `null`, and the pre-0.3.34
+start-anchored `ttft_ms` (`ttft_ms > 0` with `final_attempt_at = 0`) is zeroed
+because its request-start anchor was never stored and cannot be re-derived; a
+snapshot merge applies the same TTFT canonicalization so a pre-repair backup
+cannot reintroduce the shape. Each repair is guarded by a `meta` marker and
+re-armed when that marker is absent (a restored backup predating it). A repair
+that rewrites rows fires the projection update trigger, advancing the epoch and
+invalidating the persisted totals document so boot rebuilds it. Provider-alias
+repair applies every pair in one transaction, in source-key order, so a later
+trigger or constraint failure rolls earlier label rewrites back instead of
+leaving history half-merged.
 
 The durable log order is `(started_at, id)`, owned by the sole request-log
 index `idx_requests_log`. The web log page pushes exact provider, client, key

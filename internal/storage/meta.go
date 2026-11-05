@@ -18,6 +18,16 @@ const (
 	// The empty spelling is not valid JSON, so json_each over the raw column
 	// fails; 'null' is the writer's canonical no-value document.
 	toolNamesRepairMetaKey = "tool_names_repaired"
+	// ttftAnchorRepairMetaKey marks the one-time pre-0.3.34 TTFT-anchor repair
+	// as done. Releases up to v0.3.33 stored ttft_ms anchored at request start
+	// (upload, queueing and retry backoff included) and never stamped
+	// final_attempt_at, so such a row is exactly "ttft_ms > 0 AND
+	// final_attempt_at = 0". Current writers stamp every sent attempt and
+	// Record.TTFT refuses to report without one, so the signature cannot
+	// recur; the original anchor was not stored, so migrate zeroes the
+	// unrecoverable value once and records this marker so later boots read
+	// one meta row instead of rescanning for the signature.
+	ttftAnchorRepairMetaKey = "ttft_anchor_repaired"
 )
 
 // SaveMeta writes a durable key/value (operator state, not request rows).

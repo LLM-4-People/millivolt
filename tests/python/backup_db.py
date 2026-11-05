@@ -478,6 +478,7 @@ class BackupTest(unittest.TestCase):
             "DELETE FROM meta",
             "INSERT INTO meta VALUES ('paused_keys','secret')",
             "INSERT INTO meta VALUES ('attempts_repaired','secret')",
+            "INSERT INTO meta VALUES ('ttft_anchor_repaired','secret')",
             "ALTER TABLE requests ADD COLUMN future TEXT",
             "ALTER TABLE meta ADD COLUMN future TEXT",
             "CREATE TABLE future (content TEXT)",

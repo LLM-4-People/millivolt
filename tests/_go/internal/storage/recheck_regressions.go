@@ -213,6 +213,12 @@ func TestRestoreRejectsIntegerTotalOverflowAndNegative(t *testing.T) {
 					r.Usage.ReasoningTokens = value
 				case "ttft_ms":
 					r.TTFTMs = value
+					// A positive ttft_ms with no stamped attempt is exactly
+					// the pre-0.3.34 shape the boot repair and merge
+					// canonicalization zero, so an out-of-range value only
+					// reaches the aggregate scan on a row with an adopted
+					// attempt.
+					r.FinalAttemptAt = r.Start
 				default:
 					t.Fatalf("no fixture for %s", column)
 				}

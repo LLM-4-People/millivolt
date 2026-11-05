@@ -413,6 +413,45 @@ func migrate(db *sql.DB) error {
 			return fmt.Errorf("repair tool_names marker: %w", err)
 		}
 	}
+	// One-shot repair for the pre-0.3.34 TTFT anchor: releases up to v0.3.33
+	// stored ttft_ms anchored at request start (upload, queueing and retry
+	// backoff included) and never stamped final_attempt_at, so a legacy row is
+	// exactly "ttft_ms > 0 AND final_attempt_at = 0". Current writers stamp
+	// every sent attempt and Record.TTFT refuses to report without one, so the
+	// signature can never be produced again, but the original per-attempt
+	// anchor was not stored and the value cannot be re-anchored: zero it once
+	// so history never reports a start-anchored value as a per-attempt one.
+	// Like the repairs above, the unindexed EXISTS probe is one-shot through
+	// the shared meta marker: absent on the first boot and on any backup
+	// predating it, written after a clean probe or after the rewrite itself.
+	// The rewrite fires the requests_projection_update trigger, which advances
+	// request_projection_state.epoch; the next loadTotals sees the persisted
+	// document's epoch no longer match and rebuilds it from rows. That is the
+	// invalidation path here - totalsMetaVersion is deliberately not bumped.
+	var repairedTTFT string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, ttftAnchorRepairMetaKey).Scan(&repairedTTFT); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("repair ttft anchor marker: %w", err)
+	}
+	if repairedTTFT == "" {
+		var legacyAnchors int
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE ttft_ms > 0 AND final_attempt_at = 0)`).Scan(&legacyAnchors); err != nil {
+			return fmt.Errorf("repair ttft anchor: %w", err)
+		}
+		if legacyAnchors != 0 {
+			res, err := db.Exec(`UPDATE requests SET ttft_ms = 0 WHERE ttft_ms > 0 AND final_attempt_at = 0`)
+			if err != nil {
+				return fmt.Errorf("repair ttft anchor: %w", err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("repair ttft anchor: %w", err)
+			}
+			log.Printf("storage: repaired %d pre-0.3.34 TTFT anchors (ttft_ms reset to 0)", n)
+		}
+		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, ttftAnchorRepairMetaKey); err != nil {
+			return fmt.Errorf("repair ttft anchor marker: %w", err)
+		}
+	}
 	// Every leading equality column now exists, whether this database was just
 	// created with the full schema or upgraded by the ALTER pass above. Build
 	// the ordered log indexes once; IF NOT EXISTS keeps later boots cheap.
