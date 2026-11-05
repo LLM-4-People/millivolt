@@ -198,6 +198,12 @@
   .metrics-row[aria-checked="false"] { color: var(--muted); }
   .metrics-row .mp-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
   .traffic-card .card-hd { flex-wrap: wrap; flex-shrink: 0; justify-content: space-between; }
+  /* The chart-head controls are the most-used controls on the card, so they
+     keep a full touch target wherever the pointer is coarse or the viewport
+     is narrow. The 480px rule below still trims their inline padding. */
+  @media (max-width: 800px), (hover: none), (pointer: coarse) {
+    .chart-trigger, #chart-metrics-btn { height: var(--tap); padding-inline: 12px; }
+  }
   @media (max-width: 480px) {
     /* Exact sub-1000 values are longer than the compact K/M/B ones the base
        84px floor was sized for: "617.967 tok/s" measures ~117px at 15px, so

@@ -444,6 +444,9 @@
     .st-row:has(.st-switch) .st-ctl { align-items: flex-start; }
     .st-del-opts { grid-template-columns: 1fr; }
     .st-hd input[type="search"] { max-width: none; }
+    /* The sheet's own header controls are the way in and out of the modal;
+       they take the full touch target on a phone. */
+    .st-hd .btn, .st-hd input[type="search"] { min-height: var(--tap); }
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
     .ro-head-actions { justify-content: flex-start; }
