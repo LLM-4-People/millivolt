@@ -116,19 +116,19 @@ function menuClose(panel) {
     cancelAnimationFrame(menuSyncRaf);
     menuSyncRaf = 0;
   }
+  // Capture the focus rule before hiding: hiding the focused panel (or one
+  // containing focus) blurs it to the body in a real browser, so a check after
+  // the hide would never see focus inside. A close with focus elsewhere (an
+  // outside press) leaves that focus alone.
+  const restore = state.panel.contains(document.activeElement);
+  const target = state.restoreTarget;
   state.panel.hidden = true;
   state.panel.classList.remove('mn-on');
   menuClearGeometry(state.panel);
   delete state.panel.dataset.placement;
   menuSetExpanded(state.trigger, false);
   menuShowScrim(false);
-  // The one focus rule: closing while focus is inside the panel hands it back
-  // to the trigger. A close with focus elsewhere (an outside press) leaves
-  // that focus alone.
-  const restore = state.panel.contains(document.activeElement);
-  if (restore && state.restoreTarget && state.restoreTarget.isConnected) {
-    state.restoreTarget.focus();
-  }
+  if (restore && target && target.isConnected) target.focus();
   if (state.opts.onClose) state.opts.onClose();
   return true;
 }

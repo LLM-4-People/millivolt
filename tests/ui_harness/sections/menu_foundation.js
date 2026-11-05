@@ -117,11 +117,26 @@ module.exports = async function menuFoundation(H) {
     check('pointerdown on the trigger keeps the menu open', !panel.hidden && d.activeElement === outside);
     // menuClose is the one focus owner: closing while focus is inside the
     // panel hands it back to the trigger (the row-activation path a pick
-    // uses), never to the page body.
+    // uses), never to the page body. A real browser blurs a focused
+    // descendant when its ancestor becomes hidden; jsdom does not, so the
+    // hide is instrumented to reproduce that order. Focus must be captured
+    // before the panel hides, not after.
+    const hiddenDesc = Object.getOwnPropertyDescriptor(w.HTMLElement.prototype, 'hidden');
+    Object.defineProperty(panel, 'hidden', {
+      configurable: true,
+      get() { return hiddenDesc.get.call(panel); },
+      set(v) {
+        // Blur first: jsdom refuses to blur an element after its ancestor is
+        // hidden, while a browser blurs it as part of that hide.
+        if (v && panel.contains(d.activeElement)) d.activeElement.blur();
+        hiddenDesc.set.call(panel, v);
+      },
+    });
     w.menuOpen(trigger, panel, {initialFocus: 'item'});
     w.menuClose(panel);
     check('closing while focus is inside returns it to the trigger',
       panel.hidden && d.activeElement === trigger);
+    delete panel.hidden;
     w.menuClose(panel);
   }
 
