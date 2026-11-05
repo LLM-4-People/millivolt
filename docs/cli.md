@@ -48,9 +48,9 @@ Human output is the default. `--json` (or `-j`) prints one JSON document, and
 command output is stable enough for a pipeline. Diagnostics go to stderr as
 `mvctl: ...`. After argument parsing, `--json` turns a command failure into
 `{"error": "..."}` on stdout so a caller can parse one stream. A usage error
-found before `--json` is parsed still goes to stderr and exits 2 because JSON
-mode is not established yet; after parsing, a usage error also follows
-`--json`.
+detected while parsing the arguments still goes to stderr and exits 2, because
+JSON mode is not established yet; a usage error a command reports after a
+successful parse follows `--json` like any other failure.
 
 | Exit | Meaning |
 | --- | --- |
@@ -81,9 +81,9 @@ cannot inject an escape sequence.
 | `--help`, `-h` | command or global help |
 | `--version` | print the mvctl version and source revision |
 
-`--` ends flag parsing; when no command has been named yet, the next word may still name one. Boolean flags accept `--flag`, `--flag=true`,
-`--flag=1`, `--flag=yes`, `--flag=on`, and the false spellings `false`, `0`,
-`no`, `off`.
+`--` ends flag parsing; when no command has been named yet, the next word may
+still name one. Boolean flags accept `--flag`, `--flag=true`, `--flag=1`,
+`--flag=yes`, `--flag=on`, and the false spellings `false`, `0`, `no`, `off`.
 
 ## Commands
 
@@ -93,7 +93,7 @@ cannot inject an escape sequence.
 | --- | --- |
 | `mvctl status` | health, origin, dashboard build and headline metrics |
 | `mvctl overview` | KPI, storage, pause, throttle and debug state |
-| `mvctl requests [N]` | one page of the request log, default and bounds from the shipped `dash_log_rows` |
+| `mvctl requests [N]` | one page of the request log, default the shipped `dash_log_rows`; `N` must be inside that setting's schema band |
 | `mvctl query "SELECT ..."` | bounded SQL through `/metrics/query` |
 | `mvctl prometheus` | the Prometheus text exposition |
 | `mvctl watch` | sample live counters and print a sparkline |
@@ -192,10 +192,11 @@ ramps take a duration such as `1m`. At least one dimension is required.
 | `mvctl debug off --id ID --yes` | stop one session |
 | `mvctl debug off --all --yes` | stop every session |
 
-Exactly one drain scope is required. `debug on` requires a scope and has no
-unrestricted all-traffic form, matching the MCP tool: a bare enable would
-capture every request body. Captures are sensitive even after header redaction,
-and a capture create needs durable storage; the proxy answers 503 without it.
+Exactly one drain scope is required. `debug on` requires a scope unless `--id`
+names an existing session to edit, and it has no unrestricted all-traffic form,
+matching the MCP tool: a bare enable would capture every request body. Captures
+are sensitive even after header redaction, and a capture create needs durable
+storage; the proxy answers 503 without it.
 `debug off` identifies a session by `id` or `--all`, never by a scope flag,
 and the two are mutually exclusive. `debug on` refuses a scope name the proxy
 has not seen, because such a session reports enabled but captures nothing.
