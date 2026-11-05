@@ -102,7 +102,7 @@ type ColumnDoc struct {
 // PredicateDoc carries the health predicates as ready-to-use SQL.
 type PredicateDoc struct {
 	IsError     string `json:"is_error" jsonschema:"exact SQL for the canonical error predicate"`
-	RateLimited string `json:"rate_limited" jsonschema:"exact SQL for a request that saw a 429 on the final or any absorbed attempt"`
+	RateLimited string `json:"rate_limited" jsonschema:"exact SQL for a request that hit a rate-limit class - a 429, a provider rate-limit type or code, or such an attempt - on the final response or any absorbed or in-band attempt"`
 	Note        string `json:"note" jsonschema:"why 429 alone is not an error"`
 }
 
@@ -150,7 +150,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 		},
 		Indexes:    RequestIndexes,
 		Tables:     tableDocs,
-		Predicates: predicates,
+		Predicates: definePredicates(),
 		Notes: []string{
 			"Timestamps are Unix MILLISECONDS, not seconds: started_at, first_token_at, last_token_at, first_answer_at, first_reasoning_at and final_attempt_at.",
 			"ttft_ms, duration_ms, processing_ms, queue_wait_ms, retry_after_ms, upstream_connect_ms, upstream_tls_ms and upstream_ttfb_ms are integer milliseconds.",
@@ -560,25 +560,30 @@ func RequestsColumnNames() []string {
 	return nil
 }
 
-// predicates are the health predicates, quoted exactly. They DELEGATE to
-// metrics, which owns one rendering of each predicate for both this published
-// document and the durable purge filter, so a model's SQL and the dashboard's
-// counts cannot disagree.
-var predicates = func() PredicateDoc {
+// definePredicates renders the health predicates, quoted exactly. They
+// DELEGATE to metrics, which owns one rendering of each predicate for both this
+// published document and the durable purge filter, so a model's SQL and the
+// dashboard's counts cannot disagree. It is called per describe document, not
+// captured at package init: the effective rate-limit vocabulary includes the
+// operator's rate_limit_error_classes extensions, which are installed when the
+// proxy's config is built (proxy.New / proxy.Reload) - an init-time capture
+// would freeze the built-ins and disagree with the live dashboard after any
+// reload.
+func definePredicates() PredicateDoc {
 	return PredicateDoc{
 		IsError:     metrics.IsErrorSQL(),
 		RateLimited: metrics.HasRateLimitSQL(),
 		Note: "err_final counts distinct requests through is_error; rate_limit_requests counts distinct requests through rate_limited. " +
 			"A 429 alone is NOT an error: it is flow control. " +
 			"A response whose own type or code names a rate limit counts in rate_limit_requests even when its status is not 429 " +
-			"(providers commonly answer a rate limit with a 400 rather than a 429); when such a response is the final outcome of a non-429 status, " +
-			"the request still failed and also counts in err_final. " +
+			"(providers commonly answer a rate limit with a 400 rather than a 429); on a non-429 status a final response that carries a structured error type " +
+			"means the request failed and also counts in err_final. " +
 			"A durable quota/billing class keeps its own reaction (quota_pause_mode); on a non-429 status it is an error and not a rate-limit event. " +
 			"An absorbed 5xx in attempts IS an error even when a retry recovered, including on a rate-limited request. " +
 			"A 499 is a client abort unless it carries a structured error_type, which means the upstream had already failed in band. " +
 			"An in-band attempt entry records an upstream status a committed 200 could not relay; its own rate-limit class still counts as rate-limited.",
 	}
-}()
+}
 
 // The column reference above is curated rather than generated: it states the
 // meaning and unit an analysis needs, which DDL cannot. A new column is a

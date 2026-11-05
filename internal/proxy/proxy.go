@@ -378,12 +378,16 @@ func preserveUpstreamRedirect(*http.Request, []*http.Request) error {
 // HTTP server timeouts, history size) are NOT re-applied - they require a
 // restart and are the caller's responsibility to flag.
 func (s *Server) Reload(cfg *config.Config) {
-	// Swap the config snapshot first so subsequent reads see it.
-	s.cfgSnap.Store(cfg)
-	// Publish the extension vocabularies from the new snapshot so every
-	// classification (retry ladder, health predicates, published SQL,
-	// dashboard) answers from the same effective lists.
+	// Publish the extension vocabularies from the new snapshot FIRST, so the
+	// vocabulary is never behind the config: every classification (retry
+	// ladder, health predicates, published SQL, dashboard) then answers from
+	// the same effective lists. The swap is atomic; an in-flight request may
+	// see the new vocabularies with the old snapshot for the microseconds
+	// between the two stores, which is the same best-effort window config
+	// reload has always had.
 	installClassExtensions(cfg)
+	// Swap the config snapshot so subsequent reads see it.
+	s.cfgSnap.Store(cfg)
 	// Swap the upstream transport for new requests; drain the old one's idle
 	// connections (in-flight streams on the old client are unaffected and finish
 	// normally - CloseIdleConnections never touches active connections).
@@ -743,6 +747,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
+			// The retry/class directive writer was attached to the ORIGINAL
+			// record; re-point it at the translated one, or an error response on
+			// this path would carry the class of an abandoned record.
+			if d, ok := w.(*clientRetryDirective); ok {
+				d.rec = rec
+			}
 			if err := parseGeneratedLLMRequest(body, rec, s.cfg().CaptureBodyPreview, s.cfg()); err != nil {
 				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
@@ -943,7 +953,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rec.ErrorType = metrics.TypeQueueFull
 		rec.ErrorMsg = err.Error()
-		writeClientErrorHdr(w, rec, t.inbound, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
+		writeClientErrorHdr(w, rec, t.inbound, metrics.TypeRateLimit, "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
 		return
 	}
 	rec.QueueWaitMs += time.Since(queueStart).Milliseconds()

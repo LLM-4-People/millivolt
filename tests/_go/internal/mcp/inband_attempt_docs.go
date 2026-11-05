@@ -42,7 +42,7 @@ func TestInBandAttemptContractDocs(t *testing.T) {
 
 	operations := repoText(t, "docs/operations.md")
 	for _, want := range []string{
-		"HTTP 429 counts requests that encountered a final, retried or in-band 429",
+		"Rate limits count requests that saw a rate-limit class on the final, a retried or an in-band attempt",
 		"AND COALESCE(json_extract(j.value,'$.in_band'),0)=0",
 		"One row per absorbed retry, oldest first",
 		"that entry is health evidence, not a retry",

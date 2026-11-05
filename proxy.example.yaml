@@ -423,11 +423,12 @@ retryable_error_classes: []
 # Operator extensions to the built-in transient rate-limit vocabulary (rate_limit_error,
 # rate_limit_exceeded, tier_limit_exceeded, resource_exhausted, rpm/tpm spellings and
 # friends). A gateway that announces its limit under a custom type or code string
-# (case-insensitive) is then treated exactly like a 429: retried transparently within the
-# retry budget, counted in the rate-limit series instead of the error rate, and classified
-# rate_limit for clients. Entries add to the built-ins and never move one; a durable
-# quota/billing spelling is rejected at load. Reload applies to new classifications and
-# re-reads stored history through the same vocabulary.
+# (case-insensitive) is then retried transparently within the retry budget, counted in the
+# rate-limit series, and classified rate_limit for clients. Unlike a bare 429, a non-429
+# status carrying the class still counts as a failed request on the health surface.
+# Entries add to the built-ins and never move one; a durable quota/billing spelling is
+# rejected at load. Reload applies to new classifications and re-reads stored history
+# through the same vocabulary.
 # Hot-reload: yes.
 #   type: list of string
 rate_limit_error_classes: []

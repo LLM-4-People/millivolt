@@ -426,21 +426,27 @@ multiplicity. Tests cover raw/projected/durable/ring/pending parity.
 observer, the Cursor transport, the health predicates, the client-facing class
 and the published SQL all read it. `metrics.OutcomeIsError` (composed by
 `Record.IsError`) owns the health arms, and the MCP describe document and the
-durable purge filter render `metrics.IsErrorSQL`/`HasRateLimitSQL` instead of
-carrying their own predicates. Classification reads the status AND the
+durable purge filter render `metrics.IsErrorSQL`/`HasRateLimitSQL` per call
+instead of carrying their own predicates, so an operator extension applied by a
+reload reaches the published SQL too. Classification reads the status AND the
 provider's own type/code, never message text. The two questions are separate
-and answer differently in exactly two families: a 429 whose body names a
-durable quota/billing condition is ClassQuota for the retry ladder and
+and answer differently in the two documented families: a 429 whose body names
+a durable quota/billing condition is ClassQuota for the retry ladder and
 quota_pause_mode while the health surface counts the 429 itself as flow
 control (not an error), and a rate-limit class on any non-429 status is
 counted in the rate-limit series while the health surface also counts the
-failed request as an error. The operator's
+failed request as an error. The health predicate reads the status and the
+error type only, so a spelling carried solely in `error_code` (a shape the
+envelope parser does not produce - it pairs every code with a type) can move
+the class but not the health answer. The operator's
 `rate_limit_error_classes`/`quota_error_classes`/`retryable_error_classes`
-extensions are installed as one value (`metrics.InstallClassExtensions`, called
-only by `proxy.New`/`proxy.Reload`) and every consumer reads the effective
+extensions are installed as one value (`metrics.InstallClassExtensions`,
+installed by `proxy.New`/`proxy.Reload`) and every consumer reads the effective
 vocabulary, including the browser mirror, which receives it in the bootstrap
 payload when extensions are installed. Extensions add only: config validation
-rejects a spelling that names a built-in of another class. With
+rejects a spelling that names a built-in of another class; the one documented
+exception is `retryable_error_classes` naming a built-in client-fault spelling,
+the explicit override for a gateway that mislabels transient failures. With
 `client_error_class: header` the relay's outer writer stamps
 `X-Proxy-Error-Class` and a class-derived `X-Should-Retry` on every error
 status before the line commits (`suppress_client_retries` still forces false);

@@ -29,10 +29,11 @@ type ClassExtensions struct {
 // every test that resets them.
 var classExtensions atomic.Pointer[ClassExtensions]
 
-// InstallClassExtensions replaces the operator extensions. The single caller
-// is the proxy's config owner, on construction and on every reload; a nil or
-// empty value restores the built-ins. The swap is atomic, so a concurrent
-// request classifies against one coherent vocabulary.
+// InstallClassExtensions replaces the operator extensions. The proxy's config
+// owner installs them on construction and on every reload; tests install them
+// directly. A nil or empty value restores the built-ins. The swap is atomic,
+// so a concurrent request classifies against one coherent vocabulary, and the
+// last install wins - one process must have one owner.
 func InstallClassExtensions(ext ClassExtensions) {
 	normalized := ClassExtensions{}
 	normalized.RateLimit = normalizeExtension(ext.RateLimit)
@@ -106,9 +107,10 @@ const (
 	ClassNone ErrorClass = ""
 
 	// ClassRateLimit is transient flow control: the provider is asking for a
-	// slower rate. It raises the rate-limit health count and is retryable, but
-	// it is deliberately NOT an error (a 429 alone is flow control, and the
-	// same rule now holds for a rate-limit code carried by any status).
+	// slower rate. Retryable, and counted in the rate-limit series. The
+	// class's own predicate reads it as a flow event (a 429 alone is flow
+	// control); the health surface decides separately - a rate-limit class
+	// carried by a non-429 status is still a failed request (OutcomeIsError).
 	ClassRateLimit ErrorClass = "rate_limit"
 
 	// ClassQuota is a durable account/billing condition (credits exhausted,
@@ -288,8 +290,10 @@ func Classify(f ErrorFacts) ErrorClass {
 	if isTimeoutClass(typ, code) {
 		return ClassTimeout
 	}
-	// 9. Transient upstream availability.
-	if f.Status >= 500 && f.Status <= 599 {
+	// 9. Transient upstream availability. Any status at or above 500 is a
+	// server-side availability failure, including a non-standard 6xx-9xx from
+	// a hostile or broken gateway: nothing above 500 is a clean success.
+	if f.Status >= 500 {
 		return ClassUnavailable
 	}
 	if IsRetryableClass(typ, code) {
@@ -327,9 +331,11 @@ func (c ErrorClass) Retryable() bool {
 	return false
 }
 
-// IsError reports whether the class counts as a failure on the health surface.
-// A rate limit and a cancellation are flow events, exactly as a bare 429 and a
-// bare 499 always were; every other class is a failure.
+// IsError reports whether the class itself reads as a failure: a rate limit
+// and a cancellation are flow events, every other class is a failure. The
+// health surface answers a different question (OutcomeIsError) by reading the
+// status and the error type rather than the class, so the two deliberately
+// diverge in the documented families; neither is derived from the other.
 func (c ErrorClass) IsError() bool {
 	switch c {
 	case ClassNone, ClassRateLimit, ClassCanceled:
@@ -457,6 +463,13 @@ func IsLocalErrorType(t string) bool {
 
 func localClass(typ, code string) (ErrorClass, bool) {
 	if proxyClasses[typ] || proxyClasses[code] {
+		// queue_drained is a retryable capacity answer, not a proxy fault: the
+		// response is a 503 (or an in-band rate_limit_error) with Retry-After,
+		// so classifying it as ClassProxy would tell clients and SDKs not to
+		// retry the very response that asks them to.
+		if typ == TypeQueueDrained || code == TypeQueueDrained {
+			return ClassUnavailable, true
+		}
 		return ClassProxy, true
 	}
 	if contentClasses[typ] || contentClasses[code] {
@@ -500,11 +513,13 @@ func IsRetryableClass(typ, code string) bool {
 	return extensionMatches(installedClassExtensions().Retryable, typ, code)
 }
 
-// BuiltinClass names the built-in class a spelling belongs to ("rate_limit",
-// "quota" or "retryable"), or "" when no built-in vocabulary knows it. Config
-// validation uses it to reject an operator extension that names a built-in
-// spelling of a DIFFERENT class: extensions may only add, never move a
-// spelling between classes.
+// BuiltinClass names the built-in class a spelling belongs to - "quota",
+// "rate_limit", "retryable", "timeout", "content", "proxy" or "client_error" -
+// or "" when no built-in vocabulary knows it. Config validation uses it to
+// reject an operator extension that names a built-in spelling of a DIFFERENT
+// class: extensions may only add, never move a spelling between classes.
+// Gateway overlaps resolve to the first matching family (gateway_timeout is
+// both retryable and a timeout, so it reports "retryable").
 func BuiltinClass(spelling string) string {
 	spelling = strings.ToLower(strings.TrimSpace(spelling))
 	switch {
@@ -514,6 +529,14 @@ func BuiltinClass(spelling string) string {
 		return "rate_limit"
 	case retryableClasses[spelling]:
 		return "retryable"
+	case timeoutClasses[spelling]:
+		return "timeout"
+	case contentClasses[spelling]:
+		return "content"
+	case proxyClasses[spelling] || spelling == TypeUpstreamUnreachable:
+		return "proxy"
+	case clientFaultClasses[spelling]:
+		return "client_error"
 	}
 	return ""
 }
@@ -616,13 +639,14 @@ func RateLimitClassListSQL() string {
 // RateLimitClassSQL renders the "one of these SQL expressions names a
 // rate-limit class" predicate, using the same vocabulary. Each argument is a
 // nullable text expression (a column, or a json_extract path); NULL is treated
-// as empty, matching the record's empty-string zero, and the comparison is
-// case-insensitive like the Go matcher.
+// as empty, matching the record's empty-string zero, and the comparison trims
+// and lowercases like the Go matcher, so a spelling stored with surrounding
+// whitespace answers the same on both sides.
 func RateLimitClassSQL(exprs ...string) string {
 	list := RateLimitClassListSQL()
 	parts := make([]string, 0, len(exprs))
 	for _, e := range exprs {
-		parts = append(parts, "lower(coalesce("+e+", '')) IN ("+list+")")
+		parts = append(parts, "lower(trim(coalesce("+e+", ''))) IN ("+list+")")
 	}
 	return "(" + strings.Join(parts, " OR ") + ")"
 }

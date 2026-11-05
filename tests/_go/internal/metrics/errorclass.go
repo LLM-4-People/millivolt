@@ -59,6 +59,10 @@ func TestClassifyDefault(t *testing.T) {
 		{"proxy transform_error", ErrorFacts{Status: 500, Type: TypeTransformError, Local: true}, ClassProxy},
 		{"proxy queue_full", ErrorFacts{Status: 503, Type: TypeQueueFull, Local: true}, ClassProxy},
 		{"proxy unknown local type", ErrorFacts{Status: 500, Type: "mystery_local", Local: true}, ClassProxy},
+		// A queue drain is the proxy asking the client to retry (503 plus
+		// Retry-After), so it is a retryable capacity answer, not a proxy
+		// fault the client should abandon.
+		{"proxy queue_drained", ErrorFacts{Status: 503, Type: TypeQueueDrained, Local: true}, ClassUnavailable},
 
 		// Timeouts before the generic availability class.
 		{"500 with timeout_error", ErrorFacts{Status: 500, Type: "timeout_error"}, ClassTimeout},
@@ -66,6 +70,9 @@ func TestClassifyDefault(t *testing.T) {
 		{"503 with service_unavailable", ErrorFacts{Status: 503, Type: "service_unavailable"}, ClassUnavailable},
 		{"500 alone", ErrorFacts{Status: 500}, ClassUnavailable},
 		{"502 with api_error", ErrorFacts{Status: 502, Type: "api_error"}, ClassUnavailable},
+		// A non-standard status from a broken or hostile gateway is still a
+		// server-side availability failure, never a clean success.
+		{"620 from a broken gateway", ErrorFacts{Status: 620}, ClassUnavailable},
 
 		// Cancellation: only a BARE 499 is the client's own abort; a 499
 		// carrying a structured error is classified by the envelope.
@@ -221,12 +228,19 @@ func TestClassExtensionsAddButNeverMove(t *testing.T) {
 	}
 
 	// BuiltinClass names the built-in a spelling belongs to, so validation can
-	// reject a remap; the extension itself never changes those answers.
+	// reject a remap; the extension itself never changes those answers, and
+	// the coverage spans every family, not only the three extension lists.
 	for spelling, want := range map[string]string{
-		"tier_limit_exceeded": "rate_limit",
-		"insufficient_quota":  "quota",
-		"server_error":        "retryable",
-		"warming_up":          "",
+		"tier_limit_exceeded":   "rate_limit",
+		"insufficient_quota":    "quota",
+		"server_error":          "retryable",
+		"bad_gateway":           "retryable",
+		"timeout_error":         "timeout",
+		TypeQueueFull:           "proxy",
+		TypeUpstreamUnreachable: "proxy",
+		CodeEmptyCompletion:     "content",
+		TypeInvalidRequest:      "client_error",
+		"warming_up":            "",
 	} {
 		if got := BuiltinClass(spelling); got != want {
 			t.Errorf("BuiltinClass(%q) = %q, want %q", spelling, got, want)
@@ -242,7 +256,8 @@ func TestClassExtensionsAddButNeverMove(t *testing.T) {
 
 // TestOutcomeIsErrorIsClassBlind pins the exact relationship between the health
 // predicate and the class across the whole corpus: the two answer differently
-// in exactly two families, and nowhere else.
+// only in the two documented families, and any other divergence among these
+// rows is a bug.
 //
 //   - a 429 is flow control by status, so the health surface never counts it -
 //     even when its body names a durable quota/billing condition (the class is
@@ -253,7 +268,10 @@ func TestClassExtensionsAddButNeverMove(t *testing.T) {
 //     carrying a rate-limit error all count as errors while HasRateLimit also
 //     counts them in the rate-limit series.
 //
-// Any other divergence between "what is this" and "did it fail" is a bug.
+// One latent shape is not corpus-exercised: Classify also reads error_code,
+// while the health predicate reads the type alone (the envelope parser pairs
+// every code with a type, so a code-only spelling does not reach a record in
+// production).
 func TestOutcomeIsErrorIsClassBlind(t *testing.T) {
 	quota429, rateLimitOther := 0, 0
 	for _, row := range isErrorCorpus {

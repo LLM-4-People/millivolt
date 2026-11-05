@@ -255,10 +255,11 @@ document.addEventListener('error', e => {
 }, true);
 // X429_COUNTING_RULE is the one counting-rule sentence every ×429 signal
 // tooltip carries (the chart's rate-limited series and the explorer node
-// badge): a request counts once whether the 429 was its final status or an
-// absorbed retry. The chart's series title appends its doctrine clause on
-// top of this shared sentence.
-const X429_COUNTING_RULE = 'Requests with final or retried HTTP 429; each request counted once';
+// badge): a request counts once when its final response or any retried or
+// in-band attempt hit a rate limit - a 429 or a recognized rate-limit
+// type/code. The chart's series title appends its doctrine clause on top of
+// this shared sentence.
+const X429_COUNTING_RULE = 'Requests with a final, retried or in-band rate limit (HTTP 429 or a recognized rate-limit type/code); each request counted once';
 
 // MAGNITUDES is the one compact-scale ladder (divisor + suffix) every large
 // number formatter walks down: 1e9 → B, 1e6 → M, 1e3 → K, largest first.

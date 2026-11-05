@@ -167,12 +167,21 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// This relay's overflow policy: a peek that OVERFLOWS the cap leaves
 		// the body open (peekLeftOpen), so the final relay can serve
 		// prefix + live remainder verbatim and an oversized error keeps normal
-		// retry semantics.
+		// retry semantics. A peek whose read FAILED (peekErr) closed the body
+		// under the whole-document bound: the final relay re-serves the
+		// captured prefix and keeps the failed read propagating through the
+		// untrustworthy remainder, so a translated or buffered owner fails
+		// closed instead of asserting the upstream status over a truncated
+		// envelope.
 		var errBody []byte
 		peekLeftOpen := false
 		var errTyp, errCode string
+		var peekErr error
 		if resp.StatusCode >= 400 {
-			errBody, errTyp, errCode, peekLeftOpen = peekErrorEnvelope(resp)
+			// The peek is part of THIS send: the attempt context carries the
+			// per-send deadline (X-Proxy-Timeout-Ms) when one was requested
+			// and falls back to the shared whole-document bound otherwise.
+			errBody, errTyp, errCode, peekLeftOpen, peekErr = s.peekErrorEnvelope(attemptCtx, resp)
 			// A 429 whose envelope names a durable account condition is the
 			// documented quota-pause trigger. The pause reacts to a 429; a
 			// durable code on another status still classifies as quota (so it
@@ -195,7 +204,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 				// Quota waits never burn the ordinary retry budget - only
 				// transient attempts count against maxRetries.
 				attemptCancel() // the in-cap body was drained by the peek
-				retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader)
+				retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader, metrics.ClassQuota)
 				rec.RetryAfterMs = int(retryAfter.Milliseconds())
 				// A durable quota condition is an account state, not flow
 				// control: RateLimited stays unset for the same reason the
@@ -237,9 +246,10 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			end(retryable)
 			// Stamp the parsed classification so the record, the live ring and
 			// the health predicates all read the SAME class the retry ladder
-			// just decided on. Without this a rate limit carried by a 400 is
-			// filed as a client error: it raises the error count and stays out
-			// of the rate-limit count, which is the opposite of what it is.
+			// just decided on. Without this a rate limit carried by a 400
+			// reaches the record as a bare 400: it still counts as a failed
+			// request by status, but it stays out of the rate-limit series and
+			// the client-visible class reads as a plain client fault.
 			if errTyp != "" || errCode != "" {
 				rec.ErrorType, rec.ErrorCode = errTyp, errCode
 				if msg, _, _ := parseErrorBody(errBody); msg != "" {
@@ -251,15 +261,30 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 				rec.RateLimited = true
 			case class == metrics.ClassQuota:
 				// A durable account condition is not an error-storm event and
-				// not flow control: leave the storm evidence and the
-				// rate-limit flag alone, exactly as the 429 path does.
-				rec.RateLimited = false
+				// not flow control: leave the storm evidence and the pacing
+				// flag alone, exactly as the 429 path does (a queue wait or an
+				// earlier absorbed 503 may already have set RateLimited for the
+				// scheduler, and this response neither adds nor clears it).
+			}
+			if peekErr != nil {
+				// The bounded envelope read failed mid-body (the
+				// whole-document bound fired, the shared idle guard canceled
+				// the attempt, or the connection reset): the captured prefix
+				// is re-served, but the record must name the read failure
+				// exactly as the live relay loop does for a body read it
+				// cannot finish. Only the SURFACED attempt marks: an absorbed
+				// read failure just truncates the discarded error detail.
+				markStreamErr(ctx, rec, peekErr)
 			}
 			if errBody != nil {
-				if peekLeftOpen {
-					// Oversized 429, budget exhausted: relay the COMPLETE body -
-					// captured prefix + live remainder (byte-for-byte, never a
-					// truncated prefix). Close() closes the original body.
+				if peekLeftOpen || peekErr != nil {
+					// Overflow: relay the COMPLETE body - captured prefix +
+					// live remainder (byte-for-byte, never a truncated prefix);
+					// Close() closes the original body. Read failure: the rest
+					// is the broken/closed body the peek abandoned - only the
+					// captured prefix is trustworthy, so the re-served chain
+					// yields the prefix and lets the read failure propagate
+					// into the owner's bounded read (fail closed).
 					resp.Body = &prefixRemainderBody{prefix: errBody, rest: resp.Body}
 				} else {
 					resp.Body = io.NopCloser(bytes.NewReader(errBody))
@@ -274,14 +299,12 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// Read the failed attempt's error body (bounded) so the proxy logs the
 		// full failure detail even though the client never sees it. The body is
 		// then discarded - it is never forwarded. Best-effort: a read failure
-		// just means less error detail for this absorbed attempt. (An in-cap
-		// error body was already captured+closed by the envelope peek above; an
-		// OVERSIZED one left the body open, so close it here - the remainder is
-		// discarded with the rest of the attempt.)
-		if errBody == nil {
-			errBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
-			resp.Body.Close()
-		} else if peekLeftOpen {
+		// just means less error detail for this absorbed attempt. The envelope
+		// peek above captured the in-cap prefix (io.ReadAll never returns nil)
+		// and closed the body on a read failure; an OVERSIZED body was left
+		// open, so close it here - the remainder is discarded with the rest of
+		// the attempt.
+		if peekLeftOpen {
 			resp.Body.Close()
 		}
 		// The absorbed attempt's send is over (body drained): release its
@@ -289,8 +312,10 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		attemptCancel()
 
 		// Record the absorbed attempt so the dashboard/drawer show the errors
-		// that preceded the final (e.g. 200) outcome.
-		retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader)
+		// that preceded the final (e.g. 200) outcome. The caller's parsed
+		// envelope is passed in so the retry-hint decision reuses the class it
+		// already computed instead of decoding the body a second time.
+		retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader, class)
 		s.publishUpdate(rec)
 		// The canonical class decides the rate-limit flag, so a rate limit
 		// announced by a code on a non-429 status is counted exactly like a

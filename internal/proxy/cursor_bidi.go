@@ -483,10 +483,19 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		// body, and a tarpit past the headers must not pin the send forever.
 		resp.Body = s.wrapUpstreamBody(resp.Body, upstreamCancel)
 		stopRead := context.AfterFunc(ctx, upstreamCancel)
-		retryable, class := cursorOutcome(resp)
+		retryable, class, peekErr := s.cursorOutcome(ctx, resp)
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)
 		if !retryable || !s.allowStormRetry(ctx, active) {
 			stopRead()
+			if peekErr != nil {
+				// The bounded peek failed mid-body (the whole-document
+				// bound, the idle guard, or a reset): the captured prefix is
+				// still what the caller re-serves, but the record must name
+				// the read failure like every other body-read failure on this
+				// transport. Only the surfaced attempt marks: an absorbed
+				// read failure is retry mechanics.
+				markStreamErr(ctx, state.rec, peekErr)
+			}
 			failed = retryable
 			// This response reaches the caller (the client or the re-ask's
 			// run): adopt this attempt's transport timing. Like the
@@ -500,7 +509,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		resp.Body.Close()
 		stopRead()
 		upstreamCancel()
-		retryAfter := s.absorbHTTPRetry(state.rec, resp, errBody, t.authHeader)
+		retryAfter := s.absorbHTTPRetry(state.rec, resp, errBody, t.authHeader, class)
 		state.rec.RetryAfterMs = int(retryAfter.Milliseconds())
 		// The canonical class, not the status, decides the rate-limit flag, so
 		// a limit announced by a code on a non-429 status counts here too. 503
@@ -544,20 +553,22 @@ func (s *Server) cursorEndSend(groupKey string, own, failed bool) {
 // wrong. This transport's overflow policy is applied here: an oversized body is
 // closed and re-wrapped as only the captured prefix (the cursor path
 // synthesizes its own envelope for the final error renderer), keeping normal
-// retry semantics. The quota pause never triggers from here: cursor is not an
+// retry semantics. A read failure returns the captured prefix together with the
+// error, so the caller can mark the record like every other body-read failure.
+// The quota pause never triggers from here: cursor is not an
 // OpenAI-wire target, so a durable cursor 429 keeps its surface-immediately
 // behavior - it is simply not retried.
-func cursorOutcome(resp *http.Response) (retryable bool, class metrics.ErrorClass) {
+func (s *Server) cursorOutcome(ctx context.Context, resp *http.Response) (retryable bool, class metrics.ErrorClass, readErr error) {
 	if resp.StatusCode < 400 {
-		return false, metrics.ClassNone
+		return false, metrics.ClassNone, nil
 	}
-	peeked, typ, code, leftOpen := peekErrorEnvelope(resp)
+	peeked, typ, code, leftOpen, readErr := s.peekErrorEnvelope(ctx, resp)
 	if leftOpen {
 		resp.Body.Close()
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(peeked))
 	class = metrics.Classify(metrics.ErrorFacts{Status: resp.StatusCode, Type: typ, Code: code})
-	return class.Retryable(), class
+	return class.Retryable(), class, readErr
 }
 
 // openCursorRun opens a fresh agent.v1 Run stream for the given request body.

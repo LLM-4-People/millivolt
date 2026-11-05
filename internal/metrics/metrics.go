@@ -444,9 +444,9 @@ func absorbedServerFailure(attempts []RetryAttempt) bool {
 // in-band stream error, or a translation failure), so the upstream failure
 // must not vanish from the error rate - it counts exactly like its 200 twin
 // (the committed status line a client abort cannot rewrite). (503 is retried
-// for scheduler pacing but is still a server error, so it counts, unless its
-// own body names a rate limit - then the class is flow control and
-// HasRateLimit owns it.)
+// for scheduler pacing but is still a server error, so it counts; a
+// rate-limit spelling in its body changes the class and the rate-limit
+// series, never this answer.)
 //
 // Use it everywhere instead of re-deriving the predicate so the live counter,
 // the aggregates, and the dashboard never disagree. The arms live in
@@ -466,17 +466,20 @@ func (r *Record) IsError() bool {
 //
 // The health surface asks "did this request fail", not "what kind of thing was
 // this" - that second question belongs to Classify, and the two answer
-// differently in two documented families:
+// differently in the two documented families:
 //
 //   - a final 429 is the flow-control handshake the client can retry, so it is
 //     not an error even when its body names a durable quota/billing condition
 //     (the class is ClassQuota there, and quota_pause_mode owns the reaction);
-//   - a recorded structured error on any OTHER status is a failure, even when
-//     its own type or code names a rate limit (a provider answering 400
+//   - a rate-limit class on any OTHER status is a failure here even though the
+//     class itself reads as flow control: a provider answering 400
 //     `tier_limit_exceeded`, an in-band 429 behind a committed 200, or a 499
-//     carrying a rate-limit error the client aborted around): the class says
-//     rate_limit, and HasRateLimit counts it, while the request still failed
-//     and belongs in the error rate.
+//     carrying a rate-limit error the client aborted around has the class
+//     rate_limit AND counts in the error rate (HasRateLimit counts it too).
+//
+// The predicate reads the status and the error TYPE; a spelling carried only
+// in error_code (a shape the envelope parser does not produce - it pairs every
+// code with a type) can change the class but not this answer.
 //
 // Both are fixed answers, and the SQL twin (IsErrorSQL) and the JS mirror
 // (recordOutcomeIsError) are pinned to this one by the health-predicate truth
@@ -504,10 +507,12 @@ func OutcomeIsError(status int, typ, code string) bool {
 // attempts.
 //
 // A rate limit is the CLASS, not the status: providers commonly answer one with
-// a 400 (`tier_limit_exceeded`, `resource_exhausted`), and filing those as
-// errors both inflated the error count and hid them from the rate-limit series.
-// RateLimited is broader scheduler metadata (queue waits and 503 pacing) and
-// intentionally does not define this observer metric.
+// a 400 (`tier_limit_exceeded`, `resource_exhausted`), and a status-only test
+// left those out of the rate-limit series while reading them as plain client
+// faults. This is a different question from the health surface: on a non-429
+// status the same request also fails (OutcomeIsError), while a bare 429 is not
+// an error. RateLimited is broader scheduler metadata (queue waits and 503
+// pacing) and intentionally does not define this observer metric.
 func (r *Record) HasRateLimit() bool {
 	if r.StatusCode == 429 || IsRateLimitClass(r.ErrorType, r.ErrorCode) {
 		return true

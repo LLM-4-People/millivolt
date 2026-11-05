@@ -119,7 +119,10 @@ func TestErrorClassExtensionListsConfig(t *testing.T) {
 		!reflect.DeepEqual(c.QuotaErrorClasses, []string{"account_depleted"}) {
 		t.Fatalf("applied lists = %q / %q, want the submitted values", c.RateLimitErrorClasses, c.QuotaErrorClasses)
 	}
-	// Every invalid shape must fail Validate with the owning list named.
+	// Every invalid shape must fail Validate with the owning list named,
+	// including built-ins of families outside the three extension
+	// vocabularies: an extension may never remap a timeout, proxy or content
+	// spelling into a retryable, rate-limit or quota class.
 	for name, mutate := range map[string]func(*Config){
 		"blank rate-limit entry": func(c *Config) { c.RateLimitErrorClasses = []string{"  "} },
 		"duplicate quota entry":  func(c *Config) { c.QuotaErrorClasses = []string{"a_b", "A_B"} },
@@ -134,6 +137,15 @@ func TestErrorClassExtensionListsConfig(t *testing.T) {
 		"built-in rate limit in quota": func(c *Config) {
 			c.QuotaErrorClasses = []string{"tier_limit_exceeded"}
 		},
+		"built-in client fault in limits": func(c *Config) { c.RateLimitErrorClasses = []string{"invalid_request_error"} },
+		"built-in timeout in limits":      func(c *Config) { c.RateLimitErrorClasses = []string{"timeout_error"} },
+		"built-in proxy in limits":        func(c *Config) { c.RateLimitErrorClasses = []string{"queue_full"} },
+		"built-in content in quota":       func(c *Config) { c.QuotaErrorClasses = []string{"empty_completion"} },
+		"built-in timeout in quota":       func(c *Config) { c.QuotaErrorClasses = []string{"timeout_error"} },
+		"built-in client fault in quota":  func(c *Config) { c.QuotaErrorClasses = []string{"authentication_error"} },
+		"built-in proxy in retryable":     func(c *Config) { c.RetryableErrorClasses = []string{"queue_full"} },
+		"built-in content in retryable":   func(c *Config) { c.RetryableErrorClasses = []string{"empty_completion"} },
+		"built-in timeout in retryable":   func(c *Config) { c.RetryableErrorClasses = []string{"timeout"} },
 	} {
 		c := Default()
 		mutate(c)
@@ -147,6 +159,15 @@ func TestErrorClassExtensionListsConfig(t *testing.T) {
 	c.QuotaErrorClasses = []string{"insufficient_quota"}
 	if err := c.Validate(); err != nil {
 		t.Errorf("Validate rejected same-class built-in spellings: %v", err)
+	}
+	// The retryable list may name a built-in client-fault spelling: that is
+	// the documented override for a gateway that mislabels transient failures
+	// as client faults (the pre-existing in-band authority), and the only
+	// class remap any extension list may declare.
+	c = Default()
+	c.RetryableErrorClasses = []string{"invalid_request_error"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate rejected the documented client-fault override: %v", err)
 	}
 	// The clone copies each new slice.
 	src := Default()

@@ -286,9 +286,11 @@ the built-in vocabularies with gateway-specific spellings, additively:
 `retryable_error_classes` for in-band transient errors). Entries are matched
 case-insensitively against the parsed envelope's type and code; validation
 rejects a spelling that names a built-in of a different class, so a built-in
-classification can never be moved or weakened. Reload applies to new
-classifications and the published predicates re-read stored history through
-the same effective vocabulary.
+classification can never be moved or weakened (the one exception is
+`retryable_error_classes` naming a built-in client-fault spelling, the
+documented override for a gateway that mislabels transient failures). Reload
+applies to new classifications, and the published predicates render per call,
+so they re-read stored history through the same effective vocabulary.
 
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
@@ -326,11 +328,13 @@ relabelled `text/event-stream`: the upstream bytes are never converted into SSE
 frames, and the relay surfaces the non-SSE body as a truncated-stream error
 rather than translating it. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
-relayed: the error classes the OpenAI API documents as retryable (500
-`server_error`, the 503 overloaded/unavailable family, request timeouts, the
-equivalent Anthropic/gateway spellings, and the `engine_overloaded` capacity
-code) are dropped before the wire and the request re-sent, so the client never
-sees the failure. A specific capacity code overrides the generic
+relayed: the same availability and timeout vocabulary the status path treats
+as retryable (500 `server_error`, the 503 overloaded/unavailable family, the
+timeout spellings, the equivalent Anthropic/gateway spellings including
+`bad_gateway`, `gateway_timeout` and `upstream_error`, and the
+`engine_overloaded` capacity code) is dropped before the wire and the request
+re-sent, so the client never sees the failure. A specific capacity code
+overrides the generic
 `invalid_request_error` wrapper, because the code names a transient overload
 rather than a malformed request; authentication, permission, not-found and
 too-large types stay final. The

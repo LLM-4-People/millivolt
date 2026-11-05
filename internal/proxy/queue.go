@@ -116,7 +116,7 @@ func (s *Server) writeQueueDrainedError(w http.ResponseWriter, rec *metrics.Reco
 		return false
 	}
 	queueDrainedRecord(rec, err)
-	writeClientErrorHdr(w, rec, inbound, "rate_limit_error", queueDrainedMessage, http.StatusServiceUnavailable, s.retryAfterHeader())
+	writeClientErrorHdr(w, rec, inbound, metrics.TypeRateLimit, queueDrainedMessage, http.StatusServiceUnavailable, s.retryAfterHeader())
 	return true
 }
 
@@ -128,5 +128,5 @@ func queueDrainedStreamError(rec *metrics.Record, err error) (typ, msg string, o
 		return "", "", false
 	}
 	queueDrainedRecord(rec, err)
-	return "rate_limit_error", queueDrainedMessage, true
+	return metrics.TypeRateLimit, queueDrainedMessage, true
 }

@@ -425,10 +425,13 @@ func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 // (final entry + absorbed-attempt entries) - the single owner of what counts as
 // an error signature event. It reads the canonical health predicate
 // (metrics.OutcomeIsError) rather than re-deriving error-ness from the status,
-// so the explorer groups exactly the failures the KPI counts: a bare 429 and a
-// plain 499 are flow events, while a request that failed around a rate limit
-// (a provider answering 400 `tier_limit_exceeded`, an in-band 429 behind a
-// committed 200) is an error entry AND counts in the rate-limit series.
+// so every entry names a real failure outcome: a bare 429 and a plain 499 are
+// flow events, while a request that failed around a rate limit (a provider
+// answering 400 `tier_limit_exceeded`, an in-band 429 behind a committed 200)
+// is an error entry AND counts in the rate-limit series. Entries are failure
+// EVENTS (per attempt); Record.IsError counts affected REQUESTS through its
+// absorbed-5xx arm, so a recovered typed or bare 4xx attempt can list here
+// without the request counting in the error KPI.
 func errorEntries(r *metrics.Record) []errEnt {
 	var out []errEnt
 	fin := r.StatusCode
@@ -447,6 +450,13 @@ func errorEntries(r *metrics.Record) []errEnt {
 		if a.InBand {
 			// An in-band entry records a status the committed 200 hid; the
 			// final error entry already owns this failure.
+			continue
+		}
+		if a.ErrorType == metrics.TypeTransport {
+			// A transport retry is retry mechanics, not an upstream error
+			// event: the aborted send produced no upstream response to
+			// disclose, and the request-level predicate counts absorbed
+			// attempts only at or above 500.
 			continue
 		}
 		as := a.StatusCode

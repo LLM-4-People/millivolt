@@ -92,12 +92,14 @@ func seedPurgeStore(t *testing.T, s *Store) {
 			return r
 		}(),
 		// A rate limit announced by a CODE on a non-429 status: providers
-		// commonly answer one with a 400 (tier_limit_exceeded). It is flow
-		// control, so it must NOT be purged as an error, and it must be
-		// reachable as a rate limit.
+		// commonly answer one with a 400 (tier_limit_exceeded). It is a
+		// failed request (a structured error on a non-429 status), so it IS
+		// purged by the error filter, and it must be reachable as a rate
+		// limit.
 		mk("rl-code", "beta", 400, "tier_limit_exceeded"),
 		// The same shape with an absorbed 5xx attempt: the upstream genuinely
-		// failed once, so it counts as an error despite the rate-limit class.
+		// failed once, so it counts as an error - through its own structured
+		// error or the absorbed attempt (both, here).
 		func() *metrics.Record {
 			r := mk("rl-code-5xx", "beta", 400, "tier_limit_exceeded")
 			r.Retries = 1

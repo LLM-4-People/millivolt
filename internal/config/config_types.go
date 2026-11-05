@@ -273,8 +273,9 @@ type Config struct {
 
 	// RetryableErrorClasses extends the built-in retryable in-band error
 	// vocabulary (OpenAI server_error / service_unavailable family,
-	// api_error, overloaded_error, timeout_error, engine_overloaded and the
-	// common gateway spellings) with operator-supplied type or code strings:
+	// api_error, overloaded_error, the timeout spellings, engine_overloaded
+	// and the common gateway spellings bad_gateway / gateway_timeout /
+	// upstream_error) with operator-supplied type or code strings:
 	// a gateway that reports a transient failure under a custom spelling can
 	// be re-sent without a code change. The built-in engine_overloaded
 	// capacity code also overrides the generic invalid_request_error
@@ -292,8 +293,9 @@ type Config struct {
 	// / resource_exhausted / rpm+tpm spellings and friends) with
 	// operator-supplied type or code strings: a gateway that announces its
 	// limit under a custom spelling is then retried transparently, counted in
-	// the rate-limit series instead of the error rate, and classified as a
-	// rate limit in the client-facing class, exactly like a 429. Matched
+	// the rate-limit series, and classified as a rate limit in the
+	// client-facing class. Unlike a bare 429, a non-429 status carrying the
+	// class also counts as a failed request on the health surface. Matched
 	// case-insensitively against the parsed envelope's type and code fields,
 	// never message text. Additive only: validation rejects an entry that
 	// names a built-in spelling of a different class, and a durable

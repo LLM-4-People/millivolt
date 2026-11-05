@@ -374,13 +374,15 @@ function recordTools(r) {
 }
 
 // finalErrorEntry returns the record's client-visible failure, or null for a
-// clean completion, a rate limit or a plain client close. Genuine failures are
+// clean completion, a bare 429 or a plain client close. Genuine failures are
 // exactly the outcomes metrics.OutcomeIsError accepts (recordOutcomeIsError
-// mirrors it): a structured NON-rate-limit error (including on a 499, which
-// observed the upstream's own failure before the client aborted around it), or
-// any error status, with a rate-limit class on ANY status treated as flow
-// control. The status is only the code fallback once a failure is established.
-// The drawer banner and the error-group enumerator share this one predicate.
+// mirrors it): a structured error on any status other than a bare 429/499
+// (including a 499, which observed the upstream's own failure before the
+// client aborted around it) or any status >= 400. A non-429 status carrying a
+// rate-limit class is therefore a failure here even though the rate-limit
+// series also counts it. The status is only the code fallback once a failure
+// is established. The drawer banner and the error-group enumerator share this
+// one predicate.
 function finalErrorEntry(r) {
   if (!recordOutcomeIsError(r.status_code, r.error_type, r.error_code)) return null;
   const finStatus = r.status_code || 0;
@@ -398,15 +400,17 @@ function finalErrorEntry(r) {
 // without allocating one object per entry; both share the final-failure
 // predicate above, and the absorbed arm reads the same health predicate
 // (recordOutcomeIsError) the Go owner (web/aggregate.go errorEntries) reads, so
-// a rate limit announced by a code on a 400 is flow control on both sides.
+// the explorer groups the same failures the server does. A transport retry is
+// retry mechanics, not an upstream error event, and a bare 429 never lists.
 function forEachErrorEntry(r, visit) {
   const final = finalErrorEntry(r);
   if (final) visit(final.type, final.code, final.msg, false, final.at);
-  // Absorbed retry attempts: only genuine failures the client never saw.
-  // An in-band entry is the hidden status of the final failure, already
+  // Absorbed retry attempts: only genuine upstream failures the client never
+  // saw. An in-band entry is the hidden status of the final failure, already
   // visited above, so it never adds a second entry.
   for (const a of (r.attempts || [])) {
     if (a.in_band) continue;
+    if (a.error_type === 'transport') continue;
     if (!recordOutcomeIsError(a.status_code, a.error_type, a.error_code)) continue;
     const as = a.status_code || 0;
     const t = a.error_type || (as ? 'http_' + as : 'transport');

@@ -169,7 +169,9 @@ module.exports = async function w16Mirrors(H) {
       // in-band provider error on a 200 does, and
       // absorbed attempts keep genuine failures (5xx, typed, 4xx, and a
       // rate-limit code, which is a failure with a rate-limit cause) while
-      // skipping a bare 429 and bare non-failures. In-band attempt entries
+      // skipping a bare 429, bare non-failures, and a transport retry
+      // (retry mechanics, not an upstream error event - the Go enumerator
+      // skips error_type 'transport' the same way). In-band attempt entries
       // are health evidence, never a second disclosure for the final failure,
       // including the synthetic in-band 5xx shape. errorKey mirrors the Go
       // type|code|msg identity the explorer error dimension filters by.
@@ -179,6 +181,7 @@ module.exports = async function w16Mirrors(H) {
           {status_code: 429},
           {status_code: 502, error_type: 'upstream'},
           {status_code: 0, error_type: 'dial_failed'},
+          {status_code: 0, error_type: 'transport'},
           {status_code: 401},
           {status_code: 302},
           {status_code: 400, error_type: 'tier_limit_exceeded', error_code: 'tier_limit_exceeded'},

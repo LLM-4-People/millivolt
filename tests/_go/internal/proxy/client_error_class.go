@@ -152,9 +152,9 @@ func TestSuppressClientRetriesWinsOverTheClassAdvice(t *testing.T) {
 
 // TestOperatorRateLimitExtensionDrivesRetryAndClass pins the extension end to
 // end: a spelling the operator listed under rate_limit_error_classes is
-// retried transparently (the upstream sees a second call), counted as a rate
-// limit rather than an error, and disclosed as rate_limit when it finally
-// surfaces.
+// retried transparently (the upstream sees a second call), counted in the
+// rate-limit series (and, because the surfaced 400 failed, in the error rate),
+// and disclosed as rate_limit when it finally surfaces.
 func TestOperatorRateLimitExtensionDrivesRetryAndClass(t *testing.T) {
 	up := newFixtureUpstream(t, "application/json", http.StatusBadRequest,
 		`{"error":{"type":"gateway_throttle","message":"slow down at the gateway"}}`)
@@ -179,5 +179,35 @@ func TestOperatorRateLimitExtensionDrivesRetryAndClass(t *testing.T) {
 	}
 	if got := w.Header().Get("X-Should-Retry"); got != "true" {
 		t.Fatalf("X-Should-Retry = %q, want true", got)
+	}
+}
+
+// TestClientErrorClassSurvivesTranslation pins the translated-relay record
+// handoff: the translator replaces the request record (the translated body's
+// parameters are re-derived), and the outer writer must classify the REPLACED
+// record. Classifying the abandoned one labeled a 400 carrying
+// tier_limit_exceeded as client_error and advised against the retry the
+// response asks for.
+func TestClientErrorClassSurvivesTranslation(t *testing.T) {
+	up := newFixtureUpstream(t, "application/json", http.StatusBadRequest,
+		`{"error":{"code":"tier_limit_exceeded","message":"membership rpm limit exceeded: 101/100 resets 2026-11-03T23:11:00Z"}}`)
+	cfg := config.Default()
+	cfg.MaxRetries = 0
+	cfg.ClientErrorClass = config.ClientErrorClassHeader
+	s := New(cfg, metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	// Anthropic inbound translated to the OpenAI upstream: this is the path
+	// where the translator replaces the record.
+	w := proxyRequest(t, s, "/v1/messages", "openai",
+		`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want the surfaced 400 (body %s)", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("X-Proxy-Error-Class"); got != string(metrics.ClassRateLimit) {
+		t.Fatalf("X-Proxy-Error-Class = %q, want %q from the translated record", got, metrics.ClassRateLimit)
+	}
+	if got := w.Header().Get("X-Should-Retry"); got != "true" {
+		t.Fatalf("X-Should-Retry = %q, want true from the translated record", got)
 	}
 }

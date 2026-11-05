@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -675,19 +676,26 @@ func validateStorm(c *Config) error {
 
 // validateErrorClassExtensions owns the three operator extension lists:
 // retryable_error_classes, rate_limit_error_classes and quota_error_classes.
-// Every entry must be a non-blank, case-insensitively unique spelling; no
+// Every entry must be a non-blank, case-insensitively unique spelling, no
 // spelling may appear in two lists (it would be ambiguous), and no entry may
-// name a built-in spelling of a different class (an extension adds, it never
-// moves a spelling between classes or weakens a built-in).
+// name a built-in spelling of a different class: an extension adds, it never
+// moves a spelling between classes or weakens a built-in. The one documented
+// exception is retryable_error_classes, which stays authoritative over the
+// built-in client-fault deny (a gateway that mislabels a transient failure as
+// invalid_request_error can be opted back in); the rate-limit and quota lists
+// have no such override.
 func validateErrorClassExtensions(c *Config) error {
 	lists := []struct {
 		key   string
 		list  []string
 		class string
+		// alsoAllowed are additional built-in classes this list may name,
+		// overriding the default built-in deny.
+		alsoAllowed []string
 	}{
-		{"retryable_error_classes", c.RetryableErrorClasses, "retryable"},
-		{"rate_limit_error_classes", c.RateLimitErrorClasses, "rate_limit"},
-		{"quota_error_classes", c.QuotaErrorClasses, "quota"},
+		{"retryable_error_classes", c.RetryableErrorClasses, "retryable", []string{"client_error"}},
+		{"rate_limit_error_classes", c.RateLimitErrorClasses, "rate_limit", nil},
+		{"quota_error_classes", c.QuotaErrorClasses, "quota", nil},
 	}
 	seen := make(map[string]string)
 	for _, l := range lists {
@@ -701,9 +709,10 @@ func validateErrorClassExtensions(c *Config) error {
 			}
 			seen[lower] = l.key
 			builtin := metrics.BuiltinClass(entry)
-			if builtin == "" || builtin == l.class {
+			if builtin == "" || builtin == l.class || slices.Contains(l.alsoAllowed, builtin) {
 				// Unknown spellings are the point of an extension; a built-in
-				// of the same class is a harmless no-op.
+				// of the same class, or one the list may override, is a no-op
+				// or the documented override.
 				continue
 			}
 			if builtin == "quota" {

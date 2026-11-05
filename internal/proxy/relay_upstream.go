@@ -190,30 +190,43 @@ func (b *prefixRemainderBody) Read(p []byte) (int, error) {
 func (b *prefixRemainderBody) Close() error { return b.rest.Close() }
 
 // peekErrorEnvelope is the single owner of the bounded error-envelope read:
-// it captures at most maxErrBodyBytes+1 bytes and classifies the in-cap
-// envelope through the canonical parser (metrics.ParseErrorEnvelope). An
-// in-cap body is closed and reported together with the envelope's protocol
-// tokens (type, code); an overflowed body (longer than maxErrBodyBytes) is
-// deliberately left OPEN and unclassified so the caller's own overflow policy
-// can re-serve it verbatim (prefix + live remainder) or truncate it.
+// it captures at most maxErrBodyBytes+1 bytes through the shared
+// whole-document reader (readWholeDocument), so the configured
+// whole_document_read_timeout / whole_document_read_max bound the error
+// document exactly like every other buffered upstream read. The caller-armed
+// upstream idle guard alone is NOT a bound on this read: a provider that
+// drips one byte at a time resets the idle timer on every write, so only the
+// whole-document deadline fails a dripping body closed.
 //
-// Every transport is guarded externally: the caller arms the shared upstream
-// idle guard on resp.Body at receipt (doWithRetry and openCursorHTTP), so a
-// tarpit that sends headers and stalls cannot hold this read past
-// upstream_stream_idle_timeout.
+// Classification itself stays: an in-cap body is closed and reported together
+// with the envelope's protocol tokens (type, code) through the canonical
+// parser (metrics.ParseErrorEnvelope); an overflowed body (longer than
+// maxErrBodyBytes) is deliberately left OPEN and unclassified so the caller's
+// own overflow policy can re-serve it verbatim (prefix + live remainder) or
+// truncate it. A read failure (the whole-document bound fired, the shared
+// idle guard canceled the attempt, or the connection reset mid-body) closes
+// the body and returns the partial prefix AND the error with leftOpen=false:
+// a broken or closed body's remainder is not trustworthy, so the caller
+// re-serves the prefix only and records the read failure exactly as the live
+// relay path does - the failed read keeps propagating through the closed
+// remainder, so a buffered owner's own bounded read fails closed.
 //
 // This is the classification gate for EVERY error status, not only 429: the
 // provider's own type/code is what distinguishes a rate limit carried by a 400
 // from a real client fault, so reading it only for 429 made identical conditions
 // behave differently depending on the status the provider happened to choose.
-func peekErrorEnvelope(resp *http.Response) (peeked []byte, typ, code string, leftOpen bool) {
-	peeked, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
+func (s *Server) peekErrorEnvelope(ctx context.Context, resp *http.Response) (peeked []byte, typ, code string, leftOpen bool, readErr error) {
+	peeked, readErr = s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes+1)
+	if readErr != nil {
+		resp.Body.Close()
+		return peeked, "", "", false, readErr
+	}
 	if len(peeked) > maxErrBodyBytes {
-		return peeked, "", "", true
+		return peeked, "", "", true, nil
 	}
 	resp.Body.Close()
 	typ, code, _ = metrics.ParseErrorEnvelope(peeked)
-	return peeked, typ, code, false
+	return peeked, typ, code, false, nil
 }
 
 // withSendTimeout derives the per-attempt upstream send context: the
@@ -385,7 +398,7 @@ func (s *Server) admitSendAttempt(ctx context.Context, groupKey string, hooks sc
 func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string, own bool) bool {
 	rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
 		StatusCode: 0,
-		ErrorType:  "transport",
+		ErrorType:  metrics.TypeTransport,
 		ErrorMsg:   msg,
 		At:         time.Now(),
 	})
@@ -403,8 +416,9 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 // stamps and publish order stay per-transport: the generic relay interplays
 // with the durable-quota 429 peek and clears stale error fields after its
 // publish; the cursor driver closes its duplex pipe and stamps before
-// publishing.
-func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBody []byte, authHeader string) time.Duration {
+// publishing. class is the canonical class the caller already computed for
+// this response, so the reset-hint decision never decodes the body twice.
+func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBody []byte, authHeader string, class metrics.ErrorClass) time.Duration {
 	retryAfter := parseRetryAfter(resp)
 	// Some providers carry the only reset hint in the message body
 	// ("... resets 2026-11-03T23:11:00Z") instead of a header. Without it the
@@ -413,11 +427,8 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 	// classifier calls a rate limit, not only a 429: `tier_limit_exceeded`
 	// arrives as a 400 from some gateways and carries its reset instant only
 	// in the message.
-	if retryAfter == 0 {
-		typ, code, _ := parseErrorBody(errBody)
-		if outcomeClass(resp, typ, code).IsRateLimit() {
-			retryAfter = retryHintFromBody(errBody)
-		}
+	if retryAfter == 0 && class.IsRateLimit() {
+		retryAfter = retryHintFromBody(errBody)
 	}
 	at := metrics.RetryAttempt{
 		StatusCode:   resp.StatusCode,

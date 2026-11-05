@@ -63,8 +63,8 @@ func TestHealthPredicatesMatchTheRecordTruthTable(t *testing.T) {
 		"inBand500":            {{StatusCode: 500, InBand: true}},
 		"attemptRateLimitCode": {{StatusCode: 400, ErrorCode: "tier_limit_exceeded"}},
 	}
-	isErrorSQL := "SELECT (" + predicates.IsError + ") = 1 FROM requests WHERE id = ?"
-	rateLimitedSQL := "SELECT (" + predicates.RateLimited + ") = 1 FROM requests WHERE id = ?"
+	isErrorSQL := "SELECT (" + definePredicates().IsError + ") = 1 FROM requests WHERE id = ?"
+	rateLimitedSQL := "SELECT (" + definePredicates().RateLimited + ") = 1 FROM requests WHERE id = ?"
 
 	for _, status := range statuses {
 		for _, errorType := range errorTypes {

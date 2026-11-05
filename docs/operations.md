@@ -1231,8 +1231,9 @@ The retry-mode gate shares the storm scheduler's parking, probes and pacing,
 so storm recovery settings configure it without storm protection being
 enabled. It surfaces in the storm banner as a quota incident with a
 **Resume now** action (`POST /admin/quota`); manual-mode holds appear on the
-pause surface with their reason and resume like any hold. A quota 429 is
-never marked as a rate limit, and quota re-sends never burn the transient
+pause surface with their reason and resume like any hold. A quota 429 never
+arms the rate-limit pacing trip (the rate-limit health series still counts the
+429 itself), and quota re-sends never burn the transient
 `max_retries` budget. The retry gate is in-memory - a restart drops it and
 the provider's next durable quota 429 re-arms it - while manual-mode holds
 persist like every operator pause. In-band occurrences (the same envelope
@@ -1438,8 +1439,9 @@ and first numbers, and a final upstream failure renders as an error alert above
 the groups. Only the selected group is shown; card headers collapse, and the
 active group and collapse choices survive live updates.
 
-A typed rate limit is flow control, not an error: its reason, code and message
-stay in the rate-limit card while the alert stays reserved for a final failure.
+A typed 429 is flow control, so its reason, code and message stay in the
+rate-limit card instead of the error alert; a rate limit carried by a non-429
+status is a final failure and renders the alert like any other.
 An in-band upstream response that arrived after a committed success is disclosed
 in Diagnostics rather than counted as a retry. Live pause and throttle state
 appear as explicit rows while a request is in flight.
@@ -1499,9 +1501,13 @@ indexes can overstate the tool-call count without growing memory past the
 bound.
 
 Errors count affected requests with a genuine failure, including recovered
-upstream failures. HTTP 429 counts requests that encountered a final, retried or
-in-band 429 (a 429 whose status line a committed 200 could not relay); the two
-signals can overlap, but 429 alone is not an error. Client-local
+upstream failures. Rate limits count requests that saw a rate-limit class on
+the final, a retried or an in-band attempt: an HTTP 429, a 429 whose status
+line a committed 200 could not relay, or a provider spelling the classifier
+recognizes (such as `tier_limit_exceeded` on a 400); each request counts once.
+The two signals can overlap: a bare 429 is not an error, but a non-429 status
+that carries a rate-limit class failed the request and counts in both.
+Client-local
 cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client

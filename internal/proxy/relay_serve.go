@@ -119,7 +119,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					rec.StatusCode = status
 					msg := fmt.Sprintf("upstream HTTP %d cannot carry an error body", resp.StatusCode)
 					if rec.ErrorType == "" {
-						rec.ErrorType = "upstream_error"
+						rec.ErrorType = metrics.TypeUpstreamError
 						rec.ErrorMsg = msg
 					}
 					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
@@ -133,7 +133,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					status = http.StatusBadGateway
 					rec.StatusCode = status
 					if rec.ErrorType == "" {
-						rec.ErrorType = "upstream_error"
+						rec.ErrorType = metrics.TypeUpstreamError
 						rec.ErrorMsg = "upstream error body could not be read"
 					}
 					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
@@ -294,7 +294,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				clientStatus = http.StatusBadGateway
 				rec.StatusCode = clientStatus
 				if rec.ErrorType == "" {
-					rec.ErrorType = "upstream_error"
+					rec.ErrorType = metrics.TypeUpstreamError
 					rec.ErrorMsg = "upstream returned an in-band error"
 				}
 			}
