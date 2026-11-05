@@ -545,7 +545,7 @@ func TestDecodeRejectsOversizePayload(t *testing.T) {
 	if err := enc.Close(); err != nil {
 		t.Fatal(err)
 	}
-	raw := append([]byte(magic), archiveVersion, flagConfig, 0, 0)
+	raw := append([]byte(Magic), archiveVersion, flagConfig, 0, 0)
 	raw = binary.BigEndian.AppendUint64(raw, 0)
 	raw = append(raw, sum[:]...)
 	raw = append(raw, zbuf.Bytes()...)
@@ -1332,7 +1332,7 @@ func framedArchive(t *testing.T, flags byte, created time.Time, payload []byte) 
 	if err := enc.Close(); err != nil {
 		t.Fatal(err)
 	}
-	raw := append([]byte(magic), archiveVersion, flags, 0, 0)
+	raw := append([]byte(Magic), archiveVersion, flags, 0, 0)
 	raw = binary.BigEndian.AppendUint64(raw, uint64(created.Unix()))
 	raw = append(raw, sum[:]...)
 	return append(raw, body.Bytes()...)

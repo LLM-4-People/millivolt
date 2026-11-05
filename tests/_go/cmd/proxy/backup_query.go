@@ -217,73 +217,83 @@ func TestRestorePercentDecodedConsumedKeyIsConsumed(t *testing.T) {
 	}
 }
 
-// TestBackupRestoreConsumedQueryKeysPinned is the consumed-set source pin:
-// nothing bounded the two lists' contents, so widening restoreQueryKeys by
-// one key would silently re-admit the ignore class wave 24 removed. The pin
-// reads cmd/proxy/backup.go's source text (the package dir is the test
-// binary's working directory, the same relative-read convention
-// dev_config.go uses for scripts/dev.sh), asserts the exact list literals,
-// confirms the parsed literals against the live package variables so a
-// stale parse can never pass, and requires each route's two gates
-// (DuplicateQueryKey and UnknownQueryKey) to be called exactly once with
-// the same list variable, so the set cannot drift between the gates.
+// TestBackupRestoreConsumedQueryKeysPinned pins the consumed-set contract:
+// nothing bounded the two lists' contents, so widening the restore set by one
+// key would silently re-admit the ignore class wave 24 removed. The sets now
+// live in internal/backup, the owner the HTTP handlers and the command-line
+// client share. The test pins each named key constant, confirms the sets the
+// owner returns, checks that a caller cannot mutate them for every later
+// caller, and requires each route's two gates (DuplicateQueryKey and
+// UnknownQueryKey) to be called exactly once with the same shared set.
 func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
 	raw, err := os.ReadFile("backup.go")
 	if err != nil {
 		t.Fatalf("read cmd/proxy/backup.go: %v", err)
 	}
-	src := string(raw)
+	handlerSrc := string(raw)
 	region := func(decl string) string {
 		t.Helper()
-		start := strings.Index(src, decl)
+		start := strings.Index(handlerSrc, decl)
 		if start < 0 {
 			t.Fatalf("cmd/proxy/backup.go is missing %q", decl)
 		}
-		rest := src[start:]
+		rest := handlerSrc[start:]
 		end := strings.Index(rest, "\n}")
 		if end < 0 {
 			t.Fatalf("%q is not terminated by a line-anchored closing brace", decl)
 		}
 		return rest[:end]
 	}
-	listLiteral := func(name string) []string {
-		t.Helper()
-		m := regexp.MustCompile(`(?m)^\t` + name + `\s*=\s*\[\]string\{([^}]*)\}`).FindStringSubmatch(src)
-		if m == nil {
-			t.Fatalf("%s is not a top-level []string literal in cmd/proxy/backup.go", name)
+	for name, want := range map[string]string{
+		"ParamInspect": backup.ParamInspect, "ParamConfig": backup.ParamConfig,
+		"ParamDatabase": backup.ParamDatabase, "ParamConfigMode": backup.ParamConfigMode,
+		"ParamDatabaseMode": backup.ParamDatabaseMode,
+	} {
+		if want == "" {
+			t.Errorf("%s is empty", name)
 		}
-		quotes := regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(m[1], -1)
-		if len(quotes) == 0 {
-			t.Fatalf("%s declares no keys", name)
+	}
+	if backup.ParamInspect != "inspect" || backup.ParamConfig != "config" ||
+		backup.ParamDatabase != "database" || backup.ParamConfigMode != "config_mode" ||
+		backup.ParamDatabaseMode != "database_mode" {
+		t.Fatalf("query parameter constants changed: %q %q %q %q %q",
+			backup.ParamInspect, backup.ParamConfig, backup.ParamDatabase,
+			backup.ParamConfigMode, backup.ParamDatabaseMode)
+	}
+	wantBackup := []string{backup.ParamConfig, backup.ParamDatabase}
+	wantRestore := []string{backup.ParamInspect, backup.ParamConfig, backup.ParamDatabase,
+		backup.ParamConfigMode, backup.ParamDatabaseMode}
+	for _, set := range []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{"BackupQueryKeys", backup.BackupQueryKeys(), wantBackup},
+		{"RestoreQueryKeys", backup.RestoreQueryKeys(), wantRestore},
+	} {
+		if !slices.Equal(set.got, set.want) {
+			t.Errorf("%s = %v, want exactly %v", set.name, set.got, set.want)
 		}
-		keys := make([]string, 0, len(quotes))
-		for _, q := range quotes {
-			keys = append(keys, q[1])
+		// The returned slice must be per-call state: a caller mutating it must
+		// not widen the grammar every other caller accepts.
+		if len(set.got) > 0 {
+			set.got[0] = "mutated"
+			if fresh := backup.BackupQueryKeys(); set.name == "BackupQueryKeys" && fresh[0] == "mutated" {
+				t.Errorf("%s returns shared state; a caller can widen the accepted grammar", set.name)
+			}
+			if fresh := backup.RestoreQueryKeys(); set.name == "RestoreQueryKeys" && fresh[0] == "mutated" {
+				t.Errorf("%s returns shared state; a caller can widen the accepted grammar", set.name)
+			}
 		}
-		return keys
-	}
-	wantBackup := []string{"config", "database"}
-	wantRestore := []string{"inspect", "config", "database", "config_mode", "database_mode"}
-	if got := listLiteral("backupQueryKeys"); !slices.Equal(got, wantBackup) {
-		t.Errorf("backupQueryKeys source literal = %v, want exactly %v", got, wantBackup)
-	}
-	if !slices.Equal(backupQueryKeys, wantBackup) {
-		t.Errorf("live backupQueryKeys = %v, want exactly %v (the source pin and the variable disagree)", backupQueryKeys, wantBackup)
-	}
-	if got := listLiteral("restoreQueryKeys"); !slices.Equal(got, wantRestore) {
-		t.Errorf("restoreQueryKeys source literal = %v, want exactly %v", got, wantRestore)
-	}
-	if !slices.Equal(restoreQueryKeys, wantRestore) {
-		t.Errorf("live restoreQueryKeys = %v, want exactly %v (the source pin and the variable disagree)", restoreQueryKeys, wantRestore)
 	}
 	for _, route := range []struct{ decl, list string }{
-		{"func handleBackup(", "backupQueryKeys"},
-		{"func handleRestore(", "restoreQueryKeys"},
+		{"func handleBackup(", "backup.BackupQueryKeys"},
+		{"func handleRestore(", "backup.RestoreQueryKeys"},
 	} {
 		body := region(route.decl)
 		calls := map[string]string{}
 		for _, gate := range []string{"adminjson.DuplicateQueryKey", "adminjson.UnknownQueryKey"} {
-			matches := regexp.MustCompile(regexp.QuoteMeta(gate)+`\(([^)]*)\)`).FindAllStringSubmatch(body, -1)
+			matches := regexp.MustCompile(regexp.QuoteMeta(gate)+`\(([^\n]*)\)`).FindAllStringSubmatch(body, -1)
 			if len(matches) != 1 {
 				t.Errorf("%s calls %s %d times, want exactly one consumed-set gate call", route.decl, gate, len(matches))
 				continue
@@ -295,7 +305,7 @@ func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
 			}
 			calls[gate] = strings.TrimSpace(args[1])
 		}
-		want := route.list + "..."
+		want := route.list + "()..."
 		if calls["adminjson.DuplicateQueryKey"] != want || calls["adminjson.UnknownQueryKey"] != want {
 			t.Errorf("%s gates read %q and %q, want both to pass %s", route.decl,
 				calls["adminjson.DuplicateQueryKey"], calls["adminjson.UnknownQueryKey"], want)

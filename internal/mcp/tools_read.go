@@ -96,7 +96,7 @@ func (s *Service) explore(ctx context.Context, in ExploreInput) (*ExploreOutput,
 	// The explorer folds ALL history like the chart, so it goes through the
 	// client's query path: bounded by QueryTimeout, not by the generic timeout
 	// every other call carries.
-	if err := s.client.getJSONQuery(ctx, routeExplorer, values, &payload); err != nil {
+	if err := s.client.getJSONQuery(ctx, RouteExplorer, values, &payload); err != nil {
 		return nil, err
 	}
 	groups, truncation := clamp(payload.Groups, explorerMaxGroups, "groups", exploreAdvice)
@@ -200,7 +200,7 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 		CostPerMTok *float64         `json:"cost_per_mtok"`
 		Buckets     []map[string]any `json:"buckets"`
 	}
-	if err := s.client.getJSONQuery(ctx, routeChart, values, &payload); err != nil {
+	if err := s.client.getJSONQuery(ctx, RouteChart, values, &payload); err != nil {
 		return nil, err
 	}
 	buckets, truncation := clamp(payload.Buckets, chartMaxBuckets, "buckets", chartAdvice)
@@ -411,7 +411,7 @@ type PrometheusOutput struct {
 // Prometheus returns the scrape text. It covers the in-memory ring, NOT the
 // durable since-inception totals the dashboard aggregates use.
 func (s *Service) prometheus(ctx context.Context, _ PrometheusInput) (*PrometheusOutput, error) {
-	body, err := s.client.getText(ctx, routePrometheus, nil)
+	body, err := s.client.getText(ctx, RoutePrometheus, nil)
 	if err != nil {
 		return nil, err
 	}

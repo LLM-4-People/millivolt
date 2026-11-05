@@ -383,7 +383,7 @@ func TestOversizedFailureBodyDecodeIsBounded(t *testing.T) {
 	if strings.Contains(apiErr.Message, testToken) {
 		t.Fatalf("the credential inside the oversized body survived: %q", apiErr.Message)
 	}
-	if !strings.Contains(apiErr.Message, redactionMarker) {
+	if !strings.Contains(apiErr.Message, RedactionMarker) {
 		t.Fatalf("the redaction must stay visible in the excerpt: %q", apiErr.Message)
 	}
 }
@@ -998,9 +998,9 @@ func TestErrorBodyRedactionCoversFullByteNestedPercent(t *testing.T) {
 			encoded := percentNest(token, tc.depth)
 			message := failureMessage(t, token, "upstream echoed "+encoded)
 			if tc.failClosed {
-				if message != redactionMarker {
+				if message != RedactionMarker {
 					t.Fatalf("nesting past the %d layer bound must replace the excerpt with %q, got %q",
-						maxPercentLayers, redactionMarker, message)
+						maxPercentLayers, RedactionMarker, message)
 				}
 				return
 			}
@@ -1016,7 +1016,7 @@ func TestErrorBodyRedactionCoversFullByteNestedPercent(t *testing.T) {
 	// the rest would still leak.
 	encoded := percentNest(token, maxPercentLayers+1)
 	message := failureMessage(t, token, `{"error":`+quote("upstream echoed "+encoded+" and "+token)+`}`)
-	if message != redactionMarker {
+	if message != RedactionMarker {
 		t.Fatalf("a deeper form beside the literal credential must fail closed, got %q", message)
 	}
 }
@@ -1032,7 +1032,7 @@ func TestErrorBodyRedactionCoversDoubleQueryEscape(t *testing.T) {
 	message := failureMessage(t, token, `{"error":`+quote("upstream echoed "+encoded)+`}`)
 	assertRedacted(t, token, "double QueryEscape echo", message, encoded)
 	decoded := doubleUnescape(message)
-	if !strings.Contains(message, redactionMarker) {
+	if !strings.Contains(message, RedactionMarker) {
 		t.Fatalf("the double-escaped echo must be redacted: %q", message)
 	}
 	if strings.Contains(decoded, token[:minRedactionRun]) {
@@ -1197,8 +1197,8 @@ func TestWhitespaceFloodRedactionIsBoundedAndFailsClosed(t *testing.T) {
 	started := time.Now()
 	got := redactForExcerpt(message, token)
 	elapsed := time.Since(started)
-	if got != redactionMarker {
-		t.Fatalf("the whitespace flood must fail closed to %q, got %q", redactionMarker, got)
+	if got != RedactionMarker {
+		t.Fatalf("the whitespace flood must fail closed to %q, got %q", RedactionMarker, got)
 	}
 	// The examined-bytes assertion above is the work bound; this time budget is
 	// only a secondary sanity bound on the same path.
@@ -1216,8 +1216,8 @@ func TestTokenBeyondTheScanCapNeverSurvives(t *testing.T) {
 	const token = testToken
 	message := strings.Repeat(" ", maxExcerptScanBytes+64) + token + strings.Repeat(" ", 64)
 	got := redactForExcerpt(message, token)
-	if got != redactionMarker {
-		t.Fatalf("a token beyond the cap must fail closed to %q, got %q", redactionMarker, got)
+	if got != RedactionMarker {
+		t.Fatalf("a token beyond the cap must fail closed to %q, got %q", RedactionMarker, got)
 	}
 	assertRedacted(t, token, "token beyond the cap", got)
 }
@@ -1228,9 +1228,9 @@ func TestTokenBeyondTheScanCapNeverSurvives(t *testing.T) {
 // cannot be proven clean.
 func TestPlainWhitespaceFloodFailsClosed(t *testing.T) {
 	message := strings.Repeat(" ", maxExcerptScanBytes+1)
-	if got := redactForExcerpt(message, testToken); got != redactionMarker {
+	if got := redactForExcerpt(message, testToken); got != RedactionMarker {
 		t.Fatalf("a whitespace body whose target is not reached must fail closed to %q, got %q",
-			redactionMarker, got)
+			RedactionMarker, got)
 	}
 }
 
@@ -1251,7 +1251,7 @@ func TestTokenInsideTheScanCapIsCaughtAtTheBoundaryOffsets(t *testing.T) {
 		if strings.Contains(got, token) {
 			t.Fatalf("a token inside the cap survived: %q", got)
 		}
-		if !strings.Contains(got, "start") || !strings.Contains(got, redactionMarker) {
+		if !strings.Contains(got, "start") || !strings.Contains(got, RedactionMarker) {
 			t.Fatalf("a token inside the cap must be redacted without losing the diagnostics: %q", got)
 		}
 		assertNoCredentialFragment(t, token, "token inside the cap", got)
@@ -1262,7 +1262,7 @@ func TestTokenInsideTheScanCapIsCaughtAtTheBoundaryOffsets(t *testing.T) {
 	if len(crossing) <= maxExcerptScanBytes {
 		t.Fatal("the crossing fixture must exceed the cap")
 	}
-	if got := redactForExcerpt(crossing, token); got != redactionMarker {
-		t.Fatalf("a token crossing the cap must fail closed to %q, got %q", redactionMarker, got)
+	if got := redactForExcerpt(crossing, token); got != RedactionMarker {
+		t.Fatalf("a token crossing the cap must fail closed to %q, got %q", RedactionMarker, got)
 	}
 }

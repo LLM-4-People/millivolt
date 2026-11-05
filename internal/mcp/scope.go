@@ -203,7 +203,7 @@ func (c *Client) recordsPage(ctx context.Context, query url.Values, before *page
 		values.Set("before_id", before.ID)
 	}
 	var page RecordsPage
-	if err := c.getJSON(ctx, routeLog, values, &page); err != nil {
+	if err := c.getJSON(ctx, RouteLog, values, &page); err != nil {
 		return nil, err
 	}
 	return &page, nil

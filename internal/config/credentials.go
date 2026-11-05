@@ -9,7 +9,9 @@ import (
 //
 //   - the request-overrides load gate (ForbiddenOverrideHeader),
 //   - the send-stage belt (overrideHeaderAuthOwned in internal/proxy),
-//   - capture and debug retention (redactHeaderName in internal/proxy).
+//   - capture and debug retention (redactHeaderName in internal/proxy),
+//   - saved-config redaction for the Settings and operator CLI surfaces
+//     (RedactProviderHeaders below).
 //
 // An override header value is operator-supplied and is stamped onto a request
 // whose destination the caller chooses with X-Proxy-Base-URL, which is
@@ -126,4 +128,91 @@ func containsAny(s string, words []string) bool {
 		}
 	}
 	return false
+}
+
+// RedactProviderHeaders returns a shallow copy of a config values map with
+// every credential-class provider header value replaced by marker. This is the
+// one owner of where a saved config document carries a secret: provider
+// overrides' headers. Token counters, windows and rate-limit values are
+// measurements and stay intact through CredentialHeaderName.
+//
+// The copy shares every non-provider value with the input; callers treat the
+// result as read-only, exactly like Config.Map.
+func RedactProviderHeaders(values map[string]any, marker string) map[string]any {
+	out := make(map[string]any, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	// A JSON-decoded document carries map[string]any; Config.Map carries the
+	// typed map[string]ProviderOverride. Both are legitimate saved-config
+	// shapes, and a redactor that silently skipped the typed one would fail
+	// open on the in-process path.
+	switch providers := values["providers"].(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(providers))
+		for name, provider := range providers {
+			switch fields := provider.(type) {
+			case map[string]any:
+				redacted[name] = redactProviderFields(fields, marker)
+			case ProviderOverride:
+				redacted[name] = redactProviderOverride(fields, marker)
+			default:
+				redacted[name] = provider
+			}
+		}
+		out["providers"] = redacted
+	case map[string]ProviderOverride:
+		redacted := make(map[string]ProviderOverride, len(providers))
+		for name, provider := range providers {
+			redacted[name] = redactProviderOverride(provider, marker)
+		}
+		out["providers"] = redacted
+	}
+	return out
+}
+
+func redactProviderFields(fields map[string]any, marker string) map[string]any {
+	clone := make(map[string]any, len(fields))
+	for key, value := range fields {
+		clone[key] = value
+	}
+	switch headers := fields["headers"].(type) {
+	case map[string]any:
+		redacted := make(map[string]any, len(headers))
+		for header, value := range headers {
+			if CredentialHeaderName(header) {
+				redacted[header] = marker
+			} else {
+				redacted[header] = value
+			}
+		}
+		clone["headers"] = redacted
+	case map[string]string:
+		redacted := make(map[string]string, len(headers))
+		for header, value := range headers {
+			if CredentialHeaderName(header) {
+				redacted[header] = marker
+			} else {
+				redacted[header] = value
+			}
+		}
+		clone["headers"] = redacted
+	}
+	return clone
+}
+
+func redactProviderOverride(provider ProviderOverride, marker string) ProviderOverride {
+	clone := provider
+	if provider.Headers == nil {
+		return clone
+	}
+	clone.Headers = make(map[string]string, len(provider.Headers))
+	for header, value := range provider.Headers {
+		if CredentialHeaderName(header) {
+			clone.Headers[header] = marker
+		} else {
+			clone.Headers[header] = value
+		}
+	}
+	return clone
 }
