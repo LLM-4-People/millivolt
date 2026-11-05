@@ -18,6 +18,7 @@ that matches what you need to do.
 | Evaluate the proxy | [Protocol](protocol.md), [dashboard tour](dashboard.md) |
 | Operate a deployment | [Operations](operations.md), [reverse proxy](reverse-proxy.md), [performance](performance.md) |
 | Integrate a client or agent | [Adapters](adapters.md), [MCP server](mcp.md) |
+| Work from a terminal | [Operator CLI](cli.md) |
 | Contribute a change | [Contributing](../CONTRIBUTING.md), [support](../SUPPORT.md) |
 
 ## Guides
@@ -25,6 +26,7 @@ that matches what you need to do.
 - [Upstream compatibility and adapters](adapters.md) - OpenAI-compatible, Anthropic Messages, Cursor Connect, and token refresh.
 - [Reverse proxy](reverse-proxy.md) - protected ingress, credentials, and NGINX.
 - [MCP server](mcp.md) - the 22-tool operator API for LLM-driven analysis.
+- [Operator CLI](cli.md) - `cmd/mvctl`, a human client over the same operator plane.
 - [Container operation](operations.md#containers) - image selection, volumes, backups, and shutdown.
 
 ## Reference

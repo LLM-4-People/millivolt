@@ -53,7 +53,7 @@ case "$mode" in
     for script in scripts/*.sh; do bash -n "$script"; done
     go mod verify
     # Explicit command paths make missing command source fail on a fresh checkout.
-    go list ./cmd/proxy ./cmd/stress ./cmd/release
+    go list ./cmd/proxy ./cmd/stress ./cmd/release ./cmd/mvctl
     go build -mod=readonly -o "$check_dir/" ./...
     python3 -B -m tests.go vet -mod=readonly ./...
     # Independent suites do not share source state. Start them while the race
