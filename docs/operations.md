@@ -1378,7 +1378,7 @@ source rebuilds from container replacement and ordinary shutdown.
 The KPI band is global. Explorer selections and the request status filter scope
 the timeline and request log; selecting a card adds a filter and entity links
 pivot within that shared route. Browser back/forward restores hash-based scopes.
-Chart preset, range, percentile and series visibility persist in browser storage.
+Chart preset, timeframe, percentile and series visibility persist in browser storage.
 These saved views are local browser state, not shared server settings.
 
 The In-flight tile separates work that is sending from work the scheduler is
@@ -1415,10 +1415,14 @@ plots throughput on its own axis with TTFT and the decode window (first token to
 last, the span decode speed measures) sharing a duration axis; Errors compares
 error count/rate; Cost places reported USD spend beside request volume. One
 percentile selection controls the timing series (the Overview keeps only the
-time-range control). Period readouts are computed from period samples, not
+timeframe control). Period readouts are computed from period samples, not
 averages of bucket percentiles. Insufficient samples
 remain unavailable. All time means the available retained history, not deleted,
-dropped or never-observed requests.
+dropped or never-observed requests, and the timeframe control never offers a
+window wider than it. The chart endpoint takes either a minute `window` (or
+`all`) or an explicit `from_ms`/`to_ms` pair for calendar ranges; each payload
+reports the resolved right edge `to_ms` and the unscoped `data_from_ms` extent
+the control gates on.
 
 ### Request rows and details
 
