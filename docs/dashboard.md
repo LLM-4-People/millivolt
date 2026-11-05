@@ -165,7 +165,7 @@ dimensions, such as tools and errors, can overlap rather than partition requests
 | Conversations | Conversation IDs from explicit sessions, tracked body params (`k:` identities) or automatic grouping, with declared ancestry when resolvable. Selecting a conversation selects that leaf, not its descendants. |
 | Tools | Observed tool names; one request can belong to several tools. |
 | Time | Request start in the server's local timezone: weekday night 00:00-08:00, work 08:00-16:00, evening 16:00-24:00, or a single weekend group. This is separate from chart history range. |
-| Status | Coarse outcome classes and live states. The Requests dropdown instead selects exact HTTP codes or named live states. |
+| Status | Coarse outcome classes and live states. The Requests dropdown instead selects exact HTTP codes or named live states, grouped into live states and HTTP status; it stays a native select so the operating system picker is the touch affordance. |
 | Errors | Distinct observed error identities, including absorbed failures; one request can have several. HTTP 429 alone is not an error. |
 | Keys | SHA-256 hashes of upstream credentials, never raw keys. Labels show only an eight-hex-character prefix; identical short labels do not establish identical full hashes. |
 
