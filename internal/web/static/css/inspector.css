@@ -245,6 +245,11 @@
     footer .f-right { margin-left: 0; width: 100%; justify-content: space-between; gap: 8px; }
     footer .f-right .f-cell:first-child { display: none; } /* hide the footer clock on the narrowest viewport */
   }
+  /* An odd KPI count in the two-column phone band would leave the last tile
+     half-width with an empty cell; let that tile own the full row. */
+  @media (max-width: 440px) {
+    .kpis .kpi:last-child:nth-child(odd) { grid-column: 1 / -1; border-left: 0; }
+  }
   footer .f-live { color: var(--ok); }
   footer .f-live.paused { color: var(--muted); }
   footer b { color: var(--text); font-weight: 600; }
