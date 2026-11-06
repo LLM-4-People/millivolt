@@ -388,7 +388,10 @@ lineage metadata only for the returned conversation cards, and overlay
 ring/pending declarations without mutating the published build. Projected
 metric samples stay in shared sorted orders: single-valued dimensions retain one
 group id per row, while tool/error membership spans preserve multi-valued
-occurrences. Exact group accumulators are capped at
+occurrences. An error's identity is `type|code|msg`; a backslash or the `|`
+separator inside a part is escaped, so arbitrary error text can never merge two
+distinct errors into one dictionary id. Ordinary text keeps the historic
+spelling, which preserves saved error-filter ids. Exact group accumulators are capped at
 `explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
 fold into one synthetic `other` card carrying aggregate count, cost, token,
 tool and health fields; no per-value accumulator or error affected-ID map is

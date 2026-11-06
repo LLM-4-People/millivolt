@@ -313,26 +313,28 @@ function shareBar(fraction, color) {
 // derivation shared by filter matching (and mirrored in Go on the server for
 // the aggregates - keep both in lockstep). The derived value is the filter id.
 
-// errorKey is the stable identity of one distinct error (final or absorbed
-// attempt): type|code|msg - same grouping as the explorer error dimension.
-function errorKey(type, code, msg) {
-  return [type || '', code || '', msg || ''].join('|');
+// escapeErrorKeyPart is the mirror of Go escapeErrorKeyPart: a backslash
+// escapes a backslash or the '|' separator, and ordinary text is unchanged.
+// Error messages are arbitrary text, so without this {type:'a', code:'b|c'}
+// and {type:'a|b', code:'c'} would share one identity.
+function escapeErrorKeyPart(s) {
+  s = s || '';
+  return s.indexOf('|') < 0 && s.indexOf('\\') < 0 ? s : s.replace(/[\\|]/g, '\\$&');
 }
 
-// errorKeyMatches compares the joined error identity without building it: the
-// filter path evaluates every error entry of every row.
+// errorKey is the stable identity of one distinct error (final or absorbed
+// attempt): escaped type|code|msg - same grouping as the explorer error
+// dimension. The escape keeps saved ids for ordinary errors unchanged.
+function errorKey(type, code, msg) {
+  return escapeErrorKeyPart(type) + '|' + escapeErrorKeyPart(code) + '|' + escapeErrorKeyPart(msg);
+}
+
+// errorKeyMatches compares the joined error identity. Building the key is
+// bounded by the few error entries a row carries; the previous delimiter
+// walk could not distinguish a separator inside a message from the field
+// boundary.
 function errorKeyMatches(key, type, code, msg) {
-  const t = type || '', c = code || '', m = msg || '';
-  let p = 0;
-  if (!key.startsWith(t)) return false;
-  p = t.length;
-  if (key.charCodeAt(p) !== 124) return false;
-  p++;
-  if (!key.startsWith(c, p)) return false;
-  p += c.length;
-  if (key.charCodeAt(p) !== 124) return false;
-  p++;
-  return key.length === p + m.length && key.startsWith(m, p);
+  return key === errorKey(type, code, msg);
 }
 
 // statusClass buckets a record's HTTP status into a coarse class. Keep in

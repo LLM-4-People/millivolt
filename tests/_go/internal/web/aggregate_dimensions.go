@@ -217,3 +217,28 @@ func TestDimensionNamesMirrorExplorerRail(t *testing.T) {
 		}
 	}
 }
+
+// TestErrorKeyEscapesSeparator pins the error identity lexer: ordinary text
+// keeps the historic type|code|msg spelling (so saved filter ids survive), and
+// a backslash or the separator is escaped so two distinct errors can never
+// share one dictionary key. entities.js mirrors this byte for byte.
+func TestErrorKeyEscapesSeparator(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ent  errEnt
+		want string
+	}{
+		{"ordinary", errEnt{typ: "http_500", code: "500"}, "http_500|500|"},
+		{"empty", errEnt{}, "||"},
+		{"pipe in code", errEnt{typ: "a", code: "b|c", msg: "d"}, `a|b\|c|d`},
+		{"pipe in type", errEnt{typ: "a|b", code: "c", msg: "d"}, `a\|b|c|d`},
+		{"backslash", errEnt{typ: "a", code: `b\c`, msg: "d"}, `a|b\\c|d`},
+	} {
+		if got := errorKey(tc.ent); got != tc.want {
+			t.Errorf("%s: errorKey = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if errorKey(errEnt{typ: "a", code: "b|c", msg: "d"}) == errorKey(errEnt{typ: "a|b", code: "c", msg: "d"}) {
+		t.Fatal("separator-bearing errors share one identity")
+	}
+}

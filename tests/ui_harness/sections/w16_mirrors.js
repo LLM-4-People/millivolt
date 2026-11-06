@@ -221,6 +221,13 @@ module.exports = async function w16Mirrors(H) {
         sw.errorKey('http_500', '500', '') === 'http_500|500|' &&
         sw.errorKey('', '', '') === '||' &&
         ents.every(e => sw.errorKey(e.type, e.code, e.msg) === [e.type, e.code, e.msg].join('|')));
+      check('errorKey escapes the separator so distinct errors never collide',
+        sw.errorKey('a', 'b|c', 'd') === 'a|b\\|c|d' &&
+        sw.errorKey('a|b', 'c', 'd') === 'a\\|b|c|d' &&
+        sw.errorKey('a', 'b|c', 'd') !== sw.errorKey('a|b', 'c', 'd') &&
+        sw.errorKey('a', 'b\\c', 'd') === 'a|b\\\\c|d' &&
+        sw.errorKeyMatches('a|b\\|c|d', 'a', 'b|c', 'd') &&
+        !sw.errorKeyMatches('a|b\\|c|d', 'a|b', 'c', 'd'));
 
       // The duration vocabularies mirror Go acceptance: PAUSE_DURS and
       // DEBUG_DURS tokens are the pauseDurations allowlist (pinned through

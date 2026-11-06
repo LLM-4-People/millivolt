@@ -2,6 +2,7 @@ package web
 
 import (
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -177,7 +178,32 @@ func (d *contribDimensions) internLabels(c *contrib, labels contribLabels) {
 	c.labels = nil
 }
 
-func errorKey(e errEnt) string { return e.typ + "|" + e.code + "|" + e.msg }
+// escapeErrorKeyPart keeps ordinary error text byte-identical while making
+// the '|' separator unambiguous. Error messages are arbitrary text and may
+// contain the separator; without escaping, {type:"a", code:"b|c"} and
+// {type:"a|b", code:"c"} would share one dictionary identity and one filter
+// id, merging distinct errors. Escaping changes a key only when that part
+// actually contains a backslash or pipe, so saved filters for ordinary
+// errors keep their existing ids. The dashboard's entities.js mirrors this
+// lexer byte for byte.
+func escapeErrorKeyPart(s string) string {
+	if !strings.ContainsAny(s, `\|`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' || s[i] == '|' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func errorKey(e errEnt) string {
+	return escapeErrorKeyPart(e.typ) + "|" + escapeErrorKeyPart(e.code) + "|" + escapeErrorKeyPart(e.msg)
+}
 
 // Bind single-valued scope filters to the projection dictionaries once,
 // keeping projection rows immutable so readers can fold pointers without
