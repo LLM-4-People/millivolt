@@ -454,6 +454,12 @@ function paintCheckRow(label, name, on, taken, policy) {
   setNodeData(label, 'checkKey', name);
   const input = label.querySelector('input[type=checkbox]');
   if (input.value !== name) input.value = name;
+  // Chrome's autofill audit requires an id or name on every form control.
+  // Checklist identity is the operator vocabulary entry, so the generated
+  // name carries it; checkbox names may repeat across the pause and debug
+  // menus without affecting collection, which reads value and data-check-key.
+  const fieldName = 'operator-check-' + name;
+  if (input.name !== fieldName) input.name = fieldName;
   if (input.checked !== on) input.checked = on;
   setNodeDisabled(input, taken || policy.busy);
   setNodeClass(label, 'taken', taken);

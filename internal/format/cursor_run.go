@@ -104,6 +104,9 @@ type CursorRun struct {
 	in      *connectReader
 	blobs   *KVBlobStore
 	closeFn func()
+	// closeOnce runs closeFn exactly once; Do blocks a concurrent Close until
+	// the first caller's teardown returns, so Close always means complete.
+	closeOnce sync.Once
 
 	// heartbeat is the ClientHeartbeat cadence (idle parked runs included),
 	// supplied by the caller from the live config at run creation.
@@ -839,18 +842,19 @@ func (r *CursorRun) usageSnapshot() (prompt, output, reasoning int64) {
 
 // Close tears down the run: stops the pump and closes the underlying stream.
 // Pump exit shares this owner, so EOF also retires the parked heartbeat and
-// transport immediately. The closed guard makes teardown exactly once.
+// transport immediately. The closed guard makes teardown exactly once; every
+// caller then waits on closeOnce, so a second Close cannot return while the
+// first is still between the guard and the upstream cancel and stream closes.
+// Callers treat Close returning as teardown completion.
 func (r *CursorRun) Close() {
 	r.mu.Lock()
-	if r.closed {
-		r.mu.Unlock()
-		return
+	if !r.closed {
+		r.closed = true
+		close(r.stopPump)
 	}
-	r.closed = true
 	r.mu.Unlock()
-	close(r.stopPump)
 	if r.closeFn != nil {
-		r.closeFn()
+		r.closeOnce.Do(r.closeFn)
 	}
 }
 

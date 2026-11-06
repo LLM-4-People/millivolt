@@ -456,3 +456,42 @@ func TestCursorRunGuardrailsPreserveNormalParkAndResume(t *testing.T) {
 		}
 	})
 }
+
+// TestCursorRunCloseWaitsForTeardown pins Close's completion contract. The
+// pump exits on EOF and calls Close from its own goroutine; a caller that
+// closes the returned run must not observe the upstream context still live
+// because the pump happened to win the closed guard first. The second Close
+// therefore blocks until closeFn has run.
+func TestCursorRunCloseWaitsForTeardown(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	run := NewCursorRun(io.Discard, bytes.NewReader(nil), nil, func() {
+		close(entered)
+		<-release
+		close(finished)
+	}, time.Hour)
+	run.Start()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pump never entered teardown")
+	}
+	second := make(chan struct{})
+	go func() {
+		run.Close()
+		close(second)
+	}()
+	select {
+	case <-second:
+		t.Fatal("Close returned before the teardown callback finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-second:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return after teardown")
+	}
+	<-finished
+}

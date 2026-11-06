@@ -250,6 +250,7 @@ function fillSettingsForm(doc) {
   const purgeAt = doc.fields.reduce((at, f, i) => f.category === 'storage' ? i + 1 : at, -1);
   if (purgeAt >= 0) rows.splice(purgeAt, 0, settingsDeleteRowHTML(), settingsPurgeRowHTML());
   box.innerHTML = rows.join('') + settingsBackupHTML(doc);
+  watchSettingsFieldNames(box);
   box.querySelectorAll('[data-st-scalar]').forEach(validateSettingsScalar);
   if (!doc.writable) {
     // Every config field is read-only, not just the Apply action. Backup

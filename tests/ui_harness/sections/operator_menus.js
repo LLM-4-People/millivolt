@@ -355,6 +355,9 @@ module.exports = async function operatorMenus(H) {
       check('a second pause hold appends its exact row and vocabulary name',
         JSON.stringify(pauseRow()) === JSON.stringify(['all requests · 15m', 'client-b · 1h']) &&
         !!d.querySelector('#pf-clients input[value="client-b"]'));
+      check('known pause-scope checkboxes carry generated form names',
+        [...d.querySelectorAll('#pf-clients input[type=checkbox], #pf-providers input[type=checkbox]')]
+          .every(el => el.name === 'operator-check-' + el.value));
       w.applyPauseState(pauseFixture([], 0, { clients: [] }));
       check('removing every pause hold clears the rows and known clients',
         d.getElementById('pf-holds').textContent === '' &&

@@ -64,6 +64,25 @@ module.exports = async function settingsSearch(H) {
     w.__filterDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__filterDoc; fillSettingsForm(settingsDoc)');
     delete w.__filterDoc;
+    // Chrome's autofill audit walks every form control; composite editors
+    // render rows without ids, so the sheet names those controls from their
+    // row key, position and accessible label. Cover both the full render and
+    // an editor append, and keep the generated names unique.
+    const fieldControls = [...d.querySelectorAll('#settings-fields input, #settings-fields select, #settings-fields textarea')];
+    check('every rendered settings control carries an id or a name',
+      fieldControls.length > 10 && fieldControls.every(el => el.id || el.name));
+    const generated = fieldControls.filter(el => !el.id && el.name.startsWith('settings-'));
+    check('generated settings names are unique and derive from the row key',
+      generated.length > 0 && new Set(generated.map(el => el.name)).size === generated.length);
+    const providerRow = d.querySelector('#settings-fields .st-row[data-key="providers"]');
+    const addLabel = providerRow.querySelector('.prov-new-label');
+    addLabel.value = 'late.example';
+    providerRow.querySelector('[data-prov-add]').click();
+    await sleep(0);
+    const lateCard = [...providerRow.querySelectorAll('.st-prov')]
+      .find(card => card.querySelector('.sp-label')?.value === 'late.example');
+    check('a provider card appended after the render is named by the settings observer',
+      !!lateCard && [...lateCard.querySelectorAll('input, select, textarea')].every(el => el.id || el.name));
   }
 
   // ---- settings search haystack cache: fillSettingsForm stamps each rendered
