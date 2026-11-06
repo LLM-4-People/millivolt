@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -385,10 +387,9 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 		}
 	}
 	// The duplicate wording, pinned through the route's JSON error
-	// transport (a freeze row: the wording is already correct). The export
-	// owner keeps its own inline all-keys walk, so this row is the one
-	// that sees a drift between the export's "duplicate %s" and the
-	// shared owner's wording the adminjson contract row pins.
+	// transport. The export owner delegates the repeated-key rule to the
+	// shared adminjson owner, and this row sees the user-facing wording
+	// through the real route.
 	dupReq := httptest.NewRequest(http.MethodGet, "/metrics/export", nil)
 	dupReq.URL.RawQuery = "provider=a&provider=b"
 	dupW := httptest.NewRecorder()
@@ -433,6 +434,41 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", nil).WithContext(ctx))
 	if w.Code != 500 || b.Len() != 1 {
 		t.Fatal("canceled purge changed live ring")
+	}
+}
+
+// TestExportFilterKeysMatchPurgeFilterTags pins the export query grammar to
+// storage.PurgeFilter's JSON tags. Both the JSON count/clear body and the CSV
+// export must expose the same predicate; a new filter field that reaches one
+// surface only would make the export silently broader or narrower than the
+// preview it mirrors. Every tag must parse through exportLogFilter, and the
+// parser's closed default branch proves it accepts nothing else.
+func TestExportFilterKeysMatchPurgeFilterTags(t *testing.T) {
+	typ := reflect.TypeOf(storage.PurgeFilter{})
+	fields := 0
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		key := strings.Split(field.Tag.Get("json"), ",")[0]
+		if key == "" || key == "-" {
+			continue
+		}
+		fields++
+		raw := "x"
+		switch field.Type.Kind() {
+		case reflect.String:
+		case reflect.Int, reflect.Int64:
+			raw = "1"
+		case reflect.Bool:
+			raw = "0"
+		default:
+			t.Fatalf("PurgeFilter field %s has unsupported kind %s; extend the parity fixture", key, field.Type.Kind())
+		}
+		if _, err := exportLogFilter(url.Values{key: {raw}}); err != nil {
+			t.Errorf("export filter rejects PurgeFilter tag %q: %v", key, err)
+		}
+	}
+	if fields == 0 {
+		t.Fatal("PurgeFilter declares no JSON tags; the parity walk is blind")
 	}
 }
 

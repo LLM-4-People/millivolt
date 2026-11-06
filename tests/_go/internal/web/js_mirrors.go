@@ -109,6 +109,161 @@ func TestConversationParentDimsMatchGoPivotOrder(t *testing.T) {
 	}
 }
 
+// TestChartPercentilesMatchGoOrder pins chart.js CHART_PCTS to the Go
+// percentile triple the chart wire publishes. The selector, the tile spark
+// index and the payload's [p50, p95, p99] order all read this one JS list;
+// a change on either side without the other would relabel a series or drop
+// a percentile the server still sends.
+func TestChartPercentilesMatchGoOrder(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chart.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := firstSubmatch(t, string(src), `const CHART_PCTS = \[([^\]]*)\];`)
+	var got []float64
+	for _, token := range regexp.MustCompile(`-?\d+(?:\.\d+)?`).FindAllString(body, -1) {
+		value, err := strconv.ParseFloat(token, 64)
+		if err != nil {
+			t.Fatalf("CHART_PCTS token %q: %v", token, err)
+		}
+		got = append(got, value)
+	}
+	want := ChartPercentiles[:]
+	if !slices.Equal(got, want) {
+		t.Fatalf("chart.js CHART_PCTS = %v, want the Go ChartPercentiles wire order %v", got, want)
+	}
+}
+
+// TestExplorerDimensionSetMatchesGoDictionaryAndRail pins the three dimension
+// vocabularies together: explorer.js EXPLORER_DIMS (hash grammar and record
+// matching), XP_RAIL_DIMS (rail order) and internal/web dimensionNames (the
+// API allowlist and dictionary slots). `by` is explorer view state, not a
+// filter dimension, so it is excluded from the comparison but must still be
+// declared. A dimension added to one side alone would otherwise strand a
+// rail entry or accept a filter the server cannot resolve.
+func TestExplorerDimensionSetMatchesGoDictionaryAndRail(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/explorer.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := jsObjectKeys(jsObjectBlock(t, src, "EXPLORER_DIMS"))
+	if !slices.Contains(declared, "by") {
+		t.Fatal("EXPLORER_DIMS lost the `by` breakdown marker")
+	}
+	filterDims := slices.DeleteFunc(slices.Clone(declared), func(dim string) bool { return dim == "by" })
+	rail := jsStringList(t, src, "const XP_RAIL_DIMS = ")
+	goDims := slices.Clone(dimensionNames[:])
+	for _, pair := range []struct {
+		name string
+		got  []string
+	}{
+		{"EXPLORER_DIMS filter dimensions", filterDims},
+		{"XP_RAIL_DIMS", rail},
+	} {
+		got := slices.Clone(pair.got)
+		want := slices.Clone(goDims)
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s = %v, want the Go dimensionNames set %v", pair.name, got, want)
+		}
+	}
+}
+
+// TestDashApplyKeysMatchSchema pins the config keys applyDashValues consumes
+// to the schema: every dashboard-category field plus history_size (the
+// in-memory ring depth that also reshapes the log window). The function is
+// the browser's only writer of dashCfg from GET /admin/config; a schema key
+// with no consumer would silently keep its first-paint seed, and a consumed
+// key missing from the schema would read as undefined.
+func TestDashApplyKeysMatchSchema(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome_menus.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := sourceRegion(t, string(src), "function applyDashValues")
+	var got []string
+	for _, m := range regexp.MustCompile(`\bv\.([A-Za-z_][A-Za-z0-9_]*)`).FindAllStringSubmatch(body, -1) {
+		if !slices.Contains(got, m[1]) {
+			got = append(got, m[1])
+		}
+	}
+	want := []string{"history_size"}
+	for _, field := range config.Schema() {
+		if field.Category == "dashboard" {
+			want = append(want, field.Key)
+		}
+	}
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("applyDashValues consumes %v, want the schema's dashboard keys plus history_size %v", got, want)
+	}
+}
+
+// TestDashboardRouteLiteralsMatchGoRegistry pins every dashboard API path
+// literal to the Go route vocabulary. Most paths are mcp.Route constants the
+// proxy mux also registers; the two dashboard-only delivery endpoints
+// (artifact export and the live SSE stream) have no MCP client constant
+// because no MCP tool calls them. The dynamic '/admin/' prefix is checked
+// against the operatorState kinds, which are the only suffixes it accepts.
+func TestDashboardRouteLiteralsMatchGoRegistry(t *testing.T) {
+	allowed := map[string]bool{
+		"/metrics/export":      true,
+		"/metrics/live/stream": true,
+	}
+	for _, route := range []mcp.Route{
+		mcp.RouteQuery, mcp.RouteExplorer, mcp.RouteChart, mcp.RouteLog,
+		mcp.RouteBootstrap, mcp.RoutePrometheus, mcp.RoutePause, mcp.RouteThrottle,
+		mcp.RouteQuota, mcp.RouteDebug, mcp.RouteDebugCapture, mcp.RouteConfig,
+		mcp.RouteReload, mcp.RouteRestart, mcp.RouteDrain, mcp.RoutePurge,
+		mcp.RoutePurgeCount, mcp.RouteBackup, mcp.RouteRestore,
+	} {
+		allowed[string(route)] = true
+	}
+	entries, err := staticFS.ReadDir("static/js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeLiteral := regexp.MustCompile("['\"`](/(?:admin|metrics)/[A-Za-z0-9_/-]*)")
+	seen := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".js") {
+			continue
+		}
+		src, err := staticFS.ReadFile(path.Join("static/js", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range routeLiteral.FindAllSubmatch(src, -1) {
+			route := string(m[1])
+			if route == "/admin/" {
+				continue // the dynamic prefix, pinned through operatorState below
+			}
+			seen++
+			if !allowed[route] {
+				t.Errorf("%s references route %q, which no Go route constant or dashboard delivery endpoint owns", entry.Name(), route)
+			}
+		}
+	}
+	if seen < 10 {
+		t.Fatalf("found only %d API route literals; the scan is blind", seen)
+	}
+	operatorSrc, err := staticFS.ReadFile("static/js/chrome_operator.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := jsObjectKeys(jsObjectBlock(t, operatorSrc, "operatorState"))
+	if len(kinds) == 0 {
+		t.Fatal("operatorState declares no kinds")
+	}
+	for _, kind := range kinds {
+		if !allowed["/admin/"+kind] {
+			t.Errorf("operatorState kind %q posts to /admin/%s, which no Go route constant owns", kind, kind)
+		}
+	}
+}
+
 // TestSettingsCategoryRefKeysMatchGoCategories pins the settings.js
 // SETTINGS_CAT_REF registry to config.Categories(): the same category ids,
 // in the same order, with no orphan on either side. settingsCatVisual falls

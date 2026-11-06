@@ -60,8 +60,8 @@ func rejectPurgeQuery(w http.ResponseWriter, r *http.Request) bool {
 func exportLogFilter(q url.Values) (storage.PurgeFilter, error) {
 	var f storage.PurgeFilter
 	for key, values := range q {
-		if len(values) != 1 {
-			return f, fmt.Errorf("duplicate %s", key)
+		if err := adminjson.DuplicateQueryKey(q, key); err != nil {
+			return f, err
 		}
 		v := values[0]
 		var err error
