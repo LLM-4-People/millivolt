@@ -460,6 +460,23 @@ module.exports = async function operatorMenus(H) {
         check('applying all traffic omits the narrower scope fields the server rejects',
           allBody && allBody.all === true &&
           !('new' in allBody) && !('clients' in allBody) && !('providers' in allBody));
+        // Switching an existing named hold to all takes the same body path.
+        w.applyPauseState({ok: true, paused: true, queued: 0,
+          holds: [{id: 'named-hold', clients: ['client-a'], providers: []}],
+          known_clients: ['client-a'], known_providers: []});
+        w.editPauseHold('named-hold');
+        d.getElementById('pf-scope').value = 'all';
+        w.onPauseScopeChange();
+        let switchBody;
+        w.fetch = async (_url, options) => {
+          switchBody = JSON.parse(options.body);
+          return {ok: true, json: async () => ({ok: true, paused: true, holds: [{id: 'named-hold', all: true}], queued: 0})};
+        };
+        await w.applyPauseMenu();
+        w.fetch = originalFetch;
+        check('switching a named hold to all also omits the narrower fields',
+          switchBody && switchBody.all === true && switchBody.id === 'named-hold' &&
+          !('new' in switchBody) && !('clients' in switchBody) && !('providers' in switchBody));
         w.hideHdrMenu('pause-menu');
       }
       {
