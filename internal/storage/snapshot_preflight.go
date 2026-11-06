@@ -123,6 +123,16 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
+	// A capture's id is its only fetch key. SQLite permits NULL in a TEXT
+	// PRIMARY KEY and the table is not STRICT, so an imported sidecar can
+	// carry NULL, a BLOB or a blank id. Such a row can never be fetched by
+	// LoadDebugCapture, never matches the expiry sweep, and still counts
+	// against debug_store_max_bytes. Reject the set before any live file is
+	// touched.
+	if err := preflightDebugCaptureKeys(context.Background(), db, "", "pending snapshot"); err != nil {
+		db.Close()
+		return err
+	}
 	// The legacy empty attempts spelling is a valid admission input (scans
 	// treat it as no attempts), but HasError/count/export/purge run json_each
 	// over the raw column. Canonicalize it to the writer's own no-value
@@ -188,6 +198,30 @@ func preflightForeignTriggers(ctx context.Context, db mergeConn) error {
 		sort.Strings(foreign)
 		return fmt.Errorf("pending snapshot has %d unowned trigger(s) (%s); only the analytical projection triggers are permitted",
 			len(foreign), strings.Join(foreign, ", "))
+	}
+	return nil
+}
+
+// preflightDebugCaptureKeys rejects a request_debug set with an id that cannot
+// be fetched. The sidecar schema keeps `id TEXT PRIMARY KEY` (SQLite permits
+// NULL there, and the table is not STRICT), and neither admission nor merge
+// rebuilds it. LoadDebugCapture matches `id = ?`, and the expiry sweep selects
+// by expires_at, so a NULL/BLOB/blank id is invisible to reads and expiry while
+// its payload still counts against the debug byte cap. Deny the whole set at
+// both trust boundaries instead of importing dead weight.
+func preflightDebugCaptureKeys(ctx context.Context, db mergeConn, schema, label string) error {
+	table := "request_debug"
+	if schema != "" {
+		table = schema + ".request_debug"
+	}
+	var bad int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE id IS NULL OR typeof(id) <> 'text' OR TRIM(id) = ''`).Scan(&bad); err != nil {
+		return fmt.Errorf("%s debug capture ids: %w", label, err)
+	}
+	if bad != 0 {
+		return fmt.Errorf("%s request_debug has %d unfetchable capture id(s); every capture id must be non-empty text",
+			label, bad)
 	}
 	return nil
 }
