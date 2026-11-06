@@ -1033,6 +1033,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// silent. The deferred Stop reads the variable, not a nil receiver
 			// captured before this branch.
 			pacer = s.newSSEPacerFor(w)
+			// The late pacer owns the same client-gone signal as the
+			// streaming one: a failed keepalive proves the socket is gone,
+			// so cancel the request context instead of waiting for the
+			// upstream to finish an unread body.
+			pacer.onGone = cancelCtx
 			w = pacer
 			pacer.Arm()
 		}
