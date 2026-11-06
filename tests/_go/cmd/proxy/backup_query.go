@@ -350,6 +350,13 @@ func TestValidateRestoreMergePathResolvesSymlink(t *testing.T) {
 	if err := validateRestoreMergePath(&restoreConfigPlan{dbPath: link}, s); err != nil {
 		t.Fatalf("symlinked db_path to the running store rejected: %v", err)
 	}
+	hardlink := filepath.Join(dir, "hardlink.db")
+	if err := os.Link(target, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRestoreMergePath(&restoreConfigPlan{dbPath: hardlink}, s); err != nil {
+		t.Fatalf("hardlinked db_path to the running store rejected: %v", err)
+	}
 	if err := validateRestoreMergePath(&restoreConfigPlan{dbPath: filepath.Join(dir, "other.db")}, s); err == nil {
 		t.Fatal("a different db_path was accepted for a merge")
 	}

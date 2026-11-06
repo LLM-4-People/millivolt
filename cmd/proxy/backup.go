@@ -869,12 +869,18 @@ func validateRestoreMergePath(plan *restoreConfigPlan, store *storage.Store) err
 	if plan == nil {
 		return nil
 	}
-	// Compare file identities, not spellings: db_path may be a symlink whose
-	// resolved target is exactly the running store. A genuinely different
-	// path still fails below.
+	// Compare file identities, not spellings: db_path may be a symlink, a
+	// relative spelling or a hardlink of the running store. SameFile answers
+	// all three; the cleaned-path fallback covers a path that does not exist
+	// yet but spells the same name. A genuinely different path fails below.
 	resolved, err := storage.ResolveDatabasePath(plan.dbPath)
 	if err != nil {
 		return err
+	}
+	planInfo, planErr := os.Stat(resolved)
+	storeInfo, storeErr := os.Stat(store.DBPath())
+	if planErr == nil && storeErr == nil && os.SameFile(planInfo, storeInfo) {
+		return nil
 	}
 	if filepath.Clean(resolved) == filepath.Clean(store.DBPath()) {
 		return nil
@@ -1060,13 +1066,16 @@ func backupStatus() map[string]any {
 		dbPath = liveCfg.DBPath
 	}
 	liveMu.Unlock()
-	if store != nil {
-		// The store's path is already the resolved real file, the same base
-		// staging and admission derive their names from.
+	if dbPath == "" && store != nil {
+		// No live config document: the running store is the only path owner.
 		dbPath = store.DBPath()
 	}
 	pending := false
 	if dbPath != "" {
+		// This reports the NEXT boot's slot. liveCfg.DBPath already carries a
+		// reloaded db_path even though the running store still points at its
+		// old file, so using the store path here would hide a staged restore
+		// (and report a stale slot the next boot will ignore).
 		resolved, err := storage.ResolveDatabasePath(dbPath)
 		if err != nil {
 			log.Printf("backup status: %v", err)
