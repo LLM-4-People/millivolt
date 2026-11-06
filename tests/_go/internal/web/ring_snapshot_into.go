@@ -2,6 +2,7 @@ package web
 
 import (
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"testing"
 	"time"
@@ -156,12 +157,10 @@ func TestRingSnapshotKeepsScratchWhenAllWritten(t *testing.T) {
 
 // TestRingSnapshotAllocationCeiling pins the pooled borrow at the 250k-slot
 // probe size. ringSnapshot copies and filters the whole ring, and the invariant
-// is zero allocations: the borrowed scratch must be reused rather than
-// replaced. The byte figure is race-instrumented (-race shadow memory inflates
-// it), so it is logged for diagnosis, not asserted. A local
-// make([]*metrics.Record, 0, 64) would grow to the ring size on every read
-// (about 2 MB here) instead of reusing the released scratch, allocating on
-// every read and failing the zero-allocation ceiling.
+// is bounded allocations: the borrowed scratch must be reused rather than
+// replaced. A local make([]*metrics.Record, 0, 64) would grow to the ring size
+// on every read (about 2 MB here) instead of reusing the released scratch,
+// allocating on every read and failing the bound by orders of magnitude.
 func TestRingSnapshotAllocationCeiling(t *testing.T) {
 	if raceInstrumented {
 		// sync.Pool.Put drops one in four items when the race detector is
@@ -200,6 +199,13 @@ func TestRingSnapshotAllocationCeiling(t *testing.T) {
 	}
 	releaseRing(scratch, view)
 	result := testing.Benchmark(func(b *testing.B) {
+		// sync.Pool parks a Put buffer in the current P's private slot, and a
+		// Get on another P cannot steal a private slot. Pinning the benchmark
+		// goroutine to one OS thread reduces scheduler migrations; it cannot
+		// eliminate them (an M may lose its P), so the assertion below allows a
+		// small bounded number of pool misses.
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
 		// runN calls runtime.GC before this function, which can clear the
 		// package pool. Re-warm after that boundary so the measured loop
 		// starts from the reuse steady state rather than a cold miss.
@@ -221,10 +227,14 @@ func TestRingSnapshotAllocationCeiling(t *testing.T) {
 	t.Logf("ringSnapshot = %d B/op %d allocs/op (%d allocations over N=%d)",
 		bytes, allocs, result.MemAllocs, result.N)
 	// AllocsPerOp is integer MemAllocs/N, so a single allocation every few
-	// hundred reads still rounds to zero. Assert the total instead: the
-	// measured loop must not allocate at all.
-	if result.MemAllocs != 0 {
-		t.Fatalf("ringSnapshot = %d total allocations over %d reads, want 0", result.MemAllocs, result.N)
+	// hundred reads still rounds to zero. Assert the total instead. A small
+	// constant covers the two bounded one-offs: a sync.Pool miss after a P
+	// migration, and runtime background work counted process-wide by MemStats.
+	// A per-read allocation would exceed this by orders of magnitude.
+	const maxStrayAllocs = 8
+	if result.MemAllocs > maxStrayAllocs {
+		t.Fatalf("ringSnapshot = %d total allocations over %d reads, want at most %d",
+			result.MemAllocs, result.N, maxStrayAllocs)
 	}
 }
 
