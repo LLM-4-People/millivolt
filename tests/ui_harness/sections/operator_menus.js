@@ -144,7 +144,7 @@ module.exports = async function operatorMenus(H) {
       d.activeElement === debugModel && debugModel.isConnected && debugModel.checked &&
       d.querySelector('#df-models input[value="model-a"]') === debugModel &&
       d.querySelector('#df-holds .pause-hold') === debugHold &&
-      debugHold.textContent.includes('ran 3m') && debugHold.textContent.includes('9 req'));
+      debugHold.textContent.includes('ran 3m') && debugHold.textContent.includes('9 captures'));
     check('debug duration options are not rebuilt by an elapsed-only poll',
       d.getElementById('df-dur') === debugDur && debugDur.options[0] === debugDurOption);
 
@@ -296,7 +296,7 @@ module.exports = async function operatorMenus(H) {
       check('a header policy change repaints the controls through the structural signature',
         antiBox.checked === false && rampSel.value === '30s' &&
         d.querySelector('#lim-holds .lim-src').textContent === 'header' &&
-        d.getElementById('lim-count').textContent === 'set by header · edge · in-flight 1 · 19/20 req');
+        d.getElementById('lim-count').textContent === 'set by header · edge · ramp 30s (inactive) · in-flight 1 · 19/20 req');
       w.applyThrottleState(policyFixture({anti_burst: true, ramp_duration: '45s'}));
       const customs = () => [...rampSel.options].filter(o => o.dataset.pairCustom === '1');
       check('an unknown stored ramp duration becomes one preserved custom option',
@@ -321,14 +321,14 @@ module.exports = async function operatorMenus(H) {
       const debugRow = () => [...d.querySelectorAll('#df-holds .pause-hold')]
         .map(row => row.querySelector('.hold-edit').textContent);
       check('a debug session renders its exact scope, duration and capture count',
-        JSON.stringify(debugRow()) === JSON.stringify(['client-a · 15m · 0 req']) &&
+        JSON.stringify(debugRow()) === JSON.stringify(['client-a · 15m · 0 captures']) &&
         d.querySelector('#df-holds [data-operator="debug-stop"]').textContent === 'Stop');
       const oldClient = d.querySelector('#df-clients input[value="client-a"]');
       w.applyDebugState(debugFixture(
         [{ id: 'structure-2', providers: ['provider-a'], duration: '1h', ran_ms: 0, captures: 0 }],
         { clients: ['client-b'], models: ['model-b'] }));
       check('a replaced debug session and vocabulary renders the new exact rows and removes the old name',
-        JSON.stringify(debugRow()) === JSON.stringify(['provider-a · 1h · 0 req']) &&
+        JSON.stringify(debugRow()) === JSON.stringify(['provider-a · 1h · 0 captures']) &&
         !oldClient.isConnected && !d.querySelector('#df-clients input[value="client-a"]') &&
         d.querySelector('#df-clients label').textContent.trim() === 'client-b' &&
         d.querySelector('#df-models input[value="model-b"]').type === 'checkbox');
@@ -399,16 +399,114 @@ module.exports = async function operatorMenus(H) {
         JSON.stringify(state.drainCalls) === JSON.stringify([{ all: true }]));
       check('a successful Drain clears the previous count-line error',
         d.getElementById('lim-count').textContent !== 'stale failure');
-      d.getElementById('lim-drain-client').value = 'client-a';
+      d.getElementById('lim-drain-scope').value = 'client';
+      d.getElementById('lim-drain-value').value = 'client-a';
       await w.drainLimitsQueue();
       check('a client-scoped Drain posts only that client',
         JSON.stringify(state.drainCalls[1]) === JSON.stringify({ client: 'client-a' }) &&
-        d.getElementById('lim-drain-client').value === '');
-      d.getElementById('lim-drain-model').value = 'model-a';
+        d.getElementById('lim-drain-value').value === '');
+      d.getElementById('lim-drain-scope').value = 'model';
+      d.getElementById('lim-drain-value').value = 'model-a';
       await w.drainLimitsQueue();
       check('a model-scoped Drain posts only that model',
         JSON.stringify(state.drainCalls[2]) === JSON.stringify({ model: 'model-a' }) &&
-        d.getElementById('lim-drain-model').value === '');
+        d.getElementById('lim-drain-value').value === '');
+      d.getElementById('lim-drain-scope').value = 'provider';
+      await w.drainLimitsQueue();
+      check('a provider-scoped Drain posts the selected provider',
+        JSON.stringify(state.drainCalls[3]) === JSON.stringify({ provider: 'provider-a' }));
+
+      // ---- redesigned menu anatomy: selection counts, pending-action
+      // summaries and the two-click confirm for broad actions.
+      {
+        d.getElementById('pause-menu').hidden = false;
+        w.applyPauseState({ ok: true, paused: false, holds: [], queued: 0,
+          known_clients: ['client-a'], known_providers: ['provider-a'] });
+        w.resetPauseMenuForm();
+        d.getElementById('pf-scope').value = '';
+        w.onPauseScopeChange();
+        d.querySelector('#pf-clients input[value="client-a"]').checked = true;
+        d.querySelector('#pf-providers input[value="provider-a"]').checked = true;
+        d.getElementById('pf-dur').value = '1h';
+        w.updatePauseApplyEnabled();
+        check('Pause reports the selected names and writes the pending action',
+          d.getElementById('pf-clients-n').textContent === '1 selected' &&
+          d.getElementById('pf-providers-n').textContent === '1 selected' &&
+          d.getElementById('pause-summary').textContent === 'Hold 1 client + 1 provider for 1 hour.');
+        d.getElementById('pf-scope').value = 'all';
+        w.onPauseScopeChange();
+        check('choosing all traffic hides the checklists but keeps their draft',
+          d.getElementById('pf-lists').hidden &&
+          d.querySelector('#pf-clients input[value="client-a"]').checked &&
+          d.getElementById('pause-summary').textContent === 'Hold all traffic for 1 hour.');
+        d.getElementById('pf-scope').value = '';
+        w.onPauseScopeChange();
+        check('returning to named scope restores the draft instead of clearing it',
+          !d.getElementById('pf-lists').hidden &&
+          d.querySelector('#pf-clients input[value="client-a"]').checked &&
+          d.getElementById('pf-clients-n').textContent === '1 selected');
+        w.hideHdrMenu('pause-menu');
+      }
+      {
+        d.getElementById('debug-menu').hidden = false;
+        w.applyDebugState(observerFixture({ ok: true, enabled: false, sessions: [],
+          known_clients: ['client-a'], known_providers: [], known_models: ['model-a'],
+          ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture() }));
+        w.resetDebugMenuForm();
+        d.querySelector('#df-models input[value="model-a"]').checked = true;
+        w.updateDebugApplyEnabled();
+        check('Debug reports its selection, pending action and retention facts',
+          d.getElementById('df-models-n').textContent === '1 selected' &&
+          d.getElementById('debug-summary').textContent === 'Capture 1 model until stopped.' &&
+          d.getElementById('debug-facts').textContent.includes('Retained 24h') &&
+          d.getElementById('debug-facts').textContent.includes('1MiB stored'));
+        w.hideHdrMenu('debug-menu');
+      }
+      {
+        d.getElementById('limits-menu').hidden = false;
+        w.applyThrottleState({ ok: true, active: false, known_providers: ['provider-a'], throttles: [] });
+        w.syncLimitsMenuState();
+        d.getElementById('lim-provider').value = 'provider-a';
+        d.getElementById('lim-conc').value = '2';
+        d.getElementById('lim-req').value = '10';
+        d.getElementById('lim-reqw').value = '1m';
+        w.updateLimitsApplyEnabled();
+        check('Limits writes the pending policy and enables Apply',
+          d.getElementById('lim-summary').textContent ===
+            'Set provider-a: 2 concurrent · 10 requests per 1 minute.' &&
+          !d.getElementById('btn-limits-apply').disabled);
+        for (const id of ['lim-conc', 'lim-req', 'lim-tok']) d.getElementById(id).value = '0';
+        w.updateLimitsApplyEnabled();
+        check('Limits refuses an empty Apply and points at Clear',
+          d.getElementById('btn-limits-apply').disabled &&
+          d.getElementById('lim-summary').textContent.includes('Set at least one limit'));
+        w.hideHdrMenu('limits-menu');
+      }
+      {
+        // First click arms, second click runs the inline owner.
+        const stop = d.getElementById('btn-debug-stop');
+        w.applyDebugState(observerFixture({ ok: true, enabled: true,
+          sessions: [{ id: 'armed-stop', clients: ['client-a'] }],
+          known_clients: [], known_providers: [], known_models: [],
+          ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture() }));
+        const originalStop = w.stopDebugMenu;
+        let stops = 0;
+        w.stopDebugMenu = () => { stops++; };
+        try {
+          stop.click();
+          check('a broad action arms on the first click instead of running',
+            stop.dataset.armed === '1' && stops === 0 &&
+            stop.textContent === 'Stop every capture session');
+          stop.click();
+          check('the second click runs the armed broad action and disarms',
+            stops === 1 && stop.dataset.armed !== '1' && stop.textContent === 'Stop all');
+        } finally {
+          w.stopDebugMenu = originalStop;
+          w.applyDebugState(observerFixture({ ok: true, enabled: false, sessions: [],
+            known_clients: [], known_providers: [], known_models: [],
+            ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture() }));
+        }
+      }
 
       w.applyPauseState({ ok: true, paused: false, holds: [], known_clients: [], known_providers: [] });
       w.resetPauseMenuForm();

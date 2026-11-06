@@ -246,7 +246,7 @@ module.exports = async function w16Mirrors(H) {
         JSON.stringify(sw.eval('[["", "off"]].concat(LIMIT_WINDOWS)')));
       check('FILTER_AGES offers canonical Go duration spellings',
         JSON.stringify(sw.eval('FILTER_AGES')) === JSON.stringify([
-          ['', '-'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
+          ['', 'any'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
       sw.togglePauseMenu({stopPropagation() {}});
       check('the pause menu renders the PAUSE_DURS token set',
         JSON.stringify([...sd.getElementById('pf-dur').options].map(o => o.value)) ===

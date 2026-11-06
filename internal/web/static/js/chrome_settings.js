@@ -241,21 +241,39 @@ function pauseMenuScope() {
 }
 
 function onPauseScopeChange() {
-  const blanket = pauseMenuScope() === 'all';
+  const scope = pauseMenuScope();
+  const named = scope === '';
   const box = $('pf-clients');
   const pbox = $('pf-providers');
-  if (box) box.classList.toggle('pause-disabled', blanket);
-  if (pbox) pbox.classList.toggle('pause-disabled', blanket);
+  const lists = $('pf-lists');
+  const any = $('pf-any');
+  if (lists) lists.hidden = !named;
+  if (any) any.hidden = !named;
+  if (box) box.classList.toggle('pause-disabled', !named);
+  if (pbox) pbox.classList.toggle('pause-disabled', !named);
   const disable = (root) => {
     if (!root) return;
-    root.querySelectorAll('input[type=checkbox]').forEach(c => {
-      c.disabled = operatorState.pause.busy || blanket;
-      if (blanket) c.checked = false;
-    });
+    // Keep the operator's draft when the scope changes away and back; a
+    // disabled checkbox is not submitted, so applying all still sends an
+    // empty scope.
+    root.querySelectorAll('input[type=checkbox]').forEach(c => { c.disabled = operatorState.pause.busy || !named; });
   };
   disable(box);
   disable(pbox);
+  updatePauseHint();
+  updatePauseSummary();
   updatePauseApplyEnabled();
+}
+
+function updatePauseHint() {
+  const el = $('pf-hint');
+  if (!el) return;
+  const scope = pauseMenuScope();
+  el.textContent = scope === 'all'
+    ? 'Every new request is parked. In-flight work finishes normally.'
+    : scope === 'new'
+      ? 'Clients unseen when this hold starts are parked. Requests already running finish normally.'
+      : 'Check any clients or providers. Leave a list empty to match any value.';
 }
 
 function selectedCheckboxValues(boxId) {
@@ -276,12 +294,55 @@ function pauseMenuCap() {
   return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
 }
 
+function durationText(id) {
+  const el = $(id);
+  return el && el.selectedOptions && el.selectedOptions[0] ? el.selectedOptions[0].textContent : '';
+}
+
+function updatePauseSelectedCounts() {
+  const c = selectedCheckboxValues('pf-clients').length;
+  const p = selectedCheckboxValues('pf-providers').length;
+  setNodeText($('pf-clients-n'), c ? c + ' selected' : 'any');
+  setNodeText($('pf-providers-n'), p ? p + ' selected' : 'any');
+}
+
+function updatePauseSummary() {
+  const el = $('pause-summary');
+  if (!el) return;
+  const scope = pauseMenuScope();
+  const duration = durationText('pf-dur');
+  const when = duration && duration !== 'I resume' ? ' for ' + duration.toLowerCase() : ' until resumed';
+  let text;
+  if (scope === 'all') {
+    text = 'Hold all traffic' + when + '.';
+  } else if (scope === 'new') {
+    text = 'Hold new clients' + when + '.';
+  } else {
+    const clients = selectedCheckboxValues('pf-clients').length;
+    const providers = selectedCheckboxValues('pf-providers').length;
+    if (!clients && !providers) {
+      text = 'Pick at least one client or provider, or choose all requests.';
+    } else {
+      const parts = [];
+      if (clients) parts.push(clients + (clients === 1 ? ' client' : ' clients'));
+      if (providers) parts.push(providers + (providers === 1 ? ' provider' : ' providers'));
+      text = 'Hold ' + parts.join(' + ') + when + '.';
+    }
+  }
+  setNodeText(el, (pauseEditID ? 'Update this hold: ' : '') + text);
+}
+
 function updatePauseApplyEnabled() {
   const btn = $('btn-pause-apply');
   if (!btn) return;
   const scope = pauseMenuScope();
-  btn.disabled = operatorState.pause.busy || (scope !== 'all' && scope !== 'new' && selectedCheckboxValues('pf-clients').length === 0 && selectedCheckboxValues('pf-providers').length === 0);
-  btn.textContent = pauseEditID ? 'Update' : 'Pause';
+  const named = scope !== 'all' && scope !== 'new';
+  const empty = named && selectedCheckboxValues('pf-clients').length === 0 && selectedCheckboxValues('pf-providers').length === 0;
+  btn.disabled = operatorState.pause.busy || empty;
+  btn.textContent = pauseEditID ? 'Update hold' : 'Pause';
+  btn.title = empty ? 'Check a client or provider, or choose all requests' : '';
+  updatePauseSelectedCounts();
+  updatePauseSummary();
 }
 
 // NONE_YET_NOTE is the one empty-state sentence for the operator menus'
@@ -539,7 +600,7 @@ function refreshPauseMenuDisplay() {
   const resume = $('btn-pause-resume');
   if (resume) resume.disabled = operatorState.pause.busy || !pauseActive();
   const hd = document.querySelector('#pause-menu .clear-menu-hd');
-  if (hd) hd.textContent = pauseEditID ? 'Edit hold…' : (pauseActive() ? 'Holding requests…' : 'Hold requests…');
+  if (hd) hd.textContent = pauseEditID ? 'Edit hold' : (pauseActive() ? 'Holding requests' : 'Pause traffic');
   const count = $('pause-count');
   if (count && !count.dataset.err) count.textContent = pauseActive() ? pauseStatusBits().join(' · ') : '';
   renderPauseHolds();
@@ -626,6 +687,13 @@ function openHdrMenuForEdit(menuId) {
   closeHeaderMenus(menuId);
   const m = $(menuId);
   if (m) m.hidden = false;
+  // The narrow header flyout is the only container that shows these panels
+  // on a phone. Opening the edit without it left the operator staring at
+  // the unchanged page.
+  const nav = $('btn-nav');
+  if (nav && nav.getClientRects().length && !$('hdr-actions').classList.contains('is-open')) {
+    setClassMenuOpen(NAV_CLASS_MENU, true);
+  }
   syncHdrMenuExpanded();
 }
 

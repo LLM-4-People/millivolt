@@ -118,143 +118,174 @@ try {
   </button>
   <div class="refresh-controls" id="hdr-actions">
     <div class="menu-wrap">
-      <button class="btn" id="btn-pause" onclick="togglePauseMenu(event)" aria-haspopup="menu" aria-controls="pause-menu" aria-expanded="false" aria-pressed="false" aria-label="Pause" title="Pause">
+      <button class="btn" id="btn-pause" onclick="togglePauseMenu(event)" aria-haspopup="dialog" aria-controls="pause-menu" aria-expanded="false" aria-pressed="false" aria-label="Pause" title="Pause">
         <svg class="hdr-ico solid" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="3" width="2.6" height="10" rx="0.8"/><rect x="9.4" y="3" width="2.6" height="10" rx="0.8"/></svg>
         <span class="hdr-btn-label">Pause</span>
       </button>
-      <div class="hdr-menu" id="pause-menu" hidden>
-        <div class="clear-menu-hd">Hold requests…</div>
+      <div class="hdr-menu op-menu" id="pause-menu" hidden role="dialog" aria-label="Pause traffic">
+        <div class="op-head">
+          <div class="clear-menu-hd">Pause traffic</div>
+          <p class="op-sub">Parks new matching requests. In-flight work always finishes.</p>
+        </div>
         <div id="pf-holds" class="pause-holds"></div>
-        <div class="clear-opts">
-          <label>scope
+        <div class="op-fields">
+          <label class="op-field" for="pf-scope">Scope
             <select id="pf-scope" onchange="onPauseScopeChange()"></select>
           </label>
-          <label>until
-            <select id="pf-dur"></select>
+          <label class="op-field" for="pf-dur">Until
+            <select id="pf-dur" onchange="updatePauseSummary()"></select>
           </label>
         </div>
-        <div class="pause-known">
+        <p class="op-hint" id="pf-hint">Pick named clients or providers, or hold everything.</p>
+        <div class="pause-known" id="pf-lists">
           <div>
-            <div class="pause-known-hd">Known clients</div>
+            <div class="pause-known-hd">Clients <span class="op-pick" id="pf-clients-n"></span></div>
             <div id="pf-clients" class="pause-clients"></div>
           </div>
           <div>
-            <div class="pause-known-hd">Known providers</div>
+            <div class="pause-known-hd">Providers <span class="op-pick" id="pf-providers-n"></span></div>
             <div id="pf-providers" class="pause-clients"></div>
           </div>
         </div>
-        <div class="clear-opts pause-cap-row">
-          <label>queue cap
+        <p class="op-note" id="pf-any">A list left empty matches any value in that dimension.</p>
+        <details class="op-advanced">
+          <summary>Queue options</summary>
+          <label class="op-field" for="pf-cap">Queue cap
             <input type="number" id="pf-cap" min="0" step="1" placeholder="default">
           </label>
-        </div>
+          <p class="op-hint">Blank keeps the current cap. 0 means unlimited.</p>
+        </details>
         <div class="clear-menu-ft">
-          <span class="clear-count" id="pause-count"></span>
+          <div class="op-summary" id="pause-summary"></div>
+          <span class="clear-count" id="pause-count" role="status" aria-live="polite"></span>
           <div class="clear-actions">
-            <button class="btn" id="btn-pause-apply" onclick="applyPauseMenu()" disabled>Pause</button>
-            <button class="btn" id="btn-pause-resume" onclick="resumePauseMenu()" disabled>Resume all</button>
+            <button class="btn btn-accent" id="btn-pause-apply" onclick="applyPauseMenu()" disabled>Pause</button>
+            <button class="btn btn-danger-outline" id="btn-pause-resume" onclick="resumePauseMenu()" data-confirm="Resume every hold" disabled>Resume all</button>
           </div>
         </div>
       </div>
     </div>
     <div class="menu-wrap">
-      <button class="btn" id="btn-debug" onclick="toggleDebugMenu(event)" aria-haspopup="menu" aria-controls="debug-menu" aria-expanded="false" aria-pressed="false" aria-label="Debug" title="Debug">
+      <button class="btn" id="btn-debug" onclick="toggleDebugMenu(event)" aria-haspopup="dialog" aria-controls="debug-menu" aria-expanded="false" aria-pressed="false" aria-label="Debug" title="Debug">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.6v2.2"/><path d="M8 11.2v2.2"/><circle cx="8" cy="8" r="2.4"/><path d="M3.4 4.2 4.9 5.7M11.1 10.3l1.5 1.5M3.4 11.8 4.9 10.3M11.1 5.7l1.5-1.5"/></svg>
         <span class="hdr-btn-label">Debug</span>
       </button>
-      <div class="hdr-menu" id="debug-menu" hidden>
-        <div class="clear-menu-hd">Capture debug…</div>
+      <div class="hdr-menu op-menu" id="debug-menu" hidden role="dialog" aria-label="Capture debug">
+        <div class="op-head">
+          <div class="clear-menu-hd">Capture debug</div>
+          <p class="op-sub">Stores matching request and response bodies for later inspection.</p>
+        </div>
         <div id="df-holds" class="pause-holds"></div>
-        <div class="clear-opts">
-          <label>until
+        <div class="op-fields">
+          <label class="op-field" for="df-dur">Until
             <select id="df-dur"></select>
           </label>
         </div>
         <div class="pause-known">
           <div>
-            <div class="pause-known-hd">Known clients</div>
+            <div class="pause-known-hd">Clients <span class="op-pick" id="df-clients-n"></span></div>
             <div id="df-clients" class="pause-clients"></div>
           </div>
           <div>
-            <div class="pause-known-hd">Known providers</div>
+            <div class="pause-known-hd">Providers <span class="op-pick" id="df-providers-n"></span></div>
             <div id="df-providers" class="pause-clients"></div>
           </div>
         </div>
         <div class="pause-known pause-known-one">
           <div>
-            <div class="pause-known-hd">Known models</div>
+            <div class="pause-known-hd">Models <span class="op-pick" id="df-models-n"></span></div>
             <div id="df-models" class="pause-clients"></div>
           </div>
         </div>
+        <p class="op-note" id="df-any">A list left empty matches any value in that dimension.</p>
+        <div class="op-facts" id="debug-facts"></div>
+        <p class="op-warning">Captures can contain credentials and private content. Keep the retention window short and download only what you need.</p>
         <div class="clear-menu-ft">
-          <span class="clear-count" id="debug-count"></span>
+          <div class="op-summary" id="debug-summary"></div>
+          <span class="clear-count" id="debug-count" role="status" aria-live="polite"></span>
           <div class="clear-actions">
-            <button class="btn" id="btn-debug-apply" onclick="applyDebugMenu()" disabled>Start</button>
-            <button class="btn" id="btn-debug-stop" onclick="stopDebugMenu()" disabled>Stop all</button>
+            <button class="btn btn-accent" id="btn-debug-apply" onclick="applyDebugMenu()" disabled>Start capture</button>
+            <button class="btn btn-danger-outline" id="btn-debug-stop" onclick="stopDebugMenu()" data-confirm="Stop every capture session" disabled>Stop all</button>
           </div>
         </div>
       </div>
     </div>
     <div class="menu-wrap">
-      <button class="btn" id="btn-limits" onclick="toggleLimitsMenu(event)" aria-haspopup="menu" aria-controls="limits-menu" aria-expanded="false" aria-pressed="false" aria-label="Limits" title="Limits">
+      <button class="btn" id="btn-limits" onclick="toggleLimitsMenu(event)" aria-haspopup="dialog" aria-controls="limits-menu" aria-expanded="false" aria-pressed="false" aria-label="Limits" title="Limits">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 12.3a5.6 5.6 0 1 1 9.6 0"/><path d="M8 12.3 11.1 7.5"/><circle cx="8" cy="12.3" r="1.05" fill="currentColor" stroke="none"/></svg>
         <span class="hdr-btn-label">Limits</span>
       </button>
-      <div class="hdr-menu" id="limits-menu" hidden>
-        <div class="clear-menu-hd">Provider limits…</div>
+      <div class="hdr-menu op-menu" id="limits-menu" hidden role="dialog" aria-label="Provider limits">
+        <div class="op-head">
+          <div class="clear-menu-hd">Provider limits</div>
+          <p class="op-sub">One policy per provider, across every client and key.</p>
+        </div>
         <div id="lim-holds" class="pause-holds"></div>
-        <div class="clear-opts">
-          <label>provider
-            <select id="lim-provider" onchange="onLimitProviderChange()"></select>
+        <label class="op-field" for="lim-provider">Provider
+          <select id="lim-provider" onchange="onLimitProviderChange()"></select>
+        </label>
+        <div class="lim-grid">
+          <label class="op-field" for="lim-conc">Concurrency
+            <input type="number" id="lim-conc" min="0" step="1" placeholder="off" oninput="updateLimitSummary()">
           </label>
-          <label>concurrency
-            <input type="number" id="lim-conc" min="0" step="1" placeholder="off">
+          <label class="op-field" for="lim-req">Requests
+            <input type="number" id="lim-req" min="0" step="1" placeholder="off" oninput="updateLimitSummary()">
           </label>
-          <label>requests
-            <input type="number" id="lim-req" min="0" step="1" placeholder="off">
+          <label class="op-field" for="lim-reqw">Request window
+            <select id="lim-reqw" onchange="updateLimitSummary()"></select>
           </label>
-          <label>per
-            <select id="lim-reqw"></select>
+          <label class="op-field" for="lim-tok">Tokens
+            <input type="number" id="lim-tok" min="0" step="1" placeholder="off" oninput="updateLimitSummary()">
           </label>
-          <label>tokens
-            <input type="number" id="lim-tok" min="0" step="1" placeholder="off">
+          <label class="op-field" for="lim-tokw">Token window
+            <select id="lim-tokw" onchange="updateLimitSummary()"></select>
           </label>
-          <label>per
-            <select id="lim-tokw"></select>
+          <label class="op-check" for="lim-antiburst">Anti-burst
+            <input type="checkbox" id="lim-antiburst" onchange="updateLimitSummary()">
           </label>
-          <label>anti-burst
-            <input type="checkbox" id="lim-antiburst">
-          </label>
-          <label>ramp in
-            <select id="lim-ramp"></select>
-          </label>
-        </div>
-        <div class="clear-opts">
-          <label>drain model
-            <input type="text" id="lim-drain-model" placeholder="any">
-          </label>
-          <label>drain client
-            <input type="text" id="lim-drain-client" placeholder="any">
+          <label class="op-field" for="lim-ramp">Ramp in
+            <select id="lim-ramp" onchange="updateLimitSummary()"></select>
           </label>
         </div>
-        <div class="lim-queue" id="lim-drain-count"></div>
+        <p class="op-hint">0 turns a dimension off. A window alone does nothing until its count is set.</p>
+        <div class="op-section">
+          <div class="op-section-hd">Queue</div>
+          <div class="lim-queue" id="lim-drain-count"></div>
+          <div class="op-fields">
+            <label class="op-field" for="lim-drain-scope">Drain
+              <select id="lim-drain-scope" onchange="updateDrainScope()">
+                <option value="all">everything queued</option>
+                <option value="provider">this provider</option>
+                <option value="model">one model</option>
+                <option value="client">one client</option>
+              </select>
+            </label>
+            <label class="op-field" for="lim-drain-value" id="lim-drain-value-wrap" hidden>Value
+              <input type="text" id="lim-drain-value" placeholder="name">
+            </label>
+          </div>
+          <button class="btn" id="btn-limits-drain" onclick="drainLimitsQueue()">Drain queued</button>
+        </div>
         <div class="clear-menu-ft">
-          <span class="clear-count" id="lim-count"></span>
+          <div class="op-summary" id="lim-summary"></div>
+          <span class="clear-count" id="lim-count" role="status" aria-live="polite"></span>
           <div class="clear-actions">
-            <button class="btn" id="btn-limits-apply" onclick="applyLimitsMenu()" disabled>Apply</button>
-            <button class="btn" id="btn-limits-clear" onclick="clearLimitsMenu()" disabled>Clear</button>
-            <button class="btn" id="btn-limits-drain" onclick="drainLimitsQueue()">Drain queued</button>
+            <button class="btn btn-accent" id="btn-limits-apply" onclick="applyLimitsMenu()" disabled>Apply limit</button>
+            <button class="btn btn-danger-outline" id="btn-limits-clear" onclick="clearLimitsMenu()" data-confirm="Remove this provider limit" disabled>Clear</button>
           </div>
         </div>
       </div>
     </div>
     <div class="menu-wrap">
-      <button class="btn" id="btn-logs" onclick="toggleLogsMenu(event)" aria-haspopup="menu" aria-controls="logs-menu" aria-expanded="false" aria-label="Logs" title="Logs">
+      <button class="btn" id="btn-logs" onclick="toggleLogsMenu(event)" aria-haspopup="dialog" aria-controls="logs-menu" aria-expanded="false" aria-label="Logs" title="Logs">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.8v7.4"/><path d="M5.1 7.6 8 10.6l2.9-3"/><path d="M3.2 13.2h9.6"/></svg>
         <span class="hdr-btn-label">Logs</span>
       </button>
-      <div class="hdr-menu" id="logs-menu" hidden>
-        <div class="clear-menu-hd">Download logs (JSON, gzip)…</div>
+      <div class="hdr-menu op-menu" id="logs-menu" hidden role="dialog" aria-label="Export logs">
+        <div class="op-head">
+          <div class="clear-menu-hd">Export logs (JSON, gzip)</div>
+          <p class="op-sub">Streams every matching record. The preview and the download use the same filter.</p>
+        </div>
         <div class="clear-opts">
           <label>provider <select id="lf-provider"></select></label>
           <label>model <select id="lf-model"></select></label>
@@ -264,11 +295,16 @@ try {
           <label>debug <select id="lf-debug"></select></label>
           <label>older than <select id="lf-age"></select></label>
         </div>
+        <div class="op-hintrow">
+          <p class="op-hint">Filters read durable history when storage is enabled. Status 0 is an in-flight row and is never offered.</p>
+          <button class="op-link" id="btn-logs-reset" onclick="resetLogsFilters()">Reset filters</button>
+        </div>
         <div class="clear-menu-ft">
-          <span class="clear-count" id="logs-count"></span>
+          <div class="op-summary" id="logs-summary"></div>
+          <span class="clear-count" id="logs-count" role="status" aria-live="polite"></span>
           <div class="clear-actions">
-            <button class="btn" id="btn-logs-filtered" onclick="downloadLogsFiltered()" disabled>Download matching</button>
-            <button class="btn btn-danger-outline" onclick="downloadLogsAll()">Download all</button>
+            <button class="btn btn-accent" id="btn-logs-filtered" onclick="downloadLogsFiltered()" disabled>Download matching</button>
+            <button class="btn" onclick="downloadLogsAll()">Download all</button>
           </div>
         </div>
       </div>

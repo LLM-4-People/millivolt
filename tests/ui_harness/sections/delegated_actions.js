@@ -374,15 +374,11 @@ module.exports = async function delegatedActions(H) {
         for (const id of ['lim-conc','lim-req','lim-tok']) sd.getElementById(id).value = '0';
         anti.checked = true;
         ramp.value = '30s';
-        adminReply = Promise.resolve({ok:true,json:async()=>({
-          ok:true,active:false,known_providers:['provider-a'],throttles:[]})});
-        const clearIndex = adminBodies.length;
+        const emptyIndex = adminBodies.length;
         await sw.applyLimitsMenu();
-        check('an empty cap form clears anti-burst instead of sending an on-ramp',
-          JSON.stringify(JSON.parse(adminBodies[clearIndex])) === JSON.stringify({
-            provider:'provider-a', concurrency:0, requests:0, request_window:'',
-            tokens:0, token_window:'', anti_burst:false, ramp_duration:'',
-          }));
+        check('an empty cap form is refused; Clear is the only removal path',
+          adminBodies.length === emptyIndex &&
+          sd.getElementById('lim-count').textContent.includes('use Clear'));
       }
 
       const draft=sd.createElement('div');

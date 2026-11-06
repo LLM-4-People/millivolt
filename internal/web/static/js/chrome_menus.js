@@ -90,10 +90,47 @@ function hideHdrMenu(id) {
   if (!el) return false;
   const wasOpen = !el.hidden;
   el.hidden = true;
+  disarmConfirmations(el);
   if (wasOpen) HEADER_MENU_CLOSE.get(id)?.();
   syncHdrMenuExpanded();
   return wasOpen;
 }
+
+// A broad action gets one explicit second click instead of a blocking
+// dialog: the first click arms the button and renames it, the second runs
+// the inline owner, and five seconds, a menu close or another arm disarms
+// it. Capture phase intercepts before the inline onclick, so the action
+// owner never needs to know this exists.
+const CONFIRM_ARM_MS = 5000;
+let _confirmTimer = 0;
+function disarmConfirm(btn) {
+  if (!btn) return;
+  if (btn.dataset.confirmLabel) {
+    btn.textContent = btn.dataset.confirmLabel;
+    delete btn.dataset.confirmLabel;
+  }
+  delete btn.dataset.armed;
+}
+function disarmConfirmations(root) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll('[data-armed="1"]').forEach(disarmConfirm);
+  clearTimeout(_confirmTimer);
+}
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-confirm]');
+  if (!btn || btn.disabled) return;
+  if (btn.dataset.armed === '1') {
+    disarmConfirm(btn);
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  disarmConfirmations(btn.closest('.hdr-menu') || document);
+  btn.dataset.confirmLabel = btn.textContent;
+  btn.dataset.armed = '1';
+  btn.textContent = btn.dataset.confirm;
+  _confirmTimer = setTimeout(() => disarmConfirm(btn), CONFIRM_ARM_MS);
+}, true);
 
 function parseGoDuration(s) {
   if (s == null || s === '') return 0;
@@ -197,7 +234,7 @@ const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
 // Filter ages reuse the shared hour wording for '1h'; the longer spans are
 // deliberately day/week wording in the age context, not clock arithmetic.
-const FILTER_AGES = [['', '-'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
+const FILTER_AGES = [['', 'any'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
 
 function populateFilterMenu(prefix, onChange) {
   const recs = lastData?.records || [];
@@ -208,7 +245,9 @@ function populateFilterMenu(prefix, onChange) {
   };
   fill(prefix+'-provider', [...new Set(recs.map(r => r.provider).filter(Boolean))].sort());
   fill(prefix+'-client', [...new Set(recs.map(r => r.client).filter(Boolean))].sort(), clientLabel);
-  fill(prefix+'-status', [...new Set(recs.map(r => r.status_code))].sort((a,b)=>a-b).map(String));
+  // 0 is an in-flight row, not a response status: offering it would let a
+  // filter that the backend treats as "ignore" look like a real match.
+  fill(prefix+'-status', [...new Set(recs.map(r => r.status_code).filter(n => n > 0))].sort((a,b)=>a-b).map(String));
   // The model select groups spelling variants under their canonical group
   // (an <optgroup> per multi-variant group) so the same model clusters
   // visually - but each <option> keeps its raw value: delete/download
@@ -350,7 +389,27 @@ function logsExportURL(f) {
 }
 
 function updateLogsCount() {
-  return updateFilterCount('lf', 'logs-count', 'btn-logs-filtered', n => 'download ' + recPhrase(n) + ' from the full database');
+  const summary = $('logs-summary');
+  if (summary) {
+    summary.textContent = clearFilterActive(filterFromUI('lf'))
+      ? 'Filtered export. Matching uses the same predicate as the preview.'
+      : 'Every stored record. Add a filter to narrow the export.';
+  }
+  const source = typeof storageState !== 'undefined' && storageState && storageState.enabled
+    ? 'durable history'
+    : 'live buffer';
+  return updateFilterCount('lf', 'logs-count', 'btn-logs-filtered',
+    n => 'download ' + recPhrase(n) + ' from the ' + source);
+}
+
+// resetLogsFilters is the one reset owner for the export surface: every
+// select returns to its empty "any" choice, then the preview re-runs once.
+function resetLogsFilters() {
+  for (const name of ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']) {
+    const el = $('lf-' + name);
+    if (el) el.value = '';
+  }
+  return updateLogsCount();
 }
 
 function downloadLogsFiltered() {

@@ -174,11 +174,52 @@ function debugMenuDuration() {
   return el ? el.value : '';
 }
 
+function debugStorageDisabled() {
+  return typeof storageState !== 'undefined' && !!storageState && storageState.enabled === false;
+}
+
+function updateDebugSelectedCounts() {
+  const c = selectedCheckboxValues('df-clients').length;
+  const p = selectedCheckboxValues('df-providers').length;
+  const m = selectedCheckboxValues('df-models').length;
+  setNodeText($('df-clients-n'), c ? c + ' selected' : 'any');
+  setNodeText($('df-providers-n'), p ? p + ' selected' : 'any');
+  setNodeText($('df-models-n'), m ? m + ' selected' : 'any');
+}
+
+function updateDebugSummary() {
+  const el = $('debug-summary');
+  if (!el) return;
+  const clients = selectedCheckboxValues('df-clients').length;
+  const providers = selectedCheckboxValues('df-providers').length;
+  const models = selectedCheckboxValues('df-models').length;
+  const duration = durationText('df-dur');
+  const when = duration && duration !== 'I stop' ? ' for ' + duration.toLowerCase() : ' until stopped';
+  if (!clients && !providers && !models) {
+    setNodeText(el, 'Pick at least one client, provider or model.');
+    return;
+  }
+  const parts = [];
+  if (clients) parts.push(clients + (clients === 1 ? ' client' : ' clients'));
+  if (providers) parts.push(providers + (providers === 1 ? ' provider' : ' providers'));
+  if (models) parts.push(models + (models === 1 ? ' model' : ' models'));
+  setNodeText(el, (debugEditID ? 'Update this session: capture ' : 'Capture ') + parts.join(' + ') + when + '.');
+}
+
 function updateDebugApplyEnabled() {
   const btn = $('btn-debug-apply');
   if (!btn || btn.dataset.busy) return;
-  btn.disabled = operatorState.debug.busy || selectedCheckboxValues('df-clients').length === 0 && selectedCheckboxValues('df-providers').length === 0 && selectedCheckboxValues('df-models').length === 0;
-  btn.textContent = debugEditID ? 'Update' : 'Start';
+  const empty = selectedCheckboxValues('df-clients').length === 0 &&
+    selectedCheckboxValues('df-providers').length === 0 &&
+    selectedCheckboxValues('df-models').length === 0;
+  const blocked = debugStorageDisabled();
+  btn.disabled = operatorState.debug.busy || empty || blocked;
+  btn.textContent = debugEditID ? 'Update session' : 'Start capture';
+  btn.title = blocked
+    ? 'Durable storage is off; set db_path before starting a capture'
+    : empty ? 'Check a client, provider or model' : '';
+  updateDebugSelectedCounts();
+  updateDebugSummary();
 }
 
 function paintDebugModelRow(label, g, keep, takenNames) {
@@ -272,7 +313,7 @@ function debugSessionLabel(h) {
   const ran = debugRanLabel(h);
   if (ran) left.push('ran ' + ran);
   const n = typeof h.captures === 'number' ? h.captures : 0;
-  left.push(n + ' req');
+  left.push(n + (n === 1 ? ' capture' : ' captures'));
   return left.join(' · ');
 }
 
@@ -318,9 +359,22 @@ function refreshDebugMenuDisplay() {
   const stop = $('btn-debug-stop');
   if (stop) stop.disabled = operatorState.debug.busy || !debugActive();
   const hd = document.querySelector('#debug-menu .clear-menu-hd');
-  if (hd) hd.textContent = debugEditID ? 'Edit session…' : (debugActive() ? 'Capturing debug…' : 'Capture debug…');
+  if (hd) hd.textContent = debugEditID ? 'Edit session' : (debugActive() ? 'Capturing debug' : 'Capture debug');
   const count = $('debug-count');
   if (count && !count.dataset.err) count.textContent = debugActive() ? debugStatusBits().join(' · ') : '';
+  const facts = $('debug-facts');
+  if (facts) {
+    const ttl = debugState.ttl || '';
+    const max = debugState.max_bytes || '';
+    const retention = ttl || max
+      ? 'Retained ' + (ttl || 'until removed') + (max ? ' · ' + max + ' stored' : '') + '.'
+      : '';
+    const blocked = debugStorageDisabled()
+      ? 'Durable storage is off, so captures cannot start. Set db_path and restart.'
+      : '';
+    setNodeText(facts, [blocked, retention].filter(Boolean).join(' '));
+    facts.classList.toggle('op-warning', !!blocked);
+  }
   renderDebugSessions();
 }
 
@@ -469,10 +523,15 @@ function syncLimitsMenuState() {
     const empty = known.length ? '' : `<option value="">${NONE_YET_NOTE}</option>`;
     sel.innerHTML = empty + known.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
     if (keep && known.includes(keep)) sel.value = keep;
+    // The option list was rebuilt and the selection may have moved to a
+    // different provider. Refill the numeric fields from the new selection
+    // so Apply can never send the previous provider's caps to it.
+    if (sel.value !== keep) onLimitProviderChange();
   }
   fillLimitPolicy();
   updateLimitCount();
   updateQueueDrainCount();
+  updateDrainScope();
   renderLimitHolds();
   updateLimitsApplyEnabled();
   _limitsMenuSig = limitsMenuStructuralSig();
@@ -494,8 +553,12 @@ function onLimitProviderChange() {
 }
 
 function limitPolicyBits(t) {
-  if (!t || !t.anti_burst) return [];
-  return ['anti-burst' + (t.ramp_duration ? ' ' + t.ramp_duration : '')];
+  if (!t) return [];
+  if (t.anti_burst) return ['anti-burst' + (t.ramp_duration ? ' ' + t.ramp_duration : '')];
+  // A stored ramp with the flag off does nothing, but it is still saved
+  // state; hiding it made an inert policy invisible.
+  if (t.ramp_duration) return ['ramp ' + t.ramp_duration + ' (inactive)'];
+  return [];
 }
 
 function updateLimitCount() {
@@ -517,6 +580,43 @@ function updateLimitCount() {
   }
 }
 
+// updateLimitSummary states the pending policy in words, so Apply is never
+// a mystery: the operator sees exactly which dimensions and windows will be
+// sent, or why there is nothing to send.
+function updateLimitSummary() {
+  const el = $('lim-summary');
+  if (!el) return;
+  const provider = $('lim-provider') ? $('lim-provider').value : '';
+  if (!provider) {
+    setNodeText(el, 'Pick a provider to set a limit.');
+    return;
+  }
+  const conc = limitNum('lim-conc');
+  const req = limitNum('lim-req');
+  const tok = limitNum('lim-tok');
+  if ([conc, req, tok].some(Number.isNaN)) {
+    setNodeText(el, 'Limits must be whole numbers of 0 or more.');
+    return;
+  }
+  const bits = [];
+  if (conc > 0) bits.push(conc + ' concurrent');
+  if (req > 0) bits.push(fmt(req) + ' requests per ' + (durationText('lim-reqw') || LIMIT_WINDOW_DEFAULT));
+  if (tok > 0) bits.push(fmt(tok) + ' tokens per ' + (durationText('lim-tokw') || LIMIT_WINDOW_DEFAULT));
+  const anti = $('lim-antiburst');
+  const ramp = durationText('lim-ramp');
+  if (ramp && ramp !== 'off') {
+    bits.push(anti && anti.checked ? 'ramp over ' + ramp : 'ramp ' + ramp + ' inactive');
+  }
+  const existing = limitByProvider(provider);
+  if (!bits.length) {
+    setNodeText(el, existing
+      ? 'No limit dimensions set. Use Clear to remove this provider policy.'
+      : 'Set at least one limit dimension.');
+    return;
+  }
+  setNodeText(el, (existing ? 'Update ' : 'Set ') + provider + ': ' + bits.join(' · ') + '.');
+}
+
 // updateQueueDrainCount owns the queue total beside the drain fields. It is
 // the same scheduler count the footer shows (admission waiters plus send-gate
 // waiters), not the selected provider's row, so the operator can see what a
@@ -530,11 +630,45 @@ function updateQueueDrainCount() {
 }
 
 function updateLimitsApplyEnabled() {
-  const hasProv = !!( $('lim-provider') && $('lim-provider').value );
+  const provider = $('lim-provider') ? $('lim-provider').value : '';
+  const hasProv = !!provider;
+  const existing = hasProv ? limitByProvider(provider) : null;
+  const conc = limitNum('lim-conc');
+  const req = limitNum('lim-req');
+  const tok = limitNum('lim-tok');
+  const dims = conc > 0 || req > 0 || tok > 0;
   const apply = $('btn-limits-apply');
   const clear = $('btn-limits-clear');
-  if (apply) apply.disabled = operatorState.throttle.busy || !hasProv;
-  if (clear) clear.disabled = operatorState.throttle.busy || !hasProv || !limitByProvider($('lim-provider').value);
+  if (apply) {
+    apply.disabled = operatorState.throttle.busy || !hasProv || !dims;
+    apply.title = !hasProv
+      ? 'Pick a provider first'
+      : !dims
+        ? (existing ? 'Nothing to apply. Use Clear to remove this policy.' : 'Set at least one limit dimension')
+        : '';
+  }
+  if (clear) clear.disabled = operatorState.throttle.busy || !hasProv || !existing;
+  const drain = $('btn-limits-drain');
+  if (drain) drain.disabled = operatorState.throttle.busy || (Number(pauseState.queued) || 0) <= 0;
+  updateLimitSummary();
+}
+
+// updateDrainScope is the one owner of the queue-drain scope control: one
+// select and one value field replace the old pair of free-text inputs, and
+// the provider scope reuses the provider selected above.
+function updateDrainScope() {
+  const scope = $('lim-drain-scope') ? $('lim-drain-scope').value : 'all';
+  const wrap = $('lim-drain-value-wrap');
+  const input = $('lim-drain-value');
+  const needsValue = scope === 'model' || scope === 'client';
+  if (wrap) wrap.hidden = !needsValue;
+  if (input) input.placeholder = scope === 'model' ? 'model id' : scope === 'client' ? 'client label' : 'name';
+  const btn = $('btn-limits-drain');
+  if (btn) {
+    btn.textContent = scope === 'all' ? 'Drain everything' : scope === 'provider' ? 'Drain this provider' : 'Drain matching';
+    if (scope === 'all') btn.dataset.confirm = 'Drain every queued request';
+    else delete btn.dataset.confirm;
+  }
 }
 
 function limitNum(id) {
@@ -551,6 +685,13 @@ function applyLimitsMenu() {
   const req = limitNum('lim-req');
   const tok = limitNum('lim-tok');
   if ([conc, req, tok].some(Number.isNaN)) { operatorError('throttle', 'limits must be non-negative whole numbers'); return; }
+  if (conc === 0 && req === 0 && tok === 0) {
+    operatorError('throttle', limitByProvider(provider)
+      ? 'nothing to apply: use Clear to remove this provider policy'
+      : 'set at least one limit dimension');
+    updateLimitSummary();
+    return;
+  }
   const anti = $('lim-antiburst');
   const ramp = $('lim-ramp');
   // A ramp only shapes an active cap: an explicit on-ramp with every cap at
@@ -584,13 +725,19 @@ function clearLimitsMenu() {
 // never count as provider failures.
 async function drainLimitsQueue() {
   if (operatorState.throttle.busy) return;
-  const model = $('lim-drain-model') ? $('lim-drain-model').value.trim() : '';
-  const client = $('lim-drain-client') ? $('lim-drain-client').value.trim() : '';
-  if (model && client) {
-    operatorError('throttle', 'drain either a model or a client, not both');
-    return;
+  const scope = $('lim-drain-scope') ? $('lim-drain-scope').value : 'all';
+  const value = $('lim-drain-value') ? $('lim-drain-value').value.trim() : '';
+  const provider = $('lim-provider') ? $('lim-provider').value : '';
+  let body;
+  if (scope === 'all') {
+    body = { all: true };
+  } else if (scope === 'provider') {
+    if (!provider) { operatorError('throttle', 'pick a provider before draining it'); return; }
+    body = { provider };
+  } else {
+    if (!value) { operatorError('throttle', 'enter the ' + scope + ' to drain'); return; }
+    body = { [scope]: value };
   }
-  const body = model ? { model } : client ? { client } : { all: true };
   operatorState.throttle.busy = true;
   operatorState.throttle.sync();
   try {
@@ -598,8 +745,7 @@ async function drainLimitsQueue() {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
     }, 'could not drain the queue');
     operatorCountClear('throttle');
-    if ($('lim-drain-model')) $('lim-drain-model').value = '';
-    if ($('lim-drain-client')) $('lim-drain-client').value = '';
+    if ($('lim-drain-value')) $('lim-drain-value').value = '';
   } catch (err) {
     operatorError('throttle', String(err.message || 'could not drain the queue'));
   } finally {
@@ -671,6 +817,8 @@ function limitsMenuStructuralSig() {
 function refreshLimitsMenuDisplay() {
   updateLimitCount();
   updateQueueDrainCount();
+  const drain = $('btn-limits-drain');
+  if (drain) drain.disabled = operatorState.throttle.busy || (Number(pauseState.queued) || 0) <= 0;
   renderLimitHolds();
 }
 
@@ -745,12 +893,14 @@ function refreshFooterState() {
     btn.setAttribute('aria-pressed', holding ? 'true' : 'false');
     btn.setAttribute('aria-label', holding ? 'Paused' : 'Pause');
     btn.title = holding ? 'Paused' : 'Pause';
+    setNodeText(btn.querySelector('.hdr-btn-label'), holding ? 'Paused' : 'Pause');
   }
   const dbtn = $('btn-debug');
   if (dbtn) {
     dbtn.setAttribute('aria-pressed', debugging ? 'true' : 'false');
     dbtn.setAttribute('aria-label', debugging ? 'Debugging' : 'Debug');
     dbtn.title = debugging ? 'Debugging' : 'Debug';
+    setNodeText(dbtn.querySelector('.hdr-btn-label'), debugging ? 'Debugging' : 'Debug');
   }
   const resume = $('btn-pause-resume');
   if (resume) resume.disabled = operatorState.pause.busy || !holding;
