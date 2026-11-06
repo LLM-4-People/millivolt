@@ -17,11 +17,14 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 type aggregateKey struct {
 	params, canon      string
 	database           int64
+	classes            uint64
 	finalized, pending uint64
 }
 
@@ -139,7 +142,13 @@ func (a *AggAPI) aggregateKey(ctx context.Context, params, canon string, include
 	if !includePending {
 		pending = 0 // chart sums are finalized-only
 	}
-	key := aggregateKey{params: params, canon: canon, finalized: finalized, pending: pending}
+	// Classification flags (has429, error, retryable) derive from the installed
+	// vocabulary, not from a stored column. A reload can change them with an
+	// unchanged database version, so the witness is part of the key.
+	key := aggregateKey{
+		params: params, canon: canon, classes: metrics.ClassExtensionRevision(),
+		finalized: finalized, pending: pending,
+	}
 	if a.store != nil {
 		var err error
 		key.database, err = a.store.DataVersion(ctx)

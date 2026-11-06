@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -29,6 +30,30 @@ type ClassExtensions struct {
 // every test that resets them.
 var classExtensions atomic.Pointer[ClassExtensions]
 
+// classExtensionRevision advances only when the installed vocabulary actually
+// changes. Classification depends on it, so any cache that retains a derived
+// has429/error/retryable answer (the dashboard's durable projection and its
+// aggregate memos) must key freshness on this witness, not on the database
+// version: a reload changes the classifier without changing a stored row.
+var classExtensionRevision atomic.Uint64
+
+// ClassExtensionRevision returns the current vocabulary witness. It changes
+// whenever an install swaps in a different set of extensions, and never on a
+// no-op install, so a cache can compare it cheaply.
+func ClassExtensionRevision() uint64 {
+	return classExtensionRevision.Load()
+}
+
+func sameClassExtensions(a, b ClassExtensions) bool {
+	return slices.Equal(a.RateLimit, b.RateLimit) &&
+		slices.Equal(a.Quota, b.Quota) &&
+		slices.Equal(a.Retryable, b.Retryable)
+}
+
+func emptyClassExtensions(e ClassExtensions) bool {
+	return len(e.RateLimit) == 0 && len(e.Quota) == 0 && len(e.Retryable) == 0
+}
+
 // InstallClassExtensions replaces the operator extensions. The proxy's config
 // owner installs them on construction and on every reload; tests install them
 // directly. A nil or empty value restores the built-ins. The swap is atomic,
@@ -39,7 +64,25 @@ func InstallClassExtensions(ext ClassExtensions) {
 	normalized.RateLimit = normalizeExtension(ext.RateLimit)
 	normalized.Quota = normalizeExtension(ext.Quota)
 	normalized.Retryable = normalizeExtension(ext.Retryable)
-	classExtensions.Store(&normalized)
+	for {
+		old := classExtensions.Load()
+		if old != nil && sameClassExtensions(*old, normalized) {
+			return
+		}
+		if old == nil && emptyClassExtensions(normalized) {
+			// The built-ins are already effective. Publish the canonical
+			// empty value without advancing the revision: a no-op install
+			// must not invalidate every classification-derived cache.
+			if classExtensions.CompareAndSwap(nil, &normalized) {
+				return
+			}
+			continue
+		}
+		if classExtensions.CompareAndSwap(old, &normalized) {
+			classExtensionRevision.Add(1)
+			return
+		}
+	}
 }
 
 // installedClassExtensions returns the current extensions (never nil).
