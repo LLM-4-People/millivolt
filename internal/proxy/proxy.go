@@ -806,12 +806,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.Paused = true
 	}
 	debugTap := s.beginDebugTap(r, t, rec, body)
-	if lp, ok := s.rec.(livePublisher); ok {
-		lp.PublishLive("begin", rec)
-	}
-	s.pause.clients.add(rec.Client)
-	s.pause.providers.add(rec.Provider)
-	s.pause.models.add(canonicalModel(rec.Model))
+	// Register the finalizer before the begin event. A live subscriber sees
+	// the pending record the moment PublishLive runs; if that sink panics (or
+	// a future edit adds a failing step between the two), the pending view
+	// must still be retired. A begin without its deferred Record leaves a
+	// permanent in-flight row, because nothing else owns that snapshot.
 	defer func() {
 		rec.End = time.Now()
 		metrics.FinalizeRecord(rec)
@@ -827,6 +826,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			saveCapture()
 		}
 	}()
+	if lp, ok := s.rec.(livePublisher); ok {
+		lp.PublishLive("begin", rec)
+	}
+	s.pause.clients.add(rec.Client)
+	s.pause.providers.add(rec.Provider)
+	s.pause.models.add(canonicalModel(rec.Model))
 
 	state := &stormRequestState{rec: rec, format: t.format}
 	ctx, cancelCtx := context.WithCancel(context.WithValue(r.Context(), stormContextKey{}, state))
@@ -1033,6 +1038,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// silent. The deferred Stop reads the variable, not a nil receiver
 			// captured before this branch.
 			pacer = s.newSSEPacerFor(w)
+			// The late pacer owns the same client-gone signal as the
+			// streaming one: a failed keepalive proves the socket is gone,
+			// so cancel the request context instead of waiting for the
+			// upstream to finish an unread body.
+			pacer.onGone = cancelCtx
 			w = pacer
 			pacer.Arm()
 		}

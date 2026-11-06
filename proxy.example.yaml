@@ -344,8 +344,9 @@ max_inflight_requests: 10000
 # Process-wide budget for buffered inbound request bodies. Admission charges the bytes
 # actually read and refuses with 503 when the next read would exceed the budget. A
 # declared Content-Length reserves nothing, so an idle connection cannot hold the budget.
-# Bytes past max_request_bytes are not charged: that body is answered 413 by the cap
-# owner. 0 = unlimited. Hot-reloads.
+# Bytes past max_request_bytes are neither charged nor retained: that body is answered 413
+# by the cap owner. A refused request drains at most its remaining cap window so an
+# over-cap body still answers 413 rather than a retryable 503. 0 = unlimited. Hot-reloads.
 # Hot-reload: yes.
 #   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
 max_inflight_body_bytes: 256MiB

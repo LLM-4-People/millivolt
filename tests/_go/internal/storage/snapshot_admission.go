@@ -262,3 +262,64 @@ func TestAdmissionRejectsIDWithoutUniqueKey(t *testing.T) {
 		t.Fatalf("live ingestion after rejection: %v", err)
 	}
 }
+
+// TestAdmissionThroughSymlinkedDBPathKeepsTheLinkAndReplacesTheTarget pins
+// the resolved identity: SQLite follows a symlinked db_path, while rename
+// acts on the directory entry. Admission must stage, preflight, move aside
+// and replace the real file, leaving the operator's link pointing at the
+// replacement instead of turning the link into a second database copy.
+func TestAdmissionThroughSymlinkedDBPathKeepsTheLinkAndReplacesTheTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.db")
+	link := filepath.Join(dir, "proxy.db")
+	if err := os.Symlink(filepath.Base(target), link); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := Open(link, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Record(&metrics.Record{ID: "old-row", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("configured link replaced before admission (info=%v err=%v)", info, err)
+	}
+
+	if err := StageSnapshot(link, packedSnapshot(t, "replacement-row")); err != nil {
+		t.Fatalf("stage through symlink: %v", err)
+	}
+	if _, err := os.Stat(PendingSnapshotPath(target)); err != nil {
+		t.Fatalf("pending snapshot not staged beside the resolved target: %v", err)
+	}
+	if _, err := os.Stat(PendingSnapshotPath(link)); !os.IsNotExist(err) {
+		t.Fatal("pending snapshot was staged beside the link spelling")
+	}
+
+	reopened, err := Open(link, testOpts)
+	if err != nil {
+		t.Fatalf("admit through symlink: %v", err)
+	}
+	defer reopened.Close()
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("admission replaced the configured symlink (info=%v err=%v)", info, err)
+	}
+	if got := reopened.DBPath(); got != target {
+		t.Fatalf("DBPath = %q, want the resolved target %q", got, target)
+	}
+	rows, err := reopened.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != "replacement-row" {
+		t.Fatalf("rows after admission = %#v, want replacement-row", rows)
+	}
+	if _, err := os.Stat(PendingSnapshotPath(target)); !os.IsNotExist(err) {
+		t.Fatal("admitted pending snapshot was not consumed at the resolved target")
+	}
+}

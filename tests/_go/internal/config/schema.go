@@ -626,6 +626,32 @@ func TestSchemaZeroTokenMatchesFormatters(t *testing.T) {
 	}
 }
 
+// TestSchemaBoundLabelsMatchFormatter pins MinLabel/MaxLabel to the same
+// formatter TypeLine uses. Settings renders these labels instead of guessing a
+// unit from the raw canonical bound, so a duration bound must never display as
+// nanoseconds or a byte bound as a bare integer.
+func TestSchemaBoundLabelsMatchFormatter(t *testing.T) {
+	for _, f := range Schema() {
+		if f.Min == nil {
+			if f.MinLabel != "" {
+				t.Errorf("%s has min_label %q without a min", f.Key, f.MinLabel)
+			}
+		} else if want := f.formatBound(*f.Min); f.MinLabel != want {
+			t.Errorf("%s min_label = %q, want %q", f.Key, f.MinLabel, want)
+		}
+		if f.Max == nil {
+			if f.MaxLabel != "" {
+				t.Errorf("%s has max_label %q without a max", f.Key, f.MaxLabel)
+			}
+		} else if want := f.formatBound(*f.Max); f.MaxLabel != want {
+			t.Errorf("%s max_label = %q, want %q", f.Key, f.MaxLabel, want)
+		}
+	}
+	if f := FieldByKey("debug_capture_ttl"); f == nil || f.MinLabel != FormatDuration(DebugCaptureTTLMin) {
+		t.Fatalf("debug_capture_ttl min_label = %+v, want %q", f, FormatDuration(DebugCaptureTTLMin))
+	}
+}
+
 func TestTypeLineDurationRange(t *testing.T) {
 	d := Default()
 	st := FieldByKey("shutdown_timeout")

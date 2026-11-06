@@ -221,6 +221,24 @@ module.exports = async function w16Mirrors(H) {
         sw.errorKey('http_500', '500', '') === 'http_500|500|' &&
         sw.errorKey('', '', '') === '||' &&
         ents.every(e => sw.errorKey(e.type, e.code, e.msg) === [e.type, e.code, e.msg].join('|')));
+      check('errorKey escapes the separator so distinct errors never collide',
+        sw.errorKey('a', 'b|c', 'd') === 'a|b\\|c|d' &&
+        sw.errorKey('a|b', 'c', 'd') === 'a\\|b|c|d' &&
+        sw.errorKey('a', 'b|c', 'd') !== sw.errorKey('a|b', 'c', 'd') &&
+        sw.errorKey('a', 'b\\c', 'd') === 'a|b\\\\c|d' &&
+        sw.errorKeyMatches('a|b\\|c|d', 'a', 'b|c', 'd') &&
+        !sw.errorKeyMatches('a|b\\|c|d', 'a|b', 'c', 'd'));
+      check('escaped error keys decode for display and chips',
+        sw.errorKeyType(sw.errorKey('a|b', 'c', 'd')) === 'a|b' &&
+        sw.errorKeyDisplay(sw.errorKey('a', 'b', 'd')) === 'a|b|d' &&
+        sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) === 'a|b\\|c|d' &&
+        sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) !==
+          sw.errorKeyDisplay(sw.errorKey('a|b', 'c', 'd')) &&
+        // Any invented quoting can collide with ordinary text; the escaped
+        // key is the only injective display for a special part.
+        sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) !==
+          sw.errorKeyDisplay(sw.errorKey('"a" · "b', 'c" · "d', 'e"')) &&
+        sw.shortId('error', sw.errorKey('a|b', 'c', 'd')) === 'a|b');
 
       // The duration vocabularies mirror Go acceptance: PAUSE_DURS and
       // DEBUG_DURS tokens are the pauseDurations allowlist (pinned through
@@ -246,7 +264,7 @@ module.exports = async function w16Mirrors(H) {
         JSON.stringify(sw.eval('[["", "off"]].concat(LIMIT_WINDOWS)')));
       check('FILTER_AGES offers canonical Go duration spellings',
         JSON.stringify(sw.eval('FILTER_AGES')) === JSON.stringify([
-          ['', '-'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
+          ['', 'any'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
       sw.togglePauseMenu({stopPropagation() {}});
       check('the pause menu renders the PAUSE_DURS token set',
         JSON.stringify([...sd.getElementById('pf-dur').options].map(o => o.value)) ===
@@ -315,6 +333,25 @@ module.exports = async function w16Mirrors(H) {
         sw.eval('parseGoDuration(\'45 min\')') === 0 &&
         sw.eval('parseGoDuration(\'\')') === 0 &&
         sw.eval('parseGoDuration(null)') === 0);
+      // The Apply gate trusts the strict parser, so it must accept exactly the
+      // grammar time.ParseDuration accepts (including the Settings-only typed
+      // `0`) and reject trailing or mid-string garbage.
+      const strictDurRows = [
+        ['0', 0], ['0s', 0], ['+1h', 3600000], ['.5h', 1800000],
+        ['1.h', 3600000], ['1h.5m', 3630000], ['-1.5h', -5400000],
+      ];
+      const strictMisses = strictDurRows
+        .filter(([spelling, want]) => sw.eval(`parseGoDurationValue(${JSON.stringify(spelling)})`) !== want)
+        .map(([spelling]) => spelling);
+      check('parseGoDurationValue accepts the Go duration grammar' +
+        (strictMisses.length ? ' (missed: ' + strictMisses.join(', ') + ')' : ''),
+        strictMisses.length === 0);
+      const badDurRows = ['1h garbage', '1h-30m', '.s', '1', '1H', '1e3s', '--1h', '3000000h'];
+      const acceptedBad = badDurRows
+        .filter(spelling => sw.eval(`parseGoDurationValue(${JSON.stringify(spelling)})`) !== null);
+      check('parseGoDurationValue rejects malformed durations' +
+        (acceptedBad.length ? ' (accepted: ' + acceptedBad.join(', ') + ')' : ''),
+        acceptedBad.length === 0);
 
       // MODEL_RULES_MAX mirrors config.ModelRulesMax (pinned Go-side): the
       // count line and the add gate at the cap.

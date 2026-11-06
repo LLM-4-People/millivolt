@@ -231,13 +231,11 @@
      paints its muted look. CSS :empty would hide later text nodes. */
   .pause-clients .pause-none { color: var(--muted); font-size: 10px; }
   .pause-disabled { opacity: .45; pointer-events: none; }
-  .pause-cap-row { grid-template-columns: 1fr; margin-top: 10px; }
   .pause-holds { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
   .pause-hold { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text); text-transform: none; letter-spacing: 0; cursor: pointer; border-radius: 6px; padding: 2px 4px; }
   .pause-hold:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
   .pause-hold.editing { color: var(--warn); }
   .pause-hold button { min-width: 0; padding: 2px 8px; cursor: pointer; }
-  #pause-menu, #debug-menu { width: min(360px, calc(100vw - 16px)); }
   #btn-debug[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); }
   #btn-debug[aria-pressed="true"]:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) var(--halo), transparent); }
   #btn-settings[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
@@ -245,7 +243,54 @@
   #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent); }
   #btn-limits[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   #btn-limits[aria-pressed="true"]:hover { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
-  #limits-menu { width: min(380px, calc(100vw - 16px)); }
+  /* ---------- operator menu anatomy ----------
+     Every header action menu shares one shell: a titled head, a grouped
+     body, one live summary and one action foot. The foot sticks inside the
+     desktop panel so a tall checklist never hides the commit action; the
+     narrow flyout stays the single scroller and the foot flows with it. */
+  #pause-menu, #debug-menu { width: min(380px, calc(100vw - 16px)); }
+  #limits-menu { width: min(420px, calc(100vw - 16px)); }
+  #logs-menu { width: min(380px, calc(100vw - 16px)); }
+  .op-menu { display: flex; flex-direction: column; gap: 0; }
+  .op-head { margin-bottom: 10px; }
+  .op-sub { margin: 3px 0 0; color: var(--muted); font: 10.5px/1.5 var(--sans); }
+  .op-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .op-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 9px; color: var(--muted); letter-spacing: .05em; }
+  .op-field select, .op-field input { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
+  .op-hintrow { display: flex; align-items: flex-start; gap: 10px; margin-top: 8px; }
+  .op-hintrow .op-hint { margin: 0; flex: 1; }
+  .op-hint { margin: 6px 0 0; color: var(--muted); font: 10px/1.5 var(--sans); }
+  .op-link { border: 0; background: none; color: var(--accent); font: 10px var(--mono); padding: 2px 0; cursor: pointer; flex-shrink: 0; }
+  .op-link:hover { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 2px; }
+  .op-link:focus-visible { outline: var(--focus-outline); outline-offset: 2px; border-radius: 4px; }
+  .op-note { margin: 8px 0 0; color: var(--muted); font: 10px/1.45 var(--sans); }
+  .op-pick { margin-left: 4px; color: var(--accent); font-size: 9px; }
+  .op-advanced { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+  .op-advanced summary { cursor: pointer; color: var(--muted); font: 10px var(--mono); padding: 2px 0; }
+  .op-advanced summary::-webkit-details-marker { display: none; }
+  .op-advanced summary::before { content: '+ '; color: var(--accent); }
+  .op-advanced[open] summary::before { content: '- '; }
+  .op-advanced[open] summary { margin-bottom: 6px; }
+  .op-advanced .op-field { margin-top: 6px; }
+  .op-section { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+  .op-section-hd { margin-bottom: 4px; color: var(--muted); font: 600 9px var(--mono); letter-spacing: .08em; }
+  .op-section .btn { margin-top: 8px; }
+  .op-summary { color: var(--muted); font: 10.5px/1.5 var(--sans); margin-bottom: 6px; min-height: 16px; }
+  .op-summary b { color: var(--text); font-weight: 600; }
+  .op-facts { margin-top: 8px; color: var(--muted); font: 10px/1.5 var(--mono); }
+  .op-warning { margin: 8px 0 0; padding: 7px 9px; border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border)); border-radius: 7px; background: color-mix(in srgb, var(--warn) 8%, transparent); color: var(--warn); font: 10px/1.5 var(--sans); }
+  .op-check { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; font-size: 9px; color: var(--muted); letter-spacing: .05em; }
+  .op-check input[type="checkbox"] { width: 16px; height: 16px; flex-shrink: 0; }
+  .lim-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .lim-grid .op-check { align-self: end; min-height: 26px; }
+  .op-menu .pause-hold { min-height: 28px; }
+  .op-menu .pause-hold .hold-edit { min-width: 0; text-align: left; }
+  @media (min-width: 801px) {
+    .op-menu .clear-menu-ft { position: sticky; bottom: -12px; z-index: 1; margin: 12px -12px -12px; padding: 10px 12px 12px; background: var(--panel); border-top: 1px solid var(--border2); border-radius: 0 0 10px 10px; }
+  }
+  @media (max-width: 800px) {
+    .op-fields, .lim-grid { grid-template-columns: 1fr; }
+  }
   #restart-menu { width: min(340px, calc(100vw - 16px)); }
   .restart-description { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
   /* The header still opens the live progress menu while its action is disabled. */

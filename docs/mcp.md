@@ -135,7 +135,7 @@ semantics below, correct SQL is guesswork.
 | `set_throttle` | Set, merge or clear one provider's caps, including the optional anti-burst pair. |
 | `resume_quota` | Close one provider's open retry-mode quota gate. |
 | `set_config` | Revision-checked partial configuration patch. |
-| `config_get` | The live configuration document: values, running overrides (the keys the process pins outside the file, which `set_config` strips), the canonical usage and model metadata field names, defaults, per-key schema, restart-required set and the revision a patch must echo. |
+| `config_get` | The live configuration document: values, running overrides (the keys the process pins outside the file, which `set_config` strips), the canonical usage and model metadata field names, defaults, per-key schema, restart-required set and the revision a patch must echo. Credential-class provider headers and last-reload error text are redacted; use the operator CLI with `--reveal` for the raw bytes. |
 | `reload_config` | Re-read the configuration file. |
 | `purge_preview` | Count what a filter would delete, without deleting. |
 | `purge` | Delete matching history permanently. |
@@ -149,8 +149,14 @@ they never leave the process and the gate re-validates the forwarded Bearer.
 `set_throttle` takes `provider` and any of `concurrency`,
 `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and
 `ramp_duration`; omitted dimensions keep their value, and `clear: true` drops
-the whole policy. The proxy owns the duration grammar and band and refuses an
-explicit on-ramp without an active limit.
+the whole policy. `clear` cannot be combined with a dimension. The proxy owns
+the duration grammar and band and refuses an explicit on-ramp without an
+active limit.
+
+`set_pause` refuses a resume that carries a scope, and refuses `all` combined
+with `new`, `clients` or `providers`. `config_get` and the `set_config` echo
+redact credential-class provider headers and last-reload error text; the CLI's
+`--reveal` flag is the explicit operator opt-in.
 
 ### Filters
 

@@ -298,6 +298,32 @@ func postThrottle(t *testing.T, p *Server, body string) *httptest.ResponseRecord
 	return rr
 }
 
+// Clear is a whole-policy action. A dimension beside it must be refused, not
+// dropped, or the caller can believe a cap is active when the policy is gone.
+func TestHandleThrottleClearRejectsDimensions(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	provider := "neutral.example"
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","concurrency":5}`); rr.Code != 200 {
+		t.Fatalf("seed = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	for _, body := range []string{
+		`{"provider":"` + provider + `","clear":true,"concurrency":7}`,
+		`{"provider":"` + provider + `","clear":true,"requests":10}`,
+		`{"provider":"` + provider + `","clear":true,"tokens":10}`,
+		`{"provider":"` + provider + `","clear":true,"request_window":"1m"}`,
+		`{"provider":"` + provider + `","clear":true,"token_window":"1m"}`,
+		`{"provider":"` + provider + `","clear":true,"anti_burst":true}`,
+		`{"provider":"` + provider + `","clear":true,"ramp_duration":"10s"}`,
+	} {
+		if rr := postThrottle(t, p, body); rr.Code != http.StatusBadRequest {
+			t.Fatalf("clear plus dimension %s = %d, want 400 body %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	if got := schedThrottleFor(p.scheduler, provider).Limit.Concurrency; got != 5 {
+		t.Fatalf("rejected clear changed concurrency to %d, want 5", got)
+	}
+}
+
 func throttleChat(t *testing.T, srv *httptest.Server, upstreamURL, key string, headers map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions",

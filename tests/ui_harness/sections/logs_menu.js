@@ -23,7 +23,7 @@ module.exports = async function logsMenu(H) {
   // Exact-text pin (like the debug menu header's) so the pre-compression
   // "(JSON)" label cannot return.
   check('logs menu header states the gzip export format',
-    d.querySelector('#logs-menu .clear-menu-hd').textContent === 'Download logs (JSON, gzip)…');
+    d.querySelector('#logs-menu .clear-menu-hd').textContent === 'Export logs (JSON, gzip)');
   // ---- L4-C8 pin: the Logs menu (lf-) and the settings sheet's
   // delete-matching block (del-) are one row set modulo the id prefix.
   // The row lists must stay identical (same label texts, same per-row
@@ -104,7 +104,7 @@ module.exports = async function logsMenu(H) {
         editing[0].querySelector('[data-operator="debug-edit"]').dataset.value === 'dbg-stamped' &&
         holds.some(h => !h.classList.contains('editing') &&
           h.querySelector('[data-operator="debug-edit"]').dataset.value === 'dbg-scope') &&
-        d.querySelector('#debug-menu .clear-menu-hd').textContent === 'Edit session…');
+        d.querySelector('#debug-menu .clear-menu-hd').textContent === 'Edit session');
   }
   w.resetDebugMenuForm();
   w.toggleDebugMenu({ stopPropagation() {} });

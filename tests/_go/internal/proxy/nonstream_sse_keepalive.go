@@ -17,6 +17,62 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
+// goneResponseWriter models a client whose socket stays open but refuses
+// every write (a stuck consumer or an expired stream deadline). Header and
+// status writes succeed, so the handler reaches the body phase and only the
+// pacer's keepalive observes the failure.
+type goneResponseWriter struct{ header http.Header }
+
+func (w *goneResponseWriter) Header() http.Header       { return w.header }
+func (w *goneResponseWriter) WriteHeader(int)           {}
+func (w *goneResponseWriter) Write([]byte) (int, error) { return 0, errClientGone }
+func (w *goneResponseWriter) Flush()                    {}
+
+// A failed keepalive on the late (non-streaming request, event-stream
+// response) pacer proves the client is gone. It must cancel the request
+// context exactly like the streaming pacer, or the proxy keeps reading an
+// upstream body nobody can receive until the upstream or a deadline ends it.
+func TestNonStreamingLatePacerCancelsUpstreamOnGone(t *testing.T) {
+	canceled := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Stay quiet: the only proxy writes are keepalives.
+		select {
+		case <-r.Context().Done():
+			close(canceled)
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.SSEKeepaliveInterval = 20 * time.Millisecond
+	p := New(cfg, metrics.Noop{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.ServeHTTP(&goneResponseWriter{header: http.Header{}}, req)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the late pacer did not cancel the upstream after a failed keepalive")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the request did not unwind after the upstream was canceled")
+	}
+}
+
 func TestNonStreamingSSEKeepalive(t *testing.T) {
 	const stall = 120 * time.Millisecond
 	chatSSE := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"

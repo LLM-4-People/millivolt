@@ -432,3 +432,55 @@ func TestBackupSurfacesReportStorageDisabledSentinel(t *testing.T) {
 		t.Fatalf("backup without storage: status=%d body=%s, want 400", rr.Code, rr.Body.String())
 	}
 }
+
+// TestBackupStatusTracksTheNextBootPath pins the pending-database field to the
+// path the NEXT boot opens. A reload can change restart-bound db_path while
+// the running store still serves the old file; status must follow liveCfg, or
+// a staged restore is reported as absent and a stale slot as pending.
+func TestBackupStatusTracksTheNextBootPath(t *testing.T) {
+	oldCfg, oldStore, oldPath := liveCfg, liveStore, liveConfigPath
+	t.Cleanup(func() { liveCfg, liveStore, liveConfigPath = oldCfg, oldStore, oldPath })
+	dir := t.TempDir()
+	liveConfigPath = filepath.Join(dir, "c.yaml")
+	d := config.Default()
+	live, err := storage.Open(filepath.Join(dir, "old.db"), storage.Options{
+		WriteChanCap:  d.StorageWriteChanCap,
+		BatchCap:      d.StorageBatchCap,
+		FlushInterval: d.StorageFlushInterval,
+		QueryTimeout:  d.StorageQueryTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { live.Close() })
+	liveStore = live
+	liveCfg = config.Default()
+	liveCfg.DBPath = filepath.Join(dir, "next.db")
+
+	if err := os.WriteFile(storage.PendingSnapshotPath(liveCfg.DBPath), []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st := backupStatus(); st["pending_database"] != true {
+		t.Fatalf("pending at the next-boot path not reported: %v", st)
+	}
+	if err := os.Remove(storage.PendingSnapshotPath(liveCfg.DBPath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storage.PendingSnapshotPath(live.DBPath()), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st := backupStatus(); st["pending_database"] != false {
+		t.Fatalf("stale pending at the running store path reported: %v", st)
+	}
+	// An explicit empty db_path in a present config means the next boot opens
+	// no store, so the running store's slot is meaningless.
+	liveCfg.DBPath = ""
+	if st := backupStatus(); st["pending_database"] != false {
+		t.Fatalf("running store's slot reported for an explicit empty db_path: %v", st)
+	}
+	// With no config document at all the running store is the only path owner.
+	liveCfg = nil
+	if st := backupStatus(); st["pending_database"] != true {
+		t.Fatalf("store slot ignored when no config document exists: %v", st)
+	}
+}

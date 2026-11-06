@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
@@ -32,6 +33,11 @@ type projectionData struct {
 	hasStart   bool
 	cursor     storage.ProjectionCursor
 	version    int64
+	// classRevision fingerprints the classification vocabulary the decoded
+	// has429 flag (and any future vocabulary-derived flag) was computed with.
+	// A reload can change that flag without changing any stored row, so the
+	// storage version alone cannot prove the projection is still faithful.
+	classRevision uint64
 	// chunkMaxStart holds the maximum contribution start per rowsGrowChunk
 	// block, so a bounded window can skip whole blocks whose newest row is
 	// older than the window. Late completions only raise their own block's
@@ -244,8 +250,9 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		if err != nil {
 			return err // never serve an old projection when freshness is unknowable
 		}
+		classRev := metrics.ClassExtensionRevision()
 		p.mu.RLock()
-		current := p.data.cursor.Ready && p.data.version == version
+		current := p.data.cursor.Ready && p.data.version == version && p.data.classRevision == classRev
 		wait := p.building
 		p.mu.RUnlock()
 		if current {
@@ -281,11 +288,19 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 			p.mu.Unlock()
 			return err
 		}
-		if p.data.cursor.Ready && p.data.version == version {
+		classRev = metrics.ClassExtensionRevision()
+		if p.data.cursor.Ready && p.data.version == version && p.data.classRevision == classRev {
 			p.mu.Unlock()
 			return nil
 		}
 		base := p.data // snapshot metadata; underlying rows stay immutable until apply
+		// A vocabulary change reclassifies existing rows. A delta append would
+		// keep the stale flags on every old contribution, so force the full
+		// rebuild path (a zero cursor) even though the database is unchanged.
+		startCursor := base.cursor
+		if base.classRevision != classRev {
+			startCursor = storage.ProjectionCursor{}
+		}
 		done := make(chan struct{})
 		p.building = done
 		p.mu.Unlock()
@@ -298,7 +313,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		var incoming []contrib
 		var incomingLabels []contribLabels
 		scanned := 0
-		next, full, err := projectionStream(ctx, store, budget, base.cursor, func(rows *sql.Rows) error {
+		next, full, err := projectionStream(ctx, store, budget, startCursor, func(rows *sql.Rows) error {
 			c, labels, err := scanContrib(rows) // raw spelling; query rules apply later
 			if err != nil {
 				return err
@@ -333,6 +348,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 				p.mu.Unlock()
 				return err
 			}
+			data.classRevision = classRev
 			p.data = data
 			p.finishBuildLocked(done)
 			p.mu.Unlock()
@@ -375,7 +391,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 			data.lineage.resolve()
 		}
 		data.metrics.append(data.rows, previousRows)
-		data.cursor, data.version = next, version
+		data.cursor, data.version, data.classRevision = next, version, classRev
 		p.data = data
 		p.finishBuildLocked(done)
 		p.mu.Unlock()

@@ -58,6 +58,13 @@ func TestMCPErrorKeyExamplesAreProducedByTheOwner(t *testing.T) {
 			record: metrics.Record{StatusCode: http.StatusInternalServerError, ErrorType: "server_error", Start: start},
 			want:   "server_error|500|",
 		},
+		{
+			// A type containing the separator must be escaped so the published
+			// example teaches the unambiguous grammar.
+			name:   "separator inside the type",
+			record: metrics.Record{StatusCode: http.StatusBadRequest, ErrorType: "a|b", ErrorCode: "c", ErrorMsg: "d", Start: start},
+			want:   `a\|b|c|d`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			entries := errorEntries(&tc.record)
@@ -73,7 +80,8 @@ func TestMCPErrorKeyExamplesAreProducedByTheOwner(t *testing.T) {
 			}
 		})
 	}
-	if len(mcp.ErrorKeyExamples) != 1 || mcp.ErrorKeyExamples[0] != "server_error|500|" {
-		t.Fatalf("mcp.ErrorKeyExamples = %v, want exactly the one producible example", mcp.ErrorKeyExamples)
+	wantExamples := []string{"server_error|500|", `a\|b|c|d`}
+	if !slices.Equal(mcp.ErrorKeyExamples, wantExamples) {
+		t.Fatalf("mcp.ErrorKeyExamples = %v, want the producible examples %v", mcp.ErrorKeyExamples, wantExamples)
 	}
 }

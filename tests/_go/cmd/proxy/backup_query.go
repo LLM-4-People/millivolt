@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -321,5 +322,42 @@ func TestBackupRequiresAPart(t *testing.T) {
 	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?config=0&database=0", nil))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status %d, want 400", rr.Code)
+	}
+}
+
+// TestValidateRestoreMergePathResolvesSymlink pins file identity, not
+// spelling: a restored config that keeps db_path as a symlink to the running
+// store is the same database, while a genuinely different target still fails.
+func TestValidateRestoreMergePathResolvesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.db")
+	c := config.Default()
+	s, err := storage.Open(target, storage.Options{
+		WriteChanCap:  c.StorageWriteChanCap,
+		BatchCap:      c.StorageBatchCap,
+		FlushInterval: c.StorageFlushInterval,
+		QueryTimeout:  c.StorageQueryTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	link := filepath.Join(dir, "proxy.db")
+	if err := os.Symlink(filepath.Base(target), link); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRestoreMergePath(&restoreConfigPlan{dbPath: link}, s); err != nil {
+		t.Fatalf("symlinked db_path to the running store rejected: %v", err)
+	}
+	hardlink := filepath.Join(dir, "hardlink.db")
+	if err := os.Link(target, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRestoreMergePath(&restoreConfigPlan{dbPath: hardlink}, s); err != nil {
+		t.Fatalf("hardlinked db_path to the running store rejected: %v", err)
+	}
+	if err := validateRestoreMergePath(&restoreConfigPlan{dbPath: filepath.Join(dir, "other.db")}, s); err == nil {
+		t.Fatal("a different db_path was accepted for a merge")
 	}
 }

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -70,7 +71,9 @@ func readRequest(r *http.Request, maxBytes int64, preview bool, cfg *config.Conf
 //
 // The per-request cap owns the status when both apply: an over-cap body is
 // answered 413 and a budget refusal only applies to a body that fits. A
-// refusal is therefore reported after the cap check, never during the read.
+// refused chunk therefore aborts retention immediately, and this owner then
+// drains at most the remaining cap window without keeping those bytes to
+// decide which status applies.
 //
 // hintMax bounds the allocation the declared length may trigger. It stays at
 // the speculative read hint rather than the declared size: a 32 MiB
@@ -94,15 +97,13 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 	}
 	body, err = readRequestBody(src, r.ContentLength, maxBytes, hintMax)
 	if err != nil {
+		if charged != nil && errors.Is(err, errBodyBudget) {
+			return nil, nil, chargeRefusalError(r.Body, charged.read, maxBytes)
+		}
 		return nil, nil, err
 	}
 	if int64(len(body)) > maxBytes {
 		return nil, nil, &http.MaxBytesError{Limit: maxBytes}
-	}
-	// Only a body that fits the cap can be a capacity refusal: a retry of an
-	// over-cap request can never succeed, so the cap answer above wins.
-	if charged != nil && charged.refused {
-		return nil, nil, errBodyBudget
 	}
 	// The inbound body size: one assignment on the bytes already in hand -
 	// no second read, no timing change (Start below still excludes upload).
@@ -116,6 +117,29 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 		return nil, nil, err
 	}
 	return body, rec, nil
+}
+
+// chargeRefusalError owns the status of a body the budget refused. The chunk
+// that could not be charged is already read and counted. If it already proves
+// the body is over the per-request cap, answer 413 without reading more;
+// otherwise drain at most the remaining cap window into Discard, so a retry of
+// an over-cap request still gets the definitive 413 while a body that fits the
+// cap keeps the retryable 503. Nothing drained here is retained.
+func chargeRefusalError(body io.Reader, read, maxBytes int64) error {
+	if read > maxBytes {
+		return &http.MaxBytesError{Limit: maxBytes}
+	}
+	remaining := maxBytes + 1 - read
+	if remaining > 0 {
+		n, err := io.Copy(io.Discard, io.LimitReader(body, remaining))
+		if err != nil {
+			return err
+		}
+		if read+n > maxBytes {
+			return &http.MaxBytesError{Limit: maxBytes}
+		}
+	}
+	return errBodyBudget
 }
 
 // readRequestBody reads at most maxBytes+1 bytes. A declared length that fits

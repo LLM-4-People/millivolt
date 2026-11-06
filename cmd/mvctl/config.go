@@ -293,15 +293,8 @@ func redactConfigDocument(raw map[string]any, reveal bool) map[string]any {
 	// The last reload's error text can quote a value the loader rejected. Keep
 	// the outcome metadata and omit the quoted text unless the operator asked
 	// to reveal secrets.
-	if reload, ok := raw["last_reload"].(map[string]any); ok {
-		clone := make(map[string]any, len(reload))
-		for key, value := range reload {
-			clone[key] = value
-		}
-		if message, ok := clone["error"].(string); ok && strings.TrimSpace(message) != "" {
-			clone["error"] = mcp.RedactionMarker
-		}
-		out["last_reload"] = clone
+	if reload, ok := raw["last_reload"]; ok {
+		out["last_reload"] = config.RedactLastReload(reload, mcp.RedactionMarker)
 	}
 	return out
 }

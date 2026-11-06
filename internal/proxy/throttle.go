@@ -838,6 +838,17 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if r.Method == http.MethodPost {
+		q, err := adminjson.StrictQuery(r)
+		if err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := adminjson.UnknownQueryKey(q); err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	provider := strings.TrimSpace(body.Provider)
 	if provider == "" {
 		adminjson.WriteError(w, http.StatusBadRequest, "provider required")
@@ -848,6 +859,16 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Clear {
+		// Clear is a whole-policy action. Accepting a dimension beside it
+		// would drop the field and report success, so the caller could
+		// believe a cap is active when none is.
+		if body.Concurrency != nil || body.Requests != nil || body.ReqWindow != nil ||
+			body.Tokens != nil || body.TokWindow != nil || body.AntiBurst != nil ||
+			body.RampDuration != nil {
+			adminjson.WriteError(w, http.StatusBadRequest,
+				"clear cannot be combined with limit dimensions")
+			return
+		}
 		s.resetOperatorState(w, s.ThrottleSnapshot,
 			func() error { return s.applyThrottle(scheduler.Throttle{Provider: provider}) },
 			"throttle cleared (%s)", provider)

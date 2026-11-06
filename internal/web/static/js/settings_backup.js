@@ -498,10 +498,42 @@ function settingsScalarErrorMessage(input) {
   return input.validationMessage || 'enter a valid value';
 }
 
+// settingsScalarRangeError parses the two text grammars the schema carries a
+// numeric band for. The server remains the authority; this only stops an
+// obviously invalid value before the POST.
+function settingsScalarRangeError(input) {
+  const kind = input.dataset.stKind || '';
+  if (kind !== 'duration' && kind !== 'bytes') return '';
+  const raw = input.value.trim();
+  if (!raw) return 'enter a value';
+  let value;
+  if (kind === 'duration') {
+    const ms = parseGoDurationValue(raw);
+    if (ms == null) return 'use a duration such as 10s or 1h';
+    // Field.Min/Max carry the Go time.Duration value (nanoseconds), the same
+    // canonical unit the YAML writer and validator use.
+    value = ms * 1e6;
+  } else {
+    value = parseGoByteSize(raw);
+    if (value == null) return 'use a byte size such as 32MiB';
+  }
+  const min = input.dataset.stMin === '' ? null : Number(input.dataset.stMin);
+  const max = input.dataset.stMax === '' ? null : Number(input.dataset.stMax);
+  if (min != null && value < min) {
+    return 'must be at least ' + (input.dataset.stMinLabel || input.dataset.stMin);
+  }
+  if (max != null && value > max) {
+    return 'must be at most ' + (input.dataset.stMaxLabel || input.dataset.stMax);
+  }
+  return '';
+}
+
 function validateSettingsScalar(input) {
   if (!input || !input.dataset || input.dataset.stScalar !== '1') return true;
   const row = input.closest('.st-row');
   const error = row && row.querySelector('.st-error');
+  const range = settingsScalarRangeError(input);
+  input.setCustomValidity(range || '');
   const valid = !input.willValidate || input.checkValidity();
   input.classList.toggle('prov-bad', !valid);
   if (valid) input.removeAttribute('aria-invalid');
@@ -522,8 +554,9 @@ function settingsFieldHTML(f, val, def, override) {
   const helpId = settingsFieldID(f.key, 'help');
   const errorId = settingsFieldID(f.key, 'error');
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
-  const scalarAttrs = ` data-st-scalar="1" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
-  const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
+  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-min-label="${escapeHtml(f.min_label || '')}" data-st-max-label="${escapeHtml(f.max_label || '')}" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
+  const pills = (locked ? '<span class="st-pill lock">flag</span>' : '') +
+    (f.hot_reload ? '' : '<span class="st-pill restart" title="takes a process restart">restart</span>');
   let hint = '';
   if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
   else if (def != null && def !== '' && f.kind === 'model_rules' && JSON.stringify(val) === JSON.stringify(def)) hint = `<span class="st-hint">default</span>`;
@@ -556,8 +589,15 @@ function settingsFieldHTML(f, val, def, override) {
     const min = f.min != null ? ` min="${escapeHtml(String(f.min))}"` : '';
     const max = f.max != null ? ` max="${escapeHtml(String(f.max))}"` : '';
     control = `<div class="st-ctl-line"><input type="number" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(String(val ?? ''))}" step="1" required${min}${max}${scalarAttrs}${dis}>${unit}</div>`;
+  } else if (f.kind === 'string' && Array.isArray(f.choices) && f.choices.length) {
+    const opts = f.choices.map(c =>
+      `<option value="${escapeHtml(c)}"${String(val) === c ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('');
+    control = `<select id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" required${scalarAttrs}${dis}>${opts}</select>`;
   } else {
-    control = `<div class="st-ctl-line"><input type="text" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${scalarAttrs}${dis}>${unit}</div>`;
+    // Durations and byte sizes keep their text grammar (10s, 1MiB); the
+    // shared validator parses them and enforces the schema's numeric band.
+    const required = f.kind === 'duration' || f.kind === 'bytes' ? ' required' : '';
+    control = `<div class="st-ctl-line"><input type="text" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${required}${scalarAttrs}${dis}>${unit}</div>`;
   }
   const block = (structured || f.kind === 'strings') ? ' st-block' : '';
   const name = structured

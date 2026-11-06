@@ -524,12 +524,34 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, "paused boolean required")
 		return
 	}
+	if r.Method == http.MethodPost {
+		q, err := adminjson.StrictQuery(r)
+		if err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := adminjson.UnknownQueryKey(q); err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	id, err := adminjson.OptionalID(body.ID)
 	if err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !*body.Paused {
+		// A resume names at most one hold. The proxy has no scope-selective
+		// resume, so accepting scope here would silently resume more traffic
+		// than the caller named. The MCP and CLI request owners refuse the
+		// same shapes; this is the HTTP trust boundary those wrappers cannot
+		// protect.
+		if body.All.set || body.New.set || body.Clients != nil || body.Providers != nil ||
+			body.Duration != nil || body.MaxQueued != nil {
+			adminjson.WriteError(w, http.StatusBadRequest,
+				"a resume carries only id; scope, duration and max_queued apply to a create or edit")
+			return
+		}
 		if id != "" {
 			s.resetOperatorState(w, s.PauseSnapshot, func() error { return s.removePause(id, time.Time{}) },
 				"proxy resumed hold %s", id)
@@ -575,6 +597,13 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			// global hold - deny by default.
 			if !all && !newc && len(clients) == 0 && len(providers) == 0 {
 				return prev, fmt.Errorf("all, new, clients, or providers required")
+			}
+			// "all" already covers every narrower scope; accepting both
+			// would let a caller believe the hold was narrowed while the
+			// proxy installs the global one. Names within a dimension and
+			// New plus named clients remain valid unions (documented).
+			if all && (body.New.set || body.Clients != nil || body.Providers != nil) {
+				return prev, fmt.Errorf("all cannot be combined with new, clients, or providers")
 			}
 			if all {
 				newc = false

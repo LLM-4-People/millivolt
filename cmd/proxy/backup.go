@@ -786,7 +786,15 @@ type restorePendingGuard struct {
 // config phase can restore it byte-for-byte instead of deleting it. No pending
 // file means the guard only owns removing its newly staged successor.
 func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
-	pending := storage.PendingSnapshotPath(dbPath)
+	// The configured db_path may be a symlink. Staging and boot admission
+	// resolve it, so the preserved pending slot must be the same real-file
+	// name or rollback would restore beside the link instead of over the
+	// database.
+	resolved, err := storage.ResolveDatabasePath(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	pending := storage.PendingSnapshotPath(resolved)
 	g := &restorePendingGuard{pending: pending}
 	if _, err := os.Lstat(pending); err != nil {
 		if os.IsNotExist(err) {
@@ -861,7 +869,20 @@ func validateRestoreMergePath(plan *restoreConfigPlan, store *storage.Store) err
 	if plan == nil {
 		return nil
 	}
-	if filepath.Clean(plan.dbPath) == filepath.Clean(store.DBPath()) {
+	// Compare file identities, not spellings: db_path may be a symlink, a
+	// relative spelling or a hardlink of the running store. SameFile answers
+	// all three; the cleaned-path fallback covers a path that does not exist
+	// yet but spells the same name. A genuinely different path fails below.
+	resolved, err := storage.ResolveDatabasePath(plan.dbPath)
+	if err != nil {
+		return err
+	}
+	planInfo, planErr := os.Stat(resolved)
+	storeInfo, storeErr := os.Stat(store.DBPath())
+	if planErr == nil && storeErr == nil && os.SameFile(planInfo, storeInfo) {
+		return nil
+	}
+	if filepath.Clean(resolved) == filepath.Clean(store.DBPath()) {
 		return nil
 	}
 	return fmt.Errorf("config and database merge cannot change db_path: the restored config selects %q but the running store is %q; merge the database separately or use database_mode=replace", plan.dbPath, store.DBPath())
@@ -1040,15 +1061,31 @@ func backupStatus() map[string]any {
 	liveMu.Lock()
 	path := liveConfigPath
 	store := liveStore
+	haveCfg := liveCfg != nil
 	dbPath := ""
-	if liveCfg != nil {
+	if haveCfg {
 		dbPath = liveCfg.DBPath
 	}
 	liveMu.Unlock()
+	if !haveCfg && store != nil {
+		// No live config document: the running store is the only path owner.
+		// An explicit `db_path: ""` in a present document means the next boot
+		// opens no store, so it must not fall back to this one's stale slot.
+		dbPath = store.DBPath()
+	}
 	pending := false
 	if dbPath != "" {
-		_, err := os.Stat(storage.PendingSnapshotPath(dbPath))
-		pending = err == nil
+		// This reports the NEXT boot's slot. liveCfg.DBPath already carries a
+		// reloaded db_path even though the running store still points at its
+		// old file, so using the store path here would hide a staged restore
+		// (and report a stale slot the next boot will ignore).
+		resolved, err := storage.ResolveDatabasePath(dbPath)
+		if err != nil {
+			log.Printf("backup status: %v", err)
+		} else {
+			_, statErr := os.Stat(storage.PendingSnapshotPath(resolved))
+			pending = statErr == nil
+		}
 	}
 	var requests int64
 	if store != nil {

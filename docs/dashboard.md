@@ -282,16 +282,23 @@ not active operator policies from the source instance.
 
 Pause queues newly admitted matching work by scope rather than canceling streams
 already running. The menu exposes scopes, durations and current holds, including
-resume/edit controls when applicable. Queue limits still apply.
+resume/edit controls when applicable. The scope select explains the current
+choice, each checklist header reports how many names are selected or `any`, the
+pending action is written out above the buttons, and the queue cap sits under
+`Queue options`. Resume all asks for a second click before it releases every
+hold. Queue limits still apply.
 
 ![Pause menu with scope and duration controls and recorded client/provider choices](images/menus/pause.png)
 
 ### Debug
 
 Debug starts a scoped capture session with timed or manual stop. Retained
-captures have separate size and lifetime limits. It is
-opt-in and can retain sensitive request/response bodies even when known secret
-headers are redacted. No debug session was enabled for this screenshot.
+captures have separate size and lifetime limits, and the menu states the
+current retention window and byte budget beside the sensitivity warning. The
+session rows report captures rather than requests. Start is disabled with an
+explanation when durable storage is off. It is opt-in and can retain sensitive
+request/response bodies even when known secret headers are redacted. Stop all
+asks for a second click. No debug session was enabled for this screenshot.
 
 ![Debug menu with scoped capture controls and session limits](images/menus/debug.png)
 
@@ -308,7 +315,11 @@ limits are distinct from key-scoped scheduling
 and upstream rate-limit observations. The menu shows the selected provider's
 configured controls and active policies, including the anti-burst checkbox and
 ramp select, and its count line names the policy source and adds an anti-burst
-hint when the ramp is enabled.
+hint when the ramp is enabled. A stored ramp with the flag off is labeled
+inactive instead of disappearing. The summary above the buttons spells out the
+pending policy, Apply is disabled when no dimension is set, and Clear (which
+asks for a second click) is the only removal path. The queue section has its
+own scope select: everything, the selected provider, one model, or one client.
 
 ![Limits menu with provider-wide request, token and concurrency controls](images/menus/limits.png)
 
@@ -318,7 +329,10 @@ hint when the ramp is enabled.
 
 Logs selects a full-history export using the shared provider, model, client,
 status, error, debug and age filters. The menu's count preview is separate from
-the recent rows currently loaded in the browser. No export was downloaded here.
+the recent rows currently loaded in the browser; the state line names whether
+the export reads durable history or the live buffer. In-flight status 0 is not
+offered as a filter, Reset filters clears the whole set in one click, and both
+download actions are neutral read-only controls. No export was downloaded here.
 
 ![Logs menu with full-history export filters and download actions](images/menus/logs.png)
 
@@ -382,10 +396,17 @@ stored history or the configuration revision.
 
 Settings uses the same schema, validation and defaults as configuration files.
 Search finds fields across categories. Changed values are revision-checked;
-the UI identifies hot-reload and restart requirements. Structured fields replace
-their whole map/list value rather than recursively merging nested entries.
-The generated [configuration example](../proxy.example.yaml) documents every
-field, including categories not pictured here.
+every row whose field is restart-bound carries its own `restart` marker instead
+of only a category banner. Closed vocabularies render as selects from the
+schema's `choices`, and duration/byte values are parsed and checked against the
+schema's numeric band before Apply. A read-only config disables its field
+controls, not only Apply. The category rail right-aligns its row counts beside
+the label; on a phone it becomes one horizontally scrollable chip strip so the
+field pane keeps the height. Switching categories resets the field scroller,
+and the footer status is a live region with a distinct error tone. Structured
+fields replace their whole map/list value rather than recursively merging
+nested entries. The generated [configuration example](../proxy.example.yaml)
+documents every field, including categories not pictured here.
 
 ### Dashboard cadence
 

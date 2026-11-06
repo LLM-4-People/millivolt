@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // OperatorStateOutput reads every operator control in one call: the pause
@@ -120,6 +122,9 @@ func (in SetPauseInput) Document() (map[string]any, error) {
 			return nil, fmt.Errorf("duration: %v", err)
 		}
 		body["duration"] = *in.Duration
+	}
+	if in.All && (in.New || in.Clients != nil || in.Providers != nil) {
+		return nil, fmt.Errorf("all cannot be combined with new, clients, or providers")
 	}
 	if in.All {
 		body["all"] = true
@@ -367,6 +372,13 @@ func (in SetThrottleInput) document() (throttleDocument, error) {
 	body := map[string]any{"provider": provider}
 	windowOnly := false
 	if in.Clear {
+		// Clear is a whole-policy action; a dimension beside it would be
+		// dropped and the caller could believe a cap is active.
+		if in.Concurrency != nil || in.Requests != nil || in.RequestWindow != "" ||
+			in.Tokens != nil || in.TokenWindow != "" || in.AntiBurst != nil ||
+			in.RampDuration != nil {
+			return throttleDocument{}, fmt.Errorf("clear cannot be combined with limit dimensions")
+		}
 		body["clear"] = true
 		return throttleDocument{body: body}, nil
 	}
@@ -620,6 +632,7 @@ type ConfigGetOutput struct {
 // configNote is the workflow the set_config description points at.
 const configNote = "patch with set_config by sending only the keys to change, plus this revision; " +
 	"a supplied list or map replaces that whole field, so read it here first. Keys equal to their default are still real settings. " +
+	"provider credential headers and last-reload error text are redacted here; use the operator CLI to reveal them. " +
 	"overrides names the keys the process pins outside the file: set_config strips them from a patch, so a key listed there will not change"
 
 // GetConfig reads GET /admin/config into the shared document every caller
@@ -648,6 +661,13 @@ func (s *Service) configGet(ctx context.Context, _ ConfigGetInput) (*ConfigGetOu
 	if err != nil {
 		return nil, err
 	}
+	// This surface feeds a model context, so credential-class provider
+	// headers and any reload error text (which can quote a rejected secret)
+	// are redacted here. The client and CLI stay raw so `mvctl config get
+	// --reveal` remains the explicit operator opt-in.
+	document.Values = config.RedactProviderHeaders(document.Values, RedactionMarker)
+	document.Effective = config.RedactProviderHeaders(document.Effective, RedactionMarker)
+	document.LastReload = config.RedactLastReload(document.LastReload, RedactionMarker)
 	document.Note = configNote
 	return document, nil
 }
@@ -736,7 +756,14 @@ func (c *Client) SetConfig(ctx context.Context, in SetConfigInput) (*SetConfigOu
 
 // SetConfig is the MCP tool entry point over the shared client method.
 func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigOutput, error) {
-	return s.client.SetConfig(ctx, in)
+	out, err := s.client.SetConfig(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	// Echo the saved document through the same model-context redaction as
+	// config_get. mvctl calls the client directly and owns its own --reveal.
+	out.Values = config.RedactProviderHeaders(out.Values, RedactionMarker)
+	return out, nil
 }
 
 // ReloadConfigInput takes no arguments.

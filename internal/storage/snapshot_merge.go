@@ -228,6 +228,9 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 		if err := preflightMergeTable(ctx, db, "request_debug"); err != nil {
 			return err
 		}
+		if err := preflightDebugSidecar(ctx, db, "backup_merge", "backup"); err != nil {
+			return err
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}

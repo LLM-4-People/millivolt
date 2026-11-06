@@ -9,7 +9,8 @@ module.exports = async function menusScroll(H) {
   const js = w.getComputedStyle(d.querySelector('#logs-menu .clear-actions'));
   check('menu action row splits ends-wise', js.justifyContent === 'space-between');
   const dlAll = [...d.querySelectorAll('#logs-menu .clear-actions button')].find(b => b.textContent.includes('Download all'));
-  check('download all is the red-outline variant', dlAll && dlAll.classList.contains('btn-danger-outline'));
+  check('download all is a read-only neutral action, not a danger action',
+    dlAll && !dlAll.classList.contains('btn-danger-outline') && !dlAll.classList.contains('btn-danger'));
   w.toggleLogsMenu({ stopPropagation() {} });
 
   // ---- test 9b: every database deletion control lives in the settings

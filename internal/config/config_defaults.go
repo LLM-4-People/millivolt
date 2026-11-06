@@ -153,7 +153,11 @@ const (
 	TranslationLossReject = "reject"
 )
 
-func translationLossPolicies() string { return TranslationLossWarn + ", " + TranslationLossReject }
+// TranslationLossPolicies is the closed translation_loss vocabulary. The
+// validator and the Settings schema read this one slice.
+var TranslationLossPolicies = []string{TranslationLossWarn, TranslationLossReject}
+
+func translationLossPolicies() string { return strings.Join(TranslationLossPolicies, ", ") }
 
 // Quota pause modes (QuotaPauseMode values; exact lowercase strings).
 const (
@@ -162,9 +166,11 @@ const (
 	QuotaPauseManual = "manual"
 )
 
-func quotaPauseModes() string {
-	return strings.Join([]string{QuotaPauseOff, QuotaPauseRetry, QuotaPauseManual}, ", ")
-}
+// QuotaPauseModes is the closed quota_pause_mode vocabulary. The validator
+// and the Settings schema read this one slice.
+var QuotaPauseModes = []string{QuotaPauseOff, QuotaPauseRetry, QuotaPauseManual}
+
+func quotaPauseModes() string { return strings.Join(QuotaPauseModes, ", ") }
 
 // Client error-class disclosure modes (ClientErrorClass values; exact
 // lowercase strings, deny by default).
@@ -176,9 +182,11 @@ const (
 	ClientErrorClassHeader = "header"
 )
 
-func clientErrorClassModes() string {
-	return strings.Join([]string{ClientErrorClassOff, ClientErrorClassHeader}, ", ")
-}
+// ClientErrorClassModes is the closed client_error_class vocabulary. The
+// validator and the Settings schema read this one slice.
+var ClientErrorClassModes = []string{ClientErrorClassOff, ClientErrorClassHeader}
+
+func clientErrorClassModes() string { return strings.Join(ClientErrorClassModes, ", ") }
 
 func heartbeatRange() string {
 	return FormatDuration(HeartbeatIntervalMin) + ".." + FormatDuration(HeartbeatIntervalMax)

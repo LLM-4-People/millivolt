@@ -313,26 +313,55 @@ function shareBar(fraction, color) {
 // derivation shared by filter matching (and mirrored in Go on the server for
 // the aggregates - keep both in lockstep). The derived value is the filter id.
 
-// errorKey is the stable identity of one distinct error (final or absorbed
-// attempt): type|code|msg - same grouping as the explorer error dimension.
-function errorKey(type, code, msg) {
-  return [type || '', code || '', msg || ''].join('|');
+// escapeErrorKeyPart is the mirror of Go escapeErrorKeyPart: a backslash
+// escapes a backslash or the '|' separator, and ordinary text is unchanged.
+// Error messages are arbitrary text, so without this {type:'a', code:'b|c'}
+// and {type:'a|b', code:'c'} would share one identity.
+function escapeErrorKeyPart(s) {
+  s = s || '';
+  return s.indexOf('|') < 0 && s.indexOf('\\') < 0 ? s : s.replace(/[\\|]/g, '\\$&');
 }
 
-// errorKeyMatches compares the joined error identity without building it: the
-// filter path evaluates every error entry of every row.
+// errorKey is the stable identity of one distinct error (final or absorbed
+// attempt): escaped type|code|msg - same grouping as the explorer error
+// dimension. The escape keeps saved ids for ordinary errors unchanged.
+function errorKey(type, code, msg) {
+  return escapeErrorKeyPart(type) + '|' + escapeErrorKeyPart(code) + '|' + escapeErrorKeyPart(msg);
+}
+
+// errorKeyMatches compares the joined error identity. Building the key is
+// bounded by the few error entries a row carries; the previous delimiter
+// walk could not distinguish a separator inside a message from the field
+// boundary.
 function errorKeyMatches(key, type, code, msg) {
-  const t = type || '', c = code || '', m = msg || '';
-  let p = 0;
-  if (!key.startsWith(t)) return false;
-  p = t.length;
-  if (key.charCodeAt(p) !== 124) return false;
-  p++;
-  if (!key.startsWith(c, p)) return false;
-  p += c.length;
-  if (key.charCodeAt(p) !== 124) return false;
-  p++;
-  return key.length === p + m.length && key.startsWith(m, p);
+  return key === errorKey(type, code, msg);
+}
+
+// errorKeyParts decodes an escaped error key back into [type, code, message].
+// A backslash escapes the next character; the encoder only emits \\ and \|,
+// so this is the exact inverse of escapeErrorKeyPart.
+function errorKeyParts(key) {
+  const parts = [];
+  let cur = '';
+  for (let i = 0; i < key.length; i++) {
+    const ch = key[i];
+    if (ch === '\\' && i + 1 < key.length) { cur += key[++i]; continue; }
+    if (ch === '|') { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+function errorKeyType(key) { return errorKeyParts(key)[0] || 'error'; }
+
+// errorKeyDisplay renders the decoded parts for a card. When a part contains
+// the separator or a backslash, the escaped key itself is the only injective
+// human spelling (any invented quoting can collide with ordinary text), so it
+// is shown unchanged. Ordinary errors keep the familiar type|code|msg form.
+function errorKeyDisplay(key) {
+  const parts = errorKeyParts(key);
+  return parts.some(p => p.includes('|') || p.includes('\\')) ? key : parts.join('|');
 }
 
 // statusClass buckets a record's HTTP status into a coarse class. Keep in

@@ -139,9 +139,14 @@ constant.
 ### Saving settings safely
 
 Settings collects a draft until Apply. Revert reloads the saved document, and
-closing a dirty sheet keeps it open until Apply or Revert. The server validates the whole
-result and compares its revision before writing. A stale tab receives 409;
-reload/review its values instead of resubmitting an old full form.
+closing a dirty sheet keeps it open until Apply or Revert; an open dirty draft
+also asks the browser to confirm a tab close or reload. The server validates the
+whole result and compares its revision before writing. A stale tab receives 409;
+reload/review its values instead of resubmitting an old full form. The sheet
+renders closed vocabularies as selects from the schema's `choices` and checks
+duration/byte text against the schema's numeric band before the POST; the server
+remains the authority. With no writable config the field controls are disabled,
+not only the Apply action.
 
 API saves overlay supplied top-level keys on the saved config. Omitted keys
 remain unchanged, but a supplied map/list replaces that entire field. For
@@ -661,7 +666,12 @@ hot-applies through the same owner as a Settings save, is reflected in
 `last_reload`, and reports restart-required keys. Database
 **replace** streams the decoded file into a pending snapshot next to `db_path`,
 syncs it, and atomically renames it into place; Open admits the pending file
-only after it checks again, and the restore waits for process restart.
+only after it checks again, and the restore waits for process restart. A
+`db_path` that is a symlink is resolved to its real target first, so staging,
+admission, the rollback set and the state marker all belong to the file SQLite
+actually opened; the link stays intact and points at the replacement. A
+combined merge compares the same resolved identities rather than the two
+spellings.
 Database **merge** attaches the decoded file read-only and inserts request ids
 that are not already in the live store immediately (live rows win on conflict);
 the attached snapshot rejects writes, while the live database stays writable
@@ -691,7 +701,14 @@ running store's file, because the rows would be written to a database the next
 boot does not open; merge the database separately or use database replace.
 
 At boot, a pending snapshot is admitted only after the same schema, trigger,
-writer-insert and request-scan value preflight `Open` runs. Recovery consults
+writer-insert, request-scan value and capture-id preflight `Open` runs. The
+trigger fence rejects every unowned trigger in the snapshot, not only those
+attached to `requests`: a trigger body is arbitrary SQL, so one attached to
+`meta` or `request_debug` can delete or rewrite request rows. The capture-id
+fence rejects a `request_debug` id that is NULL, non-text or blank: such a row
+can never be fetched by id or reached by the expiry sweep, yet still counts
+against the debug byte budget. Restore merge applies the same fence before it
+imports any row. Recovery consults
 the durable `.snapshot-state` marker rather than inferring a transition from the
 files present. A markerless rollback set from a pre-marker release cannot be
 classified: when a live main exists, recovery keeps it and removes the
@@ -1019,6 +1036,14 @@ an indefinite hold needs an explicit resume. Existing holds can be edited in
 place or resumed individually, while Resume all clears all holds. Overlapping
 scopes are rejected instead of silently replacing a different hold.
 
+The HTTP shape is closed. A resume carries only `paused:false` and an optional
+`id`; supplying a scope, duration or queue cap beside it is a 400, because the
+proxy has no scope-selective resume and accepting one would clear more holds
+than the caller named. `all:true` cannot be combined with `new`, `clients` or
+`providers`; the global hold already covers them. Named clients plus `new`
+remains a valid union. These are enforced by the handler, not only by the MCP
+and CLI wrappers.
+
 The known client/provider/model vocabularies (the pause and debug pickers, and
 the snapshot a New-clients hold compares against) are bounded at 4096 names per
 dimension. Client labels and model ids come from the request, so they are
@@ -1041,7 +1066,9 @@ sends another client's label is parked, or not parked, as that client. See
 Limits applies to a provider across all clients and keys, independently of the
 per-key concurrency/queue settings. Choose concurrency, requests per window,
 tokens per window and the optional anti-burst ramp, then Apply; Clear removes
-that provider policy. The menu shows whether a policy came from the UI or a
+that provider policy. `clear:true` cannot be combined with a limit dimension:
+the handler refuses the ambiguity instead of dropping the supplied value and
+reporting success. The menu shows whether a policy came from the UI or a
 request header, together with available budget and in-flight/queued state.
 Queued counts every request the scheduler parks for that provider - admission
 waits and send-gate waits behind a 429/5xx pacing window alike - not only work
@@ -1104,9 +1131,13 @@ declared length alone holds no budget), and `max_inflight_response_bytes` its
 budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
-(at most 1 MiB plus one 32 KiB chunk), and model discovery. Requests above
-any bound are refused with `503` and `Retry-After` before the body or upstream
-response is read. Request-body reads must make progress within
+(at most 1 MiB plus one 32 KiB chunk), and model discovery. A request-slot
+refusal is answered with `503` and `Retry-After` before the body is read. The
+body budget refuses on the read that would cross it; that chunk and the rest
+of the upload are not retained. The per-request cap still owns the status: a
+refused request drains at most the remaining `max_request_bytes` window so an
+over-cap body answers the definitive `413` instead of a retryable `503`, while
+a body that fits the cap answers `503`. Request-body reads must make progress within
 `request_body_idle_timeout` and finish within the absolute
 `request_body_read_timeout`, so a stalled peer releases its reservation
 without cutting off a slow but progressing upload. Buffered whole-document
@@ -1250,7 +1281,9 @@ Debug selects clients, providers and/or models and starts a capture session for
 a chosen duration or until stopped. At least one dimension is required; selected
 dimensions intersect, with alternatives inside each dimension. It does not have
 an unrestricted "all" switch. Sessions can be edited or stopped individually;
-Stop all ends every active session. Conflicting scopes are rejected.
+Stop all ends every active session. A stop carries only `enabled:false` and an
+optional session `id`; a scope or duration beside a stop is a 400 rather than a
+silent stop-everything. Conflicting scopes are rejected.
 
 Debug model matching uses the native-model normalization in
 [debug.go](../internal/proxy/debug.go), separate from display-only model rules.
@@ -1357,7 +1390,13 @@ beyond the menu's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
 [PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
 deliberate and destructive; never use malformed JSON as an all-records command.
-The delete fence preserves newer completions and in-flight work.
+The delete fence preserves newer completions and in-flight work. A completed
+purge, and an expired debug-capture sweep, checkpoint-truncates the WAL after
+the committed delete: `secure_delete` zeroes freed cells in the pages SQLite
+writes, and the checkpoint removes the pre-delete frames that would otherwise
+keep the old page images readable in the `-wal` sidecar. A reader holding an
+older snapshot can defer the checkpoint; the next destructive maintenance pass
+retries it.
 
 ### Settings and Restart
 

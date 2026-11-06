@@ -363,6 +363,15 @@ func restrictDatabaseSidecars(path string) error {
 // background writer. Call Close to shut down cleanly. opts carries the
 // pipeline tunables (channel/batch sizes, flush cadence, query timeout).
 func Open(path string, opts Options) (*Store, error) {
+	// Admission renames files, and rename acts on a directory entry while
+	// SQLite follows a symlink. Resolve once here so every derived name
+	// (pending slot, rollback set, state marker, staging) belongs to the real
+	// file and the configured link is never replaced by admission.
+	resolved, err := ResolveDatabasePath(path)
+	if err != nil {
+		return nil, err
+	}
+	path = resolved
 	admission, err := admitPendingSnapshot(path)
 	if err != nil {
 		return nil, fmt.Errorf("pending snapshot: %w", err)

@@ -174,8 +174,10 @@ SQLite accounting.
 ## Finalized records, pending lifecycle and replay
 
 `PublishLive(begin/update)` snapshots pending state without adding durable rows.
-`Buffer.Record` atomically finalizes the row, retires pending state, updates its
-gauge/revision and emits end. Exactly one finalized record per request is the
+The proxy registers its deferred `Record` before publishing `begin`, so a
+subscriber that fails while handling the begin event cannot leave a permanent
+in-flight row. `Buffer.Record` atomically finalizes the row, retires pending
+state, updates its gauge/revision and emits end. Exactly one finalized record per request is the
 accounting unit; proxy-owned IDs cannot collide with reused client request IDs.
 A debug capture registers its pending sidecar marker in `debugRuntime` before
 that publish and encodes/saves after it, so the sidecar write delays neither
@@ -279,7 +281,12 @@ matching records/sidecars and rebuilds totals transactionally, then removes only
 matching ring rows through that boundary. New completions survive. Failed SQL
 does not mutate the ring; postcommit memory effects finish even after caller
 cancellation. The atomic command check must not acquire the producer lock for
-every ordinary consumed record.
+every ordinary consumed record. A non-empty purge, and a drained expired-capture
+sweep, checkpoint-truncates the WAL after the commit: `secure_delete` cleans the
+pages SQLite writes, and truncation removes the pre-delete frames that would
+otherwise keep the old page images in the `-wal` sidecar. The checkpoint is
+bounded and best effort; a busy reader defers it to the next destructive pass
+without failing the committed deletion.
 
 Operator backup and restore stage database-sized work as private files.
 `backup.EncodeFile` streams the packed snapshot, encoded archive and self-check
@@ -320,7 +327,13 @@ share its builder. SQLite transactions capture rowid high-water/destructive
 epoch/schema authority; destructive changes rebuild. Failed or canceled reads
 never publish stale rows or advance authority. Folds check the caller's context
 once per 4,096-row block, and the ring visitors use the same cadence, so an
-abandoned request stops without publishing a partial result.
+abandoned request stops without publishing a partial result. The `has429`
+flag (and any future vocabulary-derived classification) comes from the
+installed vocabulary, not from a stored column, so the projection stamps the
+metrics classifier revision and forces a full reclassification rebuild when a
+reload changes it. The chart and explorer memos include the same revision in
+their key, so neither a stale projection nor a pre-reload memo can answer a
+post-reload request.
 
 Materialization runs off the projection lock with one single-flight builder;
 concurrent readers keep serving the previous complete snapshot and wait for
@@ -378,7 +391,10 @@ lineage metadata only for the returned conversation cards, and overlay
 ring/pending declarations without mutating the published build. Projected
 metric samples stay in shared sorted orders: single-valued dimensions retain one
 group id per row, while tool/error membership spans preserve multi-valued
-occurrences. Exact group accumulators are capped at
+occurrences. An error's identity is `type|code|msg`; a backslash or the `|`
+separator inside a part is escaped, so arbitrary error text can never merge two
+distinct errors into one dictionary id. Ordinary text keeps the historic
+spelling, which preserves saved error-filter ids. Exact group accumulators are capped at
 `explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
 fold into one synthetic `other` card carrying aggregate count, cost, token,
 tool and health fields; no per-value accumulator or error affected-ID map is

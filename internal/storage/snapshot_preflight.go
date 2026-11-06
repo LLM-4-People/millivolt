@@ -103,11 +103,12 @@ func preflightPendingSnapshot(path string) error {
 		return err
 	}
 	// initializeDatabase reconciles the four owned analytical triggers but
-	// leaves every other trigger in place. An unowned write-path trigger on
-	// requests could delete or rewrite accepted rows after the writer has
+	// leaves every other trigger in place. An unowned trigger can target
+	// requests from any table (`AFTER INSERT ON meta ... DELETE FROM
+	// requests`), which would delete or rewrite accepted rows after the writer
 	// accounted them, so replacement admission rejects the whole set instead
 	// of trusting the writer probe (which reads its own sentinel back).
-	if err := preflightRequestTriggers(context.Background(), db); err != nil {
+	if err := preflightForeignTriggers(context.Background(), db); err != nil {
 		db.Close()
 		return err
 	}
@@ -119,6 +120,16 @@ func preflightPendingSnapshot(path string) error {
 	// any non-STRICT column (stream='abc', stream=2), so check the staged rows
 	// before any live file is touched.
 	if err := preflightRequestScanValues(context.Background(), db, "", "pending snapshot"); err != nil {
+		db.Close()
+		return err
+	}
+	// A capture's id is its only fetch key, and the sidecar's value classes
+	// drive every later read and expiry. SQLite permits NULL in a TEXT PRIMARY
+	// KEY, and the table is not STRICT, so an imported sidecar can carry NULL,
+	// a BLOB or a blank id, a non-text payload, or a negative expiry. Such a
+	// row can never be fetched or swept while it still counts against
+	// debug_store_max_bytes. Reject the set before any live file is touched.
+	if err := preflightDebugSidecar(context.Background(), db, "", "pending snapshot"); err != nil {
 		db.Close()
 		return err
 	}
@@ -153,29 +164,31 @@ func preflightPendingSnapshot(path string) error {
 	return removeSnapshotSidecars(path)
 }
 
-// preflightRequestTriggers rejects every trigger on requests that is not one of
-// the four analytical triggers this package owns. ensureProjectionTriggers has
-// already restored the owned definitions, so any other name is foreign: a
-// replacement snapshot is a database file, and an unowned INSERT/UPDATE/DELETE
-// trigger could silently delete or rewrite writes that insertBatch still counts.
-func preflightRequestTriggers(ctx context.Context, db mergeConn) error {
+// preflightForeignTriggers rejects every trigger that is not one of the four
+// analytical triggers this package owns. ensureProjectionTriggers has already
+// restored the owned definitions, so any other name is foreign regardless of
+// its table: SQLite trigger bodies are arbitrary SQL, and a trigger attached
+// to meta or request_debug can delete or rewrite requests just as directly as
+// one attached to requests. A replacement snapshot is a database file, so deny
+// the whole set instead of trying to parse what each body may touch.
+func preflightForeignTriggers(ctx context.Context, db mergeConn) error {
 	owned := make(map[string]struct{}, len(projectionTriggers))
 	for _, tr := range projectionTriggers {
 		owned[tr.name] = struct{}{}
 	}
-	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'requests'`)
+	rows, err := db.QueryContext(ctx, `SELECT name, tbl_name FROM sqlite_schema WHERE type = 'trigger'`)
 	if err != nil {
 		return fmt.Errorf("pending snapshot triggers: %w", err)
 	}
 	defer rows.Close()
 	var foreign []string
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var name, table string
+		if err := rows.Scan(&name, &table); err != nil {
 			return err
 		}
 		if _, ok := owned[name]; !ok {
-			foreign = append(foreign, name)
+			foreign = append(foreign, name+" on "+table)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -183,8 +196,48 @@ func preflightRequestTriggers(ctx context.Context, db mergeConn) error {
 	}
 	if len(foreign) != 0 {
 		sort.Strings(foreign)
-		return fmt.Errorf("pending snapshot requests has %d unowned trigger(s) (%s); only the analytical projection triggers are permitted",
+		return fmt.Errorf("pending snapshot has %d unowned trigger(s) (%s); only the analytical projection triggers are permitted",
 			len(foreign), strings.Join(foreign, ", "))
+	}
+	return nil
+}
+
+// preflightDebugSidecar rejects a request_debug set whose keys or values
+// cannot be read back or expired. The sidecar schema keeps `id TEXT PRIMARY
+// KEY` (SQLite permits NULL there, and the table is not STRICT), and neither
+// admission nor merge rebuilds it. LoadDebugCapture matches `id = ?`, the
+// expiry sweep selects by expires_at, and both scan payload into a string, so
+// a NULL/BLOB/blank id, a missing or non-text column, or a negative expiry is
+// invisible to reads and expiry while its payload still counts against the
+// debug byte cap. A missing column fails the query, so the fence also catches
+// a legacy table the initializer could not add columns to.
+func preflightDebugSidecar(ctx context.Context, db mergeConn, schema, label string) error {
+	table := "request_debug"
+	if schema != "" {
+		table = schema + ".request_debug"
+	}
+	blank := `TRIM(id, char(9)||char(10)||char(11)||char(12)||char(13)||char(32)) = ''`
+	var badIDs int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE id IS NULL OR typeof(id) <> 'text' OR `+blank).Scan(&badIDs); err != nil {
+		return fmt.Errorf("%s debug capture ids: %w", label, err)
+	}
+	if badIDs != 0 {
+		return fmt.Errorf("%s request_debug has %d unfetchable capture id(s); every capture id must be non-empty text",
+			label, badIDs)
+	}
+	var badValues int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE
+			typeof(session_id) <> 'text' OR
+			typeof(payload) <> 'text' OR
+			typeof(captured_at) <> 'integer' OR captured_at < 0 OR
+			typeof(expires_at) <> 'integer' OR expires_at < 0`).Scan(&badValues); err != nil {
+		return fmt.Errorf("%s debug capture values: %w", label, err)
+	}
+	if badValues != 0 {
+		return fmt.Errorf("%s request_debug has %d invalid capture row(s); payload and session_id must be text, timestamps must be non-negative integers",
+			label, badValues)
 	}
 	return nil
 }

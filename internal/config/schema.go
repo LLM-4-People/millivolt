@@ -47,8 +47,19 @@ type Field struct {
 	HotReload bool     `json:"hot_reload"`
 	Min       *float64 `json:"min,omitempty"`
 	Max       *float64 `json:"max,omitempty"`
-	ZeroMeans string   `json:"zero_means,omitempty"`
-	Unit      string   `json:"unit,omitempty"`
+	// MinLabel and MaxLabel are the formatted bounds for display. The wire
+	// keeps Min/Max in their canonical unit (duration nanoseconds, bytes for
+	// byte sizes); Settings renders these labels so it never has to guess the
+	// unit. Filled once with ZeroToken, from the same formatBound owner.
+	MinLabel  string `json:"min_label,omitempty"`
+	MaxLabel  string `json:"max_label,omitempty"`
+	ZeroMeans string `json:"zero_means,omitempty"`
+	Unit      string `json:"unit,omitempty"`
+	// Choices is the closed vocabulary for a string setting whose validator
+	// accepts only named values. The schema and the validator read the same
+	// slice, so Settings renders a select instead of a free-text field and
+	// the accepted spellings cannot drift.
+	Choices []string `json:"choices,omitempty"`
 	// ZeroToken is the formatted zero for duration/bytes fields, filled by
 	// Schema from FormatDuration/FormatByteSize so Settings does not hardcode 0s/0B.
 	ZeroToken string `json:"zero_token,omitempty"`
@@ -80,7 +91,7 @@ func Categories() []Category {
 // schemaRegistry builds the schema once per process and shares it across all
 // callers. The slice is immutable after build; see Schema for the contract.
 var schemaRegistry = sync.OnceValue(func() []Field {
-	return withZeroTokens([]Field{
+	return withSchemaDerived([]Field{
 		// ---- server ----
 		{Key: "listen", Category: "server", Label: "Listen address",
 			Help: "Host:port the HTTP server binds. Restart required.",
@@ -224,7 +235,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Process-wide inference admission bound. Requests above it are refused with 503 and Retry-After instead of buffering their bodies. 0 = unlimited. Hot-reloads.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(1_000_000)},
 		{Key: "max_inflight_body_bytes", Category: "queue", Label: "Max in-flight body bytes",
-			Help: "Process-wide budget for buffered inbound request bodies. Admission charges the bytes actually read and refuses with 503 when the next read would exceed the budget. A declared Content-Length reserves nothing, so an idle connection cannot hold the budget. Bytes past max_request_bytes are not charged: that body is answered 413 by the cap owner. 0 = unlimited. Hot-reloads.", Kind: KindBytes, HotReload: true, Min: num(float64(MaxInflightBodyBytesMin)), Max: num(float64(MaxInflightBodyBytesMax)), ZeroMeans: "unlimited"},
+			Help: "Process-wide budget for buffered inbound request bodies. Admission charges the bytes actually read and refuses with 503 when the next read would exceed the budget. A declared Content-Length reserves nothing, so an idle connection cannot hold the budget. Bytes past max_request_bytes are neither charged nor retained: that body is answered 413 by the cap owner. A refused request drains at most its remaining cap window so an over-cap body still answers 413 rather than a retryable 503. 0 = unlimited. Hot-reloads.", Kind: KindBytes, HotReload: true, Min: num(float64(MaxInflightBodyBytesMin)), Max: num(float64(MaxInflightBodyBytesMax)), ZeroMeans: "unlimited"},
 		{Key: "max_inflight_response_bytes", Category: "queue", Label: "Max in-flight response bytes",
 			Help: "Process-wide budget for buffered upstream response bodies: whole-document translation of non-streaming responses, the non-streaming 200 quality spool (at most 1 MiB plus one 32 KiB chunk), and model discovery. Admission reserves the declared Content-Length when it fits the bounded read cap, otherwise that cap, and refuses with 503 and Retry-After before reading when the budget would be exceeded. The reservation is released once the buffer is written, translated, or abandoned. 0 = unlimited. Hot-reloads.", Kind: KindBytes, HotReload: true, Min: num(float64(MaxInflightResponseBytesMin)), Max: num(float64(MaxInflightResponseBytesMax)), ZeroMeans: "unlimited"},
 		{Key: "max_queue_wait", Category: "queue", Label: "Max queue wait",
@@ -262,7 +273,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindBool, HotReload: true},
 		{Key: "client_error_class", Category: "queue", Label: "Client error class",
 			Help: "Negotiate millivolt's canonical error class to clients on the LLM relay surface. off leaves relayed responses exactly as the provider sent them. header stamps X-Proxy-Error-Class (rate_limit, quota, unavailable, unreachable, timeout, content, client_error, proxy, canceled, upstream) and a class-derived X-Should-Retry: true|false on every error status before the status line commits, so a client can tell a rate limit announced by a 400 from a client fault and a durable quota block from transient backpressure without parsing provider envelopes. The body is never rewritten. suppress_client_retries still wins while it is on; mid-stream SSE errors cannot carry new headers. Reload applies to new responses.",
-			Kind: KindString, HotReload: true},
+			Kind: KindString, HotReload: true, Choices: ClientErrorClassModes},
 
 		// ---- storm ----
 		{Key: "storm_enabled", Category: "storm", Label: "Enable protection",
@@ -326,7 +337,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		// ---- quota ----
 		{Key: "quota_pause_mode", Category: "quota", Label: "Mode",
 			Help: "Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits; in-band occurrences included): off surfaces it immediately; retry opens a provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per the storm recovery delays, new requests park on the gate (bounded by storm_max_queue/storm_max_wait), and the gate closes after quota_pause_recovery_successes consecutive successful probes (the default 1 closes on the first 2xx); manual creates an indefinite provider pause that only an operator resumes. The built-in classification is fixed (quota_error_classes may add unknown spellings); only the reaction is configurable. OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior.",
-			Kind: KindString, HotReload: true},
+			Kind: KindString, HotReload: true, Choices: QuotaPauseModes},
 		{Key: "quota_pause_recovery_successes", Category: "quota", Label: "Recovery successes",
 			Help: "Consecutive successful recovery probes that close a retry-mode quota gate. 1 releases the queue on the first 2xx. Meaningful only in retry mode.",
 			Kind: KindInt, HotReload: true, Min: num(1), Max: num(100)},
@@ -351,7 +362,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindInt, HotReload: true, Min: num(StreamToolCallsMin), Max: num(StreamToolCallsBandMax)},
 		{Key: "translation_loss", Category: "format", Label: "Translation loss policy",
 			Help: "What a cross-protocol translation does when the target cannot represent a client field. warn (default) drops optional fields and reports them in X-Proxy-Warnings; reject fails the request with 400 naming the fields before any upstream send and refuses every recorded loss, including a documented approximation. Structural features are always rejected when they cannot be honored. A response-side loss is never fatal: a non-streaming response reports it in X-Proxy-Warnings, and a streaming response drops it without a header. Hot-reloads.",
-			Kind: KindString, HotReload: true},
+			Kind: KindString, HotReload: true, Choices: TranslationLossPolicies},
 		{Key: "cursor_default_context_window", Category: "format", Label: "Cursor default context window",
 			Help: "Optional context-window hint stamped onto every model in GET /v1/models when X-Proxy-Format is cursor. 0 omits the field.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "omit (client default)", Unit: "tokens"},
@@ -451,13 +462,23 @@ func Schema() []Field {
 	return schemaRegistry()
 }
 
-func withZeroTokens(fields []Field) []Field {
+// withSchemaDerived fills the presentation tokens the Settings sheet reads:
+// the formatted zero for duration/bytes fields and the display labels for any
+// finite band. It runs once at registry build; the returned slice is the
+// shared immutable schema.
+func withSchemaDerived(fields []Field) []Field {
 	for i := range fields {
 		switch fields[i].Kind {
 		case KindDuration:
 			fields[i].ZeroToken = FormatDuration(0)
 		case KindBytes:
 			fields[i].ZeroToken = FormatByteSize(0)
+		}
+		if fields[i].Min != nil {
+			fields[i].MinLabel = fields[i].formatBound(*fields[i].Min)
+		}
+		if fields[i].Max != nil {
+			fields[i].MaxLabel = fields[i].formatBound(*fields[i].Max)
 		}
 	}
 	return fields

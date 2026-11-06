@@ -285,18 +285,22 @@ func TestOpenSweepPreservesSymlinkedLiveTarget(t *testing.T) {
 	if err := os.Symlink(filepath.Base(target), link); err != nil {
 		t.Fatal(err)
 	}
+	// A state marker is authoritative once db_path resolves: recovery reads
+	// the marker at the real file. Use the committed state so recovery only
+	// clears a rollback set that is absent here. The junk pending slot is
+	// quarantined during admission, so the quarantine evidence, not the
+	// consumed slot, is what the sweep must protect; the dedicated sweep test
+	// covers every admission path without running admission.
 	protected := []string{
 		target,
 		target + "-wal",
 		target + "-shm",
-		PendingSnapshotPath(target),
-		PendingSnapshotPath(target) + "-wal",
-		PendingSnapshotPath(target) + "-shm",
-		PendingSnapshotPath(target) + "-journal",
-		target + pendingSnapshotPreviousSuffix,
 		target + pendingSnapshotStateSuffix,
 		PendingSnapshotPath(target) + pendingSnapshotInvalidSuffix,
 		PendingSnapshotPath(target) + pendingSnapshotInterruptedSuffix,
+	}
+	if err := os.WriteFile(target+pendingSnapshotStateSuffix, []byte(snapshotStateCommitted), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	for _, protectedPath := range protected {
 		makeOldLivePath(t, protectedPath)

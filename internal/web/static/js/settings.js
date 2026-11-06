@@ -112,7 +112,11 @@ function openSettings() {
   settingsQ = '';
   fetchSettings().then(() => {
     const focus = $('settings-q');
-    if (focus && settingsIsOpen()) focus.focus();
+    const active = document.activeElement;
+    // The modal open already focused the search box. A late fetch must not
+    // pull focus back after the operator moved into a field.
+    if (focus && settingsIsOpen() &&
+        (active === document.body || active === focus || active === s)) focus.focus();
   });
 }
 
@@ -192,7 +196,7 @@ function fetchSettings(discard = false) {
       return doc;
     })
     .catch(err => {
-      if (req === settingsReq && settingsIsOpen()) settingsStatus(String(err.message || err));
+      if (req === settingsReq && settingsIsOpen()) settingsStatus(String(err.message || err), 'error');
       return null;
     });
 }
@@ -233,9 +237,9 @@ function fillSettingsForm(doc) {
     const on = c.id === settingsCat ? ' active' : '';
     const ref = SETTINGS_CAT_REF[c.id] || SETTINGS_CAT_REF.server;
     const badge = ref.dim
-      ? entityBadge(ref.dim, '', c.label)
-      : `<span class="ent" style="--ent:${vis.color}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb">${escapeHtml(c.label)}</span></span>`;
-    return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
+      ? entityBadge(ref.dim, '', c.label, null, c.label)
+      : `<span class="ent" style="--ent:${vis.color}" title="${escapeHtml(c.label)}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb" title="${escapeHtml(c.label)}">${escapeHtml(c.label)}</span></span>`;
+    return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}" aria-label="${escapeHtml(c.label)}, ${n} settings">${badge}<span class="rail-n" aria-hidden="true">${n}</span></button>`;
   }).join('');
   // The storage pane also owns both database deletions: the scoped
   // delete-matching block and the whole-database action row ride the same
@@ -247,6 +251,12 @@ function fillSettingsForm(doc) {
   if (purgeAt >= 0) rows.splice(purgeAt, 0, settingsDeleteRowHTML(), settingsPurgeRowHTML());
   box.innerHTML = rows.join('') + settingsBackupHTML(doc);
   box.querySelectorAll('[data-st-scalar]').forEach(validateSettingsScalar);
+  if (!doc.writable) {
+    // Every config field is read-only, not just the Apply action. Backup
+    // rows carry no data-key and stay usable.
+    box.querySelectorAll('.st-row[data-key] input, .st-row[data-key] select, .st-row[data-key] textarea, .st-row[data-key] button')
+      .forEach(el => { el.disabled = true; });
+  }
   wireBackupPane();
   const purgeAllBtn = $('btn-purge-all');
   if (purgeAllBtn) purgeAllBtn.disabled = _purgeBusy;
@@ -288,3 +298,12 @@ function fillSettingsForm(doc) {
 // pass after this module. Under the production loader that promise is
 // already in flight, so this call only returns it.
 loadSettingsModule(1).catch(() => {});
+
+// A dirty draft survives an accidental tab close or reload: the browser
+// shows its own leave confirmation, and the sheet's own close guard still
+// owns the in-app paths.
+window.addEventListener('beforeunload', e => {
+  if (!settingsIsOpen() || !settingsIsDirty()) return;
+  e.preventDefault();
+  e.returnValue = '';
+});

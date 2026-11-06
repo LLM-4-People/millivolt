@@ -69,7 +69,7 @@
   }
   .st-sheet {
     position: fixed; z-index: 71; top: calc(var(--rail-h) + var(--rail-tick)); left: 50%;
-    width: min(1080px, calc(100vw - 24px)); height: calc(100vh - var(--rail-h) - var(--rail-tick) - 8px);
+    width: min(1080px, calc(100vw - 24px)); height: calc(100dvh - var(--rail-h) - var(--rail-tick) - 8px);
     display: flex; flex-direction: column;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 14px;
     box-shadow: 0 24px 64px rgba(var(--shadow-rgb),.55), 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent) inset;
@@ -109,7 +109,11 @@
      deviations live here: the entity-accent fallback for the active edge,
      the label that pushes counts out, and the search-hit/miss states. */
   .st-rail-item.active { border-left-color: var(--ent, var(--accent)); }
-  .st-rail-item .ent { flex: 1; }
+  .st-rail-item .ent { flex: 1; min-width: 0; }
+  /* The explorer's 90px count floor exists for its conversation summary.
+     Settings has no such summary: a right-aligned, width-to-content count
+     keeps the label readable and the number beside the row edge. */
+  .st-rail-item .rail-n { min-width: 2ch; margin-left: auto; padding-left: 6px; text-align: right; }
   .st-rail-item.has-hit .rail-n { color: var(--accent); }
   .st-rail-item.is-miss { opacity: .4; }
   .st-live {
@@ -149,6 +153,7 @@
     text-transform: lowercase;
   }
   .st-pill.lock { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .st-pill.restart { color: var(--muted); background: color-mix(in srgb, var(--text) 6%, transparent); }
   .st-ctl { display: flex; flex-direction: column; gap: 4px; align-items: stretch; min-width: 0; }
   .st-ctl-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .st-ctl-line > input { min-width: 0; }
@@ -432,21 +437,29 @@
   }
   .st-status { flex: 1; min-height: 15px; font: 11px var(--mono); color: var(--warn); }
   .st-status.ok { color: var(--ok); }
+  .st-status[data-tone="error"] { color: var(--err); }
   .st-actions { display: flex; gap: 8px; }
   @media (max-width: 720px) {
     .st-sheet { border-radius: 12px; }
     .st-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
     .st-side { border-right: none; border-bottom: 1px solid var(--border); }
-    .st-rail { flex-direction: row; flex-wrap: wrap; max-height: 152px; }
-    .st-rail-item { width: auto; }
+    /* One compact chip strip instead of a wrapped block: every category is
+       one thumb-scroll away and the field pane keeps the height. */
+    .st-rail {
+      flex-direction: row; flex-wrap: nowrap; max-height: none;
+      overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
+      scrollbar-width: thin; padding: 8px 10px;
+    }
+    .st-rail-item { width: auto; flex: 0 0 auto; }
+    .st-rail-item .ent { flex: 0 1 auto; }
     .st-live { display: none; }
     .st-row { grid-template-columns: 1fr; gap: 6px; }
     .st-row:has(.st-switch) .st-ctl { align-items: flex-start; }
     .st-del-opts { grid-template-columns: 1fr; }
     .st-hd input[type="search"] { max-width: none; }
-    /* The sheet's own header controls are the way in and out of the modal;
-       they take the full touch target on a phone. */
-    .st-hd .btn, .st-hd input[type="search"] { min-height: var(--tap); }
+    .mr-row, .mr-preview { grid-template-columns: 1fr; gap: 5px; }
+    .mr-row .prov-arrow, .mr-preview .prov-arrow { display: none; }
+    .mr-tools { flex-wrap: wrap; }
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
     .ro-head-actions { justify-content: flex-start; }
@@ -462,4 +475,7 @@
     .prov-menu-custom input, .prov-menu-custom .btn { min-height: var(--tap); }
     .st-rail-item { min-height: var(--tap); }
     .st-actions .btn { min-height: var(--tap); }
+    /* The header controls are the way in and out of the sheet, so they take
+       the same touch target as the rail and footer at every touch width. */
+    .st-hd .btn, .st-hd input[type="search"] { min-height: var(--tap); }
   }

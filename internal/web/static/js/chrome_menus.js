@@ -90,24 +90,117 @@ function hideHdrMenu(id) {
   if (!el) return false;
   const wasOpen = !el.hidden;
   el.hidden = true;
+  disarmConfirmations(el);
   if (wasOpen) HEADER_MENU_CLOSE.get(id)?.();
   syncHdrMenuExpanded();
   return wasOpen;
 }
 
-function parseGoDuration(s) {
-  if (s == null || s === '') return 0;
-  s = String(s).trim();
-  if (!s) return 0;
-  const re = /(-?\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)/g;
-  let m, total = 0, any = false;
-  while ((m = re.exec(s))) {
-    any = true;
-    const n = parseFloat(m[1]);
-    const mul = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000}[m[2]];
-    total += n * (mul || 0);
+// A broad action gets one explicit second click instead of a blocking
+// dialog: the first click arms the button and renames it, the second runs
+// the inline owner, and five seconds, a menu close or another arm disarms
+// it. Capture phase intercepts before the inline onclick, so the action
+// owner never needs to know this exists.
+const CONFIRM_ARM_MS = 5000;
+let _confirmTimer = 0;
+function disarmConfirm(btn) {
+  if (!btn) return;
+  if (btn.dataset.confirmLabel) {
+    btn.textContent = btn.dataset.confirmLabel;
+    delete btn.dataset.confirmLabel;
   }
-  return any ? total : 0;
+  delete btn.dataset.armed;
+}
+function disarmConfirmations(root) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll('[data-armed="1"]').forEach(disarmConfirm);
+  clearTimeout(_confirmTimer);
+}
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-confirm]');
+  if (!btn || btn.disabled) return;
+  if (btn.dataset.armed === '1') {
+    disarmConfirm(btn);
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  disarmConfirmations(btn.closest('.hdr-menu') || document);
+  btn.dataset.confirmLabel = btn.textContent;
+  btn.dataset.armed = '1';
+  btn.textContent = btn.dataset.confirm;
+  _confirmTimer = setTimeout(() => disarmConfirm(btn), CONFIRM_ARM_MS);
+}, true);
+
+// maxGoDurationMS is time.ParseDuration's int64 nanosecond ceiling expressed
+// in milliseconds; the server rejects anything beyond it.
+const maxGoDurationMS = 9223372036854775807 / 1e6;
+
+// parseGoDurationValue is the strict owner: null means the text is not a Go
+// duration at all. It mirrors time.ParseDuration, the server's authority:
+// one optional leading sign, `0` by itself, then one or more number+unit
+// groups where a number is `digits[.digits]` or `.digits`, and the unit is
+// one of the Go spellings. The old unanchored scan accepted trailing garbage
+// and misread `.5h` as 5h, which the settings Apply gate now treats as truth.
+// parseGoDuration keeps the historic lenient 0 result for callers that treat
+// garbage as "no interval".
+function parseGoDurationValue(s) {
+  if (s == null) return null;
+  s = String(s).trim();
+  if (!s) return null;
+  let sign = 1;
+  if (s[0] === '+' || s[0] === '-') {
+    if (s[0] === '-') sign = -1;
+    s = s.slice(1);
+  }
+  if (s === '0') return 0;
+  if (!s) return null;
+  const unitMS = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000};
+  const isDigit = ch => ch >= '0' && ch <= '9';
+  let total = 0, i = 0, groups = 0;
+  while (i < s.length) {
+    const start = i;
+    while (i < s.length && isDigit(s[i])) i++;
+    const pre = i > start;
+    let post = false;
+    if (s[i] === '.') {
+      i++;
+      const frac = i;
+      while (i < s.length && isDigit(s[i])) i++;
+      post = i > frac;
+    }
+    if (!pre && !post) return null;
+    const number = parseFloat(s.slice(start, i));
+    const unitStart = i;
+    while (i < s.length && s[i] !== '.' && !isDigit(s[i])) i++;
+    if (i === unitStart) return null;
+    const unit = unitMS[s.slice(unitStart, i)];
+    if (unit == null) return null;
+    total += number * unit;
+    groups++;
+  }
+  if (!groups || !Number.isFinite(total) || Math.abs(total) > maxGoDurationMS) return null;
+  return sign * total;
+}
+function parseGoDuration(s) {
+  const value = parseGoDurationValue(s);
+  return value == null ? 0 : value;
+}
+
+// parseGoByteSize mirrors internal/config parseByteSizeString: a bare integer
+// is bytes, and the accepted suffixes are B/KiB/MiB/GiB (case-insensitive).
+// null means the text is not a byte size.
+function parseGoByteSize(s) {
+  if (s == null) return null;
+  const compact = String(s).trim().replace(/\s+/g, '');
+  if (!compact) return null;
+  const m = /^(\d+)(GiB|MiB|KiB|B)?$/i.exec(compact);
+  if (!m) return null;
+  const mult = {gib: 1 << 30, mib: 1 << 20, kib: 1 << 10, b: 1}[ (m[2] || 'b').toLowerCase() ];
+  const n = Number(m[1]);
+  if (!Number.isSafeInteger(n) || !mult) return null;
+  const value = n * mult;
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 function applyDashValues(v) {
@@ -197,7 +290,7 @@ const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
 // Filter ages reuse the shared hour wording for '1h'; the longer spans are
 // deliberately day/week wording in the age context, not clock arithmetic.
-const FILTER_AGES = [['', '-'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
+const FILTER_AGES = [['', 'any'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
 
 function populateFilterMenu(prefix, onChange) {
   const recs = lastData?.records || [];
@@ -208,7 +301,9 @@ function populateFilterMenu(prefix, onChange) {
   };
   fill(prefix+'-provider', [...new Set(recs.map(r => r.provider).filter(Boolean))].sort());
   fill(prefix+'-client', [...new Set(recs.map(r => r.client).filter(Boolean))].sort(), clientLabel);
-  fill(prefix+'-status', [...new Set(recs.map(r => r.status_code))].sort((a,b)=>a-b).map(String));
+  // 0 is an in-flight row, not a response status: offering it would let a
+  // filter that the backend treats as "ignore" look like a real match.
+  fill(prefix+'-status', [...new Set(recs.map(r => r.status_code).filter(n => n > 0))].sort((a,b)=>a-b).map(String));
   // The model select groups spelling variants under their canonical group
   // (an <optgroup> per multi-variant group) so the same model clusters
   // visually - but each <option> keeps its raw value: delete/download
@@ -350,7 +445,27 @@ function logsExportURL(f) {
 }
 
 function updateLogsCount() {
-  return updateFilterCount('lf', 'logs-count', 'btn-logs-filtered', n => 'download ' + recPhrase(n) + ' from the full database');
+  const summary = $('logs-summary');
+  if (summary) {
+    summary.textContent = clearFilterActive(filterFromUI('lf'))
+      ? 'Filtered export. Matching uses the same predicate as the preview.'
+      : 'Every stored record. Add a filter to narrow the export.';
+  }
+  const source = typeof storageState !== 'undefined' && storageState && storageState.enabled
+    ? 'durable history'
+    : 'live buffer';
+  return updateFilterCount('lf', 'logs-count', 'btn-logs-filtered',
+    n => 'download ' + recPhrase(n) + ' from the ' + source);
+}
+
+// resetLogsFilters is the one reset owner for the export surface: every
+// select returns to its empty "any" choice, then the preview re-runs once.
+function resetLogsFilters() {
+  for (const name of ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']) {
+    const el = $('lf-' + name);
+    if (el) el.value = '';
+  }
+  return updateLogsCount();
 }
 
 function downloadLogsFiltered() {

@@ -12,11 +12,13 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/backup"
 )
 
-// DBPath is the running database's own file: the boot-time path the store
-// opened, not the reloadable db_path config value (db_path is startup-bound,
-// so a reload that changes it leaves the live database at its boot path
-// until the process restarts). Its directory is the volume that owns
-// database-sized transient staging; see stageDir.
+// DBPath is the running database's own file: the resolved boot-time path the
+// store opened, not the reloadable db_path config value (db_path is
+// startup-bound, so a reload that changes it leaves the live database at its
+// boot path until the process restarts). A symlinked db_path therefore
+// reports its target, which is the file SQLite actually opened and renamed
+// during admission. Its directory is the volume that owns database-sized
+// transient staging; see stageDir.
 func (s *Store) DBPath() string {
 	return s.path
 }
@@ -92,9 +94,11 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 // byte-buffered wrapper over the shared publish owner; restore uses
 // StageSnapshotFile so the validated database member is never copied into heap.
 func StageSnapshot(path string, data []byte) error {
-	if path == "" {
-		return fmt.Errorf("database path is empty")
+	resolved, err := ResolveDatabasePath(path)
+	if err != nil {
+		return err
 	}
+	path = resolved
 	if err := backup.CheckDatabase(filepath.Dir(path), data); err != nil {
 		return err
 	}
@@ -113,12 +117,14 @@ func StageSnapshot(path string, data []byte) error {
 // source, so the file-backed restore never writes a database-sized heap copy.
 // The source file is left to its owner.
 func StageSnapshotFile(path, source string) error {
-	if path == "" {
-		return fmt.Errorf("database path is empty")
-	}
 	if source == "" {
 		return fmt.Errorf("snapshot source path is empty")
 	}
+	resolved, err := ResolveDatabasePath(path)
+	if err != nil {
+		return err
+	}
+	path = resolved
 	if err := backup.CheckDatabaseFile(source); err != nil {
 		return err
 	}
@@ -154,10 +160,11 @@ func StageSnapshotFile(path, source string) error {
 // may be migrated in place and its stale sidecars removed, exactly as a boot
 // admission would do; the caller owns removing or quarantining it on failure.
 func ValidatePendingSnapshot(path string) error {
-	if path == "" {
-		return fmt.Errorf("database path is empty")
+	resolved, err := ResolveDatabasePath(path)
+	if err != nil {
+		return err
 	}
-	return preflightPendingSnapshot(PendingSnapshotPath(path))
+	return preflightPendingSnapshot(PendingSnapshotPath(resolved))
 }
 
 // publishSnapshot is the one atomic publish owner for both snapshot wrappers:

@@ -8,11 +8,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -349,6 +351,26 @@ func quoteJSON(tok string) string {
 // extract exactly (a style widening stays pinned), and a paren inside a
 // quoted token cannot cut the durationPairs group short. Malformed input
 // fails loudly instead of extracting a truncated token.
+// TestCaptureDurationOptionsMatchPauseAllowlist pins the MCP capture
+// vocabulary to the proxy's pauseDurations allowlist. The two surfaces accept
+// the same explicit session durations (empty means until stopped); a value
+// added to one list alone would let an MCP caller request a hold the HTTP
+// owner rejects, or leave a newly accepted HTTP duration unreachable from MCP.
+func TestCaptureDurationOptionsMatchPauseAllowlist(t *testing.T) {
+	var want []string
+	for token := range pauseDurations {
+		if token != "" {
+			want = append(want, token)
+		}
+	}
+	got := strings.Split(mcp.CaptureDurationOptions, ", ")
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("mcp.CaptureDurationOptions = %v, want the proxy pauseDurations allowlist %v", got, want)
+	}
+}
+
 func TestMenuDurationTokensAcceptEitherQuoteStyle(t *testing.T) {
 	single := "const X = [['', 'I resume'], durationPairs('15m', '1 hour')];"
 	double := `const X = [["", "I resume"], durationPairs("15m", "1 hour")];`

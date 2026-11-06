@@ -321,6 +321,12 @@ func mergeSortedMetricOrder[T ~int64 | ~float64](old, added []metricSample[T]) [
 	return out
 }
 
+// ChartPercentiles is the one percentile vocabulary the chart wire carries:
+// every timing series publishes p50, p95 and p99 in this order. The rank
+// layout below is sized to it, and the dashboard's CHART_PCTS selector is
+// pinned to the same triple by TestChartPercentilesMatchGoOrder.
+var ChartPercentiles = [3]float64{50, 95, 99}
+
 // Each bucket and the viewed period need only six sorted ranks. Positions
 // can repeat for sparse (but nonsuppressed) samples, so observe consumes every
 // matching position rather than discarding a repeated floor/ceiling rank.
@@ -340,7 +346,7 @@ func (s *metricRankSet) init(count int) {
 		s.next = len(s.positions)
 		return
 	}
-	for i, p := range [...]float64{50, 95, 99} {
+	for i, p := range ChartPercentiles {
 		lo, hi, fraction, _ := percentilePosition(count, p)
 		s.positions[2*i], s.positions[2*i+1] = lo, hi
 		s.fractions[i] = fraction
