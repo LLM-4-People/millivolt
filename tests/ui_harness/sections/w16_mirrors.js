@@ -231,9 +231,13 @@ module.exports = async function w16Mirrors(H) {
       check('escaped error keys decode for display and chips',
         sw.errorKeyType(sw.errorKey('a|b', 'c', 'd')) === 'a|b' &&
         sw.errorKeyDisplay(sw.errorKey('a', 'b', 'd')) === 'a|b|d' &&
-        sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) === '"a" · "b|c" · "d"' &&
+        sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) === 'a|b\\|c|d' &&
         sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) !==
           sw.errorKeyDisplay(sw.errorKey('a|b', 'c', 'd')) &&
+        // Any invented quoting can collide with ordinary text; the escaped
+        // key is the only injective display for a special part.
+        sw.errorKeyDisplay(sw.errorKey('a', 'b|c', 'd')) !==
+          sw.errorKeyDisplay(sw.errorKey('"a" · "b', 'c" · "d', 'e"')) &&
         sw.shortId('error', sw.errorKey('a|b', 'c', 'd')) === 'a|b');
 
       // The duration vocabularies mirror Go acceptance: PAUSE_DURS and

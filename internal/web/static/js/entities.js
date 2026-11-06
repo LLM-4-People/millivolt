@@ -355,15 +355,13 @@ function errorKeyParts(key) {
 
 function errorKeyType(key) { return errorKeyParts(key)[0] || 'error'; }
 
-// errorKeyDisplay renders the decoded parts for a card. A part that itself
-// contains the separator or a backslash is JSON-quoted, so two distinct
-// errors cannot render as the same text: the escaped filter id stays the
-// authoritative identity, and ordinary errors keep the familiar type|code|msg
-// spelling.
+// errorKeyDisplay renders the decoded parts for a card. When a part contains
+// the separator or a backslash, the escaped key itself is the only injective
+// human spelling (any invented quoting can collide with ordinary text), so it
+// is shown unchanged. Ordinary errors keep the familiar type|code|msg form.
 function errorKeyDisplay(key) {
   const parts = errorKeyParts(key);
-  if (!parts.some(p => p.includes('|') || p.includes('\\'))) return parts.join('|');
-  return parts.map(p => JSON.stringify(p)).join(' · ');
+  return parts.some(p => p.includes('|') || p.includes('\\')) ? key : parts.join('|');
 }
 
 // statusClass buckets a record's HTTP status into a coarse class. Keep in
