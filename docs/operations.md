@@ -1127,9 +1127,13 @@ declared length alone holds no budget), and `max_inflight_response_bytes` its
 budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
-(at most 1 MiB plus one 32 KiB chunk), and model discovery. Requests above
-any bound are refused with `503` and `Retry-After` before the body or upstream
-response is read. Request-body reads must make progress within
+(at most 1 MiB plus one 32 KiB chunk), and model discovery. A request-slot
+refusal is answered with `503` and `Retry-After` before the body is read. The
+body budget refuses on the read that would cross it; that chunk and the rest
+of the upload are not retained. The per-request cap still owns the status: a
+refused request drains at most the remaining `max_request_bytes` window so an
+over-cap body answers the definitive `413` instead of a retryable `503`, while
+a body that fits the cap answers `503`. Request-body reads must make progress within
 `request_body_idle_timeout` and finish within the absolute
 `request_body_read_timeout`, so a stalled peer releases its reservation
 without cutting off a slow but progressing upload. Buffered whole-document

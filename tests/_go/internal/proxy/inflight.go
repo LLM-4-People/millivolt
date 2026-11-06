@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -347,25 +348,65 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 		t.Fatalf("bytes = %d after release, want 0", got)
 	}
 
-	// The reader records a refusal instead of returning it, so the cap owner
-	// decides the status: the read still completes and reports the flag.
+	// A refused chunk is counted but not delivered: the reader reports the
+	// refusal immediately so the body owner releases its scratch instead of
+	// buffering the rest uncharged. readRequestHint owns the cap drain.
 	refused := &chargedReader{
 		r:      bytes.NewReader(make([]byte, 10)),
 		charge: func(int64) bool { return false },
 	}
-	if _, err := io.ReadAll(refused); err != nil {
-		t.Fatalf("a refused read must not error out of the reader: %v", err)
+	got, err := io.ReadAll(refused)
+	if !errors.Is(err, errBodyBudget) || len(got) != 0 {
+		t.Fatalf("refused read = %d bytes, err=%v; want 0 bytes and errBodyBudget", len(got), err)
 	}
-	if !refused.refused {
-		t.Fatal("a refused charge was not recorded")
+	if refused.read != 10 {
+		t.Fatalf("refused chunk count = %d, want 10", refused.read)
 	}
-	// A read that is chargeable leaves the flag clear.
+	// A read that is chargeable is delivered in full.
 	fine := &chargedReader{
 		r:      bytes.NewReader(make([]byte, 10)),
 		charge: func(int64) bool { return true },
 	}
-	if _, err := io.ReadAll(fine); err != nil || fine.refused {
-		t.Fatalf("a chargeable read reported refused=%v err=%v", fine.refused, err)
+	if got, err := io.ReadAll(fine); err != nil || fine.read != 10 || len(got) != 10 {
+		t.Fatalf("a chargeable read delivered %d bytes, read=%d err=%v", len(got), fine.read, err)
+	}
+}
+
+// TestReadRequestHintBudgetRefusalBoundsRetention pins the cap/budget split
+// after a refused charge: the body owner must not retain the upload, but it
+// still has to answer 413 for an over-cap body (a retry can never succeed)
+// and 503 only for a body that fits the cap.
+func TestReadRequestHintBudgetRefusalBoundsRetention(t *testing.T) {
+	const maxBytes = 1 << 20
+	cfg := config.Default()
+	for _, tc := range []struct {
+		name    string
+		size    int
+		want413 bool
+	}{
+		{"fits cap", maxBytes / 2, false},
+		{"exactly cap", maxBytes, false},
+		{"one byte over cap", maxBytes + 1, true},
+		{"far over cap", 4 * maxBytes, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+				bytes.NewReader(make([]byte, tc.size)))
+			req.ContentLength = -1 // unknown length exercises the grower
+			body, _, err := readRequestHint(req, maxBytes, false, requestReadHintMax,
+				func(int64) bool { return false }, cfg)
+			if body != nil {
+				t.Fatalf("refused request retained %d body bytes", len(body))
+			}
+			var overflow *http.MaxBytesError
+			if tc.want413 {
+				if !errors.As(err, &overflow) || overflow.Limit != maxBytes {
+					t.Fatalf("over-cap refusal = %T %v, want MaxBytesError(%d)", err, err, maxBytes)
+				}
+			} else if !errors.Is(err, errBodyBudget) {
+				t.Fatalf("fits-cap refusal = %T %v, want errBodyBudget", err, err)
+			}
+		})
 	}
 }
 

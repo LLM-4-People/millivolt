@@ -94,8 +94,8 @@ func (l *inflightLimiter) acquireBody() (*bodyReservation, bool) {
 }
 
 // chargeRead charges the budget for n bytes just read. A refusal leaves the
-// counter unchanged; the caller aborts the read and releases the whole
-// reservation on return.
+// counter unchanged; the charged reader aborts retention on that chunk and
+// the handler releases the whole reservation on return.
 func (r *bodyReservation) chargeRead(n int64) bool {
 	if n <= 0 {
 		return true
@@ -117,24 +117,29 @@ func (r *bodyReservation) release() { r.l.release(r.charged) }
 // chargedReader charges every byte it delivers to the body reservation, so a
 // declared length never reserves capacity the client does not send.
 //
-// A refusal is recorded rather than returned: the read is already bounded by
-// the per-request cap, so letting it finish proves whether this request is
-// definitively over `max_request_bytes`. That distinction owns the status: an
-// over-cap body answers 413, which a retry can never change, while only a body
-// that fits the cap may answer the retryable 503. Refusing immediately would
-// report an unrelated capacity 503 for a request that is simply too large.
+// A refused chunk is counted but not delivered: the reader returns the refusal
+// error immediately, so readRequestBody releases its scratch instead of
+// buffering the rest of the body. readRequestHint then drains at most the
+// remaining cap window (max_request_bytes+1 minus what was already read) to
+// keep the cap precedence without retaining those bytes: an over-cap body is
+// still 413, which a retry can never change, while a body that fits the cap is
+// the retryable 503. Letting the body reader finish instead retained up to
+// max_request_bytes of uncharged heap per refused request.
 type chargedReader struct {
 	r      io.Reader
 	charge func(int64) bool
-	// refused records that a chunk could not be charged. The read continues so
-	// the cap owner can take precedence; at most cap+1 bytes go uncharged.
-	refused bool
+	// read is every byte taken from the underlying reader, including the
+	// refused chunk. readRequestHint uses it to bound the cap drain.
+	read int64
 }
 
 func (c *chargedReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
-	if n > 0 && c.charge != nil && !c.refused && !c.charge(int64(n)) {
-		c.refused = true
+	if n > 0 {
+		c.read += int64(n)
+		if c.charge != nil && !c.charge(int64(n)) {
+			return 0, errBodyBudget
+		}
 	}
 	return n, err
 }
