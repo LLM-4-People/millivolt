@@ -489,6 +489,63 @@ function settingsFieldID(key, part) {
   return `settings-${part}-${encodeURIComponent(String(key))}`;
 }
 
+// Chrome's autofill audit flags any form control that carries neither an id
+// nor a name. Scalar settings fields already own settingsFieldID; the
+// composite editors (providers, aliases, model rules, request overrides,
+// sub-conversations) build rows from templates and later append more rows.
+// Naming each control in every template would duplicate one rule across all
+// producers and every append path, so the sheet names exactly the controls
+// that still lack both attributes, from their row key, position and
+// accessible label. The child-list observer keeps appended rows covered, and
+// naming writes only the name attribute, so it never re-enters the observer.
+let settingsControlObserver = null;
+
+function settingsControlName(el, owner, at) {
+  const label = String(el.getAttribute('aria-label') || el.className || el.type || el.tagName);
+  const slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+  return ['settings', owner.dataset.key || 'misc', at, slug || el.tagName.toLowerCase()].join('-');
+}
+
+function nameSettingsControls(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return 0;
+  const pending = new Map();
+  const collect = el => {
+    if (el.id || el.name) return;
+    const owner = el.closest('.st-row[data-key]') || el.closest('#settings-fields');
+    if (!owner) return;
+    if (!pending.has(owner)) pending.set(owner, []);
+    pending.get(owner).push(el);
+  };
+  if (typeof root.matches === 'function' && root.matches('input, select, textarea')) collect(root);
+  root.querySelectorAll('input, select, textarea').forEach(collect);
+  let named = 0;
+  for (const [owner, controls] of pending) {
+    const positions = new Map([...owner.querySelectorAll('input, select, textarea')].map((el, i) => [el, i]));
+    for (const el of controls) {
+      el.name = settingsControlName(el, owner, positions.get(el) ?? 0);
+      named++;
+    }
+  }
+  return named;
+}
+
+// watchSettingsFieldNames runs the naming pass for the full render and then
+// observes the container, so every later editor append inherits the same
+// identity rule without calling this owner itself.
+function watchSettingsFieldNames(box) {
+  if (!box) return;
+  nameSettingsControls(box);
+  if (settingsControlObserver || typeof MutationObserver !== 'function') return;
+  settingsControlObserver = new MutationObserver(records => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType === 1) nameSettingsControls(node);
+      }
+    }
+  });
+  settingsControlObserver.observe(box, { childList: true, subtree: true });
+}
+
 function settingsScalarErrorMessage(input) {
   const validity = input.validity;
   if (validity.valueMissing) return 'enter a value';

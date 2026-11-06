@@ -54,6 +54,9 @@ async function copyText(text) {
   try {
     area = document.createElement('textarea');
     area.value = value;
+    // The transient copy buffer is a form control even though it is invisible
+    // and never submitted; Chrome's autofill audit still expects an identity.
+    area.name = 'copy-fallback';
     area.setAttribute('readonly', '');
     area.setAttribute('data-copy-fallback', '');
     area.style.position = 'fixed';
