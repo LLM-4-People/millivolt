@@ -47,8 +47,14 @@ type Field struct {
 	HotReload bool     `json:"hot_reload"`
 	Min       *float64 `json:"min,omitempty"`
 	Max       *float64 `json:"max,omitempty"`
-	ZeroMeans string   `json:"zero_means,omitempty"`
-	Unit      string   `json:"unit,omitempty"`
+	// MinLabel and MaxLabel are the formatted bounds for display. The wire
+	// keeps Min/Max in their canonical unit (duration nanoseconds, bytes for
+	// byte sizes); Settings renders these labels so it never has to guess the
+	// unit. Filled once with ZeroToken, from the same formatBound owner.
+	MinLabel  string `json:"min_label,omitempty"`
+	MaxLabel  string `json:"max_label,omitempty"`
+	ZeroMeans string `json:"zero_means,omitempty"`
+	Unit      string `json:"unit,omitempty"`
 	// Choices is the closed vocabulary for a string setting whose validator
 	// accepts only named values. The schema and the validator read the same
 	// slice, so Settings renders a select instead of a free-text field and
@@ -85,7 +91,7 @@ func Categories() []Category {
 // schemaRegistry builds the schema once per process and shares it across all
 // callers. The slice is immutable after build; see Schema for the contract.
 var schemaRegistry = sync.OnceValue(func() []Field {
-	return withZeroTokens([]Field{
+	return withSchemaDerived([]Field{
 		// ---- server ----
 		{Key: "listen", Category: "server", Label: "Listen address",
 			Help: "Host:port the HTTP server binds. Restart required.",
@@ -456,13 +462,23 @@ func Schema() []Field {
 	return schemaRegistry()
 }
 
-func withZeroTokens(fields []Field) []Field {
+// withSchemaDerived fills the presentation tokens the Settings sheet reads:
+// the formatted zero for duration/bytes fields and the display labels for any
+// finite band. It runs once at registry build; the returned slice is the
+// shared immutable schema.
+func withSchemaDerived(fields []Field) []Field {
 	for i := range fields {
 		switch fields[i].Kind {
 		case KindDuration:
 			fields[i].ZeroToken = FormatDuration(0)
 		case KindBytes:
 			fields[i].ZeroToken = FormatByteSize(0)
+		}
+		if fields[i].Min != nil {
+			fields[i].MinLabel = fields[i].formatBound(*fields[i].Min)
+		}
+		if fields[i].Max != nil {
+			fields[i].MaxLabel = fields[i].formatBound(*fields[i].Max)
 		}
 	}
 	return fields

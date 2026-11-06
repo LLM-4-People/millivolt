@@ -510,7 +510,9 @@ function settingsScalarRangeError(input) {
   if (kind === 'duration') {
     const ms = parseGoDurationValue(raw);
     if (ms == null) return 'use a duration such as 10s or 1h';
-    value = ms / 1000;
+    // Field.Min/Max carry the Go time.Duration value (nanoseconds), the same
+    // canonical unit the YAML writer and validator use.
+    value = ms * 1e6;
   } else {
     value = parseGoByteSize(raw);
     if (value == null) return 'use a byte size such as 32MiB';
@@ -518,10 +520,10 @@ function settingsScalarRangeError(input) {
   const min = input.dataset.stMin === '' ? null : Number(input.dataset.stMin);
   const max = input.dataset.stMax === '' ? null : Number(input.dataset.stMax);
   if (min != null && value < min) {
-    return 'must be at least ' + (kind === 'duration' ? input.dataset.stMin + 's' : input.dataset.stMin + ' bytes');
+    return 'must be at least ' + (input.dataset.stMinLabel || input.dataset.stMin);
   }
   if (max != null && value > max) {
-    return 'must be at most ' + (kind === 'duration' ? input.dataset.stMax + 's' : input.dataset.stMax + ' bytes');
+    return 'must be at most ' + (input.dataset.stMaxLabel || input.dataset.stMax);
   }
   return '';
 }
@@ -552,7 +554,7 @@ function settingsFieldHTML(f, val, def, override) {
   const helpId = settingsFieldID(f.key, 'help');
   const errorId = settingsFieldID(f.key, 'error');
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
-  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
+  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-min-label="${escapeHtml(f.min_label || '')}" data-st-max-label="${escapeHtml(f.max_label || '')}" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
   const pills = (locked ? '<span class="st-pill lock">flag</span>' : '') +
     (f.hot_reload ? '' : '<span class="st-pill restart" title="takes a process restart">restart</span>');
   let hint = '';

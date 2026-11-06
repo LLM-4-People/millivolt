@@ -369,8 +369,8 @@ module.exports = async function settingsSearch(H) {
       revision: 'ux-settings-r1',
       fields: [
         { key: 'quota_pause_mode', category: 'quota', label: 'Mode', help: '', kind: 'string', hot_reload: true, choices: ['off', 'retry', 'manual'] },
-        { key: 'debug_capture_ttl', category: 'request', label: 'Capture TTL', help: '', kind: 'duration', hot_reload: true, min: 60, max: 604800 },
-        { key: 'max_request_bytes', category: 'request', label: 'Max request bytes', help: '', kind: 'bytes', hot_reload: true, min: 1024, max: 1073741824 },
+        { key: 'debug_capture_ttl', category: 'request', label: 'Capture TTL', help: '', kind: 'duration', hot_reload: true, min: 3600000000000, max: 604800000000000, min_label: '1h', max_label: '168h' },
+        { key: 'max_request_bytes', category: 'request', label: 'Max request bytes', help: '', kind: 'bytes', hot_reload: true, min: 1024, max: 1073741824, min_label: '1KiB', max_label: '1GiB' },
         { key: 'listen', category: 'server', label: 'Listen', help: '', kind: 'string', hot_reload: false },
       ],
       categories: [
@@ -392,10 +392,19 @@ module.exports = async function settingsSearch(H) {
     check('a malformed duration fails inline with a readable reason',
       !w.validateSettingsScalar(ttl) &&
       ttl.closest('.st-row').querySelector('.st-error').textContent.includes('duration'));
-    ttl.value = '30m';
+    ttl.value = '2h';
     check('a valid duration passes the shared scalar validator', w.validateSettingsScalar(ttl));
+    ttl.value = '30m';
+    check('a duration below the schema band fails inline and names the display bound',
+      !w.validateSettingsScalar(ttl) &&
+      ttl.closest('.st-row').querySelector('.st-error').textContent.includes('1h'));
     ttl.value = '999d';
     check('a duration above the schema band fails inline', !w.validateSettingsScalar(ttl));
+    ttl.value = 'garbage';
+    let blocked = false;
+    try { w.collectSettingsValues(true); } catch (err) { blocked = String(err.message || err).includes('debug_capture_ttl'); }
+    check('a malformed text scalar blocks collection before the POST', blocked);
+    ttl.value = '2h';
     const bytes = d.querySelector('.st-row[data-key="max_request_bytes"] input');
     bytes.value = '1MiB';
     check('a valid byte size passes the shared scalar validator', w.validateSettingsScalar(bytes));

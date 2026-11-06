@@ -227,6 +227,12 @@ function collectSettingsFieldValue(el, validate = false) {
     }
     return el.value.trim() && Number.isFinite(n) ? n : el.value;
   }
+  // Text scalars (duration and byte-size grammars) carry the same schema
+  // band. Only the number branch used to gate the POST, so an invalid
+  // duration reached the server despite the inline error.
+  if (validate && el.dataset.stScalar === '1' && !validateSettingsScalar(el)) {
+    throw Object.assign(new Error(k + ': ' + settingsScalarErrorMessage(el)), { input: el });
+  }
   return el.value;
 }
 
