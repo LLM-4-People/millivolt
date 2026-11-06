@@ -354,7 +354,17 @@ function errorKeyParts(key) {
 }
 
 function errorKeyType(key) { return errorKeyParts(key)[0] || 'error'; }
-function errorKeyDisplay(key) { return errorKeyParts(key).join('|'); }
+
+// errorKeyDisplay renders the decoded parts for a card. A part that itself
+// contains the separator or a backslash is JSON-quoted, so two distinct
+// errors cannot render as the same text: the escaped filter id stays the
+// authoritative identity, and ordinary errors keep the familiar type|code|msg
+// spelling.
+function errorKeyDisplay(key) {
+  const parts = errorKeyParts(key);
+  if (!parts.some(p => p.includes('|') || p.includes('\\'))) return parts.join('|');
+  return parts.map(p => JSON.stringify(p)).join(' · ');
+}
 
 // statusClass buckets a record's HTTP status into a coarse class. Keep in
 // lockstep with contribStatusClass in aggregate_status.go. Live in-flight rows
