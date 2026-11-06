@@ -666,7 +666,12 @@ hot-applies through the same owner as a Settings save, is reflected in
 `last_reload`, and reports restart-required keys. Database
 **replace** streams the decoded file into a pending snapshot next to `db_path`,
 syncs it, and atomically renames it into place; Open admits the pending file
-only after it checks again, and the restore waits for process restart.
+only after it checks again, and the restore waits for process restart. A
+`db_path` that is a symlink is resolved to its real target first, so staging,
+admission, the rollback set and the state marker all belong to the file SQLite
+actually opened; the link stays intact and points at the replacement. A
+combined merge compares the same resolved identities rather than the two
+spellings.
 Database **merge** attaches the decoded file read-only and inserts request ids
 that are not already in the live store immediately (live rows win on conflict);
 the attached snapshot rejects writes, while the live database stays writable

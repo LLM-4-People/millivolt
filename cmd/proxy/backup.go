@@ -786,7 +786,15 @@ type restorePendingGuard struct {
 // config phase can restore it byte-for-byte instead of deleting it. No pending
 // file means the guard only owns removing its newly staged successor.
 func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
-	pending := storage.PendingSnapshotPath(dbPath)
+	// The configured db_path may be a symlink. Staging and boot admission
+	// resolve it, so the preserved pending slot must be the same real-file
+	// name or rollback would restore beside the link instead of over the
+	// database.
+	resolved, err := storage.ResolveDatabasePath(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	pending := storage.PendingSnapshotPath(resolved)
 	g := &restorePendingGuard{pending: pending}
 	if _, err := os.Lstat(pending); err != nil {
 		if os.IsNotExist(err) {
@@ -861,7 +869,14 @@ func validateRestoreMergePath(plan *restoreConfigPlan, store *storage.Store) err
 	if plan == nil {
 		return nil
 	}
-	if filepath.Clean(plan.dbPath) == filepath.Clean(store.DBPath()) {
+	// Compare file identities, not spellings: db_path may be a symlink whose
+	// resolved target is exactly the running store. A genuinely different
+	// path still fails below.
+	resolved, err := storage.ResolveDatabasePath(plan.dbPath)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(resolved) == filepath.Clean(store.DBPath()) {
 		return nil
 	}
 	return fmt.Errorf("config and database merge cannot change db_path: the restored config selects %q but the running store is %q; merge the database separately or use database_mode=replace", plan.dbPath, store.DBPath())
@@ -1045,10 +1060,20 @@ func backupStatus() map[string]any {
 		dbPath = liveCfg.DBPath
 	}
 	liveMu.Unlock()
+	if store != nil {
+		// The store's path is already the resolved real file, the same base
+		// staging and admission derive their names from.
+		dbPath = store.DBPath()
+	}
 	pending := false
 	if dbPath != "" {
-		_, err := os.Stat(storage.PendingSnapshotPath(dbPath))
-		pending = err == nil
+		resolved, err := storage.ResolveDatabasePath(dbPath)
+		if err != nil {
+			log.Printf("backup status: %v", err)
+		} else {
+			_, statErr := os.Stat(storage.PendingSnapshotPath(resolved))
+			pending = statErr == nil
+		}
 	}
 	var requests int64
 	if store != nil {
