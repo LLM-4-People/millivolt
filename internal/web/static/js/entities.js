@@ -337,6 +337,25 @@ function errorKeyMatches(key, type, code, msg) {
   return key === errorKey(type, code, msg);
 }
 
+// errorKeyParts decodes an escaped error key back into [type, code, message].
+// A backslash escapes the next character; the encoder only emits \\ and \|,
+// so this is the exact inverse of escapeErrorKeyPart.
+function errorKeyParts(key) {
+  const parts = [];
+  let cur = '';
+  for (let i = 0; i < key.length; i++) {
+    const ch = key[i];
+    if (ch === '\\' && i + 1 < key.length) { cur += key[++i]; continue; }
+    if (ch === '|') { parts.push(cur); cur = ''; continue; }
+    cur += ch;
+  }
+  parts.push(cur);
+  return parts;
+}
+
+function errorKeyType(key) { return errorKeyParts(key)[0] || 'error'; }
+function errorKeyDisplay(key) { return errorKeyParts(key).join('|'); }
+
 // statusClass buckets a record's HTTP status into a coarse class. Keep in
 // lockstep with contribStatusClass in aggregate_status.go. Live in-flight rows
 // (the live flag - status_code may already be set after upstream headers)

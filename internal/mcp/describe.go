@@ -248,7 +248,7 @@ var ErrorFilterKeys = []string{"type", "code", "message"}
 // against the owner, internal/web errorEntries plus errorKey, by the web
 // package's TestMCPErrorKeyExamplesAreProducedByTheOwner; a key nothing
 // produces (the old note showed "other||") fails that test.
-var ErrorKeyExamples = []string{"server_error|500|"}
+var ErrorKeyExamples = []string{"server_error|500|", `a\|b|c|d`}
 
 // RequestIndexes is the published planner reference: the durable indexes a
 // query can use, plus the explicit statement that nothing else is indexed -
@@ -291,8 +291,9 @@ var vocabularies = []VocabularyDoc{
 		Dimension: "error",
 		Values:    ErrorFilterKeys,
 		Note: "a filter value is type|code|message joined with '|', in that order, from the stored error_type, error_code and error_msg. " +
-			"The proxy fills a missing type with http_<status> and a missing code with the status where it can, but a part CAN be empty " +
-			"(a real key is " + strings.Join(ErrorKeyExamples, " or ") + "), so a value is three parts even when one is blank. " +
+			"A backslash escapes a backslash or the '|' separator inside a part, so a type containing '|' is written a\\|b; ordinary parts " +
+			"need no escaping. The proxy fills a missing type with http_<status> and a missing code with the status where it can, but a part " +
+			"CAN be empty (real keys are " + strings.Join(ErrorKeyExamples, " or ") + "), so a value is three parts even when one is blank. " +
 			"Use the values tool on error_type, error_code and error_message to discover them",
 	},
 	{

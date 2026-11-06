@@ -115,7 +115,7 @@ function recordHasError(r, key) {
 function shortId(dim, id) {
   if (id == null || id === '') return '';
   if (dim === 'conversation') return id.startsWith('s:') ? id.slice(2) : id;
-  if (dim === 'error') return id.split('|')[0] || 'error';
+  if (dim === 'error') return errorKeyType(id);
   if (dim === 'key') return '…' + id.slice(0, 8);
   if (dim === 'time') return TIME_BUCKET_LABELS[id] || id;
   return id;
@@ -644,7 +644,9 @@ function xpNodeCard(st, e, payload) {
     : ` data-xp-key="${escapeHtml(key)}" aria-pressed="${selected}"`;
   const tag = synthetic ? 'div' : 'button';
   const typeAttr = synthetic ? '' : ' type="button"';
-  const label = synthetic ? key + ' (grouped)' : key;
+  // An error key is escaped; show the decoded human identity on the card while
+  // the filter id keeps its unambiguous escaped spelling.
+  const label = synthetic ? key + ' (grouped)' : dim === 'error' ? errorKeyDisplay(key) : key;
   const info = dim === 'conversation' ? e.conversation : null;
   const role = info?.role === 'main' || info?.role === 'sub' ? info.role : 'unresolved';
   const roleTitle = role === 'main' ? 'No parent declared in observed history' : role === 'sub' ?

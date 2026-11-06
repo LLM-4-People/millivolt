@@ -228,6 +228,10 @@ module.exports = async function w16Mirrors(H) {
         sw.errorKey('a', 'b\\c', 'd') === 'a|b\\\\c|d' &&
         sw.errorKeyMatches('a|b\\|c|d', 'a', 'b|c', 'd') &&
         !sw.errorKeyMatches('a|b\\|c|d', 'a|b', 'c', 'd'));
+      check('escaped error keys decode for display and chips',
+        sw.errorKeyType(sw.errorKey('a|b', 'c', 'd')) === 'a|b' &&
+        sw.errorKeyDisplay(sw.errorKey('a|b', 'c', 'd')) === 'a|b|c|d' &&
+        sw.shortId('error', sw.errorKey('a|b', 'c', 'd')) === 'a|b');
 
       // The duration vocabularies mirror Go acceptance: PAUSE_DURS and
       // DEBUG_DURS tokens are the pauseDurations allowlist (pinned through
