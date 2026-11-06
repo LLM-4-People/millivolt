@@ -8,11 +8,11 @@ import (
 	"testing"
 )
 
-// snapshotWithDebugID builds a valid packed snapshot and then inserts one
-// request_debug row whose id is the supplied SQL expression. SQLite allows
-// NULL in a TEXT PRIMARY KEY and stores any value class in a non-STRICT
-// column, so these shapes are reachable through an imported snapshot.
-func snapshotWithDebugID(t *testing.T, idExpr string) []byte {
+// snapshotWithDebugRow builds a valid packed snapshot and then inserts one
+// request_debug row with the supplied VALUES tuple. SQLite allows NULL in a
+// TEXT PRIMARY KEY and stores any value class in a non-STRICT column, so these
+// shapes are reachable through an imported snapshot.
+func snapshotWithDebugRow(t *testing.T, values string) []byte {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "bad-debug.db")
 	if err := os.WriteFile(path, packedSnapshot(t, "row"), 0o600); err != nil {
@@ -23,7 +23,7 @@ func snapshotWithDebugID(t *testing.T, idExpr string) []byte {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`INSERT INTO request_debug(id, session_id, captured_at, expires_at, payload)
-		VALUES (` + idExpr + `, 'sess', 1, 0, '{}')`); err != nil {
+		VALUES (` + values + `)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -42,21 +42,25 @@ func snapshotWithDebugID(t *testing.T, idExpr string) []byte {
 func TestRestoreRejectsUnfetchableDebugCaptureIDs(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		expr string
+		row  string
 	}{
-		{"null", "NULL"},
-		{"empty", "''"},
-		{"blank", "'  '"},
-		{"blob", "X'4142'"},
+		{"null id", "NULL, 'sess', 1, 0, '{}'"},
+		{"empty id", "'', 'sess', 1, 0, '{}'"},
+		{"blank id", "'  ', 'sess', 1, 0, '{}'"},
+		{"tab id", "char(9), 'sess', 1, 0, '{}'"},
+		{"blob id", "X'4142', 'sess', 1, 0, '{}'"},
+		{"negative expiry", "'id', 'sess', 1, -1, '{}'"},
+		{"blob payload", "'id', 'sess', 1, 0, X'00'"},
+		{"negative capture", "'id', 'sess', -1, 0, '{}'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "dst.db")
-			if err := StageSnapshot(path, snapshotWithDebugID(t, tc.expr)); err != nil {
+			if err := StageSnapshot(path, snapshotWithDebugRow(t, tc.row)); err != nil {
 				t.Fatal(err)
 			}
 			if err := ValidatePendingSnapshot(path); err == nil {
-				t.Fatalf("%s capture id was admitted", tc.name)
-			} else if !strings.Contains(err.Error(), "unfetchable capture id") {
+				t.Fatalf("%s capture row was admitted", tc.name)
+			} else if !strings.Contains(err.Error(), "capture") {
 				t.Fatalf("rejection = %v", err)
 			}
 		})
@@ -68,21 +72,22 @@ func TestRestoreRejectsUnfetchableDebugCaptureIDs(t *testing.T) {
 func TestMergeRejectsUnfetchableDebugCaptureIDs(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		expr string
+		row  string
 	}{
-		{"null", "NULL"},
-		{"empty", "''"},
-		{"blob", "X'4142'"},
+		{"null id", "NULL, 'sess', 1, 0, '{}'"},
+		{"empty id", "'', 'sess', 1, 0, '{}'"},
+		{"blob id", "X'4142', 'sess', 1, 0, '{}'"},
+		{"negative expiry", "'id', 'sess', 1, -1, '{}'"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live := openPurgeTestStore(t, testOpts)
 			path := filepath.Join(t.TempDir(), "incoming.db")
-			if err := os.WriteFile(path, snapshotWithDebugID(t, tc.expr), 0o600); err != nil {
+			if err := os.WriteFile(path, snapshotWithDebugRow(t, tc.row), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := live.MergeSnapshotFile(t.Context(), path); err == nil {
-				t.Fatalf("%s capture id was merged", tc.name)
-			} else if !strings.Contains(err.Error(), "unfetchable capture id") {
+				t.Fatalf("%s capture row was merged", tc.name)
+			} else if !strings.Contains(err.Error(), "capture") {
 				t.Fatalf("merge rejection = %v", err)
 			}
 			if n := countRows(t, live); n != 0 {

@@ -123,13 +123,13 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
-	// A capture's id is its only fetch key. SQLite permits NULL in a TEXT
-	// PRIMARY KEY and the table is not STRICT, so an imported sidecar can
-	// carry NULL, a BLOB or a blank id. Such a row can never be fetched by
-	// LoadDebugCapture, never matches the expiry sweep, and still counts
-	// against debug_store_max_bytes. Reject the set before any live file is
-	// touched.
-	if err := preflightDebugCaptureKeys(context.Background(), db, "", "pending snapshot"); err != nil {
+	// A capture's id is its only fetch key, and the sidecar's value classes
+	// drive every later read and expiry. SQLite permits NULL in a TEXT PRIMARY
+	// KEY, and the table is not STRICT, so an imported sidecar can carry NULL,
+	// a BLOB or a blank id, a non-text payload, or a negative expiry. Such a
+	// row can never be fetched or swept while it still counts against
+	// debug_store_max_bytes. Reject the set before any live file is touched.
+	if err := preflightDebugSidecar(context.Background(), db, "", "pending snapshot"); err != nil {
 		db.Close()
 		return err
 	}
@@ -202,26 +202,42 @@ func preflightForeignTriggers(ctx context.Context, db mergeConn) error {
 	return nil
 }
 
-// preflightDebugCaptureKeys rejects a request_debug set with an id that cannot
-// be fetched. The sidecar schema keeps `id TEXT PRIMARY KEY` (SQLite permits
-// NULL there, and the table is not STRICT), and neither admission nor merge
-// rebuilds it. LoadDebugCapture matches `id = ?`, and the expiry sweep selects
-// by expires_at, so a NULL/BLOB/blank id is invisible to reads and expiry while
-// its payload still counts against the debug byte cap. Deny the whole set at
-// both trust boundaries instead of importing dead weight.
-func preflightDebugCaptureKeys(ctx context.Context, db mergeConn, schema, label string) error {
+// preflightDebugSidecar rejects a request_debug set whose keys or values
+// cannot be read back or expired. The sidecar schema keeps `id TEXT PRIMARY
+// KEY` (SQLite permits NULL there, and the table is not STRICT), and neither
+// admission nor merge rebuilds it. LoadDebugCapture matches `id = ?`, the
+// expiry sweep selects by expires_at, and both scan payload into a string, so
+// a NULL/BLOB/blank id, a missing or non-text column, or a negative expiry is
+// invisible to reads and expiry while its payload still counts against the
+// debug byte cap. A missing column fails the query, so the fence also catches
+// a legacy table the initializer could not add columns to.
+func preflightDebugSidecar(ctx context.Context, db mergeConn, schema, label string) error {
 	table := "request_debug"
 	if schema != "" {
 		table = schema + ".request_debug"
 	}
-	var bad int64
+	blank := `TRIM(id, char(9)||char(10)||char(11)||char(12)||char(13)||char(32)) = ''`
+	var badIDs int64
 	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM `+table+` WHERE id IS NULL OR typeof(id) <> 'text' OR TRIM(id) = ''`).Scan(&bad); err != nil {
+		`SELECT COUNT(*) FROM `+table+` WHERE id IS NULL OR typeof(id) <> 'text' OR `+blank).Scan(&badIDs); err != nil {
 		return fmt.Errorf("%s debug capture ids: %w", label, err)
 	}
-	if bad != 0 {
+	if badIDs != 0 {
 		return fmt.Errorf("%s request_debug has %d unfetchable capture id(s); every capture id must be non-empty text",
-			label, bad)
+			label, badIDs)
+	}
+	var badValues int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE
+			typeof(session_id) <> 'text' OR
+			typeof(payload) <> 'text' OR
+			typeof(captured_at) <> 'integer' OR captured_at < 0 OR
+			typeof(expires_at) <> 'integer' OR expires_at < 0`).Scan(&badValues); err != nil {
+		return fmt.Errorf("%s debug capture values: %w", label, err)
+	}
+	if badValues != 0 {
+		return fmt.Errorf("%s request_debug has %d invalid capture row(s); payload and session_id must be text, timestamps must be non-negative integers",
+			label, badValues)
 	}
 	return nil
 }
