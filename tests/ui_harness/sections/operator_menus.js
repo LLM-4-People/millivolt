@@ -445,6 +445,21 @@ module.exports = async function operatorMenus(H) {
           !d.getElementById('pf-lists').hidden &&
           d.querySelector('#pf-clients input[value="client-a"]').checked &&
           d.getElementById('pf-clients-n').textContent === '1 selected');
+        // A kept named draft must not travel with a global hold: the server
+        // rejects all combined with new/clients/providers.
+        d.getElementById('pf-scope').value = 'all';
+        w.onPauseScopeChange();
+        let allBody;
+        const originalFetch = w.fetch;
+        w.fetch = async (_url, options) => {
+          allBody = JSON.parse(options.body);
+          return {ok: true, json: async () => ({ok: true, paused: true, holds: [{id: 'all-hold', all: true}], queued: 0})};
+        };
+        await w.applyPauseMenu();
+        w.fetch = originalFetch;
+        check('applying all traffic omits the narrower scope fields the server rejects',
+          allBody && allBody.all === true &&
+          !('new' in allBody) && !('clients' in allBody) && !('providers' in allBody));
         w.hideHdrMenu('pause-menu');
       }
       {

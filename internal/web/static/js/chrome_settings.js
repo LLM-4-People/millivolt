@@ -753,7 +753,16 @@ function applyPauseMenu() {
   const clients = all ? [] : selectedCheckboxValues('pf-clients');
   const providers = all ? [] : selectedCheckboxValues('pf-providers');
   if (!all && !neu && !clients.length && !providers.length) return;
-  const body = { paused: true, all, new: !all && neu, clients, providers, duration: pauseMenuDuration() };
+  const body = { paused: true, all, duration: pauseMenuDuration() };
+  // The server rejects "all" combined with any narrower scope, and `all`
+  // already covers every narrower selection. Omit those fields entirely so a
+  // draft kept for the named scope cannot poison a global hold. New-client and
+  // named scopes stay explicit; new plus named clients is a documented union.
+  if (!all) {
+    body.new = neu;
+    body.clients = clients;
+    body.providers = providers;
+  }
   if (pauseEditID) body.id = pauseEditID;
   const cap = pauseMenuCap();
   if (Number.isNaN(cap)) {
