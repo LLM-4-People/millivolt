@@ -396,10 +396,17 @@ stored history or the configuration revision.
 
 Settings uses the same schema, validation and defaults as configuration files.
 Search finds fields across categories. Changed values are revision-checked;
-the UI identifies hot-reload and restart requirements. Structured fields replace
-their whole map/list value rather than recursively merging nested entries.
-The generated [configuration example](../proxy.example.yaml) documents every
-field, including categories not pictured here.
+every row whose field is restart-bound carries its own `restart` marker instead
+of only a category banner. Closed vocabularies render as selects from the
+schema's `choices`, and duration/byte values are parsed and checked against the
+schema's numeric band before Apply. A read-only config disables its field
+controls, not only Apply. The category rail right-aligns its row counts beside
+the label; on a phone it becomes one horizontally scrollable chip strip so the
+field pane keeps the height. Switching categories resets the field scroller,
+and the footer status is a live region with a distinct error tone. Structured
+fields replace their whole map/list value rather than recursively merging
+nested entries. The generated [configuration example](../proxy.example.yaml)
+documents every field, including categories not pictured here.
 
 ### Dashboard cadence
 

@@ -162,9 +162,9 @@ module.exports = async function lazySettings(H) {
       check('a settings load failure reports a console error',
         failed.errors.some(line => line.includes('settings module failed to load')));
       failed.sw.toggleSettings({ stopPropagation() {} });
-      await sleep(0); // negative proof: a failed load is not retried on the next open
-      check('a failed settings load is not retried on the next open',
-        failed.appended.length === 1);
+      await sleep(0);
+      check('a failed settings load is retried on the next open',
+        failed.appended.length === 2);
     } finally { failed.dom.window.close(); }
   }
 };

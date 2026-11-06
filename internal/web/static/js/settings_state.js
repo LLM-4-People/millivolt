@@ -61,13 +61,15 @@ function wireSettingsDelegation() {
     if (e.target.classList && (e.target.classList.contains('sp-upath') || e.target.classList.contains('sp-cost-in') || e.target.classList.contains('sp-label') || e.target.classList.contains('sp-mkey') || e.target.classList.contains('sp-mpath') || e.target.classList.contains('sp-hname') || e.target.classList.contains('sp-hval'))) {
       const trim = e.target.closest('.ro-wrap') ? trimServerSpace : value => String(value == null ? '' : value).trim();
       const v = trim(e.target.value);
-      let bad = false;
+      let bad = false, reason = '';
       if (v !== '') {
-        if (e.target.classList.contains('sp-mpath')) bad = !v.startsWith('/');
-        else if (e.target.classList.contains('sp-mkey') || e.target.classList.contains('sp-upath')) bad = !PROV_PATH_RE.test(v);
-        else if (e.target.classList.contains('sp-hname')) bad = !PROV_HEADER_RE.test(v);
+        if (e.target.classList.contains('sp-mpath')) { bad = !v.startsWith('/'); reason = 'a model metadata path must start with /'; }
+        else if (e.target.classList.contains('sp-mkey') || e.target.classList.contains('sp-upath')) { bad = !PROV_PATH_RE.test(v); reason = 'use a dotted response path such as usage.input_tokens'; }
+        else if (e.target.classList.contains('sp-hname')) { bad = !PROV_HEADER_RE.test(v); reason = 'use a valid HTTP header name'; }
       }
       e.target.classList.toggle('prov-bad', bad);
+      if (bad) { e.target.title = reason; e.target.setAttribute('aria-invalid', 'true'); }
+      else { e.target.removeAttribute('title'); e.target.removeAttribute('aria-invalid'); }
     }
     const mrMode = e.target.classList && e.target.classList.contains('mr-mode') ? e.target.closest('.mr-row') : null;
     if (mrMode) {
@@ -404,6 +406,8 @@ function showSettingsCat() {
       const n = perCat.get(btn.dataset.stCat) || 0;
       const badge = btn.querySelector('.rail-n');
       if (badge) badge.textContent = n;
+      const label = btn.querySelector('.ent-lb');
+      if (label) btn.setAttribute('aria-label', label.textContent + ', ' + n + (n === 1 ? ' setting' : ' settings'));
       btn.classList.toggle('has-hit', !!q && n > 0);
       btn.classList.toggle('is-miss', !!q && n === 0);
     });
@@ -458,6 +462,7 @@ function applySettings() {
   }
   const submitted = JSON.stringify(values);
   btn.dataset.busy = '1';
+  settingsStatus('saving');
   updateSettingsActions();
   // Model-rules save gate: nothing invalid reaches the POST (the row is
   // already marked red inline - focus + flash the first offender).
@@ -530,7 +535,7 @@ function applySettings() {
     if (settingsIsDirty()) settingsStatus('saved · ' + settingsDirtyCount() + ' unsaved changes');
     if (lastData) renderAll(lastData);
   }).catch(err => {
-    settingsStatus(String(err.message || err));
+    settingsStatus(String(err.message || err), 'error');
   }).finally(() => { if (btn) delete btn.dataset.busy; updateSettingsActions(); });
 }
 
@@ -538,6 +543,7 @@ function revertSettings() {
   const btn = $('btn-settings-revert');
   if (btn && btn.disabled) return;
   if (btn) btn.dataset.busy = '1';
+  settingsStatus('reverting');
   updateSettingsActions();
   return fetchSettings(true).finally(() => {
     if (btn) delete btn.dataset.busy;
@@ -553,6 +559,8 @@ document.getElementById('settings-rail')?.addEventListener('click', e => {
   const q = $('settings-q');
   if (q) q.value = '';
   showSettingsCat();
+  const fields = $('settings-fields');
+  if (fields) fields.scrollTop = 0;
 });
 
 // ---------- storage purge controls ----------

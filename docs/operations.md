@@ -139,9 +139,14 @@ constant.
 ### Saving settings safely
 
 Settings collects a draft until Apply. Revert reloads the saved document, and
-closing a dirty sheet keeps it open until Apply or Revert. The server validates the whole
-result and compares its revision before writing. A stale tab receives 409;
-reload/review its values instead of resubmitting an old full form.
+closing a dirty sheet keeps it open until Apply or Revert; an open dirty draft
+also asks the browser to confirm a tab close or reload. The server validates the
+whole result and compares its revision before writing. A stale tab receives 409;
+reload/review its values instead of resubmitting an old full form. The sheet
+renders closed vocabularies as selects from the schema's `choices` and checks
+duration/byte text against the schema's numeric band before the POST; the server
+remains the authority. With no writable config the field controls are disabled,
+not only the Apply action.
 
 API saves overlay supplied top-level keys on the saved config. Omitted keys
 remain unchanged, but a supplied map/list replaces that entire field. For

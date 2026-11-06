@@ -49,6 +49,11 @@ type Field struct {
 	Max       *float64 `json:"max,omitempty"`
 	ZeroMeans string   `json:"zero_means,omitempty"`
 	Unit      string   `json:"unit,omitempty"`
+	// Choices is the closed vocabulary for a string setting whose validator
+	// accepts only named values. The schema and the validator read the same
+	// slice, so Settings renders a select instead of a free-text field and
+	// the accepted spellings cannot drift.
+	Choices []string `json:"choices,omitempty"`
 	// ZeroToken is the formatted zero for duration/bytes fields, filled by
 	// Schema from FormatDuration/FormatByteSize so Settings does not hardcode 0s/0B.
 	ZeroToken string `json:"zero_token,omitempty"`
@@ -262,7 +267,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindBool, HotReload: true},
 		{Key: "client_error_class", Category: "queue", Label: "Client error class",
 			Help: "Negotiate millivolt's canonical error class to clients on the LLM relay surface. off leaves relayed responses exactly as the provider sent them. header stamps X-Proxy-Error-Class (rate_limit, quota, unavailable, unreachable, timeout, content, client_error, proxy, canceled, upstream) and a class-derived X-Should-Retry: true|false on every error status before the status line commits, so a client can tell a rate limit announced by a 400 from a client fault and a durable quota block from transient backpressure without parsing provider envelopes. The body is never rewritten. suppress_client_retries still wins while it is on; mid-stream SSE errors cannot carry new headers. Reload applies to new responses.",
-			Kind: KindString, HotReload: true},
+			Kind: KindString, HotReload: true, Choices: ClientErrorClassModes},
 
 		// ---- storm ----
 		{Key: "storm_enabled", Category: "storm", Label: "Enable protection",
@@ -326,7 +331,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		// ---- quota ----
 		{Key: "quota_pause_mode", Category: "quota", Label: "Mode",
 			Help: "Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits; in-band occurrences included): off surfaces it immediately; retry opens a provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per the storm recovery delays, new requests park on the gate (bounded by storm_max_queue/storm_max_wait), and the gate closes after quota_pause_recovery_successes consecutive successful probes (the default 1 closes on the first 2xx); manual creates an indefinite provider pause that only an operator resumes. The built-in classification is fixed (quota_error_classes may add unknown spellings); only the reaction is configurable. OpenAI-compatible wire only; Anthropic and Cursor upstreams keep the off behavior.",
-			Kind: KindString, HotReload: true},
+			Kind: KindString, HotReload: true, Choices: QuotaPauseModes},
 		{Key: "quota_pause_recovery_successes", Category: "quota", Label: "Recovery successes",
 			Help: "Consecutive successful recovery probes that close a retry-mode quota gate. 1 releases the queue on the first 2xx. Meaningful only in retry mode.",
 			Kind: KindInt, HotReload: true, Min: num(1), Max: num(100)},
@@ -351,7 +356,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindInt, HotReload: true, Min: num(StreamToolCallsMin), Max: num(StreamToolCallsBandMax)},
 		{Key: "translation_loss", Category: "format", Label: "Translation loss policy",
 			Help: "What a cross-protocol translation does when the target cannot represent a client field. warn (default) drops optional fields and reports them in X-Proxy-Warnings; reject fails the request with 400 naming the fields before any upstream send and refuses every recorded loss, including a documented approximation. Structural features are always rejected when they cannot be honored. A response-side loss is never fatal: a non-streaming response reports it in X-Proxy-Warnings, and a streaming response drops it without a header. Hot-reloads.",
-			Kind: KindString, HotReload: true},
+			Kind: KindString, HotReload: true, Choices: TranslationLossPolicies},
 		{Key: "cursor_default_context_window", Category: "format", Label: "Cursor default context window",
 			Help: "Optional context-window hint stamped onto every model in GET /v1/models when X-Proxy-Format is cursor. 0 omits the field.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "omit (client default)", Unit: "tokens"},

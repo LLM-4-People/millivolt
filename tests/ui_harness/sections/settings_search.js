@@ -360,4 +360,69 @@ module.exports = async function settingsSearch(H) {
     w.closeSettings(true);
     delete w.__settingsNoopRestore;
   }
+
+  // ---- redesigned settings controls: schema-owned choices and numeric
+  // bands, per-field restart markers, count alignment, scroll reset and the
+  // read-only field state.
+  {
+    const doc = {
+      revision: 'ux-settings-r1',
+      fields: [
+        { key: 'quota_pause_mode', category: 'quota', label: 'Mode', help: '', kind: 'string', hot_reload: true, choices: ['off', 'retry', 'manual'] },
+        { key: 'debug_capture_ttl', category: 'request', label: 'Capture TTL', help: '', kind: 'duration', hot_reload: true, min: 60, max: 604800 },
+        { key: 'max_request_bytes', category: 'request', label: 'Max request bytes', help: '', kind: 'bytes', hot_reload: true, min: 1024, max: 1073741824 },
+        { key: 'listen', category: 'server', label: 'Listen', help: '', kind: 'string', hot_reload: false },
+      ],
+      categories: [
+        { id: 'quota', label: 'Quota pause', help: '' },
+        { id: 'request', label: 'Request', help: '' },
+        { id: 'server', label: 'Server', help: '' },
+      ],
+      values: { quota_pause_mode: 'retry', debug_capture_ttl: '24h', max_request_bytes: '32MiB', listen: ':8080' },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    w.settingsCat = 'quota';
+    w.fillSettingsForm(doc);
+    const mode = d.querySelector('.st-row[data-key="quota_pause_mode"] select');
+    check('a schema enum renders a closed select instead of free text',
+      mode && mode.tagName === 'SELECT' &&
+      [...mode.options].map(o => o.value).join(',') === 'off,retry,manual');
+    const ttl = d.querySelector('.st-row[data-key="debug_capture_ttl"] input');
+    ttl.value = 'garbage';
+    check('a malformed duration fails inline with a readable reason',
+      !w.validateSettingsScalar(ttl) &&
+      ttl.closest('.st-row').querySelector('.st-error').textContent.includes('duration'));
+    ttl.value = '30m';
+    check('a valid duration passes the shared scalar validator', w.validateSettingsScalar(ttl));
+    ttl.value = '999d';
+    check('a duration above the schema band fails inline', !w.validateSettingsScalar(ttl));
+    const bytes = d.querySelector('.st-row[data-key="max_request_bytes"] input');
+    bytes.value = '1MiB';
+    check('a valid byte size passes the shared scalar validator', w.validateSettingsScalar(bytes));
+    bytes.value = '1XB';
+    check('an unknown byte suffix fails inline', !w.validateSettingsScalar(bytes));
+    bytes.value = '999GiB';
+    check('a byte size above the schema band fails inline', !w.validateSettingsScalar(bytes));
+    check('only a restart-bound field carries the per-field restart pill',
+      !!d.querySelector('[data-key="listen"] .st-pill.restart') &&
+      !d.querySelector('[data-key="debug_capture_ttl"] .st-pill.restart'));
+    check('the settings status line is announced as a live region',
+      d.getElementById('settings-count').getAttribute('role') === 'status' &&
+      d.getElementById('settings-count').getAttribute('aria-live') === 'polite');
+    const railCount = d.querySelector('#settings-rail .rail-n');
+    const countStyle = w.getComputedStyle(railCount);
+    check('settings rail counts right-align instead of taking the explorer count floor',
+      countStyle.textAlign === 'right' && countStyle.minWidth !== '90px');
+    const fields = d.getElementById('settings-fields');
+    fields.scrollTop = 40;
+    d.querySelector('#settings-rail .st-rail-item[data-st-cat="server"]').click();
+    check('switching category resets the field scroller', fields.scrollTop === 0);
+    w.settingsCat = 'server';
+    w.fillSettingsForm({ ...doc, writable: false });
+    check('a read-only config disables its field controls, not only Apply',
+      d.querySelector('.st-row[data-key="listen"] input').disabled &&
+      d.getElementById('btn-settings-apply').disabled);
+    w.fillSettingsForm(cfgDoc);
+    w.eval("settingsCat = 'providers'");
+  }
 };

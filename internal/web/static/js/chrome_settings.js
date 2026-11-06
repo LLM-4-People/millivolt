@@ -42,6 +42,8 @@ function settingsStatus(text, kind) {
   if (!el) return;
   el.textContent = text || '';
   el.classList.toggle('ok', kind === 'ok');
+  if (kind === 'error') el.dataset.tone = 'error';
+  else delete el.dataset.tone;
 }
 
 // The settings-load failure copy, shared by the lazy loader and the fetched
@@ -88,7 +90,8 @@ function loadSettingsModule(from = 0) {
     };
     append();
   }).catch(err => {
-    settingsStatus(SETTINGS_LOAD_FAIL);
+    settingsStatus(SETTINGS_LOAD_FAIL, 'error');
+    toast(SETTINGS_LOAD_FAIL, 'err');
     console.error('settings module failed to load:', err && err.message ? err.message : err);
     throw err;
   });
@@ -142,7 +145,10 @@ function toggleSettings(e) {
   }, () => {
     settingsLoading = false;
     settingsWantOpen = false;
-    settingsStatus(SETTINGS_LOAD_FAIL);
+    // A failed load must be retryable: the rejected promise is not a
+    // permanent state.
+    settingsLoadPromise = null;
+    settingsStatus(SETTINGS_LOAD_FAIL, 'error');
   });
 }
 

@@ -132,10 +132,13 @@ document.addEventListener('click', e => {
   _confirmTimer = setTimeout(() => disarmConfirm(btn), CONFIRM_ARM_MS);
 }, true);
 
-function parseGoDuration(s) {
-  if (s == null || s === '') return 0;
+// parseGoDurationValue is the strict owner: null means the text is not a Go
+// duration at all. parseGoDuration keeps the historic lenient 0 result for
+// callers that treat garbage as "no interval".
+function parseGoDurationValue(s) {
+  if (s == null) return null;
   s = String(s).trim();
-  if (!s) return 0;
+  if (!s) return null;
   const re = /(-?\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)/g;
   let m, total = 0, any = false;
   while ((m = re.exec(s))) {
@@ -144,7 +147,27 @@ function parseGoDuration(s) {
     const mul = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000}[m[2]];
     total += n * (mul || 0);
   }
-  return any ? total : 0;
+  return any && Number.isFinite(total) ? total : null;
+}
+function parseGoDuration(s) {
+  const value = parseGoDurationValue(s);
+  return value == null ? 0 : value;
+}
+
+// parseGoByteSize mirrors internal/config parseByteSizeString: a bare integer
+// is bytes, and the accepted suffixes are B/KiB/MiB/GiB (case-insensitive).
+// null means the text is not a byte size.
+function parseGoByteSize(s) {
+  if (s == null) return null;
+  const compact = String(s).trim().replace(/\s+/g, '');
+  if (!compact) return null;
+  const m = /^(\d+)(GiB|MiB|KiB|B)?$/i.exec(compact);
+  if (!m) return null;
+  const mult = {gib: 1 << 30, mib: 1 << 20, kib: 1 << 10, b: 1}[ (m[2] || 'b').toLowerCase() ];
+  const n = Number(m[1]);
+  if (!Number.isSafeInteger(n) || !mult) return null;
+  const value = n * mult;
+  return Number.isSafeInteger(value) ? value : null;
 }
 
 function applyDashValues(v) {
