@@ -132,6 +132,10 @@ document.addEventListener('click', e => {
   _confirmTimer = setTimeout(() => disarmConfirm(btn), CONFIRM_ARM_MS);
 }, true);
 
+// maxGoDurationMS is time.ParseDuration's int64 nanosecond ceiling expressed
+// in milliseconds; the server rejects anything beyond it.
+const maxGoDurationMS = 9223372036854775807 / 1e6;
+
 // parseGoDurationValue is the strict owner: null means the text is not a Go
 // duration at all. It mirrors time.ParseDuration, the server's authority:
 // one optional leading sign, `0` by itself, then one or more number+unit
@@ -175,7 +179,7 @@ function parseGoDurationValue(s) {
     total += number * unit;
     groups++;
   }
-  if (!groups || !Number.isFinite(total)) return null;
+  if (!groups || !Number.isFinite(total) || Math.abs(total) > maxGoDurationMS) return null;
   return sign * total;
 }
 function parseGoDuration(s) {

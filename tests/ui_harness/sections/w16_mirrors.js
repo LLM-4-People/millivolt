@@ -346,7 +346,7 @@ module.exports = async function w16Mirrors(H) {
       check('parseGoDurationValue accepts the Go duration grammar' +
         (strictMisses.length ? ' (missed: ' + strictMisses.join(', ') + ')' : ''),
         strictMisses.length === 0);
-      const badDurRows = ['1h garbage', '1h-30m', '.s', '1', '1H', '1e3s', '--1h'];
+      const badDurRows = ['1h garbage', '1h-30m', '.s', '1', '1H', '1e3s', '--1h', '3000000h'];
       const acceptedBad = badDurRows
         .filter(spelling => sw.eval(`parseGoDurationValue(${JSON.stringify(spelling)})`) !== null);
       check('parseGoDurationValue rejects malformed durations' +
