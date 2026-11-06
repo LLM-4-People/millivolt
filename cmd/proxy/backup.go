@@ -1061,13 +1061,16 @@ func backupStatus() map[string]any {
 	liveMu.Lock()
 	path := liveConfigPath
 	store := liveStore
+	haveCfg := liveCfg != nil
 	dbPath := ""
-	if liveCfg != nil {
+	if haveCfg {
 		dbPath = liveCfg.DBPath
 	}
 	liveMu.Unlock()
-	if dbPath == "" && store != nil {
+	if !haveCfg && store != nil {
 		// No live config document: the running store is the only path owner.
+		// An explicit `db_path: ""` in a present document means the next boot
+		// opens no store, so it must not fall back to this one's stale slot.
 		dbPath = store.DBPath()
 	}
 	pending := false

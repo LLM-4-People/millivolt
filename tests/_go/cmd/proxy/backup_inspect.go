@@ -472,4 +472,15 @@ func TestBackupStatusTracksTheNextBootPath(t *testing.T) {
 	if st := backupStatus(); st["pending_database"] != false {
 		t.Fatalf("stale pending at the running store path reported: %v", st)
 	}
+	// An explicit empty db_path in a present config means the next boot opens
+	// no store, so the running store's slot is meaningless.
+	liveCfg.DBPath = ""
+	if st := backupStatus(); st["pending_database"] != false {
+		t.Fatalf("running store's slot reported for an explicit empty db_path: %v", st)
+	}
+	// With no config document at all the running store is the only path owner.
+	liveCfg = nil
+	if st := backupStatus(); st["pending_database"] != true {
+		t.Fatalf("store slot ignored when no config document exists: %v", st)
+	}
 }
