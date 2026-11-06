@@ -17,62 +17,79 @@ func (s *Store) SaveDebugCapture(ctx context.Context, id, sessionID string, capt
 		return errors.New("debug capture id required")
 	}
 	if s.debugMaxBytes > 0 {
-		// Reserve the sole writer connection BEFORE taking debugMu. Purge and
-		// merge hold that connection while recomputing the counter, so this
-		// order cannot deadlock; taking the lock first would.
-		conn, err := s.db.Conn(ctx)
-		if err != nil {
-			return err
+		// The helper releases the writer connection (and debugMu) before it
+		// returns, so the caller can checkpoint a sweep it committed without
+		// waiting on the only connection.
+		expired, err := s.saveDebugCaptureUnderCap(ctx, id, sessionID, capturedAt, expiresAt, payload)
+		if expired > 0 {
+			s.checkpointWAL()
 		}
-		defer conn.Close()
-		s.debugMu.Lock()
-		defer s.debugMu.Unlock()
-		if !s.debugSeeded {
-			var n int64
-			if err := conn.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n); err != nil {
-				return err
-			}
-			s.debugBytes, s.debugSeeded = n, true
-		}
-		previous, err := s.debugCaptureBytes(ctx, conn, id)
-		if err != nil {
-			return err
-		}
-		next := s.debugBytes - previous + int64(len(payload))
-		if next > s.debugMaxBytes {
-			// Expired rows are invisible to reads but still counted until the
-			// periodic sweep. Reclaim them now, on this held connection and
-			// under debugMu, instead of refusing a capture the cap already
-			// allows on disk. The row being replaced may itself have expired,
-			// so re-read its committed length after the sweep.
-			_, more, sweepErr := s.expireDebugCapturesLocked(ctx, conn, time.Now().UnixMilli(), debugExpireBatchesPerSweep)
-			if more {
-				s.debugExpirePending.Store(true)
-			}
-			if sweepErr != nil {
-				return sweepErr
-			}
-			previous, err = s.debugCaptureBytes(ctx, conn, id)
-			if err != nil {
-				return err
-			}
-			next = s.debugBytes - previous + int64(len(payload))
-			if next > s.debugMaxBytes {
-				return fmt.Errorf("debug capture store limit reached (%d of %d bytes)", s.debugBytes, s.debugMaxBytes)
-			}
-		}
-		if _, err := conn.ExecContext(ctx,
-			`INSERT OR REPLACE INTO request_debug(id, session_id, captured_at, expires_at, payload) VALUES (?, ?, ?, ?, ?)`,
-			id, sessionID, capturedAt, expiresAt, string(payload)); err != nil {
-			return err
-		}
-		s.debugBytes = next
-		return nil
+		return err
 	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT OR REPLACE INTO request_debug(id, session_id, captured_at, expires_at, payload) VALUES (?, ?, ?, ?, ?)`,
 		id, sessionID, capturedAt, expiresAt, string(payload))
 	return err
+}
+
+// saveDebugCaptureUnderCap is the cap-active save. It reports how many expired
+// rows its inline reclamation deleted so the caller can checkpoint the WAL
+// after the connection is released. A sweep can commit even when the later
+// insert fails, so the count is returned alongside the error.
+func (s *Store) saveDebugCaptureUnderCap(ctx context.Context, id, sessionID string, capturedAt, expiresAt int64, payload []byte) (int64, error) {
+	// Reserve the sole writer connection BEFORE taking debugMu. Purge and
+	// merge hold that connection while recomputing the counter, so this
+	// order cannot deadlock; taking the lock first would.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	s.debugMu.Lock()
+	defer s.debugMu.Unlock()
+	if !s.debugSeeded {
+		var n int64
+		if err := conn.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n); err != nil {
+			return 0, err
+		}
+		s.debugBytes, s.debugSeeded = n, true
+	}
+	previous, err := s.debugCaptureBytes(ctx, conn, id)
+	if err != nil {
+		return 0, err
+	}
+	next := s.debugBytes - previous + int64(len(payload))
+	var expired int64
+	if next > s.debugMaxBytes {
+		// Expired rows are invisible to reads but still counted until the
+		// periodic sweep. Reclaim them now, on this held connection and
+		// under debugMu, instead of refusing a capture the cap already
+		// allows on disk. The row being replaced may itself have expired,
+		// so re-read its committed length after the sweep.
+		var more bool
+		expired, more, err = s.expireDebugCapturesLocked(ctx, conn, time.Now().UnixMilli(), debugExpireBatchesPerSweep)
+		if more {
+			s.debugExpirePending.Store(true)
+		}
+		if err != nil {
+			return expired, err
+		}
+		previous, err = s.debugCaptureBytes(ctx, conn, id)
+		if err != nil {
+			return expired, err
+		}
+		next = s.debugBytes - previous + int64(len(payload))
+		if next > s.debugMaxBytes {
+			return expired, fmt.Errorf("debug capture store limit reached (%d of %d bytes)", s.debugBytes, s.debugMaxBytes)
+		}
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT OR REPLACE INTO request_debug(id, session_id, captured_at, expires_at, payload) VALUES (?, ?, ?, ?, ?)`,
+		id, sessionID, capturedAt, expiresAt, string(payload)); err != nil {
+		return expired, err
+	}
+	s.debugBytes = next
+	return expired, nil
 }
 
 // debugCaptureBytes reads one committed capture's payload length on the held

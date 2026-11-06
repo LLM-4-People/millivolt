@@ -88,3 +88,38 @@ func TestDebugExpireCheckpointsWAL(t *testing.T) {
 		t.Fatalf("expiry left the capture payload readable (main=%v wal=%v)", main, wal)
 	}
 }
+
+// The cap-pressure path reclaims expired captures inline inside
+// SaveDebugCapture, not only through the periodic sweep. That commit needs the
+// same checkpoint: otherwise the reclaimed payload stays readable in the WAL
+// until SQLite happens to checkpoint on its own.
+func TestSaveDebugCaptureCheckpointsInlineExpiry(t *testing.T) {
+	const marker = "wal-residue-inline-4d2b"
+	opts := testOpts
+	opts.DebugMaxBytes = 64
+	path := filepath.Join(t.TempDir(), "inline-wal.db")
+	s, err := Open(path, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	if err := s.SaveDebugCapture(t.Context(), "expired-inline", "sess",
+		now.UnixMilli(), now.Add(-time.Minute).UnixMilli(), []byte(marker)); err != nil {
+		t.Fatal(err)
+	}
+	if main, wal := walCarries(t, path, marker); !wal {
+		t.Fatalf("fixture: marker missing from the WAL (main=%v)", main)
+	}
+
+	// 64 bytes of new payload forces the inline reclaim of the 32-byte
+	// expired row before the cap check.
+	if err := s.SaveDebugCapture(t.Context(), "fresh-inline", "sess",
+		now.UnixMilli(), now.Add(time.Hour).UnixMilli(), bytes.Repeat([]byte("x"), 64)); err != nil {
+		t.Fatal(err)
+	}
+	if main, wal := walCarries(t, path, marker); main || wal {
+		t.Fatalf("inline expiry left the capture payload readable (main=%v wal=%v)", main, wal)
+	}
+}
