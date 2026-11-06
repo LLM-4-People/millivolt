@@ -16,6 +16,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
@@ -482,12 +483,32 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, "enabled boolean required")
 		return
 	}
+	if r.Method == http.MethodPost {
+		q, err := adminjson.StrictQuery(r)
+		if err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := adminjson.UnknownQueryKey(q); err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	id, err := adminjson.OptionalID(body.ID)
 	if err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !*body.Enabled {
+		// A stop names at most one session. A stop carrying scope would
+		// otherwise clear every session while looking selective; the MCP
+		// stop tool requires either one session id or an explicit
+		// stop-every-session confirmation.
+		if body.Clients != nil || body.Providers != nil || body.Models != nil || body.Duration != nil {
+			adminjson.WriteError(w, http.StatusBadRequest,
+				"a stop carries only id; scope and duration apply to a start or edit")
+			return
+		}
 		if id != "" {
 			found, err := s.removeDebug(id, time.Time{})
 			if err != nil {
@@ -670,9 +691,7 @@ func (s *Server) DebugSnapshot() map[string]any {
 // restore plane) rejects every key outside its consumed set. The method,
 // id, no-store and 404 semantics are identical in both modes.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET")
+	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
 	q, err := adminjson.StrictQuery(r)

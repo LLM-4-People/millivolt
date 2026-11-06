@@ -190,6 +190,70 @@ func TestHandlePauseTwoNonOverlappingAndResumeOne(t *testing.T) {
 	}
 }
 
+// A resume carrying a scope is ambiguous: the proxy has no scope-selective
+// resume, so the only safe answer is to reject it without touching any hold.
+func TestHandlePauseResumeRejectsScope(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	for _, body := range []string{
+		`{"paused":true,"clients":["client-a"]}`,
+		`{"paused":true,"clients":["client-b"]}`,
+	} {
+		rr := httptest.NewRecorder()
+		p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause", strings.NewReader(body)))
+		if rr.Code != 200 {
+			t.Fatalf("seed %s = %d %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	for _, body := range []string{
+		`{"paused":false,"clients":["client-a"]}`,
+		`{"paused":false,"all":true}`,
+		`{"paused":false,"new":true}`,
+		`{"paused":false,"duration":"1h"}`,
+		`{"paused":false,"max_queued":3}`,
+	} {
+		rr := httptest.NewRecorder()
+		p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause", strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("resume with scope %s = %d, want 400 body %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	if !p.scheduler.Holds("client-a") || !p.scheduler.Holds("client-b") {
+		t.Fatal("a rejected resume cleared a hold")
+	}
+}
+
+// all already covers every narrower scope, so combining them is ambiguous:
+// deny it instead of silently installing the global hold.
+func TestHandlePauseAllRejectsNarrowerScope(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	for _, body := range []string{
+		`{"paused":true,"all":true,"clients":["client-a"]}`,
+		`{"paused":true,"all":true,"providers":["alpha.example"]}`,
+		`{"paused":true,"all":true,"new":true}`,
+	} {
+		rr := httptest.NewRecorder()
+		p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause", strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("all plus scope %s = %d, want 400 body %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	if p.scheduler.Stats().Paused {
+		t.Fatal("a rejected all-plus-scope body installed a hold")
+	}
+}
+
+// A mutating route consumes no query keys, so a supplied key must not be
+// silently ignored (a stale ?id= would otherwise resume every hold).
+func TestHandlePauseRejectsUnknownQuery(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	rr := httptest.NewRecorder()
+	p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause?id=deadbeef",
+		strings.NewReader(`{"paused":false}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown query = %d, want 400 body %s", rr.Code, rr.Body.Bytes())
+	}
+}
+
 func TestHandlePauseDefaultMaxQueued(t *testing.T) {
 	// MaxConcurrent is a per-group concurrency cap, not a queue cap: it
 	// must not feed the hold's default queue capacity.

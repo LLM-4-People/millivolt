@@ -188,6 +188,38 @@ func TestHandleDebugEmptyScope400(t *testing.T) {
 	}
 }
 
+// A stop carrying capture scope is ambiguous: the proxy can stop one session
+// or every session, so a scoped stop must be refused instead of clearing all.
+func TestHandleDebugStopRejectsScope(t *testing.T) {
+	p := newStoredTestProxy(t, metrics.Noop{})
+	for _, body := range []string{
+		`{"enabled":true,"clients":["client-a"]}`,
+		`{"enabled":true,"clients":["client-b"]}`,
+	} {
+		rr := httptest.NewRecorder()
+		p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug", strings.NewReader(body)))
+		if rr.Code != 200 {
+			t.Fatalf("seed %s = %d %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	for _, body := range []string{
+		`{"enabled":false,"clients":["client-a"]}`,
+		`{"enabled":false,"providers":["alpha.example"]}`,
+		`{"enabled":false,"models":["m1"]}`,
+		`{"enabled":false,"duration":"1h"}`,
+	} {
+		rr := httptest.NewRecorder()
+		p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug", strings.NewReader(body)))
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("scoped stop %s = %d, want 400 body %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	sessions, _ := p.DebugSnapshot()["sessions"].([]map[string]any)
+	if len(sessions) != 2 {
+		t.Fatalf("sessions after rejected stops = %d, want 2", len(sessions))
+	}
+}
+
 // debugSessionOf posts a HandleDebug body and returns the single session the
 // state document reports, failing on any non-200 or a missing/ambiguous
 // session list.

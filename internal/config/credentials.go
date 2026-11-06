@@ -171,6 +171,26 @@ func RedactProviderHeaders(values map[string]any, marker string) map[string]any 
 	return out
 }
 
+// RedactLastReload returns a shallow copy of a config document's last_reload
+// value with its error text replaced by marker. The outcome metadata stays so
+// a caller still learns that a reload failed; the quoted text is omitted
+// because the loader can echo a rejected value, credentials included. Shapes
+// other than an object pass through unchanged.
+func RedactLastReload(reload any, marker string) any {
+	fields, ok := reload.(map[string]any)
+	if !ok {
+		return reload
+	}
+	out := make(map[string]any, len(fields))
+	for key, value := range fields {
+		out[key] = value
+	}
+	if message, ok := out["error"].(string); ok && strings.TrimSpace(message) != "" {
+		out["error"] = marker
+	}
+	return out
+}
+
 func redactProviderFields(fields map[string]any, marker string) map[string]any {
 	clone := make(map[string]any, len(fields))
 	for key, value := range fields {

@@ -216,11 +216,15 @@ func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 		t.Fatalf("a merge must not carry clear: %v", ramped)
 	}
 
-	// clear drops the whole policy, so naming the pair alongside it changes
-	// nothing: the body stays provider plus clear.
+	// clear drops the whole policy, so a dimension beside it would be
+	// silently dropped. The request-shape owner now refuses that ambiguity
+	// instead of sending a body whose extra fields do nothing.
 	if _, err := service.setThrottle(ctx, SetThrottleInput{
 		Provider: "local", Clear: true, AntiBurst: throttleBoolPtr(true), RampDuration: &ramp,
-	}); err != nil {
+	}); err == nil {
+		t.Fatal("clear plus a dimension must be refused")
+	}
+	if _, err := service.setThrottle(ctx, SetThrottleInput{Provider: "local", Clear: true}); err != nil {
 		t.Fatal(err)
 	}
 	cleared := decodeBody(t, proxy.requestsFor(http.MethodPost, throttlePath)[2])
@@ -229,7 +233,7 @@ func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 	}
 	for _, absent := range []string{"anti_burst", "ramp_duration"} {
 		if _, present := cleared[absent]; present {
-			t.Fatalf("clear drops the policy, so it must not send %q: %v", absent, cleared)
+			t.Fatalf("clear body must not send %q: %v", absent, cleared)
 		}
 	}
 
@@ -746,6 +750,55 @@ func TestConfigGetCarriesTheProxyPinnedKeys(t *testing.T) {
 		t.Fatalf("the note must explain that overrides are stripped from a patch: %q", out.Note)
 	}
 	assertAuth(t, proxy.requestsFor(http.MethodGet, configPath)[0])
+}
+
+// Config_get feeds a model context. Provider credential headers and a reload
+// error that can quote a rejected secret must never reach it; mvctl keeps the
+// explicit --reveal opt-in for an operator who needs the raw bytes.
+func TestConfigGetRedactsProviderSecrets(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, configPath, `{"revision":"abc",`+
+		`"values":{"providers":{"p":{"headers":{"Authorization":"Bearer secret","X-Trace":"visible"}}}},`+
+		`"effective":{"providers":{"p":{"headers":{"X-Api-Key":"sk-live"}}}},`+
+		`"last_reload":{"ok":false,"error":"rejected sk-live"},"writable":true}`)
+	service := newTestService(t, proxy, Limits{})
+	out, err := service.configGet(context.Background(), ConfigGetInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := out.Values["providers"].(map[string]any)["p"].(map[string]any)["headers"].(map[string]any)
+	if values["Authorization"] != RedactionMarker || values["X-Trace"] != "visible" {
+		t.Fatalf("values headers = %v", values)
+	}
+	effective := out.Effective["providers"].(map[string]any)["p"].(map[string]any)["headers"].(map[string]any)
+	if effective["X-Api-Key"] != RedactionMarker {
+		t.Fatalf("effective headers = %v", effective)
+	}
+	reload := out.LastReload.(map[string]any)
+	if reload["error"] != RedactionMarker || reload["ok"] != false {
+		t.Fatalf("last_reload = %v", reload)
+	}
+}
+
+// Set_config echoes the saved document; the echo carries the same redaction.
+func TestSetConfigRedactsSavedProviderSecrets(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodPost, configPath, `{"saved":true,"revision":"abc",`+
+		`"values":{"providers":{"p":{"headers":{"X-Api-Key":"sk-live"}}},"history_size":7}}`)
+	service := newTestService(t, proxy, Limits{})
+	out, err := service.setConfig(context.Background(), SetConfigInput{
+		Values: map[string]any{"history_size": 7}, Revision: "abc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := out.Values["providers"].(map[string]any)["p"].(map[string]any)["headers"].(map[string]any)
+	if headers["X-Api-Key"] != RedactionMarker {
+		t.Fatalf("saved headers = %v", headers)
+	}
+	if out.Values["history_size"] != float64(7) {
+		t.Fatalf("non-secret values must survive: %v", out.Values)
+	}
 }
 
 // TestSetConfigIsARevisionCheckedPatch pins the read-then-patch behaviour, the

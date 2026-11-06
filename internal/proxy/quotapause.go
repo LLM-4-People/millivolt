@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -140,12 +141,24 @@ func (s *Server) HandleQuotaPause(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if body.Provider == "" || body.Resume == nil || !*body.Resume {
+	if r.Method == http.MethodPost {
+		q, err := adminjson.StrictQuery(r)
+		if err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := adminjson.UnknownQueryKey(q); err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	provider := strings.TrimSpace(body.Provider)
+	if provider == "" || body.Resume == nil || !*body.Resume {
 		adminjson.WriteError(w, http.StatusBadRequest, "provider and resume true required")
 		return
 	}
-	if s.scheduler.ReleaseQuota(body.Provider) {
-		log.Printf("quota pause: provider %s resumed by operator", body.Provider)
+	if s.scheduler.ReleaseQuota(provider) {
+		log.Printf("quota pause: provider %s resumed by operator", provider)
 	}
 	writeOperatorState(w, s.StormSnapshot(), nil)
 }

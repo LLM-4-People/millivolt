@@ -1019,6 +1019,14 @@ an indefinite hold needs an explicit resume. Existing holds can be edited in
 place or resumed individually, while Resume all clears all holds. Overlapping
 scopes are rejected instead of silently replacing a different hold.
 
+The HTTP shape is closed. A resume carries only `paused:false` and an optional
+`id`; supplying a scope, duration or queue cap beside it is a 400, because the
+proxy has no scope-selective resume and accepting one would clear more holds
+than the caller named. `all:true` cannot be combined with `new`, `clients` or
+`providers`; the global hold already covers them. Named clients plus `new`
+remains a valid union. These are enforced by the handler, not only by the MCP
+and CLI wrappers.
+
 The known client/provider/model vocabularies (the pause and debug pickers, and
 the snapshot a New-clients hold compares against) are bounded at 4096 names per
 dimension. Client labels and model ids come from the request, so they are
@@ -1041,7 +1049,9 @@ sends another client's label is parked, or not parked, as that client. See
 Limits applies to a provider across all clients and keys, independently of the
 per-key concurrency/queue settings. Choose concurrency, requests per window,
 tokens per window and the optional anti-burst ramp, then Apply; Clear removes
-that provider policy. The menu shows whether a policy came from the UI or a
+that provider policy. `clear:true` cannot be combined with a limit dimension:
+the handler refuses the ambiguity instead of dropping the supplied value and
+reporting success. The menu shows whether a policy came from the UI or a
 request header, together with available budget and in-flight/queued state.
 Queued counts every request the scheduler parks for that provider - admission
 waits and send-gate waits behind a 429/5xx pacing window alike - not only work
@@ -1250,7 +1260,9 @@ Debug selects clients, providers and/or models and starts a capture session for
 a chosen duration or until stopped. At least one dimension is required; selected
 dimensions intersect, with alternatives inside each dimension. It does not have
 an unrestricted "all" switch. Sessions can be edited or stopped individually;
-Stop all ends every active session. Conflicting scopes are rejected.
+Stop all ends every active session. A stop carries only `enabled:false` and an
+optional session `id`; a scope or duration beside a stop is a 400 rather than a
+silent stop-everything. Conflicting scopes are rejected.
 
 Debug model matching uses the native-model normalization in
 [debug.go](../internal/proxy/debug.go), separate from display-only model rules.
