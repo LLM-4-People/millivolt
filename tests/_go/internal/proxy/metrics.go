@@ -805,3 +805,43 @@ func TestInBandStreamErrorAnthropicShape(t *testing.T) {
 		t.Error("record must be flagged as an error")
 	}
 }
+
+// panicBeginRecorder publishes a begin event and then panics, modeling any
+// failure in the live sink (or a future step between publication and return).
+type panicBeginRecorder struct{ records atomic.Int64 }
+
+func (r *panicBeginRecorder) Record(*metrics.Record) { r.records.Add(1) }
+
+func (r *panicBeginRecorder) PublishLive(phase string, _ *metrics.Record) {
+	if phase == "begin" {
+		panic("publish begin")
+	}
+}
+
+// TestBeginPublicationAlwaysRetiresThePendingRecord pins the finalizer order:
+// the begin event reaches subscribers before the handler returns, so its
+// deferred Record must already be registered. A begin without an end leaves a
+// permanent in-flight/pending dashboard row that nothing else can retire.
+func TestBeginPublicationAlwaysRetiresThePendingRecord(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the request reached upstream before the begin panic")
+	}))
+	defer upstream.Close()
+	rec := &panicBeginRecorder{}
+	srv := New(config.Default(), rec)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("X-Proxy-Key", "sk-test")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the fake begin sink did not panic")
+			}
+		}()
+		srv.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	if got := rec.records.Load(); got != 1 {
+		t.Fatalf("Record calls after a begin panic = %d, want 1 (the pending row leaked)", got)
+	}
+}

@@ -174,8 +174,10 @@ SQLite accounting.
 ## Finalized records, pending lifecycle and replay
 
 `PublishLive(begin/update)` snapshots pending state without adding durable rows.
-`Buffer.Record` atomically finalizes the row, retires pending state, updates its
-gauge/revision and emits end. Exactly one finalized record per request is the
+The proxy registers its deferred `Record` before publishing `begin`, so a
+subscriber that fails while handling the begin event cannot leave a permanent
+in-flight row. `Buffer.Record` atomically finalizes the row, retires pending
+state, updates its gauge/revision and emits end. Exactly one finalized record per request is the
 accounting unit; proxy-owned IDs cannot collide with reused client request IDs.
 A debug capture registers its pending sidecar marker in `debugRuntime` before
 that publish and encodes/saves after it, so the sidecar write delays neither
