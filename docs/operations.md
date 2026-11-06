@@ -696,7 +696,10 @@ running store's file, because the rows would be written to a database the next
 boot does not open; merge the database separately or use database replace.
 
 At boot, a pending snapshot is admitted only after the same schema, trigger,
-writer-insert and request-scan value preflight `Open` runs. Recovery consults
+writer-insert and request-scan value preflight `Open` runs. The trigger fence
+rejects every unowned trigger in the snapshot, not only those attached to
+`requests`: a trigger body is arbitrary SQL, so one attached to `meta` or
+`request_debug` can delete or rewrite request rows. Recovery consults
 the durable `.snapshot-state` marker rather than inferring a transition from the
 files present. A markerless rollback set from a pre-marker release cannot be
 classified: when a live main exists, recovery keeps it and removes the

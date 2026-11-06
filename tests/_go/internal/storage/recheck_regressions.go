@@ -666,6 +666,48 @@ func TestRestoreRejectsUnownedRequestTriggers(t *testing.T) {
 	}
 }
 
+// TestRestoreRejectsCrossTableTriggers pins the widened trigger fence: a
+// trigger attached to meta or request_debug can mutate requests just as
+// directly as one attached to requests, so every unowned trigger is foreign.
+func TestRestoreRejectsCrossTableTriggers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ddl  string
+	}{
+		{"meta", `CREATE TRIGGER poison_meta AFTER INSERT ON meta
+			BEGIN DELETE FROM requests WHERE id <> 'millivolt-preflight'; END`},
+		{"request_debug", `CREATE TRIGGER poison_debug AFTER DELETE ON request_debug
+			BEGIN DELETE FROM requests; END`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "dst.db")
+			src := filepath.Join(dir, "src.db")
+			if err := os.WriteFile(src, packedSnapshot(t, "backup-row"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := sql.Open("sqlite", src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(tc.ddl); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := StageSnapshotFile(path, src); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidatePendingSnapshot(path); err == nil {
+				t.Fatalf("%s trigger replacement was admitted", tc.name)
+			} else if !strings.Contains(err.Error(), "unowned trigger") {
+				t.Fatalf("trigger rejection = %v", err)
+			}
+		})
+	}
+}
+
 // TestOpenRepairsLegacyEmptyToolNames pins the MCP-5 storage owner: a database
 // migrated by the old ADD COLUMN default keeps tool_names=” on old rows, and
 // the one-shot repair canonicalizes it to the writer's no-value document so
