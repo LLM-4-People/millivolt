@@ -34,9 +34,9 @@ type projectionData struct {
 	cursor     storage.ProjectionCursor
 	version    int64
 	// classRevision fingerprints the classification vocabulary the decoded
-	// has429/error/retryable flags were computed with. A reload can change
-	// those flags without changing any stored row, so the storage version
-	// alone cannot prove the projection is still faithful.
+	// has429 flag (and any future vocabulary-derived flag) was computed with.
+	// A reload can change that flag without changing any stored row, so the
+	// storage version alone cannot prove the projection is still faithful.
 	classRevision uint64
 	// chunkMaxStart holds the maximum contribution start per rowsGrowChunk
 	// block, so a bounded window can skip whole blocks whose newest row is

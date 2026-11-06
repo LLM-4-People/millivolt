@@ -327,12 +327,13 @@ share its builder. SQLite transactions capture rowid high-water/destructive
 epoch/schema authority; destructive changes rebuild. Failed or canceled reads
 never publish stale rows or advance authority. Folds check the caller's context
 once per 4,096-row block, and the ring visitors use the same cadence, so an
-abandoned request stops without publishing a partial result. Classification
-flags (`has429`, error, retryable) come from the installed vocabulary, not from
-a stored column, so the projection stamps the metrics classifier revision and
-forces a full reclassification rebuild when a reload changes it. The chart and
-explorer memos include the same revision in their key, so neither a stale
-projection nor a pre-reload memo can answer a post-reload request.
+abandoned request stops without publishing a partial result. The `has429`
+flag (and any future vocabulary-derived classification) comes from the
+installed vocabulary, not from a stored column, so the projection stamps the
+metrics classifier revision and forces a full reclassification rebuild when a
+reload changes it. The chart and explorer memos include the same revision in
+their key, so neither a stale projection nor a pre-reload memo can answer a
+post-reload request.
 
 Materialization runs off the projection lock with one single-flight builder;
 concurrent readers keep serving the previous complete snapshot and wait for

@@ -142,9 +142,10 @@ func (a *AggAPI) aggregateKey(ctx context.Context, params, canon string, include
 	if !includePending {
 		pending = 0 // chart sums are finalized-only
 	}
-	// Classification flags (has429, error, retryable) derive from the installed
-	// vocabulary, not from a stored column. A reload can change them with an
-	// unchanged database version, so the witness is part of the key.
+	// The has429 flag (and any future vocabulary-derived classification)
+	// comes from the installed vocabulary, not from a stored column. A reload
+	// can change it with an unchanged database version, so the witness is part
+	// of the key.
 	key := aggregateKey{
 		params: params, canon: canon, classes: metrics.ClassExtensionRevision(),
 		finalized: finalized, pending: pending,

@@ -32,7 +32,7 @@ var classExtensions atomic.Pointer[ClassExtensions]
 
 // classExtensionRevision advances only when the installed vocabulary actually
 // changes. Classification depends on it, so any cache that retains a derived
-// has429/error/retryable answer (the dashboard's durable projection and its
+// vocabulary-dependent answer (the dashboard's has429 projection flag and its
 // aggregate memos) must key freshness on this witness, not on the database
 // version: a reload changes the classifier without changing a stored row.
 var classExtensionRevision atomic.Uint64
