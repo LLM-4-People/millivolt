@@ -149,6 +149,9 @@ func (s *Store) ExpireDebugCaptures(ctx context.Context, beforeMs int64) (int64,
 	if more {
 		s.debugExpirePending.Store(true)
 	}
+	if err == nil && total > 0 {
+		s.checkpointWAL()
+	}
 	return total, err
 }
 
@@ -369,9 +372,15 @@ func (s *Store) sweepDebugCaptures(now time.Time) {
 	s.lastDebugExpire = now
 	ctx, cancel := s.withQueryTimeout(context.Background())
 	defer cancel()
-	_, more, err := s.expireDebugCaptures(ctx, now.UnixMilli(), debugExpireBatchesPerSweep)
+	total, more, err := s.expireDebugCaptures(ctx, now.UnixMilli(), debugExpireBatchesPerSweep)
 	s.debugExpirePending.Store(err == nil && more)
 	if err != nil && ctx.Err() == nil {
 		log.Printf("storage: expire debug captures: %v", err)
+	}
+	// Only the drained sweep checkpoints: a large expired set continues on
+	// the near-term tick, and truncating the log after every bounded batch
+	// would copy the same pages repeatedly.
+	if err == nil && total > 0 && !more {
+		s.checkpointWAL()
 	}
 }

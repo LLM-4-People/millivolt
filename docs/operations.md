@@ -1374,7 +1374,13 @@ beyond the menu's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
 [PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
 deliberate and destructive; never use malformed JSON as an all-records command.
-The delete fence preserves newer completions and in-flight work.
+The delete fence preserves newer completions and in-flight work. A completed
+purge, and an expired debug-capture sweep, checkpoint-truncates the WAL after
+the committed delete: `secure_delete` zeroes freed cells in the pages SQLite
+writes, and the checkpoint removes the pre-delete frames that would otherwise
+keep the old page images readable in the `-wal` sidecar. A reader holding an
+older snapshot can defer the checkpoint; the next destructive maintenance pass
+retries it.
 
 ### Settings and Restart
 

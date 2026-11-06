@@ -414,5 +414,12 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 		}
 		result.BufferRemoved = cmd.buffer.RemoveThrough(cmd.boundary, match)
 	}
+	// The delete committed; the WAL still holds the pre-delete page images
+	// (including any request_debug payloads) until a checkpoint folds the
+	// surviving pages into the main file and truncates the log. Nothing was
+	// freed, so an empty purge leaves the log untouched.
+	if n > 0 || debugDelta < 0 {
+		s.checkpointWAL()
+	}
 	return result, nil
 }

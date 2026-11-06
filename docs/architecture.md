@@ -279,7 +279,12 @@ matching records/sidecars and rebuilds totals transactionally, then removes only
 matching ring rows through that boundary. New completions survive. Failed SQL
 does not mutate the ring; postcommit memory effects finish even after caller
 cancellation. The atomic command check must not acquire the producer lock for
-every ordinary consumed record.
+every ordinary consumed record. A non-empty purge, and a drained expired-capture
+sweep, checkpoint-truncates the WAL after the commit: `secure_delete` cleans the
+pages SQLite writes, and truncation removes the pre-delete frames that would
+otherwise keep the old page images in the `-wal` sidecar. The checkpoint is
+bounded and best effort; a busy reader defers it to the next destructive pass
+without failing the committed deletion.
 
 Operator backup and restore stage database-sized work as private files.
 `backup.EncodeFile` streams the packed snapshot, encoded archive and self-check
