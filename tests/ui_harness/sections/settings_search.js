@@ -398,7 +398,11 @@ module.exports = async function settingsSearch(H) {
     check('a duration below the schema band fails inline and names the display bound',
       !w.validateSettingsScalar(ttl) &&
       ttl.closest('.st-row').querySelector('.st-error').textContent.includes('1h'));
-    ttl.value = '999d';
+    ttl.value = '.5h';
+    check('a leading-dot duration is parsed as a fraction, not a whole unit',
+      !w.validateSettingsScalar(ttl) &&
+      ttl.closest('.st-row').querySelector('.st-error').textContent.includes('1h'));
+    ttl.value = '200h';
     check('a duration above the schema band fails inline', !w.validateSettingsScalar(ttl));
     ttl.value = 'garbage';
     let blocked = false;

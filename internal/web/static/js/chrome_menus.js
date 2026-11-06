@@ -133,21 +133,50 @@ document.addEventListener('click', e => {
 }, true);
 
 // parseGoDurationValue is the strict owner: null means the text is not a Go
-// duration at all. parseGoDuration keeps the historic lenient 0 result for
-// callers that treat garbage as "no interval".
+// duration at all. It mirrors time.ParseDuration, the server's authority:
+// one optional leading sign, `0` by itself, then one or more number+unit
+// groups where a number is `digits[.digits]` or `.digits`, and the unit is
+// one of the Go spellings. The old unanchored scan accepted trailing garbage
+// and misread `.5h` as 5h, which the settings Apply gate now treats as truth.
+// parseGoDuration keeps the historic lenient 0 result for callers that treat
+// garbage as "no interval".
 function parseGoDurationValue(s) {
   if (s == null) return null;
   s = String(s).trim();
   if (!s) return null;
-  const re = /(-?\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)/g;
-  let m, total = 0, any = false;
-  while ((m = re.exec(s))) {
-    any = true;
-    const n = parseFloat(m[1]);
-    const mul = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000}[m[2]];
-    total += n * (mul || 0);
+  let sign = 1;
+  if (s[0] === '+' || s[0] === '-') {
+    if (s[0] === '-') sign = -1;
+    s = s.slice(1);
   }
-  return any && Number.isFinite(total) ? total : null;
+  if (s === '0') return 0;
+  if (!s) return null;
+  const unitMS = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000};
+  const isDigit = ch => ch >= '0' && ch <= '9';
+  let total = 0, i = 0, groups = 0;
+  while (i < s.length) {
+    const start = i;
+    while (i < s.length && isDigit(s[i])) i++;
+    const pre = i > start;
+    let post = false;
+    if (s[i] === '.') {
+      i++;
+      const frac = i;
+      while (i < s.length && isDigit(s[i])) i++;
+      post = i > frac;
+    }
+    if (!pre && !post) return null;
+    const number = parseFloat(s.slice(start, i));
+    const unitStart = i;
+    while (i < s.length && s[i] !== '.' && !isDigit(s[i])) i++;
+    if (i === unitStart) return null;
+    const unit = unitMS[s.slice(unitStart, i)];
+    if (unit == null) return null;
+    total += number * unit;
+    groups++;
+  }
+  if (!groups || !Number.isFinite(total)) return null;
+  return sign * total;
 }
 function parseGoDuration(s) {
   const value = parseGoDurationValue(s);
