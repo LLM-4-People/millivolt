@@ -1,6 +1,6 @@
 # The docs build is a small static renderer. Keep the parser exact so a
 # dependency update cannot silently change heading anchors or HTML output.
-Markdown==3.11.2
+Markdown==3.11.3
 
 # python-markdown passes raw HTML, `attr_list` attribute blocks and arbitrary
 # link schemes through unchanged. Every rendered document crosses one
