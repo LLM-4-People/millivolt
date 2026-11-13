@@ -720,12 +720,22 @@ func (s *Server) syncNamePins() {
 	}
 	s.debug.mu.Unlock()
 
+	var policyClients, policyProviders, policyModels []string
+	for _, policy := range s.scheduler.ThrottlePolicies() {
+		policyClients = append(policyClients, policy.Scope.Clients...)
+		policyProviders = append(policyProviders, policy.Scope.Providers...)
+		policyModels = append(policyModels, canonicalModelList(policy.Scope.Models)...)
+	}
+
 	var dropped []string
 	dropped = append(dropped, s.pause.clients.setPins("pause", holdClients)...)
 	dropped = append(dropped, s.pause.clients.setPins("debug", debugClients)...)
+	dropped = append(dropped, s.pause.clients.setPins("limit", policyClients)...)
 	dropped = append(dropped, s.pause.providers.setPins("pause", holdProviders)...)
 	dropped = append(dropped, s.pause.providers.setPins("debug", debugProviders)...)
+	dropped = append(dropped, s.pause.providers.setPins("limit", policyProviders)...)
 	dropped = append(dropped, s.pause.models.setPins("debug", debugModels)...)
+	dropped = append(dropped, s.pause.models.setPins("limit", policyModels)...)
 	if len(dropped) > 0 {
 		log.Printf("pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
 			len(dropped), strings.Join(firstN(dropped, 8), ", "))

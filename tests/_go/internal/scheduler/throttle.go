@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -12,7 +13,7 @@ import (
 
 func TestThrottleConcurrencyAcrossKeys(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "alpha.example", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"alpha.example"}}, Limit: Limit{Concurrency: 1}})
 	ctx := context.Background()
 
 	r1, err := s.AcquireWith(ctx, "alpha.example|k1", 0, WaiterHooks{Provider: "alpha.example"})
@@ -45,7 +46,7 @@ func TestThrottleConcurrencyAcrossKeys(t *testing.T) {
 
 func TestThrottleConcurrencyDoesNotAffectOtherProvider(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "alpha.example", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"alpha.example"}}, Limit: Limit{Concurrency: 1}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "alpha.example|k", 0, WaiterHooks{Provider: "alpha.example"})
 	if err != nil {
@@ -61,7 +62,7 @@ func TestThrottleConcurrencyDoesNotAffectOtherProvider(t *testing.T) {
 
 func TestThrottleRequestsPerWindow(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Requests: 1, ReqWindow: 80 * time.Millisecond}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Requests: 1, ReqWindow: 80 * time.Millisecond}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
 	if err != nil {
@@ -97,14 +98,14 @@ func TestThrottleRequestsPerWindow(t *testing.T) {
 
 func TestThrottleTokensReserveAndSettle(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Tokens: 100, TokWindow: time.Hour}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Tokens: 100, TokWindow: time.Hour}})
 	ctx := context.Background()
 
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p", EstTokens: 100})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reserved := s.gate("p").reserved; reserved != 100 {
+	if reserved := providerGateFor(s, "p").reserved; reserved != 100 {
 		t.Fatalf("reserved = %d, want 100", reserved)
 	}
 	r1(100)
@@ -124,7 +125,7 @@ func TestThrottleTokensReserveAndSettle(t *testing.T) {
 
 func TestThrottleSettleRefundsReservation(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Tokens: 50, TokWindow: time.Hour}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Tokens: 50, TokWindow: time.Hour}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p", EstTokens: 50})
 	if err != nil {
@@ -141,7 +142,7 @@ func TestThrottleSettleRefundsReservation(t *testing.T) {
 
 func TestThrottleClearUnblocksWaiters(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
 	if err != nil {
@@ -161,7 +162,7 @@ func TestThrottleClearUnblocksWaiters(t *testing.T) {
 	// The waiter must be parked on the concurrency cap before the clear, so
 	// the clear truly exercises the wakeup of a parked waiter.
 	waitFor(t, func() bool { return s.Stats().Queued >= 1 }, "throttled waiter to queue")
-	s.SetThrottle(Throttle{Provider: "p"})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}})
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -187,7 +188,7 @@ func TestThrottleOffIsUnlimited(t *testing.T) {
 
 func TestThrottleOnThrottleHook(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
 	if err != nil {
@@ -218,7 +219,7 @@ func TestThrottleOnThrottleHook(t *testing.T) {
 	// Clearing the cap is the observable lift: kickThrottles (pauseMu, never
 	// holdCountMu) wakes the parked waiter and its deferred OnUnthrottle fires
 	// when the grant returns.
-	s.SetThrottle(Throttle{Provider: "p"})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}})
 	waitFor(t, func() bool { return !throttled.Load() }, "OnUnthrottle to fire after the cap clear")
 	select {
 	case <-done:
@@ -230,7 +231,7 @@ func TestThrottleOnThrottleHook(t *testing.T) {
 
 func TestThrottleLoosenConcurrencyGrantsWaiters(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
 	if err != nil {
@@ -253,7 +254,7 @@ func TestThrottleLoosenConcurrencyGrantsWaiters(t *testing.T) {
 	}
 	// Both waiters must be parked on the cap before loosening it.
 	waitFor(t, func() bool { return s.Stats().Queued >= 2 }, "two throttled waiters to queue")
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 8}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 8}})
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
@@ -265,14 +266,14 @@ func TestThrottleLoosenConcurrencyGrantsWaiters(t *testing.T) {
 
 func TestThrottleListAndRestore(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "b.com", Limit: Limit{Concurrency: 2}, Source: ThrottleSourceHeader, UpdatedBy: "client-a"})
-	s.SetThrottle(Throttle{Provider: "a.com", Limit: Limit{Requests: 10, ReqWindow: time.Minute}, Source: ThrottleSourceUI, UpdatedBy: "dashboard"})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"b.com"}}, Limit: Limit{Concurrency: 2}, Source: ThrottleSourceHeader, UpdatedBy: "client-a"})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"a.com"}}, Limit: Limit{Requests: 10, ReqWindow: time.Minute}, Source: ThrottleSourceUI, UpdatedBy: "dashboard"})
 	got := s.ListThrottles()
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
 	}
-	if got[0].Provider != "a.com" || got[1].Provider != "b.com" {
-		t.Fatalf("order = %s,%s", got[0].Provider, got[1].Provider)
+	if got[0].Scope.PrimaryProvider() != "a.com" || got[1].Scope.PrimaryProvider() != "b.com" {
+		t.Fatalf("order = %s,%s", got[0].Scope.PrimaryProvider(), got[1].Scope.PrimaryProvider())
 	}
 	if got[1].Source != ThrottleSourceHeader || got[1].UpdatedBy != "client-a" {
 		t.Fatalf("header source lost: %+v", got[1])
@@ -285,7 +286,7 @@ func TestThrottleListAndRestore(t *testing.T) {
 	}
 	s2.RestoreThrottles(ts)
 	restored := func(provider string) Throttle {
-		g := s2.gate(provider)
+		g := providerGateFor(s2, provider)
 		g.mu.Lock()
 		cur := g.throttle
 		g.mu.Unlock()
@@ -308,12 +309,12 @@ func TestThrottlePoliciesMatchesListThrottles(t *testing.T) {
 	s := New(Options{})
 	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	for _, th := range []Throttle{
-		{Provider: "alpha.example", Limit: Limit{Requests: 30, ReqWindow: time.Minute}, Source: ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
-		{Provider: "busy.example", Limit: Limit{Concurrency: 1}, Source: ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
-		{Provider: "zulu.example", Limit: Limit{Tokens: 9000, TokWindow: time.Hour}, Source: ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
+		{Scope: LimitScope{Providers: []string{"alpha.example"}}, Limit: Limit{Requests: 30, ReqWindow: time.Minute}, Source: ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
+		{Scope: LimitScope{Providers: []string{"busy.example"}}, Limit: Limit{Concurrency: 1}, Source: ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
+		{Scope: LimitScope{Providers: []string{"zulu.example"}}, Limit: Limit{Tokens: 9000, TokWindow: time.Hour}, Source: ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
 	} {
-		if !s.SetThrottle(th) {
-			t.Fatalf("failed to install policy for %s", th.Provider)
+		if !s.SetPolicy(th) {
+			t.Fatalf("failed to install policy for %s", th.Scope.PrimaryProvider())
 		}
 	}
 
@@ -344,11 +345,11 @@ func TestThrottlePoliciesMatchesListThrottles(t *testing.T) {
 		t.Fatalf("listing lengths differ: ListThrottles=%d ThrottlePolicies=%d", len(infos), len(policies))
 	}
 	for i := range infos {
-		if infos[i].Provider != policies[i].Provider || infos[i].Throttle != policies[i] {
+		if infos[i].Scope.PrimaryProvider() != policies[i].Scope.PrimaryProvider() || !reflect.DeepEqual(infos[i].Throttle, policies[i]) {
 			t.Fatalf("policy %d differs: ListThrottles=%+v ThrottlePolicies=%+v", i, infos[i].Throttle, policies[i])
 		}
 	}
-	if infos[1].Provider != "busy.example" || infos[1].InFlight != 1 || infos[1].Queued != 2 {
+	if infos[1].Scope.PrimaryProvider() != "busy.example" || infos[1].InFlight != 1 || infos[1].Queued != 2 {
 		t.Fatalf("busy occupancy = %+v, want 1 in flight and 2 queued", infos[1])
 	}
 	if infos[0].InFlight != 0 || infos[0].Queued != 0 || infos[2].InFlight != 0 || infos[2].Queued != 0 {
@@ -374,17 +375,18 @@ func TestThrottlePoliciesSnapshotSurvivesGateUpdate(t *testing.T) {
 	s := New(Options{})
 	base := time.Date(2026, time.February, 3, 4, 5, 6, 0, time.UTC)
 	initial := Throttle{
-		Provider:  "provider.example",
+		Scope:     LimitScope{Providers: []string{"provider.example"}},
 		Limit:     Limit{Concurrency: 1, Requests: 7, ReqWindow: time.Minute, Tokens: 70, TokWindow: time.Hour},
 		Source:    ThrottleSourceUI,
 		UpdatedBy: "dashboard",
 		UpdatedAt: base,
 	}
-	if !s.SetThrottle(initial) {
+	initial.ID = PolicyID(initial.Scope, initial.Schedule)
+	if !s.SetPolicy(initial) {
 		t.Fatal("initial policy was not installed")
 	}
 	before := s.ThrottlePolicies()
-	if len(before) != 1 || before[0] != initial {
+	if len(before) != 1 || !reflect.DeepEqual(before[0], initial) {
 		t.Fatalf("policy snapshot = %+v, want %+v", before, initial)
 	}
 
@@ -393,14 +395,14 @@ func TestThrottlePoliciesSnapshotSurvivesGateUpdate(t *testing.T) {
 	changed.Source = ThrottleSourceHeader
 	changed.UpdatedBy = "client-b"
 	changed.UpdatedAt = base.Add(time.Hour)
-	if !s.SetThrottle(changed) {
+	if !s.SetPolicy(changed) {
 		t.Fatal("changed policy was not installed")
 	}
-	if before[0] != initial {
+	if !reflect.DeepEqual(before[0], initial) {
 		t.Fatalf("gate update mutated the earlier snapshot: %+v, want %+v", before[0], initial)
 	}
 	after := s.ThrottlePolicies()
-	if len(after) != 1 || after[0] != changed {
+	if len(after) != 1 || !reflect.DeepEqual(after[0], changed) {
 		t.Fatalf("new snapshot = %+v, want %+v", after, changed)
 	}
 }
@@ -410,7 +412,7 @@ func TestThrottlePoliciesSnapshotSurvivesGateUpdate(t *testing.T) {
 // taking a group mutex, so a busy group can never delay a durable save.
 func TestThrottlePoliciesDoesNotLockGroups(t *testing.T) {
 	s := New(Options{})
-	if !s.SetThrottle(Throttle{Provider: "provider.example", Limit: Limit{Concurrency: 1}}) {
+	if !s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"provider.example"}}, Limit: Limit{Concurrency: 1}}) {
 		t.Fatal("policy was not installed")
 	}
 	g := s.groupFor("provider.example|key", 0)
@@ -419,7 +421,7 @@ func TestThrottlePoliciesDoesNotLockGroups(t *testing.T) {
 	go func() { listed <- s.ThrottlePolicies() }()
 	select {
 	case got := <-listed:
-		if len(got) != 1 || got[0].Provider != "provider.example" {
+		if len(got) != 1 || got[0].Scope.PrimaryProvider() != "provider.example" {
 			g.mu.Unlock()
 			t.Fatalf("policy listing = %+v", got)
 		}
@@ -437,8 +439,8 @@ func TestThrottlePoliciesDoesNotLockGroups(t *testing.T) {
 // none, so a misattributed or global count cannot pass.
 func TestThrottleQueuedAttributionPerProvider(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
-	s.SetThrottle(Throttle{Provider: "q", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"q"}}, Limit: Limit{Concurrency: 1}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
 	if err != nil {
@@ -463,7 +465,7 @@ func TestThrottleQueuedAttributionPerProvider(t *testing.T) {
 	waitFor(t, func() bool { return s.Stats().Queued >= 2 }, "two throttled waiters to queue")
 
 	for _, ti := range s.ListThrottles() {
-		switch ti.Provider {
+		switch ti.Scope.PrimaryProvider() {
 		case "p":
 			if ti.Queued != 2 {
 				t.Fatalf("provider p queued = %d, want 2 (its own parked waiters)", ti.Queued)
@@ -473,11 +475,11 @@ func TestThrottleQueuedAttributionPerProvider(t *testing.T) {
 				t.Fatalf("provider q queued = %d, want 0 (no waiters parked on it)", ti.Queued)
 			}
 		default:
-			t.Fatalf("unexpected provider %q in ListThrottles", ti.Provider)
+			t.Fatalf("unexpected provider %q in ListThrottles", ti.Scope.PrimaryProvider())
 		}
 	}
 
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 8}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 8}})
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 	select {
@@ -491,7 +493,7 @@ func TestThrottleOversizeRequestAdmitted(t *testing.T) {
 	// A single request larger than the window is allowed (can't fragment it);
 	// it exhausts the bucket so the next admit waits.
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Tokens: 10, TokWindow: time.Hour}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Tokens: 10, TokWindow: time.Hour}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p", EstTokens: 10_000})
 	if err != nil {
@@ -507,7 +509,7 @@ func TestThrottleOversizeRequestAdmitted(t *testing.T) {
 
 func TestPerKeyCapStillAppliesUnderProviderThrottle(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 8}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 8}})
 	ctx := context.Background()
 	r1, err := s.AcquireWith(ctx, "p|k", 1, WaiterHooks{Provider: "p"})
 	if err != nil {
@@ -547,7 +549,7 @@ func TestRequestWindowIsStrictNotABucket(t *testing.T) {
 	const count = 5
 	const window = 100 * time.Millisecond
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Requests: count, ReqWindow: window}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Requests: count, ReqWindow: window}})
 	ctx := context.Background()
 
 	// Spend the whole budget at once, the way a burst arrives.
@@ -575,7 +577,7 @@ func TestRequestWindowIsStrictNotABucket(t *testing.T) {
 	// The observable the dashboard renders is the trailing-window allowance,
 	// never a refilling fill: after a full burst it reads 0, not a positive
 	// trickle that would let the next request through.
-	s.SetThrottle(Throttle{Provider: "p2", Limit: Limit{Requests: 4, ReqWindow: time.Minute}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p2"}}, Limit: Limit{Requests: 4, ReqWindow: time.Minute}})
 	for i := range 4 {
 		r, err := s.AcquireWith(ctx, fmt.Sprintf("p2|k%d", i), 0, WaiterHooks{Provider: "p2"})
 		if err != nil {
@@ -585,7 +587,7 @@ func TestRequestWindowIsStrictNotABucket(t *testing.T) {
 	}
 	infos := s.ListThrottles()
 	for _, inf := range infos {
-		if inf.Provider != "p2" {
+		if inf.Scope.PrimaryProvider() != "p2" {
 			continue
 		}
 		if inf.ReqRemaining != 0 || inf.ReqCapacity != 4 {
@@ -713,7 +715,7 @@ func TestProviderDrainScopedToReleasedProvider(t *testing.T) {
 		}
 	}
 	for _, provider := range providers {
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 	}
 
 	holdAlpha, err := s.AcquireWith(ctx, "alpha.example|held", 0, WaiterHooks{Provider: "alpha.example"})
@@ -781,7 +783,7 @@ func TestProviderIndexAttributesGroupLearnedAfterCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	release(0)
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 	holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
 	if err != nil {
 		t.Fatal(err)
@@ -816,7 +818,7 @@ func TestProviderIndexAttributesGroupLearnedAfterCreation(t *testing.T) {
 func TestProviderDrainReleasesSchedulerLockBeforeGroup(t *testing.T) {
 	s := New(Options{})
 	provider := "lock.example"
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
@@ -930,7 +932,7 @@ func TestProviderDrainSkipsIdleGroupsAndGrantsQueued(t *testing.T) {
 		}
 		release(0)
 	}
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 	holder, err := s.AcquireWith(ctx, provider+"|held", 0, WaiterHooks{Provider: provider})
 	if err != nil {
 		t.Fatal(err)
@@ -1076,7 +1078,7 @@ func TestProviderIndexAdoptsQueuedGroupAtAttribution(t *testing.T) {
 func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 	s := New(Options{})
 	provider := "race.example"
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1}})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
@@ -1204,7 +1206,7 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 func TestProviderDrainConcurrentGroupCreation(t *testing.T) {
 	s := New(Options{})
 	provider := "concurrent.example"
-	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 4}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 4}})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -1285,7 +1287,7 @@ func TestProviderDrainConcurrentGroupCreation(t *testing.T) {
 func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Requests: 100, ReqWindow: time.Minute}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Requests: 100, ReqWindow: time.Minute}})
 	// Attribute the group to the provider the way production does: every send
 	// gate caller first acquires its admission slot.
 	release, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
@@ -1305,7 +1307,7 @@ func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
 	waitFor(t, func() bool { return s.Stats().SendWaiters == 1 }, "send-gate waiter")
 
 	infos := s.ListThrottles()
-	if len(infos) != 1 || infos[0].Provider != "p" || infos[0].Queued != 1 {
+	if len(infos) != 1 || infos[0].Scope.PrimaryProvider() != "p" || infos[0].Queued != 1 {
 		t.Fatalf("ListThrottles = %+v, want p with queued 1", infos)
 	}
 
@@ -1329,7 +1331,7 @@ func TestSendWaitersCountTowardProviderQueued(t *testing.T) {
 // tombstone representation, so a scan cannot dereference a dead slot.
 func TestThrottleQueuedIgnoresCancelledWaiters(t *testing.T) {
 	s := New(Options{})
-	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{"p"}}, Limit: Limit{Concurrency: 1}})
 	g := s.groupFor("p|k", 1)
 	waiters := make([]*waiter, 16)
 	for i := range waiters {
@@ -1353,7 +1355,35 @@ func TestThrottleQueuedIgnoresCancelledWaiters(t *testing.T) {
 	}
 
 	infos := s.ListThrottles()
-	if len(infos) != 1 || infos[0].Provider != "p" || infos[0].Queued != len(waiters)-1 {
+	if len(infos) != 1 || infos[0].Scope.PrimaryProvider() != "p" || infos[0].Queued != len(waiters)-1 {
 		t.Fatalf("ListThrottles = %+v, want p with queued %d", infos, len(waiters)-1)
 	}
+}
+
+// providerGateFor is the package tests' read path to the gate that owns a
+// provider-only, unscheduled policy. The scheduler keys policies by their
+// canonical identity, so a test that wants the live counters derives that
+// identity instead of reaching into the policy map by provider name.
+func providerGateFor(s *Scheduler, provider string) *policyGate {
+	id := PolicyID(LimitScope{Providers: []string{provider}}, LimitSchedule{})
+	s.throttleMu.Lock()
+	defer s.throttleMu.Unlock()
+	return s.gates[id]
+}
+
+// snapshotGate is the admission-path read: it loads the immutable policy
+// snapshot and never takes throttleMu. The lock-order test uses it to prove
+// that a policy write holding throttleMu and waiting for a gate mutex cannot
+// block admission.
+func snapshotGate(s *Scheduler, provider string) *policyGate {
+	idx := s.policySnap.Load()
+	if idx == nil {
+		return nil
+	}
+	for _, g := range idx.byProvider[provider] {
+		if g.throttle.Scope.ProviderOnly() && g.throttle.Schedule.Empty() {
+			return g
+		}
+	}
+	return nil
 }

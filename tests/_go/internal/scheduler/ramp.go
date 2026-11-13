@@ -74,10 +74,10 @@ func TestRampDisabledIsNoOp(t *testing.T) {
 	}{
 		{name: "zero-policy", setup: func(*Scheduler) {}},
 		{name: "flag-off", capped: true, setup: func(s *Scheduler) {
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: target, RampDuration: ramp}})
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: target, RampDuration: ramp}})
 		}},
 		{name: "zero-duration", capped: true, setup: func(s *Scheduler) {
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: target, AntiBurst: true}})
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: target, AntiBurst: true}})
 		}},
 	}
 	for _, tc := range cases {
@@ -99,7 +99,7 @@ func TestRampDisabledIsNoOp(t *testing.T) {
 				if st := s.Stats(); st.InFlight != target || st.Queued != 0 {
 					t.Fatalf("occupancy = %+v, want all %d admitted immediately", st, target)
 				}
-				if gate := s.gate(provider); gate != nil {
+				if gate := providerGateFor(s, provider); gate != nil {
 					if timer, _ := wakeTimerState(&gate.wake); timer != nil {
 						t.Fatal("disabled ramp armed a provider wake")
 					}
@@ -145,7 +145,7 @@ func TestRampDisabledIsNoOp(t *testing.T) {
 				if start, idle := rampState(t, s, key); !start.IsZero() || !idle.IsZero() {
 					t.Fatalf("disabled ramp wrote state after traffic: start=%v idle=%v", start, idle)
 				}
-				if gate := s.gate(provider); gate != nil {
+				if gate := providerGateFor(s, provider); gate != nil {
 					if timer, _ := wakeTimerState(&gate.wake); timer != nil {
 						t.Fatal("disabled ramp left a provider timer")
 					}
@@ -172,7 +172,7 @@ func TestRampGrowsAllowanceToTarget(t *testing.T) {
 		s := New(Options{})
 		provider := "ramp.example"
 		key := provider + "|k"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 			Concurrency: target, AntiBurst: true, RampDuration: ramp,
 		}})
 		ctx := context.Background()
@@ -195,7 +195,7 @@ func TestRampGrowsAllowanceToTarget(t *testing.T) {
 		if st := s.Stats(); st.InFlight != 1 || st.Queued != target-1 {
 			t.Fatalf("at t0 occupancy = %+v, want 1 in flight and %d queued", st, target-1)
 		}
-		if timer, _ := wakeTimerState(&s.gate(provider).wake); timer == nil {
+		if timer, _ := wakeTimerState(&providerGateFor(s, provider).wake); timer == nil {
 			t.Fatal("first ramp step was not armed")
 		}
 
@@ -216,7 +216,7 @@ func TestRampGrowsAllowanceToTarget(t *testing.T) {
 		if st := s.Stats(); st.InFlight != target || st.Queued != 0 {
 			t.Fatalf("at full duration occupancy = %+v, want %d in flight", st, target)
 		}
-		if timer, _ := wakeTimerState(&s.gate(provider).wake); timer != nil {
+		if timer, _ := wakeTimerState(&providerGateFor(s, provider).wake); timer != nil {
 			t.Fatal("ramp retained a timer after reaching the target")
 		}
 
@@ -245,7 +245,7 @@ func TestRampIdleEpochReset(t *testing.T) {
 	t.Run("full-duration-resets", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 				Concurrency: target, AntiBurst: true, RampDuration: ramp,
 			}})
 			ctx := context.Background()
@@ -310,7 +310,7 @@ func TestRampIdleEpochReset(t *testing.T) {
 	t.Run("short-idle-keeps-epoch", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 				Concurrency: target, AntiBurst: true, RampDuration: ramp,
 			}})
 			ctx := context.Background()
@@ -373,7 +373,7 @@ func TestRampEnabledMidFlightAnchors(t *testing.T) {
 		s := New(Options{})
 		provider := "ramp.example"
 		key := provider + "|k"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: target}})
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: target}})
 		ctx := context.Background()
 		hooks := WaiterHooks{Provider: provider}
 
@@ -385,7 +385,7 @@ func TestRampEnabledMidFlightAnchors(t *testing.T) {
 			}
 			holders = append(holders, release)
 		}
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 			Concurrency: target, AntiBurst: true, RampDuration: ramp,
 		}})
 
@@ -449,12 +449,12 @@ func TestRampPolicyChangeResetsEpoch(t *testing.T) {
 		provider := "ramp.example"
 		key := provider + "|k"
 		base := Throttle{
-			Provider:  provider,
+			Scope:     LimitScope{Providers: []string{provider}},
 			Limit:     Limit{Concurrency: target, AntiBurst: true, RampDuration: ramp},
 			Source:    ThrottleSourceUI,
 			UpdatedBy: "dashboard",
 		}
-		if !s.SetThrottle(base) {
+		if !s.SetPolicy(base) {
 			t.Fatal("initial policy not installed")
 		}
 		ctx := context.Background()
@@ -468,7 +468,7 @@ func TestRampPolicyChangeResetsEpoch(t *testing.T) {
 
 		repeated := base
 		repeated.UpdatedBy = "another-client"
-		if s.SetThrottle(repeated) {
+		if s.SetPolicy(repeated) {
 			t.Fatal("identical effective policy counted as a change")
 		}
 		if start, _ := rampState(t, s, key); !start.Equal(start0) {
@@ -478,7 +478,7 @@ func TestRampPolicyChangeResetsEpoch(t *testing.T) {
 		tokenOnly := base
 		tokenOnly.Limit.Tokens = 1000
 		tokenOnly.Limit.TokWindow = time.Hour
-		if !s.SetThrottle(tokenOnly) {
+		if !s.SetPolicy(tokenOnly) {
 			t.Fatal("token-only change was not installed")
 		}
 		if start, _ := rampState(t, s, key); !start.Equal(start0) {
@@ -487,7 +487,7 @@ func TestRampPolicyChangeResetsEpoch(t *testing.T) {
 
 		clamped := tokenOnly
 		clamped.Limit.Concurrency = 2
-		if !s.SetThrottle(clamped) {
+		if !s.SetPolicy(clamped) {
 			t.Fatal("target change was not installed")
 		}
 		if start, _ := rampState(t, s, key); !start.IsZero() {
@@ -528,7 +528,7 @@ func TestRampInertBelowTwoConcurrency(t *testing.T) {
 	t.Run("concurrency-1", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 				Concurrency: 1, AntiBurst: true, RampDuration: ramp,
 			}})
 			ctx := context.Background()
@@ -546,7 +546,7 @@ func TestRampInertBelowTwoConcurrency(t *testing.T) {
 			if got := s.Stats().Queued; got != 1 {
 				t.Fatalf("queued = %d, want the ordinary provider cap", got)
 			}
-			if timer, _ := wakeTimerState(&s.gate(provider).wake); timer != nil {
+			if timer, _ := wakeTimerState(&providerGateFor(s, provider).wake); timer != nil {
 				t.Fatal("concurrency 1 armed a ramp timer")
 			}
 			first(0)
@@ -561,7 +561,7 @@ func TestRampInertBelowTwoConcurrency(t *testing.T) {
 	t.Run("concurrency-0", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			s := New(Options{})
-			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+			s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 				Concurrency: 0, AntiBurst: true, RampDuration: ramp,
 				Requests: 100, ReqWindow: time.Hour,
 			}})
@@ -581,7 +581,7 @@ func TestRampInertBelowTwoConcurrency(t *testing.T) {
 			if start, _ := rampState(t, s, key); !start.IsZero() {
 				t.Fatal("concurrency 0 started a ramp epoch")
 			}
-			if timer, _ := wakeTimerState(&s.gate(provider).wake); timer != nil {
+			if timer, _ := wakeTimerState(&providerGateFor(s, provider).wake); timer != nil {
 				t.Fatal("concurrency 0 armed a ramp timer")
 			}
 			for _, release := range releases {
@@ -604,7 +604,7 @@ func TestRampCancelDoesNoLeak(t *testing.T) {
 		s := New(Options{})
 		provider := "ramp.example"
 		key := provider + "|k"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 			Concurrency: target, AntiBurst: true, RampDuration: ramp,
 		}})
 		ctx := context.Background()
@@ -659,7 +659,7 @@ func TestRampCancelDoesNoLeak(t *testing.T) {
 		// The next step wake was armed when the ramp grant left a backlog.
 		time.Sleep(15 * time.Millisecond)
 		synctest.Wait()
-		if timer, _ := wakeTimerState(&s.gate(provider).wake); timer != nil {
+		if timer, _ := wakeTimerState(&providerGateFor(s, provider).wake); timer != nil {
 			t.Fatal("ramp wake survived after firing on an empty queue")
 		}
 		granted(0)
@@ -686,7 +686,7 @@ func TestRampFailedFirstAdmissionDoesNotStartClock(t *testing.T) {
 		const ramp = 40 * time.Millisecond
 		s := New(Options{})
 		provider := "ramp.example"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 			Concurrency: 4, Tokens: 1, TokWindow: time.Hour,
 			AntiBurst: true, RampDuration: ramp,
 		}})
@@ -716,8 +716,8 @@ func TestRampFailedFirstAdmissionDoesNotStartClock(t *testing.T) {
 		cancelBlocked()
 		synctest.Wait()
 		wg.Wait()
-		gate := s.gate(provider)
-		s.SetThrottle(Throttle{Provider: provider})
+		gate := providerGateFor(s, provider)
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}})
 		if st := s.Stats(); st.InFlight != 0 || st.Queued != 0 {
 			t.Fatalf("failed-admission cleanup leaked occupancy: %+v", st)
 		}
@@ -739,7 +739,7 @@ func TestRampRepeatedArmsCoalesce(t *testing.T) {
 		s := New(Options{})
 		provider := "ramp.example"
 		key := provider + "|k"
-		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{
 			Concurrency: target, AntiBurst: true, RampDuration: ramp,
 		}})
 		ctx := context.Background()
@@ -766,7 +766,7 @@ func TestRampRepeatedArmsCoalesce(t *testing.T) {
 			})
 		}
 		synctest.Wait()
-		gate := s.gate(provider)
+		gate := providerGateFor(s, provider)
 		timer0, gen0 := wakeTimerState(&gate.wake)
 		if timer0 == nil {
 			t.Fatal("ramp step wake not armed")

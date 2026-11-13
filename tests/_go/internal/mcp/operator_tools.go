@@ -443,7 +443,7 @@ func TestSetThrottleRampValidationStaysWithTheProxy(t *testing.T) {
 		t.Fatalf("a ramp with no active limit must be refused: %s", textOf(t, rampOnly))
 	}
 	if message := textOf(t, rampOnly); !strings.Contains(message, "400") ||
-		!strings.Contains(message, "anti_burst and ramp_duration require an active provider limit") {
+		!strings.Contains(message, "anti_burst and ramp_duration require an active limit") {
 		t.Fatalf("the refusal must be the proxy's active-limit 400: %q", message)
 	}
 	if snapshot := rampProxy.ThrottleSnapshot(); snapshot["active"] != false {

@@ -893,10 +893,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// cycle-free.
 	var hookMu sync.Mutex
 	hooks := scheduler.WaiterHooks{
-		Client:    rec.Client,
-		Provider:  rec.Provider,
-		Model:     rec.Model,
-		EstTokens: estimateTokens(rec),
+		Client:       rec.Client,
+		Provider:     rec.Provider,
+		Model:        rec.Model,
+		KeyHash:      rec.KeyHash,
+		Conversation: rec.ConversationID,
+		EstTokens:    estimateTokens(rec),
 		OnWait: func() {
 			if stream {
 				pacer.Start()

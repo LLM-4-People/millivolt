@@ -94,7 +94,7 @@ func TestThrottleAntiBurstRestoreDocument(t *testing.T) {
 // shape, so no stored document gains a key it never opted into.
 func TestPersistedThrottleRampOffKeepsLegacyBytes(t *testing.T) {
 	th := scheduler.Throttle{
-		Provider: "alpha.example",
+		Scope: scheduler.LimitScope{Providers: []string{"alpha.example"}},
 		Limit: scheduler.Limit{
 			Concurrency: 4,
 			Requests:    30,
@@ -141,7 +141,7 @@ func TestThrottlePersistDocumentBoundWithRampFields(t *testing.T) {
 				limit.RampDuration = worstRamp
 			}
 			items = append(items, throttleToPersisted(scheduler.Throttle{
-				Provider:  provider,
+				Scope:     scheduler.LimitScope{Providers: []string{provider}},
 				Limit:     limit,
 				Source:    scheduler.ThrottleSourceHeader,
 				UpdatedBy: client,

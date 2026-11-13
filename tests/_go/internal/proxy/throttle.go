@@ -72,8 +72,10 @@ func deferThrottleWriter(p *Server) {
 // reads as a zero Throttle, matching a cleared cap.
 func schedThrottleFor(sched *scheduler.Scheduler, provider string) scheduler.Throttle {
 	for _, info := range sched.ListThrottles() {
-		if info.Provider == provider {
-			return info.Throttle
+		if info.Scope.PrimaryProvider() == provider {
+			th := info.Throttle
+			th.ID = ""
+			return th
 		}
 	}
 	return scheduler.Throttle{}
@@ -92,8 +94,8 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 	provider := "provider.example"
 	// Seed the anti-burst pair so every header merge below must carry it: an
 	// unchanged header is a whole-policy no-op only if both fields survive.
-	initial := scheduler.Throttle{Provider: provider, Limit: scheduler.Limit{Concurrency: 3, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: time.Now().Add(-time.Hour)}
-	p.applyThrottle(initial)
+	initial := scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{provider}}, Limit: scheduler.Limit{Concurrency: 3, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: time.Now().Add(-time.Hour)}
+	applyTestThrottle(p, initial)
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	r.Header.Set(hdrLimitConcurrency, "3")
 	for i := 0; i < 20; i++ {
@@ -104,7 +106,7 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 	if err := p.FlushThrottles(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if saves := store.saveCount(); saves != 1 || schedThrottleFor(p.scheduler, provider) != initial {
+	if saves := store.saveCount(); saves != 1 || !reflect.DeepEqual(schedThrottleFor(p.scheduler, provider), initial) {
 		t.Fatal("repeated header rewrote a dashboard policy or its persistence")
 	}
 	// The opposite source direction is also a policy no-op.
@@ -120,8 +122,8 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 		t.Fatal("changed header policy was not persisted with new attribution")
 	}
 	initial.Limit.Concurrency = 4
-	p.applyThrottle(initial)
-	if saves := store.saveCount(); saves != 2 || schedThrottleFor(p.scheduler, provider) != headerPolicy {
+	applyTestThrottle(p, initial)
+	if saves := store.saveCount(); saves != 2 || !reflect.DeepEqual(schedThrottleFor(p.scheduler, provider), headerPolicy) {
 		t.Fatal("identical UI cap replaced the last actual header policy change")
 	}
 	r.Header.Set(hdrLimitConcurrency, "off")
@@ -150,7 +152,7 @@ func TestThrottleConcurrentHeadersMergeLatestPolicy(t *testing.T) {
 	})
 	provider := "provider.example"
 	for i := 0; i < 40; i++ {
-		p.applyThrottle(scheduler.Throttle{Provider: provider})
+		applyTestThrottle(p, scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{provider}}})
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		for name, value := range map[string]string{hdrLimitConcurrency: "3", hdrLimitRequests: "10/1m", hdrLimitTokens: "100/1m"} {
@@ -224,7 +226,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 	})
 	provider := "provider.example"
 	for i := 0; i < 40; i++ {
-		p.applyThrottle(scheduler.Throttle{Provider: provider})
+		applyTestThrottle(p, scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{provider}}})
 		start := make(chan struct{})
 		var wg sync.WaitGroup
 		wg.Go(func() {
@@ -262,7 +264,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		if rr := postThrottle(t, p, `{"provider":"provider.example","concurrency":8,"tokens":-1}`); rr.Code != http.StatusBadRequest {
 			t.Fatalf("invalid UI patch status = %d", rr.Code)
 		}
-		if schedThrottleFor(p.scheduler, provider) != before || store.saveCount() != saves {
+		if !reflect.DeepEqual(schedThrottleFor(p.scheduler, provider), before) || store.saveCount() != saves {
 			t.Fatal("invalid UI patch partly changed or persisted the policy")
 		}
 	}
@@ -567,14 +569,14 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 
 	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
 	policies := []scheduler.Throttle{
-		{Provider: "alpha.example", Limit: scheduler.Limit{Requests: 30, ReqWindow: time.Minute}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
-		{Provider: "busy.example", Limit: scheduler.Limit{Concurrency: 1}, Source: scheduler.ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
-		{Provider: "ramp.example", Limit: scheduler.Limit{Concurrency: 4, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(90 * time.Second)},
-		{Provider: "zulu.example", Limit: scheduler.Limit{Tokens: 9000, TokWindow: time.Hour}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
+		{Scope: scheduler.LimitScope{Providers: []string{"alpha.example"}}, Limit: scheduler.Limit{Requests: 30, ReqWindow: time.Minute}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
+		{Scope: scheduler.LimitScope{Providers: []string{"busy.example"}}, Limit: scheduler.Limit{Concurrency: 1}, Source: scheduler.ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
+		{Scope: scheduler.LimitScope{Providers: []string{"ramp.example"}}, Limit: scheduler.Limit{Concurrency: 4, AntiBurst: true, RampDuration: 10 * time.Second}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(90 * time.Second)},
+		{Scope: scheduler.LimitScope{Providers: []string{"zulu.example"}}, Limit: scheduler.Limit{Tokens: 9000, TokWindow: time.Hour}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
 	}
 	for _, th := range policies {
-		if err := p.applyThrottle(th); err != nil {
-			t.Fatalf("apply %s: %v", th.Provider, err)
+		if err := applyTestThrottle(p, th); err != nil {
+			t.Fatalf("apply %s: %v", th.Scope.PrimaryProvider(), err)
 		}
 	}
 
@@ -608,7 +610,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	// still holds its in-flight slot and parked waiter.
 	changed := policies[0]
 	changed.Limit.Requests = 31
-	if err := p.applyThrottle(changed); err != nil {
+	if err := applyTestThrottle(p, changed); err != nil {
 		t.Fatalf("apply changed policy: %v", err)
 	}
 
@@ -616,7 +618,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	legacy := make([]persistedThrottle, 0, len(infos))
 	busyLive := false
 	for _, inf := range infos {
-		if inf.Provider == "busy.example" && inf.InFlight == 1 && inf.Queued == 1 {
+		if inf.Scope.PrimaryProvider() == "busy.example" && inf.InFlight == 1 && inf.Queued == 1 {
 			busyLive = true
 		}
 		legacy = append(legacy, throttleToPersisted(inf.Throttle))
@@ -624,7 +626,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	if !busyLive {
 		t.Fatalf("dashboard listing lost live occupancy: %+v", infos)
 	}
-	wantRaw, err := json.Marshal(persistedThrottleDoc{Throttles: legacy})
+	wantRaw, err := json.Marshal(persistedThrottleDoc{Version: throttleDocVersion, Throttles: legacy})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -639,7 +641,7 @@ func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
 	if !reflect.DeepEqual(snap, legacy) {
 		t.Fatalf("latestThrottleSnap = %+v, want %+v", snap, legacy)
 	}
-	snapRaw, err := json.Marshal(persistedThrottleDoc{Throttles: snap})
+	snapRaw, err := json.Marshal(persistedThrottleDoc{Version: throttleDocVersion, Throttles: snap})
 	if err != nil {
 		t.Fatal(err)
 	}

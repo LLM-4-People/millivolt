@@ -14,22 +14,22 @@ func TestAcquisitionOwnsOriginalThrottle(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := New(Options{})
 				provider := "provider.example"
-				cap := Throttle{Provider: provider, Limit: Limit{Concurrency: 1, Tokens: 100, TokWindow: time.Hour}}
+				cap := Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1, Tokens: 100, TokWindow: time.Hour}}
 				if initialCap {
-					s.SetThrottle(cap)
+					s.SetPolicy(cap)
 				}
 				first, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 40})
 				if err != nil {
 					t.Fatal(err)
 				}
-				s.SetThrottle(Throttle{Provider: provider})
-				s.SetThrottle(cap)
+				s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}})
+				s.SetPolicy(cap)
 				second, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 20})
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer second(0)
-				g := s.gate(provider)
+				g := providerGateFor(s, provider)
 				before := g.snapshot(0)
 				first(30)
 				if after := g.snapshot(0); after.InFlight != before.InFlight || after.TokRemaining != before.TokRemaining || g.reserved != 20 {
@@ -44,20 +44,20 @@ func TestReleaseSettlesExactlyOnceAcrossPolicyChange(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "provider.example"
-		limit := Throttle{Provider: provider, Limit: Limit{Tokens: 100, TokWindow: time.Hour}}
-		s.SetThrottle(limit)
+		limit := Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Tokens: 100, TokWindow: time.Hour}}
+		s.SetPolicy(limit)
 		release, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 40})
 		if err != nil {
 			t.Fatal(err)
 		}
 		limit.Limit.Tokens = 200
-		s.SetThrottle(limit) // an in-place change keeps the same acquisition owner
+		s.SetPolicy(limit) // an in-place change keeps the same acquisition owner
 		var wg sync.WaitGroup
 		for i := 0; i < 32; i++ {
 			wg.Go(func() { release(25) })
 		}
 		wg.Wait()
-		g := s.gate(provider)
+		g := providerGateFor(s, provider)
 		if after := g.snapshot(0); after.TokRemaining != 175 || after.InFlight != 0 || g.reserved != 0 || s.Stats().InFlight != 0 {
 			t.Fatalf("usage or slot was settled more than once: %+v reserved=%d", after, g.reserved)
 		}
@@ -68,8 +68,8 @@ func TestCancelledGrantedWaiterUsesOriginalGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
 		provider := "provider.example"
-		limit := Throttle{Provider: provider, Limit: Limit{Concurrency: 1, Tokens: 100, TokWindow: time.Hour}}
-		s.SetThrottle(limit)
+		limit := Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 1, Tokens: 100, TokWindow: time.Hour}}
+		s.SetPolicy(limit)
 		// Attribute the group through a real Acquire so it is linked into the
 		// provider index; a provider-attributed group must be visible to the
 		// fair provider drain, and the fixture then installs one granted but
@@ -86,14 +86,14 @@ func TestCancelledGrantedWaiterUsesOriginalGate(t *testing.T) {
 		g.syncQueueLocked()
 		g.mu.Unlock()
 		g.drain() // grant sent, but the caller has not consumed it
-		s.SetThrottle(Throttle{Provider: provider})
-		s.SetThrottle(limit)
+		s.SetPolicy(Throttle{Scope: LimitScope{Providers: []string{provider}}})
+		s.SetPolicy(limit)
 		release, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 20})
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer release(0)
-		current := s.gate(provider)
+		current := providerGateFor(s, provider)
 		before := current.snapshot(0)
 		g.removeWaiter(w)
 		if after := current.snapshot(0); after.InFlight != before.InFlight || after.TokRemaining != before.TokRemaining || current.reserved != 20 {
@@ -122,23 +122,23 @@ func TestAcquisitionOwnsTokenBucketGeneration(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := New(Options{})
 				provider := "provider.example"
-				limit := Throttle{Provider: provider, Limit: Limit{Concurrency: 3, Tokens: initialTokens, TokWindow: time.Hour}}
-				s.SetThrottle(limit)
+				limit := Throttle{Scope: LimitScope{Providers: []string{provider}}, Limit: Limit{Concurrency: 3, Tokens: initialTokens, TokWindow: time.Hour}}
+				s.SetPolicy(limit)
 				first, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 40})
 				if err != nil {
 					t.Fatal(err)
 				}
 				limit.Limit.Tokens = 0
-				s.SetThrottle(limit)
+				s.SetPolicy(limit)
 				limit.Limit.Tokens = 100
-				s.SetThrottle(limit)
+				s.SetPolicy(limit)
 				second, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 20})
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer second(0)
 				first(30)
-				g := s.gate(provider)
+				g := providerGateFor(s, provider)
 				if after := g.snapshot(0); after.TokRemaining != 80 || after.InFlight != 1 || g.reserved != 20 {
 					t.Fatalf("old token lease changed newly enabled bucket: %+v reserved=%d", after, g.reserved)
 				}

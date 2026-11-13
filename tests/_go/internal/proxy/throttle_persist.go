@@ -310,13 +310,13 @@ func TestThrottleStaleWriteRewritesLatest(t *testing.T) {
 
 	firstDone := make(chan error, 1)
 	go func() {
-		firstDone <- p.applyThrottle(scheduler.Throttle{
-			Provider: "provider.example", Limit: scheduler.Limit{Concurrency: 1},
+		firstDone <- applyTestThrottle(p, scheduler.Throttle{
+			Scope: scheduler.LimitScope{Providers: []string{"provider.example"}}, Limit: scheduler.Limit{Concurrency: 1},
 		})
 	}()
 	<-entered
-	if err := p.applyThrottle(scheduler.Throttle{
-		Provider: "provider.example", Limit: scheduler.Limit{Concurrency: 2},
+	if err := applyTestThrottle(p, scheduler.Throttle{
+		Scope: scheduler.LimitScope{Providers: []string{"provider.example"}}, Limit: scheduler.Limit{Concurrency: 2},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +657,7 @@ func TestThrottleProviderLabelBound(t *testing.T) {
 	if err := p.applyThrottleHeaders(r, overlong, "client"); err == nil {
 		t.Fatal("overlong header provider label was accepted")
 	}
-	if err := p.applyThrottle(scheduler.Throttle{Provider: overlong, Limit: scheduler.Limit{Concurrency: 1}}); err == nil {
+	if err := applyTestThrottle(p, scheduler.Throttle{Scope: scheduler.LimitScope{Providers: []string{overlong}}, Limit: scheduler.Limit{Concurrency: 1}}); err == nil {
 		t.Fatal("overlong operator provider label was accepted")
 	}
 	rr := postThrottle(t, p, `{"provider":"`+overlong+`","concurrency":1}`)
@@ -675,4 +675,18 @@ func TestThrottleProviderLabelBound(t *testing.T) {
 	if len(items) != 1 || items[0].Provider != normal {
 		t.Fatalf("overlong label changed the persisted document: %+v", items)
 	}
+}
+
+// applyTestThrottle installs a complete policy through the same scheduler and
+// persistence owners the operator path uses, without going through HTTP. Tests
+// that need a seeded policy call it instead of reaching into scheduler state.
+func applyTestThrottle(p *Server, th scheduler.Throttle) error {
+	if err := validateThrottleScope(th.Scope); err != nil {
+		return err
+	}
+	if !p.scheduler.SetPolicy(th) {
+		return nil
+	}
+	p.notePolicyScope(th)
+	return p.persistThrottleSync()
 }

@@ -81,21 +81,23 @@ type group struct {
 }
 
 type waiter struct {
-	ch        chan struct{}
-	enqueued  time.Time
-	ctx       context.Context // for detecting already-cancelled waiters at grant time
-	pausedAt  time.Time       // when the current hold began while this waiter was queued
-	client    string
-	provider  string
-	model     string
-	drainSeq  uint64
-	holdID    string
-	holding   bool
-	onHold    func()
-	onUnhold  func()
-	estTokens int64
-	admission admission // exact provider/token owners captured at grant
-	queueNode listNode[waiter]
+	ch           chan struct{}
+	enqueued     time.Time
+	ctx          context.Context // for detecting already-cancelled waiters at grant time
+	pausedAt     time.Time       // when the current hold began while this waiter was queued
+	client       string
+	provider     string
+	model        string
+	keyHash      string
+	conversation string
+	drainSeq     uint64
+	holdID       string
+	holding      bool
+	onHold       func()
+	onUnhold     func()
+	estTokens    int64
+	admission    admission // exact policy/token owners captured at grant
+	queueNode    listNode[waiter]
 }
 
 // WaiterHooks is optional Acquire context: which client/provider this caller
@@ -115,12 +117,27 @@ type WaiterHooks struct {
 	Client       string
 	Provider     string
 	Model        string
+	KeyHash      string
+	Conversation string
 	EstTokens    int64
 	OnWait       func()
 	OnHold       func()
 	OnUnhold     func()
 	OnThrottle   func()
 	OnUnthrottle func()
+}
+
+// policyTarget is the identity every matching operator limit is evaluated
+// against. The scheduler never re-reads the request; the caller supplies the
+// facts it already resolved at admission.
+func (h WaiterHooks) policyTarget() policyTarget {
+	return policyTarget{
+		Provider:     h.Provider,
+		Model:        h.Model,
+		Client:       h.Client,
+		KeyHash:      h.KeyHash,
+		Conversation: h.Conversation,
+	}
 }
 
 // AcquireWith blocks until the group's head-of-queue slot is available,
@@ -183,7 +200,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!now.Before(g.nextAllowedAt) &&
 		g.sched.matchingHold(hooks.Client, hooks.Provider) == nil {
-		ok, lease, wait, _ := g.admitLocked(now, hooks.Provider, hooks.EstTokens)
+		ok, lease, wait, _ := g.admitLocked(now, hooks.policyTarget(), hooks.EstTokens)
 		if ok {
 			g.inFlight++
 			g.sched.markGroupBusyLocked(g)
@@ -203,6 +220,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	w := &waiter{
 		ch: make(chan struct{}, 1), enqueued: enqueued, ctx: ctx,
 		client: hooks.Client, provider: hooks.Provider, model: hooks.Model,
+		keyHash: hooks.KeyHash, conversation: hooks.Conversation,
 		drainSeq: g.sched.drainSeq.Load(),
 		onHold:   hooks.OnHold, onUnhold: hooks.OnUnhold,
 		estTokens: hooks.EstTokens,
@@ -453,21 +471,46 @@ func (g *group) drain() {
 // enabled is true only when the flag is set and both dimensions can ramp:
 // Concurrency >= 2 and RampDuration > 0. The returned target is always the
 // configured provider concurrency, never a live allowance.
+func (w *waiter) policyTarget() policyTarget {
+	return policyTarget{
+		Provider:     w.provider,
+		Model:        w.model,
+		Client:       w.client,
+		KeyHash:      w.keyHash,
+		Conversation: w.conversation,
+	}
+}
+
+// rampPolicy resolves this group's provider anti-burst policy. Anti-burst is
+// defined only for a provider-wide, unscheduled policy: a selector that names
+// models, clients, keys or conversations would need a ramp per matched policy,
+// which the operator surface does not offer and the scheduler does not
+// pretend to support. Callers hold g.mu; the policy read nests inside that
+// existing g.mu -> policyGate.mu order. enabled is true only when the flag is
+// set and both dimensions can ramp: Concurrency >= 2 and RampDuration > 0.
+// The returned target is always the configured concurrency, never a live
+// allowance.
 func (g *group) rampPolicy() (target int, duration time.Duration, enabled bool) {
 	if g.provider == "" {
 		return 0, 0, false
 	}
-	gate := g.sched.gate(g.provider)
-	if gate == nil {
+	idx := g.sched.policySnap.Load()
+	if idx == nil {
 		return 0, 0, false
 	}
-	gate.mu.Lock()
-	limit := gate.throttle.Limit
-	gate.mu.Unlock()
-	if !limit.rampActive() {
-		return 0, 0, false
+	for _, gate := range idx.byProvider[g.provider] {
+		if !gate.throttle.Scope.ProviderOnly() || !gate.throttle.Schedule.Empty() {
+			continue
+		}
+		gate.mu.Lock()
+		limit := gate.throttle.Limit
+		gate.mu.Unlock()
+		if !limit.rampActive() {
+			return 0, 0, false
+		}
+		return limit.Concurrency, limit.RampDuration, true
 	}
-	return limit.Concurrency, limit.RampDuration, true
+	return 0, 0, false
 }
 
 // rampSteps returns floor(elapsed*(target-1)/duration). The 128-bit product
@@ -602,13 +645,13 @@ func (g *group) armRampStepLocked(now time.Time) {
 // that transition. A failed provider admission never starts a fresh epoch;
 // only a successful grant does, while the mid-flight anchor reflects
 // occupancy that already exists.
-func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok bool, lease admission, wait time.Duration, gateBlocked bool) {
+func (g *group) admitLocked(now time.Time, request policyTarget, estTokens int64) (ok bool, lease admission, wait time.Duration, gateBlocked bool) {
 	target, duration, enabled := g.rampPolicy()
 	if !enabled {
 		if !g.rampStart.IsZero() || !g.idleSince.IsZero() {
 			g.resetRampLocked()
 		}
-		ok, lease, wait = g.sched.tryAdmit(provider, estTokens)
+		ok, lease, wait = g.sched.tryAdmit(request, estTokens)
 		if !ok && g.queue.live > 0 {
 			g.markGateWaitingLocked()
 			gateBlocked = true
@@ -622,7 +665,7 @@ func (g *group) admitLocked(now time.Time, provider string, estTokens int64) (ok
 		}
 		return false, admission{}, 0, false
 	}
-	ok, lease, wait = g.sched.tryAdmit(provider, estTokens)
+	ok, lease, wait = g.sched.tryAdmit(request, estTokens)
 	if ok {
 		g.startRampLocked(now, duration)
 	} else if g.queue.live > 0 {
@@ -673,7 +716,7 @@ func (g *group) drainLimited(budget int) int {
 			node = next
 			continue
 		}
-		ok, lease, wait, gateBlocked := g.admitLocked(now, w.provider, w.estTokens)
+		ok, lease, wait, gateBlocked := g.admitLocked(now, w.policyTarget(), w.estTokens)
 		if !ok {
 			refused = gateBlocked
 			if wait > 0 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -170,7 +171,7 @@ func TestThrottleRampDurationGrammar(t *testing.T) {
 				if rr.Code != http.StatusBadRequest {
 					t.Fatalf("ramp %q = %d %s, want 400", tc.raw, rr.Code, rr.Body.String())
 				}
-				if after := schedThrottleFor(p.scheduler, "alpha.example"); after != before || store.saveCount() != saves {
+				if after := schedThrottleFor(p.scheduler, "alpha.example"); !reflect.DeepEqual(after, before) || store.saveCount() != saves {
 					t.Fatalf("rejected ramp %q changed the policy: %+v (saves %d -> %d)", tc.raw, after, saves, store.saveCount())
 				}
 				return
