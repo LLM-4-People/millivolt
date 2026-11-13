@@ -292,6 +292,23 @@ documented override for a gateway that mislabels transient failures). Reload
 applies to new classifications, and the published predicates render per call,
 so they re-read stored history through the same effective vocabulary.
 
+A failed response's reason is read from the provider's own body, in two layers.
+The OpenAI/Anthropic envelope (`{"error":{"message","type","code"}}`,
+`{"type":"error","error":{…}}`, or a plain-string `"error"`) always wins and
+supplies type, code and message. When the body carries no such envelope, the
+failure path still recovers a human-readable reason from the members gateways
+commonly use: a top-level `detail`, `message`, `msg`, `reason` or
+`error_description` string, a FastAPI validation `detail` array (the first
+item's `msg`), or Cloudflare's `errors` array (`message`, with its numeric
+`code`). Nested lookups are depth-bounded, a wrong-typed member is ignored
+rather than stringified, and every reason is truncated to the same record bound
+as an envelope message. A body that is valid JSON but carries no extractable
+reason stays classified as `provider_error` with no message, and an empty body
+stays unclassified - only the status remains. This recovery runs only where the
+response is already known to have failed; the success paths keep treating
+those same bodies as non-errors, so a 2xx completion carrying a top-level
+`message` is never mistaken for a failure.
+
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion

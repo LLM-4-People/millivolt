@@ -570,6 +570,12 @@ func HasErrorKey(b []byte) bool {
 // genuinely unparseable JSON it also returns ("", "", ""); callers that must
 // still classify such bodies keep their own bounded raw-prefix fallback
 // (proxy's parseErrorBody). Message is bounded via TruncatePreview.
+//
+// This is the SUCCESS-CAPABLE decoder: an empty answer means "not a failure I
+// can prove", so every caller that inspects a 2xx body relies on it. A caller
+// that already knows the response failed - a 4xx/5xx, or a re-send that
+// answered one - must call ParseFailureBody instead, which additionally reads
+// the reason members a non-OpenAI gateway uses.
 func ParseErrorEnvelope(b []byte) (typ, code, msg string) {
 	trimmed := bytes.TrimSpace(b)
 	if len(trimmed) == 0 {
@@ -582,6 +588,160 @@ func ParseErrorEnvelope(b []byte) (typ, code, msg string) {
 		return "", "", ""
 	}
 	return parseErrorValue(probe.Error)
+}
+
+// failureReasonMembers is the ordered set of top-level members that carry a
+// failure's human-readable reason when the body has no OpenAI "error" envelope.
+// Ordered most-specific first, so a body carrying several picks the one that
+// reads as the provider's own statement rather than a generic echo. It is the
+// single vocabulary for non-envelope failure shapes; the proxy's failure path
+// is the only consumer.
+var failureReasonMembers = []string{"detail", "message", "msg", "reason", "error_description"}
+
+// ParseFailureBody is the failure-only companion to ParseErrorEnvelope. It must
+// be called only where the response is ALREADY known to have failed (a 4xx/5xx,
+// or a re-send that answered one); it never decides success or failure.
+//
+// A provider behind a gateway does not always speak the OpenAI envelope. The
+// observed shapes are:
+//
+//	{"detail":"model is not serving"}                  FastAPI
+//	{"detail":[{"loc":[...],"msg":"field required"}]}  FastAPI validation
+//	{"message":"model is not serving"}                 generic gateway
+//	{"success":false,"errors":[{"code":1000,"message":"..."}]}  Cloudflare
+//
+// Without this fallback such a body classified as provider_error with an EMPTY
+// message, so the dashboard showed a bare status with no reason at all (the
+// exact symptom reported for a 503 that carried no OpenAI envelope).
+//
+// The OpenAI envelope always wins. When it yields nothing, the reason members
+// are tried in failureReasonMembers order; a "detail"/"errors" member that is
+// an array or object is searched for a nested string reason, so FastAPI's
+// validation list and Cloudflare's errors array both read naturally. Every
+// candidate string is bounded by RetainedErrorMsgMax, the same bound the
+// envelope path uses, and a wrong-typed member (a number, an object with no
+// string inside) is ignored rather than stringified, mirroring
+// ParseErrorMembers' rule. The first reason found is returned with the
+// provider_error type and, for the Cloudflare shape, its numeric code.
+func ParseFailureBody(b []byte) (typ, code, msg string) {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 {
+		return "", "", ""
+	}
+	if typ, code, msg = ParseErrorEnvelope(trimmed); typ != "" {
+		return typ, code, msg
+	}
+	// Not an envelope (or a decoy one): read the failure's own reason members.
+	// A top-level JSON string is the whole reason; otherwise only an object
+	// document can carry named members.
+	if trimmed[0] == '"' {
+		if s := rawErrorString(trimmed); s != "" {
+			return TypeProviderError, "", retainRecordText(s, RetainedErrorMsgMax)
+		}
+		return "", "", ""
+	}
+	if trimmed[0] != '{' {
+		return "", "", ""
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return "", "", ""
+	}
+	// The Cloudflare shape names its reason inside an "errors" array; check it
+	// alongside the flat members so a body carrying both prefers the flat one.
+	for _, member := range failureReasonMembers {
+		if s := failureReasonString(probe[member], 0); s != "" {
+			return TypeProviderError, "", retainRecordText(s, RetainedErrorMsgMax)
+		}
+	}
+	if s, c := failureReasonFromErrors(probe["errors"]); s != "" {
+		return TypeProviderError, c, retainRecordText(s, RetainedErrorMsgMax)
+	}
+	return "", "", ""
+}
+
+// failureReasonMaxDepth bounds how deep failureReasonString will follow nested
+// containers. Every real shape nests at most two levels (a validation list of
+// objects, or an object wrapping a message); the bound keeps a hostile or
+// accidental deeply-nested body from driving unbounded recursion.
+const failureReasonMaxDepth = 4
+
+// failureReasonString extracts a human-readable reason from one candidate
+// member: a plain string, or the string(s) nested inside a validation-style
+// array/object. It returns "" for a wrong-typed member (a number, a boolean, a
+// null, an object carrying no string reason) so a decoy never becomes text.
+func failureReasonString(raw json.RawMessage, depth int) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || depth > failureReasonMaxDepth {
+		return ""
+	}
+	switch raw[0] {
+	case '"':
+		return rawErrorString(raw)
+	case '[':
+		// FastAPI's validation detail: prefer each item's own "msg".
+		var items []json.RawMessage
+		if json.Unmarshal(raw, &items) != nil {
+			return ""
+		}
+		for _, item := range items {
+			if s := failureReasonString(item, depth+1); s != "" {
+				return s
+			}
+		}
+		return ""
+	case '{':
+		// A nested object: read its own reason members before any other string.
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(raw, &obj) != nil {
+			return ""
+		}
+		for _, member := range failureReasonMembers {
+			if s := failureReasonString(obj[member], depth+1); s != "" {
+				return s
+			}
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// failureReasonFromErrors reads the Cloudflare errors-array shape:
+// {"success":false,"errors":[{"code":1000,"message":"..."}]}. The message is
+// the reason; the numeric code is returned when present so the record keeps the
+// gateway's own identifier. It accepts a single object too, since some gateways
+// emit an object rather than a one-element array.
+func failureReasonFromErrors(raw json.RawMessage) (msg, code string) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return "", ""
+	}
+	items := []json.RawMessage{raw}
+	if raw[0] == '[' {
+		if json.Unmarshal(raw, &items) != nil {
+			return "", ""
+		}
+	}
+	for _, item := range items {
+		item = bytes.TrimSpace(item)
+		if len(item) == 0 || item[0] != '{' {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(item, &obj) != nil {
+			continue
+		}
+		s := failureReasonString(obj["message"], 1)
+		if s == "" {
+			s = failureReasonString(obj["detail"], 1)
+		}
+		if s == "" {
+			continue
+		}
+		return s, rawErrorCode(obj["code"])
+	}
+	return "", ""
 }
 
 // ParseResponseFailedEnvelope parses the provider error carried by a Responses

@@ -20,21 +20,31 @@ import (
 // (metrics.ParseErrorEnvelope), defaulting the type when absent. Shared by the
 // final-response path and the per-retry-attempt log so both parse identically.
 //
-// The message is bounded (metrics.TruncatePreview) because a provider's error
-// message can echo user-supplied content and is otherwise arbitrary
+// Callers invoke it only where the response ALREADY failed (the >=400 gates in
+// ServeHTTP, the quality re-send, and the retry ladder's attempt log), so it
+// delegates to metrics.ParseFailureBody: the OpenAI/Anthropic envelope first,
+// then the reason members a non-OpenAI gateway uses (`detail`, `message`,
+// `errors[].message`). Without that second step a gateway answering
+// `{"detail":"model is not serving"}` stored a provider_error with no message
+// at all, and the dashboard showed a bare status with no reason.
+//
+// The message is bounded (metrics.RetainedErrorMsgMax) because a provider's
+// error message can echo user-supplied content and is otherwise arbitrary
 // provider-controlled bytes - the record stays bounded regardless of
 // capture_body_preview. When the (bounded) body doesn't parse (e.g. it was
-// truncated mid-token), fall back to a bounded raw prefix so the record keeps a
-// classifiable signature instead of a blank one.
+// truncated mid-token by the read bound), fall back to a bounded raw prefix so
+// the record keeps a classifiable signature instead of a blank one.
 func parseErrorBody(b []byte) (typ, code, msg string) {
 	if len(b) == 0 {
 		return "", "", ""
 	}
-	if typ, code, msg = metrics.ParseErrorEnvelope(b); typ != "" {
+	if typ, code, msg = metrics.ParseFailureBody(b); typ != "" {
 		return typ, code, msg
 	}
+	// Decodable but no extractable reason: classify, no message. This keeps a
+	// valid-JSON failure body (a decoy error value, or an object carrying no
+	// reason member) classifiable without inventing text.
 	if json.Valid(b) {
-		// Decodable but null/empty error value: classify, no message.
 		return metrics.TypeProviderError, "", ""
 	}
 	// Unparseable (e.g. an oversized body truncated mid-token): keep a
