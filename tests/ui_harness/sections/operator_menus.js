@@ -802,8 +802,11 @@ module.exports = async function operatorMenus(H) {
             queued: 0, default_max_queued: 0});
           w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''}");
           w.openOperatorConsole('pause');
-          check('the pause head offers a one-click hold with its bound in the label',
-            text('#oc-pane [data-oc-quick-hold]') === 'hold 15m');
+          // The label names the scope as well as the bound: "hold 15m" read as
+          // a duration preset for the composer beside it, and the fact that it
+          // parks everything lived only in a hover title.
+          check('the pause head offers a one-click hold naming its scope and bound',
+            text('#oc-pane [data-oc-quick-hold]') === 'hold all 15m');
           click('#oc-pane [data-oc-quick-hold]');
           check('a one-click hold posts a bounded all-traffic hold',
             await settleUntil(() => posts.length === 1) &&

@@ -120,7 +120,11 @@ function ocRenderPause() {
   const headAction = ocDrafts.pause?.id
     ? `<button type="button" class="btn" data-oc-new="pause">start over</button>`
     : composing ? ''
-      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold ${ocQuickHoldMinutes}m</button>` +
+      // The label names the scope. "hold 15m" read as a duration preset for
+      // the composer beside it, and its blast radius lived only in the title,
+      // which a touch operator never sees. It stays one click: this is the
+      // incident shortcut, and a dialog would defeat it.
+      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold all ${ocQuickHoldMinutes}m</button>` +
         `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
   const entries = holds.map(hold => {
     const scope = hold.all ? 'all traffic'
