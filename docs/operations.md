@@ -1025,10 +1025,16 @@ so run the proxy under a dedicated account.
 
 Pause creates holds; it does not disconnect already-running sends. Matching new
 sends and retries wait until the hold expires or is resumed. Choose all traffic,
-named clients/providers, or clients that were unseen when a new-clients hold was
-created. "New" does not mean new requests or new conversations. Multiple names
-within a dimension are alternatives; provider and client constraints intersect.
-When named clients and new are combined, either client condition may match.
+any combination of the five scope dimensions, or clients that were unseen when a
+new-clients hold was created. "New" does not mean new requests or new
+conversations.
+
+A hold scopes on the same five dimensions a limit does: providers, models,
+clients, upstream key hashes and conversations. Values inside one dimension are
+alternatives, an unset dimension matches any value, and set dimensions
+intersect - the same rule limits use, because the scheduler matches both against
+one request identity. When named clients and new are combined, either client
+condition may match.
 
 A hold has its own duration and queue cap; the cap defaults to `max_queue_size`
 when the hold does not set one. Excess waiting work can be refused;
@@ -1039,10 +1045,12 @@ scopes are rejected instead of silently replacing a different hold.
 The HTTP shape is closed. A resume carries only `paused:false` and an optional
 `id`; supplying a scope, duration or queue cap beside it is a 400, because the
 proxy has no scope-selective resume and accepting one would clear more holds
-than the caller named. `all:true` cannot be combined with `new`, `clients` or
-`providers`; the global hold already covers them. Named clients plus `new`
-remains a valid union. These are enforced by the handler, not only by the MCP
-and CLI wrappers.
+than the caller named. `all:true` cannot be combined with `new` or any scope
+dimension; the global hold already covers them. Named clients plus `new`
+remains a valid union. An edit restates the dimensions it supplies and preserves
+the ones it omits, so supplying an explicit empty array is how a dimension is
+cleared. These are enforced by the handler, not only by the MCP and CLI
+wrappers.
 
 The known client/provider/model vocabularies (the pause and capture pickers,
 and the snapshot a new-clients hold compares against) are bounded at 4096 names

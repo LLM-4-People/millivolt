@@ -300,9 +300,12 @@ without a second total and is a polite live region.
 
 Activating the readout opens the console. On a wide viewport it is an anchored
 popover under the trigger: 520px wide, and only as tall as its content up to a
-560px cap. At 800px or narrower it becomes a bottom sheet capped at 70dvh. The
-section rail is one horizontally scrollable strip at every width, and it fades
-its trailing edge while more sections remain. Escape, an outside press, the close button, or
+560px cap, scrolling inside it. At 800px or narrower it becomes a bottom sheet
+capped at 88dvh, leaving a strip of page above it for outside-press dismissal.
+The section rail is one horizontally scrollable strip above that breakpoint and
+fades its trailing edge while more sections remain; at 800px or narrower it is a
+two-row grid, because six fixed destinations never fit one phone row and a
+hidden scrollbar left the last two unnamed. Escape, an outside press, the close button, or
 opening the theme tray or Settings closes it; opening the console closes the
 theme tray and Settings first. The session remembers the last section, so
 reopening returns where the operator left. Opening the console itself performs
@@ -322,14 +325,21 @@ and system holds the restart and Settings cards.
 Every rule is one calibration line: a kind tag in its state color, the human
 scope, the caps or schedule, then a live column for occupancy and actions. The
 scope sentence is generated from the selector the server enforces, so an empty
-dimension reads inside the sentence instead of as a separate checklist. A limit
+dimension reads inside the sentence instead of as a separate checklist. Every
+rule kind offers the dimensions its own matcher honours: a limit and a hold both
+scope on providers, models, clients, key hashes and conversations, because the
+scheduler matches both against one request identity, while a capture scopes on
+clients, providers and models. A limit
 row names its budgets and schedule plus any remaining request and token budget;
 who set it rides the row title rather than a third line. A hold row names its
-remaining time, queue cap and queued count. A capture row names its retained
-count, run time and stop time. A row is the one edit target: activating it opens
-its composer in edit mode. The action column offers copy, which starts a new
-rule from the same scope and schedule with no budgets, and the terminating
-action for that kind: remove, resume or stop. The edit action is not repeated
+remaining time, its queue cap or `queue unlimited`, and its queued count. A
+capture row names its retained count, its run time, and its duration or `manual
+stop`. A row is the one edit target: activating it opens
+its composer in edit mode. The action column offers copy, which starts a draft
+from the same scope and schedule with no budgets, and the terminating action for
+that kind: remove, resume or stop. A copied limit that still matches its source
+selector is refused and named, because a limit's identity is its selector:
+applying it would edit the original rather than add a second rule. The edit action is not repeated
 there, because the row already performs it. On a narrow phone the row takes
 two lines so the scope can be read in full instead of being clipped; the
 budget wraps beneath the scope rather than being dropped, because a limit's

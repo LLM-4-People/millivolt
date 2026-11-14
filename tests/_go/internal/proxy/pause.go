@@ -11,6 +11,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
 func TestHandlePauseRequiresPausedField(t *testing.T) {
@@ -141,7 +142,7 @@ func TestHandlePauseProviderAndSecondClient(t *testing.T) {
 	if st["paused"] != true {
 		t.Fatalf("state = %v", st)
 	}
-	if !p.scheduler.HoldsTarget("anyone", "alpha.example") || p.scheduler.HoldsTarget("anyone", "beta.example") {
+	if !p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "anyone", Provider: "alpha.example"}) || p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "anyone", Provider: "beta.example"}) {
 		t.Fatal("provider hold mismatch")
 	}
 	rr = httptest.NewRecorder()

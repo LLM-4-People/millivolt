@@ -127,11 +127,11 @@ type WaiterHooks struct {
 	OnUnthrottle func()
 }
 
-// policyTarget is the identity every matching operator limit is evaluated
+// PolicyTarget is the identity every matching operator limit is evaluated
 // against. The scheduler never re-reads the request; the caller supplies the
 // facts it already resolved at admission.
-func (h WaiterHooks) policyTarget() policyTarget {
-	return policyTarget{
+func (h WaiterHooks) PolicyTarget() PolicyTarget {
+	return PolicyTarget{
 		Provider:     h.Provider,
 		Model:        h.Model,
 		Client:       h.Client,
@@ -199,8 +199,8 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		providerFairIdle &&
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!now.Before(g.nextAllowedAt) &&
-		g.sched.matchingHold(hooks.Client, hooks.Provider) == nil {
-		ok, lease, wait, _ := g.admitLocked(now, hooks.policyTarget(), hooks.EstTokens)
+		g.sched.matchingHold(hooks.PolicyTarget()) == nil {
+		ok, lease, wait, _ := g.admitLocked(now, hooks.PolicyTarget(), hooks.EstTokens)
 		if ok {
 			g.inFlight++
 			g.sched.markGroupBusyLocked(g)
@@ -225,7 +225,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		onHold:   hooks.OnHold, onUnhold: hooks.OnUnhold,
 		estTokens: hooks.EstTokens,
 	}
-	if h := g.sched.matchingHold(w.client, w.provider); h != nil {
+	if h := g.sched.matchingHold(w.PolicyTarget()); h != nil {
 		if !g.sched.reserveHold(w, h) {
 			g.mu.Unlock()
 			return nil, ErrQueueFull
@@ -258,7 +258,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	}
 	// Re-check after OnWait: a stale enqueue-time snapshot can fire OnHold
 	// after the operator already lifted the hold during the SSE write.
-	if h := g.sched.matchingHold(w.client, w.provider); h != nil {
+	if h := g.sched.matchingHold(w.PolicyTarget()); h != nil {
 		w.adoptHold(g.sched, h)
 	}
 	// If the hold lifted between the fast-path check and enqueue, drain grants
@@ -284,7 +284,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		// post-predicate kickC() can miss the close (lost wakeup).
 		kick := g.kickC()
 		sendKick := g.sendKickC()
-		h := g.sched.matchingHold(w.client, w.provider)
+		h := g.sched.matchingHold(w.PolicyTarget())
 		if h != nil {
 			if !deadline.IsZero() && w.pausedAt.IsZero() {
 				w.pausedAt = time.Now()
@@ -342,7 +342,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 
 		var maxWait *time.Timer
 		var maxWaitC <-chan time.Time
-		if !deadline.IsZero() && g.sched.matchingHold(w.client, w.provider) == nil {
+		if !deadline.IsZero() && g.sched.matchingHold(w.PolicyTarget()) == nil {
 			maxWait = time.NewTimer(time.Until(deadline))
 			maxWaitC = maxWait.C
 		}
@@ -471,8 +471,8 @@ func (g *group) drain() {
 // enabled is true only when the flag is set and both dimensions can ramp:
 // Concurrency >= 2 and RampDuration > 0. The returned target is always the
 // configured provider concurrency, never a live allowance.
-func (w *waiter) policyTarget() policyTarget {
-	return policyTarget{
+func (w *waiter) PolicyTarget() PolicyTarget {
+	return PolicyTarget{
 		Provider:     w.provider,
 		Model:        w.model,
 		Client:       w.client,
@@ -647,7 +647,7 @@ func (g *group) armRampStepLocked(now time.Time) {
 // that transition. A failed provider admission never starts a fresh epoch;
 // only a successful grant does, while the mid-flight anchor reflects
 // occupancy that already exists.
-func (g *group) admitLocked(now time.Time, request policyTarget, estTokens int64) (ok bool, lease admission, wait time.Duration, gateBlocked bool) {
+func (g *group) admitLocked(now time.Time, request PolicyTarget, estTokens int64) (ok bool, lease admission, wait time.Duration, gateBlocked bool) {
 	target, duration, enabled := g.rampPolicy()
 	if !enabled {
 		if !g.rampStart.IsZero() || !g.idleSince.IsZero() {
@@ -714,11 +714,11 @@ func (g *group) drainLimited(budget int) int {
 			node = next
 			continue
 		}
-		if g.sched.matchingHold(w.client, w.provider) != nil {
+		if g.sched.matchingHold(w.PolicyTarget()) != nil {
 			node = next
 			continue
 		}
-		ok, lease, wait, gateBlocked := g.admitLocked(now, w.policyTarget(), w.estTokens)
+		ok, lease, wait, gateBlocked := g.admitLocked(now, w.PolicyTarget(), w.estTokens)
 		if !ok {
 			refused = gateBlocked
 			if wait > 0 {

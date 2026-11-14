@@ -483,6 +483,20 @@ func (c *clientRetryDirective) Flush() {
 func (c *clientRetryDirective) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 
 // ServeHTTP implements http.Handler.
+// policyTargetOf is the one projection from a request record to the identity
+// the scheduler matches policies and holds against. Two surfaces ask whether a
+// request is parked (the record's Paused flag and the admission gate); building
+// the identity at each call site let them disagree about which fields count.
+func policyTargetOf(rec *metrics.Record) scheduler.PolicyTarget {
+	return scheduler.PolicyTarget{
+		Provider:     rec.Provider,
+		Model:        rec.Model,
+		Client:       rec.Client,
+		KeyHash:      rec.KeyHash,
+		Conversation: rec.ConversationID,
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The retry directive rides the outermost writer so every error sink on
 	// the relay surface (relayed upstream statuses, the retry ladder's
@@ -802,7 +816,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// live "streaming" row immediately (not only after it completes). This goes
 	// ONLY to live SSE subscribers - the durable store sees just the finalized
 	// record below, so it still persists exactly one row per request.
-	if s.scheduler.HoldsTarget(rec.Client, rec.Provider) {
+	if s.scheduler.HoldsTarget(policyTargetOf(rec)) {
 		rec.Paused = true
 	}
 	debugTap := s.beginDebugTap(r, t, rec, body)
@@ -892,12 +906,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the scheduler, so the lock order holdCountMu -> hookMu -> buffer stays
 	// cycle-free.
 	var hookMu sync.Mutex
+	target := policyTargetOf(rec)
 	hooks := scheduler.WaiterHooks{
-		Client:       rec.Client,
-		Provider:     rec.Provider,
-		Model:        rec.Model,
-		KeyHash:      rec.KeyHash,
-		Conversation: rec.ConversationID,
+		Client:       target.Client,
+		Provider:     target.Provider,
+		Model:        target.Model,
+		KeyHash:      target.KeyHash,
+		Conversation: target.Conversation,
 		EstTokens:    estimateTokens(rec),
 		OnWait: func() {
 			if stream {

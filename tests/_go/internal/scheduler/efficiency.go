@@ -42,7 +42,7 @@ func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 			t.Fatal("initial policy was not installed")
 		}
 		g := providerGateFor(s, initial.Scope.PrimaryProvider())
-		if _, lease, _ := s.tryAdmit(policyTarget{Provider: initial.Scope.PrimaryProvider()}, 0); len(lease.leases) == 0 {
+		if _, lease, _ := s.tryAdmit(PolicyTarget{Provider: initial.Scope.PrimaryProvider()}, 0); len(lease.leases) == 0 {
 			t.Fatal("initial request denied")
 		}
 		s.armThrottleDrain(initial.Scope.PrimaryProvider(), time.Hour)
@@ -247,7 +247,7 @@ func TestThrottleConcurrentPolicyTimerAndCancel(t *testing.T) {
 
 func TestQueueRemovalPreservesWaitersAndOrder(t *testing.T) {
 	s := New(Options{})
-	s.AddHold(Hold{ID: "hold", Clients: []string{"held"}})
+	s.AddHold(Hold{ID: "hold", Scope: LimitScope{Clients: []string{"held"}}})
 	g := s.groupFor("group", 2)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

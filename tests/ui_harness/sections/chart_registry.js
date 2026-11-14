@@ -229,10 +229,14 @@ module.exports = async function chartRegistry(H) {
     };
     applyBtn().click();
     await settleUntil(() => !!namedBody);
-    check('a named hold sends both explicit dimensions and no all flag',
+    // Every scope dimension is restated, because the server treats a supplied
+    // array as a replacement and an omitted one as "keep". An empty array here
+    // is the operator's "any value" on that dimension, not a dropped field.
+    check('a named hold sends every explicit scope dimension and no all flag',
       JSON.stringify(namedBody) === JSON.stringify({
         paused: true, all: false, duration: '', new: false,
         clients: ['client-a'], providers: ['old.example'],
+        models: [], key_hashes: [], conversations: [],
       }));
     // The named hold arrives through a poll after the previous mutation has
     // settled; applyPauseState deliberately drops a snapshot that lands while

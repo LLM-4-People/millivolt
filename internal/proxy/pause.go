@@ -45,17 +45,47 @@ type pausePersist interface {
 // restart mid-window keeps the remaining time. Reason is the system label
 // of an auto-created hold (the durable quota/billing token); operator edits
 // preserve it and it is never accepted from the HTTP surface.
+// persistedPause is one stored operator pause. Its scope dimensions are the
+// same five a limit policy has, because the console offers one scope strip for
+// every rule kind and the scheduler matches holds against the same request
+// identity it matches limits against.
+//
+// The wire shape is additive: `clients` and `providers` keep their existing
+// names and meaning, and `models`, `key_hashes` and `conversations` are new
+// optional arrays. A document written before this change reads back with three
+// empty dimensions, which mean "any value" - exactly the behaviour it had.
 type persistedPause struct {
-	ID         string    `json:"id,omitempty"`
-	All        bool      `json:"all,omitempty"`
-	New        bool      `json:"new,omitempty"`
-	Clients    []string  `json:"clients,omitempty"`
-	Providers  []string  `json:"providers,omitempty"`
-	KnownAtNew []string  `json:"known_at_new,omitempty"`
-	Duration   string    `json:"duration,omitempty"`
-	Until      time.Time `json:"until,omitempty"`
-	MaxQueued  int       `json:"max_queued,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
+	ID            string    `json:"id,omitempty"`
+	All           bool      `json:"all,omitempty"`
+	New           bool      `json:"new,omitempty"`
+	Clients       []string  `json:"clients,omitempty"`
+	Providers     []string  `json:"providers,omitempty"`
+	Models        []string  `json:"models,omitempty"`
+	KeyHashes     []string  `json:"key_hashes,omitempty"`
+	Conversations []string  `json:"conversations,omitempty"`
+	KnownAtNew    []string  `json:"known_at_new,omitempty"`
+	Duration      string    `json:"duration,omitempty"`
+	Until         time.Time `json:"until,omitempty"`
+	MaxQueued     int       `json:"max_queued,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+}
+
+// scope projects the persisted dimensions onto the shared scope type. It is
+// the one conversion between storage and the scheduler, so a new dimension
+// cannot be honoured by one and dropped by the other.
+func (p persistedPause) scope() scheduler.LimitScope {
+	return scheduler.LimitScope{
+		Providers:     p.Providers,
+		Models:        p.Models,
+		Clients:       p.Clients,
+		KeyHashes:     p.KeyHashes,
+		Conversations: p.Conversations,
+	}
+}
+
+// hasScope reports whether this pause names any request it covers.
+func (p persistedPause) hasScope() bool {
+	return p.All || p.New || !p.scope().Empty()
 }
 
 type persistedDoc struct {
@@ -505,14 +535,17 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Paused    *bool           `json:"paused"`
-		All       pauseBool       `json:"all"`
-		New       pauseBool       `json:"new"`
-		Clients   pauseNames      `json:"clients"`
-		Providers pauseNames      `json:"providers"`
-		Duration  *string         `json:"duration"`
-		MaxQueued *int            `json:"max_queued"`
-		ID        json.RawMessage `json:"id"`
+		Paused        *bool           `json:"paused"`
+		All           pauseBool       `json:"all"`
+		New           pauseBool       `json:"new"`
+		Clients       pauseNames      `json:"clients"`
+		Providers     pauseNames      `json:"providers"`
+		Models        pauseNames      `json:"models"`
+		KeyHashes     pauseNames      `json:"key_hashes"`
+		Conversations pauseNames      `json:"conversations"`
+		Duration      *string         `json:"duration"`
+		MaxQueued     *int            `json:"max_queued"`
+		ID            json.RawMessage `json:"id"`
 	}
 	// Surface the strict decoder's cause; io.EOF is the empty-body
 	// command, which falls through to the requirement message below.
@@ -547,6 +580,7 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		// same shapes; this is the HTTP trust boundary those wrappers cannot
 		// protect.
 		if body.All.set || body.New.set || body.Clients != nil || body.Providers != nil ||
+			body.Models != nil || body.KeyHashes != nil || body.Conversations != nil ||
 			body.Duration != nil || body.MaxQueued != nil {
 			adminjson.WriteError(w, http.StatusBadRequest,
 				"a resume carries only id; scope, duration and max_queued apply to a create or edit")
@@ -574,18 +608,40 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		// Scope presence is per dimension: an omitted dimension preserves the
 		// edited hold's value, while an explicitly empty array clears it. A
 		// create starts with every omitted dimension empty ("any").
-		clients, providers := prev.Clients, prev.Providers
+		//
+		// The five dimensions are merged by one loop over the shared names so a
+		// new dimension cannot be accepted by the decoder and then dropped
+		// here, which would install a hold narrower than the caller asked for.
+		supplied := map[string]pauseNames{
+			"providers":     body.Providers,
+			"models":        body.Models,
+			"clients":       body.Clients,
+			"key_hashes":    body.KeyHashes,
+			"conversations": body.Conversations,
+		}
+		merged := map[string][]string{
+			"providers": prev.Providers, "models": prev.Models,
+			"clients": prev.Clients, "key_hashes": prev.KeyHashes,
+			"conversations": prev.Conversations,
+		}
 		if !hasPrev {
-			clients, providers = nil, nil
+			for name := range merged {
+				merged[name] = nil
+			}
 		}
-		if body.Clients != nil {
-			clients = sanitizeNameList(body.Clients)
+		scopeSupplied := false
+		for name, names := range supplied {
+			if names == nil {
+				continue
+			}
+			scopeSupplied = true
+			merged[name] = sanitizeNameList(names)
 		}
-		if body.Providers != nil {
-			providers = sanitizeNameList(body.Providers)
-		}
+		anyNamed := len(merged["clients"]) > 0 || len(merged["providers"]) > 0 ||
+			len(merged["models"]) > 0 || len(merged["key_hashes"]) > 0 ||
+			len(merged["conversations"]) > 0
 		newc := body.New.value
-		scopeOmitted := !body.All.set && !body.New.set && body.Clients == nil && body.Providers == nil
+		scopeOmitted := !body.All.set && !body.New.set && !scopeSupplied
 		var all bool
 		if hasPrev && scopeOmitted {
 			// Replace without restated scope keeps the hold. Compat
@@ -595,20 +651,21 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			all = scopeOmitted || body.All.value
 			// An explicit empty / whitespace-only scope is not a
 			// global hold - deny by default.
-			if !all && !newc && len(clients) == 0 && len(providers) == 0 {
-				return prev, fmt.Errorf("all, new, clients, or providers required")
+			if !all && !newc && !anyNamed {
+				return prev, fmt.Errorf("all, new, or at least one scope dimension is required")
 			}
 			// "all" already covers every narrower scope; accepting both
 			// would let a caller believe the hold was narrowed while the
 			// proxy installs the global one. Names within a dimension and
 			// New plus named clients remain valid unions (documented).
-			if all && (body.New.set || body.Clients != nil || body.Providers != nil) {
-				return prev, fmt.Errorf("all cannot be combined with new, clients, or providers")
+			if all && (body.New.set || scopeSupplied) {
+				return prev, fmt.Errorf("all cannot be combined with new or a scope dimension")
 			}
 			if all {
 				newc = false
-				clients = nil
-				providers = nil
+				for name := range merged {
+					merged[name] = nil
+				}
 			}
 		}
 		capn := s.defaultPauseCap()
@@ -618,8 +675,11 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			capn = prev.MaxQueued
 		}
 		snap = persistedPause{
-			ID: newPauseID(), All: all, New: newc, Clients: clients,
-			Providers: providers, Duration: dur, MaxQueued: capn,
+			ID: newPauseID(), All: all, New: newc,
+			Clients: merged["clients"], Providers: merged["providers"],
+			Models: merged["models"], KeyHashes: merged["key_hashes"],
+			Conversations: merged["conversations"],
+			Duration:      dur, MaxQueued: capn,
 			// An edit re-states scope, deadline and cap; the system origin
 			// of an auto-created hold is never restated or cleared.
 			Reason: prev.Reason,
@@ -666,9 +726,8 @@ func sanitizeNameList(in []string) []string {
 
 func toSchedHold(h persistedPause) scheduler.Hold {
 	return scheduler.Hold{
-		ID: h.ID, All: h.All, New: h.New, Clients: h.Clients,
-		Providers: h.Providers, KnownAtNew: h.KnownAtNew,
-		Until: h.Until, MaxQueued: h.MaxQueued,
+		ID: h.ID, All: h.All, New: h.New, Scope: h.scope(),
+		KnownAtNew: h.KnownAtNew, Until: h.Until, MaxQueued: h.MaxQueued,
 	}
 }
 
@@ -704,10 +763,14 @@ func firstN(in []string, n int) []string {
 
 func (s *Server) syncNamePins() {
 	s.pause.mu.Lock()
-	var holdClients, holdProviders []string
+	var holdClients, holdProviders, holdModels []string
 	for _, h := range s.pause.holds {
 		holdClients = append(holdClients, h.Clients...)
 		holdProviders = append(holdProviders, h.Providers...)
+		// A hold may now name models, so its spellings have to stay known:
+		// the vocabulary is what keeps a name offered after the traffic that
+		// introduced it has left the bounded ring.
+		holdModels = append(holdModels, canonicalModelList(h.Models)...)
 	}
 	s.pause.mu.Unlock()
 
@@ -735,6 +798,7 @@ func (s *Server) syncNamePins() {
 	dropped = append(dropped, s.pause.providers.setPins("debug", debugProviders)...)
 	dropped = append(dropped, s.pause.providers.setPins("limit", policyProviders)...)
 	dropped = append(dropped, s.pause.models.setPins("debug", debugModels)...)
+	dropped = append(dropped, s.pause.models.setPins("pause", holdModels)...)
 	dropped = append(dropped, s.pause.models.setPins("limit", policyModels)...)
 	if len(dropped) > 0 {
 		log.Printf("pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
@@ -896,7 +960,7 @@ func pauseDescribeAll(holds []persistedPause) string {
 }
 
 func pauseDescribe(snap persistedPause) string {
-	if !snap.All && !snap.New && len(snap.Clients) == 0 && len(snap.Providers) == 0 {
+	if !snap.All && !snap.New && snap.scope().Empty() {
 		return "cleared"
 	}
 	var b strings.Builder
@@ -906,17 +970,24 @@ func pauseDescribe(snap persistedPause) string {
 		if snap.New {
 			b.WriteString("new")
 		}
-		if len(snap.Clients) > 0 {
+		// The log line names every dimension the hold selects on, in one
+		// stable order, so an operator reading the log can tell a model hold
+		// from a client one. The order matches LimitScope's field order.
+		for _, part := range []struct {
+			values []string
+			prefix string
+		}{
+			{snap.Clients, ""}, {snap.Providers, ""}, {snap.Models, "model:"},
+			{snap.KeyHashes, "key:"}, {snap.Conversations, "conv:"},
+		} {
+			if len(part.values) == 0 {
+				continue
+			}
 			if b.Len() > 0 {
 				b.WriteString("+")
 			}
-			b.WriteString(strings.Join(snap.Clients, ","))
-		}
-		if len(snap.Providers) > 0 {
-			if b.Len() > 0 {
-				b.WriteString("+")
-			}
-			b.WriteString(strings.Join(snap.Providers, ","))
+			b.WriteString(part.prefix)
+			b.WriteString(strings.Join(part.values, ","))
 		}
 	}
 	if snap.Reason != "" {
@@ -959,17 +1030,20 @@ func (s *Server) PauseSnapshot() map[string]any {
 			soonest = h.Until
 		}
 		outHolds = append(outHolds, map[string]any{
-			"id":           h.ID,
-			"all":          h.All,
-			"new":          h.New,
-			"clients":      nullSlice(h.Clients),
-			"providers":    nullSlice(h.Providers),
-			"known_at_new": nullSlice(h.KnownAtNew),
-			"duration":     h.Duration,
-			"until":        rfc3339OrNil(h.Until),
-			"max_queued":   h.MaxQueued,
-			"reason":       h.Reason,
-			"queued":       s.scheduler.HoldQueued(h.ID),
+			"id":            h.ID,
+			"all":           h.All,
+			"new":           h.New,
+			"clients":       nullSlice(h.Clients),
+			"providers":     nullSlice(h.Providers),
+			"models":        nullSlice(h.Models),
+			"key_hashes":    nullSlice(h.KeyHashes),
+			"conversations": nullSlice(h.Conversations),
+			"known_at_new":  nullSlice(h.KnownAtNew),
+			"duration":      h.Duration,
+			"until":         rfc3339OrNil(h.Until),
+			"max_queued":    h.MaxQueued,
+			"reason":        h.Reason,
+			"queued":        s.scheduler.HoldQueued(h.ID),
 		})
 	}
 	return map[string]any{

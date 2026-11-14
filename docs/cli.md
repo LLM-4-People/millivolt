@@ -152,15 +152,18 @@ measurements, not credentials, and are never redacted.
 | --- | --- |
 | `mvctl pause [show]` | list holds and queued requests |
 | `mvctl pause on --client X --provider P --yes` | create a scoped hold |
+| `mvctl pause on --model M --conversation C --yes` | narrow a hold to a model or conversation |
 | `mvctl pause on --new --yes` | hold clients first seen after the hold |
 | `mvctl pause on --all --yes` | hold every client and provider |
 | `mvctl pause on --id ID [flags] --yes` | edit one hold in place |
 | `mvctl pause off --id ID --yes` | remove one hold |
 | `mvctl pause off --all --yes` | remove every hold |
 
-`pause on` requires a scope: `--client`, `--provider`, `--new` or `--all`,
-unless `--id` names an existing hold to edit. `--duration` and
-`--max-queued` are optional. `pause off` deliberately rejects scope flags: the
+`pause on` requires a scope: `--client`, `--provider`, `--model`,
+`--key-hash`, `--conversation`, `--new` or `--all`, unless `--id` names an
+existing hold to edit. Set dimensions intersect and an unset dimension matches
+any value, exactly as they do for a limit. `--duration` and `--max-queued` are
+optional. `pause off` deliberately rejects scope flags: the
 proxy identifies a hold by `id`, and a scope-looking command that cleared every
 hold would be unsafe. Use exactly one of `--id` or `--all`. A resume carries
 only the hold id because the proxy has no scope-selective resume.

@@ -321,7 +321,7 @@ module.exports = async function drawerRedesign(H) {
       d.getElementById('drawer').classList.contains('open') === false &&
       !d.getElementById('operator-console').hidden &&
       w.eval('ocDrafts.pause && ocDrafts.pause.mode') === 'named' &&
-      JSON.stringify(w.eval('ocDrafts.pause && ocDrafts.pause.clients')) ===
+      JSON.stringify(w.eval('ocDrafts.pause && ocDrafts.pause.scope.clients')) ===
         JSON.stringify(['client-long/1.2.3']));
     w.closeOperatorConsole();
     w.openDrawer('redesign');
@@ -331,7 +331,7 @@ module.exports = async function drawerRedesign(H) {
       await settleUntil(() => w.eval('ocMounted') === true &&
         !!w.eval('ocDrafts.capture'), 2000) &&
       w.eval('ocDrafts.capture.id') === '' &&
-      JSON.stringify(w.eval('ocDrafts.capture.models')) ===
+      JSON.stringify(w.eval('ocDrafts.capture.scope.models')) ===
         JSON.stringify(['family/model-2026-10-29']));
     w.closeOperatorConsole();
     w.openDrawer('redesign');

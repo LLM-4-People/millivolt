@@ -97,10 +97,10 @@ type ThrottleInfo struct {
 	Scheduled bool `json:"scheduled"`
 }
 
-// policyTarget is the request identity matched against every active policy.
+// PolicyTarget is the request identity matched against every active policy.
 // It is built at admission from the resolved record, so a policy can select on
 // any fact the proxy already owns without re-reading the request.
-type policyTarget struct {
+type PolicyTarget struct {
 	Provider     string
 	Model        string
 	Client       string
@@ -855,7 +855,7 @@ func (s *Scheduler) publishPolicyLocked() {
 // holds two policy locks, so the set lock cannot deadlock. A refusal releases
 // every lock without charging anything; wait is the earliest timer that could
 // reopen a refusing dimension (0 when only a release can).
-func (s *Scheduler) tryAdmit(target policyTarget, est int64) (ok bool, lease admission, wait time.Duration) {
+func (s *Scheduler) tryAdmit(target PolicyTarget, est int64) (ok bool, lease admission, wait time.Duration) {
 	idx := s.policySnap.Load()
 	if idx == nil {
 		return true, admission{}, 0

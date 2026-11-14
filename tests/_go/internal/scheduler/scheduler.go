@@ -520,7 +520,7 @@ func TestRestoreHoldsIdempotent(t *testing.T) {
 func TestPauseOneClientDoesNotBlockAnother(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
 	ctx := context.Background()
-	s.RestoreHolds([]Hold{{Clients: []string{"slow"}}})
+	s.RestoreHolds([]Hold{{Scope: LimitScope{Clients: []string{"slow"}}}})
 
 	slowGot := make(chan struct{})
 	go func() {

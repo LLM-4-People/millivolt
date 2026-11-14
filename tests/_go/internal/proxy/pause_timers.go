@@ -93,7 +93,7 @@ func TestSameUntilTimersClearBoth(t *testing.T) {
 
 func TestGetOmitsExpiredHold(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.scheduler.RestoreHolds([]scheduler.Hold{{ID: "live", Clients: []string{"y"}}})
+	p.scheduler.RestoreHolds([]scheduler.Hold{{ID: "live", Scope: scheduler.LimitScope{Clients: []string{"y"}}}})
 	p.pause.mu.Lock()
 	p.pause.holds = []persistedPause{
 		{ID: "dead", Clients: []string{"x"}, Until: time.Now().Add(-time.Second)},

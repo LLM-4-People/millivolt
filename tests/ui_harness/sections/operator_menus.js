@@ -889,7 +889,7 @@ module.exports = async function operatorMenus(H) {
           queued: 0, default_max_queued: 0});
         w.openOperatorConsole('pause');
         w.ocOpenPauseComposer('');
-        w.eval("ocDrafts.pause.clients = ['client-a']; ocRender()");
+        w.eval("ocDrafts.pause.scope.clients = ['client-a']; ocRender()");
         click('#oc-pane [data-oc-apply="pause"]');
         await settleUntil(() => holdPosts.length === 1);
         await settleUntil(() => !d.getElementById('oc-undo').hidden);
@@ -991,7 +991,7 @@ module.exports = async function operatorMenus(H) {
           JSON.stringify([['named', 'true'], ['new', 'false'], ['all', 'false']]));
       check('named scope with no pick cannot be applied',
         d.getElementById('oc-pause-apply').disabled &&
-        text('#oc-pause-preview').includes('Pick at least one client or provider'));
+        text('#oc-pause-preview').includes('Pick at least one condition'));
 
       const savedFetch = w.fetch;
       let posts = [];
@@ -1018,10 +1018,13 @@ module.exports = async function operatorMenus(H) {
           text('#oc-pause-preview') === 'Hold provider prov-a · client client-a until resumed.' &&
           !d.getElementById('oc-pause-apply').disabled);
         click('#oc-pause-apply');
-        check('a named hold posts both explicit dimensions',
+        // Every scope dimension is restated, so an edit narrows rather than
+        // silently inheriting a dimension the previous hold had set.
+        check('a named hold posts every explicit scope dimension',
           await settleUntil(() => posts.length === 1) &&
           stable(posts[0]) === stable({paused: true, all: false, new: false,
-            clients: ['client-a'], providers: ['prov-a'], duration: ''}));
+            clients: ['client-a'], providers: ['prov-a'], duration: '',
+            models: [], key_hashes: [], conversations: []}));
         check('the named hold is recorded as held',
           await settleUntil(() => text('#oc-change').startsWith('held ')) &&
           text('#oc-change') === 'held provider prov-a · client client-a');
@@ -1172,7 +1175,7 @@ module.exports = async function operatorMenus(H) {
       startNew('capture');
       check('a capture with no scope cannot start',
         d.getElementById('oc-capture-apply').disabled &&
-        text('#oc-capture-preview') === 'Pick at least one client, provider or model.');
+        text('#oc-capture-preview') === 'Pick at least one condition.');
       check('the capture composer states its retention and byte bounds',
         text('#oc-pane .oc-facts').includes('24h') &&
         text('#oc-pane .oc-facts').includes('1MiB'));
@@ -2031,8 +2034,8 @@ module.exports = async function operatorMenus(H) {
       w.ocOpenOperatorForRecord('pause', record);
       check('a pause record with no hold opens a named draft scoped to it',
         paneSection() === 'pause' && w.eval('ocDrafts.pause.id') === '' &&
-        JSON.stringify(evalJSON('ocDrafts.pause.clients')) === JSON.stringify(['client-a']) &&
-        JSON.stringify(evalJSON('ocDrafts.pause.providers')) === JSON.stringify(['prov-a']) &&
+        JSON.stringify(evalJSON('ocDrafts.pause.scope.clients')) === JSON.stringify(['client-a']) &&
+        JSON.stringify(evalJSON('ocDrafts.pause.scope.providers')) === JSON.stringify(['prov-a']) &&
         w.eval('ocDrafts.pause.mode') === 'named');
       w.closeOperatorConsole();
       w.applyPauseState({ok: true, paused: true,
@@ -2057,8 +2060,8 @@ module.exports = async function operatorMenus(H) {
       w.ocOpenOperatorForRecord('capture', record);
       check('a capture record with no session opens a draft scoped to it',
         paneSection() === 'capture' && w.eval('ocDrafts.capture.id') === '' &&
-        JSON.stringify(evalJSON('ocDrafts.capture.clients')) === JSON.stringify(['client-a']) &&
-        JSON.stringify(evalJSON('ocDrafts.capture.models')) === JSON.stringify(['model-a']));
+        JSON.stringify(evalJSON('ocDrafts.capture.scope.clients')) === JSON.stringify(['client-a']) &&
+        JSON.stringify(evalJSON('ocDrafts.capture.scope.models')) === JSON.stringify(['model-a']));
 
       check('a limit rule matches only records inside its client and model scope',
         w.ocPolicyMatchesRecord({scope: {clients: ['client-a'], models: ['model-a']}},

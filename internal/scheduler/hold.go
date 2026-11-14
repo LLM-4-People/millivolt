@@ -9,17 +9,25 @@ import (
 )
 
 // Hold is one operator pause. Matching is AND across the dimensions that
-// are set: All parks everyone; New parks clients not in KnownAtNew;
-// Clients / Providers are exact Record.Client / Record.Provider sets
-// (empty means "any" on that dimension). Until is the absolute unpause
-// time; zero means until the operator resumes. MaxQueued is how many
-// matching waiters this hold will park before Acquire refuses (0 = unlimited).
+// are set: All parks everyone; New parks clients not in KnownAtNew; every
+// other dimension is an exact record-field set, and an empty set means "any"
+// on that dimension. Until is the absolute unpause time; zero means until the
+// operator resumes. MaxQueued is how many matching waiters this hold will park
+// before Acquire refuses (0 = unlimited).
+//
+// A hold's dimensions are LimitScope's dimensions: the console offers the same
+// scope strip for every rule kind, and the scheduler already resolves all five
+// facts (WaiterHooks carries Provider, Model, Client, KeyHash and Conversation)
+// before it asks whether a hold applies. Matching only client and provider left
+// a hold unable to express "this model" or "this key" while a limit could, so
+// one section of the console had four fewer choices than another for no reason
+// the operator could see. Scope is embedded rather than flattened so the five
+// dimensions have one definition and one normalization.
 type Hold struct {
 	ID         string
 	All        bool
 	New        bool
-	Clients    []string
-	Providers  []string
+	Scope      LimitScope
 	KnownAtNew []string
 	Until      time.Time
 	MaxQueued  int
@@ -29,15 +37,14 @@ func (h Hold) Active() bool {
 	if holdExpired(h.Until) {
 		return false
 	}
-	return h.All || h.New || len(h.Clients) > 0 || len(h.Providers) > 0
+	return h.All || h.New || !h.Scope.Empty()
 }
 
 type holdSnap struct {
 	id        string
 	all       bool
 	new       bool
-	clients   map[string]struct{}
-	providers map[string]struct{}
+	scope     LimitScope
 	knownNew  map[string]struct{}
 	until     time.Time
 	maxQueued int
@@ -76,11 +83,12 @@ func snapHold(h Hold) *holdSnap {
 		id = newHoldID()
 	}
 	return &holdSnap{
-		id:        id,
-		all:       h.All,
-		new:       h.New,
-		clients:   setFrom(h.Clients),
-		providers: setFrom(h.Providers),
+		id:  id,
+		all: h.All,
+		new: h.New,
+		// The same normalization a limit gets, so two holds whose selectors
+		// differ only in spelling, order or duplicates address one target.
+		scope:     NormalizeLimitScope(h.Scope),
 		knownNew:  setFrom(h.KnownAtNew),
 		until:     h.Until,
 		maxQueued: h.MaxQueued,
@@ -92,8 +100,7 @@ func (h *holdSnap) hold() Hold {
 		return Hold{}
 	}
 	return Hold{
-		ID: h.id, All: h.all, New: h.new,
-		Clients: keysOf(h.clients), Providers: keysOf(h.providers),
+		ID: h.id, All: h.all, New: h.new, Scope: h.scope,
 		KnownAtNew: keysOf(h.knownNew), Until: h.until, MaxQueued: h.maxQueued,
 	}
 }
@@ -106,63 +113,57 @@ func (h *holdSnap) active() bool {
 	if h == nil || holdExpired(h.until) {
 		return false
 	}
-	return h.all || h.new || len(h.clients) > 0 || len(h.providers) > 0
+	return h.all || h.new || !h.scope.Empty()
 }
 
-// matches is AND across set dimensions. Empty client-scope (and not New/All)
-// means any client; empty provider-scope means any provider. An empty
-// provider argument only matches holds that do not filter on provider.
-func (h *holdSnap) matches(client, provider string) bool {
+// matches is AND across the dimensions that are set. An empty dimension means
+// "any value" on that dimension, and All overrides every dimension. New is a
+// client-dimension modifier: those requests park only for clients the server
+// had not seen when the hold started.
+//
+// Every dimension is read from the same five-fact identity a limit is matched
+// against, so a hold and a limit can no longer disagree about which requests
+// they cover. The one asymmetry that remains is deliberate and pre-existing:
+// New needs the client, so it is evaluated here rather than in LimitScope.
+func (h *holdSnap) matches(t PolicyTarget) bool {
 	if !h.active() {
 		return false
 	}
 	if h.all {
 		return true
 	}
-	if !h.clientOK(client) {
-		return false
-	}
-	return h.providerOK(provider)
-}
-
-func (h *holdSnap) clientOK(client string) bool {
-	if h.all {
-		return true
-	}
-	hasNamed := len(h.clients) > 0
-	if hasNamed {
-		if _, ok := h.clients[client]; ok {
-			return true
+	// The client dimension carries the New modifier, so it is decided here and
+	// the remaining four dimensions are then an exact-set AND.
+	named := h.scope.Clients
+	if len(named) > 0 {
+		if !slices.Contains(named, t.Client) {
+			// A named hold parks only its named clients. New also admits
+			// clients the server had not seen when the hold started, and a
+			// named client always wins over New rather than being re-tested.
+			if !h.new {
+				return false
+			}
+			if _, known := h.knownNew[t.Client]; known {
+				return false
+			}
+		}
+	} else if h.new {
+		if _, known := h.knownNew[t.Client]; known {
+			return false
 		}
 	}
-	if h.new {
-		_, known := h.knownNew[client]
-		return !known
-	}
-	if hasNamed {
-		return false
-	}
-	// Provider-only hold: any client.
-	return len(h.providers) > 0
+	// The client dimension is already decided; check the rest.
+	rest := h.scope
+	rest.Clients = nil
+	return rest.Matches(t.Provider, t.Model, "", t.KeyHash, t.Conversation)
 }
 
-func (h *holdSnap) providerOK(provider string) bool {
-	if h.all || len(h.providers) == 0 {
-		return true
-	}
-	if provider == "" {
-		return false
-	}
-	_, ok := h.providers[provider]
-	return ok
-}
-
-func (p *policySnap) match(client, provider string) *holdSnap {
+func (p *policySnap) match(t PolicyTarget) *holdSnap {
 	if p == nil {
 		return nil
 	}
 	for _, h := range p.holds {
-		if h.matches(client, provider) {
+		if h.matches(t) {
 			return h
 		}
 	}
@@ -227,56 +228,72 @@ func holdEqual(a, b *holdSnap) bool {
 	if a.id != b.id || a.all != b.all || a.new != b.new || a.maxQueued != b.maxQueued || !a.until.Equal(b.until) {
 		return false
 	}
-	if len(a.clients) != len(b.clients) || len(a.providers) != len(b.providers) || len(a.knownNew) != len(b.knownNew) {
+	if !slicesEqual(a.scope.Providers, b.scope.Providers) ||
+		!slicesEqual(a.scope.Models, b.scope.Models) ||
+		!slicesEqual(a.scope.Clients, b.scope.Clients) ||
+		!slicesEqual(a.scope.KeyHashes, b.scope.KeyHashes) ||
+		!slicesEqual(a.scope.Conversations, b.scope.Conversations) {
 		return false
 	}
-	for k := range a.clients {
-		if _, ok := b.clients[k]; !ok {
-			return false
-		}
+	return slicesEqual(keysOf(a.knownNew), keysOf(b.knownNew))
+}
+
+// slicesEqual reports whether two already-normalized string slices hold the
+// same values in the same order. Snapshots are built from
+// NormalizeLimitScope, so order is canonical and a direct comparison is the
+// whole answer; this exists so the five dimensions are compared by one rule
+// instead of a hand-written loop per dimension.
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	for k := range a.providers {
-		if _, ok := b.providers[k]; !ok {
-			return false
-		}
-	}
-	for k := range a.knownNew {
-		if _, ok := b.knownNew[k]; !ok {
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
 	return true
 }
 
-// holdScope is the cartesian client×provider set a hold covers. Used to
-// reject two pauses that would park the same request.
+// holdScope is the subset of requests a hold covers, one entry per dimension.
+// Used to reject two pauses that would park the same request. A dimension that
+// is not set is "any", which is why each dimension records whether it is
+// unbounded instead of relying on an empty set to mean both "any" and "none".
 type holdScope struct {
-	allClients   bool
-	newClients   bool
-	clients      map[string]struct{}
-	knownNew     map[string]struct{}
-	allProviders bool
-	providers    map[string]struct{}
+	all        bool
+	newClients bool
+	knownNew   map[string]struct{}
+	// dims is keyed by LimitScope dimension (providers, models, clients,
+	// keyHashes, conversations). A missing entry means the hold does not
+	// narrow that dimension.
+	dims map[string]map[string]struct{}
 }
 
+// holdScopeDims is the one list of scope dimensions. It is derived from the
+// shared scope type rather than restated, so a new LimitScope dimension
+// widens holds and limits together.
+var holdScopeDims = []string{"providers", "models", "clients", "keyHashes", "conversations"}
+
 func scopeOf(h Hold) holdScope {
-	s := holdScope{knownNew: setFrom(h.KnownAtNew)}
+	s := holdScope{knownNew: setFrom(h.KnownAtNew), dims: map[string]map[string]struct{}{}}
 	if h.All {
-		s.allClients = true
-		s.allProviders = true
+		s.all = true
 		return s
 	}
 	if h.New {
 		s.newClients = true
 	}
-	s.clients = setFrom(h.Clients)
-	if len(h.Providers) == 0 {
-		s.allProviders = true
-	} else {
-		s.providers = setFrom(h.Providers)
+	values := map[string][]string{
+		"providers":     h.Scope.Providers,
+		"models":        h.Scope.Models,
+		"clients":       h.Scope.Clients,
+		"keyHashes":     h.Scope.KeyHashes,
+		"conversations": h.Scope.Conversations,
 	}
-	if !h.New && len(h.Clients) == 0 {
-		s.allClients = true
+	for _, dim := range holdScopeDims {
+		if set := setFrom(values[dim]); set != nil {
+			s.dims[dim] = set
+		}
 	}
 	return s
 }
@@ -296,48 +313,78 @@ func namedOverlap(a, b map[string]struct{}) bool {
 	return false
 }
 
+// dimOverlap reports whether two holds can select the same value on one
+// dimension. A dimension either hold leaves unbounded accepts every value,
+// so it always intersects.
+func dimOverlap(a, b holdScope, dim string) bool {
+	as, bs := a.dims[dim], b.dims[dim]
+	if as == nil || bs == nil {
+		return true
+	}
+	return namedOverlap(as, bs)
+}
+
+// clientsOverlap is the client dimension plus the New modifier, which no
+// other dimension has: a New hold's client set is "everyone not in
+// KnownAtNew", so it can intersect a re-created hold's named clients.
 func clientsOverlap(a, b holdScope) bool {
-	if a.allClients || b.allClients {
+	an, bn := a.dims["clients"], b.dims["clients"]
+	// A side that neither names clients nor restricts itself to new ones
+	// accepts every client, so it intersects whatever the other side covers.
+	if (an == nil && !a.newClients) || (bn == nil && !b.newClients) {
 		return true
 	}
-	if namedOverlap(a.clients, b.clients) {
-		return true
-	}
+	// Two new-only holds: some client is unknown to both.
 	if a.newClients && b.newClients {
 		return true
 	}
+	// New against a named set: they intersect when a named client was unknown
+	// when the new-only hold started. An empty named set here cannot happen -
+	// a side with no named clients and no New returned above.
 	if a.newClients {
-		for c := range b.clients {
+		for c := range bn {
 			if _, known := a.knownNew[c]; !known {
 				return true
 			}
 		}
+		return false
 	}
 	if b.newClients {
-		for c := range a.clients {
+		for c := range an {
 			if _, known := b.knownNew[c]; !known {
 				return true
 			}
 		}
+		return false
 	}
-	return false
+	return namedOverlap(an, bn)
 }
 
-func providersOverlap(a, b holdScope) bool {
-	if a.allProviders || b.allProviders {
-		return true
-	}
-	return namedOverlap(a.providers, b.providers)
-}
-
-// HoldsOverlap reports whether two active holds would park the same
-// (client, provider) pair - even with different timers.
+// HoldsOverlap reports whether two active holds would park the same request -
+// even with different timers. Two holds conflict only when every dimension
+// they cover intersects: a provider-only hold and a model-only hold overlap on
+// their shared request space, while a hold for one model and a hold for a
+// different model do not.
 func HoldsOverlap(a, b Hold) bool {
 	if !a.Active() || !b.Active() {
 		return false
 	}
 	sa, sb := scopeOf(a), scopeOf(b)
-	return clientsOverlap(sa, sb) && providersOverlap(sa, sb)
+	if sa.all || sb.all {
+		return true
+	}
+	for _, dim := range holdScopeDims {
+		if dim == "clients" {
+			if !clientsOverlap(sa, sb) {
+				return false
+			}
+			continue
+		}
+		if !dimOverlap(sa, sb, dim) {
+			return false
+		}
+	}
+	return true
 }
 
 // RestoreHolds loads a persisted set without overlap rejection (already
@@ -548,7 +595,7 @@ func (s *Scheduler) seedQueuedHolds() {
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		g.queue.forEach(func(w *waiter) {
-			h := s.matchingHold(w.client, w.provider)
+			h := s.matchingHold(w.PolicyTarget())
 			s.holdCountMu.Lock()
 			if h == nil {
 				// ReplaceHold / RestoreHolds may drop this waiter from the
@@ -594,20 +641,23 @@ func (s *Scheduler) fireSeededHold(w *waiter, h *holdSnap) {
 	s.holdCountMu.Unlock()
 }
 
-// Holds reports whether Acquire for this client is parked when the provider
-// is unknown (client-only / all / new holds). Provider-scoped holds need
-// HoldsTarget.
+// Holds reports whether a request with only a known client is parked. A hold
+// that narrows by provider, model, key or conversation cannot answer without
+// those facts, so callers holding the full identity use HoldsTarget.
 func (s *Scheduler) Holds(client string) bool {
-	return s.matchingHold(client, "") != nil
+	return s.matchingHold(PolicyTarget{Client: client}) != nil
 }
 
-// HoldsTarget reports whether Acquire for this client+provider is parked.
-func (s *Scheduler) HoldsTarget(client, provider string) bool {
-	return s.matchingHold(client, provider) != nil
+// HoldsTarget reports whether a request with this identity is parked. It takes
+// the same five-fact target a limit is matched against, because a hold can
+// narrow by any of them; passing fewer facts is how a hold on one model used
+// to be invisible to the check that decides whether a request is parked.
+func (s *Scheduler) HoldsTarget(t PolicyTarget) bool {
+	return s.matchingHold(t) != nil
 }
 
-func (s *Scheduler) matchingHold(client, provider string) *holdSnap {
-	return s.policy.Load().match(client, provider)
+func (s *Scheduler) matchingHold(t PolicyTarget) *holdSnap {
+	return s.policy.Load().match(t)
 }
 
 // Paused reports whether any operator hold is active.
@@ -735,7 +785,7 @@ func (w *waiter) syncUnhold(s *Scheduler) bool {
 		return false
 	}
 	s.holdCountMu.Lock()
-	h := s.matchingHold(w.client, w.provider)
+	h := s.matchingHold(w.PolicyTarget())
 	if h != nil {
 		s.moveHoldCountLocked(w, h)
 		w.fireHoldLocked()

@@ -73,6 +73,9 @@ func registry() []Command {
 			Flags: []flagSpec{
 				{name: "client", kind: kindString, usage: "comma-separated client names"},
 				{name: "provider", kind: kindString, usage: "comma-separated provider names"},
+				{name: "model", kind: kindString, usage: "comma-separated model names"},
+				{name: "key-hash", kind: kindString, usage: "comma-separated upstream key hashes"},
+				{name: "conversation", kind: kindString, usage: "comma-separated conversation ids"},
 				{name: "duration", kind: kindString, usage: mcp.CaptureDurationHelp},
 				{name: "id", kind: kindString, usage: "hold id to edit or remove"},
 				{name: "all", kind: kindBool, usage: "pause every client and provider, or remove every hold"},

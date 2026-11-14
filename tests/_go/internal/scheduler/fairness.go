@@ -498,7 +498,7 @@ func TestProviderFastPathIgnoresPerKeyBlockedPeer(t *testing.T) {
 			name: "hold",
 			setup: func(t *testing.T, s *Scheduler, _ string) {
 				t.Helper()
-				if err := s.AddHold(Hold{ID: "peer", Clients: []string{"client-a"}}); err != nil {
+				if err := s.AddHold(Hold{ID: "peer", Scope: LimitScope{Clients: []string{"client-a"}}}); err != nil {
 					t.Fatal(err)
 				}
 			},

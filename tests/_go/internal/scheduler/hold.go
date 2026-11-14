@@ -12,11 +12,11 @@ import (
 
 func TestHoldsOverlapCases(t *testing.T) {
 	old := Hold{New: true, KnownAtNew: []string{"client-a"}}
-	named := Hold{Clients: []string{"client-a"}}
-	other := Hold{Clients: []string{"client-b"}}
-	prov := Hold{Providers: []string{"alpha.example"}}
-	pair := Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}
-	pair2 := Hold{Clients: []string{"client-a"}, Providers: []string{"beta.example"}}
+	named := Hold{Scope: LimitScope{Clients: []string{"client-a"}}}
+	other := Hold{Scope: LimitScope{Clients: []string{"client-b"}}}
+	prov := Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}
+	pair := Hold{Scope: LimitScope{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}}
+	pair2 := Hold{Scope: LimitScope{Clients: []string{"client-a"}, Providers: []string{"beta.example"}}}
 	all := Hold{All: true}
 
 	must := func(a, b Hold, want bool) {
@@ -32,7 +32,7 @@ func TestHoldsOverlapCases(t *testing.T) {
 	must(old, other, true)  // client-b is unseen
 	must(old, prov, true)   // unseen × alpha.example
 	must(pair, pair2, false)
-	must(pair, Hold{Clients: []string{"client-b"}, Providers: []string{"alpha.example"}}, false)
+	must(pair, Hold{Scope: LimitScope{Clients: []string{"client-b"}, Providers: []string{"alpha.example"}}}, false)
 	must(Hold{New: true}, Hold{New: true, KnownAtNew: []string{"x"}}, true)
 }
 
@@ -48,29 +48,31 @@ func TestHoldMatchesMatrix(t *testing.T) {
 		name             string
 		hold             Hold
 		client, provider string
+		model            string
 		want             bool
 	}{
-		{"all matches any request", Hold{All: true}, "client-a", "alpha.example", true},
-		{"all matches an empty identity", Hold{All: true}, "", "", true},
-		{"new skips a known client", Hold{New: true, KnownAtNew: []string{"known"}}, "known", "alpha.example", false},
-		{"new matches an unseen client", Hold{New: true, KnownAtNew: []string{"known"}}, "fresh", "alpha.example", true},
-		{"named client matches itself", Hold{Clients: []string{"client-a"}}, "client-a", "alpha.example", true},
-		{"named client matches with any provider", Hold{Clients: []string{"client-a"}}, "client-a", "", true},
-		{"named client misses another client", Hold{Clients: []string{"client-a"}}, "client-b", "alpha.example", false},
-		{"named hit wins over new", Hold{Clients: []string{"client-a"}, New: true, KnownAtNew: []string{"client-a", "seen"}}, "client-a", "alpha.example", true},
-		{"named plus new skips a known non-member", Hold{Clients: []string{"client-a"}, New: true, KnownAtNew: []string{"client-a", "seen"}}, "seen", "alpha.example", false},
-		{"named plus new matches an unseen client", Hold{Clients: []string{"client-a"}, New: true, KnownAtNew: []string{"client-a", "seen"}}, "brand-new", "alpha.example", true},
-		{"provider-only matches its provider with any client", Hold{Providers: []string{"alpha.example"}}, "whoever", "alpha.example", true},
-		{"provider-only misses another provider", Hold{Providers: []string{"alpha.example"}}, "whoever", "beta.example", false},
-		{"provider-only never matches an empty provider argument", Hold{Providers: []string{"alpha.example"}}, "whoever", "", false},
-		{"client and provider AND-match", Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}, "client-a", "alpha.example", true},
-		{"pair hold misses on provider", Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}, "client-a", "beta.example", false},
-		{"pair hold misses on client", Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}, "client-b", "alpha.example", false},
-		{"dimensionless hold is inactive", Hold{}, "client-a", "alpha.example", false},
+		{"all matches any request", Hold{All: true}, "client-a", "alpha.example", "", true},
+		{"all matches an empty identity", Hold{All: true}, "", "", "", true},
+		{"new skips a known client", Hold{New: true, KnownAtNew: []string{"known"}}, "known", "alpha.example", "", false},
+		{"new matches an unseen client", Hold{New: true, KnownAtNew: []string{"known"}}, "fresh", "alpha.example", "", true},
+		{"named client matches itself", Hold{Scope: LimitScope{Clients: []string{"client-a"}}}, "client-a", "alpha.example", "", true},
+		{"named client matches with any provider", Hold{Scope: LimitScope{Clients: []string{"client-a"}}}, "client-a", "", "", true},
+		{"named client misses another client", Hold{Scope: LimitScope{Clients: []string{"client-a"}}}, "client-b", "alpha.example", "", false},
+		{"named hit wins over new", Hold{New: true, KnownAtNew: []string{"client-a", "seen"}, Scope: LimitScope{Clients: []string{"client-a"}}}, "client-a", "alpha.example", "", true},
+		{"named plus new skips a known non-member", Hold{New: true, KnownAtNew: []string{"client-a", "seen"}, Scope: LimitScope{Clients: []string{"client-a"}}}, "seen", "alpha.example", "", false},
+		{"named plus new matches an unseen client", Hold{New: true, KnownAtNew: []string{"client-a", "seen"}, Scope: LimitScope{Clients: []string{"client-a"}}}, "brand-new", "alpha.example", "", true},
+		{"provider-only matches its provider with any client", Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}, "whoever", "alpha.example", "", true},
+		{"provider-only misses another provider", Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}, "whoever", "beta.example", "", false},
+		{"provider-only never matches an empty provider argument", Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}, "whoever", "", "", false},
+		{"client and provider AND-match", Hold{Scope: LimitScope{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}}, "client-a", "alpha.example", "", true},
+		{"pair hold misses on provider", Hold{Scope: LimitScope{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}}, "client-a", "beta.example", "", false},
+		{"pair hold misses on client", Hold{Scope: LimitScope{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}}, "client-b", "alpha.example", "", false},
+		{"dimensionless hold is inactive", Hold{}, "client-a", "alpha.example", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := snapHold(tc.hold).matches(tc.client, tc.provider); got != tc.want {
+			target := PolicyTarget{Client: tc.client, Provider: tc.provider, Model: tc.model}
+			if got := snapHold(tc.hold).matches(target); got != tc.want {
 				t.Fatalf("matches(%q, %q) = %v, want %v", tc.client, tc.provider, got, tc.want)
 			}
 		})
@@ -78,20 +80,20 @@ func TestHoldMatchesMatrix(t *testing.T) {
 	// The Go matcher folds expiry into the verdict (holdSnap.active); the
 	// JS mirror splits that half into holdLive, which the ui_check pin
 	// covers separately. This row is therefore Go-only by design.
-	if snapHold(Hold{All: true, Until: time.Now().Add(-time.Minute)}).matches("client-a", "alpha.example") {
+	if snapHold(Hold{All: true, Until: time.Now().Add(-time.Minute)}).matches(PolicyTarget{Client: "client-a", Provider: "alpha.example"}) {
 		t.Fatal("an expired hold still matched")
 	}
 }
 
 func TestAddHoldRejectsOverlap(t *testing.T) {
 	s := New(Options{})
-	if err := s.AddHold(Hold{Clients: []string{"client-a"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Clients: []string{"client-a"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddHold(Hold{Providers: []string{"alpha.example"}}); !errors.Is(err, ErrOverlap) {
+	if err := s.AddHold(Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}); !errors.Is(err, ErrOverlap) {
 		t.Fatalf("err = %v, want ErrOverlap", err)
 	}
-	if err := s.AddHold(Hold{Clients: []string{"client-b"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Clients: []string{"client-b"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.policy.Load().list(); len(got) != 2 {
@@ -102,13 +104,13 @@ func TestAddHoldRejectsOverlap(t *testing.T) {
 func TestPauseByProviderDoesNotBlockOtherProvider(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	if err := s.AddHold(Hold{Providers: []string{"alpha.example"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if s.Holds("client-a") {
 		t.Fatal("provider hold must not match with unknown provider")
 	}
-	if !s.HoldsTarget("client-a", "alpha.example") || s.HoldsTarget("client-a", "beta.example") {
+	if !s.HoldsTarget(PolicyTarget{Client: "client-a", Provider: "alpha.example"}) || s.HoldsTarget(PolicyTarget{Client: "client-a", Provider: "beta.example"}) {
 		t.Fatal("provider hold mismatch")
 	}
 
@@ -144,10 +146,10 @@ func TestPauseByProviderDoesNotBlockOtherProvider(t *testing.T) {
 func TestRemoveOneHoldLeavesTheOther(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	if err := s.AddHold(Hold{Clients: []string{"a"}, Until: time.Now().Add(time.Hour)}); err != nil {
+	if err := s.AddHold(Hold{Until: time.Now().Add(time.Hour), Scope: LimitScope{Clients: []string{"a"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddHold(Hold{Clients: []string{"b"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Clients: []string{"b"}}}); err != nil {
 		t.Fatal(err)
 	}
 	holds := s.policy.Load().list()
@@ -156,7 +158,7 @@ func TestRemoveOneHoldLeavesTheOther(t *testing.T) {
 	}
 	var idA string
 	for _, h := range holds {
-		for _, c := range h.Clients {
+		for _, c := range h.Scope.Clients {
 			if c == "a" {
 				idA = h.ID
 			}
@@ -176,7 +178,7 @@ func TestRemoveOneHoldLeavesTheOther(t *testing.T) {
 func TestPauseQueueCapRefuses(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	if err := s.AddHold(Hold{Clients: []string{"c"}, MaxQueued: 1}); err != nil {
+	if err := s.AddHold(Hold{MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	queued := make(chan struct{})
@@ -213,7 +215,7 @@ func TestUntilWakesHeldWaiter(t *testing.T) {
 	s := New(Options{})
 	held := make(chan struct{})
 	got := make(chan struct{})
-	if err := s.AddHold(Hold{Clients: []string{"c"}, Until: time.Now().Add(40 * time.Millisecond)}); err != nil {
+	if err := s.AddHold(Hold{Until: time.Now().Add(40 * time.Millisecond), Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
@@ -252,11 +254,11 @@ func TestConcurrentAddHoldKeepsBoth(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_ = s.AddHold(Hold{Clients: []string{"a"}})
+			_ = s.AddHold(Hold{Scope: LimitScope{Clients: []string{"a"}}})
 		}()
 		go func() {
 			defer wg.Done()
-			_ = s.AddHold(Hold{Clients: []string{"b"}})
+			_ = s.AddHold(Hold{Scope: LimitScope{Clients: []string{"b"}}})
 		}()
 		wg.Wait()
 		if n := len(s.policy.Load().list()); n != 2 {
@@ -271,10 +273,10 @@ func TestConcurrentAddHoldKeepsBoth(t *testing.T) {
 func TestConcurrentRemoveHoldClearsBoth(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		s := New(Options{})
-		if err := s.AddHold(Hold{ID: "ha", Clients: []string{"a"}}); err != nil {
+		if err := s.AddHold(Hold{ID: "ha", Scope: LimitScope{Clients: []string{"a"}}}); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.AddHold(Hold{ID: "hb", Clients: []string{"b"}}); err != nil {
+		if err := s.AddHold(Hold{ID: "hb", Scope: LimitScope{Clients: []string{"b"}}}); err != nil {
 			t.Fatal(err)
 		}
 		var wg sync.WaitGroup
@@ -316,7 +318,7 @@ func TestAlreadyQueuedExceedsCap(t *testing.T) {
 	if s.Stats().Queued != 3 {
 		t.Fatalf("queued = %d, want 3", s.Stats().Queued)
 	}
-	if err := s.AddHold(Hold{Clients: []string{"c"}, MaxQueued: 1}); err != nil {
+	if err := s.AddHold(Hold{MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(time.Second)
@@ -336,7 +338,7 @@ func TestAlreadyQueuedExceedsCap(t *testing.T) {
 
 func TestMaxQueuedZeroUnlimited(t *testing.T) {
 	s := New(Options{})
-	if err := s.AddHold(Hold{Clients: []string{"c"}, MaxQueued: 0}); err != nil {
+	if err := s.AddHold(Hold{MaxQueued: 0, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	var parked atomic.Int32
@@ -366,7 +368,7 @@ func TestMaxQueuedZeroUnlimited(t *testing.T) {
 func TestPairHoldANDMatch(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	if err := s.AddHold(Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}}); err != nil {
 		t.Fatal(err)
 	}
 	rel, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{Client: "client-a", Provider: "beta.example"})
@@ -404,10 +406,10 @@ func TestPairHoldANDMatch(t *testing.T) {
 
 func TestTwoProviderHoldsAllowed(t *testing.T) {
 	s := New(Options{})
-	if err := s.AddHold(Hold{Providers: []string{"alpha.example"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Providers: []string{"alpha.example"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddHold(Hold{Providers: []string{"beta.example"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Providers: []string{"beta.example"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if n := len(s.policy.Load().list()); n != 2 {
@@ -417,10 +419,10 @@ func TestTwoProviderHoldsAllowed(t *testing.T) {
 
 func TestRestoreHoldsNewIDsAreRemovable(t *testing.T) {
 	s := New(Options{})
-	if err := s.AddHold(Hold{ID: "old", Clients: []string{"c"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "old", Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
-	s.RestoreHolds([]Hold{{ID: "new", Clients: []string{"c"}}})
+	s.RestoreHolds([]Hold{{ID: "new", Scope: LimitScope{Clients: []string{"c"}}}})
 	s.RemoveHold("new")
 	if s.Holds("c") {
 		t.Fatal("RestoreHolds kept the old id; RemoveHold(new) was a no-op")
@@ -437,7 +439,7 @@ func TestHeldCancelDoesNotUnderCountInFlight(t *testing.T) {
 	held := make(chan struct{})
 	wctx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
-	if err := s.AddHold(Hold{Clients: []string{"b"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Clients: []string{"b"}}}); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
@@ -453,7 +455,7 @@ func TestHeldCancelDoesNotUnderCountInFlight(t *testing.T) {
 		t.Fatal("never held")
 	}
 	cancel()
-	if err := s.AddHold(Hold{Clients: []string{"d"}}); err != nil {
+	if err := s.AddHold(Hold{Scope: LimitScope{Clients: []string{"d"}}}); err != nil {
 		t.Fatal(err)
 	}
 	got := make(chan struct{})
@@ -490,7 +492,7 @@ func TestHeldCancelDoesNotUnderCountInFlight(t *testing.T) {
 
 func TestReplaceHoldKeepsIDAndWaiters(t *testing.T) {
 	s := New(Options{})
-	if err := s.AddHold(Hold{ID: "h1", Clients: []string{"c"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	held := make(chan struct{})
@@ -512,7 +514,7 @@ func TestReplaceHoldKeepsIDAndWaiters(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("never held")
 	}
-	if err := s.ReplaceHold(Hold{ID: "h1", Clients: []string{"c"}, MaxQueued: 4}); err != nil {
+	if err := s.ReplaceHold(Hold{ID: "h1", MaxQueued: 4, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	holds := s.policy.Load().list()
@@ -524,7 +526,7 @@ func TestReplaceHoldKeepsIDAndWaiters(t *testing.T) {
 		t.Fatal("replace must not release a still-matching waiter")
 	case <-time.After(40 * time.Millisecond):
 	}
-	if err := s.ReplaceHold(Hold{ID: "h1", Clients: []string{"other"}}); err != nil {
+	if err := s.ReplaceHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"other"}}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -536,16 +538,16 @@ func TestReplaceHoldKeepsIDAndWaiters(t *testing.T) {
 
 func TestReplaceHoldRejectsOverlapAndMissing(t *testing.T) {
 	s := New(Options{})
-	if err := s.AddHold(Hold{ID: "ha", Clients: []string{"a"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "ha", Scope: LimitScope{Clients: []string{"a"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddHold(Hold{ID: "hb", Clients: []string{"b"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "hb", Scope: LimitScope{Clients: []string{"b"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceHold(Hold{ID: "ha", Clients: []string{"b"}}); !errors.Is(err, ErrOverlap) {
+	if err := s.ReplaceHold(Hold{ID: "ha", Scope: LimitScope{Clients: []string{"b"}}}); !errors.Is(err, ErrOverlap) {
 		t.Fatalf("err = %v, want ErrOverlap", err)
 	}
-	if err := s.ReplaceHold(Hold{ID: "nope", Clients: []string{"c"}}); !errors.Is(err, ErrHoldNotFound) {
+	if err := s.ReplaceHold(Hold{ID: "nope", Scope: LimitScope{Clients: []string{"c"}}}); !errors.Is(err, ErrHoldNotFound) {
 		t.Fatalf("err = %v, want ErrHoldNotFound", err)
 	}
 	if !s.Holds("a") || !s.Holds("b") {
@@ -580,7 +582,7 @@ func TestAddHoldWakesCapWaiter(t *testing.T) {
 		t.Fatalf("queued = %d, want 1", s.Stats().Queued)
 	}
 	time.Sleep(20 * time.Millisecond) // enter the non-hold select
-	if err := s.AddHold(Hold{ID: "h1", Clients: []string{"c"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -603,7 +605,7 @@ func TestReplaceHoldWakesCapWaiter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddHold(Hold{ID: "h1", Providers: []string{"other.land"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"other.land"}}}); err != nil {
 		t.Fatal(err)
 	}
 	held := make(chan struct{})
@@ -626,7 +628,7 @@ func TestReplaceHoldWakesCapWaiter(t *testing.T) {
 		t.Fatalf("queued = %d, want 1", s.Stats().Queued)
 	}
 	time.Sleep(20 * time.Millisecond) // enter the non-hold select
-	if err := s.ReplaceHold(Hold{ID: "h1", Providers: []string{"gamma.example"}}); err != nil {
+	if err := s.ReplaceHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"gamma.example"}}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -634,7 +636,7 @@ func TestReplaceHoldWakesCapWaiter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("OnHold never ran - ReplaceHold lost wakeup on cap waiter")
 	}
-	if s.HoldsTarget("c", "beta.example") {
+	if s.HoldsTarget(PolicyTarget{Client: "c", Provider: "beta.example"}) {
 		t.Fatal("replace widened hold past the named provider")
 	}
 	s.RemoveHold("h1")
@@ -648,7 +650,7 @@ func TestReplaceHoldOnHoldDuringOnWait(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddHold(Hold{ID: "h1", Providers: []string{"other.land"}}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"other.land"}}}); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{})
@@ -671,7 +673,7 @@ func TestReplaceHoldOnHoldDuringOnWait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("OnWait never entered")
 	}
-	if err := s.ReplaceHold(Hold{ID: "h1", Providers: []string{"gamma.example"}}); err != nil {
+	if err := s.ReplaceHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"gamma.example"}}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -702,7 +704,7 @@ func TestAddHoldSeedsMaxQueuedBeforeAdopt(t *testing.T) {
 	for s.Stats().Queued < 1 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if err := s.AddHold(Hold{Clients: []string{"c"}, MaxQueued: 1}); err != nil {
+	if err := s.AddHold(Hold{MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.AcquireWith(ctx, "k", 1, WaiterHooks{Client: "c"})
@@ -731,7 +733,7 @@ func TestAddHoldSeedsMaxQueuedBeforeAdopt(t *testing.T) {
 // dropHold calls fire OnUnhold exactly once.
 func TestAdoptHoldExactlyOnceConcurrent(t *testing.T) {
 	s := New(Options{})
-	h := snapHold(Hold{ID: "h1", Clients: []string{"c"}})
+	h := snapHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"c"}}})
 	w := &waiter{client: "c", provider: "p.example"}
 	var fired atomic.Int32
 	w.onHold = func() { fired.Add(1) }
@@ -795,7 +797,7 @@ func TestHoldQueuedEqualsWaitersAfterSeedAndAdopt(t *testing.T) {
 	if s.Stats().Queued != n {
 		t.Fatalf("queued = %d, want %d", s.Stats().Queued, n)
 	}
-	if err := s.AddHold(Hold{ID: "h1", Clients: []string{"c"}, MaxQueued: n}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", MaxQueued: n, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(time.Second)
@@ -844,7 +846,7 @@ func TestAddHoldSeedsWhenOnWaitBlocked(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("OnWait never entered")
 	}
-	if err := s.AddHold(Hold{ID: "h1", Clients: []string{"c"}, MaxQueued: 1}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.HoldQueued("h1"); got != 1 {
@@ -894,13 +896,13 @@ func TestReplaceHoldDoesNotLeakQueuedCount(t *testing.T) {
 	for s.Stats().Queued < 1 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if err := s.AddHold(Hold{ID: "h1", Clients: []string{"c"}, MaxQueued: 1}); err != nil {
+	if err := s.AddHold(Hold{ID: "h1", MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.HoldQueued("h1"); got != 1 {
 		t.Fatalf("HoldQueued after AddHold = %d, want 1", got)
 	}
-	if err := s.ReplaceHold(Hold{ID: "h1", Clients: []string{"d"}, MaxQueued: 1}); err != nil {
+	if err := s.ReplaceHold(Hold{ID: "h1", MaxQueued: 1, Scope: LimitScope{Clients: []string{"d"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.HoldQueued("h1"); got != 0 {
@@ -1046,7 +1048,7 @@ func TestSeedNeverAdoptsDepartedWaiter(t *testing.T) {
 
 	// AddHold's dispatch phase runs the seam; the departures complete as the
 	// lock hands it over, so the joins happen after AddHold returns.
-	if err := s.AddHold(Hold{Clients: []string{"c"}, MaxQueued: 1}); err != nil {
+	if err := s.AddHold(Hold{MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1149,7 +1151,7 @@ func TestSeededDispatchNeverInvertsAgainstDeparture(t *testing.T) {
 	const iters = 50
 	for i := 0; i < iters; i++ {
 		s := New(Options{})
-		h := snapHold(Hold{ID: "h1", Clients: []string{"c"}})
+		h := snapHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"c"}}})
 		var seqMu sync.Mutex
 		var seq []string
 		w := &waiter{client: "c", provider: "p.example"}
@@ -1233,7 +1235,7 @@ func TestSeedDepartureRaceStressNoLeak(t *testing.T) {
 
 		addDone := make(chan struct{})
 		go func() {
-			_ = s.AddHold(Hold{Clients: []string{"c"}, MaxQueued: 1})
+			_ = s.AddHold(Hold{MaxQueued: 1, Scope: LimitScope{Clients: []string{"c"}}})
 			close(addDone)
 		}()
 		// The departures race the seed end to end - before, during, or

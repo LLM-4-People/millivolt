@@ -594,6 +594,12 @@ function ocNewScope() {
   return { providers: [], models: [], clients: [], keyHashes: [], conversations: [] };
 }
 
+// OC_SCOPE_DIMS is the one ordered list of selector dimensions. Every kind
+// that matches requests uses it: a limit, a hold and a capture offer the same
+// depth because the server matches all three against the same request identity.
+// A new dimension is added here once, not in three composers.
+const OC_SCOPE_DIMS = ['providers', 'models', 'clients', 'keyHashes', 'conversations'];
+
 function ocScopeFromPolicy(policy) {
   const scope = ocNewScope();
   for (const key of Object.keys(scope)) {
@@ -1570,20 +1576,42 @@ function ocScopeWeight(scope) {
     .reduce((n, key) => n + ((scope?.[key] || []).length ? 1 : 0), 0);
 }
 
+// ocHoldMatchesRecord mirrors scheduler.holdSnap.matches: AND across the
+// dimensions the hold sets, with the client dimension carrying the New
+// modifier. It reads the same five dimensions a limit can select on, so
+// "which hold covers this request" answers with the rule the server applied
+// rather than a narrower guess.
 function ocHoldMatchesRecord(hold, record) {
   if (!hold || !record) return false;
   if (hold.all) return true;
-  const clients = hold.clients || [];
-  const providers = hold.providers || [];
-  const known = hold.known_at_new || [];
+  const scope = ocScopeFromPolicy({ scope: hold });
   const client = record.client || '';
-  let clientOK = false;
-  if (clients.length && clients.includes(client)) clientOK = true;
-  else if (hold.new) clientOK = !known.includes(client);
-  else if (clients.length) clientOK = false;
-  else clientOK = providers.length > 0;
-  if (!clientOK) return false;
-  return !providers.length || providers.includes(record.provider || '');
+  const known = hold.known_at_new || [];
+  const named = scope.clients.length > 0;
+  if (named) {
+    if (!scope.clients.includes(client)) {
+      // A named client wins over New; otherwise New may still admit a client
+      // the server had not seen. A client it already knew never matches.
+      if (!hold.new || known.includes(client)) return false;
+    }
+  } else if (hold.new && known.includes(client)) {
+    return false;
+  }
+  const values = {
+    providers: record.provider || '',
+    models: record.model || '',
+    keyHashes: record.key_hash || '',
+    conversations: record.conversation_id || '',
+  };
+  for (const dim of ['providers', 'models', 'keyHashes', 'conversations']) {
+    const set = scope[dim];
+    if (set.length && !set.includes(values[dim])) return false;
+  }
+  // A hold with no named dimension at all is inactive; the server never
+  // installs one, and a row for it would claim a park that does not happen.
+  return named || hold.new || scope.providers.length > 0 ||
+    scope.models.length > 0 || scope.keyHashes.length > 0 ||
+    scope.conversations.length > 0;
 }
 
 function ocCaptureMatchesRecord(session, record) {
@@ -1624,9 +1652,11 @@ function ocPauseForRecord(record) {
   }
   openOperatorConsole('pause');
   const draft = ocBlankPauseDraft();
-  if (record.client) draft.clients = [record.client];
-  if (record.provider) draft.providers = [record.provider];
-  if (!draft.clients.length && !draft.providers.length) draft.mode = 'all';
+  // The same five dimensions a limit seeds from. A record knows its model,
+  // key and conversation, so a hold started from the row can name them;
+  // seeding only client and provider silently narrowed what the operator saw.
+  draft.scope = ocScopeFromPolicy({ scope: ocRecordScope(record) });
+  if (!ocScopeHas(draft.scope)) draft.mode = 'all';
   ocDrafts.pause = draft;
   ocView = { kind: 'pause', id: '' };
   ocRender();
@@ -1644,12 +1674,24 @@ function ocCaptureForRecord(record) {
   }
   openOperatorConsole('capture');
   const draft = ocBlankCaptureDraft();
-  if (record.client) draft.clients = [record.client];
-  if (record.provider) draft.providers = [record.provider];
-  if (record.model) draft.models = [record.model];
+  draft.scope = ocScopeFromPolicy({ scope: ocRecordScope(record) });
   ocDrafts.capture = draft;
   ocView = { kind: 'capture', id: '' };
   ocRender();
+}
+
+// ocRecordScope is the one projection from a request record to a scope
+// document, using the names the console drafts and the server documents
+// already share. Record-match seeds read it so a new dimension is offered by
+// every prefill at once instead of being added at each call site.
+function ocRecordScope(record) {
+  return {
+    providers: record.provider ? [record.provider] : [],
+    models: record.model ? [record.model] : [],
+    clients: record.client ? [record.client] : [],
+    key_hashes: record.key_hash ? [record.key_hash] : [],
+    conversations: record.conversation_id ? [record.conversation_id] : [],
+  };
 }
 
 // ocOpenOperatorForRecord is the one dispatch for the three record pills.

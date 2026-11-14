@@ -187,7 +187,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			// durable code on another status still classifies as quota (so it
 			// is never retried) but does not open the provider gate.
 			if resp.StatusCode == http.StatusTooManyRequests && isNonRetryableQuotaErr(errTyp, errCode) {
-				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, metrics.NonRetryableQuotaClass(errTyp, errCode), parseRetryAfter(resp)) {
+				if !s.settleQuotaFailure(permit, t.format, hooks.PolicyTarget(), metrics.NonRetryableQuotaClass(errTyp, errCode), parseRetryAfter(resp)) {
 					end(false)
 					// This response reaches the client: adopt this attempt's
 					// transport timing (the failed attempts before it never

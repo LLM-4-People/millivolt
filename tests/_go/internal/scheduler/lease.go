@@ -110,7 +110,7 @@ func TestHoldExpiresAtExactDeadline(t *testing.T) {
 			t.Fatal(err)
 		}
 		time.Sleep(time.Second)
-		if h.Active() || s.Paused() || s.HoldsTarget("client", "provider.example") {
+		if h.Active() || s.Paused() || s.HoldsTarget(PolicyTarget{Client: "client", Provider: "provider.example"}) {
 			t.Fatal("hold remained active at its exact deadline")
 		}
 	})

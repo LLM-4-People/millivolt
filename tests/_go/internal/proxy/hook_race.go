@@ -81,7 +81,7 @@ func TestHookPublishSerializesSeededHoldAndThrottleDispatch(t *testing.T) {
 			// alternating (a second cycler would trip the overlap
 			// rejection), so every cycle seeds OnHold for each parked
 			// waiter on THIS goroutine.
-			if err := s.scheduler.AddHold(scheduler.Hold{ID: "hook-race", Providers: []string{provider}}); err != nil {
+			if err := s.scheduler.AddHold(scheduler.Hold{ID: "hook-race", Scope: scheduler.LimitScope{Providers: []string{provider}}}); err != nil {
 				t.Errorf("AddHold: %v", err)
 				return
 			}

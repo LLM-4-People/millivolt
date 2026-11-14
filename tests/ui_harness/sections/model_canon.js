@@ -54,7 +54,7 @@ module.exports = async function modelCanon(H) {
     });
     d.querySelector('#oc-pane [data-oc-pick="models"]').click();
     check('a capture draft keeps the exact model spelling and checks its picker row',
-      JSON.stringify(w.eval('ocDrafts.capture.models')) === JSON.stringify(['moonshotai/kimi-k3:nube']) &&
+      JSON.stringify(w.eval('ocDrafts.capture.scope.models')) === JSON.stringify(['moonshotai/kimi-k3:nube']) &&
       d.querySelector('#oc-pane [data-oc-pick-value="models"][data-oc-value="moonshotai/kimi-k3:nube"]')
         .getAttribute('aria-checked') === 'true');
     w.closeOperatorConsole();

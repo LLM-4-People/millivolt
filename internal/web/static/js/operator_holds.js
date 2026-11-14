@@ -4,16 +4,22 @@
 // this module owns every hold and capture rule.
 
 // ---------- pause ----------
+// A hold's scope is the same five dimensions a limit has, because the
+// scheduler matches both against one request identity. Spelling them out per
+// draft kept the hold composer at two dimensions while the limit composer
+// offered five, for no reason the operator could see.
 function ocBlankPauseDraft() {
-  return { id: '', mode: 'named', clients: [], providers: [], duration: '', cap: '', picker: null, error: '' };
+  return {
+    id: '', mode: 'named', scope: ocNewScope(),
+    duration: '', cap: '', picker: null, error: '',
+  };
 }
 
 function ocPauseDraftFromHold(hold) {
   return {
     id: hold.id || '',
     mode: hold.all ? 'all' : hold.new ? 'new' : 'named',
-    clients: [...(hold.clients || [])],
-    providers: [...(hold.providers || [])],
+    scope: ocScopeFromPolicy({ scope: hold }),
     duration: hold.duration || '',
     cap: typeof hold.max_queued === 'number' ? String(hold.max_queued) : '',
     picker: null,
@@ -65,18 +71,20 @@ function ocOpenPauseComposer(id, copy) {
 function ocPauseComposerHTML(draft) {
   const editing = !!draft.id;
   const named = draft.mode === 'named';
-  const scope = { providers: draft.providers, models: [], clients: draft.clients, keyHashes: [], conversations: [] };
   return `<section class="oc-compose" data-kind="pause">` +
     `<div class="oc-compose-hd"><span>${editing ? 'editing hold' : 'new hold'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">scope</div>` +
     ocChipRow('pause-mode', ['named', 'new', 'all'], draft.mode, v =>
-      v === 'all' ? 'everything' : v === 'new' ? 'new clients' : 'named clients and providers') +
-    (named ? ocScopeConditionsHTML({ scope: { providers: draft.providers, models: [], clients: draft.clients, keyHashes: [], conversations: [] }, picker: draft.picker }, ['clients', 'providers']) : '') +
+      v === 'all' ? 'everything' : v === 'new' ? 'new clients' : 'named scope') +
+    // The same five dimensions the limit composer offers. A hold that can only
+    // name clients and providers cannot ask "park this model" while a limit can
+    // cap it, which is a difference the operator cannot account for.
+    (named ? ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, OC_SCOPE_DIMS) : '') +
     `<p class="oc-note">${draft.mode === 'all'
       ? 'Every new request parks. In-flight work always finishes.'
       : draft.mode === 'new'
         ? 'Clients unseen when this hold starts park. Requests already running finish.'
-        : 'With one dimension left empty, that side matches any value.'}</p></div>` +
+        : 'A dimension left empty matches any value; set dimensions combine.'}</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
     ocChipRow('pause-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : PAUSE_DURS[0][1]) +
     `</div>` +
@@ -97,13 +105,13 @@ function ocPausePreview() {
   const apply = ocEl('oc-pause-apply');
   if (!draft || !el || !apply) return;
   const named = draft.mode === 'named';
-  const empty = named && !draft.clients.length && !draft.providers.length;
+  const empty = named && !ocScopeHas(draft.scope);
   let text;
-  if (empty) text = 'Pick at least one client or provider, or hold everything.';
+  if (empty) text = 'Pick at least one condition, or hold everything.';
   else {
     const scope = draft.mode === 'all' ? 'all traffic'
       : draft.mode === 'new' ? 'new clients'
-        : ocScopePhrase({ providers: draft.providers, clients: draft.clients, models: [], keyHashes: [], conversations: [] });
+        : ocScopePhrase(draft.scope);
     text = 'Hold ' + scope + (draft.duration ? ' for ' + ocDurationText(draft.duration) : ' until resumed') + '.';
   }
   el.textContent = text;
@@ -129,7 +137,7 @@ function ocRenderPause() {
   const entries = holds.map(hold => {
     const scope = hold.all ? 'all traffic'
       : hold.new ? 'new clients'
-        : ocScopePhrase({ providers: hold.providers, clients: hold.clients, models: [], keyHashes: [], conversations: [] });
+        : ocScopePhrase(ocScopeFromPolicy({ scope: hold }));
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
     const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
@@ -182,8 +190,14 @@ function ocPauseBody(draft) {
   const body = { paused: true, all, duration: draft.duration || '' };
   if (!all) {
     body.new = draft.mode === 'new';
-    body.clients = draft.clients;
-    body.providers = draft.providers;
+    // Every dimension is restated, because the server treats a supplied array
+    // as a replacement and an omitted one as "keep". A narrow hold must not
+    // leave a previous broader dimension in place.
+    body.clients = draft.scope.clients;
+    body.providers = draft.scope.providers;
+    body.models = draft.scope.models;
+    body.key_hashes = draft.scope.keyHashes;
+    body.conversations = draft.scope.conversations;
   }
   // An omitted cap means different things on the two paths. On a create the
   // server writes the configured queue size, which is what an unchecked box
@@ -200,8 +214,8 @@ function ocPauseBody(draft) {
 function ocApplyPause() {
   const draft = ocDrafts.pause;
   if (!draft) return;
-  if (draft.mode === 'named' && !draft.clients.length && !draft.providers.length) {
-    draft.error = 'pick at least one client or provider, or hold everything';
+  if (draft.mode === 'named' && !ocScopeHas(draft.scope)) {
+    draft.error = 'pick at least one condition, or hold everything';
     ocRender();
     return;
   }
@@ -214,9 +228,8 @@ function ocApplyPause() {
   draft.error = '';
   const body = ocPauseBody(draft);
   const previous = draft.id ? liveHolds().find(h => h.id === draft.id) || null : null;
-  const phrase = (draft.id ? 'updated hold on ' : 'held ') + ocScopePhrase({
-    providers: body.providers || [], clients: body.clients || [], models: [], keyHashes: [], conversations: [],
-  }).replace('every request', body.all ? 'all traffic' : body.new ? 'new clients' : 'traffic');
+  const phrase = (draft.id ? 'updated hold on ' : 'held ') + (body.all ? 'all traffic'
+    : body.new ? 'new clients' : ocScopePhrase(draft.scope));
   // Undo must name the rule this write created. `find(h => h.id !== previous.id)`
   // looks right but is wrong on a create, where previous is null: it matches
   // whatever is first in the list, which is the oldest hold, not the new one.
@@ -239,7 +252,7 @@ async function ocResumeHold(id) {
   const hold = liveHolds().find(h => h.id === id);
   if (!hold) { ocRuleGone('hold'); return; }
   const scope = hold.all ? 'all traffic'
-    : hold.new ? 'new clients' : ocScopePhrase({ providers: hold.providers, clients: hold.clients });
+    : hold.new ? 'new clients' : ocScopePhrase(ocScopeFromPolicy({ scope: hold }));
   // Resuming a hold with parked work releases that backlog to the provider in
   // one burst, which is the same consequence `resume all` confirms. Asking
   // only in the bulk case taught the operator that the single resume was the
@@ -294,15 +307,13 @@ async function ocResumeAllHolds() {
 
 // ---------- capture ----------
 function ocBlankCaptureDraft() {
-  return { id: '', clients: [], providers: [], models: [], duration: '', picker: null, error: '' };
+  return { id: '', scope: ocNewScope(), duration: '', picker: null, error: '' };
 }
 
 function ocCaptureDraftFromSession(session) {
   return {
     id: session.id || '',
-    clients: [...(session.clients || [])],
-    providers: [...(session.providers || [])],
-    models: [...(session.models || [])],
+    scope: ocScopeFromPolicy({ scope: session }),
     duration: session.duration || '',
     picker: null,
     error: '',
@@ -338,7 +349,7 @@ function ocCaptureComposerHTML(draft) {
   return `<section class="oc-compose" data-kind="capture">` +
     `<div class="oc-compose-hd"><span>${editing ? 'editing capture' : 'new capture'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">capture</div>` +
-    ocScopeConditionsHTML({ scope: { providers: draft.providers, models: draft.models, clients: draft.clients, keyHashes: [], conversations: [] }, picker: draft.picker }, ['clients', 'providers', 'models']) +
+    ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, ['clients', 'providers', 'models']) +
     `<p class="oc-note">Captures can contain credentials and private content; keep the window short and download only what you need.</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
     ocChipRow('capture-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : 'until stopped') +
@@ -375,12 +386,10 @@ function ocCapturePreview() {
   const el = ocEl('oc-capture-preview');
   const apply = ocEl('oc-capture-apply');
   if (!draft || !el || !apply) return;
-  const empty = !draft.clients.length && !draft.providers.length && !draft.models.length;
-  el.textContent = empty ? 'Pick at least one client, provider or model.'
-    : 'Capture ' + ocScopePhrase({
-      providers: draft.providers, models: draft.models, clients: draft.clients,
-      keyHashes: [], conversations: [],
-    }) + (draft.duration ? ' for ' + ocDurationText(draft.duration) : ' until stopped') + '.';
+  const empty = !ocScopeHas(draft.scope);
+  el.textContent = empty ? 'Pick at least one condition.'
+    : 'Capture ' + ocScopePhrase(draft.scope) +
+      (draft.duration ? ' for ' + ocDurationText(draft.duration) : ' until stopped') + '.';
   apply.disabled = !!operatorState.debug.busy || empty || debugStorageDisabled();
 }
 
@@ -395,10 +404,7 @@ function ocRenderCapture() {
     : composing ? ''
       : `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button>`;
   const entries = sessions.map(session => {
-    const scope = ocScopePhrase({
-      providers: session.providers, models: session.models, clients: session.clients,
-      keyHashes: [], conversations: [],
-    });
+    const scope = ocScopePhrase(ocScopeFromPolicy({ scope: session }));
     const left = ocUntilPhrase(session.until) || 'until stopped';
     const ran = typeof session.ran_ms === 'number' && session.ran_ms > 0
       ? 'ran ' + hmBreakdown(Math.max(1, Math.round(session.ran_ms / OC_MINUTE))) : '';
@@ -433,11 +439,14 @@ function ocRenderCapture() {
 }
 
 function ocCaptureBody(draft) {
+  // A capture matches by client, provider and model. It has no key or
+  // conversation predicate, so the composer offers only those three rather
+  // than showing a control the server would ignore.
   const body = {
     enabled: true,
-    clients: draft.clients,
-    providers: draft.providers,
-    models: draft.models,
+    clients: draft.scope.clients,
+    providers: draft.scope.providers,
+    models: draft.scope.models,
     duration: draft.duration || '',
   };
   if (draft.id) body.id = draft.id;
@@ -447,19 +456,15 @@ function ocCaptureBody(draft) {
 function ocApplyCapture() {
   const draft = ocDrafts.capture;
   if (!draft) return;
-  if (!draft.clients.length && !draft.providers.length && !draft.models.length) {
-    draft.error = 'pick at least one client, provider or model';
+  if (!ocScopeHas(draft.scope)) {
+    draft.error = 'pick at least one condition';
     ocRender();
     return;
   }
   draft.error = '';
   const body = ocCaptureBody(draft);
   const previous = draft.id ? liveDebugSessions().find(s => s.id === draft.id) || null : null;
-  const scope = ocScopePhrase({
-    providers: draft.providers, models: draft.models, clients: draft.clients,
-    keyHashes: [], conversations: [],
-  });
-  const phrase = (draft.id ? 'updated capture on ' : 'capturing ') + scope;
+  const phrase = (draft.id ? 'updated capture on ' : 'capturing ') + ocScopePhrase(draft.scope);
   mutateOperator('debug', body, st => {
     // The debug route returns created_id for a create, so the session this
     // write installed is known exactly. Inferring it from a before/after set
@@ -482,8 +487,7 @@ function ocApplyCapture() {
 async function ocStopSession(id) {
   const session = liveDebugSessions().find(s => s.id === id);
   if (!session) { ocRuleGone('capture'); return; }
-  const scope = ocScopePhrase({ providers: session.providers, models: session.models, clients: session.clients });
-  const phrase = 'stopped capture on ' + scope;
+  const phrase = 'stopped capture on ' + ocScopePhrase(ocScopeFromPolicy({ scope: session }));
   mutateOperator('debug', { enabled: false, id }, () => {
     ocRecordChange(phrase, () => { const draft = ocCaptureDraftFromSession(session); draft.id = ''; return mutateOperator('debug', ocCaptureBody(draft)); }, 'ok');
     toast(phrase);

@@ -11,7 +11,7 @@ function ocAllRuleRows() {
       section: 'pause',
       id: hold.id || '',
       scope: hold.all ? 'all traffic' : hold.new ? 'new clients'
-        : ocScopePhrase({ providers: hold.providers, clients: hold.clients }),
+        : ocScopePhrase(ocScopeFromPolicy({ scope: hold })),
       detail: [ocUntilPhrase(hold.until), hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean).join(' · '),
     });
   }
