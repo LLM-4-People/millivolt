@@ -467,9 +467,8 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-window .oc-select { width: 100%; min-height: 24px; }
 .oc-preview {
   margin: 0; padding: 6px 8px;
-  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border: 1px solid var(--border);
   border-radius: 7px;
-  background: color-mix(in srgb, var(--accent) 5%, transparent);
   color: var(--text); font: 10px/1.55 var(--mono); overflow-wrap: anywhere;
 }
 .oc-preview:empty { display: none; }
@@ -511,9 +510,7 @@ button.oc-chip[aria-pressed="true"]::before {
   display: flex; align-items: center; justify-content: center;
   padding: 3px 2px; text-align: center;
   color: var(--_kind, var(--muted));
-  background: color-mix(in srgb, var(--_kind, var(--muted)) 9%, transparent);
-  border-right: 1px solid var(--border);
-  font: 600 8.5px/1.25 var(--mono); letter-spacing: .03em;
+  font: 600 9px/1.25 var(--mono); letter-spacing: .03em;
 }
 .oc-rule[data-kind="limit"] { --_kind: var(--accent); }
 .oc-rule[data-kind="pause"] { --_kind: var(--warn); }
@@ -542,7 +539,7 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-rule-live {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text); text-align: right;
-  font: 9px/1.4 var(--mono); font-variant-numeric: tabular-nums;
+  font: 10px/1.4 var(--mono); font-variant-numeric: tabular-nums;
 }
 /* Actions stay visible: an operator should never have to hover to learn that
    a rule can be edited or removed. They sit at muted ink so the state column
