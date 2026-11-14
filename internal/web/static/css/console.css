@@ -5,14 +5,21 @@
    ledger. Everything resolves the shared surface, accent and status tokens. */
 
 /* ---------- header readout ----------
-   The trigger is a direct child of .refresh-controls, whose square
-   icon-button rule would otherwise force it to 32px. Its data-state mirrors
-   #op-readout; operator_console.js writes both in the same repaint. */
+   The trigger is a direct child of the header, so it needs the flex row the
+   .btn base assumes. Without it the box is block-level: the words and the
+   chevron stack into two rows, and a long state overruns the button and
+   paints over the controls to its right. Its data-state mirrors #op-readout;
+   operator_console.js writes both in the same repaint. */
 .op-readout-btn {
+  display: inline-flex; align-items: center;
   width: auto; min-width: 0; max-width: min(48vw, 320px); height: auto; min-height: 30px;
   padding: 3px 8px; gap: 6px; justify-content: flex-start;
+  overflow: hidden;
 }
-.op-readout { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.op-readout {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+}
 .op-readout-dot {
   width: 7px; height: 7px; flex: none; border-radius: 50%;
   border: 1px solid var(--border2);
@@ -45,6 +52,22 @@
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .op-readout-btn[data-state="active"] .op-readout-chev { color: var(--text); }
+/* Paused stops or parks live traffic, so it takes the warn tone instead of
+   the calm accent a routine cap gets. The dot still reads as a state, not an
+   alarm: no pulse, which stays reserved for a restart. */
+#op-readout[data-state="paused"] .op-readout-state { color: var(--warn); }
+#op-readout[data-state="paused"] .op-readout-dot {
+  border-color: var(--warn); background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 18%, transparent);
+}
+.op-readout-btn[data-state="paused"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border2));
+  background: color-mix(in srgb, var(--warn) 7%, var(--panel2));
+}
+.op-readout-btn[data-state="paused"]:hover { border-color: var(--warn); }
+.op-readout-btn[data-state="paused"]:hover .op-readout-state { color: var(--warn); }
+.op-readout-btn[data-state="paused"] .op-readout-chev { color: var(--warn); }
 #op-readout[data-state="busy"] .op-readout-state { color: var(--warn); }
 #op-readout[data-state="busy"] .op-readout-dot {
   border-color: var(--warn); background: var(--warn);

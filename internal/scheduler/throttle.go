@@ -89,6 +89,12 @@ type ThrottleInfo struct {
 	TokRemaining float64 `json:"tokens_remaining"`
 	ReqCapacity  float64 `json:"requests_capacity"`
 	TokCapacity  float64 `json:"tokens_capacity"`
+	// Scheduled reports whether the policy's schedule is open right now. A
+	// policy outside its window is installed but enforces nothing, and the
+	// server owns that verdict: a client that re-derived it from start and end
+	// minutes would disagree with admission across time zones and midnight
+	// wraps.
+	Scheduled bool `json:"scheduled"`
 }
 
 // policyTarget is the request identity matched against every active policy.
@@ -466,7 +472,10 @@ func (g *policyGate) snapshot(queued int) ThrottleInfo {
 	defer g.mu.Unlock()
 	now := time.Now()
 	g.tok.refill(now)
-	info := ThrottleInfo{Throttle: g.throttle, InFlight: g.inFlight, Queued: queued}
+	info := ThrottleInfo{
+		Throttle: g.throttle, InFlight: g.inFlight, Queued: queued,
+		Scheduled: g.throttle.Schedule.Active(now),
+	}
 	info.ReqRemaining = g.req.remaining(now)
 	info.ReqCapacity = g.req.capacity()
 	if g.tok.enabled {

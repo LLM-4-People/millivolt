@@ -51,12 +51,21 @@ function ocEl(id) { return document.getElementById(id); }
 // ocRuleCounts is the one summary of everything in force. Restart is included
 // because it is the one transient state that must stay visible after the
 // console closes.
+// ocLimitEnforcing reports whether a stored policy is enforcing right now.
+// The server owns the verdict (ThrottleInfo.scheduled) because a policy
+// outside its schedule is installed but admits everything; counting it would
+// make the readout claim a cap that is not applied.
+function ocLimitEnforcing(policy) {
+  return !!policy && policy.scheduled !== false;
+}
+
 function ocRuleCounts() {
   const holds = typeof liveHolds === 'function' ? liveHolds().length : 0;
   const captures = typeof liveDebugSessions === 'function' ? liveDebugSessions().length : 0;
-  const limits = (typeof throttleState !== 'undefined' && throttleState.throttles)
-    ? throttleState.throttles.length : 0;
-  return { holds, captures, limits, total: holds + captures + limits };
+  const policies = (typeof throttleState !== 'undefined' && throttleState.throttles) || [];
+  const limits = policies.filter(ocLimitEnforcing).length;
+  return { holds, captures, limits, parked: policies.length - limits,
+    installed: policies.length, total: holds + captures + limits };
 }
 
 function ocRestartActive() {
@@ -70,12 +79,17 @@ function ocReadoutSegments() {
   if (ocRestartActive()) {
     const rank = typeof restartServerState === 'object' && restartServerState &&
       restartServerState.rank != null ? restartServerState.rank : null;
-    segs.push('restarting' + (rank != null ? ' · step ' + (rank + 1) : ''));
+    // rank -1 is the server's idle marker, not a step; naming "step 0" there
+    // would read as a bug at the moment the operator needs to trust the line.
+    segs.push('restarting' + (rank >= 0 ? ' · step ' + (rank + 1) : ''));
   }
   const counts = ocRuleCounts();
   if (counts.holds > 0) segs.push('paused ' + counts.holds);
   if (counts.captures > 0) segs.push('capture ' + counts.captures);
   if (counts.limits > 0) segs.push('limits ' + counts.limits);
+  // A stored policy outside its schedule enforces nothing, so it is named
+  // separately rather than counted as a cap.
+  if (counts.parked > 0) segs.push('scheduled ' + counts.parked);
   return segs;
 }
 
@@ -86,7 +100,11 @@ function refreshOperatorReadout() {
   const box = ocEl('op-readout');
   if (!box) return;
   const segs = ocReadoutSegments();
-  const state = ocRestartActive() ? 'busy' : segs.length ? 'active' : 'steady';
+  // A hold is the one state that stops live traffic, so it outranks a routine
+  // cap in the readout's own tone. Restart outranks both.
+  const state = ocRestartActive() ? 'busy'
+    : ocRuleCounts().holds > 0 ? 'paused'
+      : segs.length ? 'active' : 'steady';
   box.dataset.state = state;
   const text = segs.length ? segs.join(' · ') : 'steady';
   const label = ocEl('op-readout-state');

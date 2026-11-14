@@ -1266,6 +1266,9 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 			"tokens_remaining":   inf.TokRemaining,
 			"requests_capacity":  inf.ReqCapacity,
 			"tokens_capacity":    inf.TokCapacity,
+			// The server owns whether a schedule is open right now; the
+			// dashboard must not re-derive it from the stored minutes.
+			"scheduled": inf.Scheduled,
 		})
 	}
 	known := sanitizeNameList(append(s.pause.providers.list(), throttleProviders(infos)...))

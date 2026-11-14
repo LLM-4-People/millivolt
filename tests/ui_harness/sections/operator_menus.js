@@ -131,9 +131,11 @@ module.exports = async function operatorMenus(H) {
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
         throttles: [{id: 'readout-limit', scope: {providers: ['prov-a']}, concurrency: 2}]});
       const activeText = 'paused 1 · capture 1 · limits 1';
+      // A hold outranks a routine cap in the readout's tone: it is the one
+      // state that stops live traffic.
       check('one hold, one capture session and one limit read as three segments',
-        out() === activeText && trigger.dataset.state === 'active' &&
-        d.getElementById('op-readout').dataset.state === 'active');
+        out() === activeText && trigger.dataset.state === 'paused' &&
+        d.getElementById('op-readout').dataset.state === 'paused');
       check('the readout trigger names the same words to assistive tech',
         trigger.getAttribute('aria-label') ===
           'operator state: ' + activeText + '. Open the operator console.');
@@ -153,7 +155,28 @@ module.exports = async function operatorMenus(H) {
         trigger.getAttribute('aria-label') ===
           'operator state: restarting · step 2. Open the operator console.' &&
         dot.title === 'restarting · step 2');
+      // rank -1 is the server's idle marker, not a step: it must not read as
+      // "step 0", which looks like a bug exactly when the line must be trusted.
+      w.eval("restartServerState = {phase: 'building', rank: -1}");
+      w.refreshOperatorReadout();
+      check('an idle restart rank names no step', out() === 'restarting');
       w.eval('restartServerState = {}');
+      w.refreshOperatorReadout();
+
+      // A stored policy outside its schedule is installed but enforces
+      // nothing. Counting it would let the readout claim a cap that is not
+      // applied, so the server's own verdict decides which word is used.
+      w.applyThrottleState({ok: true, active: true,
+        known_providers: ['prov-a'],
+        throttles: [
+          {id: 'live-limit', scope: {providers: ['prov-a']}, concurrency: 2, scheduled: true},
+          {id: 'parked-limit', scope: {providers: ['prov-b']}, concurrency: 2, scheduled: false},
+        ]});
+      check('a limit outside its schedule is named as scheduled, not counted as a cap',
+        out() === 'limits 1 · scheduled 1' &&
+        evalJSON('ocRuleCounts().limits') === 1 &&
+        evalJSON('ocRuleCounts().parked') === 1);
+      w.applyThrottleState(EMPTY_THROTTLE);
       w.refreshOperatorReadout();
     }
 
