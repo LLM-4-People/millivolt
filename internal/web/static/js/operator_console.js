@@ -381,36 +381,76 @@ function ocFocusTarget(slot) {
   return slot.querySelector('button, input, select, textarea, [tabindex]');
 }
 
+// ocControls lists the pane's focusable controls in document order. A rebuild
+// must resolve the same list before and after, so the enumeration is the one
+// definition of "reachable by keyboard inside the pane".
+function ocControls(root) {
+  return [...root.querySelectorAll('button, input, select, textarea, [tabindex]')]
+    .filter(el => !el.disabled && el.tabIndex >= 0);
+}
+
+// ocControlSignature names a control by what it is rather than where it sits:
+// its tag, its input type and the data-oc-* attributes the console already
+// stamps on every action. Anything that distinguishes two controls is part of
+// the name, so a rule's copy button is told apart from its remove button and
+// from the copy button of another rule.
+function ocControlSignature(el) {
+  const attrs = [];
+  for (const attr of el.attributes) {
+    if (attr.name.startsWith('data-oc-') && attr.name !== 'data-oc-key') {
+      attrs.push(attr.name + '=' + attr.value);
+    }
+  }
+  attrs.sort();
+  return [el.tagName.toLowerCase(), el.type || '', attrs.join(',')].join('|');
+}
+
+// ocFocusKey names the focused control across a full pane rebuild. Draft
+// values live in ocDrafts, so only the caret and the element identity need to
+// survive.
 function ocFocusKey() {
   const active = document.activeElement;
   if (!active || !ocShell()?.contains(active)) return null;
+  let start = null, end = null;
+  try { start = active.selectionStart; end = active.selectionEnd; } catch (e) { /* not a text input */ }
   // A picker row sits inside the picker's own keyed slot, so the generic
   // keyed lookup below already restores focus into the picker that owns it.
   // Choosing a value therefore rebuilds the pane without dropping the keyboard
   // operator back to <body>.
   const keyed = active.closest('[data-oc-key]');
-  if (!keyed) {
-    // The pane is replaced wholesale on every structural change, so focus
-    // inside it must always have a landing place. An unkeyed control resolves
-    // to the pane rather than to <body>, which is the page behind the open
-    // panel: a keyboard operator who armed a checkbox used to find their next
-    // Tab walking the dashboard underneath.
-    const pane = ocEl('oc-pane');
-    return pane && pane.contains(active) ? { key: '', pane: true } : null;
+  if (keyed) return { key: keyed.dataset.ocKey, start, end };
+  const pane = ocEl('oc-pane');
+  if (!pane || !pane.contains(active)) {
+    // The undo button lives in the ledger, which is not rebuilt, but it hides
+    // itself after use. Any other surface inside the panel still needs a
+    // landing place, so the pane is the fallback.
+    return { key: '', pane: true };
   }
-  let start = null, end = null;
-  try { start = active.selectionStart; end = active.selectionEnd; } catch (e) { /* not a text input */ }
-  return { key: keyed.dataset.ocKey, start, end };
+  // Unkeyed controls are named structurally. Without that, arming a budget
+  // checkbox, opening a disclosure, picking a day or using a rule action threw
+  // the operator to the top of the form on every rebuild, because an unkeyed
+  // control had no identity to return to.
+  const sig = ocControlSignature(active);
+  const same = ocControls(pane).filter(el => ocControlSignature(el) === sig);
+  return { key: '', pane: true, sig, index: same.indexOf(active), start, end };
 }
 
 function ocRestoreFocus(saved) {
   if (!saved) return;
   const shell = ocShell();
   if (!shell) return;
-  const slot = saved.key
-    ? [...shell.querySelectorAll('[data-oc-key]')].find(el => el.dataset.ocKey === saved.key)
-    : null;
-  const next = ocFocusTarget(slot) || (saved.pane ? ocEl('oc-pane') : null);
+  let next = null;
+  if (saved.key) {
+    const slot = [...shell.querySelectorAll('[data-oc-key]')].find(el => el.dataset.ocKey === saved.key);
+    next = ocFocusTarget(slot);
+  } else if (saved.sig) {
+    const pane = ocEl('oc-pane');
+    const same = pane ? ocControls(pane).filter(el => ocControlSignature(el) === saved.sig) : [];
+    next = same[saved.index] || null;
+  }
+  // Never leave focus on <body>: that is the page behind the open panel, and
+  // the operator's next Tab would walk the dashboard underneath.
+  if (!next) next = saved.pane ? ocEl('oc-pane') : null;
   if (!next) return;
   next.focus({ preventScroll: true });
   if (saved.start != null && typeof next.setSelectionRange === 'function') {
