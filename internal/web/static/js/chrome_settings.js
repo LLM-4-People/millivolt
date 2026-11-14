@@ -32,6 +32,13 @@ let settingsLoadPromise = null;
 let settingsLoading = false;
 let settingsWantOpen = false;
 
+// settingsFields is the one reader of the settings fields container. The id was
+// spelled at fifteen sites across the modules loaded below, so a rename had to
+// reach every one of them or a module would quietly operate on nothing. It lives
+// in this shell because the shell loads eagerly and every deferred module can
+// call it; the last-loaded module cannot own a name the earlier ones use.
+const settingsFields = () => $('settings-fields');
+
 function settingsIsOpen() {
   const s = $('settings-sheet');
   return !!(s && !s.hidden);

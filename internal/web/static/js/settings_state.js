@@ -4,8 +4,50 @@
 // The renderers and editors live in the earlier SETTINGS_MODULES entries;
 // this module is last so every function it names at wiring time exists.
 
+// SETTINGS_SAVE_GATES is the one table of structured editors that refuse to
+// save an invalid draft. Each row names the editor's data-kind, its validator,
+// the sentence the status line states when it refuses, and the inputs to try,
+// in priority order, inside the first bad card. The save path had spelled the
+// same eight-step sequence three times, so a new editor meant copying it and a
+// wording change reached one editor at a time.
+//
+// `focus` is an ordered list rather than one comma selector because the two
+// readings differ: a comma selector returns whichever matches first in the
+// document, while the editor's own priority puts the header field before the
+// client field even when the client field is painted earlier.
+const SETTINGS_SAVE_GATES = [
+  {
+    kind: 'model_rules',
+    validate: wrap => validateModelRulesDraft(wrap),
+    message: 'model rules - fix the highlighted rule first',
+    focus: ['.mr-from'],
+  },
+  {
+    kind: 'request_overrides',
+    validate: wrap => validateRequestOverridesDraft(wrap),
+    message: 'request overrides - fix the highlighted rule first',
+    focus: ['.prov-bad', '.ro-client'],
+  },
+  {
+    kind: 'sub_conversations',
+    validate: wrap => validateSubConversationsDraft(wrap),
+    message: 'sub-conversations - fix the highlighted entry first',
+    focus: ['.prov-bad', '.sc-client'],
+  },
+];
+
+// settingsGateFocus resolves that ordered list to the one input to reveal. It
+// is the same precedence the three hand-written gates had, stated once.
+function settingsGateFocus(card, selectors) {
+  for (const selector of selectors) {
+    const hit = card.querySelector(selector);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 function wireSettingsDelegation() {
-  const box = $('settings-fields');
+  const box = settingsFields();
   if (!box || box.dataset.provWired) return;
   box.dataset.provWired = '1';
   const dirty = e => {
@@ -238,7 +280,7 @@ function collectSettingsFieldValue(el, validate = false) {
 
 function collectSettingsValues(validate = false) {
   const out = Object.create(null);
-  const box = $('settings-fields');
+  const box = settingsFields();
   if (!box) return out;
   box.querySelectorAll('[data-key]').forEach(el => {
     if (el.disabled) return;
@@ -375,7 +417,7 @@ function settingsCacheHaystacks(box) {
 }
 
 function showSettingsCat() {
-  const box = $('settings-fields');
+  const box = settingsFields();
   const hd = $('settings-pane-hd');
   const rail = $('settings-rail');
   if (!box) return;
@@ -470,44 +512,23 @@ function applySettings() {
   btn.dataset.busy = '1';
   settingsStatus('saving');
   updateSettingsActions();
-  // Model-rules save gate: nothing invalid reaches the POST (the row is
-  // already marked red inline - focus + flash the first offender).
-  const mrW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="model_rules"]');
-  if (mrW) {
-    const gate = validateModelRulesDraft(mrW);
-    if (!gate.ok) {
-      delete btn.dataset.busy;
-      updateSettingsActions();
-      settingsStatus('model rules - fix the highlighted rule first');
-      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.mr-from'));
-      return;
-    }
-  }
-  // Request-overrides save gate: the same discipline - the offending rule
-  // card is already marked red inline; focus its first bad input.
-  const roW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="request_overrides"]');
-  if (roW) {
-    const gate = validateRequestOverridesDraft(roW);
-    if (!gate.ok) {
-      delete btn.dataset.busy;
-      updateSettingsActions();
-      settingsStatus('request overrides - fix the highlighted rule first');
-      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.ro-client'));
-      return;
-    }
-  }
-  // Sub-conversations save gate: the same discipline - the offending
-  // entry card is already marked red inline; focus its first bad input.
-  const scW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="sub_conversations"]');
-  if (scW) {
-    const gate = validateSubConversationsDraft(scW);
-    if (!gate.ok) {
-      delete btn.dataset.busy;
-      updateSettingsActions();
-      settingsStatus('sub-conversations - fix the highlighted entry first');
-      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.sc-client'));
-      return;
-    }
+  // Nothing invalid reaches the POST. Each structured editor gates the save on
+  // its own validator, and the three had grown the same eight-step sequence by
+  // hand: find the wrapper by kind, run the validator, release the busy flag,
+  // refresh the action state, state which editor refused, then reveal and
+  // focus the first offender. SETTINGS_SAVE_GATES owns each editor's kind, its
+  // validator, the sentence it states and the input to focus inside the first
+  // bad card, so the three cannot drift apart and a fourth editor is one row.
+  for (const gateSpec of SETTINGS_SAVE_GATES) {
+    const wrap = settingsFields()?.querySelector(`[data-kind="${gateSpec.kind}"]`);
+    if (!wrap) continue;
+    const gate = gateSpec.validate(wrap);
+    if (gate.ok) continue;
+    delete btn.dataset.busy;
+    updateSettingsActions();
+    settingsStatus(gateSpec.message);
+    revealSettingsOffender(gate.firstBad, settingsGateFocus(gate.firstBad, gateSpec.focus) || gate.firstBad);
+    return;
   }
   ++settingsReq;
   return operatorFetch('/admin/config', {
@@ -531,7 +552,7 @@ function applySettings() {
         // unsaved count names exactly the keys that changed after the
         // submission rather than every key changed since the last fill.
         settingsCacheSnapshots(values);
-        settingsKeyEls = settingsKeyElementMap($('settings-fields'));
+        settingsKeyEls = settingsKeyElementMap(settingsFields());
         settingsResyncChangedKeys();
       }
     }
@@ -565,7 +586,7 @@ $('settings-rail')?.addEventListener('click', e => {
   const q = $('settings-q');
   if (q) q.value = '';
   showSettingsCat();
-  const fields = $('settings-fields');
+  const fields = settingsFields();
   if (fields) fields.scrollTop = 0;
 });
 

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -624,6 +625,55 @@ func TestSchemaZeroTokenMatchesFormatters(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSchemaZeroMeansFieldsAcceptZero pins the one contract the Settings client
+// reads to decide whether zero is a setting or a lapse. A field that declares
+// zero_means is telling the operator what zero does, and the server must accept
+// that zero: four fields carry a positive minimum (the Go memory limit, the
+// debug store, and both in-flight body budgets) and skip their range check for
+// zero specifically. A field whose zero is rejected must not advertise a
+// sentence for it, because the client would then accept a value the server
+// refuses.
+func TestSchemaZeroMeansFieldsAcceptZero(t *testing.T) {
+	for _, f := range Schema() {
+		if f.ZeroMeans == "" {
+			continue
+		}
+		if f.Min != nil && *f.Min > 0 {
+			// The field's own validator must permit the zero it advertises.
+			c := Default()
+			if err := setFieldBytes(c, f.Key, 0); err != nil {
+				t.Errorf("%s declares zero_means %q but the config shape cannot hold zero: %v",
+					f.Key, f.ZeroMeans, err)
+				continue
+			}
+			if err := c.Validate(); err != nil {
+				t.Errorf("%s declares zero_means %q but validation rejects zero: %v",
+					f.Key, f.ZeroMeans, err)
+			}
+		}
+	}
+}
+
+// setFieldBytes writes zero into a byte-size field by its schema key so the
+// check above exercises the real field rather than a synthetic one.
+func setFieldBytes(c *Config, key string, n int64) error {
+	switch key {
+	case "go_memory_limit":
+		c.MemoryLimit = ByteSize(n)
+	case "debug_store_max_bytes":
+		c.DebugStoreMaxBytes = ByteSize(n)
+	case "max_inflight_body_bytes":
+		c.MaxInflightBodyBytes = ByteSize(n)
+	case "max_inflight_response_bytes":
+		c.MaxInflightResponseBytes = ByteSize(n)
+	default:
+		// A new zero_means byte field joins this switch, which is the point:
+		// the test then proves its zero reaches validation.
+		return fmt.Errorf("no setter for zero_means field %q", key)
+	}
+	return nil
 }
 
 // TestSchemaBoundLabelsMatchFormatter pins MinLabel/MaxLabel to the same

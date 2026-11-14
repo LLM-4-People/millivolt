@@ -202,7 +202,7 @@ function fetchSettings(discard = false) {
 }
 
 function fillSettingsForm(doc) {
-  const box = $('settings-fields');
+  const box = settingsFields();
   const rail = $('settings-rail');
   const hd = $('settings-pane-hd');
   if (!box || !rail) return;

@@ -843,23 +843,49 @@ func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
 // TestSettingsRevealCallSitesPinnedInSource pins applySettings' reveal
 // discipline: every path that blocks a settings save must route its
 // offender through revealSettingsOffender, the one reveal that can
-// surface an offender whose category the sheet is not showing. Exactly
-// four call sites live inside applySettings - the three editor save
-// gates (model rules, request overrides, sub-conversations) and the
-// collectSettingsValues(true) catch for scalar offenders - so a
-// dropped gate call, a catch reverted to a bare focus(), or an ad-hoc
-// fifth call reddens here. The jsdom rows cover each path's behavior,
-// but none of them counts the call sites.
+// surface an offender whose category the sheet is not showing.
+//
+// The three editor gates are rows in SETTINGS_SAVE_GATES, so applySettings
+// has exactly two reveal call sites - the gate loop and the
+// collectSettingsValues(true) catch for scalar offenders - and every gate row
+// is proved to reach the same reveal by the loop that reads it. A dropped gate
+// row, a catch reverted to a bare focus(), or a hand-written third call reddens
+// here. The jsdom rows cover each path's behavior, but none of them counts the
+// call sites.
 func TestSettingsRevealCallSitesPinnedInSource(t *testing.T) {
 	src, err := staticFS.ReadFile("static/js/settings_state.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	region := sourceRegion(t, string(src), "function applySettings")
-	if got := strings.Count(region, "revealSettingsOffender("); got != 4 {
-		t.Errorf("applySettings routes %d offenders through revealSettingsOffender, want exactly 4 (the model-rules, request-overrides and sub-conversations save gates plus the collectSettingsValues catch)", got)
+	text := string(src)
+	region := sourceRegion(t, text, "function applySettings")
+	if got := strings.Count(region, "revealSettingsOffender("); got != 2 {
+		t.Errorf("applySettings routes %d offenders through revealSettingsOffender, want exactly 2 (the SETTINGS_SAVE_GATES loop plus the collectSettingsValues catch)", got)
 	}
-	if got := strings.Count(string(src), "function revealSettingsOffender("); got != 1 {
+	// The gate loop must read the table, not re-list the editors. The table is
+	// a const array, so its region ends at the closing bracket rather than at a
+	// function's brace.
+	gatesStart := strings.Index(text, "const SETTINGS_SAVE_GATES")
+	if gatesStart < 0 {
+		t.Fatal("source missing const SETTINGS_SAVE_GATES")
+	}
+	gatesEnd := strings.Index(text[gatesStart:], "\n];")
+	if gatesEnd < 0 {
+		t.Fatal("const SETTINGS_SAVE_GATES is not closed by a line-anchored ];")
+	}
+	gates := text[gatesStart : gatesStart+gatesEnd]
+	for _, kind := range []string{"model_rules", "request_overrides", "sub_conversations"} {
+		if !strings.Contains(gates, "kind: '"+kind+"'") {
+			t.Errorf("SETTINGS_SAVE_GATES has no %q row, so that editor no longer gates its save", kind)
+		}
+	}
+	if got := strings.Count(gates, "kind: "); got != 3 {
+		t.Errorf("SETTINGS_SAVE_GATES declares %d rows, want 3 (a fourth editor must add a row and a jsdom check)", got)
+	}
+	if !strings.Contains(region, "SETTINGS_SAVE_GATES") {
+		t.Error("applySettings does not read SETTINGS_SAVE_GATES, so the gate rows would never run")
+	}
+	if got := strings.Count(text, "function revealSettingsOffender("); got != 1 {
 		t.Errorf("settings.js declares revealSettingsOffender %d times, want exactly 1 (the count above is applySettings' call sites, not declarations)", got)
 	}
 }
