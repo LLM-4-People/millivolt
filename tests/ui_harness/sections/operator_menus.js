@@ -187,6 +187,14 @@ module.exports = async function operatorMenus(H) {
       w.eval("restartServerState = {phase: 'building', rank: -1}");
       w.refreshOperatorReadout();
       check('an idle restart rank names no step', out() === 'restarting');
+      // The bootstrap restart section carries only the eligibility verdict, so
+      // rank is absent until a status fetch lands. `null >= 0` is true in
+      // JavaScript, so a plain >= test claimed "step 1" before the server had
+      // reported any step.
+      w.eval("restartServerState = {phase: 'building'}");
+      w.refreshOperatorReadout();
+      check('a restart with no reported rank yet names no step',
+        out() === 'restarting' && !out().includes('step'));
       w.eval('restartServerState = {}');
       w.refreshOperatorReadout();
 

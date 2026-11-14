@@ -190,11 +190,14 @@ function ocRestartActive() {
 function ocReadoutSegments() {
   const segs = [];
   if (ocRestartActive()) {
-    const rank = typeof restartServerState === 'object' && restartServerState &&
-      restartServerState.rank != null ? restartServerState.rank : null;
-    // rank -1 is the server's idle marker, not a step; naming "step 0" there
-    // would read as a bug at the moment the operator needs to trust the line.
-    segs.push('restarting' + (rank >= 0 ? ' · step ' + (rank + 1) : ''));
+    const rank = typeof restartServerState === 'object' && restartServerState
+      ? restartServerState.rank : null;
+    // rank must be a real integer. The bootstrap restart section carries only
+    // the eligibility verdict, so rank is absent until someone fetches the
+    // status document; `null >= 0` is true in JavaScript, so a plain >= test
+    // printed "step 1" before the server had reported any step at all. rank -1
+    // is the server's idle marker, not a step either.
+    segs.push('restarting' + (Number.isInteger(rank) && rank >= 0 ? ' · step ' + (rank + 1) : ''));
   }
   const counts = ocRuleCounts();
   if (counts.holds > 0) segs.push('paused ' + counts.holds);
