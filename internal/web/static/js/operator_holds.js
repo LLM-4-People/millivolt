@@ -275,8 +275,17 @@ async function ocResumeAllHolds() {
   if (!ok) return;
   mutateOperator('pause', { paused: false }, () => {
     const restore = holds.slice();
+    // A partial restore must not read as a finished one: the first refusal
+    // leaves the holds it could not recreate off, and the ledger has to keep
+    // the entry so the operator can try again.
     ocRecordChange('resumed every hold', async () => {
-      for (const hold of restore) { const draft = ocPauseDraftFromHold(hold); draft.id = ''; await mutateOperator('pause', ocPauseBody(draft)); }
+      let all = true;
+      for (const hold of restore) {
+        const draft = ocPauseDraftFromHold(hold);
+        draft.id = '';
+        if (await mutateOperator('pause', ocPauseBody(draft)) === false) all = false;
+      }
+      return all;
     }, 'ok');
     toast('resumed every hold');
     ocRender();
@@ -495,7 +504,13 @@ async function ocStopAllSessions() {
   mutateOperator('debug', { enabled: false }, () => {
     const restore = sessions.slice();
     ocRecordChange('stopped every capture', async () => {
-      for (const session of restore) { const draft = ocCaptureDraftFromSession(session); draft.id = ''; await mutateOperator('debug', ocCaptureBody(draft)); }
+      let all = true;
+      for (const session of restore) {
+        const draft = ocCaptureDraftFromSession(session);
+        draft.id = '';
+        if (await mutateOperator('debug', ocCaptureBody(draft)) === false) all = false;
+      }
+      return all;
     }, 'ok');
     toast('stopped every capture');
     ocRender();

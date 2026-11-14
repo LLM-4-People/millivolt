@@ -1800,6 +1800,41 @@ module.exports = async function operatorMenus(H) {
       } finally {
         w.fetch = savedFetch;
       }
+
+      // An undo that the server refuses must not report success. The shared
+      // write owner shows the rejection in the banner and never throws, so the
+      // ledger used to pop the entry and print "undid: ..." over the top of the
+      // refusal: the operator lost both the change and the retry.
+      {
+        const savedUndoFetch = w.fetch;
+        w.fetch = async (url, options) => {
+          if (String(url).includes('/admin/throttle') && options && options.method === 'POST') {
+            return {ok: false, json: async () => ({error: 'restore refused'})};
+          }
+          return savedUndoFetch(url, options);
+        };
+        try {
+          w.ocRecordChange('removed limit for provider prov-a', async () => {
+            const ok = await w.mutateOperator('throttle', {id: 'pol-err', clear: true});
+            return ok;
+          }, 'ok');
+          await settleUntil(() => !d.getElementById('oc-undo').hidden);
+          click('#oc-undo');
+          check('a refused undo keeps the entry and says it could not undo',
+            await settleUntil(() => text('#oc-change').startsWith('could not undo: ')) &&
+            text('#oc-change').includes('could not undo: ') &&
+            !text('#oc-change').startsWith('undid: ') &&
+            !d.getElementById('oc-undo').hidden);
+          // The entry stays retryable: a second attempt still runs the closure
+          // instead of finding an empty ledger.
+          check('the refused undo leaves a retryable entry in the ledger',
+            w.eval('ocChanges.length') > 0 &&
+            typeof w.eval('ocChanges[ocChanges.length - 1].undo') === 'function');
+        } finally {
+          w.fetch = savedUndoFetch;
+          w.eval('ocChanges.length = 0; ocOperatorErrorClear();');
+        }
+      }
       w.closeOperatorConsole();
     }
 

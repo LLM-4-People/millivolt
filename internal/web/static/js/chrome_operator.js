@@ -262,7 +262,7 @@ async function mutateOperator(kind, body, after) {
   // a command. Answering it with silence made the click look ignored.
   if (gate.busy) {
     operatorError(kind, 'the ' + noun + ' change is still in flight');
-    return;
+    return false;
   }
   gate.busy = true;
   ++gate.revision;
@@ -306,6 +306,13 @@ async function mutateOperator(kind, body, after) {
     if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
     refreshFooterState();
   }
+  // Confirmed means the server's own snapshot arrived and passed the gate.
+  // Callers that must know (the undo path above all) read this instead of
+  // assuming success: the rejection above is shown in the banner and never
+  // thrown, so a caller that ignored the result reported a change that was
+  // refused. Returning a value is additive - every direct caller still just
+  // fires and lets the banner speak.
+  return !!confirmed;
 }
 
 let _pauseStateSig = '';

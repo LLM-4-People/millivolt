@@ -803,7 +803,14 @@ async function ocUndoLast() {
   ocUndoBusy = true;
   ocRenderFoot();
   try {
-    await last.undo();
+    // The shared write owner answers false when the server refused the
+    // restore. It never throws, because the banner already carries the
+    // reason; treating that as success popped the entry and printed
+    // "undid: ..." over the top of the refusal, so the operator lost both
+    // the change and the retry.
+    if (await last.undo() === false) {
+      throw new Error('the server refused that change');
+    }
     ocChanges.pop();
     ocRecordChange('undid: ' + last.phrase, null, 'ok');
   } catch (err) {
