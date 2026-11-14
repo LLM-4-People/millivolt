@@ -110,7 +110,11 @@ function ocExportFiltersHTML(draft) {
 
 function ocFilterPickerHTML(draft, dim) {
   const filter = (draft.picker.filter || '').toLowerCase();
-  const values = ocFilterValues(dim).filter(value => !filter || value.toLowerCase().includes(filter));
+  // A dimension's values are not all strings: status is a number read from the
+  // record. Comparing through String keeps one filter rule for every
+  // dimension, and a typed filter can never throw on a numeric vocabulary.
+  const values = ocFilterValues(dim).filter(value =>
+    !filter || String(value).toLowerCase().includes(filter));
   const rows = values.map(value => {
     const on = String(draft[dim] || '') === String(value);
     return `<button type="button" class="oc-pick-row" role="menuitemradio" aria-checked="${on}" data-oc-filter-value="${dim}" data-oc-value="${escapeHtml(value)}">` +

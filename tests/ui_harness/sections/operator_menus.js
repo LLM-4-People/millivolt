@@ -1073,6 +1073,30 @@ module.exports = async function operatorMenus(H) {
       w.closeOperatorConsole();
     }
 
+    // ---- a numeric filter dimension must narrow, not throw ----
+    {
+      // Seeded exactly the way the export block above seeds the ring, so the
+      // status vocabulary is the real numeric one from records.
+      w.__ocStatusRecords = [
+        {...mkRec('exp-200'), status_code: 200, provider: 'prov-a'},
+        {...mkRec('exp-499'), status_code: 499, provider: 'prov-b'},
+      ];
+      w.eval('lastData.records = window.__ocStatusRecords');
+      w.openOperatorConsole('export');
+      choose('export-mode', 'filter');
+      click('#oc-pane [data-oc-filter-pick="status"]');
+      // Status values come from the record as numbers. A filter box that
+      // called toLowerCase on them threw a TypeError and left the list
+      // unnarrowed, so the one filter the section offers there was unusable.
+      const typed = q('#oc-pane [data-oc-filter-filter="status"]');
+      typed.value = '49';
+      typed.dispatchEvent(new w.Event('input', {bubbles: true}));
+      check('a typed status filter narrows the numeric vocabulary',
+        JSON.stringify(qa('#oc-pane [data-oc-filter-value="status"]')
+          .map(row => row.dataset.ocValue)) === JSON.stringify(['', '499']));
+      w.closeOperatorConsole();
+    }
+
     // ---- 11. overview KPIs, in-force rows, drain and history ----
     {
       w.applyPauseState({ok: true, paused: true,
