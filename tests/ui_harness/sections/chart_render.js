@@ -170,7 +170,23 @@ module.exports = async function chartRender(H) {
     dataLegDecHidden[1][0] === 200 && dataLegDecHidden[2][0] === 20);
   legDec().click();
   const pctControl = d.getElementById('chart-pct');
-  check('the percentile control names the plotted metrics without a second owner', pctControl.getAttribute('aria-label') === 'Percentile' && pctControl.title.includes('speed, latency and decode'));
+  // WCAG 2.5.3 (label in name): the accessible name must contain the visible
+  // text, because a voice-control user speaks what they see. The trigger paints
+  // "p95" and used to carry a static aria-label that omitted it, so saying
+  // "click p95" matched nothing. aria-labelledby joins a hidden prefix to the
+  // very span the writer already owns, so the name carries both and there is
+  // still one writer of the visible label.
+  const accName = el => {
+    const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    if (ids.length) return ids.map(i => (d.getElementById(i) || {}).textContent || '').join(' ').trim();
+    return (el.getAttribute('aria-label') || el.textContent || '').trim();
+  };
+  const pctVisible = d.getElementById('chart-pct-label').textContent;
+  check('the percentile control puts its visible label in its accessible name',
+    pctVisible === 'p' + w.eval('chartView.pct') &&
+    accName(pctControl).includes(pctVisible) &&
+    accName(pctControl).includes('Percentile') &&
+    pctControl.title.includes('speed, latency and decode'));
   // The control is a choiceMenu on the shared foundation: its trigger opens
   // the Percentile panel and the p99 row picks the value for every plotted
   // line. Drive the real control, not the setter.
