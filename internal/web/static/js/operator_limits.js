@@ -125,6 +125,13 @@ function ocWindowSelect(name, current, aria, withOff) {
   return ocChoiceSelect(name, values, current, v => v ? ocWindowLabel(v) : 'off', aria);
 }
 
+// ocBudgetPlaceholder is the hint an unarmed budget field shows. A disabled
+// field cannot be clicked, so it must say how to enable itself rather than
+// display a value the operator never entered.
+function ocBudgetPlaceholder(draft, key, example) {
+  return ocBudgetArmed(draft, key) ? example : 'tick to cap';
+}
+
 function ocLimitComposerHTML(draft) {
   const editing = !!draft.id;
   const conds = ocScopeConditionsHTML(draft, ['providers', 'models', 'clients', 'keyHashes', 'conversations']);
@@ -138,13 +145,17 @@ function ocLimitComposerHTML(draft) {
     (global ? `<p class="oc-note">No condition selected, so this limit applies to every request that crosses the proxy.</p>` : '') +
     `</div>` +
     `<div class="oc-group"><div class="oc-label">budgets</div>` +
+    // An unarmed budget field is disabled, so a click on it does nothing. It
+    // used to carry a plausible example value in that state, which read as a
+    // pre-filled default and made the dead click look like a broken field.
+    // While disabled it now says what to do instead, at no height cost.
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="concurrency" ${ocBudgetArmed(draft, 'concurrency') ? 'checked' : ''}><span>concurrency</span></label>` +
-    ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: !ocBudgetArmed(draft, 'concurrency'), placeholder: '4' }) + `</div>` +
+    ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: !ocBudgetArmed(draft, 'concurrency'), placeholder: ocBudgetPlaceholder(draft, 'concurrency', '4') }) + `</div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="requests" ${ocBudgetArmed(draft, 'requests') ? 'checked' : ''}><span>requests</span></label>` +
-    ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: !ocBudgetArmed(draft, 'requests'), placeholder: '60' }) +
+    ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: !ocBudgetArmed(draft, 'requests'), placeholder: ocBudgetPlaceholder(draft, 'requests', '60') }) +
     `<div class="oc-window">${ocWindowSelect('request-window', draft.requestWindow, 'request window')}</div></div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="tokens" ${ocBudgetArmed(draft, 'tokens') ? 'checked' : ''}><span>tokens</span></label>` +
-    ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: !ocBudgetArmed(draft, 'tokens'), placeholder: '100000' }) +
+    ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: !ocBudgetArmed(draft, 'tokens'), placeholder: ocBudgetPlaceholder(draft, 'tokens', '100000') }) +
     `<div class="oc-window">${ocWindowSelect('token-window', draft.tokenWindow, 'token window')}</div></div>` +
     `</div>` +
     // Both optional modifiers sit on one row: they are peers, each closed by
