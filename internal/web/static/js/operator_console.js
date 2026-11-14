@@ -488,6 +488,17 @@ function ocShell() {
   return $('operator-console');
 }
 
+// ocOwns reports whether a delegated event happened inside the console. Four
+// listeners - input, change, keydown and click - each wrote the same guard by
+// hand, so the scoping rule was four copies of one decision. A console that is
+// closed or absent owns nothing, which is the part worth stating once: a
+// listener that forgot the null check would throw on the first event before
+// the shell exists.
+function ocOwns(node) {
+  const shell = ocShell();
+  return !!(node && shell && shell.contains(node));
+}
+
 // ocSyncTriggerName repaints the readout's accessible name after the console
 // opens or closes, because the name states the action the trigger performs
 // now. menu.js owns aria-expanded; this only follows it.
@@ -1660,7 +1671,7 @@ function ocInputField(key, value) {
 
 document.addEventListener('input', event => {
   const target = event.target;
-  if (!target || !ocShell()?.contains(target)) return;
+  if (!ocOwns(target)) return;
   if (target.dataset.ocField) {
     if (target.type === 'checkbox') return;
     ocInputField(target.dataset.ocField, target.value);
@@ -1691,7 +1702,7 @@ document.addEventListener('input', event => {
 
 document.addEventListener('change', event => {
   const target = event.target;
-  if (!target || !ocShell()?.contains(target)) return;
+  if (!ocOwns(target)) return;
   if (target.tagName === 'SELECT' && target.dataset.ocChoice) {
     ocHandleChoice(target.dataset.ocChoice, target.value);
     return;
@@ -1732,7 +1743,7 @@ document.addEventListener('change', event => {
 document.addEventListener('keydown', event => {
   if (event.key === 'Enter') {
     const target = event.target;
-    if (!target || !ocShell()?.contains(target)) return;
+    if (!ocOwns(target)) return;
     if (target.dataset.ocPickCustom) {
       const dim = target.dataset.ocPickCustom;
       const draft = ocActiveDraft();
@@ -1827,7 +1838,7 @@ document.addEventListener('click', event => {
   // event carries the selection instead.
   if (event.target?.dataset?.ocChoice && event.target.tagName === 'SELECT') return;
   const target = event.target.closest?.(OC_ACTION_SELECTOR);
-  if (!target || !ocShell()?.contains(target)) return;
+  if (!ocOwns(target)) return;
   event.preventDefault();
   ocHandleAction(target);
 });

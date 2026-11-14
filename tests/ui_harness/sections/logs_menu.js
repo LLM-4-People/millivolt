@@ -16,6 +16,14 @@ module.exports = async function logsMenu(H) {
     check('the console opens on its export section',
       !shell.hidden && shell.classList.contains('mn') && shell.classList.contains('oc') &&
       d.getElementById('oc-pane').dataset.section === 'export');
+    // Every delegated listener scopes its work through one guard, which owns
+    // the "closed console owns nothing" rule: a null node, a node outside the
+    // shell, and an absent shell are all false rather than a throw.
+    check('one guard scopes every delegated listener to the console',
+      w.eval('ocOwns(null)') === false &&
+      w.eval('ocOwns(document.body)') === false &&
+      w.eval('ocOwns(document.getElementById("oc-pane"))') === true &&
+      w.eval('ocOwns(document.getElementById("btn-controls"))') === false);
 
     const modeChips = [...d.querySelectorAll('#oc-pane [data-oc-choice="export-mode"]')]
       .map(chip => chip.dataset.ocValue);
