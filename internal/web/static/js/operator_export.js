@@ -131,10 +131,14 @@ function ocRenderExport() {
   const rows = filtering
     ? `<div class="oc-group"><div class="oc-label">matching</div>` +
       ocExportFiltersHTML(draft) +
+      `<div class="oc-filter-pair">` +
       `<div class="oc-filter-row"><span class="oc-filter-name">errors</span>${ocChipRow('export-errors', ['any', 'only'], draft.errors ? 'only' : 'any', v => v)}</div>` +
       `<div class="oc-filter-row"><span class="oc-filter-name">debug</span>${ocChipRow('export-debug', ['any', 'only'], draft.debug ? 'only' : 'any', v => v)}</div>` +
+      `</div>` +
+      `<div class="oc-filter-pair">` +
       `<div class="oc-filter-row"><span class="oc-filter-name">newer than</span>${ocChipRow('export-after', OC_AFTER_CHOICES.map(([v]) => v), draft.after, v => OC_AFTER_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
       `<div class="oc-filter-row"><span class="oc-filter-name">older than</span>${ocChipRow('export-age', OC_AGE_CHOICES.map(([v]) => v), draft.age, v => OC_AGE_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
+      `</div>` +
       `<label class="oc-field wide" data-oc-key="error-type"><span class="oc-field-name">error type</span><input type="text" data-oc-export-field="errorType" value="${escapeHtml(draft.errorType)}" placeholder="exact provider error type"></label>` +
       `</div>`
     : '';
@@ -148,8 +152,8 @@ function ocRenderExport() {
     `<div class="oc-receipt-sub">Debug records carry their captured bodies. Treat every export as sensitive.</div>` +
     `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-reset-export>reset</button>` +
     `<button type="button" class="btn btn-accent" id="oc-export-download" data-oc-download ${enabled ? '' : 'disabled'}>download</button></div></div>` +
-    `<div class="oc-card"><div class="oc-label">other artifacts</div>` +
-    `<p class="oc-note">Configuration and database backups live with their restore workflow in Settings.</p>` +
+    // Backups are not an export; the cross-link is one row, not a card.
+    `<div class="oc-inline oc-export-more"><span class="oc-note">Configuration and database backups live in Settings.</span>` +
     `<button type="button" class="btn" data-oc-settings>open settings</button></div>` +
     `</div>`;
 }

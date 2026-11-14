@@ -574,9 +574,23 @@ button.oc-chip[aria-pressed="true"]::before {
   margin-top: 2px; padding: 9px 0 0; border-top: 1px solid var(--border);
 }
 .oc-filter-row {
-  display: grid; grid-template-columns: 96px minmax(0, 1fr);
-  gap: 6px 10px; align-items: start; min-width: 0;
+  display: grid; grid-template-columns: 88px minmax(0, 1fr);
+  gap: 4px 8px; align-items: start; min-width: 0;
 }
+/* The two boolean and the two age pairs sit side by side: each is a short
+   label and two or four chips, so one per column halves the section height. */
+.oc-filter-pair {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 14px; min-width: 0;
+}
+.oc-filter-pair .oc-filter-row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+.oc-filter-pair .oc-filter-name { padding-top: 0; }
+.oc-filter-pair .oc-chip { min-height: 22px; padding: 0 7px; font-size: 9px; }
+.oc-export-more {
+  justify-content: space-between; gap: 8px;
+  padding: 2px 1px 0; border-top: 0;
+}
+.oc-export-more .oc-note { margin: 0; flex: 1 1 auto; }
 .oc-filter-name {
   padding-top: 6px; color: var(--muted); font: 600 9px/1.4 var(--mono);
   letter-spacing: .05em;
