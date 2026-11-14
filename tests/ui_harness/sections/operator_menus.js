@@ -1060,6 +1060,25 @@ module.exports = async function operatorMenus(H) {
               JSON.stringify(['/metrics/export?provider=prov-a', '']) &&
             text('#oc-change') === 'downloaded 7 records');
         }
+        {
+          // Switching back to all history must drop the predicate, not just
+          // the label. The filter strip is hidden in that mode, so the
+          // provider chosen above would download 5 records under a chip that
+          // says all history, with no visible sign of the narrowing.
+          choose('export-mode', 'all');
+          check('all history downloads the whole history even after a filter',
+            await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000));
+          click('#oc-pane [data-oc-download]');
+          check('the mode, the receipt and the URL agree after a mode switch',
+            JSON.stringify(downloads[downloads.length - 1]) ===
+              JSON.stringify(['/metrics/export', '']) &&
+            countBody && countBody.provider === '');
+          choose('export-mode', 'filter');
+          check('returning to filter mode restores the filter work',
+            await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
+            q('#oc-pane [data-oc-filter-pick="provider"]').closest('.oc-cond')
+              .getAttribute('data-set') === '1');
+        }
         click('#oc-pane [data-oc-reset-export]');
         check('reset restores the blank all-history draft and recounts it',
           await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&

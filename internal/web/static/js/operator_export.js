@@ -14,7 +14,19 @@ function ocBlankExportDraft() {
   };
 }
 
+// ocExportFilter is the one predicate owner for the preview and the download.
+// All history means no predicate at all: the filter fields persist across a
+// mode switch so returning to matching records restores the work, but they
+// must not reach the predicate while the mode says all history. A mode chip
+// that says one thing while the URL carries another is the export lying about
+// what it will download.
 function ocExportFilter(draft) {
+  if (draft.mode === 'all') {
+    return {
+      provider: '', model: '', client: '', conversation_id: '', error_type: '',
+      status_code: 0, has_error: false, debug: false, before_ms: 0, after_ms: 0,
+    };
+  }
   const now = Date.now();
   return {
     provider: draft.provider || '',
