@@ -984,9 +984,22 @@ function ocChipRow(name, values, current, labelOf) {
 // field, so it either wraps into three rows or clips mid-word; a native select
 // states the current window in the same 24px and hands long lists to the
 // platform's own keyboard and touch pickers.
+// ocChoiceSelect renders the one native select every choice control uses.
+//
+// A stored value that is not in the preset list must still be shown. The
+// server accepts any window from 1s to 24h, so a policy created through the
+// API, MCP or a header can carry 90s while the presets only offer 1s..24h. With
+// an exact-match-only test no option is selected and the browser displays the
+// FIRST option, so the composer said "1 second" for a rule the row above
+// correctly described as 90s, and a save would have rewritten the window the
+// operator never meant to change. An off-list value therefore gets its own
+// selected option, labelled by the same label function.
 function ocChoiceSelect(name, values, current, labelOf, aria) {
+  const list = values.map(String);
+  const missing = current != null && current !== '' && !list.includes(String(current));
+  const all = missing ? list.concat(String(current)) : list;
   return `<select class="oc-select" data-oc-choice="${escapeHtml(name)}" aria-label="${escapeHtml(aria || name)}">` +
-    values.map(value => {
+    all.map(value => {
       const selected = String(current) === String(value) ? ' selected' : '';
       return `<option value="${escapeHtml(String(value))}"${selected}>${escapeHtml(labelOf(value))}</option>`;
     }).join('') + `</select>`;

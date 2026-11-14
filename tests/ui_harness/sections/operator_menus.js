@@ -715,6 +715,46 @@ module.exports = async function operatorMenus(H) {
       w.closeOperatorConsole();
     }
 
+    // ---- 5b. a stored duration outside the preset list still shows itself ----
+    {
+      // The server accepts any window from 1s to 24h, so a policy created
+      // through the API, MCP or a header can carry 90s while the presets only
+      // offer 1s..24h. An exact-match-only select marked no option current and
+      // the browser fell back to the FIRST option: the composer read "1
+      // second" for a rule whose own row printed 90s, and a save would have
+      // rewritten the window the operator never meant to touch.
+      const odd = {
+        id: 'pol-odd', scope: {providers: ['prov-a']}, schedule: null,
+        concurrency: 0, requests: 10, request_window: '90s',
+        tokens: 2000, token_window: '45s', anti_burst: false, ramp_duration: '',
+        source: 'api', in_flight: 0, queued: 0,
+      };
+      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [odd]});
+      w.openOperatorConsole('limits');
+      check('an off-list window still reads as itself on the rule row',
+        text('#oc-pane .oc-rule[data-oc-rule="pol-odd"] .oc-rule-budget')
+          .includes('10 requests / 90s'));
+      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-odd"]');
+      const reqSel = q('#oc-pane [data-oc-choice="request-window"]');
+      const tokSel = q('#oc-pane [data-oc-choice="token-window"]');
+      check('the composer shows an off-list request window instead of the first preset',
+        reqSel && reqSel.value === '90s' &&
+        reqSel.selectedOptions[0]?.textContent === '90s' &&
+        ![...reqSel.options].some(o => o.selected && o.value === '1s'));
+      check('the composer shows an off-list token window instead of the first preset',
+        tokSel && tokSel.value === '45s' &&
+        tokSel.selectedOptions[0]?.textContent === '45s');
+      // Selecting a preset must still replace it, and the off-list option has
+      // to leave the list rather than linger as a stale extra choice.
+      choose('request-window', '5m');
+      const afterPick = q('#oc-pane [data-oc-choice="request-window"]');
+      check('choosing a preset replaces the off-list window',
+        afterPick.value === '5m' &&
+        ![...afterPick.options].some(o => o.value === '90s') &&
+        w.eval('ocDrafts.limit.requestWindow') === '5m');
+      w.closeOperatorConsole();
+    }
+
     // ---- 6. anti-burst is gated to one provider without a schedule ----
     {
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a', 'prov-b']},
