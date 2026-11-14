@@ -25,40 +25,27 @@ function syncRestartControls() {
   const btn = $('btn-restart-now');
   if (btn) {
     btn.disabled = active || unavailable;
-    btn.textContent = active ? 'Restarting…' : 'Restart now';
+    btn.textContent = active ? 'restarting…' : 'restart now';
     btn.setAttribute('aria-busy', String(active));
   }
-  const trigger = $('btn-restart');
-  if (trigger) {
-    // Keep the menu accessible so progress can be reopened during a restart.
-    if (active) trigger.dataset.busy = '1'; else delete trigger.dataset.busy;
-    trigger.title = active ? 'Restarting - view progress' : 'Restart';
-    trigger.setAttribute('aria-label', trigger.title);
-  }
-  // A binary that cannot restart is not offered at all: the whole control and
-  // its menu leave the row (the wrap is the unit - the menu means nothing
-  // without its trigger, and an empty wrap would hold the row's gap open). A
-  // run in progress keeps it reachable so progress can still be reopened.
-  // Hiding the control also hides the eligibility REASON: nothing tells the
-  // operator why the row lost its Restart entry, because the one surface that
-  // could (the menu's status line, fed by fetchRestartStatus) is itself
-  // unreachable once the trigger is gone.
-  const wrap = $('restart-wrap');
-  if (wrap) wrap.hidden = unavailable && !active;
+  // The console's system section owns the action, so a build that cannot
+  // restart says why in place instead of hiding a header control.
+  if (typeof refreshOperatorReadout === 'function') refreshOperatorReadout();
 }
 
 // applyRestartState folds the bootstrap's boot-time eligibility into the
-// restart state and re-syncs the controls, so a page that never opens the menu
-// still knows whether to OFFER the action. The verdict rides the bootstrap the
-// page already loads: no extra round trip, and a payload without the section
-// (or without a boolean available) leaves the current behaviour alone. Only the
-// verdict is adopted. The accompanying reason is deliberately NOT: the control
-// is hidden exactly when the verdict is false, so there is nowhere to render it.
-// The server's own refusal (POST /admin/restart) still carries the same string
-// for a caller of the API.
+// restart state, so a page that never opens the system section still knows
+// whether to offer the action. The verdict rides the bootstrap the page
+// already loads: no extra round trip, and a payload without the section (or
+// without a boolean available) leaves the current behaviour alone. The reason
+// is adopted with the verdict because the system section names it in place.
 function applyRestartState(st) {
   if (!st || typeof st.available !== 'boolean') return;
-  restartServerState = { ...restartServerState, available: st.available };
+  restartServerState = {
+    ...restartServerState,
+    available: st.available,
+    reason: typeof st.reason === 'string' ? st.reason : '',
+  };
   syncRestartControls();
 }
 
@@ -90,9 +77,6 @@ const RESTART_DRAIN_FALLBACK_MS = 600000;
 // socket's backlog.
 const RESTART_POLL_INTERVAL_MS = 750;
 const RESTART_POLL_HANG_MS = 5000;
-// How long the success notice stays up before the menu closes.
-const RESTART_DONE_MS = 2500;
-
 // renderRestartSteps paints the step list from a status document
 // {rank, phase, drain_elapsed_ms, drain_timeout_ms, error}. Steps below rank
 // are done, the ranked one is active (with the live drain timer), the rest
@@ -113,15 +97,16 @@ function renderRestartSteps(st) {
   }).join('');
 }
 
-function toggleRestartMenu(e) {
-  toggleHdrMenu(e, 'restart-menu', null, fetchRestartStatus);
-}
-
 function setRestartStatus(text, err) {
   const el = $('restart-count');
-  if (!el) return;
-  el.textContent = text || '';
-  if (err) el.dataset.err = '1'; else delete el.dataset.err;
+  if (el) {
+    el.textContent = text || '';
+    if (err) el.dataset.err = '1'; else delete el.dataset.err;
+    return;
+  }
+  // The system section is closed. A failure still has to reach the operator,
+  // so it takes the one toast path; routine progress stays silent.
+  if (err && text) toast(text, 'err');
 }
 
 function fetchRestartStatus() {
@@ -173,6 +158,12 @@ async function watchRestart(onEvent, signal) {
 
 async function restartProxy() {
   if (restartInProgress()) return;
+  const ok = await ocConfirm({
+    title: 'Rebuild and restart?',
+    body: 'Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.',
+    confirm: 'restart now',
+  });
+  if (!ok) return;
   const beforeFeed = feedId;
   const watcher = new AbortController();
   // Lock before the first await: rapid clicks must not start two preflights.
@@ -180,8 +171,10 @@ async function restartProxy() {
   syncRestartControls();
   try {
     const before = await fetchRestartStatus();
-    if (before.available === false || before.phase !== 'idle') return;
-    if (!confirm('Rebuild from source and restart the proxy?\n\nIn-flight streams finish; new requests queue until the fresh process takes over.')) return;
+    if (before.available === false || before.phase !== 'idle') {
+      if (before.available === false) setRestartStatus(before.reason || 'restart unavailable', true);
+      return;
+    }
     restartFailed = false;
     setRestartStatus('');
     renderRestartSteps(null);
@@ -236,10 +229,11 @@ async function restartProxy() {
       applyRestartEvent(st);
       renderRestartSteps({ rank: RESTART_STEPS.length, error: '' });
       setRestartStatus('restarted ✓ (pid ' + st.pid + ')');
+      if (typeof ocRecordChange === 'function') ocRecordChange('restarted the proxy', null, 'ok');
+      toast('restarted the proxy');
       // SSE normally detects the new feed first. If it is disconnected,
       // check fresh assets/state immediately through the same bootstrap gate.
       if (feedId === beforeFeed) fetchBootstrap('resume');
-      setTimeout(() => { hideHdrMenu('restart-menu'); setRestartStatus(''); const ol = $('restart-steps'); if (ol) { ol.hidden = true; ol.innerHTML = ''; } }, RESTART_DONE_MS);
       return;
     }
     setRestartStatus('restart did not complete in time', true);

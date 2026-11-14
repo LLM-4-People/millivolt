@@ -1,0 +1,1121 @@
+// The operator console: one control plane for every operator policy. It
+// replaces the five bespoke header menus with a persistent status readout and
+// one panel whose rail names the sections. The panel is a .mn surface, so it
+// inherits the one menu lifecycle (placement, sheet, Escape, outside press,
+// focus restore) instead of hand-rolling a second one.
+//
+// Ownership: this module owns the console's DOM, drafts and human wording.
+// The server owns policy semantics; chrome_operator.js owns the mutation gate,
+// chrome_lists.js owns the live state bits and chrome_settings.js owns the
+// shared reconcilers and download paths. Nothing here re-implements those.
+
+const OC_SECTIONS = [
+  { id: 'overview', label: 'overview' },
+  { id: 'limits', label: 'limits' },
+  { id: 'pause', label: 'pause' },
+  { id: 'capture', label: 'capture' },
+  { id: 'export', label: 'export' },
+  { id: 'system', label: 'system' },
+];
+
+const OC_STORAGE_KEY = 'millivolt.operatorSection';
+const OC_CHANGE_LIMIT = 8;
+const OC_MINUTE = 60000;
+const OC_DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+let ocSection = 'overview';
+try {
+  const saved = sessionStorage.getItem(OC_STORAGE_KEY);
+  if (saved && OC_SECTIONS.some(s => s.id === saved)) ocSection = saved;
+} catch (e) { /* storage denied: overview is the default */ }
+
+let ocMounted = false;
+let ocChanges = [];
+let ocUndoBusy = false;
+let ocError = '';
+let ocView = { kind: '', id: '' };
+
+// Drafts survive section switches and live polls. They are the operator's
+// in-progress work, never a copy of server state.
+const ocDrafts = {
+  limit: null,
+  pause: null,
+  capture: null,
+  export: null,
+};
+let ocDrain = { scope: 'all', value: '' };
+
+function ocEl(id) { return document.getElementById(id); }
+
+// ---------- status readout ----------
+// ocRuleCounts is the one summary of everything in force. Restart is included
+// because it is the one transient state that must stay visible after the
+// console closes.
+function ocRuleCounts() {
+  const holds = typeof liveHolds === 'function' ? liveHolds().length : 0;
+  const captures = typeof liveDebugSessions === 'function' ? liveDebugSessions().length : 0;
+  const limits = (typeof throttleState !== 'undefined' && throttleState.throttles)
+    ? throttleState.throttles.length : 0;
+  return { holds, captures, limits, total: holds + captures + limits };
+}
+
+function ocRestartActive() {
+  return typeof restartInProgress === 'function' && restartInProgress();
+}
+
+// ocReadoutSegments returns the readout's words in priority order: a restart
+// outranks a policy because it explains why traffic is moving.
+function ocReadoutSegments() {
+  const segs = [];
+  if (ocRestartActive()) {
+    const rank = typeof restartServerState === 'object' && restartServerState &&
+      restartServerState.rank != null ? restartServerState.rank : null;
+    segs.push('restarting' + (rank != null ? ' · step ' + (rank + 1) : ''));
+  }
+  const counts = ocRuleCounts();
+  if (counts.holds > 0) segs.push('paused ' + counts.holds);
+  if (counts.captures > 0) segs.push('capture ' + counts.captures);
+  if (counts.limits > 0) segs.push('limits ' + counts.limits);
+  return segs;
+}
+
+// refreshOperatorReadout repaints the header's always-visible state. It is the
+// answer to "is anything active right now" and it never depends on the console
+// being open.
+function refreshOperatorReadout() {
+  const box = ocEl('op-readout');
+  if (!box) return;
+  const segs = ocReadoutSegments();
+  const state = ocRestartActive() ? 'busy' : segs.length ? 'active' : 'steady';
+  box.dataset.state = state;
+  const text = segs.length ? segs.join(' · ') : 'steady';
+  const label = ocEl('op-readout-state');
+  if (label && label.textContent !== text) label.textContent = text;
+  const trigger = ocEl('btn-controls');
+  if (trigger) {
+    trigger.dataset.state = state;
+    trigger.setAttribute('aria-label', 'operator state: ' + text + '. Open the operator console.');
+  }
+  box.setAttribute('aria-label', 'operator state: ' + text + '.');
+  const dot = ocEl('op-readout-dot');
+  if (dot) dot.setAttribute('title', text);
+}
+
+// ---------- console lifecycle ----------
+function ocShell() {
+  return ocEl('operator-console');
+}
+
+function openOperatorConsole(section, view) {
+  const shell = ocShell();
+  if (!shell) return;
+  // The console is the operator plane's one open surface. Close the theme
+  // tray and the Settings sheet first: a modal sheet marks every other body
+  // child inert, so opening over it would leave the console visible but
+  // unfocusable.
+  if (typeof closeHeaderMenus === 'function') closeHeaderMenus('operator-console');
+  if (section && OC_SECTIONS.some(s => s.id === section)) ocSelectSection(section, true);
+  if (view && view.kind) ocView = { kind: view.kind, id: view.id || '' };
+  ocMounted = true;
+  ocRender();
+  // A record pill may open the console that is already open. Reusing the
+  // surface keeps menu.js's measured geometry and avoids a close/reopen that
+  // would run onClose and leave the mounted flag false.
+  if (!menuIsOpen(shell)) {
+    menuOpen(ocEl('btn-controls'), shell, {
+      align: 'end',
+      initialFocus: 'panel',
+      // Escape and an outside press close through menu.js; this keeps the
+      // console's mounted state truthful so nothing repaints into a hidden
+      // panel after the operator dismisses it.
+      onClose: () => { ocMounted = false; },
+    });
+  }
+  refreshOperatorReadout();
+}
+
+function closeOperatorConsole(restoreFocus = false) {
+  const shell = ocShell();
+  if (!shell) return;
+  const wasOpen = menuIsOpen(shell);
+  if (wasOpen) menuClose(shell);
+  ocMounted = false;
+  const trigger = ocEl('btn-controls');
+  if (restoreFocus && trigger) trigger.focus();
+}
+
+function toggleOperatorConsole(e) {
+  if (e) e.stopPropagation();
+  const shell = ocShell();
+  if (shell && menuIsOpen(shell)) { closeOperatorConsole(); return; }
+  openOperatorConsole(ocSection);
+}
+
+function ocSelectSection(id, skipRender) {
+  if (!OC_SECTIONS.some(s => s.id === id)) return;
+  // A rejection banner belongs to the write the operator attempted. Moving to
+  // another section abandons that attempt, so the banner goes with it instead
+  // of following them around.
+  if (id !== ocSection) ocError = '';
+  ocSection = id;
+  try { sessionStorage.setItem(OC_STORAGE_KEY, id); } catch (e) { /* storage denied */ }
+  if (!skipRender) ocRender();
+}
+
+// ---------- focus preservation ----------
+// ocFocusKey names the focused control across a full pane rebuild. Draft
+// values live in ocDrafts, so only the caret and the element identity need to
+// survive.
+function ocFocusKey() {
+  const active = document.activeElement;
+  if (!active || !ocShell()?.contains(active)) return null;
+  const keyed = active.closest('[data-oc-key]');
+  if (!keyed) return null;
+  return { key: keyed.dataset.ocKey, start: active.selectionStart, end: active.selectionEnd };
+}
+
+function ocRestoreFocus(saved) {
+  if (!saved) return;
+  const shell = ocShell();
+  if (!shell) return;
+  const next = [...shell.querySelectorAll('[data-oc-key]')]
+    .find(el => el.dataset.ocKey === saved.key);
+  if (!next) return;
+  next.focus({ preventScroll: true });
+  if (typeof next.setSelectionRange === 'function' && saved.start != null) {
+    try { next.setSelectionRange(saved.start, saved.end); } catch (e) { /* not a text input */ }
+  }
+}
+
+// ocRender rebuilds the rail and the active pane. It is called on a section
+// change, a structural state change, and a draft mutation that reshapes the
+// form; live-only updates use the section's own in-place painters.
+function ocRender() {
+  const shell = ocShell();
+  if (!shell || !ocMounted) return;
+  const saved = ocFocusKey();
+  ocRenderHead();
+  ocRenderRail();
+  const pane = ocEl('oc-pane');
+  if (pane) {
+    const render = {
+      overview: ocRenderOverview,
+      limits: ocRenderLimits,
+      pause: ocRenderPause,
+      capture: ocRenderCapture,
+      export: ocRenderExport,
+      system: ocRenderSystem,
+    }[ocSection];
+    pane.innerHTML = (ocError
+      ? `<div class="oc-banner" data-tone="err" role="alert"><span>${escapeHtml(ocError)}</span>` +
+        `<button type="button" class="oc-link" data-oc-error-dismiss>dismiss</button></div>`
+      : '') + (render ? render() : '');
+    pane.dataset.section = ocSection;
+    pane.setAttribute('aria-labelledby', 'oc-tab-' + ocSection);
+    // The previews are the operator's proof of what will be enforced, so they
+    // repaint with the form after any structural change, not only on input.
+    if (ocSection === 'limits') ocLimitPreview();
+    if (ocSection === 'pause') ocPausePreview();
+    if (ocSection === 'capture') ocCapturePreview();
+  }
+  ocRenderFoot();
+  ocRestoreFocus(saved);
+  const tab = shell.querySelector('.oc-rail-item[aria-selected="true"]');
+  if (tab && typeof tab.scrollIntoView === 'function') {
+    tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+}
+
+function ocRenderHead() {
+  const live = ocEl('oc-live');
+  if (!live) return;
+  // The head line repeats the readout words and nothing else. The counts are
+  // already in the segments, so a total would only say them twice.
+  const segs = ocReadoutSegments();
+  const text = segs.length ? segs.join(' · ') : 'steady · no rules in force';
+  if (live.textContent !== text) live.textContent = text;
+}
+
+// ocSyncRailOrientation keeps the tablist's announced orientation matching the
+// placement menu.js chose. The rail is a vertical column on desktop and one
+// horizontal strip in sheet mode, and the viewport can cross that breakpoint
+// while the console stays open.
+function ocSyncRailOrientation() {
+  const rail = ocEl('oc-rail');
+  if (!rail || typeof menuPlacement !== 'function') return;
+  rail.setAttribute('aria-orientation', menuPlacement() === 'sheet' ? 'horizontal' : 'vertical');
+}
+
+function ocRenderRail() {
+  const rail = ocEl('oc-rail');
+  if (!rail) return;
+  ocSyncRailOrientation();
+  const counts = { limits: ocRuleCounts().limits, pause: ocRuleCounts().holds, capture: ocRuleCounts().captures };
+  rail.innerHTML = OC_SECTIONS.map(section => {
+    const count = counts[section.id];
+    const badge = count ? `<span class="oc-rail-n">${fmt(count)}</span>` : '';
+    const active = section.id === ocSection ? 'true' : 'false';
+    return `<button type="button" class="oc-rail-item" role="tab" id="oc-tab-${section.id}" aria-selected="${active}" aria-controls="oc-pane" tabindex="${active === 'true' ? '0' : '-1'}" data-oc-section="${section.id}" data-oc-key="rail-${section.id}">` +
+      `<span class="oc-rail-label">${escapeHtml(section.label)}</span>${badge}</button>`;
+  }).join('');
+}
+
+function ocRenderFoot() {
+  const foot = ocEl('oc-change');
+  const undo = ocEl('oc-undo');
+  if (!foot) return;
+  const last = ocChanges[ocChanges.length - 1];
+  foot.textContent = last ? last.phrase : 'no changes yet this session';
+  foot.dataset.tone = last ? (last.tone || '') : '';
+  if (undo) {
+    undo.hidden = !last || typeof last.undo !== 'function';
+    undo.disabled = ocUndoBusy;
+  }
+}
+
+// ---------- shared wording ----------
+// ocScopePhrase is the one human reading of a selector. Rule rows, previews,
+// confirmations and the readout all call it, so an operator never has to
+// translate three vocabularies for one policy.
+function ocScopePhrase(scope) {
+  if (!scope) return 'every request';
+  const bits = [];
+  const dims = [
+    ['providers', 'provider', 'providers'],
+    ['models', 'model', 'models'],
+    ['clients', 'client', 'clients'],
+    ['keyHashes', 'key', 'keys'],
+    ['conversations', 'conversation', 'conversations'],
+  ];
+  for (const [key, singular, plural] of dims) {
+    const values = scope[key] || [];
+    if (!values.length) continue;
+    if (values.length === 1) bits.push(singular + ' ' + ocScopeValueLabel(key, values[0]));
+    else bits.push(values.length + ' ' + plural);
+  }
+  return bits.length ? bits.join(' · ') : 'every request';
+}
+
+function ocScopeValueLabel(dim, value) {
+  if (dim === 'keyHashes') return 'key ' + String(value).slice(0, 8) + '…';
+  return String(value);
+}
+
+// ocBudgetPhrase is the one human reading of a limit's caps.
+function ocBudgetPhrase(policy) {
+  const bits = [];
+  if (policy.concurrency) bits.push(policy.concurrency + ' in flight');
+  if (policy.requests) {
+    bits.push(fmt(policy.requests) + ' request' + (policy.requests === 1 ? '' : 's') + ' / ' + (policy.request_window || '1m'));
+  }
+  if (policy.tokens) {
+    bits.push(fmt(policy.tokens) + ' tokens / ' + (policy.token_window || '1m'));
+  }
+  if (!bits.length) return 'no caps';
+  return bits.join(' · ');
+}
+
+// ocSchedulePhrase is the one human reading of a schedule. It accepts both
+// shapes the console holds: the server document's start_minute/end_minute and
+// the composer draft's start/end. One normalizer keeps the two from drifting
+// into different sentences for the same window.
+function ocSchedulePhrase(schedule) {
+  if (!schedule) return '';
+  const start = schedule.start_minute != null ? schedule.start_minute : schedule.start;
+  const end = schedule.end_minute != null ? schedule.end_minute : schedule.end;
+  const days = Array.isArray(schedule.days) && schedule.days.length
+    ? schedule.days.map(d => OC_DAY_LABELS[d] || '?').join('') : 'every day';
+  if (start === end) return days + ' · all day';
+  const clock = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  return days + ' · ' + clock(start) + '-' + clock(end);
+}
+
+function ocUntilPhrase(until) {
+  if (!until) return '';
+  const ms = new Date(until).getTime() - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return 'expired';
+  const minutes = Math.max(1, Math.ceil(ms / OC_MINUTE));
+  return hmBreakdown(minutes) + ' left';
+}
+
+function ocDurationText(value) {
+  return DURATION_LABELS[value] || value || 'until resumed';
+}
+
+// ---------- scope editor ----------
+function ocNewScope() {
+  return { providers: [], models: [], clients: [], keyHashes: [], conversations: [] };
+}
+
+function ocScopeFromPolicy(policy) {
+  const scope = ocNewScope();
+  for (const key of Object.keys(scope)) {
+    const values = policy?.scope?.[key === 'keyHashes' ? 'key_hashes' : key] || [];
+    scope[key] = [...values];
+  }
+  return scope;
+}
+
+function ocScopeHas(scope) {
+  return Object.values(scope).some(values => values.length > 0);
+}
+
+// ocDraftScope is the one selector accessor across the three composer drafts.
+// Limit drafts carry a nested scope; pause and capture drafts keep the same
+// dimension names at the top level. The picker never needs to know which.
+function ocDraftScope(draft) {
+  return draft.scope || draft;
+}
+
+function ocScopeToggle(scope, dim, value) {
+  const values = scope[dim] || [];
+  const at = values.indexOf(value);
+  if (at >= 0) values.splice(at, 1);
+  else values.push(value);
+  scope[dim] = values;
+}
+
+// ocKnownValues is the one vocabulary for a selector dimension. Provider and
+// client names come from the operator state; models are folded into canonical
+// groups and expanded to every raw spelling the server matches; keys and
+// conversations come from the live record ring, because that is where the
+// dashboard already has them without a second query.
+function ocKnownValues(dim) {
+  if (dim === 'providers') {
+    const state = typeof throttleState !== 'undefined' ? throttleState : {};
+    const list = state.known_providers || [];
+    return [...new Set(list)].sort();
+  }
+  if (dim === 'clients') {
+    const list = (typeof throttleState !== 'undefined' && throttleState.known_clients) || [];
+    return [...new Set(list)].sort();
+  }
+  if (dim === 'models') {
+    const groups = groupByCanonical((typeof throttleState !== 'undefined' && throttleState.known_models) || []);
+    return groups.flatMap(g => g.variants).sort();
+  }
+  if (dim === 'keyHashes') {
+    const recs = (typeof lastData !== 'undefined' && lastData?.records) || [];
+    return [...new Set(recs.map(r => r.key_hash).filter(Boolean))].sort();
+  }
+  if (dim === 'conversations') {
+    const recs = (typeof lastData !== 'undefined' && lastData?.records) || [];
+    return [...new Set(recs.map(r => r.conversation_id).filter(Boolean))].sort();
+  }
+  return [];
+}
+
+function ocDimLabel(dim) {
+  return {
+    providers: 'provider', models: 'model', clients: 'client',
+    keyHashes: 'key', conversations: 'conversation',
+  }[dim] || dim;
+}
+
+function ocScopeChipsHTML(scope, dim) {
+  const values = scope[dim] || [];
+  return values.map(value =>
+    `<span class="oc-chip">${escapeHtml(ocScopeValueLabel(dim, value))}` +
+    `<button type="button" class="oc-chip-x" data-oc-scope-remove="${dim}" data-oc-value="${escapeHtml(value)}" aria-label="remove ${escapeHtml(ocScopeValueLabel(dim, value))}">×</button></span>`
+  ).join('');
+}
+
+// ocScopeConditionsHTML renders the selector's active dimensions. Each row is
+// a disclosure: the chips read the current selection, and one row at a time
+// opens its picker below.
+function ocScopeConditionsHTML(draft, dims) {
+  const rows = dims.map(dim => {
+    const values = draft.scope[dim] || [];
+    const open = draft.picker && draft.picker.dim === dim;
+    return `<div class="oc-cond" data-open="${open ? '1' : '0'}">` +
+      `<button type="button" class="oc-cond-btn" data-oc-pick="${dim}" data-oc-key="cond-${dim}" aria-expanded="${open ? 'true' : 'false'}">` +
+      `<span class="oc-cond-name">${ocDimLabel(dim)}</span>` +
+      `<span class="oc-cond-chev" aria-hidden="true">${open ? '▴' : '▾'}</span></button>` +
+      `<span class="oc-cond-values">${values.length ? ocScopeChipsHTML(draft.scope, dim) : '<span class="oc-cond-any">any</span>'}</span></div>` +
+      (open ? ocScopePickerHTML(draft, dim) : '');
+  }).join('');
+  return `<div class="oc-conds">${rows}</div>`;
+}
+
+// ocScopePickerHTML renders one dimension's picker: a filter, the known values
+// as checkable rows, and a free-value field. The panel is deliberately inline
+// rather than a nested popover; a policy editor with four chained popovers is
+// where the old menus lost their place.
+function ocScopePickerHTML(draft, dim) {
+  const filter = (draft.picker.filter || '').toLowerCase();
+  const known = ocKnownValues(dim).filter(value =>
+    !filter || ocScopeValueLabel(dim, value).toLowerCase().includes(filter));
+  const selected = new Set(draft.scope[dim] || []);
+  const rows = known.map(value => {
+    const on = selected.has(value);
+    const label = ocScopeValueLabel(dim, value);
+    return `<button type="button" class="oc-pick-row" role="menuitemcheckbox" aria-checked="${on}" data-oc-pick-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
+      `<span class="oc-pick-check" aria-hidden="true">${on ? '✓' : ''}</span><span class="oc-pick-label">${escapeHtml(label)}</span></button>`;
+  }).join('');
+  const empty = known.length ? '' : `<div class="oc-pick-empty">${NONE_YET_NOTE}</div>`;
+  const canAdd = dim !== 'keyHashes';
+  return `<div class="oc-pick" data-oc-key="pick-${dim}">` +
+    `<input type="search" class="oc-pick-filter" data-oc-pick-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${ocDimLabel(dim)}s" aria-label="filter ${ocDimLabel(dim)}s" data-oc-key="pick-filter-${dim}">` +
+    `<div class="oc-pick-list" role="menu" aria-label="${ocDimLabel(dim)} values">${rows}${empty}</div>` +
+    (canAdd ? `<div class="oc-pick-custom"><input type="text" data-oc-pick-custom="${dim}" placeholder="add a ${ocDimLabel(dim)}" aria-label="add a ${ocDimLabel(dim)}" data-oc-key="pick-custom-${dim}"><button type="button" class="btn" data-oc-pick-add="${dim}">add</button></div>` : '') +
+    `</div>`;
+}
+
+// ocOperatorError is the console's one server-error surface. chrome_operator's
+// mutation gate calls it so a rejected write is named in the pane the operator
+// is looking at, not painted into a hidden menu line.
+function ocOperatorError(message) {
+  ocError = String(message || 'the change was rejected');
+  toast(ocError, 'err');
+  if (ocMounted) ocRender();
+}
+
+function ocOperatorErrorClear() {
+  if (!ocError) return;
+  ocError = '';
+  if (ocMounted) ocRender();
+}
+
+// ---------- change ledger ----------
+// ocRecordChange is the one change receipt. It writes a human phrase, keeps a
+// bounded session history and stores the undo closure that restores the exact
+// prior policy. A change the operator cannot see or reverse was the old
+// menus' core failure.
+function ocRecordChange(phrase, undo, tone) {
+  ocError = '';
+  ocChanges.push({ phrase, undo: typeof undo === 'function' ? undo : null, tone: tone || '', at: Date.now() });
+  if (ocChanges.length > OC_CHANGE_LIMIT) ocChanges.shift();
+  ocRenderFoot();
+  refreshOperatorReadout();
+}
+
+async function ocUndoLast() {
+  const last = ocChanges[ocChanges.length - 1];
+  if (!last || typeof last.undo !== 'function' || ocUndoBusy) return;
+  ocUndoBusy = true;
+  ocRenderFoot();
+  try {
+    await last.undo();
+    ocChanges.pop();
+    ocRecordChange('undid: ' + last.phrase, null, 'ok');
+  } catch (err) {
+    last.tone = 'err';
+    last.phrase = 'could not undo: ' + String(err.message || err);
+    ocRenderFoot();
+  } finally {
+    ocUndoBusy = false;
+    ocRender();
+  }
+}
+
+// ---------- confirmation ----------
+// ocConfirm is the one destructive-action dialog. It replaces the old
+// two-click button whose armed state was invisible to anyone who looked away.
+// It resolves true only for the explicit confirm action.
+let ocConfirmSettle = null;
+function ocConfirm({ title, body, confirm, danger }) {
+  // One confirmation at a time. A second call settles the open dialog as a
+  // cancel before replacing it, so neither promise is left pending and the
+  // modal layer never points at a detached node.
+  if (ocConfirmSettle) {
+    const settle = ocConfirmSettle;
+    ocConfirmSettle = null;
+    settle(false);
+  }
+  return new Promise(resolve => {
+    const id = 'oc-confirm-dialog';
+    let dialog = ocEl(id);
+    if (dialog) dialog.remove();
+    dialog = buildModalDialog(id, 'operator-dialog', 'oc-confirm-title',
+      `<div class="operator-dialog-panel oc-confirm-panel">` +
+      `<h3 id="oc-confirm-title">${escapeHtml(title)}</h3>` +
+      `<p class="oc-confirm-body">${escapeHtml(body)}</p>` +
+      `<div class="operator-dialog-actions">` +
+      `<button type="button" class="btn" data-oc-confirm="cancel">Cancel</button>` +
+      `<button type="button" class="btn ${danger ? 'btn-danger-solid' : 'btn-accent'}" data-oc-confirm="ok">${escapeHtml(confirm)}</button>` +
+      `</div></div>`);
+    let settled = false;
+    const finish = value => {
+      if (settled) return;
+      settled = true;
+      if (ocConfirmSettle === finish) ocConfirmSettle = null;
+      closeModal(dialog);
+      dialog.remove();
+      resolve(value);
+    };
+    ocConfirmSettle = finish;
+    wireDialogDismiss(dialog, () => finish(false));
+    dialog.querySelector('[data-oc-confirm="cancel"]').onclick = () => finish(false);
+    dialog.querySelector('[data-oc-confirm="ok"]').onclick = () => finish(true);
+    // The rule that opened the dialog may be replaced by a poll repaint while
+    // the dialog is up; the pane is the stable focus home in that case.
+    openModal(dialog, { returnSelector: '#oc-pane' });
+    dialog.querySelector('[data-oc-confirm="cancel"]').focus();
+  });
+}
+
+// ---------- shared composer pieces ----------
+// ocChipRow is the one closed-vocabulary picker: a wrapping row of pressed
+// chips. It replaces the native selects the old menus stacked six deep.
+function ocChipRow(name, values, current, labelOf) {
+  return `<div class="oc-chips" role="group" aria-label="${escapeHtml(name)}">` +
+    values.map(value => {
+      const pressed = String(current) === String(value) ? 'true' : 'false';
+      return `<button type="button" class="oc-chip oc-chip-pick" aria-pressed="${pressed}" data-oc-choice="${escapeHtml(name)}" data-oc-value="${escapeHtml(String(value))}">${escapeHtml(labelOf(value))}</button>`;
+    }).join('') + `</div>`;
+}
+
+function ocWindowLabel(value) {
+  const hit = LIMIT_WINDOWS.find(([v]) => v === value);
+  return hit ? hit[1] : value;
+}
+
+function ocNumber(value) {
+  if (value === '' || value == null) return 0;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+}
+
+function ocField(key, label, value, opts = {}) {
+  const type = opts.type || 'number';
+  const attrs = type === 'number' ? 'min="0" step="1" inputmode="numeric"' : '';
+  return `<label class="oc-field${opts.wide ? ' wide' : ''}" data-oc-key="${escapeHtml(key)}">` +
+    `<span class="oc-field-name">${escapeHtml(label)}</span>` +
+    `<input type="${type}" ${attrs} data-oc-field="${escapeHtml(key)}" value="${escapeHtml(String(value == null ? '' : value))}" placeholder="${escapeHtml(opts.placeholder || '')}" ${opts.disabled ? 'disabled' : ''}>` +
+    (opts.hint ? `<span class="oc-field-hint">${escapeHtml(opts.hint)}</span>` : '') +
+    `</label>`;
+}
+
+function ocTimeValue(minutes) {
+  if (minutes == null) return '';
+  const m = Math.max(0, Math.min(1439, Number(minutes) || 0));
+  return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+}
+
+function ocParseTime(value) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(value || ''));
+  if (!m) return 0;
+  const hour = Number(m[1]), minute = Number(m[2]);
+  if (hour > 23 || minute > 59) return 0;
+  return hour * 60 + minute;
+}
+
+// ---------- system ----------
+function ocRenderSystem() {
+  queueMicrotask(() => {
+    if (ocSection === 'system' && typeof fetchRestartStatus === 'function') fetchRestartStatus();
+  });
+  const available = restartServerState.available !== false;
+  const reason = restartServerState.reason || 'This build cannot restart in place. Update the container or service externally.';
+  return `<div class="oc-sec">` +
+    `<div class="oc-sec-head"><div><h2 class="oc-h2">system</h2>` +
+    `<p class="oc-sub">Process lifecycle and the paths that live outside a policy.</p></div></div>` +
+    `<div class="oc-card">` +
+    `<div class="oc-label">rebuild and restart</div>` +
+    `<p id="restart-description" class="oc-note">Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.</p>` +
+    `<ol class="restart-steps" id="restart-steps" hidden aria-live="polite"></ol>` +
+    (available ? '' : `<p class="oc-warning">${escapeHtml(reason)}</p>`) +
+    `<div class="oc-compose-ft"><span class="clear-count" id="restart-count" role="status"></span>` +
+    `<button type="button" class="btn btn-accent" id="btn-restart-now" data-oc-restart ${available ? '' : 'disabled'}>restart now</button></div>` +
+    `</div>` +
+    `<div class="oc-card"><div class="oc-label">settings</div>` +
+    `<p class="oc-note">Queue bounds, retry budgets, storage, retention and dashboard cadence live in Settings.</p>` +
+    `<button type="button" class="btn" data-oc-settings>open settings</button></div>` +
+    `</div>`;
+}
+
+// A resize can cross the sheet breakpoint without a repaint, so the announced
+// orientation is resynced from the same owner the render path uses.
+window.addEventListener('resize', () => {
+  if (ocMounted) ocSyncRailOrientation();
+});
+
+// ---------- live sync ----------
+// operatorConsoleSync is the operator state registry's one repaint hook. It
+// keeps the readout truthful even when the console is closed, and refreshes
+// only the open console's surface. The pane repaint preserves focus, caret and
+// scroll identity itself, so there is no separate display-only path.
+function operatorConsoleSync(kind) {
+  refreshOperatorReadout();
+  const shell = ocShell();
+  if (!shell || !ocMounted || !menuIsOpen(shell)) return;
+  const section = kind === 'debug' ? 'capture' : kind === 'throttle' ? 'limits' : kind;
+  // The overview is the live "in force" summary, so any policy change repaints
+  // it. Every other section keeps the operator's place unless its own kind
+  // changed: a capture poll must not rebuild an export filter mid-typing.
+  if (section !== ocSection && ocSection !== 'overview') {
+    ocRenderRail();
+    return;
+  }
+  ocRender();
+}
+
+// ---------- event dispatch ----------
+// ocActiveDraft is the composer draft of the section on screen. Every action
+// that writes into the open form goes through it, so a new section cannot
+// forget to teach six separate ternaries about itself.
+function ocActiveDraft() {
+  if (ocSection === 'limits') return ocDrafts.limit;
+  if (ocSection === 'pause') return ocDrafts.pause;
+  if (ocSection === 'capture') return ocDrafts.capture;
+  return null;
+}
+
+function ocCurrentKind() {
+  if (ocSection === 'limits') return 'limit';
+  if (ocSection === 'pause') return 'pause';
+  if (ocSection === 'capture') return 'capture';
+  if (ocSection === 'export') return 'export';
+  return '';
+}
+
+function ocClearComposer() {
+  const kind = ocCurrentKind();
+  if (kind === 'limit') ocDrafts.limit = ocBlankLimitDraft();
+  if (kind === 'pause') ocDrafts.pause = ocBlankPauseDraft();
+  if (kind === 'capture') ocDrafts.capture = ocBlankCaptureDraft();
+  ocView = { kind: '', id: '' };
+}
+
+function ocTogglePicker(draft, dim) {
+  if (!draft) return;
+  if (draft.picker && draft.picker.dim === dim) draft.picker = null;
+  else draft.picker = { dim, filter: '' };
+  ocRender();
+}
+
+async function ocHandleAction(target) {
+  const section = target.dataset.ocSection;
+  if (section) { ocSelectSection(section); return; }
+  if (target.hasAttribute('data-oc-error-dismiss')) { ocOperatorErrorClear(); return; }
+  if (target.hasAttribute('data-oc-close')) { closeOperatorConsole(true); return; }
+  if (target.hasAttribute('data-oc-cancel')) { ocClearComposer(); ocRender(); return; }
+  const newKind = target.dataset.ocNew;
+  if (newKind) {
+    if (newKind === 'limit') ocOpenLimitComposer('');
+    if (newKind === 'pause') ocOpenPauseComposer('');
+    if (newKind === 'capture') ocOpenCaptureComposer('');
+    return;
+  }
+  const editKind = target.dataset.ocEdit;
+  if (editKind) {
+    const id = target.dataset.ocId || '';
+    if (editKind === 'limit') ocOpenLimitComposer(id);
+    if (editKind === 'pause') ocOpenPauseComposer(id);
+    if (editKind === 'capture') ocOpenCaptureComposer(id);
+    return;
+  }
+  const removeKind = target.dataset.ocRemove;
+  if (removeKind) {
+    if (removeKind === 'limit') ocRemoveLimit(target.dataset.ocId || '');
+    return;
+  }
+  const resume = target.getAttribute('data-oc-resume');
+  if (resume) { ocResumeHold(resume); return; }
+  if (target.hasAttribute('data-oc-resume-all')) { ocResumeAllHolds(); return; }
+  const stop = target.getAttribute('data-oc-stop');
+  if (stop) { ocStopSession(stop); return; }
+  if (target.hasAttribute('data-oc-stop-all')) { ocStopAllSessions(); return; }
+  const apply = target.dataset.ocApply;
+  if (apply === 'limit') { ocApplyLimit(); return; }
+  if (apply === 'pause') { ocApplyPause(); return; }
+  if (apply === 'capture') { ocApplyCapture(); return; }
+  const pick = target.dataset.ocPick;
+  if (pick) {
+    const draft = ocActiveDraft();
+    if (!draft) return;
+    ocTogglePicker(draft, pick);
+    return;
+  }
+  if (target.dataset.ocScopeRemove) {
+    const draft = ocActiveDraft();
+    if (!draft) return;
+    ocScopeToggle(ocDraftScope(draft), target.dataset.ocScopeRemove, target.dataset.ocValue || '');
+    draft.picker = null;
+    ocRender();
+    return;
+  }
+  const pickValue = target.dataset.ocPickValue;
+  if (pickValue) {
+    const draft = ocActiveDraft();
+    if (!draft) return;
+    ocScopeToggle(ocDraftScope(draft), pickValue, target.dataset.ocValue || '');
+    ocRender();
+    return;
+  }
+  const pickAdd = target.dataset.ocPickAdd;
+  if (pickAdd) {
+    const draft = ocActiveDraft();
+    const input = ocShell()?.querySelector(`[data-oc-pick-custom="${pickAdd}"]`);
+    const value = (input?.value || '').trim();
+    if (draft && value) { ocScopeToggle(ocDraftScope(draft), pickAdd, value); ocRender(); }
+    return;
+  }
+  const toggle = target.dataset.ocToggle;
+  if (toggle === 'advanced') {
+    if (ocDrafts.limit) { ocDrafts.limit.advanced = !ocDrafts.limit.advanced; ocRender(); }
+    return;
+  }
+  if (toggle === 'schedule') {
+    if (ocDrafts.limit) {
+      ocDrafts.limit.schedule = ocDrafts.limit.schedule ? null : { days: [], start: 540, end: 1020 };
+      if (!ocDrafts.limit.schedule && ocDrafts.limit.antiBurst) ocDrafts.limit.antiBurst = false;
+      ocRender();
+    }
+    return;
+  }
+  const day = target.getAttribute('data-oc-day');
+  if (day != null && ocDrafts.limit?.schedule) {
+    const days = ocDrafts.limit.schedule.days;
+    const n = Number(day);
+    const at = days.indexOf(n);
+    if (at >= 0) days.splice(at, 1); else days.push(n);
+    ocRender();
+    return;
+  }
+  const choice = target.dataset.ocChoice;
+  if (choice) { ocHandleChoice(choice, target.dataset.ocValue || ''); return; }
+  if (target.dataset.ocFilterPick) { ocToggleFilterPick(target.dataset.ocFilterPick); return; }
+  if (target.dataset.ocFilterValue != null) {
+    const draft = ocDrafts.export;
+    if (draft) {
+      draft[target.dataset.ocFilterValue] = target.dataset.ocValue || '';
+      draft.picker = null;
+      ocScheduleExportCount();
+      ocRender();
+    }
+    return;
+  }
+  if (target.dataset.ocFilterClear) {
+    const draft = ocDrafts.export;
+    if (draft) {
+      draft[target.dataset.ocFilterClear] = '';
+      draft.picker = null;
+      ocScheduleExportCount();
+      ocRender();
+    }
+    return;
+  }
+  if (target.dataset.ocFilterAdd) {
+    const dim = target.dataset.ocFilterAdd;
+    const input = ocShell()?.querySelector(`[data-oc-filter-custom="${dim}"]`);
+    const value = (input?.value || '').trim();
+    if (value && ocDrafts.export) {
+      ocDrafts.export[dim] = value;
+      ocDrafts.export.picker = null;
+      ocScheduleExportCount();
+      ocRender();
+    }
+    return;
+  }
+  if (target.hasAttribute('data-oc-download')) { ocDownloadExport(); return; }
+  if (target.hasAttribute('data-oc-reset-export')) {
+    ocDrafts.export = ocBlankExportDraft();
+    ocRender();
+    return;
+  }
+  if (target.hasAttribute('data-oc-settings')) {
+    closeOperatorConsole();
+    toggleSettings();
+    return;
+  }
+  if (target.hasAttribute('data-oc-drain')) { ocDrainQueue(); return; }
+  if (target.hasAttribute('data-oc-restart')) {
+    if (typeof restartProxy === 'function') restartProxy();
+    return;
+  }
+  if (target.hasAttribute('data-oc-undo')) { ocUndoLast(); return; }
+}
+
+// ocHandleChoice writes a closed-vocabulary chip pick into the active draft.
+function ocHandleChoice(name, value) {
+  // The drain scope lives in the overview, which is not a composer kind.
+  if (name === 'drain-scope') {
+    ocDrain.scope = value;
+    ocDrain.value = '';
+    ocRender();
+    return;
+  }
+  const kind = ocCurrentKind();
+  if (kind === 'limit' && ocDrafts.limit) {
+    const draft = ocDrafts.limit;
+    if (name === 'request-window') draft.requestWindow = value;
+    if (name === 'token-window') draft.tokenWindow = value;
+    if (name === 'ramp') draft.ramp = value;
+    if (name === 'concurrency') draft.concurrency = value;
+    ocRender();
+    return;
+  }
+  if (kind === 'pause' && ocDrafts.pause) {
+    if (name === 'pause-mode') { ocDrafts.pause.mode = value; ocDrafts.pause.picker = null; }
+    if (name === 'pause-duration') ocDrafts.pause.duration = value;
+    ocRender();
+    return;
+  }
+  if (kind === 'capture' && ocDrafts.capture) {
+    if (name === 'capture-duration') ocDrafts.capture.duration = value;
+    ocRender();
+    return;
+  }
+  if (kind === 'export' && ocDrafts.export) {
+    const draft = ocDrafts.export;
+    if (name === 'export-mode') draft.mode = value;
+    if (name === 'export-errors') draft.errors = value === 'only';
+    if (name === 'export-debug') draft.debug = value === 'only';
+    if (name === 'export-after') draft.after = value;
+    if (name === 'export-age') draft.age = value;
+    ocScheduleExportCount();
+    ocRender();
+  }
+}
+
+function ocToggleFilterPick(dim) {
+  const draft = ocDrafts.export;
+  if (!draft) return;
+  if (draft.picker && draft.picker.dim === dim) draft.picker = null;
+  else draft.picker = { dim, filter: '' };
+  ocRender();
+}
+
+// ocInputField writes a text or number field into the active draft without a
+// rebuild, so the caret never moves while typing. The preview and the commit
+// gate are the only things that repaint.
+function ocInputField(key, value) {
+  const kind = ocCurrentKind();
+  if (kind === 'limit' && ocDrafts.limit) {
+    ocDrafts.limit[key] = value;
+    ocLimitPreview();
+    return;
+  }
+  if (kind === 'pause' && ocDrafts.pause) {
+    if (key === 'pauseCap') ocDrafts.pause.cap = value;
+    ocPausePreview();
+    return;
+  }
+  if (kind === 'export' && ocDrafts.export) {
+    if (key === 'errorType') { ocDrafts.export.errorType = value; ocScheduleExportCount(); }
+  }
+}
+
+document.addEventListener('input', event => {
+  const target = event.target;
+  if (!target || !ocShell()?.contains(target)) return;
+  if (target.dataset.ocField) {
+    if (target.type === 'checkbox') return;
+    ocInputField(target.dataset.ocField, target.value);
+    return;
+  }
+  if (target.dataset.ocPickFilter) {
+    const draft = ocActiveDraft();
+    if (draft?.picker) { draft.picker.filter = target.value; ocRender(); }
+    return;
+  }
+  if (target.dataset.ocFilterFilter) {
+    if (ocDrafts.export?.picker) { ocDrafts.export.picker.filter = target.value; ocRender(); }
+    return;
+  }
+  if (target.dataset.ocExportField) {
+    ocInputField(target.dataset.ocExportField, target.value);
+    return;
+  }
+  if (target.hasAttribute('data-oc-drain-value')) {
+    ocDrain.value = target.value;
+  }
+});
+
+document.addEventListener('change', event => {
+  const target = event.target;
+  if (!target || !ocShell()?.contains(target)) return;
+  if (target.dataset.ocBudget) {
+    const draft = ocDrafts.limit;
+    if (!draft) return;
+    const key = target.dataset.ocBudget;
+    if (target.checked) {
+      draft[key] = key === 'concurrency' ? '4' : key === 'requests' ? '60' : '100000';
+    } else {
+      draft[key] = '';
+      if (key === 'concurrency') { draft.antiBurst = false; draft.ramp = ''; }
+    }
+    ocRender();
+    return;
+  }
+  if (target.dataset.ocField === 'antiBurst') {
+    if (ocDrafts.limit) { ocDrafts.limit.antiBurst = target.checked; ocRender(); }
+    return;
+  }
+  if (target.dataset.ocField === 'pauseCapOn') {
+    if (ocDrafts.pause) { ocDrafts.pause.cap = target.checked ? String(pauseState.default_max_queued || 1024) : ''; ocRender(); }
+    return;
+  }
+  if (target.dataset.ocTime && ocDrafts.limit?.schedule) {
+    const minutes = ocParseTime(target.value);
+    if (target.dataset.ocTime === 'start') ocDrafts.limit.schedule.start = minutes;
+    else ocDrafts.limit.schedule.end = minutes;
+    ocRender();
+  }
+});
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    const target = event.target;
+    if (!target || !ocShell()?.contains(target)) return;
+    if (target.dataset.ocPickCustom) {
+      const dim = target.dataset.ocPickCustom;
+      const draft = ocActiveDraft();
+      const value = target.value.trim();
+      if (draft && value) {
+        event.preventDefault();
+        ocScopeToggle(ocDraftScope(draft), dim, value);
+        ocRender();
+      }
+    }
+    if (target.dataset.ocFilterCustom) {
+      const dim = target.dataset.ocFilterCustom;
+      const value = target.value.trim();
+      if (value && ocDrafts.export) {
+        event.preventDefault();
+        ocDrafts.export[dim] = value;
+        ocDrafts.export.picker = null;
+        ocScheduleExportCount();
+        ocRender();
+      }
+    }
+    return;
+  }
+  // The rail is a real tablist: arrows, Home and End move selection and
+  // focus together. Tab still reaches the active tab and the pane in order.
+  const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+  const jump = event.key === 'Home' || event.key === 'End';
+  if (!step && !jump) return;
+  const tab = document.activeElement?.closest?.('.oc-rail-item');
+  if (!tab || !ocShell()?.contains(tab)) return;
+  const tabs = [...ocShell().querySelectorAll('.oc-rail-item')];
+  if (!tabs.length) return;
+  event.preventDefault();
+  const at = tabs.indexOf(tab);
+  const next = jump
+    ? tabs[event.key === 'Home' ? 0 : tabs.length - 1]
+    : tabs[(at + step + tabs.length) % tabs.length];
+  ocSelectSection(next.dataset.ocSection);
+  ocShell()?.querySelector(`[data-oc-key="rail-${next.dataset.ocSection}"]`)?.focus();
+});
+
+document.addEventListener('click', event => {
+  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-edit],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
+  if (!target || !ocShell()?.contains(target)) return;
+  event.preventDefault();
+  ocHandleAction(target);
+});
+
+// ---------- record-driven entry points ----------
+// A record's live pill opens the rule that produced it, already in its edit
+// transition, or starts the same kind of rule pre-scoped to that request when
+// the rule has already ended. The operator never has to translate a request
+// into four pickers first.
+
+function ocPolicyMatchesRecord(policy, record) {
+  const scope = policy?.scope || {};
+  const ok = (values, value) => !(values || []).length || (values || []).includes(value || '');
+  return ok(scope.providers, record.provider) && ok(scope.models, record.model) &&
+    ok(scope.clients, record.client) && ok(scope.key_hashes, record.key_hash) &&
+    ok(scope.conversations, record.conversation_id);
+}
+
+// ocScopeWeight ranks matches so a model rule outranks the global rule when
+// both parked the same request. Summing non-empty dimensions is enough to
+// make the choice stable without inventing a precedence the server has not
+// promised.
+function ocScopeWeight(scope) {
+  return ['providers', 'models', 'clients', 'key_hashes', 'conversations']
+    .reduce((n, key) => n + ((scope?.[key] || []).length ? 1 : 0), 0);
+}
+
+function ocHoldMatchesRecord(hold, record) {
+  if (!hold || !record) return false;
+  if (hold.all) return true;
+  const clients = hold.clients || [];
+  const providers = hold.providers || [];
+  const known = hold.known_at_new || [];
+  const client = record.client || '';
+  let clientOK = false;
+  if (clients.length && clients.includes(client)) clientOK = true;
+  else if (hold.new) clientOK = !known.includes(client);
+  else if (clients.length) clientOK = false;
+  else clientOK = providers.length > 0;
+  if (!clientOK) return false;
+  return !providers.length || providers.includes(record.provider || '');
+}
+
+function ocCaptureMatchesRecord(session, record) {
+  if (!session || !record) return false;
+  if ((session.clients || []).length && !session.clients.includes(record.client || '')) return false;
+  if ((session.providers || []).length && !session.providers.includes(record.provider || '')) return false;
+  if ((session.models || []).length && !session.models.includes(record.model || '')) return false;
+  return !!(session.clients || []).length || !!(session.providers || []).length ||
+    !!(session.models || []).length;
+}
+
+function ocLimitForRecord(record) {
+  const policies = ((typeof throttleState !== 'undefined' && throttleState.throttles) || [])
+    .filter(policy => ocPolicyMatchesRecord(policy, record))
+    .sort((a, b) => ocScopeWeight(b.scope) - ocScopeWeight(a.scope));
+  if (policies.length) {
+    openOperatorConsole('limits');
+    ocOpenLimitComposer(policies[0].id);
+    return;
+  }
+  openOperatorConsole('limits');
+  const draft = ocBlankLimitDraft();
+  if (record.provider) draft.scope.providers = [record.provider];
+  if (record.model) draft.scope.models = [record.model];
+  ocDrafts.limit = draft;
+  ocView = { kind: 'limit', id: '' };
+  ocRender();
+}
+
+function ocPauseForRecord(record) {
+  if (!record) return;
+  const holds = liveHolds();
+  const hold = holds.find(h => !h.all && ocHoldMatchesRecord(h, record)) || holds.find(h => h.all);
+  if (hold) {
+    openOperatorConsole('pause');
+    ocOpenPauseComposer(hold.id);
+    return;
+  }
+  openOperatorConsole('pause');
+  const draft = ocBlankPauseDraft();
+  if (record.client) draft.clients = [record.client];
+  if (record.provider) draft.providers = [record.provider];
+  if (!draft.clients.length && !draft.providers.length) draft.mode = 'all';
+  ocDrafts.pause = draft;
+  ocView = { kind: 'pause', id: '' };
+  ocRender();
+}
+
+function ocCaptureForRecord(record) {
+  if (!record) return;
+  const sessions = liveDebugSessions();
+  const stamped = record.debug_session_id && sessions.find(s => s.id === record.debug_session_id);
+  const session = stamped || sessions.find(s => ocCaptureMatchesRecord(s, record));
+  if (session) {
+    openOperatorConsole('capture');
+    ocOpenCaptureComposer(session.id);
+    return;
+  }
+  openOperatorConsole('capture');
+  const draft = ocBlankCaptureDraft();
+  if (record.client) draft.clients = [record.client];
+  if (record.provider) draft.providers = [record.provider];
+  if (record.model) draft.models = [record.model];
+  ocDrafts.capture = draft;
+  ocView = { kind: 'capture', id: '' };
+  ocRender();
+}
+
+// ocOpenOperatorForRecord is the one dispatch for the three record pills.
+function ocOpenOperatorForRecord(kind, record) {
+  if (!record) return;
+  if (kind === 'limit') ocLimitForRecord(record);
+  else if (kind === 'pause') ocPauseForRecord(record);
+  else if (kind === 'capture') ocCaptureForRecord(record);
+}

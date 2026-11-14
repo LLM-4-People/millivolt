@@ -612,7 +612,6 @@ async function purgeMetrics(filter) {
     const result = await operatorJsonBody('/admin/purge', options, fail);
     if (result.ok !== true) throw new Error(result.error || fail);
     _filterPreviews.clear();
-    $('btn-logs-filtered').disabled = true;
     // The scoped block's preview text describes records that just ceased
     // to exist; the next sheet fill rebuilds it empty either way.
     const delPreview = $('del-count');

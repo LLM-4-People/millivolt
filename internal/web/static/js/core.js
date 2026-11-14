@@ -161,10 +161,8 @@ const KNOWN_PROVIDERS_KEY = 'known_providers';
 const KNOWN_MODELS_KEY = 'known_models';
 let streamLive = false;
 let pauseState = { paused: false, clients: [], providers: [], holds: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], until: null, queued: 0, default_max_queued: 0 };
-let pauseEditID = '';
 let throttleState = { throttles: [], [KNOWN_PROVIDERS_KEY]: [], active: false };
 let debugState = { enabled: false, sessions: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], [KNOWN_MODELS_KEY]: [], until: null, ttl: '', max_bytes: '' };
-let debugEditID = '';
 // localStorage key for the persisted status filter. One owner: the write
 // path in chrome_lists.js (doFilter) references the same constant.
 const FILTERS_STORAGE_KEY = 'dash.filters';

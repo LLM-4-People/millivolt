@@ -51,6 +51,18 @@ function menuPlacement() {
   return window.innerWidth <= MENU_SHEET_PX ? 'sheet' : 'anchor';
 }
 
+// menuDialogAbove reports whether the event happened inside a modal dialog
+// that does not contain the open panel - a confirmation, the operator prompt,
+// the settings sheet from another surface. Such a dialog is the active
+// surface: it owns Escape and its own presses, and the menu underneath must
+// stay open. A picker that menu.js moved onto a modal sheet is still inside
+// that sheet, so the menu keeps owning its own dismissal there.
+function menuDialogAbove(event, panel) {
+  const node = event.target instanceof Element ? event.target : null;
+  const dialog = node?.closest('[role="dialog"][aria-modal="true"]:not([hidden]):not([inert])');
+  return !!dialog && !dialog.contains(panel);
+}
+
 // menuOpen opens a panel on a trigger. It closes the currently open menu
 // first (one open menu at a time), clears the panel's geometry for the
 // placement menuPlacement chooses, and owns the dismissal and re-anchor
@@ -319,6 +331,7 @@ function menuFocusInitial(state) {
 function menuKeydown(event) {
   if (event.key !== 'Escape') return;
   if (!menuOpenState) return;
+  if (menuDialogAbove(event, menuOpenState.panel)) return;
   menuClose(menuOpenState.panel);
   event.preventDefault();
   event.stopPropagation();
@@ -330,6 +343,7 @@ function menuKeydown(event) {
 function menuPointerdown(event) {
   const state = menuOpenState;
   if (!state) return;
+  if (menuDialogAbove(event, state.panel)) return;
   const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
   if (path.includes(state.panel) || path.includes(state.trigger)) return;
   menuClose(state.panel);

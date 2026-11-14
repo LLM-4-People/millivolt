@@ -114,8 +114,8 @@ function roHeaderValueOK(v) {
 
 // roKnownOptions derives one kind's autocomplete options: provider from
 // the settings doc's provider labels plus the dashboard's known-providers
-// sets, client and model from the dashboard's known sets (the wire-key
-// owners - knownNames' union discipline across the operator states).
+// sets, client and model from the dashboard's known sets, deduped and sorted
+// at this one owner.
 function roKnownOptions(kind) {
   const out = new Set();
   if (kind === 'provider') {

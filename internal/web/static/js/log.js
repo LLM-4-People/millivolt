@@ -276,19 +276,19 @@ function renderRequests(recs) {
 $('tbl-requests').addEventListener('click', e => {
   // A pivot/entity link navigates via the hash router - never open the drawer.
   if (e.target.closest('a.ent-link')) return;
-  // A state pill edits its matching operator hold/session/limit (the same
-  // form as clicking the hold row in the header menu): one table keyed by
-  // the pill's data-edit vocabulary, one branch.
+  // A state pill opens its matching operator rule, or a new draft scoped to
+  // the record when the rule has ended: one table keyed by the pill's
+  // data-edit vocabulary, one branch.
   const pillEdits = [
-    ['.pill.paused[data-edit-pause]', editHoldForRecord],
-    ['.pill.debug[data-edit-debug]', editDebugForRecord],
-    ['.pill.throttled[data-edit-limit]', editLimitForRecord],
+    ['.pill.paused[data-edit-pause]', 'pause'],
+    ['.pill.debug[data-edit-debug]', 'capture'],
+    ['.pill.throttled[data-edit-limit]', 'limit'],
   ];
-  for (const [sel, edit] of pillEdits) {
+  for (const [sel, kind] of pillEdits) {
     if (!e.target.closest(sel)) continue;
     e.stopPropagation();
     const tr = e.target.closest('.exp-row[data-id]');
-    if (tr) edit(recordById(tr.dataset.id));
+    if (tr) ocOpenOperatorForRecord(kind, recordById(tr.dataset.id));
     return;
   }
   // The retry badge toggles the absorbed-attempt sub-rows (collapsed default).

@@ -1,0 +1,791 @@
+/* Operator console: the header readout and the one operator plane.
+   The panel itself is a .mn surface, so menu.js owns placement, the sheet
+   scrim, the open transition and the inline max-height clamp. This module
+   styles only what .oc adds: a readout strip, a workspace pane and a change
+   ledger. Everything resolves the shared surface, accent and status tokens. */
+
+/* ---------- header readout ----------
+   The trigger is a direct child of .refresh-controls, whose square
+   icon-button rule would otherwise force it to 32px. Its data-state mirrors
+   #op-readout; operator_console.js writes both in the same repaint. */
+.op-readout-btn {
+  width: auto; min-width: 0; max-width: min(48vw, 320px); height: auto; min-height: 30px;
+  padding: 3px 8px; gap: 6px; justify-content: flex-start;
+}
+.op-readout { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.op-readout-dot {
+  width: 7px; height: 7px; flex: none; border-radius: 50%;
+  border: 1px solid var(--border2);
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+}
+.op-readout-state {
+  /* The button owns the available header width; the words use all of it. A
+     phone keeps the ellipsis as the visible hint that more state exists, and
+     the trigger's accessible label always carries the complete sentence. */
+  min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font: 400 10px/1.3 var(--mono); letter-spacing: 0;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.op-readout-chev {
+  width: 12px; height: 12px; flex: none; color: var(--muted);
+  transition: transform .16s ease, color .16s ease;
+}
+.op-readout-btn:hover .op-readout-state { color: var(--text); }
+#op-readout[data-state="active"] .op-readout-state { color: var(--text); }
+#op-readout[data-state="active"] .op-readout-dot {
+  border-color: var(--accent); background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.op-readout-btn[data-state="active"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border2));
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel2));
+}
+.op-readout-btn[data-state="active"]:hover {
+  color: var(--text); border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.op-readout-btn[data-state="active"] .op-readout-chev { color: var(--text); }
+#op-readout[data-state="busy"] .op-readout-state { color: var(--warn); }
+#op-readout[data-state="busy"] .op-readout-dot {
+  border-color: var(--warn); background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 18%, transparent);
+  animation: livepulse 1.6s ease-in-out infinite;
+}
+.op-readout-btn[data-state="busy"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border2));
+  background: color-mix(in srgb, var(--warn) 7%, var(--panel2));
+}
+.op-readout-btn[data-state="busy"]:hover {
+  color: var(--warn); border-color: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent);
+}
+.op-readout-btn[data-state="busy"]:hover .op-readout-state { color: var(--warn); }
+.op-readout-btn[data-state="busy"] .op-readout-chev { color: var(--warn); }
+.op-readout-btn[aria-expanded="true"] .op-readout-chev { transform: rotate(180deg); }
+
+/* ---------- console frame ----------
+   A definite desktop height lets the rail and the pane split the box instead
+   of both collapsing to content. It re-reads this max-height and clamps it
+   to the space under the trigger, so the inline value is always at most this. */
+.mn.oc {
+  --mn-w: 940px;
+  height: min(680px, calc(100dvh - 32px));
+  max-height: min(680px, calc(100dvh - 32px));
+  overflow: hidden;
+}
+.oc-hd {
+  position: relative; display: flex; align-items: center; gap: 10px;
+  flex-shrink: 0; padding: 10px 12px 12px;
+  background: var(--rail); border-bottom: 1px solid var(--border2);
+}
+/* The rail's graduated scale closes the head. */
+.oc-hd::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 5px;
+  pointer-events: none; background: var(--tick-strip); opacity: .6;
+}
+.oc-head { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.oc-mark {
+  width: 26px; height: 26px; flex: none; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent2); border: 1px solid var(--border2);
+  background: color-mix(in srgb, var(--accent2) 8%, transparent);
+}
+.oc-mark svg {
+  width: 15px; height: 15px; display: block; stroke: currentColor; fill: none;
+  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+}
+.oc-head-text { flex: 1; min-width: 0; }
+.oc-title {
+  margin: 0; color: var(--text); font: 650 15px/1.2 var(--mono);
+  letter-spacing: -.01em;
+}
+.oc-live {
+  margin: 2px 0 0; color: var(--muted); font: 400 10px/1.35 var(--mono);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-close { flex: none; min-height: 30px; padding: 3px 8px; }
+.oc-close .d-key { margin-left: 4px; font-size: 9px; color: var(--muted); }
+
+/* ---------- body: readout strip beside the workspace ---------- */
+.oc-body {
+  display: grid; grid-template-columns: 152px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1; min-height: 0; overflow: hidden;
+}
+.oc-rail {
+  display: flex; flex-direction: column; gap: 2px; min-height: 0;
+  padding: 8px; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--rail); border-right: 1px solid var(--border);
+  scrollbar-width: thin;
+}
+.oc-rail-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 30px;
+  padding: 6px 8px; text-align: left; cursor: pointer;
+  background: none; color: var(--muted);
+  border: 1px solid transparent; border-left: 2px solid transparent;
+  border-radius: 7px; font: 10.5px var(--mono);
+}
+.oc-rail-item:hover { background: var(--panel2); color: var(--text); }
+.oc-rail-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-rail-item[aria-selected="true"] {
+  background: var(--panel2); color: var(--text);
+  border-color: var(--border2); border-left-color: var(--accent);
+}
+.oc-rail-item[aria-selected="true"] .oc-rail-label { font-weight: 600; }
+.oc-rail-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-rail-n {
+  margin-left: auto; min-width: 16px; padding: 0 5px;
+  border-radius: 4px; text-align: center;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font: 600 9.5px/1.6 var(--mono); font-variant-numeric: tabular-nums;
+}
+.oc-pane {
+  min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 14px 16px 18px; scrollbar-width: thin;
+}
+.oc-pane:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
+.oc-pane::-webkit-scrollbar { width: 6px; }
+.oc-pane::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+.oc-rail::-webkit-scrollbar,
+.oc-pick-list::-webkit-scrollbar { width: 5px; }
+.oc-window .oc-chips::-webkit-scrollbar { height: 4px; }
+.oc-rail::-webkit-scrollbar-thumb,
+.oc-pick-list::-webkit-scrollbar-thumb,
+.oc-window .oc-chips::-webkit-scrollbar-thumb {
+  background: var(--border2); border-radius: 3px;
+}
+
+/* The session's change ledger, pinned below the scrolling workspace. */
+.oc-ft {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
+  padding: 8px 12px 9px; background: var(--rail);
+  border-top: 1px solid var(--border2);
+}
+.oc-change {
+  flex: 1; min-width: 0; color: var(--muted); font: 10px/1.4 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-change[data-tone="ok"] { color: var(--ok); }
+.oc-change[data-tone="err"] { color: var(--err); }
+.oc-undo { flex: none; min-height: 26px; padding: 3px 10px; }
+
+/* ---------- section chrome ---------- */
+.oc-sec { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.oc-sec-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; min-width: 0; padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+.oc-h2 {
+  margin: 0; color: var(--text); font: 650 15px/1.25 var(--mono);
+  letter-spacing: -.01em;
+}
+.oc-sub {
+  margin: 3px 0 0; color: var(--muted); font: 10.5px/1.5 var(--sans);
+  max-width: 72ch;
+}
+.oc-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.oc-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.oc-label {
+  color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .05em;
+  text-transform: none;
+}
+.oc-note { margin: 4px 0 0; color: var(--muted); font: 10px/1.55 var(--sans); }
+.oc-facts { margin: 0; color: var(--muted); font: 9.5px/1.55 var(--mono); overflow-wrap: anywhere; }
+.oc-warning {
+  margin: 6px 0 0; padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border));
+  border-radius: 7px; background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn-text); font: 10px/1.5 var(--sans);
+}
+.oc-link {
+  flex: none; border: 0; background: none; color: var(--accent);
+  font: 10px var(--mono); padding: 2px 0; cursor: pointer; border-radius: 4px;
+}
+.oc-link:hover { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 2px; }
+.oc-link:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+
+/* ---------- fields ---------- */
+.oc-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.oc-field.wide { grid-column: 1 / -1; }
+.oc-field-name {
+  color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .05em;
+  text-transform: none;
+}
+.oc-field-hint { color: var(--muted); font: 9px/1.4 var(--mono); }
+.oc-field input,
+.oc-pick input,
+.oc-inline input {
+  width: 100%; min-width: 0; min-height: 28px; padding: 5px 9px;
+  color: var(--text); background: var(--rail);
+  border: 1px solid var(--border); border-radius: 7px;
+  font: 11px/1.4 var(--mono); font-variant-numeric: tabular-nums;
+}
+.oc-field input::placeholder,
+.oc-pick input::placeholder,
+.oc-inline input::placeholder { color: var(--muted); opacity: 1; }
+.oc-field input:hover,
+.oc-pick input:hover,
+.oc-inline input:hover { border-color: var(--border2); }
+.oc-field input:focus,
+.oc-pick input:focus,
+.oc-inline input:focus {
+  border-color: var(--accent); outline: var(--focus-outline); outline-offset: 1px;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.oc-field input:disabled,
+.oc-pick input:disabled,
+.oc-inline input:disabled { opacity: .45; cursor: not-allowed; }
+.oc-check {
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+  color: var(--text); font: 10px/1.4 var(--mono); cursor: pointer;
+}
+.oc-check span { min-width: 0; }
+.oc-check input[type="checkbox"] { width: 15px; height: 15px; flex: none; margin: 0; }
+.oc-check input[type="checkbox"]:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+.oc-check:has(input:disabled) { opacity: .45; cursor: default; }
+.oc-check:has(input:disabled) span { cursor: default; }
+
+/* ---------- chips ---------- */
+.oc-chips { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.oc-chip {
+  display: inline-flex; align-items: center; gap: 3px; min-height: 24px;
+  min-width: 0; padding: 0 8px; white-space: nowrap;
+  color: var(--muted); background: var(--panel2);
+  border: 1px solid var(--border2); border-radius: 6px;
+  font: 9.5px/1 var(--mono);
+}
+button.oc-chip { cursor: pointer; transition: color .15s ease, border-color .15s ease, background .15s ease; }
+button.oc-chip:hover { color: var(--text); border-color: var(--accent); }
+.oc-chip:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+button.oc-chip[aria-pressed="true"] {
+  color: var(--text); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+button.oc-chip[aria-pressed="true"]::before {
+  content: '✓'; margin-right: 1px; color: var(--accent); font-size: 9px; line-height: 1;
+}
+.oc-chip-day { min-width: 28px; justify-content: center; padding: 0 4px; }
+.oc-chip-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; min-height: 20px; padding: 2px 5px;
+  border: 0; border-radius: 4px; background: none; color: var(--muted);
+  font: 11px/1 var(--mono); cursor: pointer;
+}
+.oc-chip-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+.oc-chip-x:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+.oc-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; max-width: 296px; }
+.oc-times { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.oc-times .oc-field { width: 108px; }
+.oc-times .oc-field-hint { align-self: center; padding-bottom: 6px; }
+.oc-disclosure {
+  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px;
+  padding: 4px 0; border: 0; background: none; text-align: left;
+  color: var(--text); font: 10.5px var(--mono); cursor: pointer;
+}
+.oc-disclosure > span:first-child { flex: 1; min-width: 0; }
+.oc-disclosure > span:last-child { flex: none; color: var(--muted); }
+.oc-disclosure-state {
+  max-width: 52%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 9.5px;
+}
+.oc-disclosure:hover .oc-disclosure-state,
+.oc-disclosure[aria-expanded="true"] .oc-disclosure-state { color: var(--text); }
+.oc-disclosure:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+.oc-advanced {
+  display: flex; flex-direction: column; gap: 8px; margin-top: 4px;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--rail);
+}
+.oc-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.oc-inline input { flex: 1 1 140px; width: auto; }
+.oc-inline .btn { flex: none; }
+
+/* ---------- scope conditions and pickers ---------- */
+.oc-conds { display: flex; flex-direction: column; min-width: 0; }
+.oc-cond {
+  display: grid; grid-template-columns: 104px minmax(0, 1fr);
+  gap: 4px 8px; align-items: start; min-width: 0;
+  padding: 6px 4px; border-top: 1px solid var(--border);
+}
+.oc-cond:first-child { border-top: 0; }
+.oc-cond[data-open="1"] {
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  border-radius: 7px;
+}
+.oc-cond-btn {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 24px;
+  padding: 2px 0; border: 0; background: none; text-align: left;
+  color: var(--muted); font: 9px var(--mono); cursor: pointer;
+}
+.oc-cond-btn:hover { color: var(--text); }
+.oc-cond-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; border-radius: 4px; }
+.oc-cond[data-open="1"] .oc-cond-name { color: var(--text); font-weight: 600; }
+.oc-cond-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-cond-chev { flex: none; color: var(--muted); font-size: 9px; }
+.oc-cond-values { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.oc-cond-values .oc-chip {
+  max-width: 100%; color: var(--text); white-space: normal;
+  overflow-wrap: anywhere;
+}
+.oc-cond-any { color: var(--muted); font: 9.5px var(--mono); }
+.oc-cond .oc-pick { grid-column: 1 / -1; }
+.oc-pick {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding: 8px;
+  border: 1px solid var(--border2); border-radius: 8px; background: var(--rail);
+}
+.oc-pick-list {
+  display: flex; flex-direction: column; gap: 1px; min-height: 0;
+  max-height: 190px; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.oc-pick-row {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 26px;
+  padding: 4px 6px; border: 0; border-radius: 6px; background: none;
+  color: var(--text); text-align: left; font: 10px var(--mono); cursor: pointer;
+}
+.oc-pick-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.oc-pick-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-pick-row[aria-checked="true"] {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.oc-pick-row[aria-checked="true"] .oc-pick-label { font-weight: 600; }
+.oc-pick-check { width: 12px; flex: none; color: var(--accent); font-size: 10px; }
+.oc-pick-label { min-width: 0; overflow-wrap: anywhere; }
+.oc-pick-empty { padding: 4px 6px; color: var(--muted); font: 9.5px/1.5 var(--sans); }
+.oc-pick-custom { display: flex; gap: 5px; align-items: center; }
+.oc-pick-custom input { flex: 1 1 auto; border-style: dashed; }
+.oc-pick-custom .btn { flex: none; }
+
+/* ---------- composer bench ---------- */
+.oc-compose {
+  margin-top: 6px; border: 1px solid var(--border2); border-radius: 9px;
+  background: var(--panel2); overflow: hidden;
+}
+.oc-compose-hd {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; background: var(--rail); border-bottom: 1px solid var(--border);
+  color: var(--text); font: 600 10.5px var(--mono);
+}
+.oc-compose .oc-group {
+  gap: 7px; padding: 10px 12px; border-top: 1px solid var(--border);
+}
+.oc-compose-hd + .oc-group { border-top: 0; }
+/* Facts, warnings, previews and errors are direct children of the bench, so
+   they need the same inline inset the padded groups carry. */
+.oc-compose > .oc-facts,
+.oc-compose > .oc-warning { margin-left: 12px; margin-right: 12px; }
+.oc-compose > .oc-facts { margin-top: 8px; }
+.oc-compose > .oc-warning { margin-top: 8px; }
+.oc-compose > .oc-preview,
+.oc-compose > .oc-error { margin: 2px 12px 10px; }
+.oc-budget {
+  display: grid; grid-template-columns: minmax(130px, 168px) 116px minmax(0, 1fr);
+  gap: 6px 10px; align-items: center; min-width: 0;
+}
+.oc-budget + .oc-budget { margin-top: 8px; }
+.oc-budget > .oc-check { align-self: center; }
+.oc-budget .oc-field { grid-column: 2; }
+.oc-window { min-width: 0; }
+/* The limit window ladder is long by design: one horizontally scrollable
+   scale keeps each budget on a single instrument line instead of wrapping
+   ten chips into three rows. */
+.oc-window .oc-chips {
+  flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
+  overscroll-behavior-x: contain; scrollbar-width: thin; padding-bottom: 1px;
+}
+.oc-window .oc-chip { flex: 0 0 auto; }
+.oc-window .oc-chip:focus-visible { outline-offset: -1px; }
+.oc-preview {
+  margin: 0; padding: 8px 10px;
+  border: 1px solid var(--border); border-left: 2px solid var(--accent);
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  color: var(--text); font: 10px/1.55 var(--mono); overflow-wrap: anywhere;
+}
+.oc-preview:empty { display: none; }
+.oc-preview[data-tone="err"] {
+  border-color: var(--err); border-left-color: var(--err);
+  background: color-mix(in srgb, var(--err) 7%, transparent);
+  color: var(--err);
+}
+.oc-error {
+  margin: 0; padding: 7px 9px;
+  border: 1px solid var(--err); border-radius: 7px;
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+  color: var(--err); font: 10px/1.5 var(--sans); overflow-wrap: anywhere;
+}
+.oc-error:empty { display: none; }
+.oc-compose-ft {
+  display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 8px;
+  padding: 10px 12px; border-top: 1px solid var(--border);
+  background: var(--rail);
+}
+.oc-compose-ft .btn { min-height: 30px; }
+
+/* ---------- rule rows: one calibrated line, one live column ---------- */
+.oc-rule {
+  display: grid; grid-template-columns: 56px minmax(0, 1fr) 156px;
+  align-items: stretch; min-width: 0; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.oc-rule:hover { border-color: var(--border2); }
+/* The visible kind label is generated from the row's data-kind: the script
+   emits no kind element, and color alone must never carry the distinction. */
+.oc-rule::before {
+  content: attr(data-kind);
+  display: flex; align-items: center; justify-content: center;
+  padding: 6px 4px; text-align: center;
+  color: var(--_kind, var(--muted));
+  background: color-mix(in srgb, var(--_kind, var(--muted)) 7%, transparent);
+  border-left: 2px solid var(--_kind, var(--border2));
+  border-right: 1px solid var(--border);
+  font: 600 9px/1.3 var(--mono); letter-spacing: .04em;
+}
+.oc-rule[data-kind="limit"] { --_kind: var(--accent); }
+.oc-rule[data-kind="pause"] { --_kind: var(--warn); }
+.oc-rule[data-kind="capture"] { --_kind: var(--cyan); }
+.oc-rule-main {
+  display: grid;
+  /* Scope owns the first line; the budget and schedule take the second, so a
+     long selector is never the reason a schedule disappears. The source sits
+     in a right column spanning both lines. */
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "scope meta" "budget meta";
+  gap: 2px 12px; align-items: baseline; align-content: center; min-width: 0;
+  padding: 8px 10px; border: 0; background: none; text-align: left;
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.oc-rule-main:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.oc-rule-main:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
+/* The scope keeps one line so rows align; a full selector plus a schedule is
+   wider than one line, so the budget wraps instead of dropping the schedule
+   behind an ellipsis. */
+.oc-rule-scope {
+  grid-area: scope; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text); font: 600 10.5px/1.4 var(--mono);
+}
+.oc-rule-budget {
+  grid-area: budget; min-width: 0; overflow-wrap: anywhere;
+  color: var(--text); font: 10px/1.4 var(--mono);
+}
+.oc-rule-meta {
+  grid-area: meta; align-self: center; min-width: 0; white-space: nowrap;
+  color: var(--muted); font: 9px/1.4 var(--mono);
+}
+.oc-rule-side {
+  display: flex; flex-direction: column; align-items: flex-end;
+  justify-content: center; gap: 4px; min-width: 0;
+  padding: 6px 8px; border-left: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+.oc-rule-live {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  min-width: 0; max-width: 100%; max-height: 2.8em; overflow: hidden;
+  color: var(--text); text-align: right;
+  font: 9px/1.35 var(--mono); font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.oc-rule-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; flex-wrap: wrap; }
+.oc-icon-btn {
+  min-height: 24px; padding: 2px 6px;
+  border: 1px solid transparent; border-radius: 5px; background: none;
+  color: var(--muted); font: 9px/1.3 var(--mono); cursor: pointer;
+}
+.oc-icon-btn:hover { color: var(--text); border-color: var(--border2); }
+.oc-icon-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+.oc-icon-btn.danger:hover {
+  color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border2));
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+
+/* ---------- overview ---------- */
+.oc-kpis {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--panel2); overflow: hidden;
+}
+.oc-kpi {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  padding: 8px 10px 9px 12px; border-left: 1px solid var(--border);
+}
+.oc-kpi:first-child { border-left: 0; }
+.oc-kpi-label {
+  color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .08em;
+}
+.oc-kpi-value {
+  color: var(--text); font: 650 17px/1.1 var(--mono);
+  letter-spacing: -.01em; font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-ov-list {
+  display: flex; flex-direction: column; min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+.oc-ov-row {
+  display: grid; grid-template-columns: 54px minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 10px; align-items: baseline; width: 100%; min-width: 0;
+  padding: 7px 6px; border: 0; border-top: 1px solid var(--border);
+  background: none; color: var(--text); text-align: left; font: inherit;
+  cursor: pointer;
+}
+.oc-ov-row:first-child { border-top: 0; }
+.oc-ov-row:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.oc-ov-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-ov-kind {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--muted); font: 600 9px/1.4 var(--mono);
+}
+.oc-ov-kind::before {
+  content: ''; width: 5px; height: 5px; flex: none; border-radius: 1px;
+  background: currentColor;
+}
+.oc-ov-kind[data-kind="limit"] { color: var(--accent); }
+.oc-ov-kind[data-kind="pause"] { color: var(--warn); }
+.oc-ov-kind[data-kind="capture"] { color: var(--cyan); }
+.oc-ov-scope {
+  min-width: 0; color: var(--text); font: 10.5px/1.4 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-ov-detail {
+  min-width: 0; color: var(--muted); text-align: right;
+  font: 9.5px/1.45 var(--mono); overflow-wrap: anywhere;
+}
+.oc-history {
+  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
+  border-bottom: 1px solid var(--border);
+}
+.oc-history li {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+  padding: 5px 2px; border-top: 1px solid var(--border); min-width: 0;
+}
+.oc-history li:first-child { border-top: 0; }
+.oc-history .oc-ov-scope { white-space: normal; overflow: visible; font-size: 10px; }
+.oc-history .oc-ov-detail { text-align: right; white-space: nowrap; }
+.oc-empty-line { color: var(--muted); font: 9.5px/1.6 var(--sans); }
+.oc-banner {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border));
+  border-left: 2px solid var(--warn); border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn-text); font: 10px/1.5 var(--mono);
+}
+.oc-banner .oc-link { color: var(--warn-text); }
+.oc-banner .oc-link:hover { color: var(--text); }
+.oc-empty {
+  padding: 18px 12px; border: 1px dashed var(--border2); border-radius: 8px;
+  color: var(--muted); font: 10px/1.6 var(--sans);
+}
+.oc-empty strong { color: var(--text); font-weight: 600; }
+
+/* ---------- capture and system cards ---------- */
+.oc-card {
+  padding: 12px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel2); min-width: 0; overflow: hidden;
+}
+.oc-card + .oc-card { margin-top: 2px; }
+.oc-card > .oc-label { margin-bottom: 6px; }
+.oc-card > .oc-note { margin-top: 0; }
+.oc-card > .btn { margin-top: 9px; }
+/* Inside a card the action row is part of the card, not a second surface:
+   no rail fill, no separator and no negative margins, so a lone action sits
+   under the copy instead of floating in a band of its own. */
+.oc-card .oc-compose-ft {
+  margin: 8px 0 0; padding: 0; background: transparent; border-top: 0;
+}
+.oc-card .oc-compose-ft .clear-count {
+  flex: 1; min-width: 0; margin-bottom: 0; font-size: 10px;
+}
+/* An idle restart has no status text. An empty status span still claimed a
+   full row, so the action sat under an invisible bar; hiding only the empty
+   case keeps a real status line on its own row when it appears. */
+.oc-card .oc-compose-ft .clear-count:empty { display: none; }
+.oc-card .restart-steps { margin-top: 8px; }
+
+/* ---------- export receipt and filter rows ---------- */
+.oc-receipt {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px; border: 1px solid var(--border2); border-radius: 8px;
+  background: var(--rail); min-width: 0;
+}
+.oc-receipt-main {
+  min-height: 16px; color: var(--text); font: 600 11px/1.45 var(--mono);
+  overflow-wrap: anywhere;
+}
+.oc-receipt-main[data-tone="err"] { color: var(--err); }
+.oc-receipt-sub { color: var(--muted); font: 9px/1.5 var(--sans); }
+.oc-receipt .oc-compose-ft {
+  margin-top: 2px; padding: 9px 0 0; border-top: 1px solid var(--border);
+}
+.oc-filter-row {
+  display: grid; grid-template-columns: 96px minmax(0, 1fr);
+  gap: 6px 10px; align-items: start; min-width: 0;
+}
+.oc-filter-name {
+  padding-top: 6px; color: var(--muted); font: 600 9px/1.4 var(--mono);
+  letter-spacing: .05em;
+}
+
+/* ---------- confirmation dialog ---------- */
+/* The shared operator dialog owns the frame; the console only widens it for
+   a scope sentence that must stay readable. */
+.oc-confirm-panel { width: min(26rem, 100%); }
+.oc-confirm-body {
+  margin: 0 0 18px; color: var(--muted); font: 13px/1.55 var(--sans);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- narrow window and sheet placement ---------- */
+@media (max-width: 800px) {
+  .mn.oc[data-placement="sheet"] {
+    height: min(86dvh, calc(100dvh - 16px));
+    max-height: min(86dvh, calc(100dvh - 16px));
+  }
+  .mn.oc .oc-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  /* One thumb-scrollable readout strip replaces the vertical rail. */
+  .mn.oc .oc-rail {
+    flex-direction: row; flex-wrap: nowrap; gap: 3px;
+    padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--border);
+    overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+  }
+  .mn.oc .oc-rail::-webkit-scrollbar { height: 3px; }
+  .mn.oc .oc-rail::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+  .mn.oc .oc-rail-item {
+    width: auto; flex: 0 0 auto; min-height: 38px; padding: 0 10px;
+    border-left-width: 1px; border-bottom: 2px solid transparent;
+  }
+  .mn.oc .oc-rail-item[aria-selected="true"] {
+    border-left-color: var(--border2); border-bottom-color: var(--accent);
+  }
+  .mn.oc .oc-hd { padding: 9px 12px 11px; }
+  .mn.oc .oc-pane { padding: 12px 12px 16px; }
+  .mn.oc .oc-ft { padding: 7px 10px; }
+  .oc-sec-head { flex-wrap: wrap; }
+  .oc-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .oc-kpi:nth-child(odd) { border-left: 0; }
+  .oc-kpi:nth-child(n+3) { border-top: 1px solid var(--border); }
+}
+
+@media (max-width: 640px) {
+  .mn.oc .oc-sec-head { flex-direction: column; align-items: stretch; gap: 8px; }
+  .mn.oc .oc-head-actions { justify-content: flex-start; flex-wrap: wrap; }
+  .mn.oc .oc-rule { grid-template-columns: 52px minmax(0, 1fr); }
+  /* The kind strip runs the full height of the stacked row, so the second
+     line keeps the same left edge instead of leaving a lone accent stub. */
+  .mn.oc .oc-rule::before { grid-row: 1 / span 2; padding: 6px 2px; }
+  .mn.oc .oc-rule-main {
+    grid-template-columns: minmax(0, 1fr); grid-template-areas: "scope" "budget" "meta";
+    gap: 2px; padding: 8px 9px;
+  }
+  .mn.oc .oc-rule-meta { white-space: normal; }
+  .mn.oc .oc-rule-scope,
+  .mn.oc .oc-rule-budget,
+  .mn.oc .oc-rule-meta { white-space: normal; overflow: visible; }
+  .mn.oc .oc-rule-side {
+    grid-column: 2; flex-direction: row; align-items: center;
+    justify-content: space-between; gap: 8px;
+    padding: 6px 8px; border-left: 0; border-top: 1px solid var(--border);
+  }
+  .mn.oc .oc-rule-live {
+    display: block; flex: 1; max-height: none; overflow: hidden;
+    text-align: left; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mn.oc .oc-budget { grid-template-columns: minmax(0, 1fr); }
+  .mn.oc .oc-budget .oc-field { grid-column: auto; }
+  .mn.oc .oc-compose .oc-group { padding: 9px 10px; }
+  .mn.oc .oc-compose > .oc-facts,
+  .mn.oc .oc-compose > .oc-warning { margin-left: 10px; margin-right: 10px; }
+  .mn.oc .oc-compose > .oc-preview,
+  .mn.oc .oc-compose > .oc-error { margin-left: 10px; margin-right: 10px; }
+  .mn.oc .oc-compose-hd { padding: 8px 10px; }
+  .mn.oc .oc-compose-ft { padding: 9px 10px; }
+  .mn.oc .oc-compose-ft .btn { flex: 1 1 auto; }
+  .mn.oc .oc-cond { grid-template-columns: 76px minmax(0, 1fr); gap: 2px 8px; align-items: center; }
+  .mn.oc .oc-cond-values { padding-left: 0; }
+  .mn.oc .oc-times .oc-field { width: calc(50% - 4px); min-width: 96px; }
+  .mn.oc .oc-ov-row { grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; }
+  .mn.oc .oc-ov-detail { grid-column: 1 / -1; text-align: left; }
+  .mn.oc .oc-ov-scope { white-space: normal; overflow: visible; }
+  .mn.oc .oc-history li { flex-direction: column; align-items: flex-start; gap: 1px; }
+  .mn.oc .oc-history .oc-ov-detail { text-align: left; }
+  .mn.oc .oc-filter-row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .mn.oc .oc-filter-name { padding-top: 0; }
+  .mn.oc .oc-receipt .oc-compose-ft .btn { flex: 1 1 auto; }
+  .mn.oc .oc-empty { padding: 14px 10px; }
+  .mn.oc .oc-card .oc-compose-ft { margin: 10px -12px -12px; }
+}
+
+/* ---------- touch sizing ----------
+   Narrow fine pointers keep the dense 38px rung; any coarse pointer takes the
+   shared 44px target. Desktop keeps the instrument's 24px to 30px controls. */
+@media (max-width: 800px) {
+  .mn.oc .btn { min-height: 38px; }
+  .mn.oc .oc-rail-item { min-height: 38px; }
+  .mn.oc .oc-rule-main,
+  .mn.oc .oc-ov-row { min-height: 38px; }
+  .mn.oc .oc-chip { min-height: 38px; padding: 0 11px; }
+  .mn.oc .oc-chip-x { min-width: 38px; min-height: 38px; }
+  .mn.oc .oc-check { min-height: 38px; }
+  .mn.oc .oc-check input[type="checkbox"] { width: 18px; height: 18px; }
+  .mn.oc .oc-field input,
+  .mn.oc .oc-pick input,
+  .mn.oc .oc-inline input { min-height: 38px; }
+  .mn.oc .oc-disclosure,
+  .mn.oc .oc-cond-btn,
+  .mn.oc .oc-pick-row,
+  .mn.oc .oc-icon-btn,
+  .mn.oc .oc-close,
+  .mn.oc .oc-undo,
+  .mn.oc .oc-link { min-height: 38px; }
+  .mn.oc .oc-link { display: inline-flex; align-items: center; padding: 0 4px; }
+  .mn.oc .oc-icon-btn { padding: 0 9px; }
+  .op-readout-btn { min-height: var(--tap); }
+}
+@media (hover: none), (pointer: coarse) {
+  .mn.oc .btn { min-height: var(--tap); }
+  .mn.oc .oc-rail-item { min-height: var(--tap); }
+  .mn.oc .oc-rule-main,
+  .mn.oc .oc-ov-row { min-height: var(--tap); }
+  .mn.oc .oc-chip { min-height: var(--tap); padding: 0 14px; }
+  .mn.oc .oc-chip-x { min-width: var(--tap); min-height: var(--tap); }
+  .mn.oc .oc-check { min-height: var(--tap); }
+  .mn.oc .oc-check input[type="checkbox"] { width: 20px; height: 20px; }
+  .mn.oc .oc-field input,
+  .mn.oc .oc-pick input,
+  .mn.oc .oc-inline input { min-height: var(--tap); }
+  .mn.oc .oc-disclosure,
+  .mn.oc .oc-cond-btn,
+  .mn.oc .oc-pick-row,
+  .mn.oc .oc-icon-btn,
+  .mn.oc .oc-close,
+  .mn.oc .oc-undo,
+  .mn.oc .oc-link { min-height: var(--tap); }
+  /* Seven day chips cannot fit a 44px target on one phone row: use four
+     columns and let the week wrap onto a second row. */
+  .mn.oc .oc-days { grid-template-columns: repeat(4, minmax(var(--tap), 1fr)); max-width: none; }
+  .mn.oc .oc-chip-day { min-width: var(--tap); }
+  .mn.oc .oc-pick-list { max-height: 40dvh; }
+  /* A free-value row and its add button each take the full tap target; giving
+     the button the same width as the field keeps the pair readable instead of
+     leaving a 44px square beside a long input. */
+  .mn.oc .oc-pick-custom .btn { min-width: var(--tap); }
+  .op-readout-btn { min-height: var(--tap); }
+  /* The confirmation panel sits outside .mn.oc, so it takes the same coarse
+     target explicitly. Its base 42px already clears the narrow rung. */
+  .oc-confirm-panel .btn { min-height: var(--tap); }
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .op-readout-dot { animation: none !important; }
+  .op-readout-chev { transition: none; }
+}

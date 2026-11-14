@@ -199,16 +199,15 @@ function askOperatorToken() {
 
 // All operator mutations share confirmation, busy and issue-order gates.
 const operatorState = {
-  pause: { revision: 0, busy: false, menu: 'pause-menu', count: 'pause-count', valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState, sync: syncPauseMenuState, refresh: refreshPauseMenuDisplay },
-  debug: { revision: 0, busy: false, menu: 'debug-menu', count: 'debug-count', valid: st => st?.ok === true && Array.isArray(st.sessions), apply: applyDebugState, sync: syncDebugMenuState, refresh: refreshDebugMenuDisplay },
-  throttle: { revision: 0, busy: false, menu: 'limits-menu', count: 'lim-count', valid: st => st?.ok === true && Array.isArray(st.throttles), apply: applyThrottleState, sync: syncLimitsMenuState, refresh: refreshLimitsMenuDisplay },
+  pause: { revision: 0, busy: false, valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState },
+  debug: { revision: 0, busy: false, valid: st => st?.ok === true && Array.isArray(st.sessions), apply: applyDebugState },
+  throttle: { revision: 0, busy: false, valid: st => st?.ok === true && Array.isArray(st.throttles), apply: applyThrottleState },
 };
 document.addEventListener('click', e => {
   const button = e.target.closest('[data-operator]');
   if (!button || button.disabled) return;
-  const actions = { 'pause-edit': editPauseHold, 'pause-resume': resumePauseHold,
-    'debug-edit': editDebugSession, 'debug-stop': stopDebugSession, 'limit-edit': editLimitProvider,
-    'storm-open': openStormDetails, 'storm-close': closeStormDetails, 'quota-resume': resumeQuotaProvider };
+  const actions = { 'storm-open': openStormDetails, 'storm-close': closeStormDetails,
+    'quota-resume': resumeQuotaProvider };
   const action = actions[button.dataset.operator];
   if (action) { e.stopPropagation(); action(button.dataset.value); }
 });
@@ -219,34 +218,24 @@ function acceptOperator(kind, st, revision) {
   const gate = operatorState[kind];
   return !gate.busy && revision === gate.revision && gate.valid(st);
 }
+// operatorError is the one rejected-write surface. The console names the
+// rejection in the pane the operator is working in; when it is not loaded (a
+// partial harness), the toast is the fallback.
 function operatorError(kind, message) {
-  const el = $(operatorState[kind].count);
-  if (el) { el.textContent = message; el.dataset.err = '1'; }
+  if (typeof ocOperatorError === 'function') { ocOperatorError(message); return; }
+  toast(String(message || 'the change was rejected'), 'err');
 }
-// operatorCountClear is operatorError's reset counterpart: one owner for the
-// count-line clear (text + error flag), keyed by kind. The limits sites'
-// text clear alone would be behavior-neutral (updateLimitCount repaints the
-// line immediately after them, and mutateOperator's gate.sync() repaints it
-// for every kind), but the ERROR-FLAG clear is load-bearing:
-// updateLimitCount early-returns while dataset.err is set, so without this
-// clear a provider edit after a failed limits write would leave the stale
-// error on the line instead of repainting the live facts (jsdom-pinned).
-function operatorCountClear(kind) {
-  const el = $(operatorState[kind].count);
-  if (el) { el.textContent = ''; delete el.dataset.err; }
+// operatorClearError drops the previous rejection before a new write starts,
+// so a stale banner cannot outlive the condition that produced it.
+function operatorClearError() {
+  if (typeof ocOperatorErrorClear === 'function') ocOperatorErrorClear();
 }
-// resyncOperatorSurfaces is the shared apply-state epilogue: re-sync the
-// kind's header menu when it is open, then schedule a live repaint when a
-// snapshot exists. displayOnly polls (occupancy, elapsed and capture counts)
-// take the kind's refresh path, which updates the affected text without
-// touching the form or checklist nodes. The per-kind pre-work (footer
-// refresh, pressed bits) stays at its apply site.
-function resyncOperatorSurfaces(kind, displayOnly = false) {
-  const menu = $(operatorState[kind].menu);
-  if (menu && !menu.hidden) {
-    if (displayOnly && operatorState[kind].refresh) operatorState[kind].refresh();
-    else operatorState[kind].sync();
-  }
+// resyncOperatorSurfaces is the shared apply-state epilogue: repaint the
+// console when it is mounted, then schedule a live repaint when a snapshot
+// exists. The console owns focus-preserving rerenders, so a display-only
+// poll needs no separate path.
+function resyncOperatorSurfaces(kind) {
+  if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
   if (lastData) scheduleRenderLive();
 }
 async function mutateOperator(kind, body, after) {
@@ -254,8 +243,8 @@ async function mutateOperator(kind, body, after) {
   if (gate.busy) return;
   gate.busy = true;
   ++gate.revision;
-  operatorCountClear(kind);
-  gate.sync();
+  operatorClearError();
+  if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
   let confirmed;
   const fail = 'could not change ' + kind;
   try {
@@ -273,12 +262,13 @@ async function mutateOperator(kind, body, after) {
       gate.apply(confirmed);
       if (after) after();
       if (confirmed.warning) {
+        // Persistence warnings are non-fatal: the runtime state is confirmed,
+        // so the console names the warning in place and stays exactly where
+        // the operator left it.
         operatorError(kind, confirmed.warning);
-        $(gate.menu).hidden = false;
-        syncHdrMenuExpanded();
       }
     }
-    gate.sync();
+    if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
     refreshFooterState();
   }
 }
@@ -286,15 +276,9 @@ async function mutateOperator(kind, body, after) {
 let _pauseStateSig = '';
 let _throttleStateSig = '';
 let _debugStateSig = '';
-// Structural menu signatures exclude display-only poll fields (queue
-// occupancy, elapsed run time and capture counts). They are refreshed in
-// place by each kind's refresh function; everything that changes rows,
-// checklist vocabulary, selection or take-ability still runs the full sync.
-let _pauseMenuSig = '';
-let _debugMenuSig = '';
-let _limitsMenuSig = '';
-let _limitsProviderSig = '';
-let _limitsPolicySig = '';
+// Each accepted snapshot is deduped by its full document signature, so an
+// unchanged poll does no paint work. The console repaints the open pane and
+// preserves focus itself when the signature does change.
 function applyPauseState(st, revision = operatorState.pause.revision) {
   if (!acceptOperator('pause', st, revision)) return;
   const sig = JSON.stringify(st);
@@ -311,9 +295,8 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     queued: typeof st.queued === 'number' ? st.queued : 0,
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
   };
-  const displayOnly = pauseMenuStructuralSig() === _pauseMenuSig;
   refreshFooterState();
-  resyncOperatorSurfaces('pause', displayOnly);
+  resyncOperatorSurfaces('pause');
 }
 
 function applyThrottleState(st, revision = operatorState.throttle.revision) {
@@ -324,10 +307,9 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   throttleState = {
     throttles: Array.isArray(st.throttles) ? st.throttles : [],
     [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
+    [KNOWN_CLIENTS_KEY]: Array.isArray(st[KNOWN_CLIENTS_KEY]) ? st[KNOWN_CLIENTS_KEY] : [],
+    [KNOWN_MODELS_KEY]: Array.isArray(st[KNOWN_MODELS_KEY]) ? st[KNOWN_MODELS_KEY] : [],
     active: !!st.active,
   };
-  const displayOnly = limitsMenuStructuralSig() === _limitsMenuSig;
-  const btn = $('btn-limits');
-  if (btn) btn.setAttribute('aria-pressed', throttleState.active ? 'true' : 'false');
-  resyncOperatorSurfaces('throttle', displayOnly);
+  resyncOperatorSurfaces('throttle');
 }
