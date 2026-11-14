@@ -141,17 +141,17 @@ function ocRenderPause() {
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
     const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
-    const html = `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}"${ocRuleEditing('pause', hold.id || '')}>` +
-      `<button type="button" class="oc-rule-main" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}" data-oc-key="rule-${escapeHtml(hold.id || '')}" title="${escapeHtml(scope)}">` +
-      `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
+    const html = ocRuleRowHTML({
+      kind: 'pause', id: hold.id || '', scope, title: scope,
       // A stored 0 is the server's "no cap on this hold", not "use the
       // default": an omitted cap is written as the configured queue size at
       // creation, so 0 only ever reaches here because the operator chose
       // unlimited. Calling that "default queue" named the opposite bound.
-      `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'queue unlimited', ...meta].join(' · '))}</span></button>` +
-      `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(ocUntilPhrase(hold.until) || 'open')}</span>` +
-      `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
-      `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
+      budget: [hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'queue unlimited', ...meta].join(' · '),
+      live: ocUntilPhrase(hold.until) || 'open',
+      actions: `<button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
+        `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button>`,
+    });
     return { html, text: scope + ' ' + (hold.reason || '') + ' ' + (hold.max_queued || '') };
   });
   const shown = ocFilterRows('pause', entries);
@@ -412,14 +412,14 @@ function ocRenderCapture() {
     const n = typeof session.captures === 'number' ? session.captures : 0;
     // Capture count and elapsed time own the budget line; the side column owns
     // the remaining window, which is the same fact the row's action changes.
-    const html = `<div class="oc-rule" data-kind="capture" data-oc-rule="${escapeHtml(session.id || '')}"${ocRuleEditing('capture', session.id || '')}>` +
-      `<button type="button" class="oc-rule-main" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}" data-oc-key="rule-${escapeHtml(session.id || '')}" title="${escapeHtml(scope)}">` +
-      `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
-      `<span class="oc-rule-budget">${escapeHtml([n + (n === 1 ? ' capture' : ' captures'), ran,
-        session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '))}</span></button>` +
-      `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(left)}</span>` +
-      `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
-      `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button></div></div></div>`;
+    const html = ocRuleRowHTML({
+      kind: 'capture', id: session.id || '', scope, title: scope,
+      budget: [n + (n === 1 ? ' capture' : ' captures'), ran,
+        session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '),
+      live: left,
+      actions: `<button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
+        `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button>`,
+    });
     return { html, text: scope + ' ' + n + ' captures ' + left };
   });
   const shown = ocFilterRows('capture', entries);

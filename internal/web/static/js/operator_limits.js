@@ -333,16 +333,16 @@ function ocLimitRuleHTML(policy) {
   // "no traffic right now" rather than "this cap is not applied at all". The
   // row now says so in the same words the readout uses.
   const offSchedule = ocLimitOffSchedule(policy);
-  return `<div class="oc-rule" data-kind="limit" data-oc-rule="${escapeHtml(policy.id)}"${ocRuleEditing('limit', policy.id)}${offSchedule ? ' data-oc-off-schedule="1"' : ''}>` +
-    `<button type="button" class="oc-rule-main" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" data-oc-key="rule-${escapeHtml(policy.id)}" title="${escapeHtml(scope + ' · ' + source)}">` +
-    `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
-    `<span class="oc-rule-budget">${escapeHtml(ocBudgetPhrase(policy))}${escapeHtml(schedule)}</span></button>` +
-    `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(offSchedule ? OC_OFF_SCHEDULE : (live.join(' · ') || 'idle'))}</span>` +
+  return ocRuleRowHTML({
+    kind: 'limit', id: policy.id, scope, title: scope + ' · ' + source,
+    budget: ocBudgetPhrase(policy) + schedule,
+    live: offSchedule ? OC_OFF_SCHEDULE : (live.join(' · ') || 'idle'),
+    attrs: offSchedule ? ' data-oc-off-schedule="1"' : '',
     // The whole row is the edit target, so a separate edit action would
     // duplicate it and take width the scope needs.
-    `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="copy this limit's scope into a new limit" title="copy this scope into a new limit">copy</button>` +
-    `<button type="button" class="oc-icon-btn danger" data-oc-remove="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="remove limit">remove</button></div></div>` +
-    `</div>`;
+    actions: `<button type="button" class="oc-icon-btn" data-oc-copy="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="copy this limit's scope into a new limit" title="copy this scope into a new limit">copy</button>` +
+      `<button type="button" class="oc-icon-btn danger" data-oc-remove="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="remove limit">remove</button>`,
+  });
 }
 
 // ocLimitBody turns a draft into the strict POST document. Empty arrays are

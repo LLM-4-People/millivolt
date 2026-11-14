@@ -114,6 +114,27 @@ function ocRuleEditing(kind, id) {
   return ' data-oc-editing="1" aria-current="true"';
 }
 
+// ocRuleRowHTML assembles one stored-rule row. Limits, holds and captures each
+// wrote this eight-tag skeleton out by hand, so the row key, the edit target
+// and the side column had to be changed in three files to stay the same row.
+// What differs between the kinds is content: the scope reading, the budget
+// line, the live column and the action verbs. Those stay with the section that
+// owns their words; the structure lives here once.
+//
+// The words are escaped here because every part is a server or operator
+// string. `actions` is trusted markup: each section builds its own verbs and
+// escapes their own values, exactly as before.
+function ocRuleRowHTML(rule) {
+  const id = escapeHtml(rule.id || '');
+  return `<div class="oc-rule" data-kind="${escapeHtml(rule.kind)}" data-oc-rule="${id}"${ocRuleEditing(rule.kind, rule.id || '')}${rule.attrs || ''}>` +
+    `<button type="button" class="oc-rule-main" data-oc-edit="${escapeHtml(rule.kind)}" data-oc-id="${id}" data-oc-key="rule-${id}" title="${escapeHtml(rule.title)}">` +
+    `<span class="oc-rule-scope">${escapeHtml(rule.scope)}</span>` +
+    `<span class="oc-rule-budget">${escapeHtml(rule.budget)}</span></button>` +
+    `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(rule.live)}</span>` +
+    `<div class="oc-rule-actions">${rule.actions}</div></div>` +
+    `</div>`;
+}
+
 // ocComposing reports whether a section is showing its editor. The three
 // sections spelled the same expression out separately (a draft exists AND is
 // either an edit of a stored rule or a fresh one for this section); one owner
