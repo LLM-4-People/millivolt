@@ -340,9 +340,7 @@ async function purgeCount(filter) {
   const doc = await operatorJsonBody('/admin/purge/count', {
     method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(filter),
   }, PURGE_COUNT_UNAVAILABLE);
-  if (!Number.isSafeInteger(doc.count) || doc.count < 0) {
-    throw new Error(doc.error || PURGE_COUNT_UNAVAILABLE);
-  }
+  if (!isCount(doc.count)) throw new Error(doc.error || PURGE_COUNT_UNAVAILABLE);
   return doc.count;
 }
 

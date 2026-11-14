@@ -500,7 +500,7 @@ function bumpRecords() { recordsRevision++; }
 function setCounters(counters, pendingRevision) {
   if (!counters) return counters;
   const prev = lastData?.counters || {};
-  if (!Number.isSafeInteger(pendingRevision) || pendingRevision < 0 || pendingRevision < _pendingRevision) {
+  if (!isCount(pendingRevision) || pendingRevision < _pendingRevision) {
     counters = {...counters, in_flight: prev.in_flight};
   } else {
     _pendingRevision = pendingRevision;
@@ -764,7 +764,7 @@ function upsertRec(rec) {
 function upsertPendingRec(rec, pendingRevision) {
   const recs = lastData?.records || [];
   if (!rec || !rec.id) return recs;
-  if (!Number.isSafeInteger(pendingRevision) || pendingRevision < 0) return recs;
+  if (!isCount(pendingRevision)) return recs;
   let i = _recIdx.get(rec.id);
   if (i !== undefined && recs[i]?.id === rec.id) {
     // The same request's watermark orders every pending field, including
@@ -1104,8 +1104,8 @@ function takeEmbeddedBootstrap() {
     const p = JSON.parse(raw);
     if (!p || typeof p !== 'object' || !Array.isArray(p.records) ||
         !p.counters || typeof p.counters !== 'object' || !p.kpi || typeof p.kpi !== 'object' ||
-        typeof p.feed_id !== 'string' || !p.feed_id || !Number.isSafeInteger(p.seq) || p.seq < 0 ||
-        !Number.isSafeInteger(p.pending_revision) || p.pending_revision < 0 ||
+        typeof p.feed_id !== 'string' || !p.feed_id || !isCount(p.seq) ||
+        !isCount(p.pending_revision) ||
         p.incremental !== false || !DASHBOARD_VERSION_RE.test(p.dashboard_version)) return null;
     return p;
   } catch (_) { return null; }
@@ -1201,7 +1201,7 @@ function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
   if (p.debug) applyDebugState(p.debug, revisions.debug);
   applyRestartState(p.restart);
   applyStormState(p.storm);
-  if (p.storage && typeof p.storage.enabled === 'boolean' && Number.isSafeInteger(p.storage.dropped) && p.storage.dropped >= 0) {
+  if (p.storage && typeof p.storage.enabled === 'boolean' && isCount(p.storage.dropped)) {
     storageState = p.storage;
     refreshFooterState();
   }

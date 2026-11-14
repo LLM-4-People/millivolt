@@ -318,6 +318,13 @@ const fmtFull = n => n == null ? '-' : Number(n).toLocaleString();
 // two module helpers each spelled this ternary themselves, so "1 request is"
 // and "2 requests are" could drift from "1 request" and "2 requests".
 const agree = (n, singular, plural) => Number(n) === 1 ? singular : plural;
+// isCount is the dashboard's one "non-negative whole number" test: a request
+// count, a sequence number, a cursor, a queue depth. Ten sites spelled the same
+// safe-integer and sign check by hand, and two of them were the same predicate
+// differing only in what they return on failure. The failure value stays with
+// the caller, because a draft field needs NaN to report a rejected edit while a
+// missing document field needs 0; the test itself lives here once.
+const isCount = n => Number.isSafeInteger(n) && n >= 0;
 // countPhrase is the frequent "1 record" / "2 records" shape over fmt, so a
 // count is formatted and agreed in one call instead of two conventions.
 const countPhrase = (n, singular, plural) =>

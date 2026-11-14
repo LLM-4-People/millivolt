@@ -18,11 +18,11 @@ function applyStormState(st) {
     ['open', 'half_open'].includes(s.state) && typeof s.reason === 'string' &&
     typeof s.quota === 'boolean' && (!s.quota || s.scope === 'provider') &&
     Number.isFinite(s.error_percent) && s.error_percent >= 0 && s.error_percent <= 100 &&
-    (s.scope !== 'provider' || Number.isSafeInteger(s.active_models) && s.active_models >= 0 &&
-      Number.isSafeInteger(s.affected_models) && s.affected_models >= 0 && s.affected_models <= s.active_models &&
+    (s.scope !== 'provider' || isCount(s.active_models) &&
+      isCount(s.affected_models) && s.affected_models <= s.active_models &&
       Number.isFinite(s.affected_model_percent) && s.affected_model_percent >= 0 && s.affected_model_percent <= 100) &&
     ['error_requests', 'failures', 'samples', 'window_ms', 'queued', 'recovery_successes', 'recovery_required'].every(key =>
-      Number.isSafeInteger(s[key]) && s[key] >= 0) && s.failures <= s.samples && s.window_ms > 0 &&
+      isCount(s[key])) && s.failures <= s.samples && s.window_ms > 0 &&
     s.error_requests <= s.failures &&
     s.recovery_required > 0 && s.recovery_successes <= s.recovery_required &&
     typeof s.retry_at === 'string' && Number.isFinite(Date.parse(s.retry_at));

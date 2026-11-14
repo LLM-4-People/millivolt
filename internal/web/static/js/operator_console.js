@@ -83,7 +83,7 @@ function ocEl(id) { return document.getElementById(id); }
 // arrived yet. Zero means the server reports no default.
 function ocPauseDefaultCap() {
   const n = typeof pauseState === 'object' && pauseState ? Number(pauseState.default_max_queued) : NaN;
-  return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+  return isCount(n) ? n : 0;
 }
 
 // ---------- long rule lists ----------
@@ -1284,7 +1284,7 @@ function ocWindowLabel(value) {
 function ocNumber(value) {
   if (value === '' || value == null) return 0;
   const n = Number(value);
-  return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
+  return isCount(n) ? n : NaN;
 }
 
 // ocField is the one labelled input. A bare field carries its name as an
