@@ -278,14 +278,27 @@ module.exports = async function w16Mirrors(H) {
         // opposite polarity - `scheduled !== false` in the readout and
         // `scheduled === false` in both row builders - so a server answering
         // null would have flipped one surface and not the other.
-        const dir = path.join(STATIC, 'js');
-        const consoleSources = fs.readdirSync(dir)
-          .filter(name => /^operator_.*\\.js$/.test(name))
-          .map(name => fs.readFileSync(path.join(dir, name), 'utf8'));
+        //
+        // The source set is the outer block's readdir, which is the only
+        // spelling that matches a file: an inner shadow whose literal carried
+        // an escaped backslash matched nothing, so the check below passed while
+        // scanning zero files. Asserting a non-empty set is what makes the
+        // absence of a banned string mean anything.
+        // The scan reads code, not prose: the owner's own comment explains the
+        // polarity it replaced, and a naive substring count would either match
+        // that comment or force the explanation out of the source. Stripping a
+        // line comment is enough here because no banned expression spans lines.
+        const codeOnly = consoleSources.map(src => src.replace(/\/\/.*$/gm, ''));
+        const polarityReads = codeOnly.reduce((n, src) =>
+          n + (src.match(/policy\.scheduled\s*[!=]==\s*false/g) || []).length, 0);
         check('the off-schedule test has one owner instead of two polarities',
-          !consoleSources.some(src => src.includes('policy.scheduled === false') ||
-            src.includes('policy.scheduled !== false') ||
-            src.includes("'off schedule'")));
+          consoleSources.length > 0 &&
+          // Exactly one polarity read survives, and it is the primitive the
+          // complement and every row derive from.
+          polarityReads === 1 &&
+          sw.eval('OC_OFF_SCHEDULE') === 'off schedule' &&
+          sw.ocLimitEnforcing({scheduled: true}) === true &&
+          sw.ocLimitOffSchedule({scheduled: true}) === false);
         check('the enforcing test and its complement can never disagree',
           sw.ocLimitEnforcing({scheduled: true}) === true &&
           sw.ocLimitOffSchedule({scheduled: true}) === false &&
@@ -298,12 +311,10 @@ module.exports = async function w16Mirrors(H) {
         // ocBudgetPhrase, and the composer preview now reads the same clause
         // list: it used to build a second sentence with its own plural rule
         // and its own window wording, so one draft printed "1 requests per
-        // 1 minute" above a row that said "1 request / 1m".
-        const dir = path.join(STATIC, 'js');
-        const consoleSources = fs.readdirSync(dir)
-          .filter(name => /^operator_.*\\.js$/.test(name))
-          .map(name => fs.readFileSync(path.join(dir, name), 'utf8'));
+        // 1 minute" above a row that said "1 request / 1m". Same source-set
+        // rule as the block above: the outer readdir, and a non-empty set.
         check('the composer preview does not spell budgets a second way',
+          consoleSources.length > 0 &&
           !consoleSources.some(src => src.includes("' requests per '") ||
             src.includes("' requests in flight'") ||
             src.includes("' tokens per '")));
