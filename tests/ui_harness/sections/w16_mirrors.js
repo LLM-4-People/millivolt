@@ -427,10 +427,20 @@ module.exports = async function w16Mirrors(H) {
           const live = sw.liveHolds().map(h => h.id);
           const active = sw.pauseActive();
           const footer = sd.getElementById('f-state').textContent;
+          // The footer names a hold's blast radius through the shared reader,
+          // so the expectation is the owner's own sentence rather than a
+          // literal. A model-scoped hold used to print only the word "hold"
+          // here because the footer assembled the scope itself.
+          const ownerPhrase = sw.ocHoldScopePhrase({all: true});
+          sw.applyPauseState({ok: true, paused: true, clients: [], providers: [],
+            holds: [{id: 'model', models: ['glm-5.3'], until: future}],
+            known_clients: [], known_providers: [], until: null, queued: 0, default_max_queued: 0});
+          const modelFooter = sd.getElementById('f-state').textContent;
           sw.applyPauseState({ok: true, paused: false, clients: [], providers: [], holds: [],
             known_clients: ['c'], known_providers: ['p'], until: null, queued: 0, default_max_queued: 0});
           return JSON.stringify(live) === JSON.stringify(['live']) && active === true &&
-            footer.includes('paused · all requests');
+            footer.includes('paused · ' + ownerPhrase) &&
+            modelFooter.includes('paused · model glm-5.3');
         })());
 
       // ocCaptureMatchesRecord is the capture session's scope half: an empty

@@ -48,6 +48,135 @@ const durationPairs = (...vals) => vals.map(v => [v, DURATION_LABELS[v]]);
 // because "until stopped" is the truth there. Tokens are shared, the
 // open-ended sentence is per kind.
 const PAUSE_DURS = [['', 'until resumed']].concat(durationPairs('15m', '1h', '6h', '12h', '24h'));
+// ---------- operator scope vocabulary ----------
+// The selector dimensions and their readings live here, in the module that
+// loads before every other operator surface, because three layers read them:
+// the footer's hold line, the header readout and the console's rows and
+// composers. They used to live in operator_console.js, which loads after the
+// footer, so the footer could not call the phrase owner and re-derived a
+// poorer copy: a hold scoped to a model, a key or a conversation printed only
+// the word "hold", and "all traffic" became "all requests" on one surface.
+//
+// ocScopePhrase is the one human reading of a selector. Rule rows, previews,
+// confirmations and the readout all call it, so an operator never has to
+// translate three vocabularies for one policy.
+function ocScopePhrase(scope) {
+  if (!scope) return 'every request';
+  const bits = [];
+  for (const dim of OC_SCOPE_DIMS) {
+    const values = scope[dim.key] || [];
+    if (!values.length) continue;
+    if (values.length === 1) bits.push(dim.one + ' ' + ocScopeValueLabel(dim.key, values[0]));
+    else bits.push(values.length + ' ' + dim.many);
+  }
+  return bits.length ? bits.join(' · ') : 'every request';
+}
+
+// ocScopeValueLabel is the one shortening of a raw selector value. The
+// dimension name always comes from the surrounding sentence or row, so this
+// never repeats it: a key reads as its short hash, not "key key abcdef12".
+function ocScopeValueLabel(dim, value) {
+  if (dim === 'keyHashes') return String(value).slice(0, 8) + '…';
+  return String(value);
+}
+
+// OC_SCOPE_DIMS is the one table of selector dimensions, in display order.
+// A limit, a hold and a capture all match a request by the same identity, so
+// every spelling of a dimension lives on its one row:
+//
+//   key    the client's field name, which the editors and drafts use
+//   wire   the server document's name, which the store and the POST body use
+//   one    the word a sentence uses for a single value
+//   many   the word a sentence uses for several
+//   record the request record field that carries the value
+//
+// The phrase readers, the selector key, the record matchers, the composer
+// bodies and the picker labels all read this table. Adding a dimension is one
+// row here instead of eight edits that can disagree about the wire name or the
+// singular word.
+const OC_SCOPE_DIMS = [
+  { key: 'providers', wire: 'providers', one: 'provider', many: 'providers', record: 'provider' },
+  { key: 'models', wire: 'models', one: 'model', many: 'models', record: 'model' },
+  { key: 'clients', wire: 'clients', one: 'client', many: 'clients', record: 'client' },
+  { key: 'keyHashes', wire: 'key_hashes', one: 'key', many: 'keys', record: 'key_hash' },
+  { key: 'conversations', wire: 'conversations', one: 'conversation', many: 'conversations', record: 'conversation_id' },
+];
+
+// OC_SCOPE_KEYS is the table's client-side order, the shape every composer and
+// chip strip iterates.
+const OC_SCOPE_KEYS = OC_SCOPE_DIMS.map(dim => dim.key);
+
+// OC_CAPTURE_SCOPE_KEYS is the subset a capture session can select on. It is
+// narrower on purpose: the server's debug scope carries clients, providers and
+// models, while a limit and a hold also match a key hash and a conversation.
+// It is derived from the table so a dimension rename reaches it too.
+const OC_CAPTURE_SCOPE_KEYS = OC_SCOPE_DIMS
+  .filter(dim => ['clients', 'providers', 'models'].includes(dim.key))
+  .map(dim => dim.key);
+
+function ocScopeDim(key) {
+  return OC_SCOPE_DIMS.find(dim => dim.key === key || dim.wire === key) || null;
+}
+
+function ocNewScope() {
+  const scope = {};
+  for (const dim of OC_SCOPE_DIMS) scope[dim.key] = [];
+  return scope;
+}
+
+// ocScopeFromPolicy reads a stored document into the draft shape. A limit
+// nests its selector under `scope`; a hold and a capture session carry the same
+// dimensions flat, so both shapes are accepted and the caller passes the
+// document it has.
+function ocScopeFromPolicy(policy) {
+  const raw = policy?.scope || policy || {};
+  const scope = ocNewScope();
+  for (const dim of OC_SCOPE_DIMS) scope[dim.key] = [...(raw[dim.wire] || [])];
+  return scope;
+}
+
+// ocScopeToWire turns a draft's selector into the document's field names. The
+// bodies send every dimension explicitly, because the server treats a supplied
+// array as a replacement and an omitted one as "keep".
+function ocScopeToWire(scope) {
+  const wire = {};
+  for (const dim of OC_SCOPE_DIMS) wire[dim.wire] = scope[dim.key] || [];
+  return wire;
+}
+
+// ocPolicyScopePhrase is the phrase for a stored server document, which nests
+// its selector. Every surface that shows a rule's blast radius reads this, so
+// the row, the removal confirmation and the overview cannot re-derive it
+// differently.
+function ocPolicyScopePhrase(policy) {
+  return ocScopePhrase(ocScopeFromPolicy(policy));
+}
+
+function ocScopeHas(scope) {
+  return Object.values(scope).some(values => values.length > 0);
+}
+
+// ocHoldScopePhrase is the one reading of a hold's blast radius. A hold is one
+// of three shapes - everything, clients unseen when it started, or a named
+// selector - and the preview, both rule rows, the ledger phrase and the resume
+// confirmation each stated that choice themselves. One owner keeps "all
+// traffic" from becoming "everything" on one surface and "all" on another.
+function ocHoldScopePhrase(hold) {
+  if (!hold) return 'every request';
+  if (hold.all) return 'all traffic';
+  if (hold.new) return 'new clients';
+  return ocScopePhrase(ocScopeFromPolicy({ scope: hold }));
+}
+
+// ocHoldDraftScopePhrase is the same reading for a composer draft, whose mode
+// is a name rather than the two booleans a stored hold carries.
+function ocHoldDraftScopePhrase(draft) {
+  if (!draft) return 'every request';
+  if (draft.mode === 'all') return 'all traffic';
+  if (draft.mode === 'new') return 'new clients';
+  return ocScopePhrase(draft.scope);
+}
+
 function liveDebugSessions() {
   return (debugState.sessions || []).filter(holdLive);
 }
@@ -211,20 +340,15 @@ function refreshFooterState() {
   if (state) {
     if (holding) {
       const live = liveHolds();
-      let scopeBits = [];
-      if (live.length === 1) {
-        const h = live[0];
-        const bits = [];
-        if (h.all) bits.push('all requests');
-        else {
-          if (h.new) bits.push('new clients');
-          if (Array.isArray(h.clients) && h.clients.length) bits.push(h.clients.join(', '));
-          if (Array.isArray(h.providers) && h.providers.length) bits.push(h.providers.join(', '));
-        }
-        scopeBits = [bits.join(' + ') || 'hold'];
-      } else if (live.length > 1) {
-        scopeBits = [live.length + ' holds'];
-      }
+      // One hold names its blast radius through the shared reader, the same
+      // one the console's rows, previews and receipts call. The footer used to
+      // assemble its own from all/new/clients/providers, so a hold scoped to a
+      // model, a key or a conversation printed only the word "hold", and its
+      // "all requests" had already drifted from the console's "all traffic"
+      // for the same state.
+      const scopeBits = live.length === 1 ? [ocHoldScopePhrase(live[0])]
+        : live.length > 1 ? [countPhrase(live.length, 'hold')]
+          : [];
       state.textContent = pauseStatusBits(scopeBits).join(' · ');
     } else if (debugging) {
       state.textContent = debugStatusBits().join(' · ');
