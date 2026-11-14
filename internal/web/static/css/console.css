@@ -791,7 +791,13 @@ button.oc-chip[aria-pressed="true"]::before {
     max-height: min(88dvh, calc(100dvh - 16px));
   }
   .mn.oc .oc-hd { padding: 8px 10px 9px; }
-  .mn.oc .oc-pane { padding: 9px 10px 12px; }
+  /* A pinned commit row can only reach the pane's true bottom edge when no
+     padding sits below the composer. With the usual bottom padding the sticky
+     row stopped exactly that many pixels short and content scrolled through
+     the gap beneath it - most visible on a landscape phone. The trailing
+     inset moves to the sections that have no pinned row. */
+  .mn.oc .oc-pane { padding: 9px 10px 0; }
+  .mn.oc .oc-pane:not(:has(.oc-compose)) { padding-bottom: 12px; }
   .mn.oc .oc-ft { padding: 6px 10px; }
   .oc-sec-head { flex-wrap: wrap; }
 }
@@ -830,7 +836,16 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc .oc-hd { padding: 5px 8px; }
   .mn.oc .oc-ft { padding: 4px 8px; }
   .mn.oc .oc-rail { padding: 4px 6px; }
-  .mn.oc .oc-pane { padding: 7px 8px 10px; }
+  .mn.oc .oc-pane { padding: 7px 8px 0; }
+  .mn.oc .oc-pane:not(:has(.oc-compose)) { padding-bottom: 10px; }
+  /* Two pinned bands in a pane this short leave almost no form between them:
+     at 568x320 the pane is 180px, the composer title took 28 and the action
+     row 63, so barely 90px of fields showed at once. The action row must stay
+     (committing is the whole task); the title does not, because the rail names
+     the section and the commit button names the action. It scrolls away like
+     the rest of the form. */
+  .mn.oc .oc-compose-hd { position: static; }
+  .mn.oc .oc-compose-ft { padding: 6px 8px; }
 }
 
 @media (max-width: 640px) {
