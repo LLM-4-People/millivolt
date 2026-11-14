@@ -430,6 +430,11 @@ function ocRenderFoot() {
   if (undo) {
     undo.hidden = !last || typeof last.undo !== 'function';
     undo.disabled = ocUndoBusy;
+    // The button says what it will restore. The footer line names the newest
+    // change, which is not always the reversible one, so the accessible name
+    // is the only place the two can be tied together for a screen reader.
+    if (!undo.hidden && last) undo.setAttribute('aria-label', 'undo: ' + last.phrase);
+    else undo.removeAttribute('aria-label');
   }
 }
 
