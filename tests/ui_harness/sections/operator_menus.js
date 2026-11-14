@@ -919,25 +919,50 @@ module.exports = async function operatorMenus(H) {
           await settleUntil(() => text('#oc-change').startsWith('resumed ')) &&
           text('#oc-change') === 'resumed all traffic');
 
+        // A hold with parked work releases that backlog on resume, which is
+        // the same consequence `resume all` confirms. Asking only in the bulk
+        // case taught the operator that the single resume was safer.
+        await settleUntil(() => w.eval('operatorState.pause.busy') === false);
+        w.applyPauseState({ok: true, paused: true,
+          holds: [{id: 'hold-q', all: true, queued: 5}], queued: 5,
+          known_clients: [], known_providers: [], until: null, default_max_queued: 0});
+        click('#oc-pane [data-oc-resume="hold-q"]');
+        await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+        check('resuming a hold that has parked work asks first',
+          text('#oc-confirm-title') === 'Resume this hold?' &&
+          d.querySelector('.oc-confirm-body').textContent.includes('5 parked requests') &&
+          d.querySelector('.oc-confirm-body').textContent.includes('releases them'));
+        const beforeQueued = posts.length;
+        click('#oc-confirm-dialog [data-oc-confirm="cancel"]');
+        check('cancelling a queued resume leaves the hold in force',
+          posts.length === beforeQueued && w.eval('pauseState.holds.length') === 1);
+        click('#oc-pane [data-oc-resume="hold-q"]');
+        await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
+        click('#oc-confirm-dialog [data-oc-confirm="ok"]');
+        check('confirming a queued resume posts the single id',
+          await settleUntil(() => posts.length === beforeQueued + 1) &&
+          stable(posts[posts.length - 1]) === stable({paused: false, id: 'hold-q'}));
+
         await settleUntil(() => w.eval('operatorState.pause.busy') === false);
         w.applyPauseState({ok: true, paused: true,
           holds: [{id: 'hold-a', all: true}, {id: 'hold-b', clients: ['client-a']}],
           queued: 2, known_clients: ['client-a'], known_providers: [],
           until: null, default_max_queued: 0});
+        const beforeAll = posts.length;
         click('#oc-pane [data-oc-resume-all]');
         await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
         check('resuming every hold asks for confirmation first',
           text('#oc-confirm-title') === 'Resume every hold?' &&
           d.querySelector('.oc-confirm-body').textContent.includes('2 holds are') &&
-          posts.length === 4);
+          posts.length === beforeAll);
         click('#oc-confirm-dialog [data-oc-confirm="cancel"]');
         check('cancelling resume-all keeps every hold', w.eval('pauseState.holds.length') === 2);
         click('#oc-pane [data-oc-resume-all]');
         await settleUntil(() => !!d.getElementById('oc-confirm-dialog'));
         click('#oc-confirm-dialog [data-oc-confirm="ok"]');
         check('confirming resume-all posts the global resume',
-          await settleUntil(() => posts.length === 5) &&
-          stable(posts[4]) === stable({paused: false}) &&
+          await settleUntil(() => posts.length === beforeAll + 1) &&
+          stable(posts[beforeAll]) === stable({paused: false}) &&
           await settleUntil(() => text('#oc-change') === 'resumed every hold'));
       } finally {
         w.fetch = savedFetch;

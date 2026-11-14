@@ -227,6 +227,21 @@ async function ocResumeHold(id) {
   if (!hold) return;
   const scope = hold.all ? 'all traffic'
     : hold.new ? 'new clients' : ocScopePhrase({ providers: hold.providers, clients: hold.clients });
+  // Resuming a hold with parked work releases that backlog to the provider in
+  // one burst, which is the same consequence `resume all` confirms. Asking
+  // only in the bulk case taught the operator that the single resume was the
+  // safer of the two when it has the identical effect on a smaller scope.
+  if (Number(hold.queued) > 0) {
+    const ok = await ocConfirm({
+      title: 'Resume this hold?',
+      body: fmt(Number(hold.queued)) + ' parked ' +
+        (Number(hold.queued) === 1 ? 'request is' : 'requests are') +
+        ' waiting behind it. Resuming releases them to the provider. In-flight streams finish normally.',
+      confirm: 'resume',
+      danger: true,
+    });
+    if (!ok) return;
+  }
   const phrase = 'resumed ' + scope;
   mutateOperator('pause', { paused: false, id }, () => {
     ocRecordChange(phrase, () => { const draft = ocPauseDraftFromHold(hold); draft.id = ''; return mutateOperator('pause', ocPauseBody(draft)); }, 'ok');
