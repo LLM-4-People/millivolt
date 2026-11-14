@@ -489,16 +489,27 @@ function ocScopeValueLabel(dim, value) {
   return String(value);
 }
 
-// ocBudgetPhrase is the one human reading of a limit's caps.
+// ocBudgetPhrase is the one human reading of a limit's caps. It is what the
+// row, the overview row and the ledger print, and the composer preview reads
+// the same clause list rather than spelling the numbers a second way: the
+// preview used to say "1 requests per 1 minute" for a row that said
+// "1 request / 1m", and it never went singular. A draft carries camelCase
+// windows and a stored policy carries snake_case ones, so the reader
+// normalizes both instead of each caller choosing a shape.
 function ocBudgetPhrase(policy) {
+  const num = value => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const reqWindow = policy.request_window || policy.requestWindow || '1m';
+  const tokWindow = policy.token_window || policy.tokenWindow || '1m';
+  const conc = num(policy.concurrency);
+  const req = num(policy.requests);
+  const tok = num(policy.tokens);
   const bits = [];
-  if (policy.concurrency) bits.push(policy.concurrency + ' in flight');
-  if (policy.requests) {
-    bits.push(fmt(policy.requests) + ' request' + (policy.requests === 1 ? '' : 's') + ' / ' + (policy.request_window || '1m'));
-  }
-  if (policy.tokens) {
-    bits.push(fmt(policy.tokens) + ' tokens / ' + (policy.token_window || '1m'));
-  }
+  if (conc > 0) bits.push(fmt(conc) + ' in flight');
+  if (req > 0) bits.push(fmt(req) + (req === 1 ? ' request / ' : ' requests / ') + reqWindow);
+  if (tok > 0) bits.push(fmt(tok) + (tok === 1 ? ' token / ' : ' tokens / ') + tokWindow);
   if (!bits.length) return 'no caps';
   return bits.join(' · ');
 }

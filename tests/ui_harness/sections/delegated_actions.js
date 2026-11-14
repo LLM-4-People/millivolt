@@ -403,7 +403,10 @@ module.exports = async function delegatedActions(H) {
       check('editing the hostile rule keeps its stored budgets, ramp and custom window',
         sd.querySelector('#oc-pane [data-oc-field="requests"]').value === '2' &&
         sw.eval('ocDrafts.limit.requestWindow') === '2m' &&
-        sd.getElementById('oc-lim-preview').textContent.includes('2 requests per 2m') &&
+        // The preview and the row read one budget owner, so the same draft
+        // prints the same sentence above and below it.
+        sd.getElementById('oc-lim-preview').textContent.includes('2 requests / 2m') &&
+        hostileRow.querySelector('.oc-rule-budget').textContent.includes('2 requests / 2m') &&
         sd.querySelector('#oc-pane [data-oc-field="antiBurst"]').checked &&
         sd.querySelector('#oc-pane [data-oc-choice="ramp"]').value === '10s' &&
         !sw.__operatorXSS);

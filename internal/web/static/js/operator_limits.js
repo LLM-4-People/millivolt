@@ -229,11 +229,17 @@ function ocLimitPreview() {
   } else if (!any) {
     text = 'set at least one budget';
   } else {
-    const bits = [];
-    if (conc > 0) bits.push(conc + ' requests in flight');
-    if (req > 0) bits.push(fmt(req) + ' requests per ' + ocWindowLabel(draft.requestWindow));
-    if (tok > 0) bits.push(fmt(tok) + ' tokens per ' + ocWindowLabel(draft.tokenWindow));
-    text = 'At most ' + bits.join(', and ') + ', for ' + ocScopePhrase({
+    // The preview names the same caps the row will print. It used to build a
+    // second sentence with its own plural rule and its own window wording, so
+    // an operator read "1 requests per 1 minute" while the row underneath said
+    // "1 request / 1m" for the same draft.
+    text = 'At most ' + ocBudgetPhrase({
+      concurrency: conc,
+      requests: req,
+      requestWindow: draft.requestWindow,
+      tokens: tok,
+      tokenWindow: draft.tokenWindow,
+    }) + ', for ' + ocScopePhrase({
       providers: draft.scope.providers,
       models: draft.scope.models,
       clients: draft.scope.clients,

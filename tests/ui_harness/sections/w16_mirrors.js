@@ -273,7 +273,33 @@ module.exports = async function w16Mirrors(H) {
         // The window pickers are one owner: ocWindowSelect derives both the
         // request/token windows and the ramp from LIMIT_WINDOWS, so a caller
         // cannot re-derive a divergent token list.
-        check('the window pickers derive their tokens from LIMIT_WINDOWS once',
+        {
+        // One budget sentence. The row, the overview and the ledger print
+        // ocBudgetPhrase, and the composer preview now reads the same clause
+        // list: it used to build a second sentence with its own plural rule
+        // and its own window wording, so one draft printed "1 requests per
+        // 1 minute" above a row that said "1 request / 1m".
+        const dir = path.join(STATIC, 'js');
+        const consoleSources = fs.readdirSync(dir)
+          .filter(name => /^operator_.*\\.js$/.test(name))
+          .map(name => fs.readFileSync(path.join(dir, name), 'utf8'));
+        check('the composer preview does not spell budgets a second way',
+          !consoleSources.some(src => src.includes("' requests per '") ||
+            src.includes("' requests in flight'") ||
+            src.includes("' tokens per '")));
+        const phrase = sw.ocBudgetPhrase;
+        check('one budget sentence names a single request in the singular',
+          phrase({concurrency: 1, requests: 1, requestWindow: '1m', tokens: 1, tokenWindow: '1h'}) ===
+            '1 in flight · 1 request / 1m · 1 token / 1h');
+        check('the same budget sentence serves a stored policy and a draft',
+          phrase({concurrency: 2, requests: 10, request_window: '1m', tokens: 1000, token_window: '1h'}) ===
+            phrase({concurrency: 2, requests: 10, requestWindow: '1m', tokens: 1000, tokenWindow: '1h'}) &&
+          phrase({concurrency: 2, requests: 10, request_window: '1m', tokens: 1000, token_window: '1h'}) ===
+            '2 in flight · 10 requests / 1m · 1K tokens / 1h');
+        check('a limit with no caps is named once, not an empty string',
+          phrase({concurrency: 0, requests: 0, tokens: 0}) === 'no caps');
+      }
+      check('the window pickers derive their tokens from LIMIT_WINDOWS once',
           consoleSources.some(src => src.includes('const values = (withOff ? [\'\'] : []).concat(LIMIT_WINDOWS.map(([v]) => v))')) &&
           !consoleSources.some(src => src.includes("ocChipRow('ramp'")));
         check('both console duration pickers read the one PAUSE_DURS vocabulary',
