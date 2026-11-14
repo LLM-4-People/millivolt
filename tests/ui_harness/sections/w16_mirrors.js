@@ -1,7 +1,8 @@
 // W16 mirror pins: the Go<->JS pairs the mutation rounds proved unguarded
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function w16Mirrors(H) {
-  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, observerFixture, pageOptions, path, rows, settleUntil} = H;
+  const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, modelFixture, observerFixture, pageOptions, path, rows, settleUntil} = H;
+  const {fs, STATIC} = H;
   const state = H.state;
 
   // ---- W16 mirror pins: the Go<->JS pairs the mutation rounds proved unguarded ----
@@ -240,45 +241,90 @@ module.exports = async function w16Mirrors(H) {
           sw.errorKeyDisplay(sw.errorKey('"a" · "b', 'c" · "d', 'e"')) &&
         sw.shortId('error', sw.errorKey('a|b', 'c', 'd')) === 'a|b');
 
-      // The duration vocabularies mirror Go acceptance: PAUSE_DURS and
-      // DEBUG_DURS tokens are the pauseDurations allowlist (pinned through
-      // the real pause/debug handlers Go-side), LIMIT_WINDOWS tokens pass
-      // parseLimitWindow, and FILTER_AGES tokens are canonical
-      // config.FormatDuration spellings. Labels ride the same pin so the
-      // '15 min' vs '15 minutes' drift class cannot return.
+      // The duration vocabularies mirror Go acceptance: PAUSE_DURS tokens are
+      // the pauseDurations allowlist (pinned through the real pause/debug
+      // handlers Go-side), LIMIT_WINDOWS tokens pass parseLimitWindow, and
+      // FILTER_AGES tokens are canonical config.FormatDuration spellings.
+      // Labels ride the same pin so the '15 min' vs '15 minutes' drift class
+      // cannot return. There is one operator vocabulary now: the console's
+      // capture composer reuses PAUSE_DURS and its ramp picker derives from
+      // LIMIT_WINDOWS, so DEBUG_DURS and LIMIT_RAMPS must not come back.
       check('PAUSE_DURS offers exactly the server-accepted hold durations',
         JSON.stringify(sw.eval('PAUSE_DURS')) === JSON.stringify([
           ['', 'I resume'], ['15m', '15 minutes'], ['1h', '1 hour'],
           ['6h', '6 hours'], ['12h', '12 hours'], ['24h', '24 hours']]));
-      check('DEBUG_DURS shares the pause vocabulary with its own empty label',
-        JSON.stringify(sw.eval('DEBUG_DURS')) === JSON.stringify([
-          ['', 'I stop'], ['15m', '15 minutes'], ['1h', '1 hour'],
-          ['6h', '6 hours'], ['12h', '12 hours'], ['24h', '24 hours']]));
+      check('DEBUG_DURS is gone: the capture composer reuses PAUSE_DURS',
+        sw.eval('typeof DEBUG_DURS') === 'undefined');
       check('LIMIT_WINDOWS offers exactly the parseLimitWindow-accepted tokens',
         JSON.stringify(sw.eval('LIMIT_WINDOWS')) === JSON.stringify([
           ['1s', '1 second'], ['10s', '10 seconds'], ['30s', '30 seconds'],
           ['1m', '1 minute'], ['5m', '5 minutes'], ['15m', '15 minutes'],
           ['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours']]));
-      check('LIMIT_RAMPS derives from LIMIT_WINDOWS behind its off pair',
-        JSON.stringify(sw.eval('LIMIT_RAMPS')) ===
-        JSON.stringify(sw.eval('[["", "off"]].concat(LIMIT_WINDOWS)')));
+      check('LIMIT_RAMPS is gone: the ramp picker derives from LIMIT_WINDOWS',
+        sw.eval('typeof LIMIT_RAMPS') === 'undefined');
+      {
+        // The ramp picker lives with the limit composer; read the console's
+        // modules as one source set so a further split cannot silently drop
+        // the derivation assertion.
+        const dir = path.join(STATIC, 'js');
+        const consoleSources = fs.readdirSync(dir)
+          .filter(name => /^operator_.*\.js$/.test(name))
+          .map(name => fs.readFileSync(path.join(dir, name), 'utf8'));
+        check('the ramp picker source derives its tokens from LIMIT_WINDOWS',
+          consoleSources.some(src => src.includes(`ocChipRow('ramp', [''].concat(LIMIT_WINDOWS.map(([v]) => v))`)));
+        check('both console duration pickers read the one PAUSE_DURS vocabulary',
+          consoleSources.reduce((n, src) =>
+            n + (src.match(/\[''\]\.concat\(PAUSE_DURS\.slice\(1\)\.map\(\(\[v\]\) => v\)\)/g) || []).length, 0) === 2);
+      }
       check('FILTER_AGES offers canonical Go duration spellings',
         JSON.stringify(sw.eval('FILTER_AGES')) === JSON.stringify([
           ['', 'any'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
-      sw.togglePauseMenu({stopPropagation() {}});
-      check('the pause menu renders the PAUSE_DURS token set',
-        JSON.stringify([...sd.getElementById('pf-dur').options].map(o => o.value)) ===
-        JSON.stringify(['', '15m', '1h', '6h', '12h', '24h']));
-      sw.togglePauseMenu({stopPropagation() {}});
-      sw.toggleLimitsMenu({stopPropagation() {}});
-      check('the limits menu renders the off-plus-window ramp token set',
-        JSON.stringify([...sd.getElementById('lim-ramp').options].map(o => o.value)) ===
-        JSON.stringify(['', '1s', '10s', '30s', '1m', '5m', '15m', '1h', '6h', '24h']));
-      sw.toggleLimitsMenu({stopPropagation() {}});
+      {
+        // The composers are the only pickers now. Each renders the shared
+        // closed vocabulary as pressed chips; the pause and capture sets are
+        // PAUSE_DURS minus its empty "resume" pair behind their own empty
+        // token, and the limit request window is LIMIT_WINDOWS exactly.
+        const chipValues = name => [...sd.querySelectorAll('#oc-pane [data-oc-choice]')]
+          .filter(chip => chip.dataset.ocChoice === name)
+          .map(chip => chip.dataset.ocValue);
+        sw.applyPauseState({ok:true,paused:false,holds:[],clients:[],providers:[],
+          known_clients:[],known_providers:[],until:null,queued:0,default_max_queued:0});
+        sw.openOperatorConsole('pause');
+        sw.ocOpenPauseComposer('');
+        check('the pause composer renders exactly the PAUSE_DURS durations behind its empty token',
+          JSON.stringify(chipValues('pause-duration')) ===
+          JSON.stringify([''].concat(sw.eval('PAUSE_DURS').slice(1).map(([v]) => v))));
+        sw.applyDebugState(observerFixture({ok:true,enabled:false,sessions:[],
+          known_clients:[],known_providers:[],known_models:[],model_canon:modelFixture()}));
+        sw.openOperatorConsole('capture');
+        sw.ocOpenCaptureComposer('');
+        check('the capture composer reuses the pause duration set',
+          JSON.stringify(chipValues('capture-duration')) ===
+          JSON.stringify([''].concat(sw.eval('PAUSE_DURS').slice(1).map(([v]) => v))));
+        sw.openOperatorConsole('limits');
+        sw.ocOpenLimitComposer('');
+        check('the limit composer renders exactly the LIMIT_WINDOWS request windows',
+          JSON.stringify(chipValues('request-window')) ===
+          JSON.stringify(sw.eval('LIMIT_WINDOWS').map(([v]) => v)) &&
+          JSON.stringify(chipValues('token-window')) ===
+          JSON.stringify(sw.eval('LIMIT_WINDOWS').map(([v]) => v)));
+        sd.querySelector('#oc-pane [data-oc-toggle="advanced"]').click();
+        check('the ramp picker is the LIMIT_WINDOWS windows behind the empty off token',
+          JSON.stringify(chipValues('ramp')) ===
+          JSON.stringify([''].concat(sw.eval('LIMIT_WINDOWS').map(([v]) => v))) &&
+          sd.querySelector('#oc-pane [data-oc-choice="ramp"][data-oc-value=""]').textContent === 'off');
+        sw.closeOperatorConsole();
+        sw.eval("ocDrafts.limit = null; ocDrafts.pause = null; ocDrafts.capture = null; ocView = {kind: '', id: ''}; ocError = ''");
+        sw.applyPauseState({ok:true,paused:false,holds:[],clients:[],providers:[],
+          known_clients:['c'],known_providers:['p'],until:null,queued:0,default_max_queued:0});
+        sw.applyDebugState(observerFixture({ok:true,enabled:false,sessions:[],
+          known_clients:['c'],known_providers:['p'],known_models:['m'],model_canon:modelFixture()}));
+        sw.applyThrottleState({ok:true,active:false,throttles:[],known_providers:['p']});
+      }
 
-      // holdMatchesRecord mirrors scheduler holdSnap.matches on the scope
-      // half (scheduler/hold.go); chrome_settings.js holdLive owns the expiry half
-      // the Go matcher folds in. The matrix mirrors the Go suite's
+      // ocHoldMatchesRecord mirrors scheduler holdSnap.matches on the scope
+      // half (scheduler/hold.go); chrome_settings.js holdLive owns the expiry
+      // half the Go matcher folds in. The matrix mirrors the Go suite's
       // TestHoldMatchesMatrix row for row (that suite owns the table, the
       // hand-mirror documented here): the wire keys are all/new/clients/
       // providers/known_at_new, and every verdict must agree.
@@ -302,14 +348,84 @@ module.exports = async function w16Mirrors(H) {
         ['dimensionless hold is inactive', {all: false, clients: [], providers: [], new: false}, {client: 'client-a', provider: 'alpha.example'}, false],
       ];
       const holdMisses = holdRows
-        .filter(([name, h, r, want]) => sw.eval(`holdMatchesRecord(${JSON.stringify(h)}, ${JSON.stringify(r)})`) !== want)
+        .filter(([name, h, r, want]) => sw.ocHoldMatchesRecord(h, r) !== want)
         .map(([name]) => name);
-      check('holdMatchesRecord agrees with the Go matcher matrix' +
+      check('the console hold matcher agrees with the Go matcher matrix' +
         (holdMisses.length ? ' (missed: ' + holdMisses.join(', ') + ')' : ''),
         holdMisses.length === 0);
+      check('a missing record or hold never matches',
+        sw.ocHoldMatchesRecord(null, {client: 'c', provider: 'p'}) === false &&
+        sw.ocHoldMatchesRecord({all: true}, null) === false);
       check('holdLive owns the expiry half the Go matcher folds in',
         sw.eval(`holdLive({all: true, until: new Date(Date.now() - 60000).toISOString()})`) === false &&
         sw.eval(`holdLive({all: true, until: new Date(Date.now() + 60000).toISOString()})`) === true);
+      check('liveHolds and pauseActive read the same expiry rule through applyPauseState',
+        (() => {
+          const expired = new Date(Date.now() - 60000).toISOString();
+          const future = new Date(Date.now() + 60000).toISOString();
+          sw.applyPauseState({ok: true, paused: true, clients: [], providers: [],
+            holds: [{id: 'live', all: true, until: future}, {id: 'gone', all: true, until: expired}],
+            known_clients: [], known_providers: [], until: null, queued: 0, default_max_queued: 0});
+          const live = sw.liveHolds().map(h => h.id);
+          const active = sw.pauseActive();
+          const footer = sd.getElementById('f-state').textContent;
+          sw.applyPauseState({ok: true, paused: false, clients: [], providers: [], holds: [],
+            known_clients: ['c'], known_providers: ['p'], until: null, queued: 0, default_max_queued: 0});
+          return JSON.stringify(live) === JSON.stringify(['live']) && active === true &&
+            footer.includes('paused · all requests');
+        })());
+
+      // ocCaptureMatchesRecord is the capture session's scope half: an empty
+      // dimension matches anything, and a session with no scope at all can
+      // never claim a request.
+      const captureRows = [
+        ['client match', {clients: ['client-a']}, {client: 'client-a', provider: 'p', model: 'm'}, true],
+        ['client miss', {clients: ['client-a']}, {client: 'client-b', provider: 'p', model: 'm'}, false],
+        ['provider match', {providers: ['alpha.example']}, {client: 'c', provider: 'alpha.example', model: 'm'}, true],
+        ['provider miss', {providers: ['alpha.example']}, {client: 'c', provider: 'beta.example', model: 'm'}, false],
+        ['model match', {models: ['glm-5.3']}, {client: 'c', provider: 'p', model: 'glm-5.3'}, true],
+        ['model miss', {models: ['glm-5.3']}, {client: 'c', provider: 'p', model: 'grok-4.6'}, false],
+        ['and-matched pair', {clients: ['client-a'], models: ['glm-5.3']}, {client: 'client-a', provider: 'p', model: 'glm-5.3'}, true],
+        ['and-matched pair misses on model', {clients: ['client-a'], models: ['glm-5.3']}, {client: 'client-a', provider: 'p', model: 'grok-4.6'}, false],
+        ['empty client matches anything', {providers: ['alpha.example'], clients: []}, {client: 'whoever', provider: 'alpha.example', model: 'm'}, true],
+      ];
+      const captureMisses = captureRows
+        .filter(([name, session, record, want]) => sw.ocCaptureMatchesRecord(session, record) !== want)
+        .map(([name]) => name);
+      check('the capture matcher agrees with its scope matrix' +
+        (captureMisses.length ? ' (missed: ' + captureMisses.join(', ') + ')' : ''),
+        captureMisses.length === 0);
+      check('an empty capture scope claims no request (deny by default)',
+        sw.ocCaptureMatchesRecord({clients: [], providers: [], models: []}, {client: 'c', provider: 'p', model: 'm'}) === false &&
+        sw.ocCaptureMatchesRecord({}, {client: 'c', provider: 'p', model: 'm'}) === false &&
+        sw.ocCaptureMatchesRecord({clients: ['c']}, null) === false);
+
+      // ocPolicyMatchesRecord is the limit policy's scope half: every stored
+      // dimension AND-matches, and an empty policy matches every request.
+      const policyRows = [
+        ['provider match', {scope: {providers: ['p']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+        ['provider miss', {scope: {providers: ['p']}}, {provider: 'q', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, false],
+        ['model match', {scope: {models: ['m']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+        ['model miss', {scope: {models: ['m']}}, {provider: 'p', model: 'other', client: 'c', key_hash: 'k', conversation_id: 'cv'}, false],
+        ['client match', {scope: {clients: ['c']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+        ['client miss', {scope: {clients: ['c']}}, {provider: 'p', model: 'm', client: 'other', key_hash: 'k', conversation_id: 'cv'}, false],
+        ['key hash match', {scope: {key_hashes: ['k']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+        ['key hash miss', {scope: {key_hashes: ['k']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'other', conversation_id: 'cv'}, false],
+        ['conversation match', {scope: {conversations: ['cv']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+        ['conversation miss', {scope: {conversations: ['cv']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'other'}, false],
+        ['pair misses on the second dimension', {scope: {providers: ['p'], models: ['m']}}, {provider: 'p', model: 'other', client: 'c', key_hash: 'k', conversation_id: 'cv'}, false],
+        ['pair matches both dimensions', {scope: {providers: ['p'], models: ['m']}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+        ['empty stored dimension matches any value', {scope: {providers: [], models: ['m']}}, {provider: 'anything', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}, true],
+      ];
+      const policyMisses = policyRows
+        .filter(([name, policy, record, want]) => sw.ocPolicyMatchesRecord(policy, record) !== want)
+        .map(([name]) => name);
+      check('the policy matcher agrees with its scope matrix' +
+        (policyMisses.length ? ' (missed: ' + policyMisses.join(', ') + ')' : ''),
+        policyMisses.length === 0);
+      check('an unscoped policy matches every request',
+        sw.ocPolicyMatchesRecord({scope: {}}, {provider: 'p', model: 'm', client: 'c', key_hash: 'k', conversation_id: 'cv'}) === true &&
+        sw.ocPolicyMatchesRecord({}, {provider: 'p'}) === true);
 
       // parseGoDuration mirrors Go's duration grammar for every spelling
       // config.FormatDuration emits (pinned Go-side by

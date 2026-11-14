@@ -66,7 +66,6 @@ function contrastChecks(context, declaredContrast) {
         const panel = token(win, '--panel');
         for (const [label, alpha, ink] of [
           ['danger hover', contract.dangerHoverTint, contract.dangerHoverInk],
-          ['danger outline hover', contract.dangerOutlineHoverTint, contract.dangerOutlineHoverInk],
         ]) {
           const fg = inkValue({ err, text: token(win, '--text'), muted: token(win, '--muted') }, ink);
           const ratio = contrast(fg, tint(err, panel, alpha / 100));

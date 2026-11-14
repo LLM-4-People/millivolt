@@ -64,8 +64,6 @@ function contrastContract(css) {
   return {
     dangerHoverTint: cssTintPercentage(css, '.btn-danger:hover', 'err'),
     dangerHoverInk: cssInk(css, '.btn-danger:hover'),
-    dangerOutlineHoverTint: cssTintPercentage(css, '.btn-danger-outline:hover', 'err'),
-    dangerOutlineHoverInk: cssInk(css, '.btn-danger-outline:hover'),
     retryIdleTint: cssTintPercentage(css, 'tr.retry-sub td', 'warn'),
     retryIdleInk: cssInk(css, 'tr.retry-sub td'),
     retryHoverTint: cssTintPercentage(css, 'tr.retry-sub:hover td', 'warn'),
@@ -94,7 +92,6 @@ function tintContractErrors(contract) {
   const errors = [];
   for (const [label, alpha] of [
     ['danger hover', contract.dangerHoverTint],
-    ['danger outline hover', contract.dangerOutlineHoverTint],
     ['retry idle', contract.retryIdleTint],
     ['retry hover', contract.retryHoverTint],
     ['nested retry pill', contract.retryPillTint],
@@ -127,7 +124,6 @@ function inkContractErrors(contract) {
     ['selected entity', contract.entityInk, TEXT_INK],
     ['cancelled pill', contract.cancelInk, TEXT_INK],
     ['danger hover', contract.dangerHoverInk, ERR_INK],
-    ['danger outline hover', contract.dangerOutlineHoverInk, ERR_INK],
     ['retry idle', contract.retryIdleInk, MUTED_INK],
     ['retry hover', contract.retryHoverInk, TEXT_INK],
     ['nested retry pill hover', contract.retryPillHoverInk, 'var(--err-text)'],

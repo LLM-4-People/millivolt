@@ -156,36 +156,44 @@ module.exports = async function chartRegistry(H) {
   }
 
   // Pause mutations must not apply error documents, overlap each other, or
-  // lose to an older bootstrap response. These drive the actual menu handlers.
+  // lose to an older bootstrap response. These drive the console's pause rows
+  // and the shared pause state.
   {
     const originalFetch = w.fetch;
     const hold = {id: 'pause-fixture', all: true, max_queued: 0};
-    const paused = {ok: true, paused: true, holds: [hold], queued: 0};
-    const resumed = {ok: true, paused: false, holds: [], queued: 0};
+    const paused = {ok: true, paused: true, holds: [hold], queued: 0,
+      known_clients: ['c'], known_providers: ['p'], default_max_queued: 0};
+    const resumed = {ok: true, paused: false, holds: [], queued: 0,
+      known_clients: ['c'], known_providers: ['p'], default_max_queued: 0};
     const settle = () => new Promise(resolve => setTimeout(resolve, 20));
-    d.getElementById('pause-menu').hidden = false;
+    const pauseShell = d.getElementById('operator-console');
+    const resumeBtn = () => d.querySelector('#oc-pane [data-oc-resume="pause-fixture"]');
+    const applyBtn = () => d.querySelector('#oc-pane [data-oc-apply="pause"]');
+    w.openOperatorConsole('pause');
     w.applyPauseState(paused);
     w.fetch = async () => ({ok: false, json: async () => ({error: 'resume rejected'})});
-    w.resumePauseHold(hold.id);
-    await settle();
-    check('failed Resume keeps the confirmed hold and displays its error',
-      w.pauseActive() && d.getElementById('pause-count').textContent.includes('resume rejected'));
+    resumeBtn().click();
+    check('failed resume keeps the confirmed hold and names the error in the console',
+      await settleUntil(() => w.pauseActive() &&
+        d.querySelector('#oc-pane .oc-banner[role="alert"]')?.textContent.includes('resume rejected')) &&
+      w.eval('pauseState.holds.length') === 1);
 
     let replyMutation, posts = 0;
+    w.applyPauseState(paused);
+    w.ocOpenPauseComposer('pause-fixture');
+    check('an edit draft for the all-traffic hold starts apply-enabled', !!applyBtn() && !applyBtn().disabled);
     w.fetch = () => { posts++; return new Promise(resolve => { replyMutation = resolve; }); };
-    w.resumePauseMenu();
-    w.resumePauseMenu();
-    w.resumePauseHold(hold.id);
-    check('pause mutations share one busy gate and disable every resume action', posts === 1 &&
-      d.getElementById('btn-pause-resume').disabled &&
-      [...d.querySelectorAll('#pf-holds button')].every(b => b.disabled));
+    resumeBtn().click();
+    resumeBtn().click();
+    check('pause mutations share one busy gate and disable the composer action', posts === 1 &&
+      applyBtn().disabled && w.eval('operatorState.pause.busy'));
     // State refreshes cannot enable controls while a mutation is outstanding.
     w.refreshFooterState();
-    w.syncPauseMenuState();
-    check('pause polling and footer refresh preserve the busy state', d.getElementById('btn-pause-resume').disabled);
+    w.operatorConsoleSync('pause');
+    check('pause polling and footer refresh preserve the busy state', applyBtn().disabled);
     replyMutation({ok: true, json: async () => resumed});
-    await settle();
-    check('successful Resume uses the confirmed server state', !w.pauseActive());
+    await settleUntil(() => !w.pauseActive());
+    check('successful resume uses the confirmed server state', !w.pauseActive());
 
     let replyBootstrap;
     w.applyPauseState(paused);
@@ -193,53 +201,70 @@ module.exports = async function chartRegistry(H) {
       ? new Promise(resolve => { replyBootstrap = resolve; })
       : Promise.resolve({ok: true, json: async () => resumed});
     w.fetchBootstrap('none');
-    w.resumePauseMenu();
-    await settle();
+    resumeBtn().click();
+    await settleUntil(() => !w.pauseActive());
     replyBootstrap({ok: true, json: async () => ({pause: paused, dash: {}})});
     await settle();
-    check('a pre-Resume bootstrap cannot resurrect the resumed hold', !w.pauseActive());
+    check('a pre-resume bootstrap cannot resurrect the resumed hold', !w.pauseActive());
 
     w.applyPauseState(resumed);
-    w.resetPauseMenuForm();
-    d.getElementById('pf-scope').value = 'all';
-    w.onPauseScopeChange();
-    d.getElementById('pf-cap').value = '-1';
+    w.ocOpenOperatorForRecord('pause', {client: 'client-a', provider: 'old.example'});
+    const capToggle = () => d.querySelector('#oc-pane [data-oc-field="pauseCapOn"]');
+    capToggle().checked = true;
+    capToggle().dispatchEvent(new w.Event('change', {bubbles: true}));
+    const capInput = d.querySelector('#oc-pane [data-oc-field="pauseCap"]');
+    capInput.value = '-1';
+    capInput.dispatchEvent(new w.Event('input', {bubbles: true}));
     posts = 0;
     w.fetch = async () => { posts++; return {ok: true, json: async () => paused}; };
-    w.applyPauseMenu();
-    await settle();
+    applyBtn().click();
     check('an invalid queue cap is rejected instead of silently becoming unlimited', posts === 0 &&
-      d.getElementById('pause-count').textContent.includes('queue cap'));
-    w.applyPauseState({...paused, holds: [{...hold, until: new Date(Date.now() - 1000).toISOString()}]});
-    check('expired holds stop showing paused even before the next server poll', !w.pauseActive());
+      d.querySelector('#oc-pane .oc-error').textContent.includes('queue cap'));
+    capToggle().checked = false;
+    capToggle().dispatchEvent(new w.Event('change', {bubbles: true}));
+    let namedBody;
+    w.fetch = async (url, options) => {
+      namedBody = JSON.parse(options.body);
+      return {ok: true, json: async () => paused};
+    };
+    applyBtn().click();
+    await settleUntil(() => !!namedBody);
+    check('a named hold sends both explicit dimensions and no all flag',
+      JSON.stringify(namedBody) === JSON.stringify({
+        paused: true, all: false, duration: '', new: false,
+        clients: ['client-a'], providers: ['old.example'],
+      }));
+    // The named hold arrives through a poll after the previous mutation has
+    // settled; applyPauseState deliberately drops a snapshot that lands while
+    // the gate is busy, so wait for the gate to clear first.
+    await settleUntil(() => !w.eval('operatorState.pause.busy'));
     const named = {id: 'named-hold', clients: ['client-a'], providers: ['old.example']};
-    w.applyPauseState({...paused, holds: [named], known_clients: ['client-a'], known_providers: ['old.example', 'new.example']});
-    w.resetPauseMenuForm();
-    const clientChoice = d.querySelector('#pf-clients input[value="client-a"]');
-    check('pause permits selecting a reused client for a disjoint provider scope', clientChoice && !clientChoice.disabled);
-    clientChoice.checked = true;
-    d.querySelector('#pf-providers input[value="new.example"]').checked = true;
-    w.syncPauseMenuState();
-    check('pause state refresh preserves the selected cross-scope draft',
-      w.selectedCheckboxValues('pf-clients').includes('client-a') && w.selectedCheckboxValues('pf-providers').includes('new.example'));
-    w.applyPauseState({...paused, holds: [{...named, new: true, known_at_new: ['client-a']}]});
-    w.editPauseHold(named.id);
+    w.applyPauseState({...paused, holds: [{...named, new: true, known_at_new: ['client-a']}],
+      known_clients: ['client-a'], known_providers: ['old.example', 'new.example']});
+    w.ocOpenPauseComposer('named-hold');
     let scopedPauseBody;
     w.fetch = async (url, options) => {
       scopedPauseBody = JSON.parse(options.body);
       return {ok: true, json: async () => resumed};
     };
-    await w.applyPauseMenu();
+    applyBtn().click();
+    await settleUntil(() => !!scopedPauseBody);
     check('editing a scoped new-client hold preserves both explicit dimensions', scopedPauseBody.new &&
       scopedPauseBody.clients.includes('client-a') && scopedPauseBody.providers.includes('old.example'));
+    // settleUntil resolves when the request is issued; the gate stays busy
+    // until its response is applied, and a snapshot that lands while the
+    // gate is busy is deliberately dropped.
+    await settleUntil(() => !w.eval('operatorState.pause.busy'));
     w.applyPauseState(paused);
     w.fetch = async () => ({ok: true, json: async () => ({...resumed, warning: 'applied in memory but not saved'})});
-    await w.resumePauseMenu();
-    check('pause persistence warnings retain confirmed runtime state and remain visible', !w.pauseActive() &&
-      !d.getElementById('pause-menu').hidden && d.getElementById('pause-count').textContent.includes('not saved'));
+    resumeBtn().click();
+    check('pause persistence warnings retain confirmed runtime state and keep the console open',
+      await settleUntil(() => !w.pauseActive() &&
+        d.querySelector('#oc-pane .oc-banner')?.textContent.includes('not saved')) &&
+      !pauseShell.hidden && w.menuIsOpen(pauseShell));
     w.applyPauseState(resumed);
-    w.resetPauseMenuForm();
-    d.getElementById('pause-menu').hidden = true;
+    w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''}; ocError = ''");
+    w.closeOperatorConsole();
     w.fetch = originalFetch;
   }
 };

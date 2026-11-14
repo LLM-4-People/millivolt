@@ -311,25 +311,28 @@ async def capture_history(args):
                 await page.wait_for_function('() => drawerId === null')
 
                 await page.set_viewport_size({'width': 1440, 'height': 900})
-                # Opening these menus is read-only with empty filter controls.
-                # The mutation and external-origin guards remain unchanged.
-                for kind in ('pause', 'debug', 'limits', 'logs', 'restart'):
-                    prefix = {'logs': 'lf'}.get(kind)
-                    if prefix:
-                        require(await page.evaluate('''prefix =>
-                            [...document.querySelectorAll('[id^="' + prefix + '-"]')].every(el => !el.value)''',
-                            prefix), 'documentation filter menu must start empty')
-                    await page.locator('#btn-' + kind).click()
-                    await page.locator('#' + kind + '-menu').wait_for(state='visible')
-                    if prefix:
-                        require(await page.evaluate('''prefix => !clearFilterActive(filterFromUI(prefix))''', prefix),
-                                'documentation filter menu selected a scope')
-                    if kind == 'restart':
+                # The operator console is the one policy surface. Opening it and
+                # switching sections is read-only: no draft is committed and no
+                # filter is selected, so the capture stays a neutral starting
+                # state. The mutation and external-origin guards are unchanged.
+                for kind in ('overview', 'limits', 'pause', 'capture', 'export', 'system'):
+                    await page.locator('#btn-controls').click()
+                    await page.locator('#operator-console').wait_for(state='visible')
+                    await page.locator('.oc-rail-item[data-oc-section="' + kind + '"]').click()
+                    await page.wait_for_function('''kind => {
+                        const pane = document.getElementById('oc-pane');
+                        return pane && pane.dataset.section === kind && !document.querySelector('.oc-compose');
+                    }''', arg=kind)
+                    if kind == 'export':
+                        require(await page.evaluate('''() =>
+                            document.getElementById('oc-export-receipt').textContent === 'every stored record' '''),
+                                'documentation export section must start on all history')
+                    if kind == 'system':
                         await page.wait_for_function('() => typeof restartServerState.available === "boolean"')
                     await ready('model')
-                    await capture_image(page, staging / 'menus' / (kind + '.png'), '#' + kind + '-menu')
+                    await capture_image(page, staging / 'console' / (kind + '.png'), '#operator-console')
                     await page.keyboard.press('Escape')
-                    await page.locator('#' + kind + '-menu').wait_for(state='hidden')
+                    await page.locator('#operator-console').wait_for(state='hidden')
 
                 await page.set_viewport_size({'width': 1440, 'height': 720})
                 await page.locator('#btn-settings').click()

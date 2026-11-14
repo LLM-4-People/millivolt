@@ -430,18 +430,13 @@ func TestMenuDeclStatementCutIsLoud(t *testing.T) {
 	}
 }
 
-// TestPauseDebugMenuDurationsAreServerAccepted posts every PAUSE_DURS token
-// through the real pause and debug handlers. DEBUG_DURS must stay the
-// derived list (PAUSE_DURS minus its resume pair), so the pause acceptance
-// covers it; an own token list would need its own acceptance rows and
-// reddens until it gets them.
-func TestPauseDebugMenuDurationsAreServerAccepted(t *testing.T) {
+// TestOperatorDurationTokensAreServerAccepted posts every PAUSE_DURS token
+// through the real pause and debug handlers. The console uses one duration
+// vocabulary for holds and captures, so both surfaces are exercised by the
+// same list; a second list would need its own acceptance rows.
+func TestOperatorDurationTokensAreServerAccepted(t *testing.T) {
 	js := chromeMenuSource(t, "chrome_lists.js")
 	toks := menuDurationTokens(t, menuDeclStatement(t, js, "PAUSE_DURS"))
-	debugStmt := menuDeclStatement(t, js, "DEBUG_DURS")
-	if !strings.Contains(debugStmt, "PAUSE_DURS.slice(1)") {
-		t.Fatalf("DEBUG_DURS no longer derives from PAUSE_DURS; give any own token its own acceptance rows: %s", debugStmt)
-	}
 	for _, tok := range toks {
 		p := newStoredTestProxy(t, metrics.Noop{})
 		body := `{"paused":true,"clients":["client-a"],"duration":` + quoteJSON(tok) + `}`
@@ -500,27 +495,23 @@ func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
 		}
 	}
 
-	rampStmt := menuDeclStatement(t, js, "LIMIT_RAMPS")
-	if !strings.Contains(rampStmt, "LIMIT_WINDOWS") {
-		t.Fatalf("LIMIT_RAMPS no longer derives from LIMIT_WINDOWS; give any own token its own acceptance rows: %s", rampStmt)
+	// The ramp picker is the same window vocabulary plus its off token. Pin
+	// that derivation so a separate ramp list cannot drift from the parser.
+	// The limit composer owns the picker (operator_limits.js); the console
+	// shell no longer carries any section markup of its own.
+	limits := string(chromeMenuSource(t, "operator_limits.js"))
+	if !strings.Contains(limits, "ocChipRow('ramp', [''].concat(LIMIT_WINDOWS.map(([v]) => v))") {
+		t.Fatal("ramp picker no longer derives its tokens from LIMIT_WINDOWS; give any own token its own acceptance rows")
 	}
-	rampToks := menuDurationTokens(t, rampStmt)
-	off := false
-	for _, tok := range rampToks {
-		if tok == "" {
-			off = true
-		}
+	for _, tok := range append([]string{""}, toks...) {
 		d, err := parseRampDuration(tok)
 		if err != nil {
-			t.Errorf("parseRampDuration(%q): %v, want the Limits ramp menu token accepted", tok, err)
+			t.Errorf("parseRampDuration(%q): %v, want the ramp picker token accepted", tok, err)
 			continue
 		}
 		if d != 0 && (d < minLimitWindow || d > maxLimitWindow) {
 			t.Errorf("parseRampDuration(%q) = %v, outside the accepted range", tok, d)
 		}
-	}
-	if !off {
-		t.Errorf("LIMIT_RAMPS offers no empty off token: %v", rampToks)
 	}
 }
 

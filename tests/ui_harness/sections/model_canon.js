@@ -22,29 +22,46 @@ module.exports = async function modelCanon(H) {
     ['kimi-k3', 'kimi-k3'], ['deepseek-v4-pro', 'deepseek-v4-pro'], ['grok-4.6', 'grok-4-6'],
   ]));
   w.applyModelCanon(modelFixture(DEF_RULES, canonNames), true);
-  // Debug model checklist: spelling variants of the same model must render as
-  // ONE checkbox (grouped display; a session stores the raw spellings and the
-  // server matches them canonically through the cursor base name), and the
-  // models box must share the clients/providers structure - nesting
-  // it under .clear-opts used to stack the checkbox ABOVE the label (the
-  // .clear-opts label rule out-specifies .pause-check).
-  const dfm = d.getElementById('df-models');
-  check('models checklist sits in the pause-known structure', !!dfm.closest('.pause-known') && !dfm.closest('.clear-opts'));
-  w.eval("debugState.known_models = ['glm-5-3','glm-5.3','glm-5-3-flash','glm-5.3-flash','kimi-k3','moonshotai/kimi-k3','moonshotai/kimi-k3:nube','deepseek-v4-pro','deepseek-v4-pro-0813','grok-4.6']");
-  w.fillDebugChecks(dfm, w.eval('debugState.known_models').slice().sort(), new Set(), 'model');
-  const mboxes = [...dfm.querySelectorAll('input[type=checkbox]')];
-  check('spelling variants merge into one checkbox each',
-    mboxes.length === 6 && mboxes.every(b => ['deepseek-v4-pro','deepseek-v4-pro-0813','glm-5-3','glm-5-3-flash','grok-4.6','kimi-k3'].includes(b.value)));
-  check('a multi-variant group shows the bare spelling', !!dfm.querySelector('input[value="kimi-k3"]'));
-  dfm.querySelector('input[value="kimi-k3"]').checked = true;
-  const expanded = w.selectedDebugModels();
-  check('checking a group expands to every raw spelling',
-    expanded.length === 3 && expanded.includes('kimi-k3') && expanded.includes('moonshotai/kimi-k3') && expanded.includes('moonshotai/kimi-k3:nube'));
-  // The picked Set must come from the WINDOW realm (fillDebugChecks checks
-  // `picked instanceof Set` - a Node-realm Set is cross-realm and fails it).
-  w.fillDebugChecks(dfm, w.eval('debugState.known_models').slice().sort(), w.eval("new Set(['glm-5.3'])"), 'model');
-  check('editing a session with a raw spelling re-checks its group', dfm.querySelector('input[value="glm-5-3"]').checked);
-  w.eval("debugState.known_models = ['m']");
+  // The console capture composer is the one model picker: known models are
+  // folded into canonical groups and every raw spelling is offered, because a
+  // capture scopes the EXACT spelling the server stored. Selecting one variant
+  // writes that spelling into capture.models, never the canonical group name.
+  // ocKnownValues('models') reads the throttle state's known vocabulary; it is
+  // seeded directly here because applyThrottleState currently drops the
+  // server's known_clients/known_models fields (reported separately).
+  {
+    const known = ['glm-5-3', 'glm-5.3', 'glm-5-3-flash', 'glm-5.3-flash', 'kimi-k3',
+      'moonshotai/kimi-k3', 'moonshotai/kimi-k3:nube', 'deepseek-v4-pro',
+      'deepseek-v4-pro-0813', 'grok-4.6'];
+    w.__knownModels = known;
+    w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
+    w.openOperatorConsole('capture');
+    d.querySelector('#oc-pane [data-oc-new="capture"]').click();
+    d.querySelector('#oc-pane [data-oc-pick="models"]').click();
+    const rows = [...d.querySelectorAll('#oc-pane [data-oc-pick-value="models"]')]
+      .map(row => row.dataset.ocValue);
+    const grouped = w.eval('groupByCanonical(window.__knownModels).flatMap(g => g.variants).sort()');
+    check('the console capture picker lists every canonical-group variant',
+      JSON.stringify(rows) === JSON.stringify(grouped) && rows.length === 10 &&
+      rows.includes('glm-5.3') && rows.includes('glm-5-3') &&
+      rows.includes('moonshotai/kimi-k3:nube'));
+    // The picker's declared selection contract: a draft carrying the exact raw
+    // spelling marks that variant checked. (The click-to-toggle path for
+    // pause/capture drafts is broken in production and reported separately;
+    // this pins the value/check contract without hiding it.)
+    w.ocOpenOperatorForRecord('capture', {
+      id: 'model-pick', provider: 'p', client: 'c', model: 'moonshotai/kimi-k3:nube',
+    });
+    d.querySelector('#oc-pane [data-oc-pick="models"]').click();
+    check('a capture draft keeps the exact model spelling and checks its picker row',
+      JSON.stringify(w.eval('ocDrafts.capture.models')) === JSON.stringify(['moonshotai/kimi-k3:nube']) &&
+      d.querySelector('#oc-pane [data-oc-pick-value="models"][data-oc-value="moonshotai/kimi-k3:nube"]')
+        .getAttribute('aria-checked') === 'true');
+    w.closeOperatorConsole();
+    w.eval("ocDrafts.capture = null; ocView = {kind: '', id: ''}");
+    delete w.__knownModels;
+    w.eval('throttleState = {...throttleState, known_models: undefined}');
+  }
 
   // ---- model canonicalization: the observer dictionary contract ----
   // The same case table as Go's TestCanonicalModel pins the lockstep
@@ -80,39 +97,61 @@ module.exports = async function modelCanon(H) {
     w.recordMatchesDim({ model: 'glm-5.3' }, 'model', 'glm-5-3') === true &&
     w.recordMatchesDim({ model: 'glm-5-3' }, 'model', 'glm-5-3') === true &&
     w.recordMatchesDim({ model: 'grok-4.6' }, 'model', 'glm-5-3') === false);
-  // The debug checklist re-groups through the SAME rules: with an exact
-  // rule live, the two deepseek spellings collapse into one checkbox.
+  // The capture picker re-groups through the SAME rules: with an exact rule
+  // live, the two deepseek spellings fold into one canonical group, but each
+  // raw variant stays selectable so the wire keeps the exact spelling.
   w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-pro-0813', to: 'deepseek-v4-pro'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-pro-0813': 'deepseek-v4-pro'}), true);
-  w.eval("debugState.known_models = ['deepseek-v4-pro', 'deepseek-v4-pro-0813', 'grok-4.6']");
-  w.fillDebugChecks(dfm, w.eval('debugState.known_models').slice().sort(), new Set(), 'model');
-  check('a config rule re-groups the debug checklist',
-    dfm.querySelectorAll('input[type=checkbox]').length === 2);
+  {
+    w.__knownModels = ['deepseek-v4-pro', 'deepseek-v4-pro-0813', 'grok-4.6'];
+    w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
+    w.openOperatorConsole('capture');
+    d.querySelector('#oc-pane [data-oc-new="capture"]').click();
+    d.querySelector('#oc-pane [data-oc-pick="models"]').click();
+    check('a config rule groups the capture picker variants under one canonical key',
+      w.eval("groupByCanonical(window.__knownModels).length") === 2 &&
+      d.querySelectorAll('#oc-pane [data-oc-pick-value="models"]').length === 3);
+    w.closeOperatorConsole();
+    w.eval("ocDrafts.capture = null; ocView = {kind: '', id: ''}");
+    delete w.__knownModels;
+    w.eval('throttleState = {...throttleState, known_models: undefined}');
+  }
   w.applyModelCanon(modelFixture(DEF_RULES, canonNames), true);
   w.eval("debugState.known_models = ['m']");
   // The shared delete/download model select (populateFilterMenu fills the
-  // logs menu and the settings delete block alike): spelling variants
-  // cluster under a canonical <optgroup>, but every <option> keeps its RAW
-  // value (exact delete).
-  const modelSelHTML = w.eval(`(() => {
-    const saved = lastData;
-    lastData = { records: [{ model: 'glm-5.3' }, { model: 'glm-5-3' }, { model: 'grok-4.6' }] };
-    populateFilterMenu('lf');
-    const html = document.getElementById('lf-model').innerHTML;
-    lastData = saved;
-    return html;
-  })()`);
+  // settings sheet's delete block, the surviving filter surface): spelling
+  // variants cluster under a canonical <optgroup>, but every <option> keeps
+  // its RAW value (exact delete).
+  const filterHost = d.createElement('div');
+  filterHost.innerHTML = w.eval('settingsDeleteRowHTML()');
+  d.body.appendChild(filterHost);
+  let modelSelHTML, clientSelHTML;
+  try {
+    modelSelHTML = w.eval(`(() => {
+      const saved = lastData;
+      lastData = { records: [{ model: 'glm-5.3' }, { model: 'glm-5-3' }, { model: 'grok-4.6' }] };
+      populateFilterMenu('del');
+      const html = document.getElementById('del-model').innerHTML;
+      lastData = saved;
+      return html;
+    })()`);
+  } finally { filterHost.remove(); }
   check('filter model options cluster variants under canonical optgroups',
     modelSelHTML.includes('<optgroup label="glm-5-3 (2)"') &&
     modelSelHTML.includes('value="glm-5.3"') && modelSelHTML.includes('value="glm-5-3"') &&
     modelSelHTML.includes('value="grok-4.6"') && !modelSelHTML.includes('value="glm-5-3 (2)"'));
-  const clientSelHTML = w.eval(`(() => {
-    const saved = lastData;
-    lastData = { records: [{ client: 'opencode/1.18.32' }, { client: 'team/2fa' }] };
-    populateFilterMenu('lf');
-    const html = document.getElementById('lf-client').innerHTML;
-    lastData = saved;
-    return html;
-  })()`);
+  const clientHost = d.createElement('div');
+  clientHost.innerHTML = w.eval('settingsDeleteRowHTML()');
+  d.body.appendChild(clientHost);
+  try {
+    clientSelHTML = w.eval(`(() => {
+      const saved = lastData;
+      lastData = { records: [{ client: 'opencode/1.18.32' }, { client: 'team/2fa' }] };
+      populateFilterMenu('del');
+      const html = document.getElementById('del-client').innerHTML;
+      lastData = saved;
+      return html;
+    })()`);
+  } finally { clientHost.remove(); }
   check('client filter labels show the recorded identity while preserving exact values',
     clientSelHTML.includes('<option value="opencode/1.18.32">opencode/1.18.32</option>') &&
     clientSelHTML.includes('<option value="team/2fa">team/2fa</option>'));

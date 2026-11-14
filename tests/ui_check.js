@@ -37,15 +37,18 @@ async function main() {
     check('dashboard labels never force uppercase, including mobile media rules',
       !declarations.some(value => value === 'uppercase' || value === 'capitalize'));
     const host = d.createElement('section');
-    host.innerHTML = '<div class="pause-known-hd"></div><div class="lim-src"></div>' +
-      '<div class="clear-opts"><label></label></div><div class="kpi"><h2></h2></div>' +
+    host.innerHTML = '<div class="oc-label"></div><div class="oc-field-name"></div>' +
+      '<div class="oc-rule-meta"></div><div class="oc-pick-label"></div>' +
+      '<div class="oc-live"></div><div class="oc-note"></div>' +
+      '<div class="kpi"><h2></h2></div>' +
       '<span class="xp-dim-by"></span><div class="prov-lb"></div><div class="mr-what"></div>' +
       '<div class="mr-ex-hd"></div><div class="card"><h2></h2></div><div class="ct-h"></div>' +
       '<table><thead><tr><th></th></tr></thead></table><span class="day-chip"></span>' +
       '<div class="detail-section"><h4></h4></div>';
     d.body.appendChild(host);
     try {
-      for (const selector of ['.pause-known-hd', '.lim-src', '.clear-opts label', '.kpi h2',
+      for (const selector of ['.oc-label', '.oc-field-name', '.oc-rule-meta', '.oc-pick-label',
+        '.oc-live', '.oc-note', '.kpi h2',
         '.xp-dim-by', '.prov-lb', '.mr-what', '.mr-ex-hd', '.card h2', '.ct-h', 'th',
         '.day-chip', '.detail-section h4']) {
         const label = host.querySelector(selector);

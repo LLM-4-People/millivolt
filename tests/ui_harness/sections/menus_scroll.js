@@ -4,14 +4,43 @@ module.exports = async function menusScroll(H) {
   const {BIG, check, d, fire, html, mkRec, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
-  // ---- test 9: menu action rows (split ends alignment + red all-actions) ----
-  w.toggleLogsMenu({ stopPropagation() {} });
-  const js = w.getComputedStyle(d.querySelector('#logs-menu .clear-actions'));
-  check('menu action row splits ends-wise', js.justifyContent === 'space-between');
-  const dlAll = [...d.querySelectorAll('#logs-menu .clear-actions button')].find(b => b.textContent.includes('Download all'));
-  check('download all is a read-only neutral action, not a danger action',
-    dlAll && !dlAll.classList.contains('btn-danger-outline') && !dlAll.classList.contains('btn-danger'));
-  w.toggleLogsMenu({ stopPropagation() {} });
+  // ---- test 9: the operator console is a shared .mn surface ----
+  // The console is the operator plane's one panel, so it inherits the shared
+  // menu lifecycle: .mn/.mn-on, anchor placement on desktop, sheet placement
+  // under the narrow breakpoint, Escape dismissal and trigger focus restore.
+  {
+    const shell = d.getElementById('operator-console');
+    w.openOperatorConsole('overview');
+    check('the operator console opens as the shared .mn surface',
+      !shell.hidden && shell.classList.contains('mn') && shell.classList.contains('mn-on') &&
+      shell.classList.contains('oc') && shell.dataset.placement === 'anchor' &&
+      w.menuIsOpen(shell) && d.getElementById('btn-controls').getAttribute('aria-expanded') === 'true');
+    const paneStyle = w.getComputedStyle(d.getElementById('oc-pane'));
+    const railStyle = w.getComputedStyle(d.getElementById('oc-rail'));
+    check('the console pane and rail own their scroll overflow',
+      paneStyle.overflowY === 'auto' && railStyle.overflowY === 'auto');
+    check('the console action rows are its own flex rows, not the retired clear-actions strip',
+      w.getComputedStyle(d.getElementById('oc-change').parentElement).display === 'flex' &&
+      !d.querySelector('.clear-actions'));
+    // Narrow viewport: the same panel hands its geometry to CSS as a sheet and
+    // the shared scrim appears. menuPlacement reads matchMedia first.
+    const originalMatch = w.matchMedia;
+    w.matchMedia = () => ({ matches: true, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
+    try {
+      w.closeOperatorConsole();
+      w.openOperatorConsole('overview');
+      check('a narrow viewport places the console as a sheet behind the shared scrim',
+        shell.dataset.placement === 'sheet' &&
+        !d.querySelector('.mn-scrim').hidden);
+    } finally {
+      w.matchMedia = originalMatch;
+      w.closeOperatorConsole();
+    }
+    w.openOperatorConsole('overview');
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check('Escape closes the console and restores the trigger',
+      shell.hidden && !w.menuIsOpen(shell) && d.activeElement === d.getElementById('btn-controls'));
+  }
 
   // ---- test 9b: every database deletion control lives in the settings
   // sheet's storage category (the header Clear menu is gone): the scoped
@@ -168,11 +197,13 @@ module.exports = async function menusScroll(H) {
   check('full resync after paging resets to page size', await settleUntil(() => rows().length === 60));
   check('resync drops store-paged rows', !rows().some(tr => tr.dataset.id === 'old000'));
 
-  // Delete/Logs preview ownership and failed mutations: exercise each actual
-  // handler, with controlled out-of-order requests and a fixed preview cutoff.
+  // Delete preview ownership and failed mutations: exercise the actual
+  // settings handlers, with controlled out-of-order requests and a fixed
+  // preview cutoff. The console export section owns its own count preview;
+  // both surfaces share purgeCount and the server predicate, pinned in the
+  // export section.
   {
     const savedFetch = w.fetch;
-    w.populateFilterMenu('lf');
     d.getElementById('del-provider').value = 'p';
     let replyCount;
     w.fetch = () => new Promise(resolve => { replyCount = resolve; });
@@ -185,8 +216,8 @@ module.exports = async function menusScroll(H) {
     check('an old count cannot overwrite an empty selection or re-enable delete',
       d.getElementById('btn-del-matching').disabled && d.getElementById('del-count').textContent === '');
 
-    check('Delete/Logs age options use duration tokens',
-      ['del', 'lf'].every(prefix => {
+    check('the delete age options use canonical duration tokens',
+      ['del'].every(prefix => {
         const el = d.getElementById(prefix + '-age');
         return !!el.querySelector('option[value="1h"]') &&
           !!el.querySelector('option[value="24h"]') &&
@@ -196,16 +227,23 @@ module.exports = async function menusScroll(H) {
           !el.querySelector('option[value="604800000"]') &&
           !el.querySelector('option[value="7d"]');
       }));
+    // FILTER_AGES remains the age vocabulary and ocExportFilter reads the same
+    // tokens into the server's before_ms predicate.
+    const ages = w.eval('FILTER_AGES');
+    check('ocExportFilter maps every FILTER_AGES token to the server cutoff',
+      ages.every(([token]) => {
+        const before = w.ocExportFilter({ age: token }).before_ms;
+        return token === '' ? before === 0 : before > 0 && before < Date.now();
+      }) &&
+      ages.map(([token]) => token).join(',') === ',1h,24h,168h');
     d.getElementById('del-age').value = '1h';
-    d.getElementById('lf-age').value = '1h';
-    const pendingCounts = [];
-    w.fetch = () => new Promise(resolve => pendingCounts.push(resolve));
-    const delCount = w.updateDelCount(), logsCount = w.updateLogsCount();
-    pendingCounts[1]({ok: true, json: async () => ({count: 4})});
-    pendingCounts[0]({ok: true, json: async () => ({count: 3})});
-    await Promise.all([delCount, logsCount]);
-    check('Logs and Delete counts do not supersede each other',
-      d.getElementById('del-count').textContent.includes('3 records') && d.getElementById('logs-count').textContent.includes('4 records'));
+    let replyScoped;
+    w.fetch = () => new Promise(resolve => { replyScoped = resolve; });
+    const delCount = w.updateDelCount();
+    replyScoped({ok: true, json: async () => ({count: 3})});
+    await delCount;
+    check('the delete count paints its own preview',
+      d.getElementById('del-count').textContent.includes('3 records'));
     const preview = w.previewedFilter('del');
     const selectedRows = rows().slice();
     let submitted, resyncs = 0;
@@ -248,11 +286,8 @@ module.exports = async function menusScroll(H) {
       ![...d.querySelectorAll('#settings-fields [data-purge="matching"] select')].some(s => s.disabled) &&
       d.getElementById('btn-del-matching').disabled);
     d.getElementById('del-age').value = '';
-    d.getElementById('lf-age').value = '';
-    d.getElementById('lf-provider').value = '';
     w.fetch = savedFetch;
     await w.updateDelCount();
-    await w.updateLogsCount();
     // Arm a fresh scoped preview, then prove a settings-origin failure
     // reports through the sheet status and never writes the delete
     // block's count preview.

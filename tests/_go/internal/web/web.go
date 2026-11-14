@@ -22,8 +22,14 @@ func TestDashFileAllowlist(t *testing.T) {
 		DashPrefix + "css/requests.css",
 		DashPrefix + "css/inspector.css",
 		DashPrefix + "css/themes.css",
+		DashPrefix + "css/console.css",
 		DashPrefix + "vendor/uplot.js",
 		DashPrefix + "js/core.js",
+		DashPrefix + "js/operator_console.js",
+		DashPrefix + "js/operator_limits.js",
+		DashPrefix + "js/operator_holds.js",
+		DashPrefix + "js/operator_export.js",
+		DashPrefix + "js/operator_overview.js",
 		DashPrefix + "js/settings.js",
 	}
 	for _, p := range ok {

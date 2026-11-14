@@ -65,7 +65,7 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 	wantStyles := []string{
 		"css/dashboard.css", "css/explorer.css", "css/overlays.css",
 		"css/charts.css", "css/requests.css", "css/inspector.css",
-		"css/themes.css",
+		"css/themes.css", "css/console.css",
 	}
 	var gotStyles []string
 	for _, ref := range rels {
