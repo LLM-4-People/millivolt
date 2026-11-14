@@ -146,6 +146,58 @@ func TestConfigDocumentSizeBound(t *testing.T) {
 // order, so the error always names the alphabetically-first failing label -
 // asserted across many loads, because map order varies per iteration and a
 // single run could get lucky.
+// TestValidateNeverEchoesCredentialValues pins the invariant that keeps
+// /admin/config safe to serve verbatim: validation errors name the field and the
+// rule, never the value. The dashboard returns provider headers unredacted so
+// the settings sheet can round-trip them, and the MCP projection redacts
+// defensively, but any validator that quoted a rejected value would put a
+// credential into last_reload.error, which both surfaces render. A rejected
+// secret must therefore be absent from the error text at every site that
+// inspects one.
+func TestValidateNeverEchoesCredentialValues(t *testing.T) {
+	const secret = "sk-live-9f2c4a7e1b6d"
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"provider header value", func(c *Config) {
+			c.Providers = map[string]ProviderOverride{
+				"alpha.example": {Headers: map[string]string{"Authorization": "Bearer " + secret + "\n"}},
+			}
+		}},
+		{"provider base url userinfo", func(c *Config) {
+			c.AllowedBaseURLs = []string{"https://user:" + secret + "@alpha.example/v1"}
+		}},
+		{"provider base url query", func(c *Config) {
+			c.AllowedBaseURLs = []string{"https://alpha.example/v1?key=" + secret}
+		}},
+		{"override header value", func(c *Config) {
+			c.RequestOverrides = []RequestOverride{{
+				Provider: "alpha.example",
+				Headers:  map[string]string{"X-Api-Key": secret + "\x00"},
+			}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatal("Validate accepted a value it must reject")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("validation error echoes the credential: %q", err.Error())
+			}
+			// A redaction marker is only needed where a value is echoed; this
+			// asserts the stronger property that nothing is echoed at all.
+			if strings.Contains(err.Error(), "sk-live") {
+				t.Fatalf("validation error leaks a credential prefix: %q", err.Error())
+			}
+		})
+	}
+}
+
 func TestValidateProvidersErrorDeterministic(t *testing.T) {
 	yaml := `providers:
   zeta.example:
