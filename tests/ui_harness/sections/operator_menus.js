@@ -1536,6 +1536,11 @@ module.exports = async function operatorMenus(H) {
         check('a menu picker keeps one tab stop and removes the rest',
           rows.length > 1 && rows[0].tabIndex === 0 &&
           rows.slice(1).every(row => row.tabIndex === -1));
+        // Opening the menu lands on its first row. A menu that leaves focus on
+        // its trigger implements arrow keys nobody can reach without a
+        // preliminary Tab.
+        check('opening a picker moves focus into its first row',
+          d.activeElement === rows[0]);
         rows[0].focus();
         // A real keypress targets the focused row, not the first one: after
         // ArrowDown the cursor has moved, so a helper pinned to rows[0] would

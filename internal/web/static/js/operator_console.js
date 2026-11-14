@@ -44,6 +44,12 @@ const ocDrafts = {
   export: null,
 };
 let ocDrain = { scope: 'all', value: '' };
+// ocPickerFocus holds the dimension whose picker was just opened by a click.
+// The picker implements the menu keys, but a menu that leaves focus on its
+// trigger makes those keys unreachable until the operator happens to press
+// Tab: opening it moves focus to the first row once, and every later repaint
+// goes back to the normal keyed-focus rule.
+let ocPickerFocus = '';
 
 function ocEl(id) { return document.getElementById(id); }
 
@@ -348,7 +354,14 @@ function ocRender() {
   }
   if (pane) pane.scrollTop = savedScroll;
   ocRenderFoot();
-  ocRestoreFocus(saved);
+  if (ocPickerFocus) {
+    // Opening the menu lands on its first row, so the arrows the menu
+    // documents work without a preliminary Tab.
+    ocPickerFocus = '';
+    pane?.querySelector('.oc-pick-list .oc-pick-row')?.focus({ preventScroll: true });
+  } else {
+    ocRestoreFocus(saved);
+  }
   const tab = shell.querySelector('.oc-rail-item[aria-selected="true"]');
   if (tab && typeof tab.scrollIntoView === 'function') {
     tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -941,8 +954,13 @@ function ocClearComposer() {
 
 function ocTogglePicker(draft, dim) {
   if (!draft) return;
-  if (draft.picker && draft.picker.dim === dim) draft.picker = null;
-  else draft.picker = { dim, filter: '' };
+  if (draft.picker && draft.picker.dim === dim) {
+    draft.picker = null;
+    ocPickerFocus = '';
+  } else {
+    draft.picker = { dim, filter: '' };
+    ocPickerFocus = dim;
+  }
   ocRender();
 }
 
@@ -1173,8 +1191,13 @@ function ocHandleChoice(name, value) {
 function ocToggleFilterPick(dim) {
   const draft = ocDrafts.export;
   if (!draft) return;
-  if (draft.picker && draft.picker.dim === dim) draft.picker = null;
-  else draft.picker = { dim, filter: '' };
+  if (draft.picker && draft.picker.dim === dim) {
+    draft.picker = null;
+    ocPickerFocus = '';
+  } else {
+    draft.picker = { dim, filter: '' };
+    ocPickerFocus = dim;
+  }
   ocRender();
 }
 
