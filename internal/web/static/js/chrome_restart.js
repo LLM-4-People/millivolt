@@ -92,7 +92,7 @@ function renderRestartSteps(st) {
     const state = s.rank < st.rank ? 'done' : (s.rank === st.rank ? (fail ? 'failed' : 'active') : 'pending');
     let sub = '';
     if (state === 'active' && s.rank === 1 && st.drain_timeout_ms > 0) {
-      sub = `<span class="rs-sub">${fmtDur(Math.round((st.drain_elapsed_ms || 0) / 1000) * 1000)} / ${fmtDur(st.drain_timeout_ms)}</span>`;
+      sub = `<span class="rs-sub">${fmtDur(Math.round((st.drain_elapsed_ms || 0) / TIME_MS.second) * TIME_MS.second)} / ${fmtDur(st.drain_timeout_ms)}</span>`;
     }
     return `<li class="rs-step ${state}"><span class="rs-dot" aria-hidden="true"></span><span class="rs-label">${s.label}</span>${sub}</li>`;
   }).join('');

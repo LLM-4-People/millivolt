@@ -78,7 +78,6 @@ const CHART_MIN_H = 40;
 // Reuse locale formatters; cursor movement must not create one per readout.
 const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-const CHART_DAY_MS = 86400000;
 
 // fmtPct keeps % axis ticks/legend values human (up to 1 decimal, no float
 // spew) through the shared percentage-value owner: a strictly-sub-100 value
@@ -107,14 +106,14 @@ function chartXTick(t) {
   const span = chartAgg ? (chartWindowEnd() - chartAgg.from_ms) : 0;
   // Alignment can extend a 24h range by one partial bucket; that is still
   // a clock-time view. Multi-day sub-day buckets keep both date and time.
-  if (span > CHART_DAY_MS + (chartAgg?.bucket_ms || 0)) {
+  if (span > TIME_MS.day + (chartAgg?.bucket_ms || 0)) {
     const d = new Date(t);
     // A numeric axis label, not the log divider's prose stamp: it has to fit
     // a tick. The calendar fields come from the date object, and the only
     // calendar question this file asks - does the window span years - is
     // chartSpansYears' own.
     const date = (d.getMonth() + 1) + '/' + d.getDate() + (chartSpansYears() ? '/' + d.getFullYear() : '');
-    return date + (chartAgg.bucket_ms < CHART_DAY_MS ? ' ' + fmtClockMs(t) : '');
+    return date + (chartAgg.bucket_ms < TIME_MS.day ? ' ' + fmtClockMs(t) : '');
   }
   return fmtClockMs(t);
 }

@@ -30,7 +30,6 @@ const TIMEFRAMES = [
   { token: 'week', kind: 'range', short: 'this week', long: 'this week' },
   { token: 'month', kind: 'range', short: 'this month', long: 'this month' },
 ];
-const TF_MINUTE_MS = 60000;
 
 // The stored-history extent: from is the earliest stored request (unix ms,
 // 0 = nothing stored) and known says whether the server has reported it yet.
@@ -103,7 +102,7 @@ function tfAvailable(token, nowMs) {
   if (!tfExtent.known) return true;
   if (tfExtent.from <= 0) return false;
   const now = Number.isFinite(nowMs) ? nowMs : Date.now();
-  if (entry.kind === 'duration') return entry.minutes * TF_MINUTE_MS <= now - tfExtent.from;
+  if (entry.kind === 'duration') return entry.minutes * TIME_MS.minute <= now - tfExtent.from;
   const span = tfRangeSpan(entry.token, now);
   return !!span && span.fromMs < span.toMs;
 }
@@ -147,7 +146,7 @@ function tfCoverage(shown, now) {
     return { left: 0, width: 100, leftText: fmtDur(total) + ' of history', rightText: 'since ' + tfSince(from) };
   }
   if (entry.kind === 'duration') {
-    const width = Math.min(100, (entry.minutes * TF_MINUTE_MS / total) * 100);
+    const width = Math.min(100, (entry.minutes * TIME_MS.minute / total) * 100);
     return { left: 100 - width, width, leftText: entry.long, rightText: fmtDur(total) + ' of history' };
   }
   const span = tfRangeSpan(entry.token, now);

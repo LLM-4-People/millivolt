@@ -128,7 +128,8 @@ function parseGoDurationValue(s) {
   }
   if (s === '0') return 0;
   if (!s) return null;
-  const unitMS = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000};
+  const unitMS = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1,
+    s:TIME_MS.second, m:TIME_MS.minute, h:TIME_MS.hour};
   const isDigit = ch => ch >= '0' && ch <= '9';
   let total = 0, i = 0, groups = 0;
   while (i < s.length) {

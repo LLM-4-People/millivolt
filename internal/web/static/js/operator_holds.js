@@ -390,7 +390,7 @@ function ocRenderCapture() {
     const scope = ocScopePhrase(ocScopeFromPolicy({ scope: session }));
     const left = ocCaptureWindowPhrase(session);
     const ran = typeof session.ran_ms === 'number' && session.ran_ms > 0
-      ? 'ran ' + hmBreakdown(Math.max(1, Math.round(session.ran_ms / OC_MINUTE))) : '';
+      ? 'ran ' + hmBreakdown(Math.max(1, Math.round(session.ran_ms / TIME_MS.minute))) : '';
     const n = typeof session.captures === 'number' ? session.captures : 0;
     // Capture count and elapsed time own the budget line; the side column owns
     // the remaining window, which is the same fact the row's action changes.

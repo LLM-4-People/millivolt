@@ -283,7 +283,7 @@ function untilLeft(until, past = '') {
   const ms = untilRemainingMs(until);
   if (ms === null) return '';
   if (ms <= 0) return past;
-  return hmBreakdown(Math.max(1, Math.ceil(ms / 60000))) + ' left';
+  return hmBreakdown(Math.max(1, Math.ceil(ms / TIME_MS.minute))) + ' left';
 }
 
 // hmBreakdown is the one compact H/M breakdown for remaining-time labels:

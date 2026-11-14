@@ -22,7 +22,7 @@ function detailFocusKey(el) {
 function fmtStamp(t) {
   if (!t) return '';
   const d = new Date(t);
-  if (isNaN(d) || d.getTime() < 86400000) return '';
+  if (isNaN(d) || d.getTime() < TIME_MS.day) return '';
   return `${fmtDateKey(d)} ` +
     `${fmtClock(d.getHours(), d.getMinutes())}:${pad2(d.getSeconds())}.` +
     String(d.getMilliseconds()).padStart(3, '0');

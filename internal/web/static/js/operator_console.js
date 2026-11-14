@@ -20,7 +20,6 @@ const OC_SECTIONS = [
 
 const OC_STORAGE_KEY = 'millivolt.operatorSection';
 const OC_CHANGE_LIMIT = 8;
-const OC_MINUTE = 60000;
 // ocNewSchedule is the one schedule a limit starts with when the operator
 // opens the schedule disclosure: no days chosen yet, 09:00 to 17:00 in the
 // server's local clock. The composer's preview fallback and the disclosure

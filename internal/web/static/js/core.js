@@ -352,6 +352,12 @@ const fmtBytes = n => {
   }
   return neg + Math.round(a) + ' B';
 };
+// TIME_MS is the one table of millisecond units. Five modules divided by a
+// bare 60000, 3600000 or 86400000 and two of them declared their own constant
+// for the same minute, so a reader that needed seconds-per-minute had to know
+// the number rather than name it. Durations stay milliseconds everywhere; this
+// is the vocabulary for converting them.
+const TIME_MS = { second: 1000, minute: 60000, hour: 3600000, day: 86400000 };
 // fmtDur is the single duration formatter for every ms value, compact and
 // readable at any scale: ms below 1s, seconds below 1m, then minutes, then
 // hours and days - always with the unit so it never overflows (450 → "450ms",
@@ -361,15 +367,15 @@ const fmtDur = ms => {
   if (ms == null || !isFinite(ms)) return '-';
   const neg = ms < 0 ? '-' : '';
   const a = Math.abs(Number(ms));
-  if (a < 1000) {
+  if (a < TIME_MS.second) {
     const rounded = Math.round(a * 1000) / 1000;
     return neg + (rounded >= 1000 ? '1s' : (rounded || a) + 'ms');
   }
   const r2 = v => Math.round(v * 100) / 100;
-  if (a < 60000) { const s = r2(a / 1000); return s >= 60 ? neg + '1m' : neg + s + 's'; }   // 1.26s
-  if (a < 3600000) { const m = r2(a / 60000); return m >= 60 ? neg + '1h' : neg + m + 'm'; } // 1.50m
-  if (a < 86400000) { const h = r2(a / 3600000); return h >= 24 ? neg + '1d' : neg + h + 'h'; }
-  return neg + r2(a / 86400000) + 'd';
+  if (a < TIME_MS.minute) { const s = r2(a / TIME_MS.second); return s >= 60 ? neg + '1m' : neg + s + 's'; }   // 1.26s
+  if (a < TIME_MS.hour) { const m = r2(a / TIME_MS.minute); return m >= 60 ? neg + '1h' : neg + m + 'm'; } // 1.50m
+  if (a < TIME_MS.day) { const h = r2(a / TIME_MS.hour); return h >= 24 ? neg + '1d' : neg + h + 'h'; }
+  return neg + r2(a / TIME_MS.day) + 'd';
 };
 // fmtTTFT is TTFT's display owner. Server ttft_ms is 0 when no token arrived,
 // when the request never sent an upstream attempt (a parked cursor resume) or
