@@ -593,12 +593,18 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-banner .oc-link:hover { color: var(--text); }
 /* ---------- overview: one row per rule in force ---------- */
 /* The overview is the same reading as a rule row: kind, scope, then the
-   budget, on one line. Clicking a row opens the section that owns the rule. */
+   budget. Clicking a row opens the section that owns the rule. The inset and
+   gap match .oc-rule-main so switching sections does not change the rhythm.
+   The row wraps rather than clipping. A three-dimension scope and a budget
+   with a schedule cannot both fit a 520px line, and truncating both left the
+   operator unable to read the scope or the budget - the two facts the row
+   exists to carry. When they do not fit together the budget drops to its own
+   right-aligned line, so the row is taller only for the rules that need it. */
 .oc-ov-list { display: flex; flex-direction: column; min-width: 0; }
 .oc-ov-row {
-  display: grid; grid-template-columns: 40px minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 8px; align-items: baseline; width: 100%; min-width: 0;
-  padding: 5px 6px; border: 0; border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px;
+  width: 100%; min-width: 0;
+  padding: 6px 8px; border: 0; border-top: 1px solid var(--border);
   background: none; color: var(--text); text-align: left; font: inherit;
   cursor: pointer;
 }
@@ -607,6 +613,7 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-ov-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
 .oc-ov-kind {
   display: inline-flex; align-items: center; gap: 5px;
+  flex: none; min-width: 40px;
   color: var(--muted); font: 600 9px/1.4 var(--mono);
 }
 .oc-ov-kind::before {
@@ -617,12 +624,18 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-ov-kind[data-kind="pause"] { color: var(--warn); }
 .oc-ov-kind[data-kind="capture"] { color: var(--cyan); }
 .oc-ov-scope {
-  min-width: 0; color: var(--text); font: 600 10px/1.4 var(--mono);
+  flex: 0 1 auto; min-width: 0;
+  color: var(--text); font: 600 10px/1.4 var(--mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* The budget gives way first: when it cannot share the line it moves to its
+   own line whole, instead of being cut mid-word. */
 .oc-ov-detail {
-  min-width: 0; color: var(--muted); text-align: right;
-  font: 10px/1.45 var(--mono); overflow-wrap: anywhere;
+  flex: 0 1 auto; min-width: 0; margin-left: auto;
+}
+.oc-ov-detail {
+  color: var(--muted); text-align: right;
+  font: 10px/1.45 var(--mono);
 }
 
 .oc-empty {

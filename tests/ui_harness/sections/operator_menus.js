@@ -1145,15 +1145,28 @@ module.exports = async function operatorMenus(H) {
         rows[0].querySelector('.oc-ov-scope').textContent === 'all traffic' &&
         rows[1].querySelector('.oc-ov-scope').textContent === 'provider prov-a');
       // An in-force row is one reading, not a stack of lines: the kind, the
-      // scope and the detail share a row, and the scope sits in its own grid
-      // cell so the kind tag cannot run into it. The row rule once vanished
-      // with a neighbouring block and the overview silently became one run of
-      // text, so its own computed layout is pinned here.
+      // scope and the detail share a line, and each keeps its own box so the
+      // kind tag cannot run into the scope. The row rule once vanished with a
+      // neighbouring block and the overview silently became one run of text,
+      // so its own computed layout is pinned here. The row is a wrapping flex
+      // line rather than a grid: a grid split gave the budget half the row and
+      // cut the scope to "client...", and the row must instead let the budget
+      // drop to its own line so neither fact is truncated.
       const ovStyle = w.getComputedStyle(rows[1]);
-      check('an in-force row declares the three-column grid it renders',
-        ovStyle.display === 'grid' &&
-        /\(?40px\)?\s+\(?minmax/.test(ovStyle.gridTemplateColumns) &&
-        rows[1].querySelectorAll('.oc-ov-kind, .oc-ov-scope, .oc-ov-detail').length === 3);
+      check('an in-force row lays out kind, scope and detail as one wrapping line',
+        ovStyle.display === 'flex' &&
+        ovStyle.flexWrap === 'wrap' &&
+        rows[1].querySelectorAll('.oc-ov-kind, .oc-ov-scope, .oc-ov-detail').length === 3 &&
+        // The three boxes sit on one line until the budget must wrap.
+        w.getComputedStyle(rows[0].querySelector('.oc-ov-kind')).flex === '0 0 auto');
+      // A row carries two facts: the scope that identifies the rule and the
+      // budget it enforces. Neither may be clipped. A grid split gave the
+      // budget half the row and cut the scope to "client...", and clipping
+      // both in step was no better: the row wraps the budget to a second
+      // line instead, so it grows only for the rules that need it.
+      check('an overview row never clips the scope or the budget it carries',
+        qa('#oc-pane .oc-ov-scope').every(el => el.scrollWidth <= el.clientWidth + 1) &&
+        qa('#oc-pane .oc-ov-detail').every(el => el.scrollWidth <= el.clientWidth + 1));
       // An overview row names one rule, so it opens that rule in its editor
       // instead of dropping the operator at the top of a list to search.
       check('an in-force row carries the rule it names',
