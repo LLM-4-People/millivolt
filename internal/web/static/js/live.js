@@ -103,8 +103,32 @@ const chartRequest = requestGate(true);
 // previous window/scope totals on screen.
 let chartKey = null;
 let chartFailure = null;
+// chartStatusCharted reports whether the Requests-card status filter can be
+// answered by the chart at all. The chart folds finalized contributions only,
+// so a live in-flight class (the same set the log draws as pills) can never
+// match there, and the server refuses it with 400 invalid scope instead of a
+// zeroed grid that would read as "no traffic". Asking anyway is what turned a
+// permanent condition into a perpetual "retrying" banner: the picker offers
+// "paused" unconditionally, and the 15s refresh re-sent it forever.
+//
+// The class list has one owner, LIVE_STATUS_FILTERS; this only asks whether a
+// selector is a member of it.
+function chartStatusCharted() {
+  return !LIVE_STATUS_FILTERS[filters.status];
+}
+// chartScopeQS is the chart's scope: the shared log scope minus a status
+// selector the chart cannot answer. Every other scope dimension (the explorer
+// filter set) applies to the chart unchanged.
+function chartScopeQS() {
+  if (chartStatusCharted()) return scopeQS();
+  const parts = [];
+  for (const f of explorerFilters()) {
+    parts.push('f=' + encodeURIComponent(f.dim + ':' + f.id));
+  }
+  return parts.join('&');
+}
 function chartReqKey() {
-  const scope = scopeQS();
+  const scope = chartScopeQS();
   return 'window=' + chartWindowToken() + (scope ? '&' + scope : '');
 }
 // chartQuery is the wire query for one chart fetch: the effective selection
@@ -116,7 +140,7 @@ function chartQuery() {
   const r = tfResolve(chartWindowToken(), Date.now());
   const params = r.kind === 'range' ? 'from_ms=' + r.fromMs + '&to_ms=' + r.toMs
     : r.kind === 'duration' ? 'window=' + r.minutes : 'window=all';
-  const scope = scopeQS();
+  const scope = chartScopeQS();
   return scope ? params + '&' + scope : params;
 }
 function markChartFailure(key) {

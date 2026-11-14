@@ -67,6 +67,57 @@ module.exports = async function chartRender(H) {
     check('a cleared failure returns the row to its ordinary reading',
       !/stale|unavailable/.test(d.getElementById('chart-context').textContent));
   }
+  // ---- a live status filter is never sent to the chart ----
+  // The chart folds finalized contributions only, so the server refuses an
+  // in-flight class with 400 invalid scope. The picker offers those classes
+  // unconditionally, and the 15s refresh re-sent the same impossible scope
+  // forever: a permanent condition painted as "chart unavailable - retrying".
+  // The chart's own scope now omits the class it cannot answer, and the context
+  // row says why instead of leaving the timeline looking unfiltered.
+  {
+    const savedStatus = w.eval('filters.status');
+    try {
+      for (const live of ['streaming', 'paused', 'throttled', 'pending']) {
+        w.eval('filters.status = ' + JSON.stringify(live));
+        check('an in-flight status class is not charted: ' + live,
+          w.eval('chartStatusCharted()') === false &&
+          !/[?&]s=/.test(w.eval('chartQuery()')) &&
+          !/[?&]s=/.test(w.eval('chartReqKey()')));
+      }
+      // A durable selector still rides the chart scope unchanged.
+      w.eval("filters.status = '200'");
+      check('a durable status code still scopes the chart',
+        w.eval('chartStatusCharted()') === true &&
+        /[?&]s=200/.test(w.eval('chartQuery()')));
+      // The explorer filter set is independent of the status selector and must
+      // keep applying even while the status is uncharted.
+      // Swap the filter source only for the duration of this assertion, and
+      // restore it in the same block: a leaked override breaks every later
+      // section that derives scope from the real function.
+      {
+        const savedSrc = w.eval('explorerFilters');
+        w.eval("filters.status = 'paused'; explorerFilters = () => [{dim: 'provider', id: 'prov-a'}]");
+        try {
+          check('the explorer filter set still scopes the chart under an in-flight status',
+            /f=provider%3Aprov-a/.test(w.eval('chartQuery()')) &&
+            !/[?&]s=/.test(w.eval('chartQuery()')));
+        } finally {
+          w.explorerFilters = savedSrc;
+        }
+      }
+      w.eval("filters.status = 'paused'; chartAgg = null; chartFailure = null; chartChromeSync()");
+      try {
+        w.eval('chartAgg = ' + JSON.stringify(mkChart()) + '; chartChromeSync()');
+        check('the context row states that an in-flight status is not charted',
+          /in-flight status is not charted/.test(d.getElementById('chart-context').textContent));
+      } finally {
+        w.eval('chartAgg = null; chartFailure = null');
+      }
+    } finally {
+      w.eval('filters.status = ' + JSON.stringify(savedStatus));
+      w.eval('chartAgg = null; chartFailure = null; chartChromeSync()');
+    }
+  }
   w.eval('chartAgg = null; chartView.preset = "traffic"; chartView.hidden = {}');
 
   // ---- test 11c: percentile selection never changes series structure ----

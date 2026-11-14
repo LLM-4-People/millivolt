@@ -954,14 +954,17 @@ function chartChromeSync() {
   // reading.
   const failed = chartFailure === chartReqKey();
   // The context row names the resolved selection, its bucket cadence, and -
-  // for all time - the stored coverage the payload reported.
+  // for all time - the stored coverage the payload reported. A live status
+  // filter is not charted at all (finalized buckets only), so the row says so
+  // instead of leaving the operator to wonder why the timeline looks unfiltered.
   const token = chartWindowToken();
   const resolved = tfResolve(token, Date.now());
   const history = token === 'all' && tfExtentFrom() > 0
     ? ' · ' + fmtDur(Date.now() - tfExtentFrom()) + ' of history' : '';
+  const inFlight = chartStatusCharted() ? '' : ' · in-flight status is not charted';
   const context = failed
     ? (chartAgg ? resolved.long + ' · stale, retrying' : 'chart unavailable - retrying')
-    : chartAgg ? resolved.long + ' · ' + fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted + history : 'Waiting for traffic';
+    : chartAgg ? resolved.long + ' · ' + fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted + history + inFlight : 'Waiting for traffic';
   updateSection('chart-context', context);
 }
 
