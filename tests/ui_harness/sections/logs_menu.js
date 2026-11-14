@@ -181,6 +181,39 @@ module.exports = async function logsMenu(H) {
         before_ms: 0, model: '', client: '', conversation_id: '', error_type: '', after_ms: 0 }) ===
         '/metrics/export?provider=openai&status_code=429');
     check('empty filter exports everything', w.ocExportURL({}) === '/metrics/export');
+    // The "choose a filter" gate reads the predicate owner, so a field that
+    // reaches ocExportFields is armed the moment it exists instead of the mode
+    // looking ready while the count refuses to run.
+    {
+      // The section is left exactly as this check found it: the lines below
+      // continue driving the live picker, so a stray mode reset here would
+      // remove the control they click.
+      const savedDraft = w.eval('JSON.stringify(ocDrafts.export)');
+      const armed = {};
+      const draftOf = patch => JSON.stringify(Object.assign(
+        JSON.parse(w.eval('JSON.stringify(ocBlankExportDraft())')), {mode: 'filter'}, patch));
+      w.eval('ocDrafts.export = ' + draftOf({}));
+      armed.blank = w.eval('ocFilterActive(ocDrafts.export)');
+      for (const field of ['provider', 'model', 'client', 'conversation', 'errorType', 'status']) {
+        w.eval('ocDrafts.export = ' + draftOf({[field]: field === 'status' ? '500' : 'x'}));
+        armed[field] = w.eval('ocFilterActive(ocDrafts.export)');
+      }
+      for (const field of ['errors', 'debug']) {
+        w.eval('ocDrafts.export = ' + draftOf({[field]: true}));
+        armed[field] = w.eval('ocFilterActive(ocDrafts.export)');
+      }
+      for (const field of ['age', 'after']) {
+        w.eval('ocDrafts.export = ' + draftOf({[field]: '1h'}));
+        armed[field] = w.eval('ocFilterActive(ocDrafts.export)');
+      }
+      w.eval("ocDrafts.export = Object.assign(ocBlankExportDraft(), {mode: 'all', provider: 'x'})");
+      armed.allMode = w.eval('ocFilterActive(ocDrafts.export)');
+      check('the export filter gate arms on every predicate field and stays off when empty',
+        armed.blank === false && armed.allMode === false &&
+        ['provider', 'model', 'client', 'conversation', 'errorType', 'status', 'errors', 'debug', 'age', 'after']
+          .every(field => armed[field] === true));
+      w.eval('ocDrafts.export = ' + savedDraft + '; ocRender()');
+    }
     check('debug-only export encodes the shared flag',
       w.ocExportURL({ debug: true }) === '/metrics/export?debug=1');
     check('conversation and error type ride their server keys',

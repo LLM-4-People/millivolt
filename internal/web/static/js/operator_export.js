@@ -85,9 +85,16 @@ function ocExportURL(filter) {
   return '/metrics/export' + (qs ? '?' + qs : '');
 }
 
+// ocFilterActive asks whether the operator chose any predicate at all. It reads
+// the predicate owner rather than listing the draft's fields a second time: a
+// new filter field is then live in the "choose a filter" gate the moment it
+// reaches ocExportFields, instead of leaving a mode that looks armed while the
+// count refuses to run. The age fields carry a window, not a selector, so they
+// are the two this reads from the draft directly.
 function ocFilterActive(draft) {
-  return !!(draft.provider || draft.model || draft.client || draft.conversation ||
-    draft.status || draft.errors || draft.debug || draft.errorType || draft.age || draft.after);
+  const fields = ocExportFields(draft);
+  const chosen = Object.values(fields).some(value => value !== '' && value !== 0 && value !== false);
+  return chosen || !!(draft.age || draft.after);
 }
 
 // ocFilterValues is one dimension's export vocabulary. The live ring alone is
