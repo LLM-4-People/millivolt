@@ -263,11 +263,7 @@ function ocRenderLimits() {
   // what the operator can actually read instead of re-deriving a predicate.
   const entries = policies.map(policy => {
     const html = ocLimitRuleHTML(policy);
-    const scope = ocScopePhrase({
-      providers: policy.scope?.providers, models: policy.scope?.models,
-      clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
-      conversations: policy.scope?.conversations,
-    });
+    const scope = ocPolicyScopePhrase(policy);
     return { html, text: scope + ' ' + ocBudgetPhrase(policy) + ' ' + (policy.source || '') };
   });
   const composing = ocComposing('limit');
@@ -297,13 +293,7 @@ function ocRenderLimits() {
 }
 
 function ocLimitRuleHTML(policy) {
-  const scope = ocScopePhrase({
-    providers: policy.scope?.providers,
-    models: policy.scope?.models,
-    clients: policy.scope?.clients,
-    keyHashes: policy.scope?.key_hashes,
-    conversations: policy.scope?.conversations,
-  });
+  const scope = ocPolicyScopePhrase(policy);
   const live = [];
   if (policy.in_flight) live.push(policy.in_flight + ' in flight');
   if (policy.queued) live.push(policy.queued + ' queued');
@@ -433,11 +423,7 @@ function ocLimitPolicyBody(policy) {
 async function ocRemoveLimit(id) {
   const policy = ocLimitById(id);
   if (!policy) { ocRuleGone('limit'); return; }
-  const scope = ocScopePhrase({
-    providers: policy.scope?.providers, models: policy.scope?.models,
-    clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
-    conversations: policy.scope?.conversations,
-  });
+  const scope = ocPolicyScopePhrase(policy);
   const live = policy.in_flight
     ? ' ' + policy.in_flight + ' ' + agree(policy.in_flight, 'request is', 'requests are') + ' in flight and will finish.'
     : '';

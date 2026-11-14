@@ -35,11 +35,7 @@ function ocAllRuleRows() {
       section: 'limits',
       id: policy.id || '',
       offSchedule,
-      scope: ocScopePhrase({
-        providers: policy.scope?.providers, models: policy.scope?.models,
-        clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
-        conversations: policy.scope?.conversations,
-      }),
+      scope: ocPolicyScopePhrase(policy),
       detail: [ocBudgetPhrase(policy), policy.schedule ? ocSchedulePhrase(policy.schedule) : '',
         offSchedule ? OC_OFF_SCHEDULE : ''].filter(Boolean).join(' · '),
     });
