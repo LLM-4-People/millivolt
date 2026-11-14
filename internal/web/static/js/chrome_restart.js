@@ -178,6 +178,10 @@ async function restartProxy() {
     const before = await fetchRestartStatus();
     if (before.available === false || before.phase !== 'idle') {
       if (before.available === false) setRestartStatus(before.reason || 'restart unavailable', true);
+      // A restart already running is a refusal too. Returning silently after
+      // the operator confirmed made a real no-op look like a missed click, and
+      // two tabs restarting at once is the ordinary way to reach this branch.
+      else setRestartStatus('a restart is already running', true);
       return;
     }
     restartFailed = false;

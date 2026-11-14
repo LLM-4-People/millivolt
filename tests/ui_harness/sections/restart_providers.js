@@ -113,6 +113,31 @@ module.exports = async function restartProviders(H) {
   check('failed restart restores the action and reports the error',
     !restartAction().disabled && d.getElementById('restart-count').textContent.includes('build failed') &&
     d.getElementById('restart-count').dataset.err === '1');
+  // A restart already running is a refusal, not a no-op. The reachable case
+  // is a stale tab: this page still believes the proxy is idle while another
+  // one started a restart, so the top guard passes, the operator confirms, and
+  // the fresh preflight is the first news of it. Returning silently there made
+  // a real refusal look like a missed click.
+  {
+    state.restartState.status = { phase: 'draining', rank: 1 };
+    // Stale local state: the phase the top guard reads.
+    w.eval("restartServerState = {phase: 'idle', rank: -1, available: true}");
+    w.syncRestartControls();
+    const savedConfirm2 = w.ocConfirm;
+    w.ocConfirm = () => Promise.resolve(true);
+    const postsBefore = state.restartState.postCount;
+    try {
+      await w.restartProxy();
+    } finally { w.ocConfirm = savedConfirm2; }
+    check('a restart another tab started refuses out loud and sends nothing',
+      state.restartState.postCount === postsBefore &&
+      d.getElementById('restart-count').textContent === 'a restart is already running' &&
+      d.getElementById('restart-count').dataset.err === '1');
+    state.restartState.status = {};
+    w.eval('restartServerState = {}');
+    w.syncRestartControls();
+  }
+
   state.restartState.status = { available: false, reason: 'source unavailable' };
   await w.fetchRestartStatus();
   check('unavailable restart stays disabled and names the reason',
