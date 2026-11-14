@@ -1389,9 +1389,11 @@ JSON, not the process's stderr log and not a complete administrative audit
 trail. With durable storage it reads the database; otherwise it uses available
 ring records. Open export, choose either all history or matching records, and
 review the previewed count before downloading. Provider, model, client and
-status choices come from the live record ring; conversation adds an exact
-conversation id field. A debug-only export can include retained capture
-sidecars.
+conversation merge the server's known vocabularies with whatever the live record
+ring holds, so a quiet proxy can still filter by what has run since it started,
+and each of them also accepts a typed value. Status is the one list-only
+dimension, because a status code is not a name anyone can type reliably. A
+debug-only export can include retained capture sidecars.
 
 The download is always a gzip artifact named `millivolt-logs-<timestamp>.json.gz`;
 gunzip it to read the JSON array of records. Compression is applied at the

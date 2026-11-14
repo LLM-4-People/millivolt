@@ -173,8 +173,9 @@ finish. Cap concurrency, request rate, or token rate for any combination of
 provider, model, client, key and conversation, or the whole proxy, with an
 optional recurring server-local schedule and an opt-in anti-burst ramp on a
 single-provider rule. A header readout stays `steady` or names every active
-hold, capture and stored limit; one operator console opens the policies, export
-and restart controls. Capture scoped debug bodies, export exactly the records
+hold, capture and enforcing limit, an `off schedule` policy that is stored but
+admitting everything, and any restart or gated backlog; one operator console
+opens the policies, export and restart controls. Capture scoped debug bodies, export exactly the records
 you filtered, and turn on error-storm protection with recovery probes. These are
 operator actions, not per-user permissions.
 

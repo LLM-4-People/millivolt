@@ -293,8 +293,9 @@ reports a real step. The counts are live state: a hold that expires, a stopped
 capture or a cleared limit leaves on the next state repaint. A hold takes the
 warning tone because it is the one state that stops live traffic; a restart
 takes it too, with a pulsing dot. If the live stream was open and then drops,
-the line keeps its last known words and appends ` · offline`, so a stale reading
-never presents itself as current. The header readout is not a live region; it
+the line keeps its last known words and appends ` · offline`; if the operator
+poll instead stops answering, it appends ` · stale`. Both mark the words as last
+known rather than current. The header readout is not a live region; it
 updates when operator state, connectivity or restart status changes, and the
 trigger's accessible label carries the same words plus the action the trigger
 performs in its current state. The open console's head line repeats those words
@@ -346,8 +347,8 @@ clients, providers and models. A limit
 row names its budgets and schedule plus any remaining request and token budget;
 who set it rides the row title rather than a third line. A hold row names its
 remaining time, its queue cap or `queue unlimited`, and its queued count. A
-capture row names its retained count, its run time, and its duration or `manual
-stop`. A row is the one edit target: activating it opens
+capture row names its retained count, its run time, and its duration or
+`until stopped`. A row is the one edit target: activating it opens
 its composer in edit mode. The action column offers copy, which starts a draft
 from the same scope and schedule with no budgets, and the terminating action for
 that kind: remove, resume or stop. A copied limit that still matches its source
@@ -392,7 +393,7 @@ line and the rest is the platform's own picker. The ramp is offered only on a si
 rule without a schedule. Equal from and to times mean all day, and a window
 that starts after its end spans midnight. Pause adds everything, new-clients
 and named clients/providers modes, a duration or until-resumed choice, and an
-optional queue cap. Its head also carries a one-click bounded hold (`hold
+optional queue cap. Its head also carries a one-click bounded hold (`hold all
 15m`), which writes the same all-traffic document through the same gate,
 ledger and undo path. It is bounded by construction: an indefinite hold is
 still available, but only through the composer where the operator chooses it. Capture starts a scoped Debug session and adds client,
@@ -404,8 +405,10 @@ and byte facts for the current configuration.
 Removing a limit, resuming every hold, stopping every capture, draining the
 queue and restarting open the shared confirmation dialog. It states the
 consequence, focuses cancel first, and names the action on its confirm button.
-Individual resume and stop actions commit directly; an edit commits when its
-composer is applied. All are recorded.
+Individual stop, and a resume with nothing queued, commit directly; resuming a
+hold that has parked requests opens the shared confirmation first, because it
+releases that backlog to the provider. An edit commits when its composer is
+applied. All are recorded.
 
 The console footer is a bounded session ledger. It shows the newest change and
 offers Undo while that change has a defined inverse. Undo applies it once and

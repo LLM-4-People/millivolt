@@ -606,9 +606,12 @@ the operator vocabularies, model grouping, capture storage gate and footer
 words, `chrome_restart` the restart choreography, and `chrome_settings` the
 Settings shell and trigger, the accepted debug snapshot, hold liveness and the
 download paths, `timeframe` the chart time vocabulary, stored-extent
-availability and the timeframe control, `log` window/drawer, `log_detail` detail
-rows, classified group tabs,
-cards and long-text surfaces,
+availability and the timeframe control, `log` the live log frame,
+`log_rows` the rows, day dividers and column registry, `log_archive` the durable
+archive window, `log_drawer` the detail drawer lifecycle and retry-attempt
+navigation, `log_detail` the detail primitives, `log_debug` the drawer's Debug
+capture section, `chrome_storm` the storm banner, incident identity and details
+dialog,
 `theme` the surface/palette registry and preview tray,
 `settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
 state. `theme.js` owns

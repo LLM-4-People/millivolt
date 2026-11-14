@@ -459,7 +459,7 @@ scripts/perf.sh stress    # private fast and streaming ramps
 scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
 scripts/perf.sh sustained # five-minute fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
-scripts/perf.sh all       # bench, stress and image, in that order
+scripts/perf.sh all       # image, bench, then stress
 ```
 
 For request, SSE-event, response-byte and output-token rates, use the
