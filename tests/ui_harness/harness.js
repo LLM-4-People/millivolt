@@ -230,6 +230,33 @@ async function settleUntil(cond, timeoutMs = 2000) {
   return true;
 }
 
+// pauseAmbient/resumeAmbient own the page's self-armed timers for a section
+// that installs a fixture the page would otherwise overwrite. The page starts
+// its own poll, footer clock and explorer live timer at load, so a section that
+// repaints from a hand-built payload races them: the rail block in render_live
+// was reproducibly overwritten (rail-n 77 -> "-") by one stale-payload tick,
+// because the fixture it installed had no scopeKey and refreshExplorerIfStale
+// therefore refetched. Fifteen sections hand-spelled the clearInterval line
+// before this owner existed; each new section had to remember the full list.
+//
+// Pause stops every timer the page arms by itself. Resume only re-arms what the
+// page would have armed, by calling the page's own functions, so the cadence
+// stays owned by core.js/app state rather than by a second implementation here.
+const AMBIENT_TIMERS = ['_dashTickTimer', '_clockTimer'];
+const AMBIENT_TIMEOUTS = ['_xpLiveTimer', 'logRetryTimer'];
+function pauseAmbient() {
+  for (const name of AMBIENT_TIMERS) {
+    w.eval(`if (${name}) { clearInterval(${name}); ${name} = null; }`);
+  }
+  for (const name of AMBIENT_TIMEOUTS) {
+    w.eval(`if (${name}) { clearTimeout(${name}); ${name} = null; }`);
+  }
+}
+function resumeAmbient() {
+  // A hidden page arms neither; never force one on.
+  w.eval('if (!_wasHidden) { armDashboardTicks(); _armClock(); }');
+}
+
 
 const rows = () => [...d.querySelectorAll('#tbl-requests tr.exp-row[data-id]')].filter(tr => !tr.classList.contains('retry-sub'));
 const fire = (type, data, lastEventId) => {
@@ -249,6 +276,7 @@ const fire = (type, data, lastEventId) => {
 module.exports = {
   dom, w, d, html, check, reportFailures, rows, fire, sleep, settleUntil,
   installDiagnostics, checkEntityIdentity, assembleHTML, dashboardDOM, loaded,
+  pauseAmbient, resumeAmbient,
   JSDOM, fs, path, STATIC,
   mkRec, LIST, BIG, CHART_FROM, BUCKET_MS, mkChart, modelFixture, observerFixture,
   DEF_RULES, cfgDoc, TEST_DASHBOARD_VERSION, pageOptions, state, watchdog, WATCHDOG_MS,

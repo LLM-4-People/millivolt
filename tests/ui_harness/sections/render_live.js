@@ -1,7 +1,7 @@
 // test 1: full render painted 30 rows
 // Extracted from the inline suite without changing order, labels or state.
 module.exports = async function renderLive(H) {
-  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, rows, settleUntil, sleep, w} = H;
+  const {JSDOM, STATIC, check, d, fire, fs, mkRec, path, pauseAmbient, resumeAmbient, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
   // ---- test 1: full render painted 30 rows ----
@@ -318,6 +318,10 @@ module.exports = async function renderLive(H) {
       w.renderGallery(w.explorerState());
     }
 
+    // The page's own tick refetches a payload it considers foreign (this
+    // fixture carries no scopeKey), which overwrote the rail under load. Own
+    // the timers for this block and hand them back afterwards.
+    pauseAmbient();
     const trigger = d.getElementById('xp-dim-trigger');
     let mutations = [];
     const observer = new w.MutationObserver(records => mutations.push(...records));
@@ -364,6 +368,7 @@ module.exports = async function renderLive(H) {
       observer.disconnect();
       w.eval('explorerAgg=window.__restoreRailAgg;delete window.__restoreRailAgg');
       w.renderDimRail(w.explorerState());
+      resumeAmbient();
     }
   }
 

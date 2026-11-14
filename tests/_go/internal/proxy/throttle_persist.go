@@ -153,34 +153,48 @@ func TestThrottleHeaderPersistenceCoalescesBurst(t *testing.T) {
 // through a rapid burst and bounds both its write count and total bytes. This
 // is the request-path decoupling proof: no flush is needed for the writer to
 // land the latest policy.
+//
+// The burst runs in virtual time (like the pause-timer checks). A real 25ms
+// debounce window made the assertion a function of machine speed: under load
+// the window expired mid-burst, so 512 changes produced many more writes and a
+// fixed count ceiling failed on a correct writer. Here the whole burst lands
+// while the writer is still waiting for quiet, which is the case the contract
+// is about, and one quiet window then collapses it into one document.
 func TestThrottleHeaderWriterCoalescesWithoutFlush(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
-	store := &countingThrottlePersist{}
-	p.attachThrottlePersist(store)
-	p.throttle.debounce = 25 * time.Millisecond
-	t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
+	synctest.Test(t, func(t *testing.T) {
+		p := New(config.Default(), metrics.Noop{})
+		store := &countingThrottlePersist{}
+		p.attachThrottlePersist(store)
+		p.throttle.debounce = 25 * time.Millisecond
+		t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
 
-	const gates = 512
-	for i := 0; i < gates; i++ {
-		applyThrottleHeader(t, p, throttleTestProvider(i), hdrLimitConcurrency, "1")
-	}
-	if !waitFor(t, func() bool { return store.saveCount() != 0 }) {
-		t.Fatal("background writer never persisted the burst")
-	}
-	if err := p.FlushThrottles(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	saves, raw, bytes, _ := store.stats()
-	if saves > 16 {
-		t.Fatalf("background writer made %d writes for one burst", saves)
-	}
-	if bytes > int64(saves)*int64(len(raw)) {
-		t.Fatalf("persisted bytes = %d, bound %d", bytes, int64(saves)*int64(len(raw)))
-	}
-	items := assertThrottleDocumentMatchesPolicy(t, raw, p)
-	if len(items) != gates {
-		t.Fatalf("persisted gates = %d, want %d", len(items), gates)
-	}
+		const gates = 512
+		for i := 0; i < gates; i++ {
+			applyThrottleHeader(t, p, throttleTestProvider(i), hdrLimitConcurrency, "1")
+		}
+		// Let virtual time cross exactly one debounce window: the burst above is
+		// one wake, so the whole 512-change run must land as a single document.
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if saves := store.saveCount(); saves != 1 {
+			t.Fatalf("background writer made %d writes for one burst, want 1 (a burst is one wake)", saves)
+		}
+		if err := p.FlushThrottles(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		saves, raw, bytes, _ := store.stats()
+		// The flush is the barrier write; nothing may follow it for this burst.
+		if saves > 2 {
+			t.Fatalf("background writer made %d writes for one burst plus its flush, want at most 2", saves)
+		}
+		if bytes > int64(saves)*int64(len(raw)) {
+			t.Fatalf("persisted bytes = %d, bound %d", bytes, int64(saves)*int64(len(raw)))
+		}
+		items := assertThrottleDocumentMatchesPolicy(t, raw, p)
+		if len(items) != gates {
+			t.Fatalf("persisted gates = %d, want %d", len(items), gates)
+		}
+	})
 }
 
 // TestThrottleHeaderSinkFailureDoesNotFailInference drives the real HTTP path

@@ -403,6 +403,10 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 	errBody := `{"error":{"type":"server_error","message":"boom","code":"internal"},"pad":"` +
 		strings.Repeat("x", 70*1024) + `"}`
 	release := make(chan struct{})
+	// decisionReached is closed by the upstream once it has written the whole
+	// 500 body and parked. It orders the abort after the proxy's decision
+	// without a wall-clock guess.
+	decisionReached := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -412,6 +416,7 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 		// Parked on the channel instead of a fixed sleep: the tail is
 		// withheld until the test releases, so the abort below
 		// deterministically lands while the proxy is mid-relay.
+		close(decisionReached)
 		<-release // the proxy is mid-relay of the 500 body here
 		w.Write([]byte(`{"tail":true}`))
 	}))
@@ -430,18 +435,25 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer sk-key")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
 
+	headersArrived := make(chan struct{})
 	go func() {
 		// Result discarded on purpose: the LOCAL client aborting mid error
-		// body IS the scenario under test.
+		// body IS the scenario under test. Headers arriving is the ordering
+		// signal: the proxy commits the status line only after it has captured
+		// and stamped the decided outcome, so waiting for this makes the abort
+		// land after the decision at any machine speed.
 		if resp, err := http.DefaultClient.Do(req); err == nil {
+			close(headersArrived)
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 		}
 	}()
-	// The parked tail keeps the response mid-body; the sleep only covers the
-	// request and the 500 burst reaching the proxy, ample at 50ms on loopback.
-	time.Sleep(50 * time.Millisecond) // the proxy is blocked relaying the slow 500 body
-	cancel()                          // the LOCAL client aborts mid-body
+	select {
+	case <-headersArrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the proxy never committed the decided error status")
+	}
+	cancel() // the LOCAL client aborts mid-body
 
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]
