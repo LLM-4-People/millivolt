@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
 // OperatorStateOutput reads every operator control in one call: the pause
@@ -310,17 +311,17 @@ const throttleNote = "the request budget is a strict sliding window: no window o
 	"that permits oversized reservations by going into debt. anti_burst only ramps a fresh provider+key group up to the concurrency target " +
 	"rather than capping concurrency bursts outright"
 
-// The bands the proxy enforces on a provider limit (internal/proxy/throttle.go
-// maxLimit* and min/maxLimitWindow). Applying them here turns a typo into a
-// readable message instead of a 400, and stops a request the proxy would refuse
-// after it was already assembled. The anti-burst ramp reuses the window band;
-// its grammar and that band stay owned by the proxy.
+// The bands the proxy enforces on a provider limit. Applying them here turns a
+// typo into a readable message instead of a 400, and stops a request the proxy
+// would refuse after it was already assembled. They are read from the scheduler
+// package, which owns them and which the proxy also reads, so this surface
+// cannot carry a second copy that drifts from enforcement.
 const (
-	maxLimitConcurrency = 100_000
-	maxLimitRequests    = 1_000_000_000
-	maxLimitTokens      = 1_000_000_000_000
-	minLimitWindow      = time.Second
-	maxLimitWindow      = 24 * time.Hour
+	maxLimitConcurrency = scheduler.LimitConcurrencyMax
+	maxLimitRequests    = scheduler.LimitRequestsMax
+	maxLimitTokens      = scheduler.LimitTokensMax
+	minLimitWindow      = scheduler.LimitWindowMin
+	maxLimitWindow      = scheduler.LimitWindowMax
 )
 
 // setThrottleDescription is the model-visible documentation of set_throttle.

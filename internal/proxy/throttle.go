@@ -28,18 +28,19 @@ const (
 	hdrLimitTokens      = "X-Proxy-Limit-Tokens"
 )
 
-// Safety guardrails on a header/UI-supplied cap. Not user-tunable: they
-// bound a hostile or typo'd value so it cannot stall the provider forever
-// or overflow the token bucket. Window is 1s..24h (same ceiling as
-// scheduler.MaxRetryHint - a daily quota window). The anti-burst ramp
-// duration reuses that same band, so both share one grammar and one range
-// check.
+// Safety guardrails on a header/UI-supplied cap. Not user-tunable: they bound a
+// hostile or typo'd value so it cannot stall the provider forever or overflow
+// the token bucket. The bands themselves live in scheduler, which this package
+// and the MCP validation surface both import, so there is one declaration
+// rather than a copy per consumer. The window ceiling is MaxRetryHint's: a daily
+// quota window is the longest span either feature reasons about, and the
+// anti-burst ramp reuses the same band.
 const (
-	maxLimitConcurrency = 100_000
-	maxLimitRequests    = 1_000_000_000
-	maxLimitTokens      = 1_000_000_000_000
-	minLimitWindow      = time.Second
-	maxLimitWindow      = 24 * time.Hour
+	maxLimitConcurrency = scheduler.LimitConcurrencyMax
+	maxLimitRequests    = scheduler.LimitRequestsMax
+	maxLimitTokens      = scheduler.LimitTokensMax
+	minLimitWindow      = scheduler.LimitWindowMin
+	maxLimitWindow      = scheduler.LimitWindowMax
 )
 
 // Durable throttle-policy bounds and background-writer cadence. These are
@@ -1300,7 +1301,7 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 		// before the restart is enforcing. Reported apart from an empty list,
 		// which would read as a deliberate, uncapped configuration.
 		"restore_degraded": restoreDegraded,
-		"active":          len(throttles) > 0,
+		"active":           len(throttles) > 0,
 	}
 }
 

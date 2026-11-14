@@ -879,12 +879,42 @@ func TestThrottleSnapshotMatchesGET(t *testing.T) {
 	}
 }
 
+// TestProviderLimitBandsHaveOneOwner pins the scheduler bands to their literal
+// values. Both the proxy and the MCP surface read the scheduler declaration, so
+// comparing the two consumers to the owner would be a tautology: it passes no
+// matter what number the owner holds. The literals are the contract a client
+// and a model were told to expect, so they are what this asserts.
+func TestProviderLimitBandsHaveOneOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		got     int64
+		literal int64
+	}{
+		{"concurrency", scheduler.LimitConcurrencyMax, 100_000},
+		{"requests", scheduler.LimitRequestsMax, 1_000_000_000},
+		{"tokens", scheduler.LimitTokensMax, 1_000_000_000_000},
+		{"window min (ns)", int64(scheduler.LimitWindowMin), int64(time.Second)},
+		{"window max (ns)", int64(scheduler.LimitWindowMax), int64(24 * time.Hour)},
+	} {
+		if tc.got != tc.literal {
+			t.Errorf("%s: scheduler owner = %d, want the published band %d (a widening or narrowing of an enforced band is a client-visible contract change, not a refactor)", tc.name, tc.got, tc.literal)
+		}
+	}
+	// The proxy's own aliases must resolve to that owner, not to a fresh copy.
+	if maxLimitConcurrency != scheduler.LimitConcurrencyMax ||
+		maxLimitRequests != scheduler.LimitRequestsMax ||
+		maxLimitTokens != scheduler.LimitTokensMax ||
+		minLimitWindow != scheduler.LimitWindowMin ||
+		maxLimitWindow != scheduler.LimitWindowMax {
+		t.Error("internal/proxy re-declares a limit band instead of reading the scheduler owner")
+	}
+}
+
 // TestMCPThrottleSchemaMirrorsTheProxyBands pins the model-visible throttle
 // argument documentation to the proxy constants that enforce it. The MCP
-// server duplicates the bands so a typo becomes a readable tool message
-// instead of a request the proxy refuses after assembly; the proxy owner is
-// the source, and the schema text is what the model reads, so a band change on
-// either side must fail here.
+// server validates against the same scheduler owner, so the bands cannot
+// disagree; the schema text is what the model reads, so a band change on
+// either side must still fail here.
 func TestMCPThrottleSchemaMirrorsTheProxyBands(t *testing.T) {
 	windowBand := fmt.Sprintf("%s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour))
 	for _, tc := range []struct {
