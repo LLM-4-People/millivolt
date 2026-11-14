@@ -528,6 +528,40 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 .oc-banner .oc-link { color: inherit; }
 .oc-banner .oc-link:hover { color: var(--text); }
+/* ---------- overview: one row per rule in force ---------- */
+/* The overview is the same reading as a rule row: kind, scope, then the
+   budget, on one line. Clicking a row opens the section that owns the rule. */
+.oc-ov-list { display: flex; flex-direction: column; min-width: 0; }
+.oc-ov-row {
+  display: grid; grid-template-columns: 40px minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 8px; align-items: baseline; width: 100%; min-width: 0;
+  padding: 5px 6px; border: 0; border-top: 1px solid var(--border);
+  background: none; color: var(--text); text-align: left; font: inherit;
+  cursor: pointer;
+}
+.oc-ov-row:first-child { border-top: 0; }
+.oc-ov-row:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.oc-ov-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-ov-kind {
+  display: inline-flex; align-items: center; gap: 5px;
+  color: var(--muted); font: 600 9px/1.4 var(--mono);
+}
+.oc-ov-kind::before {
+  content: ''; width: 5px; height: 5px; flex: none; border-radius: 1px;
+  background: currentColor;
+}
+.oc-ov-kind[data-kind="limit"] { color: var(--accent); }
+.oc-ov-kind[data-kind="pause"] { color: var(--warn); }
+.oc-ov-kind[data-kind="capture"] { color: var(--cyan); }
+.oc-ov-scope {
+  min-width: 0; color: var(--text); font: 600 10px/1.4 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-ov-detail {
+  min-width: 0; color: var(--muted); text-align: right;
+  font: 9.5px/1.45 var(--mono); overflow-wrap: anywhere;
+}
+
 .oc-empty {
   padding: 18px 12px; border: 1px dashed var(--border2); border-radius: 8px;
   color: var(--muted); font: 10px/1.6 var(--sans);

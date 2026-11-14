@@ -882,6 +882,16 @@ module.exports = async function operatorMenus(H) {
           JSON.stringify(['pause', 'limit']) &&
         rows[0].querySelector('.oc-ov-scope').textContent === 'all traffic' &&
         rows[1].querySelector('.oc-ov-scope').textContent === 'provider prov-a');
+      // An in-force row is one reading, not a stack of lines: the kind, the
+      // scope and the detail share a row, and the scope sits in its own grid
+      // cell so the kind tag cannot run into it. The row rule once vanished
+      // with a neighbouring block and the overview silently became one run of
+      // text, so its own computed layout is pinned here.
+      const ovStyle = w.getComputedStyle(rows[1]);
+      check('an in-force row declares the three-column grid it renders',
+        ovStyle.display === 'grid' &&
+        /\(?40px\)?\s+\(?minmax/.test(ovStyle.gridTemplateColumns) &&
+        rows[1].querySelectorAll('.oc-ov-kind, .oc-ov-scope, .oc-ov-detail').length === 3);
       click('#oc-pane .oc-ov-row[data-oc-section="limits"]');
       check('an in-force row switches the console to its section',
         paneSection() === 'limits' &&
