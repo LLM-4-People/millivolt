@@ -16,6 +16,31 @@ module.exports = async function logsMenu(H) {
     check('the console opens on its export section',
       !shell.hidden && shell.classList.contains('mn') && shell.classList.contains('oc') &&
       d.getElementById('oc-pane').dataset.section === 'export');
+    // The rebuild's focus preservation reads one definition of "reachable by
+    // keyboard inside the pane". Three literals lived on four adjacent lines,
+    // so a control type added to one would have been focusable for the control
+    // list but invisible to the slot lookup that restores the caret.
+    {
+      const host = d.createElement('div');
+      host.innerHTML = '<button id="f-b">b</button><label id="f-l"><input id="f-i"></label>' +
+        '<span id="f-s" tabindex="0">s</span><button id="f-d" disabled>d</button>' +
+        '<a id="f-a" href="#x">a</a>';
+      const count = w.ocControls(host).map(el => el.id).join(',');
+      check('one selector defines the pane focus order and the slot lookup',
+        w.eval('typeof OC_FOCUSABLE') === 'string' &&
+        // The pane's contract is the console's own controls. A link is not one:
+        // the console navigates by button, and the modal frame keeps the wider
+        // selector that also reaches links.
+        count === 'f-b,f-i,f-s' &&
+        w.eval('OC_FOCUSABLE').includes('[tabindex]') &&
+        !w.eval('OC_FOCUSABLE').includes('a[href]') &&
+        // A slot that is itself focusable wins over a control inside it; a
+        // wrapper label resolves to its field.
+        w.ocFocusTarget(host.querySelector('#f-b')).id === 'f-b' &&
+        w.ocFocusTarget(host.querySelector('#f-l')).id === 'f-i' &&
+        w.ocFocusTarget(host.querySelector('#f-s')).id === 'f-s' &&
+        w.ocFocusTarget(null) === null);
+    }
     // Every delegated listener scopes its work through one guard, which owns
     // the "closed console owns nothing" rule: a null node, a node outside the
     // shell, and an absent shell are all false rather than a throw.

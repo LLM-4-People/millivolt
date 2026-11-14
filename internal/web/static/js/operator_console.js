@@ -575,6 +575,14 @@ function ocSelectSection(id, skipRender) {
 }
 
 // ---------- focus preservation ----------
+// OC_FOCUSABLE is the one definition of "reachable by keyboard inside the
+// pane". It appeared as three literals on four adjacent lines, so a control
+// type added to one of them (a summary, a contenteditable) would have been
+// focusable for the rebuild's signature list but invisible to the slot lookup
+// that restores the caret. The modal frame keeps its own, wider selector
+// because a dialog also reaches links and must test computed visibility.
+const OC_FOCUSABLE = 'button, input, select, textarea, [tabindex]';
+
 // ocFocusKey names the focused control across a full pane rebuild. Draft
 // values live in ocDrafts, so only the caret and the element identity need to
 // survive.
@@ -583,15 +591,15 @@ function ocSelectSection(id, skipRender) {
 // not focusable, so the slot's own control wins when it has one.
 function ocFocusTarget(slot) {
   if (!slot) return null;
-  if (slot.matches('button, input, select, textarea, [tabindex]')) return slot;
-  return slot.querySelector('button, input, select, textarea, [tabindex]');
+  if (slot.matches(OC_FOCUSABLE)) return slot;
+  return slot.querySelector(OC_FOCUSABLE);
 }
 
 // ocControls lists the pane's focusable controls in document order. A rebuild
 // must resolve the same list before and after, so the enumeration is the one
-// definition of "reachable by keyboard inside the pane".
+// definition of what the rebuild preserves.
 function ocControls(root) {
-  return [...root.querySelectorAll('button, input, select, textarea, [tabindex]')]
+  return [...root.querySelectorAll(OC_FOCUSABLE)]
     .filter(el => !el.disabled && el.tabIndex >= 0);
 }
 
