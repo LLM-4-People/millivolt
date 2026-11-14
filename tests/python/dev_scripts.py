@@ -337,6 +337,52 @@ class DrainWaitTests(unittest.TestCase):
         self.assertIn("8082", wrong.stderr)
         self.assertIn("8081", wrong.stderr)
 
+    def test_scratch_database_cannot_be_smuggled_through_a_symlink(self):
+        """`realpath -m` resolves the final component, so a link named for a
+        harmless fixture resolved to another instance's database and the start
+        sequence then deleted that database. `realpath -ms` keeps the link's own
+        name, and the guard refuses a symlink outright."""
+        script = shell_harness('\ndev_db_path "$1" "$2" "$3"\n')
+        live = self.root / "millivolt-dev-run.db"
+        live.write_text("another instance's live data", encoding="utf-8")
+        (self.root / "millivolt-dev-ci.db").symlink_to(live.name)
+        (self.root / "millivolt-dev-safe.db").symlink_to(live)
+        for name, label in (("millivolt-dev-ci.db", "relative link"),
+                            ("millivolt-dev-safe.db", "absolute link")):
+            with self.subTest(link=label):
+                result = run_bash(script, str(self.root / name), "8081", str(self.root))
+                self.assertNotEqual(result.returncode, 0, label + " was accepted")
+                self.assertEqual(result.stdout.strip(), "", label + " resolved a path")
+                self.assertIn("symlink", result.stderr)
+                # The destructive half: the accepted-and-deleted target must
+                # never happen, so the fixture has to survive the refusal.
+                self.assertTrue(live.exists(), label + " destroyed the target")
+                self.assertEqual(live.read_text(encoding="utf-8"),
+                                 "another instance's live data", label + " rewrote the target")
+
+    def test_scratch_database_port_claim_is_any_digit_run(self):
+        """A port claim is any dash-delimited all-digit field, of any length,
+        compared with leading zeros stripped. A four-digit bound skipped
+        `-065535`, which is port 65535: a name `dev.sh` itself would refuse as
+        DEV_PORT, accepted as a database name."""
+        script = shell_harness('\ndev_db_path "$1" "$2" "$3"\n')
+        cases = (
+            ("/tmp/millivolt/millivolt-dev-065535.db", "8081", False, "a six-digit foreign port"),
+            ("/tmp/millivolt/millivolt-dev-065535.db", "65535", True, "a six-digit own port"),
+            ("/tmp/millivolt/millivolt-dev-08081.db", "8081", True, "a five-digit own port"),
+            ("/tmp/millivolt/millivolt-dev-0008081.db", "8081", True, "a padded own port"),
+            ("/tmp/millivolt/millivolt-dev-0008082.db", "8081", False, "a padded foreign port"),
+            ("/tmp/millivolt/millivolt-dev-99999999999999999999.db", "8081", False,
+             "a digit run too large for shell arithmetic"),
+        )
+        for database, port, accepted, label in cases:
+            with self.subTest(case=label):
+                result = run_bash(script, database, port, "/tmp/millivolt")
+                self.assertEqual(result.returncode == 0, accepted,
+                                 label + ": " + result.stderr)
+                if not accepted:
+                    self.assertIn("DEV_DB", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

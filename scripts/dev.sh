@@ -56,23 +56,35 @@ case "$DEV_HOST" in 127.0.0.1|localhost) ;; *) die "DEV_HOST must be loopback (1
 # DEV_DB=...-8082.db with DEV_PORT=8081 passed the old namespace-only guard and
 # then deleted the database the 8082 instance had open. A name that names no
 # port is an explicit operator choice (a documentation or CI fixture) and stays
-# allowed; a name that names a port must name this one. A short numeric label
-# such as "-v2" is not a port and is left alone.
+# allowed; a name that names a port must name this one.
+#
+# Two rules make that hold rather than nearly hold:
+#   - the final component must be the literal file, never a symlink. `realpath
+#     -m` follows it, so a link named ...-ci.db pointing at another instance's
+#     database resolved to that database and the start sequence deleted it;
+#   - any dash-delimited all-digit field is a port claim, of any length, and is
+#     compared with leading zeros stripped. A four-digit bound skipped
+#     `-065535`, which is 65535 and would have been accepted.
 dev_db_path() {
-  local raw="$1" port="$2" dir="$3" resolved bare field
+  local raw="$1" port="$2" dir="$3" resolved bare field trimmed
   [ "$raw" = none ] && { printf 'none'; return 0; }
-  resolved="$(realpath -m -- "$raw")"
+  resolved="$(realpath -ms -- "$raw")"
   [ "$(dirname "$resolved")" = "$dir" ] \
     || die "DEV_DB must be a scratch file directly inside $dir, or none"
+  [ ! -L "$resolved" ] \
+    || die "DEV_DB must be a regular file, not a symlink: ${resolved##*/}"
   bare="${resolved##*/}"
   case "$bare" in millivolt-dev*.db) ;; *) die "DEV_DB must be named millivolt-dev*.db inside $dir, or none: $bare" ;; esac
   local fields=()
   IFS=- read -r -a fields <<<"${bare#millivolt-dev}"
   for field in "${fields[@]}"; do
     field="${field%.db}"
-    [[ "$field" =~ ^[0-9]{4,5}$ ]] || continue
-    (( 10#$field == port )) \
-      || die "DEV_DB names port $((10#$field)) but DEV_PORT is $port, so starting would delete another instance's database: $bare"
+    [[ "$field" =~ ^[0-9]+$ ]] || continue
+    # Strip leading zeros rather than evaluating, so an unbounded digit run
+    # cannot overflow the shell's arithmetic.
+    trimmed="${field#"${field%%[!0]*}"}"
+    [ "$trimmed" = "$port" ] \
+      || die "DEV_DB names port ${field} but DEV_PORT is $port, so starting would delete another instance's database: $bare"
   done
   printf '%s' "$resolved"
 }
