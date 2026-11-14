@@ -198,6 +198,37 @@ function ocSectionEmpty(kind, total, html) {
   return html;
 }
 
+// OC_SECTION_OF_KIND maps a rule kind to the destination that owns it. The
+// draft and document vocabulary is the singular kind; the rail, the filter
+// store and the empty-state clear action speak the destination's name. Only
+// limits differ, and deriving the name from the kind with a suffix would spell
+// "limits" correctly but "captures" for a section actually called capture.
+const OC_SECTION_OF_KIND = { limit: 'limits', pause: 'pause', capture: 'capture' };
+
+// ocSectionHTML assembles the list shell every policy section shares: the
+// explainer with its actions, the composer when one is open, the list filter,
+// the visible rows (or the section's own empty state), and the note that names
+// a partial list. Limits, pause and capture each wrote this sequence by hand,
+// and limits placed its action outside the head-actions wrapper the other two
+// used, so on a phone its button stretched while theirs stayed compact.
+//
+// The rows arrive already built and carrying the text they render, because the
+// filter searches what the operator can read rather than a re-derived
+// predicate. The words stay with the section that owns them.
+function ocSectionHTML(sec) {
+  const section = OC_SECTION_OF_KIND[sec.kind] || sec.kind;
+  const shown = ocFilterRows(section, sec.entries);
+  const rows = shown.map(entry => entry.html).join('');
+  const actions = sec.actions ? `<div class="oc-head-actions">${sec.actions}</div>` : '';
+  return `<div class="oc-sec">` +
+    `<div class="oc-sec-head"><p class="oc-sub">${escapeHtml(sec.sub)}</p>${actions}</div>` +
+    (sec.composer || '') +
+    ocListFilterHTML(section, sec.total) +
+    (rows || ocSectionEmpty(sec.kind, sec.total, sec.empty)) +
+    ocListEmptyNote(section, shown.length, sec.total) +
+    `</div>`;
+}
+
 // ocFilterRows narrows a section's rows by the text each one renders. Matching
 // the rendered reading, rather than re-deriving the scope here, keeps one
 // search rule for every row shape and makes a new field searchable for free.

@@ -269,10 +269,6 @@ function ocRenderLimits() {
     });
     return { html, text: scope + ' ' + ocBudgetPhrase(policy) + ' ' + (policy.source || '') };
   });
-  const shown = ocFilterRows('limits', entries);
-  const rows = shown.map(entry => entry.html).join('');
-  const filter = ocListFilterHTML('limits', policies.length);
-  const hidden = ocListEmptyNote('limits', shown.length, policies.length);
   const composing = ocComposing('limit');
   const editing = !!ocDrafts.limit?.id;
   // An empty list proves no limit rule exists. It does not prove admission:
@@ -290,14 +286,13 @@ function ocRenderLimits() {
     ? `<button type="button" class="btn" data-oc-new="limit">start over</button>`
     : composing ? ''
       : `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button>`;
-  return `<div class="oc-sec">` +
-    `<div class="oc-sec-head"><p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p>` +
-    headAction + `</div>` +
-    (composing ? ocLimitComposerHTML(ocDrafts.limit) : '') +
-    filter +
-    (rows || empty) +
-    hidden +
-    `</div>`;
+  return ocSectionHTML({
+    kind: 'limit',
+    sub: 'Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.',
+    actions: headAction,
+    composer: composing ? ocLimitComposerHTML(ocDrafts.limit) : '',
+    entries, total: policies.length, empty,
+  });
 }
 
 function ocLimitRuleHTML(policy) {
