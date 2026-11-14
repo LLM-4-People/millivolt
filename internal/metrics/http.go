@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -112,11 +111,89 @@ func (b *Buffer) SnapshotRequest(q url.Values, header http.Header) Snapshot {
 	return snap
 }
 
-// appendSSEFrame appends one event frame to dst. The snapshot writer uses it
-// on an empty destination; the live loop batches many frames into one write so
-// a burst costs one syscall, one flush, and one deadline arm instead of one
-// per event.
-func appendSSEFrame(dst []byte, event string, id int64, hasID bool, data []byte) []byte {
+// sseBatchBytes bounds one dashboard SSE write. A batch larger than this is
+// split across writes by sseStreamWriter, so neither a burst nor a single
+// large payload (an old-cursor snapshot delta is the largest one) can become
+// one oversized socket write. Internal cadence, not user-tunable.
+const sseBatchBytes = 32 << 10
+
+// sseStreamWriter owns the dashboard feed's write batching for BOTH the initial
+// snapshot and the live event loop. Frame syntax still has one owner
+// (appendSSEHead); this type owns only how the resulting bytes are grouped
+// into writes, so a payload larger than sseBatchBytes cannot take a framing
+// path that bypasses the bound. One batch costs one write, one flush and one
+// deadline arm instead of one per event.
+type sseStreamWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	batch   []byte
+}
+
+func newSSEStreamWriter(w http.ResponseWriter, flusher http.Flusher) *sseStreamWriter {
+	return &sseStreamWriter{w: w, flusher: flusher, batch: make([]byte, 0, sseBatchBytes)}
+}
+
+// flush writes the pending bytes as one batch. A stream that stops reading
+// fails its write (the deadline armed here), releasing the handler instead of
+// pinning it until process shutdown.
+func (s *sseStreamWriter) flush() error {
+	if len(s.batch) == 0 {
+		return nil
+	}
+	armSSEWriteDeadline(s.w)
+	if _, err := s.w.Write(s.batch); err != nil {
+		return err
+	}
+	s.flusher.Flush()
+	s.batch = s.batch[:0]
+	return nil
+}
+
+// append copies bytes into the batch, flushing whenever the bound is reached.
+// A payload wider than one batch is therefore delivered as several bounded
+// writes, never as one oversized write, and the byte stream is unchanged.
+func (s *sseStreamWriter) append(data []byte) error {
+	for len(data) > 0 {
+		if len(s.batch) == cap(s.batch) {
+			if err := s.flush(); err != nil {
+				return err
+			}
+		}
+		n := min(cap(s.batch)-len(s.batch), len(data))
+		s.batch = append(s.batch, data[:n]...)
+		data = data[n:]
+	}
+	return nil
+}
+
+// frame writes one SSE frame through the batch bound. Head, payload and
+// terminator come from the syntax owners beside this type, so the wire format
+// cannot drift while a large data payload straddles writes. A frame that fits
+// in one batch is kept in one write; only a frame wider than the whole bound is
+// split.
+func (s *sseStreamWriter) frame(event string, id int64, hasID bool, data []byte) error {
+	head := appendSSEHead(nil, event, id, hasID)
+	if total := len(head) + len(data) + len(sseFrameEnd); total <= cap(s.batch) && len(s.batch)+total > cap(s.batch) {
+		// The frame fits on its own but not after what is pending: close the
+		// current batch first so a small event is never split.
+		if err := s.flush(); err != nil {
+			return err
+		}
+	}
+	if err := s.append(head); err != nil {
+		return err
+	}
+	if err := s.append(data); err != nil {
+		return err
+	}
+	return s.append([]byte(sseFrameEnd))
+}
+
+// appendSSEHead appends one frame's id/event/data prefix, without the payload
+// or the blank-line terminator. It is the one owner of the frame syntax;
+// sseStreamWriter uses the three parts separately so a payload larger than one
+// batch can straddle writes without re-deriving that syntax.
+func appendSSEHead(dst []byte, event string, id int64, hasID bool) []byte {
 	if hasID {
 		dst = append(dst, "id: "...)
 		dst = strconv.AppendInt(dst, id, 10)
@@ -127,21 +204,11 @@ func appendSSEFrame(dst []byte, event string, id int64, hasID bool, data []byte)
 		dst = append(dst, event...)
 		dst = append(dst, '\n')
 	}
-	dst = append(dst, "data: "...)
-	dst = append(dst, data...)
-	return append(dst, '\n', '\n')
+	return append(dst, "data: "...)
 }
 
-// writeSSEFrame streams one event as one write. The JSON payload is already
-// allocated, so concatenating prefix+payload+suffix avoids the per-part writes
-// (and their deadline re-arms) for the snapshot and the tests.
-func writeSSEFrame(w io.Writer, event string, id int64, hasID bool, data []byte) error {
-	if rw, ok := w.(http.ResponseWriter); ok {
-		armSSEWriteDeadline(rw)
-	}
-	_, err := w.Write(appendSSEFrame(nil, event, id, hasID, data))
-	return err
-}
+// sseFrameEnd terminates one event frame.
+const sseFrameEnd = "\n\n"
 
 // HandleStream serves live updates over SSE at /metrics/live/stream. It pushes
 // each new record as it arrives, plus a heartbeat every 30s - the dashboard's
@@ -210,51 +277,34 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// The snapshot's record slices are not needed after this marshal. Clearing
 	// them releases every pointer they pin for the life of the connection.
 	snapshot = Snapshot{}
-	if err := writeSSEFrame(w, "snapshot", 0, false, snap); err != nil {
+	// The snapshot goes through the same bounded writer the live events use: a
+	// reconnecting tab with an old but valid cursor can carry the whole ring,
+	// and one unbounded socket write must never be the only framing path.
+	stream := newSSEStreamWriter(w, flusher)
+	if err := stream.frame("snapshot", 0, false, snap); err != nil {
 		return
 	}
-	flusher.Flush()
+	if err := stream.flush(); err != nil {
+		return
+	}
 
 	ctx := r.Context()
 	// A purge sends an immediate invalidation before closing, avoiding the
 	// browser's reconnect delay. A restart's unchanged epoch simply closes.
+	// It rides the same bounded writer, so a pending batch is flushed first and
+	// a large payload can never split the frame ordering.
 	defer func() {
 		if feed := b.FeedID(); feed != feedID && ctx.Err() == nil {
 			data, _ := json.Marshal(map[string]string{"feed_id": feed})
-			if _, err := w.Write([]byte("event: reset\ndata: " + string(data) + "\n\n")); err == nil {
-				flusher.Flush()
+			if err := stream.frame("reset", 0, false, data); err != nil {
+				return
 			}
+			_ = stream.flush()
 		}
 	}()
 	ticker := time.NewTicker(sseHeartbeat)
 	defer ticker.Stop()
 
-	const sseBatchBytes = 32 << 10
-	batch := make([]byte, 0, sseBatchBytes)
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		armSSEWriteDeadline(w)
-		if _, err := w.Write(batch); err != nil {
-			return err
-		}
-		flusher.Flush()
-		batch = batch[:0]
-		return nil
-	}
-	appendEvent := func(event string, id int64, hasID bool, data []byte) error {
-		if len(batch) > 0 && len(batch)+len(data)+64 > sseBatchBytes {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-		batch = appendSSEFrame(batch, event, id, hasID, data)
-		if len(batch) >= sseBatchBytes {
-			return flush()
-		}
-		return nil
-	}
 	for {
 		select {
 		case <-feedDone:
@@ -264,7 +314,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case ev, ok := <-sub:
 			if !ok {
-				_ = flush()
+				_ = stream.flush()
 				return // overflow: reconnect before accepting any later cursor
 			}
 			if ev.feedID != feedID {
@@ -281,12 +331,12 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				log.Printf("metrics: encode record event: %v", err)
 				return
 			}
-			if err := appendEvent("record", ev.Seq, true, data); err != nil {
+			if err := stream.frame("record", ev.Seq, true, data); err != nil {
 				return
 			}
 		case liveEv, ok := <-live:
 			if !ok {
-				_ = flush()
+				_ = stream.flush()
 				return // overflow: the next snapshot restores pending state
 			}
 			if liveEv.feedID != feedID {
@@ -301,11 +351,11 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				log.Printf("metrics: encode live event: %v", err)
 				return
 			}
-			if err := appendEvent(liveEv.Phase, 0, false, data); err != nil {
+			if err := stream.frame(liveEv.Phase, 0, false, data); err != nil {
 				return
 			}
 		case <-ticker.C:
-			if err := flush(); err != nil {
+			if err := stream.flush(); err != nil {
 				return
 			}
 			armSSEWriteDeadline(w)
@@ -314,10 +364,10 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-feedDone:
-			_ = flush()
+			_ = stream.flush()
 			return
 		case <-ctx.Done():
-			_ = flush()
+			_ = stream.flush()
 			return
 		}
 		// Drain everything already queued into the same write. Bounded by the
@@ -328,7 +378,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			select {
 			case ev, ok := <-sub:
 				if !ok {
-					_ = flush()
+					_ = stream.flush()
 					return
 				}
 				if ev.feedID != feedID {
@@ -339,12 +389,12 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 					log.Printf("metrics: encode record event: %v", err)
 					return
 				}
-				if err := appendEvent("record", ev.Seq, true, data); err != nil {
+				if err := stream.frame("record", ev.Seq, true, data); err != nil {
 					return
 				}
 			case liveEv, ok := <-live:
 				if !ok {
-					_ = flush()
+					_ = stream.flush()
 					return
 				}
 				if liveEv.feedID != feedID {
@@ -355,20 +405,20 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 					log.Printf("metrics: encode live event: %v", err)
 					return
 				}
-				if err := appendEvent(liveEv.Phase, 0, false, data); err != nil {
+				if err := stream.frame(liveEv.Phase, 0, false, data); err != nil {
 					return
 				}
 			case <-feedDone:
-				_ = flush()
+				_ = stream.flush()
 				return
 			case <-ctx.Done():
-				_ = flush()
+				_ = stream.flush()
 				return
 			default:
 				break drain
 			}
 		}
-		if err := flush(); err != nil {
+		if err := stream.flush(); err != nil {
 			return
 		}
 	}
