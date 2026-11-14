@@ -508,9 +508,21 @@ func (t *throttleRuntime) signal() {
 // ran on context.Background(), had no bound at all. A newer change now leaves
 // the generation dirty and its own wake signal drives the next write, so one
 // wake produces at most one document.
+// persistThrottleSnapshot writes the policy generation it observed, exactly
+// once, and never chases a newer one.
+//
+// It takes the EXCLUSIVE side of persistMu, not the shared one, because the
+// document must never land out of order. With a shared lock a background write
+// that started before an operator edit could land after it: measured with a
+// held first write, the operator's second policy was overwritten by the stale
+// snapshot, persistedGen still named the newer generation, so neither a retry
+// nor the shutdown flush rewrote it and the edit was lost for good. Serializing
+// the two paths costs one wait bounded by StorageQueryTimeout and keeps the
+// one-document-per-wake bound, because the generation is read under the same
+// lock that orders the writes.
 func (s *Server) persistThrottleSnapshot(ctx context.Context) error {
-	s.throttle.persistMu.RLock()
-	defer s.throttle.persistMu.RUnlock()
+	s.throttle.persistMu.Lock()
+	defer s.throttle.persistMu.Unlock()
 	t := &s.throttle
 	t.mu.Lock()
 	gen := t.persistGen
