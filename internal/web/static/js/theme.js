@@ -90,12 +90,8 @@ function applyState(theme, mode, persist) {
   syncThemeMenu();
 }
 
-// setText guards the saved live region: an identical assignment still
-// replaces its text node and makes a screen reader announce the same status
-// again. Every writer goes through this comparison.
-function setText(element, text) {
-  if (element && element.textContent !== text) element.textContent = text;
-}
+// The theme menu's live regions write through core.js setText, so an
+// unchanged sentence is not re-announced on every repaint.
 
 function persistTheme() {
   if (!THEME_STORAGE_KEY) return false;

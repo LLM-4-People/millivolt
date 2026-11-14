@@ -2505,6 +2505,22 @@ module.exports = async function operatorMenus(H) {
       w.eval('ocRecordChange(' + JSON.stringify(openPhrase) + ', null, "ok")');
       check('a change recorded with the console open is not spoken twice',
         text('#oc-change') === openPhrase && text('#toast') === toastBefore);
+      // The ledger is a polite live region that repaints on every accepted
+      // operator poll and every console render. An unconditional assignment
+      // replaces the text node, so a console left open would re-announce the
+      // last change continuously. Node identity proves the guard: the same
+      // words keep the node, different words replace it.
+      {
+        const foot = d.getElementById('oc-change');
+        const node = foot.firstChild;
+        w.eval('ocRender()');
+        w.eval('ocRender()');
+        const kept = foot.firstChild === node;
+        w.eval('ocRecordChange("a later change", null, "ok")');
+        w.eval('ocRender()');
+        check('the console ledger speaks only when its words change',
+          kept && foot.textContent === 'a later change' && foot.firstChild !== node);
+      }
       w.closeOperatorConsole();
     }
   } finally {

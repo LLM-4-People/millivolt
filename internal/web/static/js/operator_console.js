@@ -841,7 +841,7 @@ function ocRenderFoot() {
   const undo = $('oc-undo');
   if (!foot) return;
   const last = ocChanges[ocChanges.length - 1];
-  foot.textContent = last ? last.phrase : 'no changes yet this session';
+  setText(foot, last ? last.phrase : 'no changes yet this session');
   foot.dataset.tone = last ? (last.tone || '') : '';
   if (undo) {
     undo.hidden = !last || typeof last.undo !== 'function';

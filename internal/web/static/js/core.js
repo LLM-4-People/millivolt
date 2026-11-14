@@ -497,6 +497,19 @@ const pct2 = (a, b) => b ? pctCap(a, b, 2) : '-';
 const vt = (display, full) => `<span class="vt" title="${escapeHtml(String(full ?? display))}">${escapeHtml(String(display))}</span>`;
 const $ = id => document.getElementById(id);
 
+// setText is the one writer for a live region's text. An identical assignment
+// still replaces the text node, and a screen reader announces the same status
+// again on every repaint: a console left open would repeat the last change, and
+// a settings field would repeat "1 unsaved" on every keystroke. Comparing first
+// makes the announcement mean that the words actually changed.
+//
+// It lives here rather than beside any one surface because live regions exist
+// in several modules and the guard is worthless if a writer can reach a bare
+// assignment instead.
+function setText(element, text) {
+  if (element && element.textContent !== text) element.textContent = text;
+}
+
 // ---------- focus preservation across repaints ----------
 // Redraws that replace innerHTML (request rows, gallery cards, chart legend,
 // the explorer rail) remove the focused control and leave the browser on

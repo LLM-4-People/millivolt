@@ -441,6 +441,35 @@ module.exports = async function settingsSearch(H) {
     check('the settings status line is announced as a live region',
       d.getElementById('settings-count').getAttribute('role') === 'status' &&
       d.getElementById('settings-count').getAttribute('aria-live') === 'polite');
+    // A live region must only speak when its words change. The status line
+    // re-renders on every keystroke with the same "N unsaved" sentence, and an
+    // unconditional assignment replaces the text node even when the string is
+    // identical, so the screen reader would repeat it per character. The shared
+    // writer compares first; this asserts the rule and the helper's semantics.
+    {
+      const status = d.getElementById('settings-count');
+      // Node identity, not a MutationObserver: an identical assignment replaces
+      // the text node synchronously, and the replacement IS the re-announcement.
+      // Observing asynchronously would let the assertion pass on a broken writer.
+      w.settingsStatus('1 unsaved');
+      const first = status.firstChild;
+      w.settingsStatus('1 unsaved');
+      const sameSentenceKept = status.firstChild === first;
+      w.settingsStatus('2 unsaved');
+      const changed = status.firstChild !== first && status.textContent === '2 unsaved';
+      check('a live region speaks only when its words change',
+        w.eval('typeof setText') === 'function' &&
+        sameSentenceKept && changed &&
+        // The control: a bare assignment is what the guard prevents, so this
+        // proves the assertion can tell the two writers apart.
+        (() => {
+          const el = d.createElement('div');
+          el.textContent = 'same';
+          const node = el.firstChild;
+          el.textContent = 'same';
+          return el.firstChild !== node;
+        })());
+    }
     const railCount = d.querySelector('#settings-rail .rail-n');
     const countStyle = w.getComputedStyle(railCount);
     check('settings rail counts right-align instead of taking the explorer count floor',

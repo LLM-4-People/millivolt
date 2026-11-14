@@ -47,7 +47,9 @@ function settingsIsOpen() {
 function settingsStatus(text, kind) {
   const el = $('settings-count');
   if (!el) return;
-  el.textContent = text || '';
+  // setText, not an assignment: this region is role=status, and marking a key
+  // dirty calls this on every keystroke with the same "N unsaved" sentence.
+  setText(el, text || '');
   el.classList.toggle('ok', kind === 'ok');
   if (kind === 'error') el.dataset.tone = 'error';
   else delete el.dataset.tone;
