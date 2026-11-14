@@ -677,6 +677,9 @@ button.oc-chip[aria-pressed="true"]::before {
   color: var(--muted); font: 10px/1.6 var(--sans);
 }
 .oc-empty strong { color: var(--text); font-weight: 600; }
+/* A partial result is a note, not a hole: it names the fraction the filter
+   hid and carries the same clear action as the empty state. */
+.oc-list-note { color: var(--muted); font: 10px/1.5 var(--sans); }
 
 /* ---------- capture and system cards ---------- */
 .oc-card {

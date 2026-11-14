@@ -1313,6 +1313,12 @@ module.exports = async function operatorMenus(H) {
       check('the filter narrows the list to the rule whose reading matches',
         qa('#oc-pane .oc-rule').length === 1 &&
         text('#oc-pane .oc-rule .oc-rule-scope') === 'model m-3');
+      // A partial result is as misleading as an empty one: one row on screen
+      // beside a badge of eight reads as an eight-rule policy narrowed to one,
+      // or worse, as a one-rule policy. The note names the fraction.
+      check('a filter that hides some rules names how many of the total it shows',
+        text('#oc-pane .oc-list-note') === '1 of 8 rules shown. clear the filter' &&
+        qa('#oc-pane [data-oc-list-clear="limits"]').length === 1);
 
       input('#oc-pane [data-oc-list-filter="limits"]', 'nothing matches this');
       check('a filter that hides every rule says so instead of reading as empty',
@@ -1322,7 +1328,29 @@ module.exports = async function operatorMenus(H) {
       click('#oc-pane [data-oc-list-clear="limits"]');
       check('clearing the filter restores every rule and the filter row',
         qa('#oc-pane .oc-rule').length === 8 &&
-        q('#oc-pane [data-oc-list-filter="limits"]').value === '');
+        q('#oc-pane [data-oc-list-filter="limits"]').value === '' &&
+        !q('#oc-pane .oc-list-note'));
+      // Dropping below the filter threshold must keep the control: a stored
+      // filter used to outlive its input, leaving the list narrowed with no
+      // visible cause and no way back except leaving the section.
+      input('#oc-pane [data-oc-list-filter="limits"]', 'm-3');
+      // Keep the matching rule plus one other, so the list drops to two rules
+      // (below the threshold) while the stored filter still selects one.
+      throttleDoc({ok: true, active: true, known_providers: [],
+        throttles: [many[0], many[3]]});
+      w.operatorConsoleSync('throttle');
+      check('a stored filter keeps its control when the list shrinks below the threshold',
+        !!q('#oc-pane [data-oc-list-filter="limits"]') &&
+        q('#oc-pane [data-oc-list-filter="limits"]').value === 'm-3' &&
+        qa('#oc-pane .oc-rule').length === 1);
+      click('#oc-pane [data-oc-list-clear="limits"]');
+      // Two rules is below the threshold, so clearing the filter also retires
+      // its input: the control exists only while a filter or a long list
+      // needs one.
+      check('the retained filter still clears back to every rule',
+        qa('#oc-pane .oc-rule').length === 2 &&
+        !q('#oc-pane [data-oc-list-filter="limits"]') &&
+        w.eval('ocListFilter.limits') === '');
       w.closeOperatorConsole();
     }
 

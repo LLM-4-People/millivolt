@@ -129,8 +129,12 @@ function ocFilterRows(section, rows) {
 // The hidden-everything case still offers a clear action, because there the
 // result set is empty and the input's own glyph is the only way back.
 function ocListFilterHTML(section, total) {
-  if (total < OC_LIST_FILTER_MIN) return '';
   const value = ocListFilter[section] || '';
+  // A stored filter must keep its control even when the list has shrunk below
+  // the threshold. Otherwise removing rules leaves the list silently narrowed
+  // with no visible cause and no clear action: the field unmounted while its
+  // value went on filtering.
+  if (total < OC_LIST_FILTER_MIN && !value) return '';
   return `<div class="oc-list-filter">` +
     `<input type="search" data-oc-list-filter="${section}" value="${escapeHtml(value)}"` +
     ` placeholder="filter ${total} rules" aria-label="filter the ${section} rules"` +
@@ -141,10 +145,19 @@ function ocListFilterHTML(section, total) {
 // ocListEmptyNote states that a filter hid the section's rules, so an empty
 // list never reads as an empty policy.
 function ocListEmptyNote(section, shown, total) {
-  if (!total || shown) return '';
-  return `<div class="oc-empty"><strong>No rule matches that filter.</strong> ` +
-    `${fmt(total)} ${total === 1 ? 'rule is' : 'rules are'} in force; ` +
-    `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button> to see them.</div>`;
+  // A partial result is as misleading as an empty one: five rows on screen
+  // beside a badge of fifty reads as a five-rule policy. Any active filter
+  // states what it hid and offers the same one-click clear.
+  const filtering = !!(ocListFilter[section] || '');
+  if (!total || (shown === total && !filtering)) return '';
+  if (!shown) {
+    return `<div class="oc-empty"><strong>No rule matches that filter.</strong> ` +
+      `${fmt(total)} ${total === 1 ? 'rule is' : 'rules are'} in force; ` +
+      `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button> to see them.</div>`;
+  }
+  return `<div class="oc-list-note">` +
+    `${fmt(shown)} of ${fmt(total)} ${total === 1 ? 'rule' : 'rules'} shown. ` +
+    `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button></div>`;
 }
 
 // ---------- status readout ----------
@@ -427,6 +440,12 @@ function ocRender() {
     if (ocSection === 'capture') ocCapturePreview();
   }
   if (pane) pane.scrollTop = savedScroll;
+  // The composer is inserted ABOVE the rule list, so restoring the old
+  // scrollTop is not enough: with 20+ rules it leaves the whole form off the
+  // top of the pane and the clicked row 350px down the screen, which reads as
+  // "clicking the row did nothing". The picker case keeps its own position
+  // (the composer is already in view and the picker is what just opened).
+  if (!ocPickerFocus && ocView.kind) ocRevealComposer(pane);
   ocRenderFoot();
   if (ocPickerFocus) {
     // Opening the menu lands on its first row, so the arrows the menu
@@ -846,6 +865,21 @@ function ocOperatorErrorClear() {
   if (!ocError) return;
   ocError = '';
   if (ocMounted) ocRender();
+}
+
+// ocRevealComposer brings a freshly opened composer into view. It scrolls only
+// when the composer's top is outside the pane, so a rebuild while the operator
+// is editing never moves a form they are already looking at, and it keeps the
+// row they clicked on screen by scrolling to the composer rather than to the
+// row (which the composer would immediately cover).
+function ocRevealComposer(pane) {
+  if (!pane) return;
+  const compose = pane.querySelector('.oc-compose');
+  if (!compose) return;
+  const paneTop = pane.getBoundingClientRect().top;
+  const composeTop = compose.getBoundingClientRect().top;
+  if (composeTop >= paneTop - 1) return;
+  pane.scrollTop += composeTop - paneTop - 2;
 }
 
 // ---------- change ledger ----------

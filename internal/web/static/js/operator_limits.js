@@ -302,7 +302,8 @@ function ocRenderLimits() {
     headAction + `</div>` +
     (composing ? ocLimitComposerHTML(ocDrafts.limit) : '') +
     filter +
-    (rows || hidden || empty) +
+    (rows || empty) +
+    hidden +
     `</div>`;
 }
 

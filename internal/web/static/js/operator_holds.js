@@ -166,7 +166,8 @@ function ocRenderPause() {
     `<div class="oc-sec-head"><p class="oc-sub">Park new matching requests without cancelling work that is already running.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
     headAction + `</div></div>` +
-    (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + filter + (rows || hidden || empty) + `</div>`;
+    (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + filter + (rows || empty) +
+    hidden + `</div>`;
 }
 
 // ocQuickHoldMinutes is the bounded duration the one-click hold uses. A quick
@@ -435,7 +436,8 @@ function ocRenderCapture() {
     `<div class="oc-sec-head"><p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
     headAction + `</div></div>` +
-    (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + filter + (rows || hidden || empty) + `</div>`;
+    (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + filter + (rows || empty) +
+    hidden + `</div>`;
 }
 
 function ocCaptureBody(draft) {
