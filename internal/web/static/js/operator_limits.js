@@ -48,12 +48,37 @@ function ocLimitDraftFromPolicy(policy) {
   };
 }
 
+// ocLimitDraftCopy opens a new limit that reuses a stored rule's scope and
+// schedule with no budgets. Widening a cap to a second provider or model is
+// the common follow-up to a rule that worked, and retyping four dimensions to
+// do it was the most expensive path in the console.
+function ocLimitDraftCopy(policy) {
+  const draft = ocLimitDraftFromPolicy(policy);
+  draft.id = '';
+  draft.concurrency = '';
+  draft.requests = '';
+  draft.tokens = '';
+  draft.antiBurst = false;
+  draft.ramp = '';
+  draft.advanced = false;
+  return draft;
+}
+
 function ocLimitById(id) {
   return ((typeof throttleState !== 'undefined' && throttleState.throttles) || [])
     .find(t => t && t.id === id) || null;
 }
 
-function ocOpenLimitComposer(id) {
+function ocOpenLimitComposer(id, copy) {
+  if (copy) {
+    const source = ocLimitById(id);
+    if (!source) return;
+    ocDrafts.limit = ocLimitDraftCopy(source);
+    ocView = { kind: 'limit', id: '' };
+    ocSection = 'limits';
+    ocRender();
+    return;
+  }
   if (id) {
     const policy = ocLimitById(id);
     if (!policy) return;
@@ -223,7 +248,8 @@ function ocLimitRuleHTML(policy) {
     `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
     `<span class="oc-rule-budget">${escapeHtml(ocBudgetPhrase(policy))}${escapeHtml(schedule)}</span></button>` +
     `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(live.join(' · ') || 'idle')}</span>` +
-    `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="edit limit">edit</button>` +
+    `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="copy this limit's scope into a new limit" title="copy this scope into a new limit">copy</button>` +
+    `<button type="button" class="oc-icon-btn" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="edit limit">edit</button>` +
     `<button type="button" class="oc-icon-btn danger" data-oc-remove="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="remove limit">remove</button></div></div>` +
     `</div>`;
 }

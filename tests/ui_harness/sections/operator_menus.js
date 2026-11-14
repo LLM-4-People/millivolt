@@ -396,6 +396,25 @@ module.exports = async function operatorMenus(H) {
       check('an edit composer offers the save action', text('#oc-lim-apply') === 'save limit' &&
         !d.getElementById('oc-lim-apply').disabled);
 
+      // Copy is the follow-up path: the same scope and schedule, no budgets,
+      // and no id, so the write creates a second rule instead of editing the
+      // first. Retyping four dimensions was the most expensive task here.
+      click('#oc-pane [data-oc-copy="limit"][data-oc-id="pol-edit"]');
+      const copied = evalJSON('({id: ocDrafts.limit.id, scope: ocDrafts.limit.scope,'
+        + 'schedule: ocDrafts.limit.schedule, concurrency: ocDrafts.limit.concurrency,'
+        + 'requests: ocDrafts.limit.requests, tokens: ocDrafts.limit.tokens,'
+        + 'window: ocDrafts.limit.tokenWindow})');
+      check('copy reuses the scope and schedule but clears the budgets and id',
+        copied.id === '' &&
+        JSON.stringify(copied.scope.providers) === JSON.stringify(['prov-a']) &&
+        JSON.stringify(copied.scope.models) === JSON.stringify(['model-a']) &&
+        JSON.stringify(copied.schedule) === JSON.stringify({days: [2], start: 600, end: 660}) &&
+        copied.concurrency === '' && copied.requests === '' && copied.tokens === '' &&
+        copied.window === '1h' &&
+        text('#oc-lim-apply') === 'apply limit' &&
+        d.getElementById('oc-lim-apply').disabled);
+      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
+
       const savedFetch = w.fetch;
       let editBody = null;
       w.fetch = async (url, options) => {

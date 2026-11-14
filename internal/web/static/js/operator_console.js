@@ -777,6 +777,16 @@ async function ocHandleAction(target) {
     if (newKind === 'capture') ocOpenCaptureComposer('');
     return;
   }
+  // A copy reuses the source rule's scope and schedule with no budgets, so a
+  // follow-up rule starts from what already worked instead of four pickers.
+  const copyKind = target.dataset.ocCopy;
+  if (copyKind) {
+    const id = target.dataset.ocId || '';
+    if (copyKind === 'limit') ocOpenLimitComposer(id, true);
+    if (copyKind === 'pause') ocOpenPauseComposer(id, true);
+    if (copyKind === 'capture') ocOpenCaptureComposer(id, true);
+    return;
+  }
   const editKind = target.dataset.ocEdit;
   if (editKind) {
     const id = target.dataset.ocId || '';
@@ -1091,7 +1101,7 @@ document.addEventListener('click', event => {
   // delegated action handler must not preventDefault its click. Its change
   // event carries the selection instead.
   if (event.target?.dataset?.ocChoice && event.target.tagName === 'SELECT') return;
-  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-edit],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
+  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-edit],[data-oc-copy],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
   if (!target || !ocShell()?.contains(target)) return;
   event.preventDefault();
   ocHandleAction(target);

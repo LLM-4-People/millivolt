@@ -21,7 +21,34 @@ function ocPauseDraftFromHold(hold) {
   };
 }
 
-function ocOpenPauseComposer(id) {
+// A copy reuses the source hold's scope with no queue cap and no new id, so a
+// second hold on a neighbouring client starts from the same shape.
+function ocPauseDraftCopy(hold) {
+  const draft = ocPauseDraftFromHold(hold);
+  draft.id = '';
+  draft.cap = '';
+  return draft;
+}
+
+// A copy reuses the source capture's scope with its duration left at the
+// default; the operator is choosing new evidence, not a new window.
+function ocCaptureDraftCopy(session) {
+  const draft = ocCaptureDraftFromSession(session);
+  draft.id = '';
+  draft.duration = '';
+  return draft;
+}
+
+function ocOpenPauseComposer(id, copy) {
+  if (copy) {
+    const source = liveHolds().find(h => h.id === id);
+    if (!source) return;
+    ocDrafts.pause = ocPauseDraftCopy(source);
+    ocView = { kind: 'pause', id: '' };
+    ocSection = 'pause';
+    ocRender();
+    return;
+  }
   if (id) {
     const hold = liveHolds().find(h => h.id === id);
     if (!hold) return;
@@ -98,7 +125,8 @@ function ocRenderPause() {
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
       `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue', ...meta].join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(ocUntilPhrase(hold.until) || 'open')}</span>` +
-      `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}">edit</button>` +
+      `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
+      `<button type="button" class="oc-icon-btn" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}">edit</button>` +
       `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
   }).join('');
   const empty = holds.length ? '' :
@@ -209,7 +237,16 @@ function ocCaptureDraftFromSession(session) {
   };
 }
 
-function ocOpenCaptureComposer(id) {
+function ocOpenCaptureComposer(id, copy) {
+  if (copy) {
+    const source = liveDebugSessions().find(s => s.id === id);
+    if (!source) return;
+    ocDrafts.capture = ocCaptureDraftCopy(source);
+    ocView = { kind: 'capture', id: '' };
+    ocSection = 'capture';
+    ocRender();
+    return;
+  }
   if (id) {
     const session = liveDebugSessions().find(s => s.id === id);
     if (!session) return;
@@ -288,7 +325,8 @@ function ocRenderCapture() {
       `<span class="oc-rule-budget">${escapeHtml([n + (n === 1 ? ' capture' : ' captures'), ran,
         session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(left)}</span>` +
-      `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}">edit</button>` +
+      `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
+      `<button type="button" class="oc-icon-btn" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}">edit</button>` +
       `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button></div></div></div>`;
   }).join('');
   const empty = sessions.length ? '' :
