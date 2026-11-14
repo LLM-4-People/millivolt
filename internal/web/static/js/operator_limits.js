@@ -186,8 +186,11 @@ function ocLimitComposerHTML(draft) {
       (burstAllowed ? '' : `<p class="oc-note">Burst control needs a single-provider limit without a schedule.</p>`) +
       `</div>` : '') +
     (scheduleOn ? `<div class="oc-advanced">` +
-      `<div class="oc-days" role="group" aria-label="days">` + OC_DAY_LABELS.map((label, day) =>
-        `<button type="button" class="oc-chip oc-chip-day" aria-pressed="${schedule.days.includes(day) ? 'true' : 'false'}" data-oc-day="${day}">${label}</button>`).join('') + `</div>` +
+      `<div class="oc-days" role="group" aria-label="days">` + OC_DAYS.map((day, index) =>
+        // The painted label is one letter to fit seven chips on a row; the
+        // accessible name is the day, because "S" and "T" each stand for two
+        // different days and a screen reader has no width constraint to honour.
+        `<button type="button" class="oc-chip oc-chip-day" aria-label="${escapeHtml(day.name)}" aria-pressed="${schedule.days.includes(index) ? 'true' : 'false'}" data-oc-day="${index}">${day.letter}</button>`).join('') + `</div>` +
       `<div class="oc-times"><label class="oc-field"><span class="oc-field-name">from</span><input type="time" data-oc-time="start" value="${ocTimeValue(schedule.start)}"></label>` +
       `<label class="oc-field"><span class="oc-field-name">to</span><input type="time" data-oc-time="end" value="${ocTimeValue(schedule.end)}"></label>` +
       `<span class="oc-field-hint">server local time</span></div>` +
