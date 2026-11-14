@@ -64,6 +64,11 @@ function ocFilterRows(section, rows) {
   return rows.filter(row => (row.text || '').toLowerCase().includes(needle));
 }
 
+// ocListFilterHTML is one search field, matching the dimension picker's own
+// filter: a type="search" input already carries the platform's clear control,
+// so a second "clear" button beside it was two controls for one action.
+// The hidden-everything case still offers a clear action, because there the
+// result set is empty and the input's own glyph is the only way back.
 function ocListFilterHTML(section, total) {
   if (total < OC_LIST_FILTER_MIN) return '';
   const value = ocListFilter[section] || '';
@@ -71,7 +76,6 @@ function ocListFilterHTML(section, total) {
     `<input type="search" data-oc-list-filter="${section}" value="${escapeHtml(value)}"` +
     ` placeholder="filter ${total} rules" aria-label="filter the ${section} rules"` +
     ` data-oc-key="list-filter-${section}">` +
-    (value ? `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear</button>` : '') +
     `</div>`;
 }
 

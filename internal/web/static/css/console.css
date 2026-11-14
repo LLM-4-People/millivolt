@@ -517,7 +517,6 @@ button.oc-chip[aria-pressed="true"]::before {
   border-color: var(--accent); outline: var(--focus-outline); outline-offset: 1px;
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
-.oc-list-filter .oc-link { flex: none; }
 
 /* ---------- rule rows: one calibrated line, one live column ---------- */
 /* One rule is one line: kind tag, scope, budget, then the live figure. The
