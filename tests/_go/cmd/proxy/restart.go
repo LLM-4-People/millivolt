@@ -55,6 +55,7 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 		Rank           int    `json:"rank"`
 		DrainTimeoutMs int64  `json:"drain_timeout_ms"`
 		DrainElapsedMs int64  `json:"drain_elapsed_ms"`
+		BudgetMs       int64  `json:"budget_ms"`
 	}
 	dec := json.NewDecoder(rec.Body)
 	dec.DisallowUnknownFields()
@@ -67,23 +68,25 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 	if doc.DrainTimeoutMs != 90000 || doc.DrainElapsedMs < 0 {
 		t.Fatalf("drain window = %+v, want the wired 90s bound and a live elapsed value", doc)
 	}
+	// budget_ms is the sum the dashboard polls against, so the client never
+	// mirrors the build and ready bounds as its own literals.
+	if want := (restartBuildTimeout + 90*time.Second + restartReadyTimeout).Milliseconds(); doc.BudgetMs != want {
+		t.Fatalf("budget_ms = %d, want %d (build + drain + ready)", doc.BudgetMs, want)
+	}
 }
 
-// TestRestartBudgetMirrorsPinned pins the three choreography bounds the
-// dashboard's poll fallback mirrors as literals (chrome_restart.js
-// RESTART_BUILD_BUDGET_MS / RESTART_READY_BUDGET_MS / RESTART_DRAIN_FALLBACK_
-// MS = 300000 / 300000 / 600000): the build bound, the child-ready bound, and
-// the config default the fallback renders for documents that omit or zero
-// the drain bound.
-func TestRestartBudgetMirrorsPinned(t *testing.T) {
+// TestRestartChoreographyBoundsPinned pins the two internal choreography
+// bounds. The dashboard does not mirror them: statusLocked publishes their sum
+// as budget_ms, so these values exist in exactly one language.
+func TestRestartChoreographyBoundsPinned(t *testing.T) {
 	if restartBuildTimeout != 5*time.Minute {
-		t.Errorf("restartBuildTimeout = %v, want 5 minutes (dashboard RESTART_BUILD_BUDGET_MS 300000)", restartBuildTimeout)
+		t.Errorf("restartBuildTimeout = %v, want 5 minutes", restartBuildTimeout)
 	}
 	if restartReadyTimeout != 5*time.Minute {
-		t.Errorf("restartReadyTimeout = %v, want 5 minutes (dashboard RESTART_READY_BUDGET_MS 300000)", restartReadyTimeout)
+		t.Errorf("restartReadyTimeout = %v, want 5 minutes", restartReadyTimeout)
 	}
 	if got := config.Default().RestartDrainTimeout; got != 10*time.Minute {
-		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes (dashboard RESTART_DRAIN_FALLBACK_MS 600000)", got)
+		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes", got)
 	}
 }
 

@@ -321,7 +321,18 @@ func (rs *restarter) statusLocked() map[string]any {
 		"rank":       phaseRank(rs.phase),
 	}
 	if rs.deps != nil && rs.deps.drainTimeout != nil {
-		st["drain_timeout_ms"] = rs.deps.drainTimeout().Milliseconds()
+		drain := rs.deps.drainTimeout()
+		st["drain_timeout_ms"] = drain.Milliseconds()
+		// budget_ms is the only deadline any client needs: the whole
+		// choreography bound, or 0 when the drain is unbounded. Publishing the
+		// sum here means the dashboard does not mirror restartBuildTimeout and
+		// restartReadyTimeout as literals across the language boundary; the
+		// server that enforces the two bounds is the only place they exist.
+		if drain <= 0 {
+			st["budget_ms"] = int64(0)
+		} else {
+			st["budget_ms"] = (restartBuildTimeout + drain + restartReadyTimeout).Milliseconds()
+		}
 	}
 	if rs.phase == restartDraining && !rs.phaseAt.IsZero() {
 		st["drain_elapsed_ms"] = time.Since(rs.phaseAt).Milliseconds()
