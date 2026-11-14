@@ -75,10 +75,19 @@ function ocExportFilter(draft, epoch) {
   };
 }
 
+// ocPredicateSet is the one reading of "this predicate field carries a choice".
+// The server spells absence as an empty string, a zero, or false, and the three
+// places that ask the question - the URL builder, the count gate and the
+// receipt - must agree, or a mode would look armed while the download omitted
+// the field, or the URL would carry a predicate the gate called empty.
+function ocPredicateSet(value) {
+  return value !== '' && value !== 0 && value !== false;
+}
+
 function ocExportURL(filter) {
   const p = new URLSearchParams();
   for (const [key, value] of Object.entries(filter)) {
-    if (value === '' || value === 0 || value === false) continue;
+    if (!ocPredicateSet(value)) continue;
     p.set(key, value === true ? '1' : String(value));
   }
   const qs = p.toString();
@@ -92,8 +101,7 @@ function ocExportURL(filter) {
 // count refuses to run. The age fields carry a window, not a selector, so they
 // are the two this reads from the draft directly.
 function ocFilterActive(draft) {
-  const fields = ocExportFields(draft);
-  const chosen = Object.values(fields).some(value => value !== '' && value !== 0 && value !== false);
+  const chosen = Object.values(ocExportFields(draft)).some(ocPredicateSet);
   return chosen || !!(draft.age || draft.after);
 }
 

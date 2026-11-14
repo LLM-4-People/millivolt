@@ -181,6 +181,15 @@ module.exports = async function logsMenu(H) {
         before_ms: 0, model: '', client: '', conversation_id: '', error_type: '', after_ms: 0 }) ===
         '/metrics/export?provider=openai&status_code=429');
     check('empty filter exports everything', w.ocExportURL({}) === '/metrics/export');
+    // One predicate decides what counts as a chosen field, and the URL builder
+    // and the count gate both read it: a field the URL omits must not arm the
+    // gate, and a field the gate counts must reach the URL.
+    check('one predicate decides whether a filter field carries a choice',
+      w.eval('ocPredicateSet("")') === false && w.eval('ocPredicateSet(0)') === false &&
+      w.eval('ocPredicateSet(false)') === false && w.eval('ocPredicateSet("x")') === true &&
+      w.eval('ocPredicateSet(429)') === true && w.eval('ocPredicateSet(true)') === true &&
+      w.ocExportURL({ provider: '', status_code: 0, has_error: false, model: 'm' }) ===
+        '/metrics/export?model=m');
     // The "choose a filter" gate reads the predicate owner, so a field that
     // reaches ocExportFields is armed the moment it exists instead of the mode
     // looking ready while the count refuses to run.
