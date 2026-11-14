@@ -293,8 +293,8 @@ function ocExportEnabled(draft) {
 
 function ocUpdateExportReceipt() {
   const draft = ocDrafts.export;
-  const el = ocEl('oc-export-receipt');
-  const btn = ocEl('oc-export-download');
+  const el = $('oc-export-receipt');
+  const btn = $('oc-export-download');
   if (!draft || !el) return;
   el.textContent = ocExportReceiptText(draft);
   el.dataset.tone = draft.error ? 'err' : '';

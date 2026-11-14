@@ -56,8 +56,6 @@ let ocDrain = { scope: 'all', value: '' };
 // goes back to the normal keyed-focus rule.
 let ocPickerFocus = '';
 
-function ocEl(id) { return document.getElementById(id); }
-
 // ocPauseDefaultCap is the one client reader of the server's default hold
 // queue cap. The number belongs to config.MaxQueueSize and the pause snapshot
 // publishes it as default_max_queued, so the panel must never carry a second
@@ -212,8 +210,8 @@ const OC_CHOICE_BY_NAME = Object.fromEntries(
 function ocComposeControls(kind) {
   const ids = OC_COMPOSERS[kind];
   if (!ids) return null;
-  const preview = ocEl(ids.preview);
-  const apply = ocEl(ids.apply);
+  const preview = $(ids.preview);
+  const apply = $(ids.apply);
   return preview && apply ? { preview, apply } : null;
 }
 
@@ -450,7 +448,7 @@ function ocParking() {
 // answer to "is anything active right now" and it never depends on the console
 // being open.
 function refreshOperatorReadout() {
-  const box = ocEl('op-readout');
+  const box = $('op-readout');
   if (!box) return;
   // ocSyncTriggerName at the end reads the painted words, so the label always
   // matches what is on screen.
@@ -475,28 +473,28 @@ function refreshOperatorReadout() {
   // counts are never silently presented as a live reading.
   const words = segs.length ? segs.join(' · ') : 'steady';
   const text = offline ? words + ' · offline' : stale ? words + ' · stale' : words;
-  const label = ocEl('op-readout-state');
+  const label = $('op-readout-state');
   if (label && label.textContent !== text) label.textContent = text;
-  const trigger = ocEl('btn-controls');
+  const trigger = $('btn-controls');
   if (trigger) trigger.dataset.state = state;
   ocSyncTriggerName();
   box.setAttribute('aria-label', 'operator state: ' + text + '.');
-  const dot = ocEl('op-readout-dot');
+  const dot = $('op-readout-dot');
   if (dot) dot.setAttribute('title', text);
 }
 
 // ---------- console lifecycle ----------
 function ocShell() {
-  return ocEl('operator-console');
+  return $('operator-console');
 }
 
 // ocSyncTriggerName repaints the readout's accessible name after the console
 // opens or closes, because the name states the action the trigger performs
 // now. menu.js owns aria-expanded; this only follows it.
 function ocSyncTriggerName() {
-  const trigger = ocEl('btn-controls');
+  const trigger = $('btn-controls');
   if (!trigger) return;
-  const text = (ocEl('op-readout-state')?.textContent || 'steady').trim();
+  const text = ($('op-readout-state')?.textContent || 'steady').trim();
   const open = trigger.getAttribute('aria-expanded') === 'true';
   trigger.setAttribute('aria-label', 'operator state: ' + text + '. '
     + (open ? 'Close the operator console.' : 'Open the operator console.'));
@@ -518,7 +516,7 @@ function openOperatorConsole(section, view) {
   // surface keeps menu.js's measured geometry and avoids a close/reopen that
   // would run onClose and leave the mounted flag false.
   if (!menuIsOpen(shell)) {
-    menuOpen(ocEl('btn-controls'), shell, {
+    menuOpen($('btn-controls'), shell, {
       align: 'end',
       initialFocus: 'panel',
       // Escape and an outside press close through menu.js; this keeps the
@@ -543,7 +541,7 @@ function closeOperatorConsole(restoreFocus = false) {
   if (wasOpen) menuClose(shell);
   ocMounted = false;
   ocSyncTriggerName();
-  const trigger = ocEl('btn-controls');
+  const trigger = $('btn-controls');
   if (restoreFocus && trigger) trigger.focus();
 }
 
@@ -616,7 +614,7 @@ function ocFocusKey() {
   // operator back to <body>.
   const keyed = active.closest('[data-oc-key]');
   if (keyed) return { key: keyed.dataset.ocKey, start, end };
-  const pane = ocEl('oc-pane');
+  const pane = $('oc-pane');
   if (!pane || !pane.contains(active)) {
     // The undo button lives in the ledger, which is not rebuilt, but it hides
     // itself after use. Any other surface inside the panel still needs a
@@ -641,13 +639,13 @@ function ocRestoreFocus(saved) {
     const slot = [...shell.querySelectorAll('[data-oc-key]')].find(el => el.dataset.ocKey === saved.key);
     next = ocFocusTarget(slot);
   } else if (saved.sig) {
-    const pane = ocEl('oc-pane');
+    const pane = $('oc-pane');
     const same = pane ? ocControls(pane).filter(el => ocControlSignature(el) === saved.sig) : [];
     next = same[saved.index] || null;
   }
   // Never leave focus on <body>: that is the page behind the open panel, and
   // the operator's next Tab would walk the dashboard underneath.
-  if (!next) next = saved.pane ? ocEl('oc-pane') : null;
+  if (!next) next = saved.pane ? $('oc-pane') : null;
   if (!next) return;
   next.focus({ preventScroll: true });
   if (saved.start != null && typeof next.setSelectionRange === 'function') {
@@ -662,14 +660,14 @@ function ocRender() {
   const shell = ocShell();
   if (!shell || !ocMounted) return;
   const saved = ocFocusKey();
-  const paneBefore = ocEl('oc-pane');
+  const paneBefore = $('oc-pane');
   // A pick rebuilds the pane, and the pane is the console's one scroll
   // region. Without carrying scrollTop across, selecting a second value from a
   // picker threw the operator back to the top of a form taller than the panel.
   const savedScroll = paneBefore ? paneBefore.scrollTop : 0;
   ocRenderHead();
   ocRenderRail();
-  const pane = ocEl('oc-pane');
+  const pane = $('oc-pane');
   if (pane) {
     const render = {
       overview: ocRenderOverview,
@@ -723,7 +721,7 @@ function ocRender() {
 }
 
 function ocRenderHead() {
-  const live = ocEl('oc-live');
+  const live = $('oc-live');
   if (!live) return;
   // The head line repeats the readout words and nothing else. The counts are
   // already in the segments, so a total would only say them twice.
@@ -738,7 +736,7 @@ function ocRenderHead() {
 const OC_RAIL_ORIENTATION = 'horizontal';
 
 function ocSyncRailOrientation() {
-  const rail = ocEl('oc-rail');
+  const rail = $('oc-rail');
   if (rail) rail.setAttribute('aria-orientation', OC_RAIL_ORIENTATION);
 }
 
@@ -747,7 +745,7 @@ function ocSyncRailOrientation() {
 // left the last one entirely outside the frame. The CSS fades the trailing
 // edge only while data-more is set.
 function ocSyncRailOverflow() {
-  const rail = ocEl('oc-rail');
+  const rail = $('oc-rail');
   if (!rail) return;
   const more = rail.scrollWidth - rail.clientWidth - Math.round(rail.scrollLeft) > 1;
   rail.dataset.more = more ? '1' : '0';
@@ -789,7 +787,7 @@ function ocRailTab(section) {
 // space and hidden from assistive technology, so the tab reads "limits" and
 // its count is announced by the selected pane, not glued on as "limits8".
 function ocRenderRail() {
-  const rail = ocEl('oc-rail');
+  const rail = $('oc-rail');
   if (!rail) return;
   ocSyncRailOrientation();
   const counts = ocRuleCounts();
@@ -820,8 +818,8 @@ function ocRenderRail() {
 }
 
 function ocRenderFoot() {
-  const foot = ocEl('oc-change');
-  const undo = ocEl('oc-undo');
+  const foot = $('oc-change');
+  const undo = $('oc-undo');
   if (!foot) return;
   const last = ocChanges[ocChanges.length - 1];
   foot.textContent = last ? last.phrase : 'no changes yet this session';
@@ -1200,7 +1198,7 @@ function ocConfirm({ title, body, confirm, danger }) {
   }
   return new Promise(resolve => {
     const id = 'oc-confirm-dialog';
-    let dialog = ocEl(id);
+    let dialog = $(id);
     if (dialog) dialog.remove();
     dialog = buildModalDialog(id, 'operator-dialog', 'oc-confirm-title',
       `<div class="operator-dialog-panel oc-confirm-panel">` +
@@ -1340,7 +1338,7 @@ function ocRenderSystem() {
 // from the render path.
 function ocSyncRestartVerdict() {
   if (ocSection !== 'system' || !ocMounted) return;
-  const card = ocEl('oc-pane')?.querySelector('.oc-card');
+  const card = $('oc-pane')?.querySelector('.oc-card');
   if (!card) return;
   const available = restartServerState.available !== false;
   const existing = card.querySelector('.oc-warning');

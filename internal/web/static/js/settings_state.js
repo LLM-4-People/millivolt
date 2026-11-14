@@ -557,7 +557,7 @@ function revertSettings() {
   });
 }
 
-document.getElementById('settings-rail')?.addEventListener('click', e => {
+$('settings-rail')?.addEventListener('click', e => {
   const b = e.target.closest('.st-rail-item[data-st-cat]');
   if (!b) return;
   settingsCat = b.dataset.stCat;

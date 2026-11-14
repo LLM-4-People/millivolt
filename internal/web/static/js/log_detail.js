@@ -285,7 +285,7 @@ function detailSelectGroup(key, moveFocus) {
     const active = t === tab;
     t.setAttribute('aria-selected', active ? 'true' : 'false');
     t.tabIndex = active ? 0 : -1;
-    const panel = document.getElementById(t.getAttribute('aria-controls'));
+    const panel = $(t.getAttribute('aria-controls'));
     if (panel) panel.hidden = !active;
   });
   if (moveFocus) tab.focus();
