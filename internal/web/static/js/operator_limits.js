@@ -401,7 +401,6 @@ function ocApplyLimit() {
     ocDrafts.limit = ocBlankLimitDraft();
     ocView = { kind: '', id: '' };
     ocRecordChange(phrase, undo, 'ok');
-    toast(phrase);
     ocRender();
   });
 }

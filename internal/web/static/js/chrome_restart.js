@@ -244,8 +244,9 @@ async function restartProxy() {
       applyRestartEvent(st);
       renderRestartSteps({ rank: RESTART_STEPS.length, error: '' });
       setRestartStatus('restarted ✓ (pid ' + st.pid + ')');
+      // The ledger is the one announcement owner; it toasts only when the
+      // console is closed and the ledger cannot be heard.
       if (typeof ocRecordChange === 'function') ocRecordChange('restarted the proxy', null, 'ok');
-      toast('restarted the proxy');
       // SSE normally detects the new feed first. If it is disconnected,
       // check fresh assets/state immediately through the same bootstrap gate.
       if (feedId === beforeFeed) fetchBootstrap('resume');

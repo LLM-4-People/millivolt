@@ -129,7 +129,6 @@ async function ocDrainQueue() {
     }, 'could not drain the queue');
     const phrase = 'drained ' + (body.all ? 'the queue' : ocDrain.scope + ' ' + ocDrain.value);
     ocRecordChange(phrase, null, 'ok');
-    toast(phrase);
     fetchBootstrap('none');
     ocRender();
   } catch (err) {

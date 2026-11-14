@@ -240,7 +240,6 @@ function ocApplyPause() {
     ocDrafts.pause = ocBlankPauseDraft();
     ocView = { kind: '', id: '' };
     ocRecordChange(phrase, undo, 'ok');
-    toast(phrase);
     ocRender();
   });
 }
@@ -268,7 +267,6 @@ async function ocResumeHold(id) {
   const phrase = 'resumed ' + scope;
   mutateOperator('pause', { paused: false, id }, () => {
     ocRecordChange(phrase, () => { const draft = ocPauseDraftFromHold(hold); draft.id = ''; return mutateOperator('pause', ocPauseBody(draft)); }, 'ok');
-    toast(phrase);
     ocRender();
   });
 }
@@ -297,7 +295,6 @@ async function ocResumeAllHolds() {
       }
       return all;
     }, 'ok');
-    toast('resumed every hold');
     ocRender();
   });
 }
@@ -472,7 +469,6 @@ function ocApplyCapture() {
     ocDrafts.capture = ocBlankCaptureDraft();
     ocView = { kind: '', id: '' };
     ocRecordChange(phrase, undo, 'ok');
-    toast(phrase);
     ocRender();
   });
 }
@@ -483,7 +479,6 @@ async function ocStopSession(id) {
   const phrase = 'stopped capture on ' + ocScopePhrase(ocScopeFromPolicy({ scope: session }));
   mutateOperator('debug', { enabled: false, id }, () => {
     ocRecordChange(phrase, () => { const draft = ocCaptureDraftFromSession(session); draft.id = ''; return mutateOperator('debug', ocCaptureBody(draft)); }, 'ok');
-    toast(phrase);
     ocRender();
   });
 }
@@ -509,7 +504,6 @@ async function ocStopAllSessions() {
       }
       return all;
     }, 'ok');
-    toast('stopped every capture');
     ocRender();
   });
 }

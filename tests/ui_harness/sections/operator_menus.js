@@ -2250,6 +2250,22 @@ module.exports = async function operatorMenus(H) {
         parking({paused: true, holds: [{id: 'p1', all: true}]}) === true &&
         parking({storm_waiters: 2}) === true &&
         parking({}) === false);
+      // ocRecordChange is also the one announcement owner. The footer ledger
+      // and the toast are both polite live regions, so a caller that recorded
+      // a change and then toasted the same phrase spoke it twice. The ledger
+      // is audible while the panel is open; the toast covers the closed panel.
+      w.closeOperatorConsole();
+      const phrase = 'announcement probe';
+      w.eval('ocRecordChange(' + JSON.stringify(phrase) + ', null, "ok")');
+      check('a change recorded with the console closed reaches the toast',
+        text('#toast') === phrase);
+      w.openOperatorConsole('overview');
+      const openPhrase = 'announcement probe open';
+      const toastBefore = text('#toast');
+      w.eval('ocRecordChange(' + JSON.stringify(openPhrase) + ', null, "ok")');
+      check('a change recorded with the console open is not spoken twice',
+        text('#oc-change') === openPhrase && text('#toast') === toastBefore);
+      w.closeOperatorConsole();
     }
   } finally {
     // Leave the shared page on the empty baseline every later section

@@ -1080,6 +1080,14 @@ function ocRevealComposer(pane) {
 // bounded session history and stores the undo closure that restores the exact
 // prior policy. A change the operator cannot see or reverse was the old
 // menus' core failure.
+//
+// It is also the one place a change is announced. The footer ledger and the
+// toast are both polite live regions, so recording a change and then raising
+// the same phrase as a toast spoke it twice. The ledger lives inside the
+// panel, which means it is the announcement channel while the console is
+// open, and the toast carries the phrase when the panel is closed and the
+// ledger cannot be heard. Callers pass the phrase once and do not toast it
+// themselves.
 function ocRecordChange(phrase, undo, tone) {
   ocError = '';
   // No timestamp: the ledger is a bounded LIFO of the newest changes, and
@@ -1088,6 +1096,9 @@ function ocRecordChange(phrase, undo, tone) {
   if (ocChanges.length > OC_CHANGE_LIMIT) ocChanges.shift();
   ocRenderFoot();
   refreshOperatorReadout();
+  const shell = ocShell();
+  const audible = !!shell && ocMounted && menuIsOpen(shell);
+  if (!audible && typeof toast === 'function') toast(phrase, tone);
 }
 
 async function ocUndoLast() {

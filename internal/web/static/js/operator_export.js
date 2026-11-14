@@ -320,5 +320,4 @@ function ocDownloadExport() {
   // action that was taken; the browser's own download UI reports how it went.
   const phrase = 'downloading ' + fmt(draft.count) + (draft.count === 1 ? ' record' : ' records');
   ocRecordChange(phrase, null, 'ok');
-  toast(phrase);
 }
