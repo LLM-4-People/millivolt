@@ -769,8 +769,8 @@ function ocBudgetPhrase(policy) {
     const n = Number(value);
     return Number.isFinite(n) ? n : 0;
   };
-  const reqWindow = policy.request_window || policy.requestWindow || '1m';
-  const tokWindow = policy.token_window || policy.tokenWindow || '1m';
+  const reqWindow = policy.request_window || policy.requestWindow || LIMIT_WINDOW_DEFAULT;
+  const tokWindow = policy.token_window || policy.tokenWindow || LIMIT_WINDOW_DEFAULT;
   const conc = num(policy.concurrency);
   const req = num(policy.requests);
   const tok = num(policy.tokens);

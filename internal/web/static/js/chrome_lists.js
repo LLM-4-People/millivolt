@@ -139,8 +139,12 @@ const LIMIT_WINDOWS = [
   ['1s', '1 second'], ['10s', '10 seconds'], ['30s', '30 seconds'],
   ['1m', '1 minute'], ['5m', '5 minutes'],
 ].concat(durationPairs('15m', '1h', '6h', '24h'));
-// The fallback window when a limit carries none (fillLimitWindows' default
-// and the apply body's missing-select fallback): '1m', named once.
+// LIMIT_WINDOW_DEFAULT is the one fallback window: what a new budget starts
+// with, and what a stored policy without a window reads as. It is a member of
+// LIMIT_WINDOWS, so the fallback can never name a token the picker does not
+// offer (and a Go test posts every LIMIT_WINDOWS token through the real
+// handler). The composer wrote the literal four times before this owner.
+const LIMIT_WINDOW_DEFAULT = '1m';
 function pauseUntilLabel(until) {
   return untilLeft(until);
 }
