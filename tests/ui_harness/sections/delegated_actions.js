@@ -14,6 +14,7 @@ module.exports = async function delegatedActions(H) {
     {
       kind: 'limit', section: 'limits', draft: 'limit', endpoint: '/admin/throttle',
       edit: '[data-oc-edit="limit"]', destroy: '[data-oc-remove="limit"]',
+      rowEdit: '.oc-rule-main',
       compose: '.oc-compose[data-kind="limit"]',
       post: {id: 'first', clear: true},
       seed(sw) {
@@ -30,6 +31,7 @@ module.exports = async function delegatedActions(H) {
     {
       kind: 'pause', section: 'pause', draft: 'pause', endpoint: '/admin/pause',
       edit: '[data-oc-edit="pause"]', destroy: '[data-oc-resume="first"]',
+      rowEdit: '.oc-rule-main',
       compose: '.oc-compose[data-kind="pause"]',
       post: {paused: false, id: 'first'},
       seed(sw) {
@@ -45,6 +47,7 @@ module.exports = async function delegatedActions(H) {
     {
       kind: 'capture', section: 'capture', draft: 'capture', endpoint: '/admin/debug',
       edit: '[data-oc-edit="capture"]', destroy: '[data-oc-stop="first"]',
+      rowEdit: '.oc-rule-main',
       compose: '.oc-compose[data-kind="capture"]',
       post: {enabled: false, id: 'first'},
       seed(sw) {
@@ -67,13 +70,16 @@ module.exports = async function delegatedActions(H) {
       sw.openOperatorConsole(spec.section);
       const row = () => sd.querySelector('#oc-pane [data-oc-rule="first"]');
       check(spec.kind + ' rule row renders inside the console', !!row() && !shell.hidden);
-      // The side "edit" action and the row's own main button open the same
-      // composer; the clicked node detaches because the pane rebuilds, which is
-      // why identity is the row id and never the element.
-      const sideEdit = row().querySelector('.oc-rule-actions ' + spec.edit);
-      sideEdit.click();
+      // The row itself is the one edit target: it opens the composer and the
+      // clicked node detaches because the pane rebuilds, which is why identity
+      // is the row id and never the element. A separate side "edit" button
+      // would duplicate this action and take width the scope needs.
+      const rowEdit = row().querySelector(spec.rowEdit);
+      check(spec.kind + ' row has no duplicate side edit action',
+        !row().querySelector('.oc-rule-actions ' + spec.edit));
+      rowEdit.click();
       check(spec.kind + ' edit swaps in a composer that keeps the row identity',
-        !sideEdit.isConnected && !!sd.querySelector('#oc-pane ' + spec.compose) &&
+        !rowEdit.isConnected && !!sd.querySelector('#oc-pane ' + spec.compose) &&
         sw.eval('ocDrafts.' + spec.draft + '.id') === 'first');
       sd.querySelector('#oc-pane [data-oc-cancel]').click();
       check(spec.kind + ' cancel closes the composer and restores the row',
@@ -354,7 +360,7 @@ module.exports = async function delegatedActions(H) {
       sw.openOperatorConsole('capture');
       const captureRow = () => sd.querySelector('#oc-pane [data-oc-rule="dbg-safe"]');
       const captureApply = () => sd.querySelector('#oc-pane [data-oc-apply="capture"]');
-      captureRow().querySelector('[data-oc-edit="capture"]').click();
+      captureRow().querySelector('.oc-rule-main').click();
       check('editing a capture keeps its row id and an allowed preset duration',
         sw.eval('ocDrafts.capture.id') === 'dbg-safe' &&
         sd.querySelector('#oc-pane [data-oc-choice="capture-duration"][data-oc-value="15m"]').getAttribute('aria-pressed') === 'true');
@@ -393,7 +399,7 @@ module.exports = async function delegatedActions(H) {
         !sd.querySelector('#oc-pane [onclick]') && !sw.__operatorXSS);
       check('the hostile rule row keeps its stored window and budget wording',
         hostileRow.querySelector('.oc-rule-budget').textContent.includes('2 requests / 2m'));
-      hostileRow.querySelector('[data-oc-edit="limit"]').click();
+      hostileRow.querySelector('.oc-rule-main').click();
       check('editing the hostile rule keeps its stored budgets, ramp and custom window',
         sd.querySelector('#oc-pane [data-oc-field="requests"]').value === '2' &&
         sw.eval('ocDrafts.limit.requestWindow') === '2m' &&

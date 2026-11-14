@@ -126,7 +126,6 @@ function ocRenderPause() {
       `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue', ...meta].join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(ocUntilPhrase(hold.until) || 'open')}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
-      `<button type="button" class="oc-icon-btn" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}">edit</button>` +
       `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
   }).join('');
   const empty = holds.length ? '' :
@@ -326,7 +325,6 @@ function ocRenderCapture() {
         session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(left)}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
-      `<button type="button" class="oc-icon-btn" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}">edit</button>` +
       `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button></div></div></div>`;
   }).join('');
   const empty = sessions.length ? '' :
