@@ -1214,6 +1214,20 @@ module.exports = async function operatorMenus(H) {
           q('#oc-pane [data-oc-field="requests"]').value === '41');
       }
 
+      // A picker row is a transient choice inside a slot. Selecting one
+      // rebuilds the pane, so focus must return to the picker that owns the
+      // row instead of falling to <body> and losing the keyboard operator's
+      // place. Scroll preservation is verified in the browser, because jsdom
+      // keeps scrollTop across an innerHTML replacement on its own.
+      {
+        openCond('providers');
+        const row = q('#oc-pane [data-oc-pick-value="providers"]');
+        row.focus();
+        row.click();
+        check('a pick returns focus to the picker that owns the row',
+          d.activeElement?.closest('[data-oc-key="pick-providers"]') !== null);
+      }
+
       // A keyed TEXT control carries the caret contract that the rebuilt
       // pane can preserve: the picker's data-oc-key is on the input itself, so
       // ocRestoreFocus can refocus it and restore the selection. A long known

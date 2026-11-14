@@ -217,6 +217,10 @@ function ocFocusTarget(slot) {
 function ocFocusKey() {
   const active = document.activeElement;
   if (!active || !ocShell()?.contains(active)) return null;
+  // A picker row sits inside the picker's own keyed slot, so the generic
+  // keyed lookup below already restores focus into the picker that owns it.
+  // Choosing a value therefore rebuilds the pane without dropping the keyboard
+  // operator back to <body>.
   const keyed = active.closest('[data-oc-key]');
   if (!keyed) return null;
   let start = null, end = null;
@@ -245,6 +249,11 @@ function ocRender() {
   const shell = ocShell();
   if (!shell || !ocMounted) return;
   const saved = ocFocusKey();
+  const paneBefore = ocEl('oc-pane');
+  // A pick rebuilds the pane, and the pane is the console's one scroll
+  // region. Without carrying scrollTop across, selecting a second value from a
+  // picker threw the operator back to the top of a form taller than the panel.
+  const savedScroll = paneBefore ? paneBefore.scrollTop : 0;
   ocRenderHead();
   ocRenderRail();
   const pane = ocEl('oc-pane');
@@ -269,6 +278,7 @@ function ocRender() {
     if (ocSection === 'pause') ocPausePreview();
     if (ocSection === 'capture') ocCapturePreview();
   }
+  if (pane) pane.scrollTop = savedScroll;
   ocRenderFoot();
   ocRestoreFocus(saved);
   const tab = shell.querySelector('.oc-rail-item[aria-selected="true"]');
