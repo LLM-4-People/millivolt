@@ -53,6 +53,14 @@ module.exports = async function operatorMenus(H) {
     if (!el) return null;
     return el.tagName === 'SELECT' ? el.value : el.getAttribute('aria-pressed') === 'true' ? el.dataset.ocValue : null;
   };
+  // startNew is the composer-entry path the UI actually offers: the head
+  // action only appears when no draft is open (or when editing a stored rule),
+  // because the composer footer's cancel is the one way to abandon a draft.
+  const startNew = kind => {
+    const cancel = q('#oc-pane [data-oc-cancel]');
+    if (cancel) cancel.click();
+    click(`#oc-pane [data-oc-new="${kind}"]`);
+  };
   const openCond = dim => {
     const btn = q(`#oc-pane [data-oc-pick="${dim}"]`);
     if (!btn) throw new Error('missing picker ' + dim);
@@ -337,7 +345,7 @@ module.exports = async function operatorMenus(H) {
       }];
       w.eval('lastData.records = window.__ocRecordFixture');
       w.openOperatorConsole('limits');
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       pickKnown('providers', 'prov-a');
       pickKnown('models', 'model-a');
       pickKnown('clients', 'client-a');
@@ -349,6 +357,14 @@ module.exports = async function operatorMenus(H) {
       // from its row instead. Conversations do accept a typed value.
       pickCustom('conversations', 'conv-1');
       pickKnown('keyHashes', 'abcdef123456');
+      // One action row while a draft is open. The head used to grow a second
+      // "start over" button beside the composer's own cancel: a duplicate
+      // discard of the same draft, with no dialog, that also took the accent
+      // the commit button needs.
+      check('a new draft leaves the composer footer as its only action row',
+        !q('#oc-pane .oc-sec-head [data-oc-new]') &&
+        !!q('#oc-pane .oc-compose [data-oc-cancel]') &&
+        !!q('#oc-pane [data-oc-apply="limit"]'));
       check('the five scope conditions carry the picked values',
         JSON.stringify(evalJSON('ocDrafts.limit.scope')) === JSON.stringify({
           providers: ['prov-a'], models: ['model-a'], clients: ['client-a'],
@@ -435,7 +451,7 @@ module.exports = async function operatorMenus(H) {
     {
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
       w.openOperatorConsole('limits');
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       check('a limit with no budget cannot be applied and says so',
         d.getElementById('oc-lim-apply').disabled &&
         text('#oc-lim-preview') === 'set at least one budget');
@@ -538,7 +554,7 @@ module.exports = async function operatorMenus(H) {
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a', 'prov-b']},
         {clients: ['client-a']});
       w.openOperatorConsole('limits');
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       pickKnown('providers', 'prov-a');
       click('#oc-pane [data-oc-toggle="advanced"]');
       const burstBox = () => q('#oc-pane [data-oc-field="antiBurst"]');
@@ -570,7 +586,7 @@ module.exports = async function operatorMenus(H) {
       }
       // One fresh draft per disqualifier: the control is offered only for a
       // single-provider rule without a schedule.
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       pickKnown('providers', 'prov-a');
       pickKnown('providers', 'prov-b');
       click('#oc-pane [data-oc-budget="concurrency"]');
@@ -581,7 +597,7 @@ module.exports = async function operatorMenus(H) {
         text(burstNote()) === 'Burst control needs a single-provider limit without a schedule.' &&
         evalJSON('ocLimitBody(ocDrafts.limit)').anti_burst === false);
 
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       pickKnown('providers', 'prov-a');
       pickKnown('clients', 'client-a');
       click('#oc-pane [data-oc-budget="concurrency"]');
@@ -591,7 +607,7 @@ module.exports = async function operatorMenus(H) {
         burstBox().disabled && !!burstNote() &&
         evalJSON('ocLimitBody(ocDrafts.limit)').anti_burst === false);
 
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       pickKnown('providers', 'prov-a');
       click('#oc-pane [data-oc-budget="concurrency"]');
       input('#oc-pane [data-oc-field="concurrency"]', '2');
@@ -740,7 +756,7 @@ module.exports = async function operatorMenus(H) {
         known_clients: ['client-a'], known_providers: ['prov-a'],
         until: null, default_max_queued: 16});
       w.openOperatorConsole('pause');
-      click('#oc-pane [data-oc-new="pause"]');
+      startNew('pause');
       // A quick hold is the incident shortcut, but a hold's blast radius makes
       // an unbounded one-click action the worst control this console could
       // offer. It is time-bounded by construction and writes the same document
@@ -788,7 +804,7 @@ module.exports = async function operatorMenus(H) {
         w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''};"
           + "ocChanges.length = 0; ocRenderFoot();");
         w.openOperatorConsole('pause');
-        click('#oc-pane [data-oc-new="pause"]');
+        startNew('pause');
       }
 
       // The scope vocabulary for clients lives on the throttle document, so
@@ -799,7 +815,7 @@ module.exports = async function operatorMenus(H) {
         known_clients: ['client-a'], known_providers: ['prov-a'], until: null,
         queued: 0, default_max_queued: 0});
       w.openOperatorConsole('pause');
-      click('#oc-pane [data-oc-new="pause"]');
+      startNew('pause');
       check('the pause composer offers named, new and all modes',
         JSON.stringify(qa('#oc-pane [data-oc-choice="pause-mode"]')
           .map(chip => [chip.dataset.ocValue, chip.getAttribute('aria-pressed')])) ===
@@ -842,7 +858,7 @@ module.exports = async function operatorMenus(H) {
           text('#oc-change') === 'held provider prov-a · client client-a');
 
         await settleUntil(() => w.eval('operatorState.pause.busy') === false);
-        click('#oc-pane [data-oc-new="pause"]');
+        startNew('pause');
         choose('pause-mode', 'all');
         check('all traffic previews the global hold',
           text('#oc-pause-preview') === 'Hold all traffic until resumed.');
@@ -857,7 +873,7 @@ module.exports = async function operatorMenus(H) {
           known_clients: ['client-a'], known_providers: ['prov-a'],
           until: null, default_max_queued: 16});
         w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''}; ocRender()");
-        click('#oc-pane [data-oc-new="pause"]');
+        startNew('pause');
         choose('pause-mode', 'all');
         const capToggle = q('#oc-pane [data-oc-field="pauseCapOn"]');
         capToggle.checked = true;
@@ -920,7 +936,7 @@ module.exports = async function operatorMenus(H) {
         known_clients: ['client-a'], known_providers: ['prov-a'], known_models: ['model-a'],
         ttl: '24h', max_bytes: '1MiB'}));
       w.openOperatorConsole('capture');
-      click('#oc-pane [data-oc-new="capture"]');
+      startNew('capture');
       check('a capture with no scope cannot start',
         d.getElementById('oc-capture-apply').disabled &&
         text('#oc-capture-preview') === 'Pick at least one client, provider or model.');
@@ -1551,7 +1567,7 @@ module.exports = async function operatorMenus(H) {
       const note = w.eval('NONE_YET_NOTE');
       throttleDoc({ok: true, active: false, throttles: [], known_providers: []});
       w.openOperatorConsole('limits');
-      click('#oc-pane [data-oc-new="limit"]');
+      startNew('limit');
       openCond('providers');
       check('an empty provider vocabulary renders the none-yet sentence',
         text('#oc-pane .oc-pick-empty') === note &&

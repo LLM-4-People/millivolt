@@ -113,6 +113,14 @@ function ocRenderPause() {
   const holds = liveHolds();
   if (!ocDrafts.pause) ocDrafts.pause = ocBlankPauseDraft();
   const composing = ocDrafts.pause && (ocDrafts.pause.id || ocView.kind === 'pause');
+  // One action row while a draft is open: the composer footer owns cancel and
+  // commit. A head "start over" beside it was a second, silent discard of the
+  // same draft. It stays only while editing a stored hold.
+  const headAction = ocDrafts.pause?.id
+    ? `<button type="button" class="btn" data-oc-new="pause">start over</button>`
+    : composing ? ''
+      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold ${ocQuickHoldMinutes}m</button>` +
+        `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
   const rows = holds.map(hold => {
     const scope = hold.all ? 'all traffic'
       : hold.new ? 'new clients'
@@ -133,10 +141,7 @@ function ocRenderPause() {
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Park new matching requests without cancelling work that is already running.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
-    (composing
-      ? `<button type="button" class="btn" data-oc-new="pause">start over</button>`
-      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold ${ocQuickHoldMinutes}m</button>` +
-        `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`) + `</div></div>` +
+    headAction + `</div></div>` +
     (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + (rows || empty) + `</div>`;
 }
 
@@ -329,6 +334,12 @@ function ocRenderCapture() {
   const sessions = liveDebugSessions();
   if (!ocDrafts.capture) ocDrafts.capture = ocBlankCaptureDraft();
   const composing = ocDrafts.capture && (ocDrafts.capture.id || ocView.kind === 'capture');
+  // One action row while a draft is open: the composer footer. See the pause
+  // section for why the head keeps "start over" only while editing.
+  const headAction = ocDrafts.capture?.id
+    ? `<button type="button" class="btn" data-oc-new="capture">start over</button>`
+    : composing ? ''
+      : `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button>`;
   const rows = sessions.map(session => {
     const scope = ocScopePhrase({
       providers: session.providers, models: session.models, clients: session.clients,
@@ -354,9 +365,7 @@ function ocRenderCapture() {
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
-    (composing
-      ? `<button type="button" class="btn" data-oc-new="capture">start over</button>`
-      : `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button>`) + `</div></div>` +
+    headAction + `</div></div>` +
     (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + (rows || empty) + `</div>`;
 }
 

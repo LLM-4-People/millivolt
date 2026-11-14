@@ -230,11 +230,19 @@ function ocRenderLimits() {
   const empty = policies.length ? '' :
     `<div class="oc-empty"><strong>No limits in force.</strong> Every request is admitted, at whatever rate its provider accepts.</div>`;
   const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
+  const editing = !!ocDrafts.limit?.id;
+  // The composer footer is the one action row while a draft is open. A head
+  // "start over" beside it was a second, silent discard of the same draft, and
+  // it took the accent the commit needs. It stays only while editing a stored
+  // rule, where leaving the edit to begin a fresh one is a real operation the
+  // composer cannot express.
+  const headAction = editing
+    ? `<button type="button" class="btn" data-oc-new="limit">start over</button>`
+    : composing ? ''
+      : `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p>` +
-    (composing
-      ? `<button type="button" class="btn" data-oc-new="limit">start over</button>`
-      : `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button>`) + `</div>` +
+    headAction + `</div>` +
     (composing ? ocLimitComposerHTML(ocDrafts.limit) : '') +
     (rows || empty) +
     `</div>`;
