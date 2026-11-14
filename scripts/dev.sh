@@ -104,37 +104,152 @@ not_running() {
   fi
 }
 
+# go_duration_tenths prints the tenths of a second in a Go duration string (the
+# grammar time.ParseDuration accepts in proxy.yaml), rounded up to the 100ms
+# poll tick stop waits in. It is total: every other value stops the caller with
+# the file and the value named, because silently substituting a default is how a
+# normal stop came to SIGKILL the proxy mid-drain.
+go_duration_tenths() {
+  local raw="$1" origin="$2"
+  # A drain wait beyond a day is a unit slip, never a stop. Internal safety
+  # bound, not an operator setting.
+  local bound_hours=24 bound_ns
+  local rest="$raw" negative=0 number whole fraction unit unit_ns
+  local digits scale fraction_ns unit_share unit_rest total_ns=0
+  bound_ns=$(( bound_hours * 3600 * 1000000000 ))
+  [ -n "$raw" ] || die "$origin: shutdown_timeout is empty"
+  case "$rest" in
+    +*) rest="${rest#+}" ;;
+    -*) negative=1; rest="${rest#-}" ;;
+  esac
+  [ -n "$rest" ] || die "$origin: shutdown_timeout \"$raw\" is not a Go duration (want a number and unit such as 30s, 2m30s or 1h)"
+  # time.ParseDuration reads a bare zero without a unit. The config loader then
+  # refuses it as non-positive, so name that reason instead of the grammar.
+  [ "$rest" != 0 ] || die "$origin: shutdown_timeout \"$raw\" must be positive"
+  while [ -n "$rest" ]; do
+    # time.ParseDuration reads a number, then every following character up to
+    # the next digit or dot as the unit, and repeats. Modelling the same scan
+    # keeps a unit the proxy rejects (5x, 5s # drain) from reading as a prefix
+    # it accepts.
+    if [[ ! "$rest" =~ ^([0-9]+(\.[0-9]*)?|\.[0-9]+)([^0-9.]*)(.*)$ ]]; then
+      die "$origin: shutdown_timeout \"$raw\" is not a Go duration (want a number and unit such as 30s, 2m30s or 1h)"
+    fi
+    number="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[3]}" rest="${BASH_REMATCH[4]}"
+    case "$unit" in
+      '') die "$origin: shutdown_timeout \"$raw\" is missing a unit (want a number and unit such as 30s, 2m30s or 1h)" ;;
+      ns) unit_ns=1 ;;
+      us|µs|μs) unit_ns=1000 ;;
+      ms) unit_ns=1000000 ;;
+      s) unit_ns=1000000000 ;;
+      m) unit_ns=60000000000 ;;
+      h) unit_ns=3600000000000 ;;
+      *) die "$origin: shutdown_timeout \"$raw\" is not a Go duration (\"$unit\" is not a duration unit; want ns, us, ms, s, m or h)" ;;
+    esac
+    whole="${number%%.*}" fraction=""
+    case "$number" in *.*) fraction="${number#*.}" ;; esac
+    # Leading zeros cannot change the value, but they would trip the digit
+    # bound and the base-10 arithmetic below.
+    whole="${whole#"${whole%%[!0]*}"}"
+    [ -n "$whole" ] || whole=0
+    # The day bound makes every accepted term fit comfortably in 64 bits, and
+    # checking the quotient first keeps the multiplication from wrapping.
+    (( ${#whole} <= 14 )) || die "$origin: shutdown_timeout \"$raw\" is longer than ${bound_hours}h"
+    (( 10#$whole <= bound_ns / unit_ns )) || die "$origin: shutdown_timeout \"$raw\" is longer than ${bound_hours}h"
+    total_ns=$(( total_ns + 10#$whole * unit_ns ))
+    if [ -n "$fraction" ]; then
+      # A nanosecond is the smallest value time.Duration holds, so a fraction
+      # finer than 13 digits contributes nothing for any unit up to hours.
+      digits="${fraction:0:13}"
+      scale=$(( 10 ** ${#digits} ))
+      # (digits * unit_ns) / scale without overflowing 64 bits: the unit is
+      # stripped to a small factor times a power of ten, so the product stays
+      # below the unit itself and the result is exact for every unit.
+      unit_share=$unit_ns unit_rest=0
+      while (( unit_share % 10 == 0 )); do
+        unit_share=$(( unit_share / 10 ))
+        unit_rest=$(( unit_rest + 1 ))
+      done
+      if (( ${#digits} >= unit_rest )); then
+        fraction_ns=$(( 10#$digits * unit_share / 10 ** (${#digits} - unit_rest) ))
+      else
+        fraction_ns=$(( 10#$digits * unit_share * 10 ** (unit_rest - ${#digits}) ))
+      fi
+      total_ns=$(( total_ns + fraction_ns ))
+    fi
+    (( total_ns <= bound_ns )) || die "$origin: shutdown_timeout \"$raw\" is longer than ${bound_hours}h"
+  done
+  (( negative == 0 )) || die "$origin: shutdown_timeout \"$raw\" must be positive"
+  (( total_ns > 0 )) || die "$origin: shutdown_timeout \"$raw\" must be positive"
+  # Ceil to the 100ms poll tick stop() sleeps in.
+  echo $(( (total_ns + 99999999) / 100000000 ))
+}
+
+# shutdown_timeout_value prints the top-level shutdown_timeout scalar of the
+# instance config with YAML quoting, a trailing comment and the whitespace the
+# proxy loader trims removed. The private config copy is rewritten from a file
+# a human edits, so every shape the proxy accepts must read the same here. A
+# missing, empty, repeated or nested-only key is refused rather than read as
+# some other value.
+shutdown_timeout_value() {
+  local yaml="$1" count line value values
+  [ -r "$yaml" ] || die "$yaml: cannot read the instance config to derive the drain wait"
+  count="$(grep -c '^shutdown_timeout:' "$yaml" 2>/dev/null || true)"
+  case "$count" in
+    1) ;;
+    0|'') die "$yaml: shutdown_timeout is not set; stop cannot derive the drain wait" ;;
+    *)
+      # Name every candidate: the operator has to choose which one the proxy
+      # is meant to read.
+      values="$(sed -n 's/^shutdown_timeout:[[:space:]]*//p' "$yaml" | tr '\n' ',')"
+      die "$yaml: shutdown_timeout is set $count times (${values%,}); stop cannot choose the drain wait"
+      ;;
+  esac
+  # A plain scalar may carry a trailing comment after whitespace. A quoted
+  # scalar ends at its closing quote, so a # inside it stays part of the value.
+  line="$(sed -n '/^shutdown_timeout:/{s/^shutdown_timeout:[[:space:]]*//;p;}' "$yaml")"
+  line="${line%"${line##*[![:space:]]}"}"
+  case "$line" in
+    \"*) line="${line#\"}"; value="${line%%\"*}" ;;
+    \'*) line="${line#\'}"; value="${line%%\'*}" ;;
+    *) value="${line%%[[:space:]]#*}" ;;
+  esac
+  # The proxy loader trims the scalar, so an inner space in either form is not
+  # part of the duration.
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
 # stop_grace_tenths derives the SIGTERM wait from the instance's own
 # shutdown_timeout plus the margin the proxy itself uses before reclaiming a
 # stale port. The stop sequence used to wait a flat 3.0s, while the documented
 # default drain is 5s and the store flush is uncapped: a normal stop therefore
 # SIGKILLed the process mid-drain, discarding the final write-channel drain the
-# proxy takes care to finish. Reading the running config keeps one owner for the
-# number; a YAML that does not state it falls back to the proxy's built-in
-# default, which is the same value -print-config prints.
+# proxy takes care to finish. The configured value is the one owner of the
+# number; a file that does not state a usable one is refused, never replaced by
+# a default.
 stop_grace_tenths() {
-  local yaml="${CONFIG_FILE}" timeout_s margin_s
-  margin_s=5   # cmd/proxy/portclaim.go sigtermCloseDrainMargin
-  # The YAML writes the duration unquoted (\`5s\`, \`1m\`); a quoted form is also
-  # accepted so a hand-edited config keeps working.
-  timeout_s="$(sed -n 's/^shutdown_timeout:[[:space:]]*"\{0,1\}\([0-9]\{1,3\}\)\([sm]\)"\{0,1\}[[:space:]]*$/\1 \2/p' "$yaml" 2>/dev/null | head -1)"
-  local amount unit seconds
-  read -r amount unit <<<"${timeout_s:-5 s}"
-  case "$unit" in
-    m) seconds=$((amount * 60)) ;;
-    *) seconds=$((amount)) ;;
-  esac
-  (( seconds > 0 )) || seconds=5
-  echo $(( (seconds + margin_s) * 10 ))
+  local yaml="${CONFIG_FILE}"
+  # cmd/proxy/portclaim.go sigtermCloseDrainMargin.
+  local margin_s=5
+  local value tenths
+  # A command substitution subshell does not inherit errexit, so each nested
+  # derivation's status is checked explicitly. Without this a refused value
+  # printed nothing and the arithmetic below read the empty string as 0.
+  value="$(shutdown_timeout_value "$yaml")" || exit 1
+  tenths="$(go_duration_tenths "$value" "$yaml")" || exit 1
+  echo $(( tenths + margin_s * 10 ))
 }
 
 stop() {
   if is_running; then
-    local pid; pid="$(cat "$PID_FILE")"
+    local pid ticks; pid="$(cat "$PID_FILE")"
+    # Derive the budget before signalling: a config this cannot read must
+    # refuse the stop, never start one it has no wait for.
+    ticks="$(stop_grace_tenths)"
     kill "$pid" 2>/dev/null || true
     # Poll at 100ms for the derived budget: the process is exiting cleanly for
     # that long, and only a genuinely wedged one reaches the SIGKILL.
-    local ticks; ticks="$(stop_grace_tenths)"
     for _ in $(seq 1 "$ticks"); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
     if is_running; then kill -9 "$pid" 2>/dev/null || true; fi
     echo "stopped dev instance (pid $pid)"
