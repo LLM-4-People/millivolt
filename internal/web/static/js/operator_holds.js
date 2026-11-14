@@ -185,7 +185,14 @@ function ocPauseBody(draft) {
     body.clients = draft.clients;
     body.providers = draft.providers;
   }
+  // An omitted cap means different things on the two paths. On a create the
+  // server writes the configured queue size, which is what an unchecked box
+  // asks for. On an edit it keeps the previous value, so an omitted cap made
+  // "uncheck the box" a no-op: the row went on printing a cap the operator had
+  // just removed. Unchecking a stored hold therefore sends the server's own
+  // word for no cap, which is zero.
   if (draft.cap !== '') body.max_queued = ocNumber(draft.cap);
+  else if (draft.id) body.max_queued = 0;
   if (draft.id) body.id = draft.id;
   return body;
 }

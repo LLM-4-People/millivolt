@@ -944,14 +944,36 @@ module.exports = async function operatorMenus(H) {
         check('a valid queue cap travels as max_queued',
           await settleUntil(() => posts.length === 3) && posts[2].max_queued === 8);
 
+        // Unchecking the box on a stored hold must remove the cap. The body
+        // used to omit max_queued, and the server keeps the previous value on
+        // an edit, so the control silently did nothing while the row went on
+        // printing a cap the operator had just cleared.
+        await settleUntil(() => w.eval('operatorState.pause.busy') === false);
+        w.applyPauseState({ok: true, paused: true,
+          holds: [{id: 'hold-cap', all: true, max_queued: 8}], queued: 0,
+          known_clients: [], known_providers: [], until: null, default_max_queued: 16});
+        click('#oc-pane [data-oc-edit="pause"][data-oc-id="hold-cap"]');
+        check('editing a capped hold prefills its queue cap',
+          q('#oc-pane [data-oc-field="pauseCap"]')?.value === '8');
+        const capOff = q('#oc-pane [data-oc-field="pauseCapOn"]');
+        capOff.checked = false;
+        capOff.dispatchEvent(new w.Event('change', {bubbles: true}));
+        const beforeUncap = posts.length;
+        click('#oc-pause-apply');
+        check('unchecking a stored hold\'s cap sends max_queued 0',
+          await settleUntil(() => posts.length === beforeUncap + 1) &&
+          posts[beforeUncap].max_queued === 0 &&
+          posts[beforeUncap].id === 'hold-cap');
+
         await settleUntil(() => w.eval('operatorState.pause.busy') === false);
         w.applyPauseState({ok: true, paused: true,
           holds: [{id: 'hold-r1', all: true}], queued: 0,
           known_clients: [], known_providers: [], until: null, default_max_queued: 0});
+        const beforeResume = posts.length;
         click('#oc-pane [data-oc-resume="hold-r1"]');
         check('resuming one hold posts only its id',
-          await settleUntil(() => posts.length === 4) &&
-          stable(posts[3]) === stable({paused: false, id: 'hold-r1'}));
+          await settleUntil(() => posts.length === beforeResume + 1) &&
+          stable(posts[beforeResume]) === stable({paused: false, id: 'hold-r1'}));
         check('the resume is recorded as resumed',
           await settleUntil(() => text('#oc-change').startsWith('resumed ')) &&
           text('#oc-change') === 'resumed all traffic');
