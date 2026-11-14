@@ -12,7 +12,11 @@
    operator_console.js writes both in the same repaint. */
 .op-readout-btn {
   display: inline-flex; align-items: center;
-  width: auto; min-width: 0; max-width: min(48vw, 320px); height: auto; min-height: 30px;
+  /* The right edge is pinned by the header's margin-auto, so a growing label
+     pushed the left edge - the hit target - leftward under a stationary
+     pointer every poll. A stable floor covers the common single-segment
+     state, and the clipping readout absorbs everything past it. */
+  width: auto; min-width: 96px; max-width: min(48vw, 320px); height: auto; min-height: 30px;
   padding: 3px 8px; gap: 6px; justify-content: flex-start;
   overflow: hidden;
 }
@@ -98,6 +102,14 @@
 }
 .op-readout-btn[data-state="stale"] .op-readout-chev { color: var(--muted); }
 .op-readout-btn[aria-expanded="true"] .op-readout-chev { transform: rotate(180deg); }
+/* The trigger is the one control an operator reaches for under pressure, and
+   it had no pressed feedback at all: mousedown gave nothing between hover and
+   the panel appearing. The offset is the whole signal, so it stays subtle. */
+.op-readout-btn:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+.op-readout-btn:active .op-readout-state { color: var(--text); }
 
 /* ---------- console frame ----------
    A compact popover, not a workspace: the panel is only as tall as its
