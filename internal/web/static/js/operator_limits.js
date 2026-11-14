@@ -182,6 +182,11 @@ function ocLimitComposerHTML(draft) {
 // ocLimitPreview is the live sentence above the commit button. It is the
 // operator's proof of what will be enforced, written from the same scope and
 // budget owners the rule rows use.
+// OC_WHOLE_NUMBER_FAULT is the one sentence for a non-whole budget. The
+// preview paints it and the apply guard reuses it, so the same condition
+// cannot reach the operator in two different wordings.
+const OC_WHOLE_NUMBER_FAULT = 'budgets must be whole numbers of 0 or more';
+
 function ocLimitPreview() {
   const draft = ocDrafts.limit;
   if (!draft) return;
@@ -195,7 +200,7 @@ function ocLimitPreview() {
   const any = conc > 0 || req > 0 || tok > 0;
   let text;
   if (bad) {
-    text = 'counts must be whole numbers of 0 or more';
+    text = OC_WHOLE_NUMBER_FAULT;
   } else if (!any) {
     text = 'set at least one budget';
   } else {
@@ -301,7 +306,7 @@ function ocApplyLimit() {
   const req = ocNumber(draft.requests);
   const tok = ocNumber(draft.tokens);
   if ([conc, req, tok].some(Number.isNaN)) {
-    draft.error = 'budgets must be whole numbers of 0 or more';
+    draft.error = OC_WHOLE_NUMBER_FAULT;
     ocRender();
     return;
   }
