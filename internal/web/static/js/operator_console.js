@@ -516,18 +516,70 @@ function ocSyncRailOverflow() {
   rail.dataset.more = more ? '1' : '0';
 }
 
+// ocRailBadgeCount is the one reading of "how many rules does this
+// destination hold". Only three sections count rules; the rest return 0 and
+// never paint a badge.
+function ocRailBadgeCount(section, counts) {
+  if (section === 'limits') return counts.limits;
+  if (section === 'pause') return counts.holds;
+  if (section === 'capture') return counts.captures;
+  return 0;
+}
+
+// ocRailTab creates one destination. It runs only when the rail is first
+// painted: afterwards the tab is patched in place.
+function ocRailTab(section) {
+  const tab = document.createElement('button');
+  tab.type = 'button';
+  tab.className = 'oc-rail-item';
+  tab.setAttribute('role', 'tab');
+  tab.id = 'oc-tab-' + section.id;
+  tab.setAttribute('aria-controls', 'oc-pane');
+  tab.dataset.ocSection = section.id;
+  tab.dataset.ocKey = 'rail-' + section.id;
+  const label = document.createElement('span');
+  label.className = 'oc-rail-label';
+  label.textContent = section.label;
+  tab.append(label, document.createTextNode(' '));
+  return tab;
+}
+
+// ocRenderRail paints the six destinations by patching them. It replaced the
+// whole tablist with innerHTML on every render, so a poll for a section the
+// operator was not looking at rebuilt the strip and dropped the focused tab to
+// <body> - a keyboard operator lost the console entirely while reading it.
+// Patching also keeps the accessible name stable: the badge is separated by a
+// space and hidden from assistive technology, so the tab reads "limits" and
+// its count is announced by the selected pane, not glued on as "limits8".
 function ocRenderRail() {
   const rail = ocEl('oc-rail');
   if (!rail) return;
   ocSyncRailOrientation();
-  const counts = { limits: ocRuleCounts().limits, pause: ocRuleCounts().holds, capture: ocRuleCounts().captures };
-  rail.innerHTML = OC_SECTIONS.map(section => {
-    const count = counts[section.id];
-    const badge = count ? `<span class="oc-rail-n">${fmt(count)}</span>` : '';
-    const active = section.id === ocSection ? 'true' : 'false';
-    return `<button type="button" class="oc-rail-item" role="tab" id="oc-tab-${section.id}" aria-selected="${active}" aria-controls="oc-pane" tabindex="${active === 'true' ? '0' : '-1'}" data-oc-section="${section.id}" data-oc-key="rail-${section.id}">` +
-      `<span class="oc-rail-label">${escapeHtml(section.label)}</span>${badge}</button>`;
-  }).join('');
+  const counts = ocRuleCounts();
+  OC_SECTIONS.forEach((section, index) => {
+    let tab = rail.children[index];
+    if (!tab || tab.dataset.ocSection !== section.id) {
+      tab = ocRailTab(section);
+      rail.insertBefore(tab, rail.children[index] || null);
+    }
+    const active = section.id === ocSection;
+    tab.setAttribute('aria-selected', active ? 'true' : 'false');
+    tab.tabIndex = active ? 0 : -1;
+    const count = ocRailBadgeCount(section.id, counts);
+    let badge = tab.querySelector('.oc-rail-n');
+    if (!count) {
+      if (badge) badge.remove();
+      return;
+    }
+    if (!badge) {
+      badge = document.createElement('span');
+      badge.className = 'oc-rail-n';
+      badge.setAttribute('aria-hidden', 'true');
+      tab.appendChild(badge);
+    }
+    const text = fmt(count);
+    if (badge.textContent !== text) badge.textContent = text;
+  });
 }
 
 function ocRenderFoot() {
