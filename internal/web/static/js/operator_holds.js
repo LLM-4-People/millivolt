@@ -86,7 +86,7 @@ function ocPauseComposerHTML(draft) {
         ? 'Clients unseen when this hold starts park. Requests already running finish.'
         : 'A dimension left empty matches any value; set dimensions combine.'}</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
-    ocChipRow(OC_CHOICES.pauseDuration, [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : PAUSE_DURS[0][1]) +
+    ocChipRow(OC_CHOICES.pauseDuration, PAUSE_DURS.map(([v]) => v), draft.duration, v => ocDurationText('pause', v)) +
     `</div>` +
     `<div class="oc-group"><label class="oc-check"><input type="checkbox" data-oc-field="pauseCapOn" ${draft.cap !== '' ? 'checked' : ''}><span>limit the hold queue</span></label>` +
     (draft.cap !== '' ? ocField('pauseCap', 'queued requests', draft.cap, { placeholder: String(ocPauseDefaultCap()) }) : '') +
@@ -106,7 +106,7 @@ function ocPausePreview() {
   if (empty) text = 'Pick at least one condition, or hold everything.';
   else {
     const scope = ocHoldDraftScopePhrase(draft);
-    text = 'Hold ' + scope + (draft.duration ? ' for ' + ocDurationText(draft.duration) : ' until resumed') + '.';
+    text = 'Hold ' + scope + ocDurationTail('pause', draft.duration) + '.';
   }
   el.textContent = text;
   apply.disabled = !!operatorState.pause.busy || empty;
@@ -126,7 +126,7 @@ function ocRenderPause() {
       // the composer beside it, and its blast radius lived only in the title,
       // which a touch operator never sees. It stays one click: this is the
       // incident shortcut, and a dialog would defeat it.
-      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${escapeHtml(ocDurationText(ocQuickHoldDuration))}">hold all ${escapeHtml(ocQuickHoldDuration)}</button>` +
+      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${escapeHtml(ocDurationText('pause', ocQuickHoldDuration))}">hold all ${escapeHtml(ocQuickHoldDuration)}</button>` +
         `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
   const entries = holds.map(hold => {
     const scope = ocHoldScopePhrase(hold);
@@ -340,7 +340,7 @@ function ocCaptureComposerHTML(draft) {
     ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, OC_CAPTURE_SCOPE_KEYS) +
     `<p class="oc-note">Captures can contain credentials and private content; keep the window short and download only what you need.</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
-    ocChipRow(OC_CHOICES.captureDuration, [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : 'until stopped') +
+    ocChipRow(OC_CHOICES.captureDuration, CAPTURE_DURS.map(([v]) => v), draft.duration, v => ocDurationText('capture', v)) +
     `</div>` +
     `<p class="oc-facts">${escapeHtml(ocCaptureFacts())}</p>` +
     (blocked ? `<p class="oc-warning" role="alert">Durable storage is off, so captures cannot start. Set db_path in Settings, then restart to apply it.` +
@@ -371,8 +371,7 @@ function ocCapturePreview() {
   const { preview: el, apply } = nodes;
   const empty = !ocScopeHas(draft.scope);
   el.textContent = empty ? 'Pick at least one condition.'
-    : 'Capture ' + ocScopePhrase(draft.scope) +
-      (draft.duration ? ' for ' + ocDurationText(draft.duration) : ' until stopped') + '.';
+    : 'Capture ' + ocScopePhrase(draft.scope) + ocDurationTail('capture', draft.duration) + '.';
   apply.disabled = !!operatorState.debug.busy || empty || debugStorageDisabled();
 }
 
@@ -388,7 +387,7 @@ function ocRenderCapture() {
       : `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button>`;
   const entries = sessions.map(session => {
     const scope = ocScopePhrase(ocScopeFromPolicy({ scope: session }));
-    const left = ocUntilPhrase(session.until) || 'until stopped';
+    const left = ocCaptureWindowPhrase(session);
     const ran = typeof session.ran_ms === 'number' && session.ran_ms > 0
       ? 'ran ' + hmBreakdown(Math.max(1, Math.round(session.ran_ms / OC_MINUTE))) : '';
     const n = typeof session.captures === 'number' ? session.captures : 0;
@@ -397,7 +396,7 @@ function ocRenderCapture() {
     return ocRuleRowHTML({
       kind: 'capture', id: session.id || '', scope, title: scope,
       budget: [n + ' ' + agree(n, 'capture', 'captures'), ran,
-        session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '),
+        session.duration ? ocDurationText('capture', session.duration) : ''].filter(Boolean).join(' · '),
       live: left,
       actions: `<button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
         `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button>`,

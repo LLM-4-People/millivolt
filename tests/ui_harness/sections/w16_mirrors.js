@@ -322,9 +322,18 @@ module.exports = async function w16Mirrors(H) {
       check('the window pickers derive their tokens from LIMIT_WINDOWS once',
           consoleSources.some(src => src.includes('const values = (withOff ? [\'\'] : []).concat(LIMIT_WINDOWS.map(([v]) => v))')) &&
           !consoleSources.some(src => src.includes("ocChipRow('ramp'")));
-        check('both console duration pickers read the one PAUSE_DURS vocabulary',
-          consoleSources.reduce((n, src) =>
-            n + (src.match(/\[''\]\.concat\(PAUSE_DURS\.slice\(1\)\.map\(\(\[v\]\) => v\)\)/g) || []).length, 0) === 2);
+        // Both console duration pickers offer one ladder: the capture ladder
+        // derives from PAUSE_DURS rather than re-listing the tokens, so the two
+        // pickers cannot offer different windows, and only the open-ended
+        // sentence differs per surface. The literal source shape is no longer
+        // the contract - the derived data is - so this asserts the data.
+        check('both console duration pickers offer the one token ladder',
+          JSON.stringify(sw.eval('CAPTURE_DURS.map(([v]) => v)')) ===
+            JSON.stringify(sw.eval('PAUSE_DURS.map(([v]) => v)')) &&
+          sw.eval('CAPTURE_DURS[0][1]') === 'until stopped' &&
+          sw.eval('PAUSE_DURS[0][1]') === 'until resumed' &&
+          JSON.stringify(sw.eval('CAPTURE_DURS.slice(1)')) ===
+            JSON.stringify(sw.eval('PAUSE_DURS.slice(1)')));
       }
       check('FILTER_AGES offers canonical Go duration spellings',
         JSON.stringify(sw.eval('FILTER_AGES')) === JSON.stringify([

@@ -891,10 +891,6 @@ function ocUntilPhrase(until) {
   return untilLeft(until, 'expired');
 }
 
-function ocDurationText(value) {
-  return DURATION_LABELS[value] || value || 'until resumed';
-}
-
 // ocLimitSelectorKey is the client-side reading of the server's policy
 // identity. A limit is identified by its normalized scope plus schedule, not
 // by an id the console chose: re-applying the same selector is an edit, not a

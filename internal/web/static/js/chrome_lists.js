@@ -43,11 +43,43 @@ const DURATION_LABELS = {
 };
 // durationPairs builds [value, label] select pairs from DURATION_LABELS.
 const durationPairs = (...vals) => vals.map(v => [v, DURATION_LABELS[v]]);
-// The empty token is the open-ended choice. Its label is the pause surface's
-// wording because that is the canonical reading; a capture names its own,
-// because "until stopped" is the truth there. Tokens are shared, the
-// open-ended sentence is per kind.
-const PAUSE_DURS = [['', 'until resumed']].concat(durationPairs('15m', '1h', '6h', '12h', '24h'));
+// DURATION_ENDINGS is the one open-ended sentence per surface. The duration
+// tokens are shared; only the word for "no window chosen" differs, because a
+// hold waits to be resumed while a capture records until it is stopped. It was
+// spelled six times across the two sections, and one capture row had already
+// drifted into calling the same open-ended session "until stopped" in its live
+// column and "manual stop" in its budget line.
+const DURATION_ENDINGS = { pause: 'until resumed', capture: 'until stopped' };
+const PAUSE_DURS = [['', DURATION_ENDINGS.pause]].concat(durationPairs('15m', '1h', '6h', '12h', '24h'));
+// CAPTURE_DURS is the same ladder with the capture surface's ending. It derives
+// from PAUSE_DURS rather than re-listing the tokens, so the two pickers cannot
+// offer different windows.
+const CAPTURE_DURS = [['', DURATION_ENDINGS.capture]].concat(PAUSE_DURS.slice(1));
+
+// ocDurationText reads a duration token as its label, falling back to the
+// surface's open-ended sentence when no window was chosen. The kind is
+// required: a default would silently give a capture the pause wording, which is
+// exactly the drift this replaced.
+function ocDurationText(kind, value) {
+  return DURATION_LABELS[value] || value || DURATION_ENDINGS[kind];
+}
+
+// ocDurationTail is the clause a sentence appends: "for 15 minutes" when a
+// window was chosen, or the surface's own open-ended sentence.
+function ocDurationTail(kind, value) {
+  return value ? ' for ' + ocDurationText(kind, value) : ' ' + DURATION_ENDINGS[kind];
+}
+
+// ocCaptureWindowPhrase is the one reading of a capture session's window: the
+// time it has left, else the span it was started with, else the open-ended
+// sentence. The console's row and the overview's row both print it, and they
+// had drifted three ways: the row called an open-ended session "until stopped"
+// in its live column and "manual stop" in its budget line, while the overview
+// printed the raw token ("15m") instead of its label.
+function ocCaptureWindowPhrase(session) {
+  if (!session) return '';
+  return untilLeft(session.until) || ocDurationText('capture', session.duration);
+}
 // ---------- operator scope vocabulary ----------
 // The selector dimensions and their readings live here, in the module that
 // loads before every other operator surface, because three layers read them:
