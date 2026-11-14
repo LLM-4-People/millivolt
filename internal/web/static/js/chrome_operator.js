@@ -84,8 +84,19 @@ async function operatorFetch(url, options = {}) {
 // operatorJson is the one GET-and-parse owner for operator-state JSON
 // fetches: it resolves the parsed document only for a 2xx response and
 // rejects otherwise, so every caller shares one failure contract.
+//
+// The rejection is a real Error carrying the status, not a bare
+// Promise.reject(). A reasonless rejection reached the ledger as
+// "could not undo: undefined", which tells the operator nothing and hides
+// the one fact that would help - whether the proxy refused or was
+// unreachable.
 function operatorJson(url, options = {}) {
-  return operatorFetch(url, options).then(r => r.ok ? r.json() : Promise.reject());
+  return operatorFetch(url, options).then(r => {
+    if (r.ok) return r.json();
+    const err = new Error('request failed (' + r.status + ')');
+    err.status = r.status;
+    return Promise.reject(err);
+  });
 }
 
 // operatorErrorBody is the shared failure read for an operator JSON call:
