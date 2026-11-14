@@ -26,16 +26,23 @@ function ocAllRuleRows() {
     });
   }
   for (const policy of ((typeof throttleState !== 'undefined' && throttleState.throttles) || [])) {
+    // The overview is the in-force register, and an off-schedule policy is
+    // installed but enforcing nothing. Listing it as an ordinary row made the
+    // same rule read as a live cap here, as "off schedule" in its section and
+    // as `off schedule N` in the readout: three surfaces, two answers.
+    const offSchedule = policy.scheduled === false;
     rows.push({
       kind: 'limit',
       section: 'limits',
       id: policy.id || '',
+      offSchedule,
       scope: ocScopePhrase({
         providers: policy.scope?.providers, models: policy.scope?.models,
         clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
         conversations: policy.scope?.conversations,
       }),
-      detail: ocBudgetPhrase(policy) + (policy.schedule ? ' · ' + ocSchedulePhrase(policy.schedule) : ''),
+      detail: [ocBudgetPhrase(policy), policy.schedule ? ocSchedulePhrase(policy.schedule) : '',
+        offSchedule ? 'off schedule' : ''].filter(Boolean).join(' · '),
     });
   }
   return rows;
@@ -66,7 +73,7 @@ function ocRenderOverview() {
   const queued = Number(pauseState.queued) || 0;
   const list = rows.length ? rows.map(row =>
     `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-target="${escapeHtml(row.id)}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
-    `<span class="oc-ov-kind" data-kind="${row.kind}">${row.kind}</span>` +
+    `<span class="oc-ov-kind" data-kind="${row.kind}"${row.offSchedule ? ' data-oc-off-schedule="1"' : ''}>${row.kind}</span>` +
     `<span class="oc-ov-scope">${escapeHtml(row.scope)}</span>` +
     `<span class="oc-ov-detail">${escapeHtml(row.detail)}</span></button>`).join('')
     : `<div class="oc-empty"><strong>Nothing is in force.</strong> No limit caps these requests, no hold parks them, no capture records them. The admission queue and each provider's own rate limits still apply.</div>`;

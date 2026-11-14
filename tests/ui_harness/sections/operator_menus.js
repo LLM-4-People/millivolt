@@ -1556,6 +1556,28 @@ module.exports = async function operatorMenus(H) {
       // instead of dropping the operator at the top of a list to search.
       check('an in-force row carries the rule it names',
         rows[1].dataset.ocTarget === 'ov-limit' && rows[0].dataset.ocTarget === 'ov-hold');
+      // A policy outside its window enforces nothing. The readout says
+      // `off schedule`, and the section row says it too; the overview used to
+      // list it as an ordinary in-force row, so one rule read two ways.
+      w.applyThrottleState({ok: true, active: true, known_providers: [],
+        throttles: [
+          {id: 'ov-live', scope: {providers: ['prov-a']}, concurrency: 2, scheduled: true},
+          {id: 'ov-parked', scope: {providers: ['prov-b']}, concurrency: 2, scheduled: false},
+        ]});
+      w.operatorConsoleSync('throttle');
+      {
+        const parked = q('#oc-pane .oc-ov-row[data-oc-target="ov-parked"]');
+        const live = q('#oc-pane .oc-ov-row[data-oc-target="ov-live"]');
+        check('the overview marks an off-schedule limit instead of listing it as in force',
+          !!parked && text(parked.querySelector('.oc-ov-detail')).includes('off schedule') &&
+          parked.querySelector('.oc-ov-kind').getAttribute('data-oc-off-schedule') === '1' &&
+          !!live && !text(live.querySelector('.oc-ov-detail')).includes('off schedule') &&
+          !live.querySelector('.oc-ov-kind').hasAttribute('data-oc-off-schedule'));
+      }
+      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
+        throttles: [{id: 'ov-limit', scope: {providers: ['prov-a']}, concurrency: 2, scheduled: true}]});
+      w.operatorConsoleSync('throttle');
+      w.openOperatorConsole('overview');
       click('#oc-pane .oc-ov-row[data-oc-section="limits"]');
       check('an in-force row opens the rule it names',
         paneSection() === 'limits' &&
