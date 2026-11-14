@@ -799,7 +799,8 @@ function startStream(since, feed) {
   stream.onerror = () => { if (current()) setFooterLive(false); };
   stream.addEventListener('snapshot', (e) => {
     if (source !== stream) return;
-    try { applySnapshotPayload(JSON.parse(e.data)); } catch(err) {}
+    try { applySnapshotPayload(JSON.parse(e.data)); }
+    catch (err) { reportProblem('live snapshot frame', err); }
   });
   stream.addEventListener('reset', (e) => {
     if (!current()) return;
@@ -808,7 +809,7 @@ function startStream(since, feed) {
       if (typeof next !== 'string' || !next || next === feedId) return;
       // The full-bootstrap gate owns close, invalidation and cursor-safe reopen.
       fetchBootstrap('full');
-    } catch(err) {}
+    } catch (err) { reportProblem('live reset frame', err); }
   });
   // A finalized record from the ring. The event's Last-Event-ID (the id:
   // field the stream carries) is the resume cursor - on reconnect the browser
@@ -824,7 +825,7 @@ function startStream(since, feed) {
       if (!isNaN(seq)) lastSeq = Math.max(lastSeq, seq);
       upsertRec(rec);
       scheduleRenderLive();
-    } catch(err) {}
+    } catch (err) { reportProblem('live record frame', err); }
   });
   // Per-request lifecycle: a request appears the moment it starts ("begin") and
   // is finalized when it completes ("end"), so the log shows it streaming live
@@ -859,7 +860,7 @@ function startStream(since, feed) {
       }
       scheduleRenderLive();
       scheduleExplorerLiveRefresh();
-    } catch(err) {}
+    } catch (err) { reportProblem('live lifecycle frame (' + e.type + ')', err); }
   };
   stream.addEventListener('begin', upsertLive);
   stream.addEventListener('end', upsertLive);

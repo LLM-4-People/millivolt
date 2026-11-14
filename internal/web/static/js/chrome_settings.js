@@ -111,7 +111,7 @@ function loadSettingsModule(from = 0) {
   }).catch(err => {
     settingsStatus(SETTINGS_LOAD_FAIL, 'error');
     toast(SETTINGS_LOAD_FAIL, 'err');
-    console.error('settings module failed to load:', err && err.message ? err.message : err);
+    reportProblem('settings module failed to load', err);
     throw err;
   });
   return settingsLoadPromise;

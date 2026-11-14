@@ -41,6 +41,32 @@ module.exports = async function chartRender(H) {
   w.eval("chartView.preset = 'traffic'; chartView.hidden = {}");
   check('traffic plan keeps requests + errors as bars',
     w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.bar ? "bar" : "line") + "@" + m.scale).join("|")') === 'req=bar@y|err=bar@y');
+  // ---- the context row distinguishes "no data" from "not current" ----
+  // A failed same-identity refresh keeps the last good payload on purpose, so
+  // the plot does not blank on one transient error. The numbers on screen are
+  // then old, and the row has to say so: the guard used to require an absent
+  // payload, so a failing refresh presented old buckets as a live reading.
+  {
+    w.eval(`
+      chartAgg = window.__cp = ${JSON.stringify(mkChart())};
+      chartView.preset = 'traffic'; chartView.hidden = {};
+      chartFailure = null;
+      chartChromeSync();
+    `);
+    const healthy = d.getElementById('chart-context').textContent;
+    w.eval('chartFailure = chartReqKey(); chartChromeSync()');
+    const stale = d.getElementById('chart-context').textContent;
+    check('a failed refresh over a last-good payload is marked stale, not shown as current',
+      w.eval('!!chartAgg') && stale !== healthy && /stale/.test(stale) && /retrying/.test(stale) &&
+      !/unavailable/.test(stale));
+    w.eval('chartAgg = null; chartFailure = chartReqKey(); chartChromeSync()');
+    const gone = d.getElementById('chart-context').textContent;
+    check('a failed refresh with no payload names the chart unavailable',
+      /unavailable/.test(gone) && !/stale/.test(gone));
+    w.eval('chartFailure = null; chartAgg = null; chartChromeSync()');
+    check('a cleared failure returns the row to its ordinary reading',
+      !/stale|unavailable/.test(d.getElementById('chart-context').textContent));
+  }
   w.eval('chartAgg = null; chartView.preset = "traffic"; chartView.hidden = {}');
 
   // ---- test 11c: percentile selection never changes series structure ----

@@ -4,6 +4,46 @@ module.exports = async function liveInvariants(H) {
   const {check, d, fire, mkRec, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
+  // ---- a malformed frame is reported, never swallowed ----
+  // Every stream handler wraps its work in a catch, and those catches were
+  // empty: a schema-drifted or truncated frame dropped a row silently, and the
+  // live table under-reported while the footer still said "live". They now
+  // reach the one client sink, which is the only diagnostic a field report can
+  // point at. The sink's own shape is asserted directly so the message stays
+  // useful without echoing frame contents.
+  {
+    const seen = [];
+    const original = w.console.error;
+    const savedFeed = w.eval('feedId');
+    const savedSource = w.eval('typeof source !== "undefined" ? source : null');
+    w.console.error = (...args) => { seen.push(args.join(' ')); };
+    try {
+      // Each handler gets a frame it cannot parse; a well-formed frame that
+      // merely fails a later guard is a different case and is covered where
+      // that guard lives.
+      fire('record', '{not json');
+      fire('snapshot', 'null');
+      fire('end', '{"record":');
+      // The reset handler only acts on a different feed id, so give it one.
+      const resetCb = state.sseHandlers.reset;
+      if (resetCb && savedSource !== null) {
+        w.eval('feedId = "other-feed"');
+        resetCb({type: 'reset', data: '{bad', lastEventId: ''});
+        w.eval('feedId = ' + JSON.stringify(savedFeed));
+      }
+    } finally {
+      w.console.error = original;
+    }
+    check('a malformed stream frame reaches the one client sink instead of vanishing',
+      seen.length >= 2 && seen.every(line => /^live /.test(line)) &&
+      seen.some(line => /record frame/.test(line)) &&
+      // The label names the surface; the payload is never echoed.
+      seen.every(line => !line.includes('not json') && !line.includes('record\":')));
+    check('the client sink is one function, not a console call per module',
+      w.eval('typeof reportProblem') === 'function' &&
+      w.eval("(function () { const s = []; const o = console.error; console.error = (...a) => s.push(a.join(' ')); reportProblem('probe surface', new Error('boom')); console.error = o; return s.length === 1 && /probe surface: boom/.test(s[0]); })()") === true);
+  }
+
   // ---- test 12d: a stale tick's pending snapshot must never regress an
   // in-flight row's retry progress (attempts are append-only - an older
   // snapshot carries fewer absorbed attempts than a just-arrived SSE update).

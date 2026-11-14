@@ -510,6 +510,21 @@ function setText(element, text) {
   if (element && element.textContent !== text) element.textContent = text;
 }
 
+// reportProblem is the one place a client-side failure is made visible to
+// whoever debugs the dashboard. The browser console is the only sink the page
+// has: there is no server route for a client log, and inventing one would put
+// an unauthenticated write path in front of the operator plane. What matters is
+// that a swallowed failure is not silent - a malformed stream frame, a payload
+// that fails validation, or a module that will not load all land here with the
+// same shape, so a field report has one place to look.
+//
+// `label` names the surface, `err` is whatever was thrown. The message is
+// included but no payload contents are: a frame may carry request metadata.
+function reportProblem(label, err) {
+  const detail = err && err.message ? err.message : String(err || 'unknown error');
+  console.error(label + ':', detail);
+}
+
 // keyModified reports whether a key event belongs to the browser or the OS
 // rather than to a widget's own navigation: Alt+Left is Back, Cmd+Up is the top
 // of the document, Ctrl+Home is the same. A roving handler that preventDefaults

@@ -945,14 +945,22 @@ function chartChromeSync() {
   const omitted = _compacted
     ? (_plan?.preset.requireAll ? ' · unmeasured intervals omitted' : ' · empty intervals omitted')
     : '';
-  const failed = !chartAgg && chartFailure === chartReqKey();
+  // A failed request is two different facts. With no payload there is nothing
+  // to show, so the row says so. With a last-good payload for the same
+  // identity the plot keeps drawing it - that is deliberate, a transient 500
+  // should not blank the chart - but the numbers on screen are no longer
+  // current, so the row has to say that too. It used to require !chartAgg,
+  // which meant a failing refresh kept presenting old buckets as a live
+  // reading.
+  const failed = chartFailure === chartReqKey();
   // The context row names the resolved selection, its bucket cadence, and -
   // for all time - the stored coverage the payload reported.
   const token = chartWindowToken();
   const resolved = tfResolve(token, Date.now());
   const history = token === 'all' && tfExtentFrom() > 0
     ? ' · ' + fmtDur(Date.now() - tfExtentFrom()) + ' of history' : '';
-  const context = failed ? 'chart unavailable - retrying'
+  const context = failed
+    ? (chartAgg ? resolved.long + ' · stale, retrying' : 'chart unavailable - retrying')
     : chartAgg ? resolved.long + ' · ' + fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted + history : 'Waiting for traffic';
   updateSection('chart-context', context);
 }
