@@ -765,11 +765,25 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc[data-placement="sheet"] {
     max-height: min(88dvh, calc(100dvh - 16px));
   }
+  /* Six fixed destinations never fit one phone row: measured at 390 the strip
+     showed "system" as 3.4px of its 33px label under the fade, and at 320
+     both export and system were 0px wide. A hidden scrollbar with two unnamed
+     destinations is not a navigation control. Two even rows fit instead: at
+     390 a three-column grid gives 113px cells against a 76px widest chip, and
+     the whole strip costs one extra 38px row. */
   .mn.oc .oc-rail {
-    flex-wrap: nowrap; gap: 2px; padding: 5px 6px;
-    scrollbar-width: none;
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 3px; padding: 5px 6px;
+    overflow: visible; scrollbar-width: none;
   }
-  .mn.oc .oc-rail-item { min-height: 38px; padding: 0 9px; border-radius: 5px; }
+  .mn.oc .oc-rail[data-more="1"] {
+    -webkit-mask-image: none; mask-image: none;
+  }
+  .mn.oc .oc-rail-item {
+    min-height: 38px; padding: 0 9px; border-radius: 5px;
+    justify-content: center; min-width: 0;
+  }
+  .mn.oc .oc-rail-label { overflow: visible; }
   .mn.oc .oc-hd { padding: 8px 10px 9px; }
   .mn.oc .oc-pane { padding: 9px 10px 12px; }
   .mn.oc .oc-ft { padding: 6px 10px; }
