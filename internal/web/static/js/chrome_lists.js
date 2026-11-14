@@ -146,8 +146,20 @@ const OC_CAPTURE_SCOPE_KEYS = OC_SCOPE_DIMS
   .filter(dim => ['clients', 'providers', 'models'].includes(dim.key))
   .map(dim => dim.key);
 
-function ocScopeDim(key) {
-  return OC_SCOPE_DIMS.find(dim => dim.key === key || dim.wire === key) || null;
+// ocScopeDim resolves any spelling of one dimension to its row: the client
+// field, the server wire name, the singular word a sentence uses, or the
+// request record field. A caller holding a name from another layer - a drain
+// scope says "provider", a record says "conversation_id" - therefore needs no
+// mapping table of its own, which is what OC_DRAIN_DIMS had become.
+function ocScopeDim(name) {
+  return OC_SCOPE_DIMS.find(dim =>
+    dim.key === name || dim.wire === name || dim.one === name || dim.record === name) || null;
+}
+
+// ocScopeDims maps a list of names to their rows, dropping any it cannot
+// resolve rather than emitting an undefined entry.
+function ocScopeDims(names) {
+  return (names || []).map(ocScopeDim).filter(Boolean);
 }
 
 function ocNewScope() {

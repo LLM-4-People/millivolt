@@ -50,13 +50,17 @@ function ocAllRuleRows() {
 // that has not sent traffic since the restart, so the value must stay free,
 // and retyping a name the console already knows was the same friction the
 // scope pickers were built to remove.
-const OC_DRAIN_DIMS = { provider: 'providers', model: 'models', client: 'clients' };
+// OC_DRAIN_SCOPE is the three dimensions scheduler.DrainScope can match, in
+// the singular spelling the chips render. The list is the server's contract,
+// not a client preference, so it stays one declaration and the plural lookup
+// comes from the scope table rather than a second map.
+const OC_DRAIN_SCOPE = ['provider', 'model', 'client'];
 
 function ocDrainValueHTML() {
   const dim = ocDrain.scope;
   const listId = 'oc-drain-values';
   const known = typeof ocKnownValues === 'function'
-    ? ocKnownValues(OC_DRAIN_DIMS[dim] || dim) : [];
+    ? ocKnownValues(ocScopeDim(dim)?.key || dim) : [];
   const options = known.map(value =>
     `<option value="${escapeHtml(value)}"></option>`).join('');
   return `<input type="text" data-oc-drain-value value="${escapeHtml(ocDrain.value)}"` +
@@ -88,7 +92,7 @@ function ocRenderOverview() {
   // them, so the operator is not offered a button that cannot help.
   const queue = queued ? `<div class="oc-group"><div class="oc-label">queue</div>` +
     `<p class="oc-note">${fmt(queued)} parked. Draining releases them with a retryable response; running streams finish.</p>` +
-    `<div class="oc-inline">${ocChipRow(OC_CHOICES.drainScope, ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
+    `<div class="oc-inline">${ocChipRow(OC_CHOICES.drainScope, ['all'].concat(OC_DRAIN_SCOPE), ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
     (ocDrain.scope !== 'all' ? ocDrainValueHTML() : '') +
     `<button type="button" class="btn" data-oc-drain>drain</button></div></div>` : '';
   const gated = parked.gated ? `<div class="oc-group" data-oc-gate><div class="oc-label">gate</div>` +
