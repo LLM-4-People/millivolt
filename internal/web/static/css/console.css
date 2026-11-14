@@ -216,27 +216,39 @@
 .oc-field-hint { color: var(--muted); font: 9px/1.4 var(--mono); }
 .oc-field input,
 .oc-pick input,
-.oc-inline input {
+.oc-inline input,
+.oc-select {
   width: 100%; min-width: 0; min-height: 28px; padding: 5px 9px;
   color: var(--text); background: var(--rail);
   border: 1px solid var(--border); border-radius: 7px;
   font: 11px/1.4 var(--mono); font-variant-numeric: tabular-nums;
+}
+.oc-select {
+  padding: 3px 6px; cursor: pointer; appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+  background-size: 4px 4px, 4px 4px; background-repeat: no-repeat;
+  padding-right: 20px; text-overflow: ellipsis;
 }
 .oc-field input::placeholder,
 .oc-pick input::placeholder,
 .oc-inline input::placeholder { color: var(--muted); opacity: 1; }
 .oc-field input:hover,
 .oc-pick input:hover,
-.oc-inline input:hover { border-color: var(--border2); }
+.oc-inline input:hover,
+.oc-select:hover { border-color: var(--border2); }
 .oc-field input:focus,
 .oc-pick input:focus,
-.oc-inline input:focus {
+.oc-inline input:focus,
+.oc-select:focus {
   border-color: var(--accent); outline: var(--focus-outline); outline-offset: 1px;
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .oc-field input:disabled,
 .oc-pick input:disabled,
-.oc-inline input:disabled { opacity: .45; cursor: not-allowed; }
+.oc-inline input:disabled,
+.oc-select:disabled { opacity: .45; cursor: not-allowed; }
 .oc-check {
   display: flex; align-items: center; gap: 7px; min-width: 0;
   color: var(--text); font: 10px/1.4 var(--mono); cursor: pointer;
@@ -392,16 +404,9 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-budget > .oc-check { align-self: center; }
 .oc-budget .oc-field { grid-column: 2; }
 .oc-window { min-width: 0; }
-/* The limit window ladder is long by design: one horizontally scrollable
-   scale keeps each budget on a single instrument line instead of wrapping
-   ten chips into three rows. */
-.oc-window .oc-chips {
-  flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
-  overscroll-behavior-x: contain; scrollbar-width: none; padding-bottom: 0;
-}
-.oc-window .oc-chips::-webkit-scrollbar { display: none; }
-.oc-window .oc-chip { flex: 0 0 auto; }
-.oc-window .oc-chip:focus-visible { outline-offset: -1px; }
+/* A window is one label wide, so it is a native select: the platform states
+   the current choice in 24px and opens its own list for the rest. */
+.oc-window .oc-select { width: 100%; min-height: 24px; }
 .oc-preview {
   margin: 0; padding: 6px 8px;
   border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));

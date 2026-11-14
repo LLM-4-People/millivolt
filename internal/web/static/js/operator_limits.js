@@ -78,6 +78,14 @@ function ocBurstAllowed(draft) {
     !draft.schedule;
 }
 
+// ocWindowSelect is the limit vocabulary in a native select: the list is long,
+// the track is one number wide, and every caller used to re-derive the same
+// value list. `withOff` prepends the empty ramp choice.
+function ocWindowSelect(name, current, aria, withOff) {
+  const values = (withOff ? [''] : []).concat(LIMIT_WINDOWS.map(([v]) => v));
+  return ocChoiceSelect(name, values, current, v => v ? ocWindowLabel(v) : 'off', aria);
+}
+
 function ocLimitComposerHTML(draft) {
   const editing = !!draft.id;
   const conds = ocScopeConditionsHTML(draft, ['providers', 'models', 'clients', 'keyHashes', 'conversations']);
@@ -96,17 +104,17 @@ function ocLimitComposerHTML(draft) {
     ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: draft.concurrency === '', placeholder: '4' }) + `</div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="requests" ${draft.requests !== '' ? 'checked' : ''}><span>requests</span></label>` +
     ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: draft.requests === '', placeholder: '60' }) +
-    `<div class="oc-window">${ocChipRow('request-window', LIMIT_WINDOWS.map(([v]) => v), draft.requestWindow, ocWindowLabel)}</div></div>` +
+    `<div class="oc-window">${ocWindowSelect('request-window', draft.requestWindow, 'request window')}</div></div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="tokens" ${draft.tokens !== '' ? 'checked' : ''}><span>tokens</span></label>` +
     ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: draft.tokens === '', placeholder: '100000' }) +
-    `<div class="oc-window">${ocChipRow('token-window', LIMIT_WINDOWS.map(([v]) => v), draft.tokenWindow, ocWindowLabel)}</div></div>` +
+    `<div class="oc-window">${ocWindowSelect('token-window', draft.tokenWindow, 'token window')}</div></div>` +
     `</div>` +
     `<div class="oc-group"><button type="button" class="oc-disclosure" data-oc-toggle="advanced" aria-expanded="${draft.advanced ? 'true' : 'false'}">` +
     `<span>burst control</span><span aria-hidden="true">${draft.advanced ? '▴' : '▾'}</span></button>` +
     (draft.advanced ? `<div class="oc-advanced">` +
       `<label class="oc-check"><input type="checkbox" data-oc-field="antiBurst" ${draft.antiBurst ? 'checked' : ''} ${burstAllowed ? '' : 'disabled'}>` +
       `<span>ramp each new key from one to the concurrency target</span></label>` +
-      `<div class="oc-window">${ocChipRow('ramp', [''].concat(LIMIT_WINDOWS.map(([v]) => v)), draft.ramp, v => v ? ocWindowLabel(v) : 'off')}</div>` +
+      `<div class="oc-window">${ocWindowSelect('ramp', draft.ramp, 'ramp duration', true)}</div>` +
       (burstAllowed ? '' : `<p class="oc-note">Burst control needs a single-provider limit without a schedule.</p>`) +
       `</div>` : '') +
     `</div>` +

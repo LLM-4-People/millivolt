@@ -575,14 +575,28 @@ function ocConfirm({ title, body, confirm, danger }) {
 }
 
 // ---------- shared composer pieces ----------
-// ocChipRow is the one closed-vocabulary picker: a wrapping row of pressed
-// chips. It replaces the native selects the old menus stacked six deep.
+// ocChipRow is the one closed-vocabulary picker for short lists: a wrapping row
+// of pressed chips, where every choice is one click and all of them are
+// visible at once.
 function ocChipRow(name, values, current, labelOf) {
   return `<div class="oc-chips" role="group" aria-label="${escapeHtml(name)}">` +
     values.map(value => {
       const pressed = String(current) === String(value) ? 'true' : 'false';
       return `<button type="button" class="oc-chip oc-chip-pick" aria-pressed="${pressed}" data-oc-choice="${escapeHtml(name)}" data-oc-value="${escapeHtml(String(value))}">${escapeHtml(labelOf(value))}</button>`;
     }).join('') + `</div>`;
+}
+
+// ocChoiceSelect is the same closed vocabulary for a long list in a narrow
+// track. A ten-chip ladder cannot show ten labels in the width of one number
+// field, so it either wraps into three rows or clips mid-word; a native select
+// states the current window in the same 24px and hands long lists to the
+// platform's own keyboard and touch pickers.
+function ocChoiceSelect(name, values, current, labelOf, aria) {
+  return `<select class="oc-select" data-oc-choice="${escapeHtml(name)}" aria-label="${escapeHtml(aria || name)}">` +
+    values.map(value => {
+      const selected = String(current) === String(value) ? ' selected' : '';
+      return `<option value="${escapeHtml(String(value))}"${selected}>${escapeHtml(labelOf(value))}</option>`;
+    }).join('') + `</select>`;
 }
 
 function ocWindowLabel(value) {
@@ -976,6 +990,10 @@ document.addEventListener('input', event => {
 document.addEventListener('change', event => {
   const target = event.target;
   if (!target || !ocShell()?.contains(target)) return;
+  if (target.tagName === 'SELECT' && target.dataset.ocChoice) {
+    ocHandleChoice(target.dataset.ocChoice, target.value);
+    return;
+  }
   if (target.dataset.ocBudget) {
     const draft = ocDrafts.limit;
     if (!draft) return;
@@ -1053,6 +1071,10 @@ document.addEventListener('keydown', event => {
 });
 
 document.addEventListener('click', event => {
+  // A choice select is a native control: it opens its own list, so the
+  // delegated action handler must not preventDefault its click. Its change
+  // event carries the selection instead.
+  if (event.target?.dataset?.ocChoice && event.target.tagName === 'SELECT') return;
   const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-edit],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
   if (!target || !ocShell()?.contains(target)) return;
   event.preventDefault();

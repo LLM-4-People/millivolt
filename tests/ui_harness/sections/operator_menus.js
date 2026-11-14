@@ -35,8 +35,24 @@ module.exports = async function operatorMenus(H) {
     el.dispatchEvent(new w.Event('change', {bubbles: true}));
     return el;
   };
-  const choose = (name, value) =>
-    click(`#oc-pane [data-oc-choice="${name}"][data-oc-value="${value}"]`);
+  // A closed vocabulary is either a chip row or, when the list is long, a
+  // native select. One helper drives both so a test states the choice, not the
+  // control shape.
+  const choose = (name, value) => {
+    const el = q(`#oc-pane [data-oc-choice="${name}"]`);
+    if (!el) throw new Error('missing choice ' + name);
+    if (el.tagName === 'SELECT') {
+      el.value = value;
+      el.dispatchEvent(new w.Event('change', {bubbles: true}));
+      return el;
+    }
+    return click(`#oc-pane [data-oc-choice="${name}"][data-oc-value="${value}"]`);
+  };
+  const choiceValue = name => {
+    const el = q(`#oc-pane [data-oc-choice="${name}"]`);
+    if (!el) return null;
+    return el.tagName === 'SELECT' ? el.value : el.getAttribute('aria-pressed') === 'true' ? el.dataset.ocValue : null;
+  };
   const openCond = dim => {
     const btn = q(`#oc-pane [data-oc-pick="${dim}"]`);
     if (!btn) throw new Error('missing picker ' + dim);

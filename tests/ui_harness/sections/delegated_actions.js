@@ -399,7 +399,7 @@ module.exports = async function delegatedActions(H) {
         sw.eval('ocDrafts.limit.requestWindow') === '2m' &&
         sd.getElementById('oc-lim-preview').textContent.includes('2 requests per 2m') &&
         sd.querySelector('#oc-pane [data-oc-field="antiBurst"]').checked &&
-        sd.querySelector('#oc-pane [data-oc-choice="ramp"][data-oc-value="10s"]').getAttribute('aria-pressed') === 'true' &&
+        sd.querySelector('#oc-pane [data-oc-choice="ramp"]').value === '10s' &&
         !sw.__operatorXSS);
       const reqInput = () => sd.querySelector('#oc-pane [data-oc-field="requests"]');
       for (const [value,want] of [['1e3',1000],['1.5',NaN],['-1',NaN],['',0]]) {
@@ -454,23 +454,26 @@ module.exports = async function delegatedActions(H) {
             in_flight:0,queued:0,requests_remaining:0,requests_capacity:3,
             tokens_remaining:0,tokens_capacity:0,...policy}]});
         const field = key => sd.querySelector(`#oc-pane [data-oc-field="${key}"]`);
-        const rampChip = value => sd.querySelector(`#oc-pane [data-oc-choice="ramp"][data-oc-value="${value}"]`);
+        const choice = name => sd.querySelector(`#oc-pane [data-oc-choice="${name}"]`);
+        const pickChoice = (name, value) => {
+          const el = choice(name);
+          el.value = value;
+          el.dispatchEvent(new sw.Event('change', {bubbles: true}));
+        };
         const applyButton = () => sd.querySelector('#oc-pane [data-oc-apply="limit"]');
         sw.applyThrottleState(policyState({anti_burst:false,ramp_duration:'10s'}));
         sw.ocOpenLimitComposer('burst-limit');
         check('editing a rule keeps a stored ramp selected while its flag is off',
-          !field('antiBurst').checked && rampChip('10s').getAttribute('aria-pressed') === 'true' &&
+          !field('antiBurst').checked && choice('ramp').value === '10s' &&
           field('concurrency').value === '2' && field('requests').value === '3' &&
-          sd.querySelector('#oc-pane [data-oc-choice="request-window"][data-oc-value="1m"]')
-            .getAttribute('aria-pressed') === 'true');
+          choice('request-window').value === '1m');
         field('antiBurst').checked = true;
         field('antiBurst').dispatchEvent(new sw.Event('change', {bubbles: true}));
-        rampChip('30s').click();
+        pickChoice('ramp', '30s');
         check('the anti-burst ramp picker derives its tokens from the window vocabulary',
-          JSON.stringify([...sd.querySelectorAll('#oc-pane [data-oc-choice="ramp"]')]
-            .map(chip => chip.dataset.ocValue)) ===
+          JSON.stringify([...choice('ramp').options].map(option => option.value)) ===
             JSON.stringify([''].concat(sw.eval('LIMIT_WINDOWS').map(([v]) => v))) &&
-          rampChip('30s').getAttribute('aria-pressed') === 'true');
+          choice('ramp').value === '30s');
         let releaseApply;
         adminReply = new Promise(resolve => { releaseApply = resolve; });
         const applyIndex = adminBodies.length;

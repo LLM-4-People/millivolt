@@ -270,8 +270,12 @@ module.exports = async function w16Mirrors(H) {
         const consoleSources = fs.readdirSync(dir)
           .filter(name => /^operator_.*\.js$/.test(name))
           .map(name => fs.readFileSync(path.join(dir, name), 'utf8'));
-        check('the ramp picker source derives its tokens from LIMIT_WINDOWS',
-          consoleSources.some(src => src.includes(`ocChipRow('ramp', [''].concat(LIMIT_WINDOWS.map(([v]) => v))`)));
+        // The window pickers are one owner: ocWindowSelect derives both the
+        // request/token windows and the ramp from LIMIT_WINDOWS, so a caller
+        // cannot re-derive a divergent token list.
+        check('the window pickers derive their tokens from LIMIT_WINDOWS once',
+          consoleSources.some(src => src.includes('const values = (withOff ? [\'\'] : []).concat(LIMIT_WINDOWS.map(([v]) => v))')) &&
+          !consoleSources.some(src => src.includes("ocChipRow('ramp'")));
         check('both console duration pickers read the one PAUSE_DURS vocabulary',
           consoleSources.reduce((n, src) =>
             n + (src.match(/\[''\]\.concat\(PAUSE_DURS\.slice\(1\)\.map\(\(\[v\]\) => v\)\)/g) || []).length, 0) === 2);
@@ -287,6 +291,14 @@ module.exports = async function w16Mirrors(H) {
         const chipValues = name => [...sd.querySelectorAll('#oc-pane [data-oc-choice]')]
           .filter(chip => chip.dataset.ocChoice === name)
           .map(chip => chip.dataset.ocValue);
+        // A long single-choice list is a native select; its options are the
+        // same vocabulary, so read either shape through one accessor.
+        const choiceValues = name => {
+          const el = sd.querySelector(`#oc-pane [data-oc-choice="${name}"]`);
+          if (!el) return [];
+          return el.tagName === 'SELECT'
+            ? [...el.options].map(option => option.value) : chipValues(name);
+        };
         sw.applyPauseState({ok:true,paused:false,holds:[],clients:[],providers:[],
           known_clients:[],known_providers:[],until:null,queued:0,default_max_queued:0});
         sw.openOperatorConsole('pause');
@@ -304,15 +316,15 @@ module.exports = async function w16Mirrors(H) {
         sw.openOperatorConsole('limits');
         sw.ocOpenLimitComposer('');
         check('the limit composer renders exactly the LIMIT_WINDOWS request windows',
-          JSON.stringify(chipValues('request-window')) ===
+          JSON.stringify(choiceValues('request-window')) ===
           JSON.stringify(sw.eval('LIMIT_WINDOWS').map(([v]) => v)) &&
-          JSON.stringify(chipValues('token-window')) ===
+          JSON.stringify(choiceValues('token-window')) ===
           JSON.stringify(sw.eval('LIMIT_WINDOWS').map(([v]) => v)));
         sd.querySelector('#oc-pane [data-oc-toggle="advanced"]').click();
         check('the ramp picker is the LIMIT_WINDOWS windows behind the empty off token',
-          JSON.stringify(chipValues('ramp')) ===
+          JSON.stringify(choiceValues('ramp')) ===
           JSON.stringify([''].concat(sw.eval('LIMIT_WINDOWS').map(([v]) => v))) &&
-          sd.querySelector('#oc-pane [data-oc-choice="ramp"][data-oc-value=""]').textContent === 'off');
+          sd.querySelector('#oc-pane [data-oc-choice="ramp"] option[value=""]').textContent === 'off');
         sw.closeOperatorConsole();
         sw.eval("ocDrafts.limit = null; ocDrafts.pause = null; ocDrafts.capture = null; ocView = {kind: '', id: ''}; ocError = ''");
         sw.applyPauseState({ok:true,paused:false,holds:[],clients:[],providers:[],
