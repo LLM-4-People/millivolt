@@ -1,6 +1,6 @@
 """Incremental request-table width, day geometry and retry hover checks."""
 
-from .support import require
+from .support import paused_ambient, require
 
 
 async def log_checks(page, results):
@@ -12,66 +12,67 @@ async def log_checks(page, results):
     # the measurement helper directly: deleting the probe call or
     # dropping the header floors leaves the long row visually wider
     # but lets the revert shrink the column.
-    incremental_width = await page.evaluate("""async () => {
-        const box = document.getElementById('tbl-requests');
-        const frames = () => new Promise(r =>
-            requestAnimationFrame(() => requestAnimationFrame(r)));
-        const savedFloors = REQ_FLOORS.slice();
-        const at = new Date(2026, 0, 2, 12, 0, 0).toISOString();
-        const base = {start: at, end: at, provider: 'p', model: 'm',
-            client: 'c', stream: true, status_code: 0, live: true,
-            ttft_ms: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0,
-            usage: {input_tokens: 0, output_tokens: 0},
-            retries: 0, attempts: []};
-        const recs = Array.from({length: 6}, (_, i) => ({...base,
-            id: 'iw-' + i,
-            start: new Date(new Date(at).getTime() - i * 60000).toISOString()}));
-        const long = {client: 'openai/enterprise-client-with-a-very-long-product-suffix',
-            provider: 'provider-with-a-very-long-tenant-and-region-label',
-            model: 'neutral-model-with-a-very-long-suffix'};
-        const headerFloor = () => parseFloat(
-            box.querySelector('thead th:nth-child(2)')?.style.minWidth) || 0;
-        const identity = id => {
-            const row = box.querySelector('tr.exp-row[data-id="' + id + '"]');
-            return {width: row?.cells[1]?.getBoundingClientRect().width || 0,
-                    floor: REQ_FLOORS[1], headerFloor: headerFloor(),
-                    text: row?.cells[1]?.textContent.trim() || ''};
-        };
-        try {
-            REQ_FLOORS.fill(0);
-            renderRequests(recs);
-            await frames();
-            const short = identity('iw-0');
-            const longRecs = recs.map(r => r.id === 'iw-0'
-                ? {...r, ...long} : r);
-            renderRequestsIncremental(longRecs);
-            await frames();
-            const replaced = identity('iw-0');
-            renderRequestsIncremental(recs);
-            await frames();
-            const heldReplace = identity('iw-0');
+    async with paused_ambient(page):
+        incremental_width = await page.evaluate("""async () => {
+            const box = document.getElementById('tbl-requests');
+            const frames = () => new Promise(r =>
+                requestAnimationFrame(() => requestAnimationFrame(r)));
+            const savedFloors = REQ_FLOORS.slice();
+            const at = new Date(2026, 0, 2, 12, 0, 0).toISOString();
+            const base = {start: at, end: at, provider: 'p', model: 'm',
+                client: 'c', stream: true, status_code: 0, live: true,
+                ttft_ms: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0,
+                usage: {input_tokens: 0, output_tokens: 0},
+                retries: 0, attempts: []};
+            const recs = Array.from({length: 6}, (_, i) => ({...base,
+                id: 'iw-' + i,
+                start: new Date(new Date(at).getTime() - i * 60000).toISOString()}));
+            const long = {client: 'openai/enterprise-client-with-a-very-long-product-suffix',
+                provider: 'provider-with-a-very-long-tenant-and-region-label',
+                model: 'neutral-model-with-a-very-long-suffix'};
+            const headerFloor = () => parseFloat(
+                box.querySelector('thead th:nth-child(2)')?.style.minWidth) || 0;
+            const identity = id => {
+                const row = box.querySelector('tr.exp-row[data-id="' + id + '"]');
+                return {width: row?.cells[1]?.getBoundingClientRect().width || 0,
+                        floor: REQ_FLOORS[1], headerFloor: headerFloor(),
+                        text: row?.cells[1]?.textContent.trim() || ''};
+            };
+            try {
+                REQ_FLOORS.fill(0);
+                renderRequests(recs);
+                await frames();
+                const short = identity('iw-0');
+                const longRecs = recs.map(r => r.id === 'iw-0'
+                    ? {...r, ...long} : r);
+                renderRequestsIncremental(longRecs);
+                await frames();
+                const replaced = identity('iw-0');
+                renderRequestsIncremental(recs);
+                await frames();
+                const heldReplace = identity('iw-0');
 
-            // Insert path: zero the floors, paint the short window,
-            // then add one new live row with the long identity.
-            REQ_FLOORS.fill(0);
-            renderRequests(recs);
-            await frames();
-            const insertBase = identity('iw-0');
-            renderRequestsIncremental([...recs, {...base, ...long,
-                id: 'iw-new'}]);
-            await frames();
-            const inserted = identity('iw-new');
-            renderRequestsIncremental(recs);
-            await frames();
-            const heldInsert = identity('iw-0');
-            return {short, insertBase, replaced, inserted,
-                    heldReplace, heldInsert};
-        } finally {
-            REQ_FLOORS.splice(0, REQ_FLOORS.length, ...savedFloors);
-            renderRequests(derive(lastData).scopedRecs);
-            await frames();
-        }
-    }""")
+                // Insert path: zero the floors, paint the short window,
+                // then add one new live row with the long identity.
+                REQ_FLOORS.fill(0);
+                renderRequests(recs);
+                await frames();
+                const insertBase = identity('iw-0');
+                renderRequestsIncremental([...recs, {...base, ...long,
+                    id: 'iw-new'}]);
+                await frames();
+                const inserted = identity('iw-new');
+                renderRequestsIncremental(recs);
+                await frames();
+                const heldInsert = identity('iw-0');
+                return {short, insertBase, replaced, inserted,
+                        heldReplace, heldInsert};
+            } finally {
+                REQ_FLOORS.splice(0, REQ_FLOORS.length, ...savedFloors);
+                renderRequests(derive(lastData).scopedRecs);
+                await frames();
+            }
+        }""")
     for before, after in (('short', 'replaced'), ('insertBase', 'inserted')):
         require(incremental_width[after]['floor'] >
                 incremental_width[before]['floor'] + 1, incremental_width)

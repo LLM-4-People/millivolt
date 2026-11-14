@@ -1,5 +1,6 @@
 """Shared repository location and private-state-safe source discovery."""
 
+import contextlib
 import os
 from pathlib import Path
 import re
@@ -73,6 +74,48 @@ def clip_js(script):
     if not script.startswith(head):
         raise RuntimeError('clip_js expects an async arrow function body: ' + script[:40])
     return head + CLIP_PROBE_JS + script[len(head):]
+
+
+# A probe that installs its own rows is a fixture, and the page does not know
+# it exists: the bootstrap poll repaints the table from the server's rows, and
+# the footer clock repaints its own line. Whatever a probe measured can be
+# replaced between its write and its read, which is a race the probe loses at
+# random under load. browser_drawer.py cleared the dashboard tick for this
+# reason; the request-table width probe then failed the same way on the insert
+# path, where the learned floor survived but the injected row did not.
+#
+# These are the timers the page arms for itself. The scope is one probe: pause
+# on entry, and on exit re-arm through the page's own functions, so the cadence
+# stays owned by the page and every later check sees the normal timer set.
+PAUSE_AMBIENT_JS = """() => {
+  // These are top-level `let` bindings in a classic script: they live in the
+  // global lexical environment, not on `window`, so they must be named
+  // directly. Indexing window by name silently finds nothing.
+  window.__ambientWas = {dash: !!_dashTickTimer, clock: !!_clockTimer};
+  if (_dashTickTimer) { clearInterval(_dashTickTimer); _dashTickTimer = null; }
+  if (_clockTimer) { clearInterval(_clockTimer); _clockTimer = null; }
+  if (_xpLiveTimer) { clearTimeout(_xpLiveTimer); _xpLiveTimer = null; }
+  if (logRetryTimer) { clearTimeout(logRetryTimer); logRetryTimer = null; }
+}"""
+
+RESUME_AMBIENT_JS = """() => {
+  const was = window.__ambientWas || {};
+  delete window.__ambientWas;
+  // Only re-arm what the page had armed. A hidden page arms neither, and a
+  // probe must not force a cadence the page deliberately withheld.
+  if (was.dash && !_wasHidden) armDashboardTicks();
+  if (was.clock && !_wasHidden) _armClock();
+}"""
+
+
+@contextlib.asynccontextmanager
+async def paused_ambient(page):
+    """Stop the timers the page arms for itself while one fixture is measured."""
+    await page.evaluate(PAUSE_AMBIENT_JS)
+    try:
+        yield
+    finally:
+        await page.evaluate(RESUME_AMBIENT_JS)
 
 
 async def pick_chart_control(page, trigger, value):
