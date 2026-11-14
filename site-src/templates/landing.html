@@ -70,7 +70,7 @@
       <article class="feature">
         <span class="feature-kicker">03 / control</span>
         <h3>Act before the retry storm.</h3>
-        <p>Pause new work by scope, set provider limits, capture bounded debug bodies, export exactly the records you filtered, and protect against error storms.</p>
+        <p>Pause new work by scope, cap traffic by provider, model, client, key or conversation on a recurring schedule, capture bounded debug bodies, export exactly the records you filtered, and protect against error storms.</p>
         <a href="docs/operations.html#operator-and-data-routes">Operator workflows</a>
       </article>
     </div>
@@ -130,23 +130,61 @@
     <div class="wrap control-layout">
       <div class="control-copy">
         <p class="eyebrow">operator surface</p>
-        <h2>Control from the same surface.</h2>
-        <p>These are operator actions, not per-user permissions. The shared token protects the dashboard and operator plane. Inference is transparent and does not use it.</p>
-        <ul class="control-list">
-          <li><span>Pause</span>Hold new sends and retries by client, provider, or all traffic.</li>
-          <li><span>Limits</span>Set provider-wide concurrency, request-rate, and token-rate policies.</li>
-          <li><span>Debug</span>Capture scoped bodies with a timed or manual stop; captured bodies stay sensitive.</li>
-          <li><span>Export</span>Download exactly the finalized records you filtered as gzip JSON.</li>
-          <li><span>Restart</span>Drain and hand off supported source deployments.</li>
-          <li><span>Settings</span>Edit typed fields and rules with revision-checked changes.</li>
-        </ul>
+        <h2>Control from one console.</h2>
+        <p>The header readout answers one question before you click: is anything in force. The console answers the rest, and every write leaves a sentence you can undo.</p>
+        <p class="control-fine">Six sections, one surface. Operator actions, not per-user permissions; inference stays transparent.</p>
         <a class="text-link" href="docs/operations.html#operator-and-data-routes">Read operator workflows</a>
       </div>
-      <div class="control-plates">
-        <figure class="menu-plate"><img src="assets/images/menus/pause.png" alt="Pause menu with scope, duration, and queue cap controls" width="360" height="363" loading="lazy" decoding="async"><figcaption>pause</figcaption></figure>
-        <figure class="menu-plate"><img src="assets/images/menus/limits.png" alt="Limits menu with provider concurrency and request-rate fields" width="380" height="324" loading="lazy" decoding="async"><figcaption>limits</figcaption></figure>
-        <figure class="menu-plate"><img src="assets/images/menus/debug.png" alt="Debug capture menu with scope and duration controls" width="360" height="447" loading="lazy" decoding="async"><figcaption>debug</figcaption></figure>
-      </div>
+      <figure class="console-plate">
+        <div class="cp-frame">
+          <div class="cp-bar">
+            <span class="cp-mark" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M2 8h3l1.4-3.6L9 11.6 10.6 8H14"/></svg></span>
+            <span class="cp-name">operator console</span>
+            <span class="cp-live">paused 1 · capture 1 · limits 3</span>
+          </div>
+          <div class="cp-body">
+            <div class="cp-rail" aria-hidden="true">
+              <span>overview</span>
+              <span class="is-on">limits<b>3</b></span>
+              <span>pause<b>1</b></span>
+              <span>capture<b>1</b></span>
+              <span>export</span>
+              <span>system</span>
+            </div>
+            <div class="cp-pane" aria-hidden="true">
+              <div class="cp-row" data-kind="limit">
+                <span class="cp-kind">limit</span>
+                <span class="cp-scope">provider cursor.sh · model gpt-5</span>
+                <span class="cp-budget">120 requests / 1m · MTWTF · 09:00-17:00</span>
+                <span class="cp-live-cell">118 of 120 left</span>
+              </div>
+              <div class="cp-row" data-kind="limit">
+                <span class="cp-kind">limit</span>
+                <span class="cp-scope">model glm-5.3</span>
+                <span class="cp-budget">100K tokens / 1h</span>
+                <span class="cp-live-cell">42K of 100K left</span>
+              </div>
+              <div class="cp-row" data-kind="pause">
+                <span class="cp-kind">pause</span>
+                <span class="cp-scope">client claude-code</span>
+                <span class="cp-budget">queue cap 1.02K</span>
+                <span class="cp-live-cell">58m left</span>
+              </div>
+              <div class="cp-row" data-kind="capture">
+                <span class="cp-kind">capture</span>
+                <span class="cp-scope">client claude-code</span>
+                <span class="cp-budget">6 captures · ran 9m</span>
+                <span class="cp-live-cell">15m left</span>
+              </div>
+            </div>
+          </div>
+          <div class="cp-foot">
+            <span class="cp-receipt">added limit for provider cursor.sh · 120 requests / 1m</span>
+            <span class="cp-undo">undo</span>
+          </div>
+        </div>
+        <figcaption><code>steady</code> when nothing is in force, otherwise one segment per hold, capture and limit. A scheduled limit still counts while its window is closed.</figcaption>
+      </figure>
     </div>
   </section>
 
