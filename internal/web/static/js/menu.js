@@ -366,7 +366,7 @@ function menuEnabledRows(panel, selector) {
 // modified arrows stay with the browser; Enter/Space activate through the
 // row's own click so every surface keeps one activation path.
 function menuRovingKey(panel, event) {
-  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  if (keyModified(event)) return;
   const selector = _menuRovingSelectors.get(panel) || MENU_ITEM_SELECTOR;
   const rows = menuEnabledRows(panel, selector);
   const index = rows.indexOf(event.target);

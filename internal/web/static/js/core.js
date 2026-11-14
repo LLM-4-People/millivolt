@@ -510,6 +510,16 @@ function setText(element, text) {
   if (element && element.textContent !== text) element.textContent = text;
 }
 
+// keyModified reports whether a key event belongs to the browser or the OS
+// rather than to a widget's own navigation: Alt+Left is Back, Cmd+Up is the top
+// of the document, Ctrl+Home is the same. A roving handler that preventDefaults
+// one of those takes the shortcut away from the operator, so every handler that
+// claims arrows or Home/End asks this first. It is one function because the
+// rule is easy to state and easy to forget, and five handlers already did.
+function keyModified(event) {
+  return !!(event.altKey || event.ctrlKey || event.metaKey);
+}
+
 // ---------- focus preservation across repaints ----------
 // Redraws that replace innerHTML (request rows, gallery cards, chart legend,
 // the explorer rail) remove the focused control and leave the browser on

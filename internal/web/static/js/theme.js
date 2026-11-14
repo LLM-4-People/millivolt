@@ -394,7 +394,7 @@ function wireThemeKeys(list) {
   list.addEventListener('keydown', event => {
     // Alt/Ctrl/Meta + arrow are browser or OS navigation, not radio
     // selection. Leave default behavior and the committed pair alone.
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (keyModified(event)) return;
     const options = [...list.querySelectorAll('[role="radio"]')];
     const index = options.indexOf(event.target);
     if (index < 0) return;
@@ -437,7 +437,7 @@ function closeThemeMenu() {
 function themeTriggerKey(e) {
   // Modified arrows belong to the browser or OS; they must not open the tray,
   // move the cursor, or cancel the native action.
-  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  if (keyModified(e)) return;
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
   e.preventDefault();
   const menu = $(HEADER_MENU_IDS.themeMenu);

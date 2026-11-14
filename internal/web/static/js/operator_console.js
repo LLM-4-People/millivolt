@@ -1773,6 +1773,11 @@ document.addEventListener('keydown', event => {
   // The rail is a real tablist: arrows, Home and End move selection and
   // focus together. The strip is horizontal, so both axes are accepted; Tab
   // still reaches the active tab and the pane in order.
+  //
+  // Modified keys stay with the browser: without this guard Alt+Left/Right
+  // (Back and Forward) switched console section instead, because preventDefault
+  // on a roving handler cancels the browser's own binding.
+  if (keyModified(event)) return;
   const step = (event.key === 'ArrowDown' || event.key === 'ArrowRight') ? 1
     : (event.key === 'ArrowUp' || event.key === 'ArrowLeft') ? -1 : 0;
   const jump = event.key === 'Home' || event.key === 'End';
@@ -1814,6 +1819,9 @@ document.addEventListener('keydown', event => {
   if (!ocMounted || !shell || !shell.contains(event.target)) return;
   const row = event.target.closest?.('.oc-pick-row');
   const list = row?.closest('.oc-pick-list');
+  // Modified keys stay with the browser here too: Ctrl+Home and Ctrl+End jump
+  // to the top or bottom of the document, and Cmd+Arrow is OS navigation.
+  if (list && keyModified(event)) return;
   if (list) {
     const rows = [...list.querySelectorAll('.oc-pick-row')]
       .filter(r => !r.disabled && !r.hidden);

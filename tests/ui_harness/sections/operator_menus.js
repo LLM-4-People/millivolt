@@ -504,6 +504,47 @@ module.exports = async function operatorMenus(H) {
       now = stateNow();
       check('ArrowDown on the last tab wraps to the first section',
         now.section === 'overview' && now.focus === 'overview');
+      // A roving handler that claims arrows must leave the browser's own
+      // bindings alone. Alt+Left/Right are Back and Forward, and the rail
+      // silently used them to switch section because it preventDefaulted a key
+      // it did not own.
+      {
+        const pressMod = (key, mod) => {
+          const tab = q('.oc-rail-item[aria-selected="true"]');
+          tab.focus();
+          const evt = new w.KeyboardEvent('keydown', {key, bubbles: true, cancelable: true, ...mod});
+          tab.dispatchEvent(evt);
+          return evt.defaultPrevented;
+        };
+        const beforeMod = paneSection();
+        const altPrevented = pressMod('ArrowRight', {altKey: true});
+        check('a modified arrow stays with the browser instead of switching section',
+          altPrevented === false && paneSection() === beforeMod);
+        check('the browser-navigation guard is one predicate',
+          w.eval('keyModified({})') === false && w.eval('keyModified({altKey: true})') === true &&
+          w.eval('keyModified({ctrlKey: true})') === true && w.eval('keyModified({metaKey: true})') === true &&
+          w.eval('keyModified({shiftKey: true})') === false);
+        // The unmodified key still works, so the guard cannot be satisfied by
+        // disabling the handler.
+        check('an unmodified arrow still selects the next section',
+          pressMod('ArrowRight', {}) === true && paneSection() !== beforeMod);
+        // One predicate, not one per handler: the rule is easy to state and
+        // easy to forget, and five handlers had already written it out by hand
+        // while two others omitted it entirely.
+        {
+          const {readFileSync, readdirSync} = require('fs');
+          const {join: joinPath} = require('path');
+          const dir = joinPath(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
+          const raw = [/altKey\s*\|\|\s*\w+\.ctrlKey/, /ctrlKey\s*\|\|\s*\w+\.metaKey/];
+          const offenders = readdirSync(dir).filter(n => /\.js$/.test(n) && n !== 'core.js')
+            .filter(n => {
+              const code = readFileSync(joinPath(dir, n), 'utf8').replace(/\/\/.*$/gm, '');
+              return raw.some(rx => rx.test(code));
+            });
+          check('the browser-navigation rule is not re-spelled outside its owner',
+            offenders.length === 0);
+        }
+      }
       w.closeOperatorConsole();
     }
 
@@ -868,6 +909,28 @@ module.exports = async function operatorMenus(H) {
         check('a widened scope drops the armed burst from the compiled body',
           armed.anti_burst === true && widened.anti_burst === false &&
           widened.ramp_duration === '');
+      }
+      // A picker promises a menu, so its rows honour the menu keys and leave
+      // the browser's own bindings alone. Ctrl+End is the document bottom and
+      // Alt+Arrow is history navigation; the row handler used to consume both.
+      {
+        openCond('providers');
+        const rows = [...d.querySelectorAll('#oc-pane .oc-pick-row')];
+        rows[0].focus();
+        const modified = new w.KeyboardEvent('keydown',
+          {key: 'End', ctrlKey: true, bubbles: true, cancelable: true});
+        rows[0].dispatchEvent(modified);
+        check('a modified key in a picker stays with the browser',
+          rows.length > 1 && modified.defaultPrevented === false);
+        const plain = new w.KeyboardEvent('keydown',
+          {key: 'End', bubbles: true, cancelable: true});
+        d.activeElement.dispatchEvent(plain);
+        check('an unmodified End still moves the picker cursor to the last row',
+          plain.defaultPrevented === true &&
+          d.activeElement.getAttribute('aria-checked') !== null &&
+          rows[rows.length - 1] === d.activeElement);
+        // Close the picker again so the draft flow below starts where it did.
+        openCond('providers');
       }
       // One fresh draft per disqualifier: the control is offered only for a
       // single-provider rule without a schedule.
