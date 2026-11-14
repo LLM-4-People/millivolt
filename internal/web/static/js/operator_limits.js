@@ -193,15 +193,8 @@ function ocLimitComposerHTML(draft) {
       `<span class="oc-field-hint">server local time</span></div>` +
       `</div>` : '') +
     `</div>` +
-    `<p class="oc-preview" id="oc-lim-preview" data-oc-key="lim-preview" role="status"></p>` +
-    (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
-    `<div class="oc-compose-ft">` +
-    `<button type="button" class="btn" data-oc-cancel>cancel</button>` +
-    // The button is disabled until the draft is valid, and a disabled control
-    // leaves the tab order: without this reference a screen-reader operator
-    // can never reach the reason the button is unavailable.
-    `<button type="button" class="btn btn-accent" id="oc-lim-apply" data-oc-apply="limit" aria-describedby="oc-lim-preview" aria-busy="${operatorState.throttle.busy ? 'true' : 'false'}">${editing ? 'save limit' : 'apply limit'}</button>` +
-    `</div></section>`;
+    ocComposeTailHTML('limit', { error: draft.error, label: editing ? 'save limit' : 'apply limit' }) +
+    `</section>`;
 }
 
 // ocLimitPreview is the live sentence above the commit button. It is the
@@ -215,9 +208,9 @@ const OC_WHOLE_NUMBER_FAULT = 'budgets must be whole numbers of 0 or more';
 function ocLimitPreview() {
   const draft = ocDrafts.limit;
   if (!draft) return;
-  const el = ocEl('oc-lim-preview');
-  const apply = ocEl('oc-lim-apply');
-  if (!el || !apply) return;
+  const nodes = ocComposeControls('limit');
+  if (!nodes) return;
+  const { preview: el, apply } = nodes;
   const conc = ocNumber(draft.concurrency);
   const req = ocNumber(draft.requests);
   const tok = ocNumber(draft.tokens);

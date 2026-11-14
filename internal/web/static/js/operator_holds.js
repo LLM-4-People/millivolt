@@ -91,19 +91,15 @@ function ocPauseComposerHTML(draft) {
     `<div class="oc-group"><label class="oc-check"><input type="checkbox" data-oc-field="pauseCapOn" ${draft.cap !== '' ? 'checked' : ''}><span>limit the hold queue</span></label>` +
     (draft.cap !== '' ? ocField('pauseCap', 'queued requests', draft.cap, { placeholder: String(ocPauseDefaultCap()) }) : '') +
     `</div>` +
-    `<p class="oc-preview" id="oc-pause-preview" data-oc-key="pause-preview" role="status"></p>` +
-    (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
-    `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-cancel>cancel</button>` +
-    // See the limits composer: a disabled commit must still be explainable.
-    `<button type="button" class="btn btn-accent" id="oc-pause-apply" data-oc-apply="pause" aria-describedby="oc-pause-preview" aria-busy="${operatorState.pause.busy ? 'true' : 'false'}">${editing ? 'save hold' : 'hold traffic'}</button></div>` +
+    ocComposeTailHTML('pause', { error: draft.error, label: editing ? 'save hold' : 'hold traffic' }) +
     `</section>`;
 }
 
 function ocPausePreview() {
   const draft = ocDrafts.pause;
-  const el = ocEl('oc-pause-preview');
-  const apply = ocEl('oc-pause-apply');
-  if (!draft || !el || !apply) return;
+  const nodes = ocComposeControls('pause');
+  if (!draft || !nodes) return;
+  const { preview: el, apply } = nodes;
   const named = draft.mode === 'named';
   const empty = named && !ocScopeHas(draft.scope);
   let text;
@@ -358,12 +354,7 @@ function ocCaptureComposerHTML(draft) {
     `<p class="oc-facts">${escapeHtml(ocCaptureFacts())}</p>` +
     (blocked ? `<p class="oc-warning" role="alert">Durable storage is off, so captures cannot start. Set db_path in Settings, then restart to apply it.` +
       `<button type="button" class="oc-link" data-oc-settings="server">open server settings</button></p>` : '') +
-    `<p class="oc-preview" id="oc-capture-preview" data-oc-key="capture-preview" role="status"></p>` +
-    (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
-    `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-cancel>cancel</button>` +
-    // A blocked capture can be refused by the preview or by the storage
-    // warning above it, so the button names both reasons.
-    `<button type="button" class="btn btn-accent" id="oc-capture-apply" data-oc-apply="capture" aria-describedby="oc-capture-preview" aria-busy="${operatorState.debug.busy ? 'true' : 'false'}">${editing ? 'save capture' : 'start capture'}</button></div>` +
+    ocComposeTailHTML('capture', { error: draft.error, label: editing ? 'save capture' : 'start capture' }) +
     `</section>`;
 }
 
@@ -384,9 +375,9 @@ function ocCaptureFacts() {
 
 function ocCapturePreview() {
   const draft = ocDrafts.capture;
-  const el = ocEl('oc-capture-preview');
-  const apply = ocEl('oc-capture-apply');
-  if (!draft || !el || !apply) return;
+  const nodes = ocComposeControls('capture');
+  if (!draft || !nodes) return;
+  const { preview: el, apply } = nodes;
   const empty = !ocScopeHas(draft.scope);
   el.textContent = empty ? 'Pick at least one condition.'
     : 'Capture ' + ocScopePhrase(draft.scope) +

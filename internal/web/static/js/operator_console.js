@@ -135,6 +135,41 @@ function ocRuleRowHTML(rule) {
     `</div>`;
 }
 
+// OC_COMPOSERS names each composer's preview and commit control once. The
+// markup emitted below and the live preview that writes into it both read this
+// table, so an id cannot be spelled for one and forgotten for the other - the
+// previous code named each id twice and only a rename in both places kept the
+// proof of what will be enforced attached to its button.
+const OC_COMPOSERS = {
+  limit: { preview: 'oc-lim-preview', key: 'lim-preview', apply: 'oc-lim-apply', state: 'throttle' },
+  pause: { preview: 'oc-pause-preview', key: 'pause-preview', apply: 'oc-pause-apply', state: 'pause' },
+  capture: { preview: 'oc-capture-preview', key: 'capture-preview', apply: 'oc-capture-apply', state: 'debug' },
+};
+
+// ocComposeControls resolves the two nodes a composer's preview owns, or null
+// when the composer is not mounted.
+function ocComposeControls(kind) {
+  const ids = OC_COMPOSERS[kind];
+  if (!ids) return null;
+  const preview = ocEl(ids.preview);
+  const apply = ocEl(ids.apply);
+  return preview && apply ? { preview, apply } : null;
+}
+
+// ocComposeTailHTML is the shared tail of every composer: the preview the
+// commit button points at, the draft's rejection, and the commit row. The
+// preview is referenced by aria-describedby because a disabled button leaves
+// the tab order, and without that reference a screen-reader operator can never
+// reach the reason the action is unavailable.
+function ocComposeTailHTML(kind, opts) {
+  const ids = OC_COMPOSERS[kind];
+  const busy = !!operatorState[ids.state].busy;
+  return `<p class="oc-preview" id="${ids.preview}" data-oc-key="${ids.key}" role="status"></p>` +
+    (opts.error ? `<p class="oc-error" role="alert">${escapeHtml(opts.error)}</p>` : '') +
+    `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-cancel>cancel</button>` +
+    `<button type="button" class="btn btn-accent" id="${ids.apply}" data-oc-apply="${kind}" aria-describedby="${ids.preview}" aria-busy="${busy ? 'true' : 'false'}">${opts.label}</button></div>`;
+}
+
 // ocComposing reports whether a section is showing its editor. The three
 // sections spelled the same expression out separately (a draft exists AND is
 // either an edit of a stored rule or a fresh one for this section); one owner
