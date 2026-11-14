@@ -401,7 +401,7 @@ function runBackupRestore(ev) {
 }
 
 function paintBackupPane() {
-  const box = $('settings-fields');
+  const box = settingsFields();
   if (!box || !settingsDoc) return;
   box.querySelectorAll('[data-backup]').forEach(el => el.remove());
   box.insertAdjacentHTML('beforeend', settingsBackupHTML(settingsDoc));
@@ -573,6 +573,13 @@ function settingsScalarRangeError(input) {
     value = parseGoByteSize(raw);
     if (value == null) return 'use a byte size such as 32MiB';
   }
+  // Zero is a distinct setting, not a lapsed range: the schema publishes what it
+  // means through `zero_means`, and the server's own validator skips the range
+  // entirely for it. Four fields declare a positive minimum that way - the Go
+  // memory limit, the debug store, and both in-flight body budgets - so the
+  // client must accept the same zero the server accepts. Rejecting it here
+  // blocked Apply on a value the server had itself written.
+  if (value === 0 && input.dataset.stZeroMeans) return '';
   const min = input.dataset.stMin === '' ? null : Number(input.dataset.stMin);
   const max = input.dataset.stMax === '' ? null : Number(input.dataset.stMax);
   if (min != null && value < min) {
@@ -610,7 +617,9 @@ function settingsFieldHTML(f, val, def, override) {
   const helpId = settingsFieldID(f.key, 'help');
   const errorId = settingsFieldID(f.key, 'error');
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
-  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-min-label="${escapeHtml(f.min_label || '')}" data-st-max-label="${escapeHtml(f.max_label || '')}" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
+  // data-st-zero-means carries the schema's own sentence for zero, which is
+  // what tells the range check that zero is a setting rather than a lapse.
+  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-min-label="${escapeHtml(f.min_label || '')}" data-st-max-label="${escapeHtml(f.max_label || '')}"${f.zero_means ? ` data-st-zero-means="${escapeHtml(f.zero_means)}"` : ''} data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
   const pills = (locked ? '<span class="st-pill lock">flag</span>' : '') +
     (f.hot_reload ? '' : '<span class="st-pill restart" title="takes a process restart">restart</span>');
   let hint = '';

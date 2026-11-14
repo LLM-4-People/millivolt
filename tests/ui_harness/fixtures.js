@@ -83,9 +83,16 @@ const cfgDoc = {
   fields: [
     { key: 'providers', category: 'providers', label: 'Provider field maps', help: 'Per-provider JSON key-path overrides.', kind: 'providers', hot_reload: true },
     { key: 'provider_aliases', category: 'providers', label: 'Provider aliases', help: 'Merge an old provider label into its canonical one (old → canonical).', kind: 'aliases', hot_reload: true },
+    // A bytes field whose schema minimum is positive but whose zero is a real
+    // setting. The server skips its range check for zero and publishes the
+    // sentence that says what zero means; the client must accept the same zero
+    // instead of blocking Apply on a value the server itself wrote.
+    { key: 'go_memory_limit', category: 'server', label: 'Go memory limit', kind: 'bytes',
+      hot_reload: false, min: 33554432, max: 1099511627776, min_label: '32MiB',
+      max_label: '1024GiB', zero_means: 'auto cgroup, else unbounded' },
   ],
   categories: [{ id: 'providers', label: 'Providers', help: 'Per-provider usage/cost JSON field-name maps.' }],
-  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, ensure_tools: ['bash', 'read'], headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' } },
+  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, ensure_tools: ['bash', 'read'], headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' }, go_memory_limit: '0B' },
   defaults: { providers: {}, model_rules: DEF_RULES },
   effective: {},
   overrides: {},
