@@ -325,7 +325,10 @@ module.exports = async function operatorMenus(H) {
 
     // ---- 4. a full limits selector compiles to the server document ----
     {
-      throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']},
+      // A menu needs more than one row to show a cursor moving, so the
+      // vocabulary carries neighbours the block never picks.
+      throttleDoc({ok: true, active: false, throttles: [],
+        known_providers: ['prov-a', 'prov-b', 'prov-c']},
         {clients: ['client-a'], models: ['model-a']});
       w.__ocRecordFixture = [{
         ...mkRec('oc-limit-key'),
@@ -1337,6 +1340,46 @@ module.exports = async function operatorMenus(H) {
         check('a live sync returns focus to the rebuilt budget field',
           await settleUntil(() => d.activeElement === q('#oc-pane [data-oc-field="requests"]')) &&
           q('#oc-pane [data-oc-field="requests"]').value === '41');
+      }
+
+      // The picker declares role="menu" with checkbox rows, so it must honour
+      // the contract that role promises: one tab stop in the list, arrows and
+      // Home/End between rows, and Escape that closes the picker rather than
+      // the whole panel (which would lose the operator's place in the form).
+      // A menu needs more than one row to show a cursor move, so the
+      // vocabulary carries neighbours this block never picks.
+      w.applyThrottleState({ok: true, active: true,
+        known_providers: ['prov-a', 'prov-b', 'prov-c'], throttles: [policy]});
+      w.operatorConsoleSync('throttle');
+      {
+        openCond('providers');
+        const rows = qa('#oc-pane [data-oc-pick-value="providers"]');
+        check('a menu picker keeps one tab stop and removes the rest',
+          rows.length > 1 && rows[0].tabIndex === 0 &&
+          rows.slice(1).every(row => row.tabIndex === -1));
+        rows[0].focus();
+        // A real keypress targets the focused row, not the first one: after
+        // ArrowDown the cursor has moved, so a helper pinned to rows[0] would
+        // test a key nobody could press.
+        const press = key => d.activeElement.dispatchEvent(new w.KeyboardEvent('keydown',
+          {key, bubbles: true, cancelable: true}));
+        press('ArrowDown');
+        check('ArrowDown moves the picker cursor to the next row',
+          d.activeElement === rows[1]);
+        press('ArrowUp');
+        check('ArrowUp moves the picker cursor back', d.activeElement === rows[0]);
+        press('End');
+        check('End moves the picker cursor to the last row',
+          d.activeElement === rows[rows.length - 1]);
+        press('Home');
+        check('Home moves the picker cursor to the first row',
+          d.activeElement === rows[0]);
+        const before = w.eval('ocDrafts.limit.picker && ocDrafts.limit.picker.dim');
+        press('Escape');
+        check('Escape closes the open picker and leaves the console open',
+          before === 'providers' && w.eval('ocDrafts.limit.picker') === null &&
+          !shell.hidden &&
+          d.activeElement === q('#oc-pane [data-oc-pick="providers"]'));
       }
 
       // A picker row is a transient choice inside a slot. Selecting one

@@ -543,10 +543,11 @@ function ocScopePickerHTML(draft, dim) {
   const known = all.filter(value =>
     !filter || ocScopeValueLabel(dim, value).toLowerCase().includes(filter));
   const selected = new Set(draft.scope[dim] || []);
-  const rows = known.map(value => {
+  const rows = known.map((value, index) => {
     const on = selected.has(value);
     const label = ocScopeValueLabel(dim, value);
-    return `<button type="button" class="oc-pick-row" role="menuitemcheckbox" aria-checked="${on}" data-oc-pick-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
+    // A menu is one tab stop: arrows move the cursor, Tab leaves the list.
+    return `<button type="button" class="oc-pick-row" role="menuitemcheckbox" aria-checked="${on}" tabindex="${index === 0 ? '0' : '-1'}" data-oc-pick-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
       `<span class="oc-pick-check" aria-hidden="true">${on ? '✓' : ''}</span><span class="oc-pick-label">${escapeHtml(label)}</span></button>`;
   }).join('');
   const empty = known.length ? '' : `<div class="oc-pick-empty">${NONE_YET_NOTE}</div>`;
@@ -1197,6 +1198,56 @@ document.addEventListener('keydown', event => {
   ocSelectSection(next.dataset.ocSection);
   ocShell()?.querySelector(`[data-oc-key="rail-${next.dataset.ocSection}"]`)?.focus();
 });
+
+// ocClosePicker closes the one open dimension picker and returns focus to the
+// chip that opened it. It reports whether anything closed, so Escape can fall
+// through to the panel close when no picker is open.
+function ocClosePicker() {
+  const draft = ocSection === 'export' ? ocDrafts.export : ocActiveDraft();
+  if (!draft || !draft.picker) return false;
+  const dim = draft.picker.dim;
+  draft.picker = null;
+  ocRender();
+  const key = (ocSection === 'export' ? 'filter-' : 'cond-') + dim;
+  ocShell()?.querySelector(`[data-oc-key="${escapeHtml(key)}"]`)?.focus();
+  return true;
+}
+
+// The picker promises a menu, so it honours the menu keys: arrows and Home/End
+// move between rows, and Escape closes the picker instead of the whole panel.
+// Capture phase is required because menu.js owns Escape in capture and would
+// otherwise dismiss the console from under an open picker, losing the draft
+// position the operator was working in.
+document.addEventListener('keydown', event => {
+  const shell = ocShell();
+  if (!ocMounted || !shell || !shell.contains(event.target)) return;
+  const row = event.target.closest?.('.oc-pick-row');
+  const list = row?.closest('.oc-pick-list');
+  if (list) {
+    const rows = [...list.querySelectorAll('.oc-pick-row')]
+      .filter(r => !r.disabled && !r.hidden);
+    const at = rows.indexOf(row);
+    let next = -1;
+    if (event.key === 'ArrowDown') next = (at + 1) % rows.length;
+    else if (event.key === 'ArrowUp') next = (at - 1 + rows.length) % rows.length;
+    else if (event.key === 'Home') next = 0;
+    else if (event.key === 'End') next = rows.length - 1;
+    if (next >= 0 && rows[next]) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      menuMoveRoving(rows, next);
+      return;
+    }
+  }
+  if (event.key === 'Escape' && ocClosePicker()) {
+    event.preventDefault();
+    // stopImmediatePropagation, not stopPropagation: menu.js installs its own
+    // capture-phase keydown on this same document node when the panel opens,
+    // so a plain stopPropagation leaves the panel's close to run anyway and
+    // dismisses the console the operator was still working in.
+    event.stopImmediatePropagation();
+  }
+}, true);
 
 document.addEventListener('click', event => {
   // A choice select is a native control: it opens its own list, so the
