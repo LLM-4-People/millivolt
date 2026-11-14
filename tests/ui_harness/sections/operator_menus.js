@@ -199,8 +199,11 @@ module.exports = async function operatorMenus(H) {
           {id: 'live-limit', scope: {providers: ['prov-a']}, concurrency: 2, scheduled: true},
           {id: 'parked-limit', scope: {providers: ['prov-b']}, concurrency: 2, scheduled: false},
         ]});
-      check('a limit outside its schedule is named as scheduled, not counted as a cap',
-        out() === 'limits 1 · scheduled 1' &&
+      // The server's `scheduled` field is true only while the window is open,
+      // so a policy it reports as false is off its schedule: naming that
+      // segment "scheduled" told the operator the cap was working.
+      check('a limit outside its schedule is named as off schedule, not counted as a cap',
+        out() === 'limits 1 · off schedule 1' &&
         evalJSON('ocRuleCounts().limits') === 1 &&
         evalJSON('ocRuleCounts().parked') === 1);
       w.applyThrottleState(EMPTY_THROTTLE);

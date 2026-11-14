@@ -145,8 +145,10 @@ function ocReadoutSegments() {
   if (counts.captures > 0) segs.push('capture ' + counts.captures);
   if (counts.limits > 0) segs.push('limits ' + counts.limits);
   // A stored policy outside its schedule enforces nothing, so it is named
-  // separately rather than counted as a cap.
-  if (counts.parked > 0) segs.push('scheduled ' + counts.parked);
+  // separately rather than counted as a cap. The server's `scheduled` field
+  // is true only while the window is open, so this segment counts the closed
+  // ones: "off schedule", not "scheduled", which read as the opposite.
+  if (counts.parked > 0) segs.push('off schedule ' + counts.parked);
   return segs;
 }
 

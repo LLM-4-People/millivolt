@@ -281,9 +281,11 @@ Settings sit behind the actions flyout there. It reads `steady` when no hold or
 capture is active, no limit policy is enforcing and no restart is running, then
 one segment per active hold (`paused 1`), capture session (`capture 1`) and
 enforcing limit policy (`limits 2`). A stored policy whose schedule window is
-closed enforces nothing, so it is named separately as `scheduled N` instead of
-being counted as a cap; the server owns that verdict and reports it per policy,
-so the header cannot re-derive a different answer from the stored minutes.
+closed enforces nothing, so it is named separately as `off schedule N` instead
+of being counted as a cap; the server owns that verdict and reports it per
+policy, so the header cannot re-derive a different answer from the stored
+minutes. The wording names the behaviour, because `scheduled N` read as "the
+cap is on a schedule and working" when it meant the opposite.
 While a rebuild runs, `restarting` comes first, with ` · step N` when the server
 reports a real step. The counts are live state: a hold that expires, a stopped
 capture or a cleared limit leaves on the next state repaint. A hold takes the
