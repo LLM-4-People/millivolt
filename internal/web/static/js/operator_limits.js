@@ -219,9 +219,21 @@ function ocLimitPreview() {
   const tok = ocNumber(draft.tokens);
   const bad = [conc, req, tok].some(Number.isNaN);
   const any = conc > 0 || req > 0 || tok > 0;
+  // A create whose selector already belongs to a stored rule is an edit to
+  // that rule, because the server owns identity and identity is the selector.
+  // The panel must say so rather than report "added" for a replacement.
+  //
+  // This is checked before the budgets, not after: a copy reuses the source
+  // selector and clears the budgets, so the collision is knowable the moment
+  // the composer opens. Gating it on a typed budget told the operator "set at
+  // least one budget" first and only refused after they had typed one, which
+  // is the one thing they could do that could not help.
+  const collision = draft.id ? null : ocLimitBySelector(draft.scope, draft.schedule);
   let text;
   if (bad) {
     text = OC_WHOLE_NUMBER_FAULT;
+  } else if (collision) {
+    text = 'This selector already has a limit. Change the scope or schedule to add a second rule, or open the existing one to edit it.';
   } else if (!any) {
     text = 'set at least one budget';
   } else {
@@ -235,23 +247,9 @@ function ocLimitPreview() {
       requestWindow: draft.requestWindow,
       tokens: tok,
       tokenWindow: draft.tokenWindow,
-    }) + ', for ' + ocScopePhrase({
-      providers: draft.scope.providers,
-      models: draft.scope.models,
-      clients: draft.scope.clients,
-      keyHashes: draft.scope.keyHashes,
-      conversations: draft.scope.conversations,
-    }) + '.';
+    }) + ', for ' + ocScopePhrase(draft.scope) + '.';
     if (draft.schedule) text += ' Active ' + ocSchedulePhrase(draft.schedule) + '.';
     if (draft.antiBurst && draft.ramp) text += ' Each new key ramps over ' + ocWindowLabel(draft.ramp) + '.';
-  }
-  // A create whose selector already belongs to a stored rule is an edit to
-  // that rule, because the server owns identity and identity is the selector.
-  // The panel must say so rather than report "added" for a replacement.
-  let collision = null;
-  if (!bad && any && !draft.id) collision = ocLimitBySelector(draft.scope, draft.schedule);
-  if (collision) {
-    text = 'This selector already has a limit. Change the scope or schedule to add a second rule, or open the existing one to edit it.';
   }
   el.textContent = text;
   el.dataset.tone = bad || collision ? 'err' : '';

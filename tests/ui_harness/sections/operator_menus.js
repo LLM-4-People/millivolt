@@ -726,6 +726,16 @@ module.exports = async function operatorMenus(H) {
               evalJSON('ocLimitScheduleKey(throttleState.throttles[0])')) ===
             key(evalJSON('ocDrafts.limit.scope'), evalJSON('ocDrafts.limit.schedule'));
         })());
+      // The collision is knowable the moment the composer opens: a copy reuses
+      // the source selector and clears the budgets. Gating the refusal on a
+      // typed budget told the operator "set at least one budget" first and only
+      // refused afterwards, so the one thing they could do could not help.
+      check('a copied selector names the collision before any budget is typed',
+        !w.eval('ocDrafts.limit.concurrency') && !w.eval('ocDrafts.limit.requests') &&
+        !w.eval('ocDrafts.limit.tokens') &&
+        d.getElementById('oc-lim-apply').disabled &&
+        text('#oc-lim-preview').includes('already has a limit') &&
+        q('#oc-lim-preview').dataset.tone === 'err');
       {
         for (const key of ['concurrency', 'requests', 'tokens']) {
           const box = q(`#oc-pane [data-oc-budget="${key}"]`);
