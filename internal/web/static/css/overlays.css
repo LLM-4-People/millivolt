@@ -488,6 +488,7 @@
     .ro-head-actions button,
     .ro-add-btn,
     .ro-tpl-item,
+    .ro-disclosure,
     .mr-tools select { min-height: var(--tap); }
     .mr-move button, .mr-restore { min-width: var(--tap); padding: 0 6px; }
     .prov-x { min-width: var(--tap); min-height: var(--tap); }

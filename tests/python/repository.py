@@ -12,10 +12,24 @@ from unittest.mock import patch
 
 from .. import repository_check as check
 from ..support import (PALETTE_OWNER, RETIRED_TOKENS, SITE_STYLESHEET, _template_comment_spans,
-                       root_custom_properties, site_palette_errors, token_drift_errors)
+                       css_names_control, root_custom_properties, site_palette_errors,
+                       token_drift_errors)
 
 
 class RepositoryChecks(unittest.TestCase):
+    def test_css_control_predicate_covers_every_control_shape(self):
+        # The tap-target gate is only as good as its ability to recognize a
+        # control. A selector it cannot see is a 20px target nobody notices, so
+        # the vocabulary is asserted directly rather than trusted.
+        for selector in ('.oc-close', '.oc-select', '.theme-mode-opt', '.ro-tpl-item',
+                         '#traffic-legend .leg-item', '.mn.oc .oc-chip', '.mr-move button',
+                         'button', 'select', 'input'):
+            with self.subTest(selector=selector):
+                self.assertTrue(css_names_control(selector), selector)
+        for selector in ('.clear-count', '.st-status', '.tp-plot i', '.oc-receipt-main'):
+            with self.subTest(selector=selector):
+                self.assertFalse(css_names_control(selector), selector)
+
     def test_node_suites_fail_closed_when_they_never_settle(self):
         # A Node suite whose awaited promise never settles drains the loop and
         # exits 0 with no verdict, which npm test reads as a pass. Both entry

@@ -554,8 +554,36 @@ def vendor_notice_errors(pairs):
 # control a dense layout sizes below the shared target must be raised by the
 # coarse block that owns its surface. --tap is that target.
 TAP_TOKEN_PX = 44
-CSS_INTERACTIVE = re.compile(
-    r'(^|[\s>])(button|\.btn|select|input|\.[a-z][a-z0-9-]*-(btn|tab|row|item|chip|x|toggle|move|vis|restore|select))([\s,:.\[]|$)')
+# One reading of "this selector names a control". A class-based control is any
+# element whose final class name ends in a word from the control vocabulary this
+# dashboard uses: a button, tab, row, item, chip, disclosure, close, undo, and
+# so on. The suffix list is intentionally broad - a false positive costs one
+# coarse rule, while a false negative is a 20px target nobody sees.
+CONTROL_SUFFIXES = (
+    'btn', 'button', 'tab', 'row', 'item', 'chip', 'toggle', 'move', 'vis',
+    'restore', 'select', 'close', 'undo', 'disclosure', 'opt', 'action',
+    'link', 'trigger', 'x', 'switch',
+)
+
+
+def css_names_control(selector):
+    """True when the selector's last compound names something a finger taps."""
+    last = selector.split()[-1] if selector.split() else selector
+    for part in re.split(r'[>:+~]', last):
+        part = part.strip()
+        if not part:
+            continue
+        if part in ('button', 'select', 'input', 'summary', 'textarea'):
+            return True
+        if part.startswith('#') and 'legend' not in part:
+            # An id selector on an interactive surface (a specific control).
+            return True
+        for cls in re.findall(r'\.([A-Za-z][\w-]*)', part):
+            if cls in ('btn', 'prov-x', 'mini-btn', 'copy-btn'):
+                return True
+            if any(cls == suffix or cls.endswith('-' + suffix) for suffix in CONTROL_SUFFIXES):
+                return True
+    return False
 
 
 def _css_blocks(text):
@@ -607,7 +635,7 @@ def tap_target_errors(pairs):
                 continue
             for part in selector.split(','):
                 part = part.strip()
-                if part and CSS_INTERACTIVE.search(part):
+                if part and css_names_control(part):
                     short.setdefault(part, int(match.group(1)))
         if not short:
             continue
