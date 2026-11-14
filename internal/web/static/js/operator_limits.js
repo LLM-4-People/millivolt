@@ -275,8 +275,8 @@ function ocRenderLimits() {
   // the group queue still refuses with 429 when full (ErrQueueFull), and the
   // error-storm gate refuses its own backlog (ErrStormQueueFull). Saying
   // "every request is admitted" promised something the scheduler does not.
-  const empty = ocSectionEmpty('limit', policies.length,
-    `<div class="oc-empty"><strong>No limits.</strong> Nothing here caps a request. The admission queue and each provider's own rate limits still apply.</div>`);
+  const empty = ocSectionEmpty('limit', policies.length, 'No limits.',
+    "Nothing here caps a request. The admission queue and each provider's own rate limits still apply.");
   // The composer footer is the one action row while a draft is open. A head
   // "start over" beside it was a second, silent discard of the same draft, and
   // it took the accent the commit needs. It stays only while editing a stored

@@ -77,7 +77,8 @@ function ocRenderOverview() {
     `<span class="oc-ov-kind" data-kind="${row.kind}"${row.offSchedule ? ' data-oc-off-schedule="1"' : ''}>${row.kind}</span>` +
     `<span class="oc-ov-scope">${escapeHtml(row.scope)}</span>` +
     `<span class="oc-ov-detail">${escapeHtml(row.detail)}</span></button>`).join('')
-    : `<div class="oc-empty"><strong>Nothing is in force.</strong> No limit caps these requests, no hold parks them, no capture records them. The admission queue and each provider's own rate limits still apply.</div>`;
+    : ocEmptyHTML('Nothing is in force.',
+      "No limit caps these requests, no hold parks them, no capture records them. The admission queue and each provider's own rate limits still apply.");
   const restart = restartInProgress() ? `<div class="oc-banner">Restart in progress. <button type="button" class="oc-link" data-oc-section="system">view steps</button></div>` : '';
   // The counts live in the head line and on the section chips, so the body
   // opens with the rules themselves. The queue appears only when something is

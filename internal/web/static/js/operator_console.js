@@ -187,15 +187,24 @@ function ocComposing(kind) {
   return !!draft && (!!draft.id || ocView.kind === kind);
 }
 
+// ocEmptyHTML is the one empty-state frame for the console: a bold lead that
+// names what is absent, then the sentence that explains the consequence. Five
+// surfaces wrote the wrapper by hand - three sections, the filter's no-match
+// note and the overview - so the frame could drift between them. The words
+// stay with the surface that owns them.
+function ocEmptyHTML(title, body) {
+  return `<div class="oc-empty"><strong>${escapeHtml(title)}</strong> ${body}</div>`;
+}
+
 // ocSectionEmpty is the one rule for a section's empty state: it describes a
 // policy with no rules, and an open draft is already the answer to "what does
 // this section do now". Only the limits section honoured that, so pause and
 // capture printed "No holds." / "No captures running." underneath a live form,
 // where the pane's pinned action row cut across the sentence. Each section
-// still owns its own words.
-function ocSectionEmpty(kind, total, html) {
+// still owns its own words; the frame comes from ocEmptyHTML.
+function ocSectionEmpty(kind, total, title, body) {
   if (total || ocComposing(kind)) return '';
-  return html;
+  return ocEmptyHTML(title, body);
 }
 
 // OC_SECTION_OF_KIND maps a rule kind to the destination that owns it. The
@@ -266,9 +275,9 @@ function ocListEmptyNote(section, shown, total) {
   const filtering = !!(ocListFilter[section] || '');
   if (!total || (shown === total && !filtering)) return '';
   if (!shown) {
-    return `<div class="oc-empty"><strong>No rule matches that filter.</strong> ` +
+    return ocEmptyHTML('No rule matches that filter.',
       `${fmt(total)} ${agree(total, 'rule is', 'rules are')} in force; ` +
-      `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button> to see them.</div>`;
+      `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button> to see them.`);
   }
   return `<div class="oc-list-note">` +
     `${fmt(shown)} of ${fmt(total)} ${agree(total, 'rule', 'rules')} shown. ` +

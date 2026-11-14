@@ -148,8 +148,8 @@ function ocRenderPause() {
   });
   // "As fast as it allows" was only true when no limit and no queue bound
   // applied, and this section cannot see either. It states what it knows.
-  const empty = ocSectionEmpty('pause', holds.length,
-    `<div class="oc-empty"><strong>No holds.</strong> Nothing is parked. New requests go straight to admission, where limits and the queue can still delay them.</div>`);
+  const empty = ocSectionEmpty('pause', holds.length, 'No holds.',
+    'Nothing is parked. New requests go straight to admission, where limits and the queue can still delay them.');
   return ocSectionHTML({
     kind: 'pause',
     sub: 'Park new matching requests without cancelling work that is already running.',
@@ -412,8 +412,8 @@ function ocRenderCapture() {
   // prompt/response preview even with no session running, and captures from
   // earlier sessions stay readable until their retention window ends - the
   // stop-all dialog says exactly that.
-  const empty = ocSectionEmpty('capture', sessions.length,
-    `<div class="oc-empty"><strong>No captures running.</strong> Nothing new is being recorded. Earlier captures stay readable until their retention window ends.</div>`);
+  const empty = ocSectionEmpty('capture', sessions.length, 'No captures running.',
+    'Nothing new is being recorded. Earlier captures stay readable until their retention window ends.');
   return ocSectionHTML({
     kind: 'capture',
     sub: 'Store request and response bodies for a scoped, time-bounded debug session.',
