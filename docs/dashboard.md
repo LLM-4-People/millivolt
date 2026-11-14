@@ -278,21 +278,29 @@ captures remain sensitive.
 The header's operator readout is the one control surface. It stays in the
 header rail at every width, including the phone header; the theme tray and
 Settings sit behind the actions flyout there. It reads `steady` when no hold or
-capture is active, no limit policy is stored and no restart is running, then one
-segment per active hold (`paused 1`), capture session (`capture 1`) and stored
-limit policy (`limits 2`). While a rebuild runs, `restarting` comes first, with
-` · step N` when the server reports the step. The counts are live state: a hold
-that expires, a stopped capture or a cleared limit leaves on the next state
-repaint. A scheduled limit still counts as a stored policy while its window is
-closed. The header readout is not a live region; it updates when operator state
-or restart status changes, and the trigger's accessible label carries the same
-words. The open console's head line repeats those words without a second total
-and is a polite live region.
+capture is active, no limit policy is enforcing and no restart is running, then
+one segment per active hold (`paused 1`), capture session (`capture 1`) and
+enforcing limit policy (`limits 2`). A stored policy whose schedule window is
+closed enforces nothing, so it is named separately as `scheduled N` instead of
+being counted as a cap; the server owns that verdict and reports it per policy,
+so the header cannot re-derive a different answer from the stored minutes.
+While a rebuild runs, `restarting` comes first, with ` · step N` when the server
+reports a real step. The counts are live state: a hold that expires, a stopped
+capture or a cleared limit leaves on the next state repaint. A hold takes the
+warning tone because it is the one state that stops live traffic; a restart
+takes it too, with a pulsing dot. If the live stream was open and then drops,
+the line keeps its last known words and appends ` · offline`, so a stale reading
+never presents itself as current. The header readout is not a live region; it
+updates when operator state, connectivity or restart status changes, and the
+trigger's accessible label carries the same words plus the action the trigger
+performs in its current state. The open console's head line repeats those words
+without a second total and is a polite live region.
 
 Activating the readout opens the console. On a wide viewport it is an anchored
-panel under the trigger, up to 940px wide and 680px tall. At 800px or narrower
-it becomes a bottom sheet of up to 86dvh, and the section rail becomes one
-horizontally scrollable strip. Escape, an outside press, the close button, or
+popover under the trigger: 520px wide, and only as tall as its content up to a
+560px cap. At 800px or narrower it becomes a bottom sheet capped at 70dvh. The
+section rail is one horizontally scrollable strip at every width, and it fades
+its trailing edge while more sections remain. Escape, an outside press, the close button, or
 opening the theme tray or Settings closes it; opening the console closes the
 theme tray and Settings first. The session remembers the last section, so
 reopening returns where the operator left. Opening the console itself performs
@@ -300,30 +308,40 @@ no action.
 
 The rail names six sections: overview, limits, pause, capture, export and
 system. Limits, pause and capture carry a count badge for the rules in that
-section. The overview is the summary: rules, holds, limits and queued KPI
-tiles, an in-force list whose rows jump to the owning section, the queue drain
-control, and this session's changes with their times. Limits, pause and capture
-hold rule rows and one composer; export holds the download builder, and system
-holds the restart and Settings cards.
+section. The overview is the in-force list: one row per hold, capture and
+enforcing limit, each jumping to the section that owns it, plus the queue drain
+control when requests are actually parked. The counts are not repeated there,
+because the head line and the section badges already state them. Limits, pause
+and capture hold rule rows and one composer; export holds the download builder,
+and system holds the restart and Settings cards.
 
 ### Rule rows
 
 Every rule is one calibration line: a kind tag in its state color, the human
-scope, the caps or schedule and, for a limit, who set it, plus a live column for
-occupancy and actions. The scope sentence is generated from the selector the server enforces,
-so an empty dimension reads inside the sentence instead of as a separate
-checklist. A limit row names its source (`set by header` or `set in the
-console`), its schedule when one exists, and any remaining request and token
-budget. A hold row names its remaining time, queue cap and queued count. A
-capture row names its retained count, run time and stop time. A row opens its
-composer in edit mode; remove, resume and stop sit in the row's action column.
+scope, the caps or schedule, then a live column for occupancy and actions. The
+scope sentence is generated from the selector the server enforces, so an empty
+dimension reads inside the sentence instead of as a separate checklist. A limit
+row names its budgets and schedule plus any remaining request and token budget;
+who set it rides the row title rather than a third line. A hold row names its
+remaining time, queue cap and queued count. A capture row names its retained
+count, run time and stop time. A row is the one edit target: activating it opens
+its composer in edit mode. The action column offers copy, which starts a new
+rule from the same scope and schedule with no budgets, and the terminating
+action for that kind: remove, resume or stop. On a narrow phone the row takes
+two lines so the scope can be read in full instead of being clipped.
 
 ### Composer anatomy
 
-Limits, pause and capture share one composer: a titled bench, scope conditions,
+Limits, pause and capture share one composer: a titled bench, one scope strip,
 budget or duration controls, a live preview sentence, and a footer with cancel
-and the one commit action. Scope conditions are disclosures. A closed row shows
-its chips or `any`; an open row shows a filter, the known values as checkable
+and the one commit action. The composer opens above the rule list, so its form
+and its commit are in view the moment the operator asks for one. A phone pins
+that action row to the pane's bottom edge.
+
+The scope is one wrapping strip of dimension chips rather than five stacked
+rows. An unset dimension is a dim chip you click; a set one carries its values
+inside the same chip. One picker opens at a time, below the whole strip, with a
+filter only once the list is long enough to scan, the known values as checkable
 rows, and a free-value field except for key hashes. Provider, model, client and
 conversation scopes accept a typed value; the key scope lists only SHA-256
 hashes already present in the live record ring. The preview states what the
@@ -331,7 +349,10 @@ commit will enforce.
 
 Limits add concurrency, request and token budgets with their windows, an
 optional anti-burst ramp, and an optional day-of-week schedule with
-server-local from and to times. The ramp is offered only on a single-provider
+server-local from and to times. Burst control and schedule are peers on one
+row, each opening its own body below. A window is a native select: the list is
+long and the track is one number wide, so the current choice is stated in one
+line and the rest is the platform's own picker. The ramp is offered only on a single-provider
 rule without a schedule. Equal from and to times mean all day, and a window
 that starts after its end spans midnight. Pause adds everything, new-clients
 and named clients/providers modes, a duration or until-resumed choice, and an
@@ -350,8 +371,8 @@ composer is applied. All are recorded.
 The console footer is a bounded session ledger. It shows the newest change and
 offers Undo while that change has a defined inverse. Undo applies it once and
 appends an `undid: ...` receipt; the next change becomes the new undo target.
-The overview lists the same receipts with their times. Up to eight changes are
-retained for the page session. Changes without an inverse, such as a download
+The ledger has one owner: the console footer. Up to eight changes are retained
+for the page session. Changes without an inverse, such as a download
 or a restart, are recorded without an undo action. The ledger is browser
 memory, clears on reload and is not an audit log. A rejected write is named in
 the open pane, not hidden behind a closed panel.
@@ -359,9 +380,10 @@ the open pane, not hidden behind a closed panel.
 ### Export
 
 The export section owns record exports. Choose all history or matching
-records. Matching records offers provider, model, client, conversation, status,
-errors-only, debug-only, newer-than and older-than rows, plus an exact error
-type field. Provider, model, client and status choices come from the live
+records. Matching records offers provider, model, client, conversation and
+status in the same one-strip selector the composer uses, then errors-only,
+debug-only, newer-than and older-than, plus an exact error type field. The
+receipt and its download stay in the same view as the filters that shape them. Provider, model, client and status choices come from the live
 record ring; conversation adds an exact conversation id field. For matching
 records, the receipt previews the count through the same predicate the download
 uses, and the download action is available once a nonzero count is ready.
