@@ -1063,10 +1063,16 @@ module.exports = async function operatorMenus(H) {
         ovStyle.display === 'grid' &&
         /\(?40px\)?\s+\(?minmax/.test(ovStyle.gridTemplateColumns) &&
         rows[1].querySelectorAll('.oc-ov-kind, .oc-ov-scope, .oc-ov-detail').length === 3);
+      // An overview row names one rule, so it opens that rule in its editor
+      // instead of dropping the operator at the top of a list to search.
+      check('an in-force row carries the rule it names',
+        rows[1].dataset.ocTarget === 'ov-limit' && rows[0].dataset.ocTarget === 'ov-hold');
       click('#oc-pane .oc-ov-row[data-oc-section="limits"]');
-      check('an in-force row switches the console to its section',
+      check('an in-force row opens the rule it names',
         paneSection() === 'limits' &&
-        selectedTab().dataset.ocSection === 'limits');
+        selectedTab().dataset.ocSection === 'limits' &&
+        w.eval('ocView.id') === 'ov-limit' &&
+        !!q('#oc-pane .oc-compose[data-kind="limit"]'));
 
       w.openOperatorConsole('overview');
       const savedFetch = w.fetch;

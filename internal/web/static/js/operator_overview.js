@@ -9,6 +9,7 @@ function ocAllRuleRows() {
     rows.push({
       kind: 'pause',
       section: 'pause',
+      id: hold.id || '',
       scope: hold.all ? 'all traffic' : hold.new ? 'new clients'
         : ocScopePhrase({ providers: hold.providers, clients: hold.clients }),
       detail: [ocUntilPhrase(hold.until), hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean).join(' · '),
@@ -19,6 +20,7 @@ function ocAllRuleRows() {
     rows.push({
       kind: 'capture',
       section: 'capture',
+      id: session.id || '',
       scope: ocScopePhrase({ providers: session.providers, models: session.models, clients: session.clients }),
       detail: [n + (n === 1 ? ' capture' : ' captures'), ocUntilPhrase(session.until) || session.duration || 'until stopped'].filter(Boolean).join(' · '),
     });
@@ -27,6 +29,7 @@ function ocAllRuleRows() {
     rows.push({
       kind: 'limit',
       section: 'limits',
+      id: policy.id || '',
       scope: ocScopePhrase({
         providers: policy.scope?.providers, models: policy.scope?.models,
         clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
@@ -42,7 +45,7 @@ function ocRenderOverview() {
   const rows = ocAllRuleRows();
   const queued = Number(pauseState.queued) || 0;
   const list = rows.length ? rows.map(row =>
-    `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
+    `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-target="${escapeHtml(row.id)}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
     `<span class="oc-ov-kind" data-kind="${row.kind}">${row.kind}</span>` +
     `<span class="oc-ov-scope">${escapeHtml(row.scope)}</span>` +
     `<span class="oc-ov-detail">${escapeHtml(row.detail)}</span></button>`).join('')

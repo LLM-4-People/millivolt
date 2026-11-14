@@ -833,7 +833,18 @@ function ocTogglePicker(draft, dim) {
 
 async function ocHandleAction(target) {
   const section = target.dataset.ocSection;
-  if (section) { ocSelectSection(section); return; }
+  if (section) {
+    // An overview row names one rule, so it opens that rule rather than
+    // dropping the operator at the top of the section's list to search for it.
+    const rule = target.dataset.ocTarget || '';
+    ocSelectSection(section);
+    if (rule) {
+      if (section === 'limits') ocOpenLimitComposer(rule);
+      if (section === 'pause') ocOpenPauseComposer(rule);
+      if (section === 'capture') ocOpenCaptureComposer(rule);
+    }
+    return;
+  }
   if (target.hasAttribute('data-oc-error-dismiss')) { ocOperatorErrorClear(); return; }
   if (target.hasAttribute('data-oc-close')) { closeOperatorConsole(true); return; }
   if (target.hasAttribute('data-oc-cancel')) { ocClearComposer(); ocRender(); return; }
