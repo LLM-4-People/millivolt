@@ -544,19 +544,32 @@ module.exports = async function operatorMenus(H) {
             evalJSON('Object.values(OC_CHOICES).length'));
         // One predicate, not one per handler: the rule is easy to state and
         // easy to forget, and five handlers had already written it out by hand
-        // while two others omitted it entirely.
+        // while two others omitted it entirely. Penalizing only a re-spelling
+        // is what let the drawer's tab strip keep consuming Alt+Left for months:
+        // it never wrote the modifier chain, it just never asked. So the rule is
+        // asserted from both directions - one owner, and every module that
+        // claims a navigation key asks it before calling preventDefault.
         {
           const {readFileSync, readdirSync} = require('fs');
           const {join: joinPath} = require('path');
           const dir = joinPath(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
           const raw = [/altKey\s*\|\|\s*\w+\.ctrlKey/, /ctrlKey\s*\|\|\s*\w+\.metaKey/];
-          const offenders = readdirSync(dir).filter(n => /\.js$/.test(n) && n !== 'core.js')
-            .filter(n => {
-              const code = readFileSync(joinPath(dir, n), 'utf8').replace(/\/\/.*$/gm, '');
-              return raw.some(rx => rx.test(code));
-            });
+          const sources = readdirSync(dir).filter(n => /\.js$/.test(n)).map(n =>
+            [n, readFileSync(joinPath(dir, n), 'utf8')]);
+          const respelled = sources.filter(([n, text]) => n !== 'core.js' && raw.some(rx =>
+            rx.test(text.replace(/\/\/.*$/gm, '')))).map(([n]) => n);
           check('the browser-navigation rule is not re-spelled outside its owner',
-            offenders.length === 0);
+            respelled.length === 0);
+          // A module that claims a navigation key and cancels it owns the
+          // browser's binding until it asks whether the key was modified.
+          const claimants = sources.filter(([n, text]) => {
+            const code = text.replace(/\/\/.*$/gm, '');
+            return /'(ArrowDown|ArrowUp|ArrowLeft|ArrowRight|Home|End)'/.test(code) &&
+              /preventDefault\(/.test(code);
+          }).map(([n]) => n);
+          const unguarded = claimants.filter(n => !sources.find(([x]) => x === n)[1].includes('keyModified('));
+          check('every handler that claims a navigation key asks the one predicate first',
+            claimants.length >= 4 && unguarded.length === 0);
         }
       }
       w.closeOperatorConsole();

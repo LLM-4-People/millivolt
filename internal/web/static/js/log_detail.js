@@ -337,6 +337,10 @@ document.addEventListener('click', e => {
 // WAI-ARIA tabs: the group strip is one tab stop, and Left/Right/Home/End move
 // selection and focus without leaving the strip.
 document.addEventListener('keydown', e => {
+  // Modified keys stay with the browser: Alt+Left/Right are Back and Forward,
+  // and Cmd+Left/Right are line navigation. Without this the drawer's tab
+  // strip consumed them.
+  if (keyModified(e)) return;
   const tab = e.target && typeof e.target.closest === 'function'
     ? e.target.closest('[data-group-tab]') : null;
   if (!tab) return;
