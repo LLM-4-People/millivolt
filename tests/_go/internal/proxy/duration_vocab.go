@@ -498,13 +498,17 @@ func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
 	// The ramp picker is the same window vocabulary plus its off token. Pin
 	// that derivation so a separate ramp list cannot drift from the parser.
 	// The limit composer owns the picker (operator_limits.js); the console
-	// shell no longer carries any section markup of its own. The ramp reads
-	// ocWindowSelect, the one owner that derives from LIMIT_WINDOWS, so the
-	// pin names that derivation rather than a specific chip control.
+	// shell no longer carries any section markup of its own.
+	//
+	// The pin names the derivation, not a call spelling. A control's name now
+	// comes from the OC_CHOICES row it renders, so asserting the old string
+	// argument would fail on a rename that changed nothing about the tokens -
+	// which is exactly what happened when the choice registry landed. What
+	// matters is that one owner builds both window pickers from LIMIT_WINDOWS.
 	limits := string(chromeMenuSource(t, "operator_limits.js"))
-	if !strings.Contains(limits, "ocWindowSelect('ramp'") ||
-		!strings.Contains(limits, "const values = (withOff ? [''] : []).concat(LIMIT_WINDOWS.map(([v]) => v))") {
-		t.Fatal("ramp picker no longer derives its tokens from LIMIT_WINDOWS; give any own token its own acceptance rows")
+	if !strings.Contains(limits, "const values = (withOff ? [''] : []).concat(LIMIT_WINDOWS.map(([v]) => v))") ||
+		!strings.Contains(limits, "ocChoiceSelect(choice, values, current,") {
+		t.Fatal("ramp picker no longer derives its tokens from LIMIT_WINDOWS through ocWindowSelect; give any own token its own acceptance rows")
 	}
 	for _, tok := range append([]string{""}, toks...) {
 		d, err := parseRampDuration(tok)
