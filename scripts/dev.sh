@@ -17,7 +17,7 @@
 # Env overrides:
 #   DEV_PORT   dev listen port          (default 8081)
 #   DEV_HOST   dev listen host          (default 127.0.0.1)
-#   DEV_DB     dev scratch DB path      (default /tmp/millivolt/millivolt-dev.db;
+#   DEV_DB     dev scratch DB path      (default /tmp/millivolt/millivolt-dev-<port>.db;
 #                                        "none" = in-memory)
 #   DEV_CONFIG source config file (default proxy.example.yaml, relative to repo root)
 #   DEV_COPY_DB   0=fresh, 1=private online backup, redacted=docs-safe metrics
@@ -30,8 +30,9 @@ DEV_CONFIG="${DEV_CONFIG:-proxy.example.yaml}"
 DEV_COPY_DB="${DEV_COPY_DB:-0}"
 # Reserved disposable namespace; an internal safety boundary, not a setting.
 DEV_DIR=/tmp/millivolt
-# Scratch DB lives in /tmp/millivolt (not the repo) so it never dirties the tree.
-DEV_DB="${DEV_DB:-${DEV_DIR}/millivolt-dev.db}"
+# _DEV_DB_OVERRIDE keeps an explicit DEV_DB (or "none") until the port is
+# normalized below: the default is keyed by that normalized port.
+_DEV_DB_OVERRIDE="${DEV_DB:-}"
 # Safety boundary, including status/stop: overrides can never target production
 # or arbitrary files. This namespace belongs exclusively to disposable dev data.
 die() { echo "dev: $*" >&2; exit 1; }
@@ -40,6 +41,12 @@ case "$DEV_COPY_DB" in 0|1|redacted) ;; *) die "DEV_COPY_DB must be 0, 1, or red
 DEV_PORT=$((10#$DEV_PORT))
 (( DEV_PORT >= 1024 && DEV_PORT <= 65535 && DEV_PORT != 8080 )) || die "DEV_PORT must be 1024..65535 and not production port 8080"
 case "$DEV_HOST" in 127.0.0.1|localhost) ;; *) die "DEV_HOST must be loopback (127.0.0.1 or localhost)" ;; esac
+# Scratch DB lives in /tmp/millivolt (not the repo) so it never dirties the tree.
+# It is keyed by port like every other instance artefact: the start sequence
+# deletes the file so each run begins fresh, and one shared default meant a
+# second instance on another port hard-deleted the database the first instance
+# had open, with its -wal and -shm still in use.
+DEV_DB="${_DEV_DB_OVERRIDE:-${DEV_DIR}/millivolt-dev-${DEV_PORT}.db}"
 if [ "$DEV_DB" != "none" ]; then
   DEV_DB="$(realpath -m -- "$DEV_DB")"
   case "$DEV_DB" in "$DEV_DIR"/millivolt-dev*.db) ;; *) die "DEV_DB must be a millivolt-dev*.db scratch file inside $DEV_DIR, or none" ;; esac
@@ -97,11 +104,38 @@ not_running() {
   fi
 }
 
+# stop_grace_tenths derives the SIGTERM wait from the instance's own
+# shutdown_timeout plus the margin the proxy itself uses before reclaiming a
+# stale port. The stop sequence used to wait a flat 3.0s, while the documented
+# default drain is 5s and the store flush is uncapped: a normal stop therefore
+# SIGKILLed the process mid-drain, discarding the final write-channel drain the
+# proxy takes care to finish. Reading the running config keeps one owner for the
+# number; a YAML that does not state it falls back to the proxy's built-in
+# default, which is the same value -print-config prints.
+stop_grace_tenths() {
+  local yaml="${CONFIG_FILE}" timeout_s margin_s
+  margin_s=5   # cmd/proxy/portclaim.go sigtermCloseDrainMargin
+  # The YAML writes the duration unquoted (\`5s\`, \`1m\`); a quoted form is also
+  # accepted so a hand-edited config keeps working.
+  timeout_s="$(sed -n 's/^shutdown_timeout:[[:space:]]*"\{0,1\}\([0-9]\{1,3\}\)\([sm]\)"\{0,1\}[[:space:]]*$/\1 \2/p' "$yaml" 2>/dev/null | head -1)"
+  local amount unit seconds
+  read -r amount unit <<<"${timeout_s:-5 s}"
+  case "$unit" in
+    m) seconds=$((amount * 60)) ;;
+    *) seconds=$((amount)) ;;
+  esac
+  (( seconds > 0 )) || seconds=5
+  echo $(( (seconds + margin_s) * 10 ))
+}
+
 stop() {
   if is_running; then
     local pid; pid="$(cat "$PID_FILE")"
     kill "$pid" 2>/dev/null || true
-    for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    # Poll at 100ms for the derived budget: the process is exiting cleanly for
+    # that long, and only a genuinely wedged one reaches the SIGKILL.
+    local ticks; ticks="$(stop_grace_tenths)"
+    for _ in $(seq 1 "$ticks"); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
     if is_running; then kill -9 "$pid" 2>/dev/null || true; fi
     echo "stopped dev instance (pid $pid)"
   else
