@@ -401,8 +401,11 @@ distinct errors into one dictionary id. Ordinary text keeps the historic
 spelling, which preserves saved error-filter ids. Exact group accumulators are capped at
 `explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
 fold into one synthetic `other` card carrying aggregate count, cost, token,
-tool and health fields; no per-value accumulator or error affected-ID map is
-allocated for them. The card carries an explicit `synthetic` wire marker and
+tool and health fields; no per-value accumulator and no per-card request-ID
+set is allocated for either an exact card or them. An error card's affected
+count is a counter plus the previous request id: one row's visits are
+contiguous, so that guard dedupes exactly what the old ID set did while staying
+bounded regardless of history. The card carries an explicit `synthetic` wire marker and
 no filter key, so a real value sharing its display label keeps its own exact,
 selectable card. The card ranking remains exact among tracked values, with
 `other` competing by its aggregate count, and overflow memberships map to the
