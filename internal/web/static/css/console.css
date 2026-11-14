@@ -832,7 +832,9 @@ button.oc-chip[aria-pressed="true"]::before {
     -webkit-mask-image: none; mask-image: none;
   }
   .mn.oc .oc-rail-item {
-    min-height: 38px; padding: 0 9px; border-radius: 5px;
+    /* Height comes from the shared touch rung (--oc-ctl) declared below, so
+       this block styles the grid cell without also pinning a target size. */
+    padding: 0 9px; border-radius: 5px;
     justify-content: center; min-width: 0;
   }
   .mn.oc .oc-rail-label { overflow: visible; }
@@ -929,54 +931,66 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 
 /* ---------- touch sizing ----------
-   Narrow fine pointers keep the dense 38px rung; any coarse pointer takes the
-   shared 44px target. Desktop keeps the instrument's 24px to 30px controls. */
-@media (max-width: 800px) {
-  .mn.oc .btn { min-height: 38px; }
-  .mn.oc .oc-rail-item { min-height: 38px; }
+   Two rungs, one inventory. A narrow fine pointer keeps the dense 38px rung;
+   any coarse pointer takes the shared 44px target; desktop keeps the
+   instrument's 20px to 30px controls.
+
+   The rung's numbers are configuration, not declarations: --oc-ctl,
+   --oc-chip-pad and --oc-check-box are set once per input condition, and every
+   touchable control reads them. Before this, the same selector inventory was
+   written twice - once per media condition - and the rung itself appeared nine
+   times in one block, so a control added to one list silently missed the other
+   and the two could disagree about a single target size.
+
+   The broad query is a media list, not a single condition: a wide coarse
+   pointer (a tablet) matches only the second entry, and a narrow fine pointer
+   only the first. The coarse block then overrides the three tokens, so one
+   selector inventory serves both and the later rung wins wherever both match. */
+@media (max-width: 800px), (hover: none), (pointer: coarse) {
+  .mn.oc {
+    --oc-ctl: 38px;
+    --oc-chip-pad: 0 11px;
+    --oc-check-box: 18px;
+  }
+  .mn.oc .btn,
+  .mn.oc .oc-rail-item,
   .mn.oc .oc-rule-main,
-  .mn.oc .oc-ov-row { min-height: 38px; }
-  .mn.oc .oc-chip { min-height: 38px; padding: 0 11px; }
-  .mn.oc .oc-chip-x { min-width: 38px; min-height: 38px; }
-  .mn.oc .oc-check { min-height: 38px; }
-  .mn.oc .oc-check input[type="checkbox"] { width: 18px; height: 18px; }
-  .mn.oc .oc-field input,
-  .mn.oc .oc-pick input,
-  .mn.oc .oc-inline input { min-height: 38px; }
+  .mn.oc .oc-ov-row,
+  .mn.oc .oc-check,
   .mn.oc .oc-disclosure,
   .mn.oc .oc-cond-btn,
   .mn.oc .oc-pick-row,
   .mn.oc .oc-icon-btn,
   .mn.oc .oc-close,
   .mn.oc .oc-undo,
-  .mn.oc .oc-link { min-height: 38px; }
+  .mn.oc .oc-link,
+  .mn.oc .oc-field input,
+  .mn.oc .oc-pick input,
+  .mn.oc .oc-inline input { min-height: var(--oc-ctl); }
+  .mn.oc .oc-chip { min-height: var(--oc-ctl); padding: var(--oc-chip-pad); }
+  .mn.oc .oc-chip-x {
+    min-width: var(--oc-ctl); min-height: var(--oc-ctl);
+  }
+  .mn.oc .oc-check input[type="checkbox"] {
+    width: var(--oc-check-box); height: var(--oc-check-box);
+  }
   .mn.oc .oc-link { display: inline-flex; align-items: center; padding: 0 4px; }
   .mn.oc .oc-icon-btn { padding: 0 9px; }
+  /* The readout is a header control outside .mn.oc and takes the full target
+     at any narrow or coarse size, not the dense rung. */
   .op-readout-btn { min-height: var(--tap); }
 }
+
 @media (hover: none), (pointer: coarse) {
-  .mn.oc .btn { min-height: var(--tap); }
-  .mn.oc .oc-rail-item { min-height: var(--tap); }
-  .mn.oc .oc-rule-main,
-  .mn.oc .oc-ov-row { min-height: var(--tap); }
-  .mn.oc .oc-chip { min-height: var(--tap); padding: 0 14px; }
-  .mn.oc .oc-chip-x { min-width: var(--tap); min-height: var(--tap); }
+  .mn.oc {
+    --oc-ctl: var(--tap);
+    --oc-chip-pad: 0 14px;
+    --oc-check-box: 20px;
+  }
   /* A 12em cap leaves almost nothing for the value once the remove button
      takes a 44px tap target beside 28px of padding. A phone has no hover to
      recover a clipped value, so the chip may use the strip's full width. */
   .mn.oc .oc-cond-values .oc-chip { max-width: 100%; }
-  .mn.oc .oc-check { min-height: var(--tap); }
-  .mn.oc .oc-check input[type="checkbox"] { width: 20px; height: 20px; }
-  .mn.oc .oc-field input,
-  .mn.oc .oc-pick input,
-  .mn.oc .oc-inline input { min-height: var(--tap); }
-  .mn.oc .oc-disclosure,
-  .mn.oc .oc-cond-btn,
-  .mn.oc .oc-pick-row,
-  .mn.oc .oc-icon-btn,
-  .mn.oc .oc-close,
-  .mn.oc .oc-undo,
-  .mn.oc .oc-link { min-height: var(--tap); }
   /* Seven day chips cannot fit a 44px target on one phone row: use four
      columns and let the week wrap onto a second row. */
   .mn.oc .oc-days { grid-template-columns: repeat(4, minmax(var(--tap), 1fr)); max-width: none; }
@@ -986,7 +1000,6 @@ button.oc-chip[aria-pressed="true"]::before {
      the button the same width as the field keeps the pair readable instead of
      leaving a 44px square beside a long input. */
   .mn.oc .oc-pick-custom .btn { min-width: var(--tap); }
-  .op-readout-btn { min-height: var(--tap); }
   /* The confirmation panel sits outside .mn.oc, so it takes the same coarse
      target explicitly. Its base 42px already clears the narrow rung. */
   .oc-confirm-panel .btn { min-height: var(--tap); }
