@@ -581,6 +581,10 @@ button.oc-chip[aria-pressed="true"]::before {
   color: var(--text); text-align: right;
   font: 10px/1.4 var(--mono); font-variant-numeric: tabular-nums;
 }
+/* A rule outside its schedule is installed but enforcing nothing. The state
+   column says so in the same word the readout uses, at the same warn tone
+   the readout takes for a hold, because both mean "this is not capping". */
+.oc-rule[data-oc-off-schedule="1"] .oc-rule-live { color: var(--warn); }
 /* Actions stay visible: an operator should never have to hover to learn that
    a rule can be edited or removed. They sit at muted ink so the state column
    still reads first. */

@@ -206,6 +206,20 @@ module.exports = async function operatorMenus(H) {
         out() === 'limits 1 · off schedule 1' &&
         evalJSON('ocRuleCounts().limits') === 1 &&
         evalJSON('ocRuleCounts().parked') === 1);
+      // The row must say the same thing. Its live column used to read "idle"
+      // for a policy the server reports as enforcing nothing, which an
+      // operator reads as "no traffic right now", not "this cap is off".
+      {
+        w.openOperatorConsole('limits');
+        const row = q('#oc-pane .oc-rule[data-oc-rule="parked-limit"]');
+        const onRow = q('#oc-pane .oc-rule[data-oc-rule="live-limit"]');
+        check('the row of an off-schedule limit says so instead of reading idle',
+          row?.getAttribute('data-oc-off-schedule') === '1' &&
+          text(row.querySelector('.oc-rule-live')) === 'off schedule' &&
+          !onRow?.hasAttribute('data-oc-off-schedule') &&
+          text(onRow.querySelector('.oc-rule-live')) === 'idle');
+        w.closeOperatorConsole();
+      }
       w.applyThrottleState(EMPTY_THROTTLE);
       w.refreshOperatorReadout();
     }

@@ -321,11 +321,16 @@ function ocLimitRuleHTML(policy) {
     ? 'set by header' + (policy.updated_by ? ' · ' + policy.updated_by : '')
     : 'set in the console';
   const schedule = policy.schedule ? ' · ' + ocSchedulePhrase(policy.schedule) : '';
-  return `<div class="oc-rule" data-kind="limit" data-oc-rule="${escapeHtml(policy.id)}"${ocRuleEditing('limit', policy.id)}>` +
+  // The server owns the verdict. A policy outside its window enforces
+  // nothing, and the live column used to say "idle" for it, which reads as
+  // "no traffic right now" rather than "this cap is not applied at all". The
+  // row now says so in the same words the readout uses.
+  const offSchedule = policy.scheduled === false;
+  return `<div class="oc-rule" data-kind="limit" data-oc-rule="${escapeHtml(policy.id)}"${ocRuleEditing('limit', policy.id)}${offSchedule ? ' data-oc-off-schedule="1"' : ''}>` +
     `<button type="button" class="oc-rule-main" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" data-oc-key="rule-${escapeHtml(policy.id)}" title="${escapeHtml(scope + ' · ' + source)}">` +
     `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
     `<span class="oc-rule-budget">${escapeHtml(ocBudgetPhrase(policy))}${escapeHtml(schedule)}</span></button>` +
-    `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(live.join(' · ') || 'idle')}</span>` +
+    `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(offSchedule ? 'off schedule' : (live.join(' · ') || 'idle'))}</span>` +
     // The whole row is the edit target, so a separate edit action would
     // duplicate it and take width the scope needs.
     `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="copy this limit's scope into a new limit" title="copy this scope into a new limit">copy</button>` +
