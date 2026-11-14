@@ -188,6 +188,13 @@ def check_docs_site(checks: dict, errors: list[str]) -> None:
     docs_push = docs_on.get("push") or {}
     if docs_push.get("tags-ignore") != ["**"]:
         errors.append("docs.yml: tag pushes must not run docs checks")
+    # A push trigger with tags-ignore and paths but no branches never runs on a
+    # branch push: GitHub only creates the run for the ref kinds the trigger
+    # names. That is how 226 Markdown commits landed unvalidated while
+    # check.yml skipped them by path, so the branch list is asserted, not just
+    # the tag exclusion.
+    if docs_push.get("branches") not in (["main", "testing"], ["testing", "main"]):
+        errors.append("docs.yml: docs checks must run on branch pushes to main and testing")
     if "pull_request" not in docs_on:
         errors.append("docs.yml: docs site changes need a pull request trigger")
     docs_text = all_run_text(docs)

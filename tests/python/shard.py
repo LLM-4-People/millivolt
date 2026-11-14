@@ -70,6 +70,12 @@ class ShardTests(unittest.TestCase):
         self.assertIn("-test.count=1", command)
         self.assertIn("-test.benchtime=200ms", command)
         self.assertIn("^(?:TestA|TestB)$", command)
+        # A compiled binary's own default is -test.timeout 0, so the shard must
+        # supply the bound: without it a wedged test is ended only by CI's job
+        # budget, and a local run has no bound at all.
+        self.assertIn("-test.timeout", command)
+        self.assertEqual(command[command.index("-test.timeout") + 1], shard.TEST_TIMEOUT)
+        self.assertNotEqual(shard.TEST_TIMEOUT, "0")
 
     def test_single_shard_task_runs_only_its_assigned_names(self):
         task = shard.Task("example.invalid/pkg", ("TestAlpha", "TestBeta"), 0, 1)
@@ -81,7 +87,8 @@ class ShardTests(unittest.TestCase):
 
     def test_run_pattern_escapes_regex_metacharacters(self):
         task = shard.Task("example.invalid/pkg", ("TestA.1", "TestB[2]"), 0, 1)
-        pattern = task.command("/tmp/example.test")[4]
+        command = task.command("/tmp/example.test")
+        pattern = command[command.index("-test.run") + 1]
         self.assertEqual(pattern, r"^(?:TestA\.1|TestB\[2\])$")
 
 

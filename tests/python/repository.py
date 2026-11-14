@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,39 @@ from ..support import (PALETTE_OWNER, RETIRED_TOKENS, SITE_STYLESHEET, _template
 
 
 class RepositoryChecks(unittest.TestCase):
+    def test_node_suites_fail_closed_when_they_never_settle(self):
+        # A Node suite whose awaited promise never settles drains the loop and
+        # exits 0 with no verdict, which npm test reads as a pass. Both entry
+        # points arm the shared watchdog; this drives it for real: a hang must
+        # exit 1, and a clean finish must still exit promptly.
+        harness = check.ROOT / "tests" / "ui_harness" / "harness.js"
+        self.assertIn("function watchdog(", harness.read_text())
+        for entry in ("tests/ui_check.js", "tests/theme_check.js"):
+            text = (check.ROOT / entry).read_text()
+            with self.subTest(entry=entry):
+                self.assertIn("watchdog(", text)
+                # The clear must exist, or a normal run waits out the bound.
+                self.assertIn("clearWatchdog()", text)
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        with tempfile.TemporaryDirectory(prefix="watchdog-") as temp:
+            hang = Path(temp) / "hang.js"
+            hang.write_text(
+                "const {watchdog} = require(" + repr(str(harness)) + ");\n"
+                + "watchdog(300, 'pin');\n"
+                + "(async () => { await new Promise(() => {}); })();\n")
+            result = subprocess.run([node, str(hang)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("watchdog: pin did not finish", result.stderr)
+            clean = Path(temp) / "clean.js"
+            clean.write_text(
+                "const {watchdog} = require(" + repr(str(harness)) + ");\n"
+                + "const done = watchdog(60000, 'pin');\n"
+                + "done(); process.exit(0);\n")
+            self.assertEqual(
+                subprocess.run([node, str(clean)], capture_output=True, timeout=30).returncode, 0)
+
     def test_test_source_layout(self):
         for name in ("internal/unit_test.go", "scripts/browser_check.py", "ui_check.js", "other.spec.js"):
             with self.subTest(name=name):

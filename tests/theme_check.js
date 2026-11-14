@@ -11,7 +11,12 @@ const {
   boot,
   bootChecks,
   loaded,
+  watchdog,
 } = require('./theme_check_boot');
+
+// The same bound the functional suite uses: an unsettled promise would
+// otherwise drain the loop and exit 0 with no verdict at all.
+const clearWatchdog = watchdog(60 * 60 * 1000, 'theme check');
 const { contrastChecks } = require('./theme_check_contrast');
 const { pickerChecks } = require('./theme_check_picker');
 const { surfaceChecks } = require('./theme_check_surfaces');
@@ -116,6 +121,7 @@ const selectionIsSingle = (group, expected) => {
   win.close();
   for (const extra of extraWindows) extra.window.close();
   console.log(failures === 0 ? 'ALL THEME CHECKS PASSED' : `${failures} THEME CHECK(S) FAILED`);
+  clearWatchdog();
   process.exit(failures === 0 ? 0 : 1);
 })().catch(error => {
   console.error('theme check crashed:', error);

@@ -9,6 +9,10 @@
 // ordered section modules under tests/ui_harness/sections/ run in registry
 // order. This file stays the single entry point (`npm test`).
 const harness = require('./ui_harness/harness');
+
+// A suite that never settles exits 0 with no verdict, which reads as a pass.
+// One hour is far beyond any healthy run and still ends a wedged one.
+const clearWatchdog = harness.watchdog(60 * 60 * 1000, 'ui check');
 const sections = require('./ui_harness/sections');
 const {
   dom, w, d, check, sleep, loaded, installDiagnostics, checkEntityIdentity, reportFailures,
@@ -64,6 +68,7 @@ async function main() {
   for (const run of sections) await run(harness);
 
   reportFailures(false);
+  clearWatchdog();
   process.exit(state.failures.length ? 1 : 0);
 }
 // A crashed run must not swallow what it already knows: without this
