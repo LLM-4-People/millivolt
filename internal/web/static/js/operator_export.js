@@ -93,24 +93,31 @@ function ocFilterActive(draft) {
 // ocFilterValues is one dimension's export vocabulary. The live ring alone is
 // not enough: exporting history is the section's purpose, and after a restart
 // the ring is empty while the server still knows every provider, model and
-// client it has seen. Those three come from the same server-owned lists the
-// scope picker uses, so a quiet proxy can still filter by what actually ran.
+// client it has seen. Those come from the same server-owned lists the scope
+// picker uses, so a quiet proxy can still filter by what actually ran.
+//
+// The dimension's own row supplies both names, so this is one shape for every
+// selector instead of four branches that restated the record field and the
+// known-values name per dimension. Status stays local: it is derived from a
+// record's status code rather than matched by the server, so it has no row.
 function ocFilterValues(dim) {
   const recs = (typeof lastData !== 'undefined' && lastData?.records) || [];
   const fromRing = pick => [...new Set(recs.map(pick).filter(Boolean))].sort();
-  const merged = (dimension, pick) => [...new Set([
-    ...(typeof ocKnownValues === 'function' ? ocKnownValues(dimension) : []),
-    ...fromRing(pick),
-  ])].sort();
-  if (dim === 'provider') return merged('providers', r => r.provider);
-  if (dim === 'model') return merged('models', r => r.model);
-  if (dim === 'client') return merged('clients', r => r.client);
-  if (dim === 'conversation') return fromRing(r => r.conversation_id);
-  if (dim === 'status') return fromRing(r => r.status_code > 0 ? r.status_code : '').sort((a, b) => a - b);
-  return [];
+  if (dim === 'status') {
+    return fromRing(r => r.status_code > 0 ? r.status_code : '').sort((a, b) => a - b);
+  }
+  const row = ocScopeDim(dim);
+  if (!row) return [];
+  const merged = [...new Set([
+    ...(typeof ocKnownValues === 'function' ? ocKnownValues(row.key) : []),
+    ...fromRing(r => r[row.record]),
+  ])];
+  return merged.sort();
 }
 
 function ocFilterLabel(dim, value) {
+  // A status code alone is ambiguous in a menu of numbers, so it carries the
+  // word that says what it is. Every other value is a name the operator chose.
   if (dim === 'status') return 'status ' + value;
   return String(value);
 }
@@ -162,10 +169,14 @@ function ocFilterPickerHTML(draft, dim) {
     label: value => ocFilterLabel(dim, value),
   });
   const empty = values.length ? '' : `<div class="oc-pick-empty">none yet - they appear as requests arrive</div>`;
-  const custom = dim === 'provider' || dim === 'model' || dim === 'client' || dim === 'conversation';
-  const customHint = dim === 'conversation' ? 'exact conversation id'
-    : dim === 'provider' ? 'provider name'
-      : dim === 'model' ? 'model name' : 'client name';
+  // A selector dimension can be typed as well as picked, because the value may
+  // predate this page's ring. A status code cannot: its vocabulary is the set of
+  // codes actually seen.
+  const custom = !!ocScopeDim(dim);
+  // A typed value is matched exactly, which the conversation hint says because
+  // an id is not a name the operator recognizes; every other dimension's hint is
+  // its own word.
+  const customHint = dim === 'conversation' ? 'exact conversation id' : dim + ' name';
   return `<div class="oc-pick">` +
     `<input type="search" class="oc-pick-filter" data-oc-filter-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${escapeHtml(dim)}" aria-label="filter ${escapeHtml(dim)}" data-oc-key="filter-pick-${dim}">` +
     `<div class="oc-pick-list" id="oc-filter-menu-${escapeHtml(dim)}" role="menu" aria-label="${escapeHtml(dim)} values">` +

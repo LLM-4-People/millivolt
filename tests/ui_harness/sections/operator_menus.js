@@ -2461,6 +2461,19 @@ module.exports = async function operatorMenus(H) {
           '<div class="oc-empty"><strong>No holds.</strong> Nothing is parked.</div>' &&
         w.eval('ocEmptyHTML("<b>x</b>", "a &amp; b")') ===
           '<div class="oc-empty"><strong>&lt;b&gt;x&lt;/b&gt;</strong> a &amp; b' + '</div>');
+      // Every selector dimension the export filter offers is one the scope
+      // table owns, so its known-values list and its record field come from the
+      // row rather than from a per-dimension branch. Status is the one derived
+      // dimension and stays local.
+      check('the export filter reads each selector dimension through its scope row',
+        evalJSON('OC_FILTER_DIMS.filter(d => d !== "status").every(d => !!ocScopeDim(d))') === true &&
+        // Each filter name resolves to the scope row that matches it, so the
+        // record field it reads is that row's, never a parallel literal.
+        JSON.stringify(evalJSON('OC_FILTER_DIMS.filter(d => d !== "status").map(d => ocScopeDim(d).record)')) ===
+          JSON.stringify(['provider', 'model', 'client', 'conversation_id']) &&
+        w.eval('ocScopeDim("status")') === null &&
+        evalJSON('ocScopeDim("provider") === ocScopeDim("providers")') === true &&
+        evalJSON('ocScopeDim("conversation") === ocScopeDim("conversation_id")') === true);
       // Count agreement is one rule for every surface that states a count.
       check('count agreement is one rule, not one ternary per phrase',
         w.eval('agree(1, "rule is", "rules are")') === 'rule is' &&
