@@ -25,7 +25,7 @@ from .workflows_support import shell_declaration
 
 DEV_SH = ROOT / "scripts" / "dev.sh"
 PORTCLAIM = ROOT / "cmd" / "proxy" / "portclaim.go"
-OWNERS = ("go_duration_tenths", "shutdown_timeout_value", "stop_grace_tenths")
+OWNERS = ("go_duration_tenths", "shutdown_timeout_value", "stop_grace_tenths", "dev_db_path")
 
 
 def dev_script_text():
@@ -291,6 +291,51 @@ class DrainWaitTests(unittest.TestCase):
         # then poll, and the wait was derived before either.
         self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["1234", "-0 1234"])
         self.assertIn("stopped dev instance (pid 1234)", accepted.stdout)
+
+    def test_scratch_database_can_never_name_another_instance(self):
+        """The start sequence hard-deletes DEV_DB, so a name claiming a
+        different port destroys a live database. The old guard matched only the
+        namespace, so ...-8082.db with DEV_PORT=8081 was accepted and deleted
+        the database the 8082 instance had open."""
+        script = shell_harness('\ndev_db_path "$1" "$2" "$3"\n')
+        cases = (
+            # A name that names another port is the destructive case.
+            ("/tmp/millivolt/millivolt-dev-8082.db", "8081", False, "another port"),
+            ("/tmp/millivolt/millivolt-dev-mcp-18081.db", "8081", False, "another port in a label"),
+            ("/tmp/millivolt/millivolt-dev-18099.db", "8081", False, "another port, exact shape"),
+            # The namespace and directory are still absolute boundaries.
+            ("/tmp/millivolt/prod.db", "8081", False, "outside the namespace"),
+            ("/tmp/millivolt/sub/millivolt-dev-8081.db", "8081", False, "a subdirectory"),
+            ("/srv/millivolt/proxy.db", "8081", False, "a production path"),
+            # Every real fixture name must keep working, including the ones
+            # that name no port at all.
+            ("/tmp/millivolt/millivolt-dev-8081.db", "8081", True, "the port-keyed default"),
+            ("/tmp/millivolt/millivolt-dev-mcp-8081.db", "8081", True, "a labelled own port"),
+            ("/tmp/millivolt/millivolt-dev-ci.db", "18081", True, "the CI fixture"),
+            ("/tmp/millivolt/millivolt-dev-docs.db", "18081", True, "the docs fixture"),
+            ("/tmp/millivolt/millivolt-dev-safe.db", "18081", True, "the browser fixture"),
+            ("/tmp/millivolt/millivolt-dev-mode-test.db", "18087", True, "the copy-mode fixture"),
+            ("/tmp/millivolt/millivolt-dev-run.db", "18099", True, "the stress fixture"),
+            ("/tmp/millivolt/millivolt-dev-08081.db", "8081", True, "a zero-padded own port"),
+            ("/tmp/millivolt/millivolt-dev-8081-v2.db", "8081", True, "own port plus a numeric label"),
+            ("none", "8081", True, "explicit none"),
+        )
+        for database, port, accepted, label in cases:
+            with self.subTest(case=label):
+                result = run_bash(script, database, port, "/tmp/millivolt")
+                self.assertEqual(result.returncode == 0, accepted,
+                                 label + ": " + database + "\n" + result.stderr)
+                if accepted:
+                    expected = "none" if database == "none" else database
+                    self.assertEqual(result.stdout.strip(), expected, label)
+                else:
+                    self.assertEqual(result.stdout.strip(), "", label + " resolved a path")
+                    self.assertIn("DEV_DB", result.stderr)
+        # The function's own port check is what refuses the destructive name;
+        # the message must say so, or an operator cannot tell why it stopped.
+        wrong = run_bash(script, "/tmp/millivolt/millivolt-dev-8082.db", "8081", "/tmp/millivolt")
+        self.assertIn("8082", wrong.stderr)
+        self.assertIn("8081", wrong.stderr)
 
 
 if __name__ == "__main__":

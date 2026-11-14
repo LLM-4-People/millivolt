@@ -46,12 +46,38 @@ case "$DEV_HOST" in 127.0.0.1|localhost) ;; *) die "DEV_HOST must be loopback (1
 # deletes the file so each run begins fresh, and one shared default meant a
 # second instance on another port hard-deleted the database the first instance
 # had open, with its -wal and -shm still in use.
-DEV_DB="${_DEV_DB_OVERRIDE:-${DEV_DIR}/millivolt-dev-${DEV_PORT}.db}"
-if [ "$DEV_DB" != "none" ]; then
-  DEV_DB="$(realpath -m -- "$DEV_DB")"
-  case "$DEV_DB" in "$DEV_DIR"/millivolt-dev*.db) ;; *) die "DEV_DB must be a millivolt-dev*.db scratch file inside $DEV_DIR, or none" ;; esac
-  [ "$(dirname "$DEV_DB")" = "$DEV_DIR" ] || die "DEV_DB must not contain subdirectories"
-fi
+# dev_db_path validates an explicit scratch database against the reserved
+# namespace and THIS instance's port, then prints the resolved path. It is a
+# function so the rule can be driven directly by tests, the way the drain-wait
+# owners are.
+#
+# The start sequence hard-deletes this file, so a name that claims a different
+# instance's port is a live database being destroyed:
+# DEV_DB=...-8082.db with DEV_PORT=8081 passed the old namespace-only guard and
+# then deleted the database the 8082 instance had open. A name that names no
+# port is an explicit operator choice (a documentation or CI fixture) and stays
+# allowed; a name that names a port must name this one. A short numeric label
+# such as "-v2" is not a port and is left alone.
+dev_db_path() {
+  local raw="$1" port="$2" dir="$3" resolved bare field
+  [ "$raw" = none ] && { printf 'none'; return 0; }
+  resolved="$(realpath -m -- "$raw")"
+  [ "$(dirname "$resolved")" = "$dir" ] \
+    || die "DEV_DB must be a scratch file directly inside $dir, or none"
+  bare="${resolved##*/}"
+  case "$bare" in millivolt-dev*.db) ;; *) die "DEV_DB must be named millivolt-dev*.db inside $dir, or none: $bare" ;; esac
+  local fields=()
+  IFS=- read -r -a fields <<<"${bare#millivolt-dev}"
+  for field in "${fields[@]}"; do
+    field="${field%.db}"
+    [[ "$field" =~ ^[0-9]{4,5}$ ]] || continue
+    (( 10#$field == port )) \
+      || die "DEV_DB names port $((10#$field)) but DEV_PORT is $port, so starting would delete another instance's database: $bare"
+  done
+  printf '%s' "$resolved"
+}
+DEV_DB="$(dev_db_path "${_DEV_DB_OVERRIDE:-${DEV_DIR}/millivolt-dev-${DEV_PORT}.db}" "$DEV_PORT" "$DEV_DIR")" \
+  || exit 1
 LISTEN="${DEV_HOST}:${DEV_PORT}"
 DEV_BASE="$DEV_DIR/millivolt-dev-${DEV_PORT}"
 PID_FILE="$DEV_BASE.pid"
