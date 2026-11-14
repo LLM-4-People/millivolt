@@ -25,8 +25,13 @@
 // and .mn-rail-fill. choiceMenu emits the panel, head, body, section, row and
 // check classes; the remaining blocks are what conversion bodies compose.
 
-const MENU_SHEET_QUERY = '(max-width: 800px)';
+// MENU_SHEET_PX is the one number behind the narrow-viewport decision: a
+// panel is a sheet at this width or below and an anchored menu above it.
+// MENU_SHEET_QUERY is derived from it rather than written out again, because
+// the same 800 appeared as a media-query string beside the comparison and the
+// two could be edited apart.
 const MENU_SHEET_PX = 800;
+const MENU_SHEET_QUERY = '(max-width: ' + MENU_SHEET_PX + 'px)';
 const MENU_GAP_PX = 4;
 const MENU_EDGE_PX = 8;
 const MENU_ITEM_SELECTOR = '[role^="menuitem"], .mn-item';
