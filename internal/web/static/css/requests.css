@@ -50,13 +50,15 @@
   .legend .leg-item {
     display: flex; align-items: center; gap: 5px; background: none; border: none;
     color: var(--muted); font-size: 10px; font-family: var(--mono); cursor: pointer;
-    padding: 2px 4px; border-radius: 4px; transition: all .15s;
+    /* The row height lives here, not on #traffic-legend, so the coarse
+       raiser below wins on equal specificity instead of losing to an id. */
+    min-height: 26px; padding: 2px 4px; border-radius: 4px; transition: all .15s;
   }
   .legend .leg-item:hover { color: var(--text); }
   .legend .leg-item .swatch { width: 10px; height: 3px; border-radius: 2px; background: var(--sw, var(--muted)); display: inline-block; }
   .legend .leg-item.off { color: var(--border2); text-decoration: line-through; }
   #traffic-legend { column-gap: 12px; row-gap: 5px; flex-shrink: 0; margin-top: 2px; }
-  #traffic-legend .leg-item { min-height: 26px; color: var(--text); }
+  #traffic-legend .leg-item { color: var(--text); }
   #traffic-legend .leg-item:hover { background: var(--panel2); }
   #traffic-legend .leg-item.off { color: var(--muted); text-decoration: none; }
   #traffic-legend .leg-item.off .swatch { opacity: .25; }
