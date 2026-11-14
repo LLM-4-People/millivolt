@@ -214,10 +214,12 @@ module.exports = async function logsMenu(H) {
     let downloaded = null;
     w.triggerDownload = (href, download) => { downloaded = { href, download }; };
     d.querySelector('#oc-pane [data-oc-download]').click();
-    check('download uses the previewed filter URL',
+    // The artifact streams, so this code cannot observe its status. The phrase
+    // reports the action taken, not an outcome nobody watched.
+    check('download uses the previewed filter URL and reports the request it made',
       downloaded && downloaded.href === '/metrics/export?provider=p' && downloaded.download === '' &&
       !d.querySelector('#oc-pane [data-oc-download]').disabled &&
-      d.getElementById('oc-change').textContent === 'downloaded 3 records');
+      d.getElementById('oc-change').textContent === 'downloading 3 records');
 
     d.querySelector('#oc-pane [data-oc-reset-export]').click();
     check('reset returns the export section to all history and recounts it',

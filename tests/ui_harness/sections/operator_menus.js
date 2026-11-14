@@ -1487,9 +1487,11 @@ module.exports = async function operatorMenus(H) {
           countBody && countBody.provider === '' && !d.getElementById('oc-export-download').disabled &&
           countCalls >= 1);
         click('#oc-pane [data-oc-download]');
+        // The artifact streams, so the client cannot observe the transfer's
+        // outcome. The ledger and toast report the request it made.
         check('all history downloads the bare export URL and names the count',
           JSON.stringify(downloads[0]) === JSON.stringify(['/metrics/export', '']) &&
-          text('#oc-change') === 'downloaded 7 records');
+          text('#oc-change') === 'downloading 7 records');
 
         choose('export-mode', 'filter');
         check('filter mode with no filter asks for one and disables download',
@@ -1510,7 +1512,7 @@ module.exports = async function operatorMenus(H) {
           check('the filtered download uses the exact previewed URL',
             JSON.stringify(downloads[1]) ===
               JSON.stringify(['/metrics/export?provider=prov-a', '']) &&
-            text('#oc-change') === 'downloaded 7 records');
+            text('#oc-change') === 'downloading 7 records');
         }
         {
           // Switching back to all history must drop the predicate, not just

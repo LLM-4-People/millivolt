@@ -312,7 +312,13 @@ function ocDownloadExport() {
   // age bounds here would move both edges forward and download a slightly
   // different set than the one the operator was shown.
   triggerDownload(ocExportURL(ocExportFilter(draft, draft.epoch || Date.now())), '');
-  const phrase = 'downloaded ' + fmt(draft.count) + (draft.count === 1 ? ' record' : ' records');
+  // The artifact streams by design (no Content-Length, chunked framing), so the
+  // browser owns the request and this code cannot see its status: a 500
+  // retraction or a dead connection produces no signal here. Reporting
+  // "downloaded N records" therefore asserted an outcome nobody observed, and
+  // the ledger kept that claim after a failed transfer. The phrase states the
+  // action that was taken; the browser's own download UI reports how it went.
+  const phrase = 'downloading ' + fmt(draft.count) + (draft.count === 1 ? ' record' : ' records');
   ocRecordChange(phrase, null, 'ok');
   toast(phrase);
 }
