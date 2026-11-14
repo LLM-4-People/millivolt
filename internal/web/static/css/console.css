@@ -421,7 +421,7 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 .oc-preview:empty { display: none; }
 .oc-preview[data-tone="err"] {
-  border-color: var(--err); border-left-color: var(--err);
+  border-color: var(--err);
   background: color-mix(in srgb, var(--err) 7%, transparent);
   color: var(--err);
 }

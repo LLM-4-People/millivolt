@@ -71,16 +71,31 @@ function ocFilterLabel(dim, value) {
   return String(value);
 }
 
+// ocExportFiltersHTML renders every record dimension through the console's one
+// multi-dimension strip. Five stacked filter rows cost the export section more
+// height than the download receipt itself.
+const OC_FILTER_DIMS = ['provider', 'model', 'client', 'conversation', 'status'];
+
 function ocFilterRowHTML(draft, dim) {
   const value = draft[dim] || '';
-  const open = draft.picker && draft.picker.dim === dim;
-  return `<div class="oc-cond" data-open="${open ? '1' : '0'}">` +
-    `<button type="button" class="oc-cond-btn" data-oc-filter-pick="${dim}" data-oc-key="filter-${dim}" aria-expanded="${open ? 'true' : 'false'}">` +
-    `<span class="oc-cond-name">${escapeHtml(dim)}</span>` +
-    `<span class="oc-cond-chev" aria-hidden="true">${open ? '▴' : '▾'}</span></button>` +
-    `<span class="oc-cond-values">${value ? `<span class="oc-chip">${escapeHtml(ocFilterLabel(dim, value))}<button type="button" class="oc-chip-x" data-oc-filter-clear="${dim}" aria-label="clear ${dim} filter">×</button></span>` : '<span class="oc-cond-any">any</span>'}</span>` +
-    `</div>` +
-    (open ? ocFilterPickerHTML(draft, dim) : '');
+  const open = !!draft.picker && draft.picker.dim === dim;
+  return ocDimChipHTML({
+    dim, label: dim, open, set: !!value,
+    attr: 'data-oc-filter-pick', key: 'filter-' + dim,
+    valuesHTML: value
+      ? `<span class="oc-cond-values"><span class="oc-chip">${escapeHtml(ocFilterLabel(dim, value))}` +
+        `<button type="button" class="oc-chip-x" data-oc-filter-clear="${dim}" aria-label="clear ${dim} filter">×</button></span></span>`
+      : '',
+  });
+}
+
+function ocExportFiltersHTML(draft) {
+  let picker = '';
+  const chips = OC_FILTER_DIMS.map(dim => {
+    if (draft.picker && draft.picker.dim === dim) picker = ocFilterPickerHTML(draft, dim);
+    return ocFilterRowHTML(draft, dim);
+  });
+  return ocChipStripHTML(chips, picker);
 }
 
 function ocFilterPickerHTML(draft, dim) {
@@ -115,9 +130,7 @@ function ocRenderExport() {
   const enabled = !filtering || (count != null && count > 0);
   const rows = filtering
     ? `<div class="oc-group"><div class="oc-label">matching</div>` +
-      ocFilterRowHTML(draft, 'provider') + ocFilterRowHTML(draft, 'model') +
-      ocFilterRowHTML(draft, 'client') + ocFilterRowHTML(draft, 'conversation') +
-      ocFilterRowHTML(draft, 'status') +
+      ocExportFiltersHTML(draft) +
       `<div class="oc-filter-row"><span class="oc-filter-name">errors</span>${ocChipRow('export-errors', ['any', 'only'], draft.errors ? 'only' : 'any', v => v)}</div>` +
       `<div class="oc-filter-row"><span class="oc-filter-name">debug</span>${ocChipRow('export-debug', ['any', 'only'], draft.debug ? 'only' : 'any', v => v)}</div>` +
       `<div class="oc-filter-row"><span class="oc-filter-name">newer than</span>${ocChipRow('export-after', OC_AFTER_CHOICES.map(([v]) => v), draft.after, v => OC_AFTER_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +

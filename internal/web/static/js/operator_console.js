@@ -435,24 +435,40 @@ function ocScopeChipsHTML(scope, dim) {
   ).join('');
 }
 
-// ocScopeConditionsHTML renders the selector as one wrapping strip: a chip per
-// dimension that opens its picker, with the chosen values sitting inside that
-// chip. The open picker is emitted after the strip so it can use the full
-// width instead of being squeezed into one chip's track.
+// ocDimChipHTML is one dimension in a selector strip: a chip that opens its
+// picker, carrying the chosen value chips inside it. A dimension with nothing
+// chosen stays a dim chip, so the strip never grows an "any" word per row.
+function ocDimChipHTML(opt) {
+  return `<div class="oc-cond" data-open="${opt.open ? '1' : '0'}" data-set="${opt.set ? '1' : '0'}">` +
+    `<button type="button" class="oc-cond-btn" ${opt.attr}="${escapeHtml(opt.dim)}" data-oc-key="${escapeHtml(opt.key)}" aria-expanded="${opt.open ? 'true' : 'false'}">` +
+    `<span class="oc-cond-name">${escapeHtml(opt.label)}</span>` +
+    `<span class="oc-cond-chev" aria-hidden="true">${opt.open ? '▴' : '▾'}</span></button>` +
+    (opt.valuesHTML || '') + `</div>`;
+}
+
+// ocChipStripHTML is the one multi-dimension selector: one wrapping strip of
+// dimension chips, with the single open picker spanning the full width below
+// the strip instead of being squeezed into one chip's track. The scope editor
+// and the export filter both render through it, so there is one layout rule
+// and one open-at-a-time contract for every multi-dimension choice.
+function ocChipStripHTML(chips, picker) {
+  return `<div class="oc-conds">${chips.join('')}${picker || ''}</div>`;
+}
+
+// ocScopeConditionsHTML renders the policy selector through the shared strip.
 function ocScopeConditionsHTML(draft, dims) {
   let picker = '';
   const chips = dims.map(dim => {
     const values = draft.scope[dim] || [];
-    const open = draft.picker && draft.picker.dim === dim;
+    const open = !!draft.picker && draft.picker.dim === dim;
     if (open) picker = ocScopePickerHTML(draft, dim);
-    return `<div class="oc-cond" data-open="${open ? '1' : '0'}" data-set="${values.length ? '1' : '0'}">` +
-      `<button type="button" class="oc-cond-btn" data-oc-pick="${dim}" data-oc-key="cond-${dim}" aria-expanded="${open ? 'true' : 'false'}">` +
-      `<span class="oc-cond-name">${ocDimLabel(dim)}</span>` +
-      `<span class="oc-cond-chev" aria-hidden="true">${open ? '▴' : '▾'}</span></button>` +
-      (values.length ? `<span class="oc-cond-values">${ocScopeChipsHTML(draft.scope, dim)}</span>` : '') +
-      `</div>`;
-  }).join('');
-  return `<div class="oc-conds">${chips}${picker}</div>`;
+    return ocDimChipHTML({
+      dim, label: ocDimLabel(dim), open, set: values.length > 0,
+      attr: 'data-oc-pick', key: 'cond-' + dim,
+      valuesHTML: values.length ? `<span class="oc-cond-values">${ocScopeChipsHTML(draft.scope, dim)}</span>` : '',
+    });
+  });
+  return ocChipStripHTML(chips, picker);
 }
 
 // ocScopePickerHTML is the one dimension picker: known values as checkable
