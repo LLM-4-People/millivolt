@@ -324,8 +324,12 @@ async def capture_history(args):
                         return pane && pane.dataset.section === kind && !document.querySelector('.oc-compose');
                     }''', arg=kind)
                     if kind == 'export':
+                        # The fact is the draft's mode, not a sentence the
+                        # receipt happens to paint: the receipt copy changed
+                        # when every export gained a count, and a captured
+                        # string pinned the old wording instead of the state.
                         require(await page.evaluate('''() =>
-                            document.getElementById('oc-export-receipt').textContent === 'every stored record' '''),
+                            ocDrafts.export && ocDrafts.export.mode === 'all' '''),
                                 'documentation export section must start on all history')
                     if kind == 'system':
                         await page.wait_for_function('() => typeof restartServerState.available === "boolean"')
