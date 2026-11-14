@@ -153,8 +153,18 @@
             </div>
             <div class="cp-panes">
               <div class="cp-pane" role="tabpanel" id="cp-pane-overview" aria-labelledby="cp-tab-overview">
-                <p class="cp-line"><b>4 in force</b><span>3 limits, 1 hold</span><span class="cp-val">0 queued</span></p>
-                <p class="cp-line"><span>last change</span><span class="cp-val">added limit · undo</span></p>
+                <div class="cp-row" data-kind="limit">
+                  <span class="cp-kind">limit</span>
+                  <span class="cp-scope">provider cursor.sh · model gpt-5</span>
+                  <span class="cp-budget">120 requests / 1m</span>
+                  <span class="cp-live-cell">118 left</span>
+                </div>
+                <div class="cp-row" data-kind="pause">
+                  <span class="cp-kind">pause</span>
+                  <span class="cp-scope">client claude-code</span>
+                  <span class="cp-budget">queue cap 1.02K</span>
+                  <span class="cp-live-cell">58m left</span>
+                </div>
               </div>
               <div class="cp-pane" role="tabpanel" id="cp-pane-limits" aria-labelledby="cp-tab-limits" hidden>
                 <div class="cp-row" data-kind="limit">
@@ -203,7 +213,7 @@
             <span class="cp-undo">undo</span>
           </div>
         </div>
-        <figcaption>This miniature is the real surface: pick a section. The header reads <code>steady</code> when nothing is in force, otherwise one segment per hold, capture and limit.</figcaption>
+        <figcaption>This miniature is the real surface: pick a section. The header reads <code>steady</code> when nothing is in force, otherwise one segment per hold, capture and enforcing limit, and the overview is that same reading.</figcaption>
       </figure>
     </div>
   </section>
