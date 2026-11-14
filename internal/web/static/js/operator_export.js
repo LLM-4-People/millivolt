@@ -3,8 +3,21 @@
 // only sources; this module never infers a count locally.
 
 // ---------- export ----------
-const OC_AGE_CHOICES = [['', 'any time'], ['1h', 'older than 1 hour'], ['24h', 'older than 1 day'], ['168h', 'older than 1 week']];
-const OC_AFTER_CHOICES = [['', 'from the beginning'], ['1h', 'last hour'], ['24h', 'last day'], ['168h', 'last week']];
+// The export offers the same history windows the delete filter does, so the
+// tokens come from FILTER_AGES (chrome_menus.js loads first). Only the words
+// are the export's own: "older than 1 week" names an exclusion and "last
+// week" names an inclusion, and the same token means one of those depending
+// on which side of the window the operator is choosing.
+//
+// A window added to FILTER_AGES without wording here keeps that list's own
+// label rather than rendering `undefined`, so the two lists cannot disagree
+// about which windows exist.
+const OC_AGE_LABELS = { '': 'any time', '1h': 'older than 1 hour', '24h': 'older than 1 day', '168h': 'older than 1 week' };
+const OC_AFTER_LABELS = { '': 'from the beginning', '1h': 'last hour', '24h': 'last day', '168h': 'last week' };
+const ocHistoryChoices = labels =>
+  FILTER_AGES.map(([token, fallback]) => [token, labels[token] || fallback]);
+const OC_AGE_CHOICES = ocHistoryChoices(OC_AGE_LABELS);
+const OC_AFTER_CHOICES = ocHistoryChoices(OC_AFTER_LABELS);
 
 function ocBlankExportDraft() {
   return {

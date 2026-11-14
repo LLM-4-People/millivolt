@@ -252,9 +252,20 @@ document.addEventListener('click', e => {
 // passes none because its #settings-fields change delegation owns it.
 const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
-// Filter ages reuse the shared hour wording for '1h'; the longer spans are
-// deliberately day/week wording in the age context, not clock arithmetic.
+// FILTER_AGES is the one history-window vocabulary: the age spans every
+// surface offers, with the word each reads as in a delete filter. The tokens
+// are canonical Go duration spellings because every consumer derives a
+// `before_ms` from them through parseGoDuration, and a Go test round-trips
+// each one through ParseDuration and FormatDuration.
+//
+// The tokens are shared; the prose is not. An export says what a window
+// includes and a delete filter says what it matches, so operator_export.js
+// derives its choices from this list while keeping its own wording.
 const FILTER_AGES = [['', 'any'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
+
+// FILTER_AGE_TOKENS is the token column alone, for surfaces that supply their
+// own words.
+const FILTER_AGE_TOKENS = FILTER_AGES.map(([token]) => token);
 
 function populateFilterMenu(prefix, onChange) {
   const recs = lastData?.records || [];
