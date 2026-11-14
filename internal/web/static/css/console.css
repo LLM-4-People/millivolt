@@ -529,6 +529,15 @@ button.oc-chip[aria-pressed="true"]::before {
   border-radius: 7px;
 }
 .oc-rule:hover { border-color: var(--border2); }
+/* The rule that is open in its composer is marked in the list, so the form
+   and the row it belongs to read as one thing instead of two rules. The left
+   rule is the same accent the selected rail tab uses; the list already relies
+   on that to mean "you are here". */
+.oc-rule[data-oc-editing="1"] {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border2));
+  background: color-mix(in srgb, var(--accent) 4%, var(--panel));
+}
+.oc-rule[data-oc-editing="1"]::before { color: var(--text); }
 /* The visible kind label is generated from the row's data-kind: the script
    emits no kind element, and color alone must never carry the distinction. */
 .oc-rule::before {

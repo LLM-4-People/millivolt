@@ -287,7 +287,7 @@ function ocLimitRuleHTML(policy) {
     ? 'set by header' + (policy.updated_by ? ' · ' + policy.updated_by : '')
     : 'set in the console';
   const schedule = policy.schedule ? ' · ' + ocSchedulePhrase(policy.schedule) : '';
-  return `<div class="oc-rule" data-kind="limit" data-oc-rule="${escapeHtml(policy.id)}">` +
+  return `<div class="oc-rule" data-kind="limit" data-oc-rule="${escapeHtml(policy.id)}"${ocRuleEditing('limit', policy.id)}>` +
     `<button type="button" class="oc-rule-main" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" data-oc-key="rule-${escapeHtml(policy.id)}" title="${escapeHtml(scope + ' · ' + source)}">` +
     `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
     `<span class="oc-rule-budget">${escapeHtml(ocBudgetPhrase(policy))}${escapeHtml(schedule)}</span></button>` +

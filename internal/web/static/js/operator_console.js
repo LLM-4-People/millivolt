@@ -55,6 +55,16 @@ function ocEl(id) { return document.getElementById(id); }
 const OC_LIST_FILTER_MIN = 6;
 const ocListFilter = { limits: '', pause: '', capture: '' };
 
+// ocRuleEditing reports whether a stored rule is the one open in its
+// composer. Without it the edited rule appeared twice on screen - once as the
+// composer and again as an identical row in the list - and nothing said which
+// row the form belonged to. The row now names that relationship instead of
+// reading as a second, separate rule.
+function ocRuleEditing(kind, id) {
+  if (!id || ocView.kind !== kind || ocView.id !== id) return '';
+  return ' data-oc-editing="1" aria-current="true"';
+}
+
 // ocFilterRows narrows a section's rows by the text each one renders. Matching
 // the rendered reading, rather than re-deriving the scope here, keeps one
 // search rule for every row shape and makes a new field searchable for free.

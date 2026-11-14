@@ -497,6 +497,17 @@ module.exports = async function operatorMenus(H) {
         draft.concurrency === '4' && draft.requests === '' && draft.tokens === '5' &&
         draft.tokenWindow === '1h' &&
         JSON.stringify(draft.schedule) === JSON.stringify({days: [2], start: 600, end: 660}));
+      // The edited rule stays in the list, and nothing used to say the form
+      // and that row were the same rule: the console showed the rule twice
+      // with no relationship between them.
+      {
+        const row = q('#oc-pane .oc-rule[data-oc-rule="pol-edit"]');
+        const others = qa('#oc-pane .oc-rule').filter(el => el.dataset.ocRule !== 'pol-edit');
+        check('the rule open in the composer is marked in the list',
+          row?.getAttribute('data-oc-editing') === '1' &&
+          row.getAttribute('aria-current') === 'true' &&
+          others.every(el => !el.hasAttribute('data-oc-editing')));
+      }
       check('an edit composer offers the save action', text('#oc-lim-apply') === 'save limit' &&
         !d.getElementById('oc-lim-apply').disabled);
 

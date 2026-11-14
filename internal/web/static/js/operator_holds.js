@@ -129,7 +129,7 @@ function ocRenderPause() {
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
     const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
-    const html = `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}">` +
+    const html = `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}"${ocRuleEditing('pause', hold.id || '')}>` +
       `<button type="button" class="oc-rule-main" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}" data-oc-key="rule-${escapeHtml(hold.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
       `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue', ...meta].join(' · '))}</span></button>` +
@@ -359,7 +359,7 @@ function ocRenderCapture() {
     const n = typeof session.captures === 'number' ? session.captures : 0;
     // Capture count and elapsed time own the budget line; the side column owns
     // the remaining window, which is the same fact the row's action changes.
-    const html = `<div class="oc-rule" data-kind="capture" data-oc-rule="${escapeHtml(session.id || '')}">` +
+    const html = `<div class="oc-rule" data-kind="capture" data-oc-rule="${escapeHtml(session.id || '')}"${ocRuleEditing('capture', session.id || '')}>` +
       `<button type="button" class="oc-rule-main" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}" data-oc-key="rule-${escapeHtml(session.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
       `<span class="oc-rule-budget">${escapeHtml([n + (n === 1 ? ' capture' : ' captures'), ran,
