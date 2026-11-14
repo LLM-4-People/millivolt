@@ -390,8 +390,10 @@ func TestDebugSnapshotMatchesGET(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if get.Body.String() != string(snap) {
-		t.Fatalf("GET %s\nsnap %s", get.Body.Bytes(), snap)
+	// Compare what the document means, not the wall clock it was rendered at:
+	// server_ms differs whenever the two calls straddle a millisecond.
+	if got, want := snapshotWithoutClock(t, get.Body.Bytes()), snapshotWithoutClock(t, snap); got != want {
+		t.Fatalf("GET %s\nsnap %s", got, want)
 	}
 }
 
