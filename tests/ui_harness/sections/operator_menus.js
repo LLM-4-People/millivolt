@@ -7,6 +7,9 @@
 module.exports = async function operatorMenus(H) {
   const {check, d, mkRec, modelFixture, observerFixture, settleUntil, w} = H;
   const state = H.state;
+  const STATIC = H.STATIC;
+  const fs = require('fs');
+  const path = require('path');
 
   // ---------- local helpers ----------
   const q = sel => d.querySelector(sel);
@@ -1061,6 +1064,21 @@ module.exports = async function operatorMenus(H) {
         qa('#oc-pane .oc-rule').length === 8 &&
         q('#oc-pane [data-oc-list-filter="limits"]').value === '');
       w.closeOperatorConsole();
+    }
+
+    // ---- the phone row keeps the fact the row exists to carry ----
+    {
+      // jsdom does not apply media queries, so this is a source contract: the
+      // phone block used to set .oc-rule-budget to display:none, which left a
+      // 390px row reading "model glm-5.3 · idle" with no statement of what the
+      // limit caps. The rule may be restyled there, never removed.
+      const css = fs.readFileSync(path.join(STATIC, 'css', 'console.css'), 'utf8');
+      const phone = css.slice(css.indexOf('@media (max-width: 640px)'));
+      const block = phone.slice(0, phone.indexOf('\n@media '));
+      const budgetRules = [...block.matchAll(/\.oc-rule-budget[^{]*\{([^}]*)\}/g)].map(m => m[1]);
+      check('the phone rule row never hides the budget the rule enforces',
+        budgetRules.length > 0 &&
+        budgetRules.every(rule => !/display:\s*none/.test(rule)));
     }
 
     // ---- 10. export builder ----

@@ -756,19 +756,24 @@ button.oc-chip[aria-pressed="true"]::before {
 @media (max-width: 640px) {
   .mn.oc .oc-sec-head { flex-direction: column; align-items: stretch; gap: 8px; }
   .mn.oc .oc-head-actions { justify-content: flex-start; flex-wrap: wrap; }
-  /* A phone has no room for a four-part instrument line: the kind and scope
-     take the first line at full width, and the live figure and actions share
-     the second. Squeezing all four onto one line clipped the scope to
-     "model glm…", which is the one field the operator must read. */
+  /* A phone has no room for a four-part instrument line: the kind names the
+     first line, the scope and budget share it, and the live figure and actions
+     take the second. Squeezing all four onto one line clipped the scope to
+     "model glm…", which is the one field the operator must read.
+     The budget used to be display:none here, so a phone showed
+     "model glm-5.3 · idle" and never said what the limit caps - the row's whole
+     point. It wraps beside the scope instead, with the side row below. */
   .mn.oc .oc-rule {
     grid-template-columns: 36px minmax(0, 1fr);
     grid-template-areas: "kind main" "side side";
   }
   /* The kind tag names the rule's first line, so it stays in that line's
-     height instead of stretching a tinted block beside both lines. */
-  .mn.oc .oc-rule::before { grid-area: kind; align-self: stretch; }
-  .mn.oc .oc-rule-main { grid-area: main; padding: 7px 8px; }
-  .mn.oc .oc-rule-budget { display: none; }
+     height instead of stretching a block beside every line. */
+  .mn.oc .oc-rule::before { grid-area: kind; align-self: start; }
+  .mn.oc .oc-rule-main {
+    grid-area: main; padding: 7px 8px; flex-wrap: wrap; row-gap: 1px;
+  }
+  .mn.oc .oc-rule-budget { display: block; white-space: normal; }
   .mn.oc .oc-rule-side {
     grid-area: side; justify-content: space-between;
     padding: 0 6px 4px 44px;
