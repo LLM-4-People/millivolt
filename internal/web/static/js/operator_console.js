@@ -222,7 +222,15 @@ function ocFocusKey() {
   // Choosing a value therefore rebuilds the pane without dropping the keyboard
   // operator back to <body>.
   const keyed = active.closest('[data-oc-key]');
-  if (!keyed) return null;
+  if (!keyed) {
+    // The pane is replaced wholesale on every structural change, so focus
+    // inside it must always have a landing place. An unkeyed control resolves
+    // to the pane rather than to <body>, which is the page behind the open
+    // panel: a keyboard operator who armed a checkbox used to find their next
+    // Tab walking the dashboard underneath.
+    const pane = ocEl('oc-pane');
+    return pane && pane.contains(active) ? { key: '', pane: true } : null;
+  }
   let start = null, end = null;
   try { start = active.selectionStart; end = active.selectionEnd; } catch (e) { /* not a text input */ }
   return { key: keyed.dataset.ocKey, start, end };
@@ -232,9 +240,10 @@ function ocRestoreFocus(saved) {
   if (!saved) return;
   const shell = ocShell();
   if (!shell) return;
-  const slot = [...shell.querySelectorAll('[data-oc-key]')]
-    .find(el => el.dataset.ocKey === saved.key);
-  const next = ocFocusTarget(slot);
+  const slot = saved.key
+    ? [...shell.querySelectorAll('[data-oc-key]')].find(el => el.dataset.ocKey === saved.key)
+    : null;
+  const next = ocFocusTarget(slot) || (saved.pane ? ocEl('oc-pane') : null);
   if (!next) return;
   next.focus({ preventScroll: true });
   if (saved.start != null && typeof next.setSelectionRange === 'function') {
