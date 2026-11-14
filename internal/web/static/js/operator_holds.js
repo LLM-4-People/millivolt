@@ -173,8 +173,13 @@ function ocApplyPause() {
   const phrase = (draft.id ? 'updated hold on ' : 'held ') + ocScopePhrase({
     providers: body.providers || [], clients: body.clients || [], models: [], keyHashes: [], conversations: [],
   }).replace('every request', body.all ? 'all traffic' : body.new ? 'new clients' : 'traffic');
+  // Undo must name the rule this write created. `find(h => h.id !== previous.id)`
+  // looks right but is wrong on a create, where previous is null: it matches
+  // whatever is first in the list, which is the oldest hold, not the new one.
+  // Identity is the set difference against the ids that existed before.
+  const beforeIds = new Set(liveHolds().map(h => h.id));
   mutateOperator('pause', body, () => {
-    const created = liveHolds().find(h => h.id !== previous?.id) || null;
+    const created = liveHolds().find(h => !beforeIds.has(h.id)) || null;
     const undo = created
       ? () => mutateOperator('pause', { paused: false, id: created.id })
       : previous ? () => mutateOperator('pause', ocPauseBody(ocPauseDraftFromHold(previous))) : null;
@@ -367,8 +372,11 @@ function ocApplyCapture() {
     keyHashes: [], conversations: [],
   });
   const phrase = (draft.id ? 'updated capture on ' : 'capturing ') + scope;
+  // Same set-difference identity as the hold path: an edit keeps its id, a
+  // create is whatever id did not exist before this write.
+  const beforeIds = new Set(liveDebugSessions().map(s => s.id));
   mutateOperator('debug', body, () => {
-    const created = liveDebugSessions().find(s => s.id !== previous?.id) || null;
+    const created = liveDebugSessions().find(s => !beforeIds.has(s.id)) || null;
     const undo = created
       ? () => mutateOperator('debug', { enabled: false, id: created.id })
       : previous ? () => mutateOperator('debug', ocCaptureBody(ocCaptureDraftFromSession(previous))) : null;

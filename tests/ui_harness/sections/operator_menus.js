@@ -629,6 +629,49 @@ module.exports = async function operatorMenus(H) {
         w.fetch = savedFetch;
       }
 
+      // Undo must name the rule this write created, not the first rule in the
+      // list. With older holds already present, an identity test that compares
+      // against a null previous id resumes the oldest hold instead of the new
+      // one, which is the worst failure the ledger can have.
+      {
+        const savedHoldFetch = w.fetch;
+        const holdPosts = [];
+        w.fetch = async (url, options) => {
+          if (String(url).includes('/admin/pause')) {
+            const body = JSON.parse(options.body);
+            holdPosts.push(body);
+            // Confirm exactly what was asked for, so the console sees the
+            // rule this write created rather than a canned document.
+            const base = {ok: true, paused: true, clients: [], providers: [],
+              known_clients: ['client-a'], known_providers: [], until: null,
+              queued: 0, default_max_queued: 0};
+            if (body.paused === false) {
+              return {ok: true, json: async () => ({...base, paused: true,
+                holds: [{id: 'hold-old-1', all: true}, {id: 'hold-old-2', all: true}]})};
+            }
+            return {ok: true, json: async () => ({...base,
+              holds: [{id: 'hold-old-1', all: true}, {id: 'hold-old-2', all: true},
+                {id: 'hold-new', clients: body.clients, providers: body.providers}]})};
+          }
+          return savedHoldFetch(url, options);
+        };
+        w.applyPauseState({ok: true, paused: true, clients: [], providers: [],
+          holds: [{id: 'hold-old-1', all: true}, {id: 'hold-old-2', all: true}],
+          known_clients: ['client-a'], known_providers: [], until: null,
+          queued: 0, default_max_queued: 0});
+        w.openOperatorConsole('pause');
+        w.ocOpenPauseComposer('');
+        w.eval("ocDrafts.pause.clients = ['client-a']; ocRender()");
+        click('#oc-pane [data-oc-apply="pause"]');
+        await settleUntil(() => holdPosts.length === 1);
+        await settleUntil(() => !d.getElementById('oc-undo').hidden);
+        click('#oc-undo');
+        check('undo after creating a hold resumes that hold, not an older one',
+          await settleUntil(() => holdPosts.length === 2) &&
+          JSON.stringify(holdPosts[1]) === JSON.stringify({paused: false, id: 'hold-new'}));
+        w.fetch = savedHoldFetch;
+      }
+
       // One confirmation at a time: a second call settles the open one as a
       // cancel before replacing it, so neither promise is left pending.
       const first = w.ocConfirm({title: 'First question', body: 'one', confirm: 'ok'});
