@@ -303,11 +303,19 @@ without a second total and is a polite live region.
 Activating the readout opens the console. On a wide viewport it is an anchored
 popover under the trigger: 520px wide, and only as tall as its content up to a
 560px cap, scrolling inside it. At 800px or narrower it becomes a bottom sheet
-capped at 88dvh, leaving a strip of page above it for outside-press dismissal.
-The section rail is one horizontally scrollable strip above that breakpoint and
-fades its trailing edge while more sections remain; at 800px or narrower it is a
-two-row grid, because six fixed destinations never fit one phone row and a
-hidden scrollbar left the last two unnamed. Escape, an outside press, the close button, or
+with a definite height of `min(88dvh, 100dvh - 16px)`, leaving a strip of page
+above it for outside-press dismissal. The height is definite rather than a
+cap: the body and the pane grow into the remainder, so a tall composer scrolls
+inside the pane instead of being clipped by the panel. On a landscape phone
+(800px or narrower and 500px or shorter) the header, rail, pane and ledger
+tighten and the sheet gives up its top gap, sitting flush with the top edge so
+only the 8px bottom dismissal strip remains; a very short viewport turns every
+fixed band into space the form loses. The section rail is one
+horizontally scrollable strip and fades its trailing edge while more sections
+remain; at 560px or narrower, where six chips genuinely cannot share one row,
+it becomes a two-row grid. That threshold is the content, not the device class:
+a landscape phone is 640-844 wide and keeps the single-row strip. Escape, an
+outside press, the close button, or
 opening the theme tray or Settings closes it; opening the console closes the
 theme tray and Settings first. The session remembers the last section, so
 reopening returns where the operator left. Opening the console itself performs
