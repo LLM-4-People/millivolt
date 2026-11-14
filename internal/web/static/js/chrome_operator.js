@@ -333,7 +333,6 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
   if (sig === _pauseStateSig) return;
   _pauseStateSig = sig;
   pauseState = {
-    paused: !!st.paused,
     clients: Array.isArray(st.clients) ? st.clients : [],
     providers: Array.isArray(st.providers) ? st.providers : [],
     holds: Array.isArray(st.holds) ? st.holds : [],

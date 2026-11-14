@@ -164,7 +164,11 @@ let streamLive = false;
 // that first open the dashboard is still connecting, which is not the same
 // fact as a dropped connection: only the latter makes state stale.
 let streamSeen = false;
-let pauseState = { paused: false, clients: [], providers: [], holds: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], until: null, queued: 0, storm_waiters: 0, default_max_queued: 0 };
+// pauseState is the applied pause document. Liveness is not mirrored here:
+// a hold expires on the server's clock, and `liveHolds()` derives that from
+// `holds` against the anchored clock, so a stored `paused` boolean would be a
+// second answer that goes stale between polls.
+let pauseState = { clients: [], providers: [], holds: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], until: null, queued: 0, storm_waiters: 0, default_max_queued: 0 };
 let throttleState = { throttles: [], [KNOWN_PROVIDERS_KEY]: [], active: false };
 let debugState = { enabled: false, sessions: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], [KNOWN_MODELS_KEY]: [], until: null, ttl: '', max_bytes: '' };
 // localStorage key for the persisted status filter. One owner: the write
