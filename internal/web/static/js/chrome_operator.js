@@ -249,15 +249,27 @@ function resyncOperatorSurfaces(kind) {
   if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
   if (lastData) scheduleRenderLive();
 }
+// operatorNoun is the console's own word for a kind. The wire route is
+// throttle/pause/debug; the operator reads limit/hold/capture and never sees
+// the route name anywhere else, so a failure must not answer in it.
+const OPERATOR_NOUNS = { throttle: 'limit', pause: 'hold', debug: 'capture' };
+function operatorNoun(kind) { return OPERATOR_NOUNS[kind] || kind; }
+
 async function mutateOperator(kind, body, after) {
   const gate = operatorState[kind];
-  if (gate.busy) return;
+  const noun = operatorNoun(kind);
+  // A second action while the first is in flight is a real double click, not
+  // a command. Answering it with silence made the click look ignored.
+  if (gate.busy) {
+    operatorError(kind, 'the ' + noun + ' change is still in flight');
+    return;
+  }
   gate.busy = true;
   ++gate.revision;
   operatorClearError();
   if (typeof operatorConsoleSync === 'function') operatorConsoleSync(kind);
   let confirmed;
-  const fail = 'could not change ' + kind;
+  const fail = 'could not change the ' + noun;
   try {
     const st = await operatorJsonBody('/admin/' + kind, {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
@@ -265,7 +277,12 @@ async function mutateOperator(kind, body, after) {
     if (!gate.valid(st)) throw new Error(st?.error || fail);
     confirmed = st;
   } catch (err) {
-    operatorError(kind, String(err.message || fail));
+    // A transport failure surfaces the browser's own "Failed to fetch"; the
+    // server's answer carries the operatorBody marker. Only the transport case
+    // needs the console's context prepended, so the operator learns what was
+    // not changed as well as why.
+    const message = String(err.message || fail);
+    operatorError(kind, err.operatorBody ? message : fail + ' - ' + message);
   } finally {
     gate.busy = false;
     ++gate.revision;
