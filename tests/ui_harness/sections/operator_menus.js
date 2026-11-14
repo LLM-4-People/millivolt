@@ -703,6 +703,65 @@ module.exports = async function operatorMenus(H) {
         until: null, default_max_queued: 16});
       w.openOperatorConsole('pause');
       click('#oc-pane [data-oc-new="pause"]');
+      // A quick hold is the incident shortcut, but a hold's blast radius makes
+      // an unbounded one-click action the worst control this console could
+      // offer. It is time-bounded by construction and writes the same document
+      // the composer writes, so ledger, undo and gating are identical.
+      {
+        const savedFetch = w.fetch;
+        const posts = [];
+        w.fetch = async (url, options) => {
+          if (String(url).includes('/admin/pause') && options && options.method === 'POST') {
+            const body = JSON.parse(options.body);
+            posts.push(body);
+            // Echo the scope vocabulary the server keeps, so the confirmed
+            // document does not blank the pickers the next block reads.
+            return {ok: true, json: async () => ({ok: true, paused: true,
+              holds: body.paused === false ? [] : [{id: 'hold-quick', all: true,
+                duration: body.duration || '', clients: [], providers: []}],
+              clients: [], providers: [],
+              known_clients: ['client-a'], known_providers: ['prov-a'],
+              until: null, queued: 0, default_max_queued: 16})};
+          }
+          return savedFetch(url, options);
+        };
+        try {
+          w.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+            known_clients: ['client-a'], known_providers: ['prov-a'], until: null,
+            queued: 0, default_max_queued: 0});
+          w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''}");
+          w.openOperatorConsole('pause');
+          check('the pause head offers a one-click hold with its bound in the label',
+            text('#oc-pane [data-oc-quick-hold]') === 'hold 15m');
+          click('#oc-pane [data-oc-quick-hold]');
+          check('a one-click hold posts a bounded all-traffic hold',
+            await settleUntil(() => posts.length === 1) &&
+            stable(posts[0]) === stable({paused: true, all: true, duration: '15m'}) &&
+            !posts[0].max_queued);
+          check('the quick hold is recorded so it can be undone',
+            await settleUntil(() => text('#oc-change').startsWith('held ')) &&
+            text('#oc-change').includes('all traffic'));
+        } finally {
+          w.fetch = savedFetch;
+        }
+        // A committed hold closes its composer and writes the ledger, so the
+        // next block starts from a cleared draft and an empty receipt rather
+        // than inheriting this block's.
+        w.eval("ocDrafts.pause = null; ocView = {kind: '', id: ''};"
+          + "ocChanges.length = 0; ocRenderFoot();");
+        w.openOperatorConsole('pause');
+        click('#oc-pane [data-oc-new="pause"]');
+      }
+
+      // The scope vocabulary for clients lives on the throttle document, so
+      // this block seeds it alongside the pause document it picks from.
+      throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']},
+        {clients: ['client-a']});
+      w.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+        known_clients: ['client-a'], known_providers: ['prov-a'], until: null,
+        queued: 0, default_max_queued: 0});
+      w.openOperatorConsole('pause');
+      click('#oc-pane [data-oc-new="pause"]');
       check('the pause composer offers named, new and all modes',
         JSON.stringify(qa('#oc-pane [data-oc-choice="pause-mode"]')
           .map(chip => [chip.dataset.ocValue, chip.getAttribute('aria-pressed')])) ===

@@ -136,8 +136,25 @@ function ocRenderPause() {
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
     (composing
       ? `<button type="button" class="btn" data-oc-new="pause">start over</button>`
-      : `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`) + `</div></div>` +
+      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold ${ocQuickHoldMinutes}m</button>` +
+        `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`) + `</div></div>` +
     (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + (rows || empty) + `</div>`;
+}
+
+// ocQuickHoldMinutes is the bounded duration the one-click hold uses. A quick
+// action must not be able to leave traffic parked indefinitely: the indefinite
+// hold exists, but it goes through the composer where the operator chooses it.
+const ocQuickHoldMinutes = 15;
+
+// ocQuickHold parks all traffic for a fixed window in one click. It writes the
+// same document the composer writes, through the same gate and ledger, so undo
+// and the confirmation rules are identical.
+function ocQuickHold() {
+  const draft = ocBlankPauseDraft();
+  draft.mode = 'all';
+  draft.duration = String(ocQuickHoldMinutes) + 'm';
+  ocDrafts.pause = draft;
+  ocApplyPause();
 }
 
 function ocPauseBody(draft) {
