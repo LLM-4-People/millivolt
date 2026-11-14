@@ -98,14 +98,13 @@ function openSettings() {
   if (typeof closeDrawer === 'function') closeDrawer();
   const s = $('settings-sheet');
   const v = $('settings-veil');
-  const b = $('btn-settings');
   if (!s) return;
   // A competing modal (the operator prompt) preempts the sheet through the
-  // generic close; run this owner's teardown so the veil and pressed state
-  // cannot survive the takeover.
+  // generic close; run this owner's teardown so the veil and the opener's
+  // expanded state cannot survive the takeover.
   openModal(s, {onPreempt: () => settingsClose(true)});
   if (v) v.classList.add('open');
-  if (b) b.setAttribute('aria-pressed', 'true');
+  settingsExpanded(true);
   requestAnimationFrame(() => s.classList.add('open'));
   const q = $('settings-q');
   if (q) q.value = '';
@@ -133,11 +132,10 @@ function settingsClose(force) {
   }
   const s = $('settings-sheet');
   const v = $('settings-veil');
-  const b = $('btn-settings');
   const wasOpen = settingsIsOpen();
   if (s) { s.classList.remove('open'); closeModal(s); }
   if (v) v.classList.remove('open');
-  if (b) b.setAttribute('aria-pressed', 'false');
+  settingsExpanded(false);
   if (wasOpen && !force) {
     // The Settings opener lives inside the Actions flyout, which closed
     // before the modal opened; closeModal's stored element is now hidden and

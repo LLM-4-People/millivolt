@@ -131,9 +131,9 @@ function ocBurstAllowed(draft) {
 // ocWindowSelect is the limit vocabulary in a native select: the list is long,
 // the track is one number wide, and every caller used to re-derive the same
 // value list. `withOff` prepends the empty ramp choice.
-function ocWindowSelect(choice, current, aria, withOff) {
+function ocWindowSelect(choice, current, withOff) {
   const values = (withOff ? [''] : []).concat(LIMIT_WINDOWS.map(([v]) => v));
-  return ocChoiceSelect(choice, values, current, v => v ? ocWindowLabel(v) : 'off', aria);
+  return ocChoiceSelect(choice, values, current, v => v ? ocWindowLabel(v) : 'off');
 }
 
 // ocBudgetPlaceholder is the hint an unarmed budget field shows. A disabled
@@ -164,10 +164,10 @@ function ocLimitComposerHTML(draft) {
     ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: !ocBudgetArmed(draft, 'concurrency'), placeholder: ocBudgetPlaceholder(draft, 'concurrency', '4') }) + `</div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="requests" ${ocBudgetArmed(draft, 'requests') ? 'checked' : ''}><span>requests</span></label>` +
     ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: !ocBudgetArmed(draft, 'requests'), placeholder: ocBudgetPlaceholder(draft, 'requests', '60') }) +
-    `<div class="oc-window">${ocWindowSelect(OC_CHOICES.requestWindow, draft.requestWindow, 'request window')}</div></div>` +
+    `<div class="oc-window">${ocWindowSelect(OC_CHOICES.requestWindow, draft.requestWindow)}</div></div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="tokens" ${ocBudgetArmed(draft, 'tokens') ? 'checked' : ''}><span>tokens</span></label>` +
     ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: !ocBudgetArmed(draft, 'tokens'), placeholder: ocBudgetPlaceholder(draft, 'tokens', '100000') }) +
-    `<div class="oc-window">${ocWindowSelect(OC_CHOICES.tokenWindow, draft.tokenWindow, 'token window')}</div></div>` +
+    `<div class="oc-window">${ocWindowSelect(OC_CHOICES.tokenWindow, draft.tokenWindow)}</div></div>` +
     `</div>` +
     // Both optional modifiers sit on one row: they are peers, each closed by
     // default, and two stacked full-width bands spent 45px of the panel on two
@@ -182,7 +182,7 @@ function ocLimitComposerHTML(draft) {
     (draft.advanced ? `<div class="oc-advanced">` +
       `<label class="oc-check"><input type="checkbox" data-oc-field="antiBurst" ${draft.antiBurst ? 'checked' : ''} ${burstAllowed ? '' : 'disabled'}>` +
       `<span>ramp each new key from one to the concurrency target</span></label>` +
-      `<div class="oc-window">${ocWindowSelect(OC_CHOICES.ramp, draft.ramp, 'ramp duration', true)}</div>` +
+      `<div class="oc-window">${ocWindowSelect(OC_CHOICES.ramp, draft.ramp, true)}</div>` +
       (burstAllowed ? '' : `<p class="oc-note">Burst control needs a single-provider limit without a schedule.</p>`) +
       `</div>` : '') +
     (scheduleOn ? `<div class="oc-advanced">` +

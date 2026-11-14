@@ -98,6 +98,40 @@ module.exports = async function restartProviders(H) {
       ![...d.querySelectorAll('#restart-steps .rs-step')].some(s => s.querySelector('.rs-sub')));
     w.renderRestartSteps({ rank: 0, phase: 'idle', error: 'build failed: boom' });
     check('a failed run marks its step red', !!d.querySelector('#restart-steps .rs-step.failed'));
+    // Colour is not a state a screen reader or a colour-blind operator can
+    // read. Each step carries its state in text, and the running one is marked
+    // aria-current; the failed word must be distinguishable from the done word.
+    {
+      const at = () => [...d.querySelectorAll('#restart-steps .rs-step')];
+      w.renderRestartSteps({ rank: 0, phase: 'building', error: 'build failed: boom' });
+      const failed = at();
+      check('a failed step states its failure in text, not only in colour',
+        failed[0].getAttribute('aria-current') === null &&
+        failed[0].textContent.includes('failed') &&
+        !failed[0].textContent.includes('now'));
+      w.renderRestartSteps({ rank: 1, phase: 'draining', error: '', drain_timeout_ms: 0 });
+      const running = at();
+      check('the running step is marked aria-current and worded as now',
+        running[1].getAttribute('aria-current') === 'step' &&
+        running[1].textContent.includes(' - now') &&
+        running[0].textContent.includes(' - done') &&
+        running[2].textContent.includes(' - pending') &&
+        running.filter(s => s.hasAttribute('aria-current')).length === 1);
+      // The announcement is one line, not the whole list: the list is
+      // rewritten on every 750ms poll, so a live region there re-read all four
+      // steps continuously.
+      check('the step list is not itself a live region',
+        !d.getElementById('restart-steps').hasAttribute('aria-live'));
+      const announce = d.getElementById('restart-announce');
+      w.renderRestartSteps({ rank: 2, phase: 'flushing', error: '' });
+      const second = announce.textContent;
+      w.renderRestartSteps({ rank: 2, phase: 'flushing', error: '' });
+      check('the restart announcement names one transition and does not repeat it',
+        second === 'restart step: ' + w.eval('RESTART_STEPS[2].label') &&
+        announce.textContent === second && announce.getAttribute('aria-live') === 'polite');
+      w.renderRestartSteps(null);
+      check('an idle tracker announces nothing', !d.getElementById('restart-steps').hidden === false);
+    }
     w.renderRestartSteps(null);
     check('the step list hides when idle', d.getElementById('restart-steps').hidden);
   }

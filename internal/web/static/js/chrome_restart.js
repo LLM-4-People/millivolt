@@ -82,6 +82,13 @@ const RESTART_POLL_HANG_MS = 5000;
 // {rank, phase, drain_elapsed_ms, drain_timeout_ms, error}. Steps below rank
 // are done, the ranked one is active (with the live drain timer), the rest
 // pending; an error marks the active step failed.
+// RESTART_STEP_WORDS is the state word each step carries in text. The dot is
+// colour alone, so without this a screen reader heard four identical labels and
+// a colour-blind operator saw four identical rows: a failed build read exactly
+// like a finished one. The word is visually hidden because the dot already
+// carries it for sighted users, but it is part of the step's accessible text.
+const RESTART_STEP_WORDS = {done: 'done', active: 'now', failed: 'failed', pending: 'pending'};
+
 function renderRestartSteps(st) {
   const ol = $('restart-steps');
   if (!ol) return;
@@ -94,8 +101,21 @@ function renderRestartSteps(st) {
     if (state === 'active' && s.rank === 1 && st.drain_timeout_ms > 0) {
       sub = `<span class="rs-sub">${fmtDur(Math.round((st.drain_elapsed_ms || 0) / TIME_MS.second) * TIME_MS.second)} / ${fmtDur(st.drain_timeout_ms)}</span>`;
     }
-    return `<li class="rs-step ${state}"><span class="rs-dot" aria-hidden="true"></span><span class="rs-label">${s.label}</span>${sub}</li>`;
+    // aria-current marks the running step for assistive technology; the word
+    // states it for everyone else. Both come from the same state so they
+    // cannot disagree.
+    const current = state === 'active' ? ' aria-current="step"' : '';
+    return `<li class="rs-step ${state}"${current}><span class="rs-dot" aria-hidden="true"></span>` +
+      `<span class="rs-label">${s.label}</span>` +
+      `<span class="visually-hidden"> - ${RESTART_STEP_WORDS[state]}</span>${sub}</li>`;
   }).join('');
+  // One announcement per transition, not one per repaint: the poll fires every
+  // 750ms with the same rank, and setText suppresses the repeats.
+  const ranked = RESTART_STEPS[Math.min(st.rank, RESTART_STEPS.length - 1)];
+  setText($('restart-announce'),
+    fail ? 'restart failed at ' + ranked.label
+      : st.rank >= RESTART_STEPS.length ? 'restart complete'
+        : 'restart step: ' + ranked.label);
 }
 
 function setRestartStatus(text, err) {

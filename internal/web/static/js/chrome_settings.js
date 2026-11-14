@@ -32,6 +32,16 @@ let settingsLoadPromise = null;
 let settingsLoading = false;
 let settingsWantOpen = false;
 
+// settingsExpanded is the one writer of the opener's open state. It says
+// aria-expanded, matching the operator console trigger beside it: this button
+// has aria-haspopup="dialog" and controls one sheet, so it is an expander, not
+// a toggle. The attribute was aria-pressed, which ARIA treats as contradictory
+// with a popup role, and three call sites spelled the write by hand.
+function settingsExpanded(open) {
+  const b = $('btn-settings');
+  if (b) b.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 // settingsFields is the one reader of the settings fields container. The id was
 // spelled at fifteen sites across the modules loaded below, so a rename had to
 // reach every one of them or a module would quietly operate on nothing. It lives
@@ -116,10 +126,9 @@ function closeSettings(force) {
   if (module && typeof module.close === 'function') { module.close(force); return; }
   const s = $('settings-sheet');
   const v = $('settings-veil');
-  const b = $('btn-settings');
   if (s) { s.classList.remove('open'); closeModal(s); }
   if (v) v.classList.remove('open');
-  if (b) b.setAttribute('aria-pressed', 'false');
+  settingsExpanded(false);
 }
 
 // cancelSettingsOpen consumes an Escape aimed at Settings: it closes an open

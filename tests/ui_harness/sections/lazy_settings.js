@@ -65,6 +65,22 @@ module.exports = async function lazySettings(H) {
       script.onload();
       await settleUntil(() => opened === 1);
       check('the loaded settings module opens the sheet exactly once', opened === 1);
+      // The opener is an expander for one dialog, exactly like the operator
+      // console trigger beside it: aria-expanded says whether the sheet is up,
+      // and aria-pressed would contradict the aria-haspopup role. One writer
+      // owns the write so the markup and every close path cannot drift.
+      {
+        const btn = ok.sd.getElementById('btn-settings');
+        check('the settings opener states its open state as aria-expanded',
+          btn.getAttribute('aria-haspopup') === 'dialog' &&
+          btn.getAttribute('aria-controls') === 'settings-sheet' &&
+          btn.hasAttribute('aria-expanded') && !btn.hasAttribute('aria-pressed') &&
+          ok.sw.eval('typeof settingsExpanded') === 'function');
+        ok.sw.eval('settingsExpanded(true)');
+        const open = btn.getAttribute('aria-expanded');
+        ok.sw.eval('settingsExpanded(false)');
+        check('one writer owns the opener state', open === 'true' && btn.getAttribute('aria-expanded') === 'false');
+      }
     } finally { ok.dom.window.close(); }
 
     // A close while the module is still downloading must cancel the pending

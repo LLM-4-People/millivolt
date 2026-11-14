@@ -528,6 +528,20 @@ module.exports = async function operatorMenus(H) {
         // disabling the handler.
         check('an unmodified arrow still selects the next section',
           pressMod('ArrowRight', {}) === true && paneSection() !== beforeMod);
+        // A control's accessible name is the words on screen, never the wire
+        // key the dispatcher compares against. The name and the label are
+        // separate fields because they are separate jobs, and a missing or
+        // duplicated label is now visible here rather than audible only to a
+        // speech-input user.
+        check('every choice announces a human label, never its wire key',
+          evalJSON('Object.values(OC_CHOICES).map(c => c.label)').every(l => typeof l === 'string' && l.length > 0) &&
+          evalJSON('Object.values(OC_CHOICES).every(c => c.label !== c.name)') === true &&
+          // The labels are the visible headings: a dash would mean a key
+          // leaked back in, and a duplicate would make two groups in one pane
+          // indistinguishable when announced.
+          evalJSON('Object.values(OC_CHOICES).every(c => !/-/.test(c.label))') === true &&
+          new Set(evalJSON('Object.values(OC_CHOICES).map(c => c.label + c.kind)')).size ===
+            evalJSON('Object.values(OC_CHOICES).length'));
         // One predicate, not one per handler: the rule is easy to state and
         // easy to forget, and five handlers had already written it out by hand
         // while two others omitted it entirely.

@@ -50,6 +50,21 @@ module.exports = async function logsMenu(H) {
       w.eval('ocOwns(document.getElementById("oc-pane"))') === true &&
       w.eval('ocOwns(document.getElementById("btn-controls"))') === false);
 
+    // A control's accessible name is the words on screen, never the wire key
+    // the dispatcher compares against. The registry carries both separately,
+    // and this asserts the DOM the renderer actually built: a renderer that
+    // fell back to the key would leave the registry correct and the markup
+    // wrong, which is exactly how this defect presented.
+    {
+      const byChoice = [...d.querySelectorAll('#oc-pane [data-oc-choice]')]
+        .map(el => [el.dataset.ocChoice, el.getAttribute('aria-label') ||
+          el.closest('.oc-chips')?.getAttribute('aria-label')]);
+      const groups = [...d.querySelectorAll('#oc-pane .oc-chips')]
+        .map(g => g.getAttribute('aria-label'));
+      check('rendered controls announce the visible words, not the wire key',
+        byChoice.length >= 2 && groups.includes('what to download') &&
+        byChoice.every(([name, label]) => !!label && label !== name && !/-/.test(label)));
+    }
     const modeChips = [...d.querySelectorAll('#oc-pane [data-oc-choice="export-mode"]')]
       .map(chip => chip.dataset.ocValue);
     // All history is not a claim of "everything": it previews through the same

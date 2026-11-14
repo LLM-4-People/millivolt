@@ -173,31 +173,37 @@ const OC_COMPOSERS = {
 // controls whose write invalidates a derived read - every export filter
 // changes the predicate its receipt quotes - so the count is refreshed before
 // the repaint rather than after it.
+// `name` is the wire key the delegated dispatcher compares against; `label` is
+// the words a person hears. They are separate fields because they are separate
+// jobs: the name never reaches a human, and the label never reaches the server.
+// A control that used the name as its accessible name announced "pause-mode"
+// under the visible heading "scope", so a speech-input user could not activate
+// it by the words on screen.
 const OC_CHOICES = {
   // The drain scope lives in the overview, which is not a composer kind.
-  drainScope: { name: 'drain-scope', kind: 'overview' },
-  requestWindow: { name: 'request-window', kind: 'limit', set: (d, v) => { d.requestWindow = v; } },
-  tokenWindow: { name: 'token-window', kind: 'limit', set: (d, v) => { d.tokenWindow = v; } },
-  ramp: { name: 'ramp', kind: 'limit', set: (d, v) => { d.ramp = v; } },
+  drainScope: { name: 'drain-scope', label: 'queue', kind: 'overview' },
+  requestWindow: { name: 'request-window', label: 'request window', kind: 'limit', set: (d, v) => { d.requestWindow = v; } },
+  tokenWindow: { name: 'token-window', label: 'token window', kind: 'limit', set: (d, v) => { d.tokenWindow = v; } },
+  ramp: { name: 'ramp', label: 'ramp duration', kind: 'limit', set: (d, v) => { d.ramp = v; } },
   pauseMode: {
-    name: 'pause-mode', kind: 'pause',
+    name: 'pause-mode', label: 'scope', kind: 'pause',
     // Switching mode discards the open picker: the dimensions it offered
     // belong to the previous mode.
     set: (d, v) => { d.mode = v; d.picker = null; },
   },
-  pauseDuration: { name: 'pause-duration', kind: 'pause', set: (d, v) => { d.duration = v; } },
-  captureDuration: { name: 'capture-duration', kind: 'capture', set: (d, v) => { d.duration = v; } },
+  pauseDuration: { name: 'pause-duration', label: 'until', kind: 'pause', set: (d, v) => { d.duration = v; } },
+  captureDuration: { name: 'capture-duration', label: 'until', kind: 'capture', set: (d, v) => { d.duration = v; } },
   exportMode: {
-    name: 'export-mode', kind: 'export', recount: true,
+    name: 'export-mode', label: 'what to download', kind: 'export', recount: true,
     // A mode switch also invalidates the count outright: the predicate the
     // receipt quoted belonged to the previous mode, so keeping it would state
     // a total beside a download that acts on a different one.
     set: (d, v) => { d.mode = v; d.count = null; d.counting = false; d.error = ''; },
   },
-  exportErrors: { name: 'export-errors', kind: 'export', recount: true, set: (d, v) => { d.errors = v === 'only'; } },
-  exportDebug: { name: 'export-debug', kind: 'export', recount: true, set: (d, v) => { d.debug = v === 'only'; } },
-  exportAfter: { name: 'export-after', kind: 'export', recount: true, set: (d, v) => { d.after = v; } },
-  exportAge: { name: 'export-age', kind: 'export', recount: true, set: (d, v) => { d.age = v; } },
+  exportErrors: { name: 'export-errors', label: 'errors', kind: 'export', recount: true, set: (d, v) => { d.errors = v === 'only'; } },
+  exportDebug: { name: 'export-debug', label: 'debug', kind: 'export', recount: true, set: (d, v) => { d.debug = v === 'only'; } },
+  exportAfter: { name: 'export-after', label: 'newer than', kind: 'export', recount: true, set: (d, v) => { d.after = v; } },
+  exportAge: { name: 'export-age', label: 'older than', kind: 'export', recount: true, set: (d, v) => { d.age = v; } },
 };
 
 // OC_CHOICE_BY_NAME resolves the rendered attribute back to its row, so the
@@ -1253,7 +1259,7 @@ function ocConfirm({ title, body, confirm, danger }) {
 // visible at once.
 function ocChipRow(choice, values, current, labelOf) {
   const name = choice.name;
-  return `<div class="oc-chips" role="group" aria-label="${escapeHtml(name)}">` +
+  return `<div class="oc-chips" role="group" aria-label="${escapeHtml(choice.label)}">` +
     values.map(value => {
       const pressed = String(current) === String(value) ? 'true' : 'false';
       return `<button type="button" class="oc-chip" aria-pressed="${pressed}" data-oc-choice="${escapeHtml(name)}" data-oc-value="${escapeHtml(String(value))}">${escapeHtml(labelOf(value))}</button>`;
@@ -1275,12 +1281,12 @@ function ocChipRow(choice, values, current, labelOf) {
 // correctly described as 90s, and a save would have rewritten the window the
 // operator never meant to change. An off-list value therefore gets its own
 // selected option, labelled by the same label function.
-function ocChoiceSelect(choice, values, current, labelOf, aria) {
+function ocChoiceSelect(choice, values, current, labelOf) {
   const name = choice.name;
   const list = values.map(String);
   const missing = current != null && current !== '' && !list.includes(String(current));
   const all = missing ? list.concat(String(current)) : list;
-  return `<select class="oc-select" data-oc-choice="${escapeHtml(name)}" aria-label="${escapeHtml(aria || name)}">` +
+  return `<select class="oc-select" data-oc-choice="${escapeHtml(name)}" aria-label="${escapeHtml(choice.label)}">` +
     all.map(value => {
       const selected = String(current) === String(value) ? ' selected' : '';
       return `<option value="${escapeHtml(String(value))}"${selected}>${escapeHtml(labelOf(value))}</option>`;
@@ -1340,7 +1346,11 @@ function ocRenderSystem() {
     `<div class="oc-card">` +
     `<div class="oc-label">rebuild and restart</div>` +
     `<p id="restart-description" class="oc-note">Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.</p>` +
-    `<ol class="restart-steps" id="restart-steps" hidden aria-live="polite"></ol>` +
+    // Not a live region: the list is rewritten on every status event, so a
+    // polite announcer there re-read all four steps and the drain timer roughly
+    // once a second. The one line below carries the announcement instead.
+    `<ol class="restart-steps" id="restart-steps" hidden aria-label="restart progress"></ol>` +
+    `<p class="visually-hidden" id="restart-announce" role="status" aria-live="polite"></p>` +
     (available ? '' : `<p class="oc-warning">${escapeHtml(reason)}</p>`) +
     `<div class="oc-compose-ft"><span class="clear-count" id="restart-count" role="status"></span>` +
     `<button type="button" class="btn btn-accent" id="btn-restart-now" data-oc-restart ${available ? '' : 'disabled'}>restart now</button></div>` +

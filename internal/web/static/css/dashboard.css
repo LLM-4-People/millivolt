@@ -222,13 +222,15 @@
     .refresh-controls .menu-wrap { width: 100%; }
     .hdr-btn-label { display: inline; font: 650 12px var(--sans); color: var(--text); }
   }
-  #btn-settings[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+  #btn-settings[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
   /* ---------- restart step tracker ----------
-  /* The choreography renders as a live checklist. Each step reports itself
-     when it actually starts (hijacked NDJSON watch stream; polls hang once the
-     old process stops accepting). Pending steps are dim ink, the active one
-     carries the accent pulse, done ones a tick, failures turn the step and its
-     label red. */
+  /* The choreography renders as a checklist. Each step reports itself when it
+     actually starts (hijacked NDJSON watch stream; polls hang once the old
+     process stops accepting). Pending steps are dim ink, the active one carries
+     the accent pulse and aria-current, done ones take the ok-coloured dot, and
+     a failure turns the step, its dot and its label red. The dot is colour
+     only, so chrome_restart.js also states the state in text for assistive
+     technology rather than relying on this styling. */
   .restart-steps { list-style: none; margin: 8px 0 2px; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .rs-step { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--muted); min-width: 0; }
   .rs-step .rs-dot {
@@ -560,7 +562,10 @@
      does it take the primary ink. Compact modes hide it entirely. */
   .theme-caption-preview { color: var(--muted); }
   .theme-caption-preview.has-preview { color: var(--text); }
-  .theme-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+  /* visually hidden, still spoken: text that must reach assistive technology
+     without taking a line of the dense layout (a live region's detail, a step's
+     state word). Declared once so every such surface clips identically. */
+  .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
   .theme-mode-field { flex: none; margin-left: auto; display: grid; gap: 3px; justify-items: end; }
   .theme-mode-label { color: var(--muted); font: 600 9px var(--mono); letter-spacing: .05em; }
   .theme-mode {

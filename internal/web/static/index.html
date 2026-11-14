@@ -173,7 +173,7 @@ try {
             <div class="theme-mode" id="theme-mode" role="radiogroup" aria-labelledby="theme-mode-label"></div>
           </div>
         </div>
-        <p class="theme-status" id="theme-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p class="theme-status visually-hidden" id="theme-status" role="status" aria-live="polite" aria-atomic="true"></p>
         <div class="clear-menu-hd theme-palette-hd" id="theme-palette-hd">Palette</div>
         <div class="theme-list" id="theme-list" role="radiogroup" aria-orientation="vertical" aria-labelledby="theme-palette-hd"></div>
         <p class="theme-hintbar">Arrows preview. Click or press Enter to apply. Esc closes.</p>
@@ -183,7 +183,7 @@ try {
         </div>
       </div>
     </div>
-    <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">
+    <button class="btn" id="btn-settings" type="button" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-controls="settings-sheet" aria-expanded="false" aria-label="Settings" title="Settings">
       <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4"/><circle cx="8" cy="8" r="1.5"/><path d="M8 2.6v1.5M8 11.9v1.5M2.6 8h1.5M11.9 8h1.5M4.05 4.05l1.05 1.05M10.9 10.9l1.05 1.05M11.95 4.05l-1.05 1.05M5.1 10.9l-1.05 1.05"/></svg>
       <span class="hdr-btn-label">Settings</span>
     </button>
