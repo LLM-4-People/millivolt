@@ -255,8 +255,12 @@ function ocRenderLimits() {
   const rows = shown.map(entry => entry.html).join('');
   const filter = ocListFilterHTML('limits', policies.length);
   const hidden = ocListEmptyNote('limits', shown.length, policies.length);
+  // An empty list proves no limit rule exists. It does not prove admission:
+  // the group queue still refuses with 429 when full (ErrQueueFull), and the
+  // error-storm gate refuses its own backlog (ErrStormQueueFull). Saying
+  // "every request is admitted" promised something the scheduler does not.
   const empty = policies.length ? '' :
-    `<div class="oc-empty"><strong>No limits in force.</strong> Every request is admitted, at whatever rate its provider accepts.</div>`;
+    `<div class="oc-empty"><strong>No limits.</strong> Nothing here caps a request. The admission queue and each provider's own rate limits still apply.</div>`;
   const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
   const editing = !!ocDrafts.limit?.id;
   // The composer footer is the one action row while a draft is open. A head

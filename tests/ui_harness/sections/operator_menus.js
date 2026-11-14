@@ -210,6 +210,40 @@ module.exports = async function operatorMenus(H) {
       w.refreshOperatorReadout();
     }
 
+    // ---- empty states state only what the server can prove ----
+    {
+      // Each empty state used to promise admission - "every request is
+      // admitted", "requests flow unrestricted", "as fast as it allows" -
+      // while the group queue (ErrQueueFull) and the error-storm gate
+      // (ErrStormQueueFull) still refuse, and capture_body_preview stores
+      // prompt previews with no session running.
+      const emptySays = (section, needle) => {
+        w.openOperatorConsole(section);
+        return text('#oc-pane .oc-empty') || '';
+      };
+      w.applyThrottleState({ok: true, active: false, known_providers: [], throttles: []});
+      w.applyPauseState(EMPTY_PAUSE);
+      w.applyDebugState({ok: true, enabled: false, sessions: [], model_canon: {}});
+      w.refreshOperatorReadout();
+
+      check('the limits empty state does not promise that every request is admitted',
+        emptySays('limits').includes('No limits.') &&
+        emptySays('limits').includes('still apply') &&
+        !emptySays('limits').includes('Every request is admitted'));
+      check("the pause empty state does not promise a provider's own rate",
+        emptySays('pause').includes('No holds.') &&
+        emptySays('pause').includes('can still delay') &&
+        !emptySays('pause').includes('as fast as it allows'));
+      check('the capture empty state does not claim records hold only headers',
+        emptySays('capture').includes('No captures running.') &&
+        emptySays('capture').includes('Earlier captures stay readable') &&
+        !emptySays('capture').includes('only headers and metrics'));
+      check('the overview empty state does not promise unrestricted flow',
+        emptySays('overview').includes('still apply') &&
+        !emptySays('overview').includes('flow unrestricted'));
+      w.closeOperatorConsole();
+    }
+
     // ---- 2. one panel lifecycle, one focus owner ----
     {
       w.openOperatorConsole('overview');

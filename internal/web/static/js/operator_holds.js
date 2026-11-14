@@ -150,8 +150,10 @@ function ocRenderPause() {
   const rows = shown.map(entry => entry.html).join('');
   const filter = ocListFilterHTML('pause', holds.length);
   const hidden = ocListEmptyNote('pause', shown.length, holds.length);
+  // "As fast as it allows" was only true when no limit and no queue bound
+  // applied, and this section cannot see either. It states what it knows.
   const empty = holds.length ? '' :
-    `<div class="oc-empty"><strong>Traffic is flowing.</strong> Nothing is held, so requests reach their provider as fast as it allows.</div>`;
+    `<div class="oc-empty"><strong>No holds.</strong> Nothing is parked. New requests go straight to admission, where limits and the queue can still delay them.</div>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Park new matching requests without cancelling work that is already running.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
@@ -401,8 +403,12 @@ function ocRenderCapture() {
   const rows = shown.map(entry => entry.html).join('');
   const filter = ocListFilterHTML('capture', sessions.length);
   const hidden = ocListEmptyNote('capture', shown.length, sessions.length);
+  // Two ways this sentence was wrong: capture_body_preview stores a bounded
+  // prompt/response preview even with no session running, and captures from
+  // earlier sessions stay readable until their retention window ends - the
+  // stop-all dialog says exactly that.
   const empty = sessions.length ? '' :
-    `<div class="oc-empty"><strong>No capture sessions.</strong> Nothing is being recorded, so stored records hold only headers and metrics.</div>`;
+    `<div class="oc-empty"><strong>No captures running.</strong> Nothing new is being recorded. Earlier captures stay readable until their retention window ends.</div>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
