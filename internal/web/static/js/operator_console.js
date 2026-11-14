@@ -1016,7 +1016,15 @@ function ocHandleChoice(name, value) {
   }
   if (kind === 'export' && ocDrafts.export) {
     const draft = ocDrafts.export;
-    if (name === 'export-mode') draft.mode = value;
+    // A mode switch invalidates the count: the predicate the receipt quoted
+    // belonged to the previous mode, so keeping it would state a total beside
+    // a download that acts on a different one.
+    if (name === 'export-mode') {
+      draft.mode = value;
+      draft.count = null;
+      draft.counting = false;
+      draft.error = '';
+    }
     if (name === 'export-errors') draft.errors = value === 'only';
     if (name === 'export-debug') draft.debug = value === 'only';
     if (name === 'export-after') draft.after = value;

@@ -19,9 +19,12 @@ module.exports = async function logsMenu(H) {
 
     const modeChips = [...d.querySelectorAll('#oc-pane [data-oc-choice="export-mode"]')]
       .map(chip => chip.dataset.ocValue);
+    // All history is not a claim of "everything": it previews through the same
+    // server count the filtered mode uses, so its receipt is a number too.
     check('the export section offers all history and matching records',
       JSON.stringify(modeChips) === JSON.stringify(['all', 'filter']) &&
-      d.getElementById('oc-export-receipt').textContent === 'every stored record');
+      await settleUntil(() =>
+        /^\d+ records? · JSON, gzip$/.test(d.getElementById('oc-export-receipt').textContent), 3000));
 
     // Controlled record set: both surfaces derive their options from lastData
     // through their own owners, so one fixture proves the vocabularies agree.
@@ -37,8 +40,12 @@ module.exports = async function logsMenu(H) {
     w.populateFilterMenu('del');
 
     d.querySelector('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]').click();
+    // A mode switch invalidates the count, so the receipt asks for a filter
+    // rather than showing the unfiltered total beside a download that would
+    // act on a different predicate.
     check('filter mode without an active filter asks for one and disables download',
-      d.getElementById('oc-export-receipt').textContent === 'choose a filter to preview the export' &&
+      await settleUntil(() =>
+        d.getElementById('oc-export-receipt').textContent === 'choose a filter to preview the export', 3000) &&
       d.querySelector('#oc-pane [data-oc-download]').disabled);
     const exportValues = dim => {
       d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
@@ -173,8 +180,9 @@ module.exports = async function logsMenu(H) {
       d.getElementById('oc-change').textContent === 'downloaded 3 records');
 
     d.querySelector('#oc-pane [data-oc-reset-export]').click();
-    check('reset returns the export section to all history',
-      d.getElementById('oc-export-receipt').textContent === 'every stored record' &&
+    check('reset returns the export section to all history and recounts it',
+      await settleUntil(() =>
+        /^\d+ records? · JSON, gzip$/.test(d.getElementById('oc-export-receipt').textContent), 3000) &&
       d.querySelector('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
         .getAttribute('aria-pressed') === 'true');
   } finally {

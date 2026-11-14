@@ -908,34 +908,38 @@ module.exports = async function operatorMenus(H) {
         provider: 'prov-a', model: 'model-a', client: 'client-a', conversation_id: 'conv-1',
       }];
       w.eval('lastData.records = window.__ocExportRecords');
-      w.openOperatorConsole('export');
       const savedDownload = w.triggerDownload;
       const downloads = [];
       w.triggerDownload = (href, download) => { downloads.push([href, download]); };
+      // Both modes preview through the same server count, so the fixture
+      // answers with one throughout instead of only for the filtered mode.
+      const savedFetch = w.fetch;
+      let countBody = null;
+      let countCalls = 0;
+      w.fetch = async (url, options) => {
+        if (String(url).includes('/admin/purge/count')) {
+          countBody = JSON.parse(options.body);
+          countCalls += 1;
+          return {ok: true, json: async () => ({count: 7})};
+        }
+        return savedFetch(url, options);
+      };
+      w.openOperatorConsole('export');
       try {
-        check('all history offers an enabled download of every record',
-          text('#oc-export-receipt') === 'every stored record' &&
-          !d.getElementById('oc-export-download').disabled);
+        check('all history previews the same record count as a filter',
+          await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
+          countBody && countBody.provider === '' && !d.getElementById('oc-export-download').disabled &&
+          countCalls >= 1);
         click('#oc-pane [data-oc-download]');
-        check('all history downloads the bare export URL',
+        check('all history downloads the bare export URL and names the count',
           JSON.stringify(downloads[0]) === JSON.stringify(['/metrics/export', '']) &&
-          text('#oc-change') === 'downloaded every stored record');
+          text('#oc-change') === 'downloaded 7 records');
 
         choose('export-mode', 'filter');
         check('filter mode with no filter asks for one and disables download',
           text('#oc-export-receipt') === 'choose a filter to preview the export' &&
           d.getElementById('oc-export-download').disabled);
-
-        const savedFetch = w.fetch;
-        let countBody = null;
-        w.fetch = async (url, options) => {
-          if (String(url).includes('/admin/purge/count')) {
-            countBody = JSON.parse(options.body);
-            return {ok: true, json: async () => ({count: 7})};
-          }
-          return savedFetch(url, options);
-        };
-        try {
+        {
           click('#oc-pane [data-oc-filter-pick="provider"]');
           click('#oc-pane [data-oc-filter-value="provider"][data-oc-value="prov-a"]');
           check('a chosen filter previews its record count',
@@ -951,17 +955,16 @@ module.exports = async function operatorMenus(H) {
             JSON.stringify(downloads[1]) ===
               JSON.stringify(['/metrics/export?provider=prov-a', '']) &&
             text('#oc-change') === 'downloaded 7 records');
-        } finally {
-          w.fetch = savedFetch;
         }
         click('#oc-pane [data-oc-reset-export]');
-        check('reset restores the blank all-history draft',
-          text('#oc-export-receipt') === 'every stored record' &&
+        check('reset restores the blank all-history draft and recounts it',
+          await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
           q('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
             .getAttribute('aria-pressed') === 'true' &&
           !d.getElementById('oc-export-download').disabled);
       } finally {
         w.triggerDownload = savedDownload;
+        w.fetch = savedFetch;
       }
       w.closeOperatorConsole();
     }

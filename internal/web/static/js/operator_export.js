@@ -133,14 +133,13 @@ function ocFilterPickerHTML(draft, dim) {
 function ocRenderExport() {
   if (!ocDrafts.export) ocDrafts.export = ocBlankExportDraft();
   const draft = ocDrafts.export;
+  // The receipt is a server count in both modes, so the section asks for one
+  // when it opens with no answer yet. The schedule owner debounces and guards
+  // against a stale reply.
+  if (draft.count == null && !draft.counting && !draft.error) ocScheduleExportCount();
   const filtering = draft.mode === 'filter';
-  const filter = ocExportFilter(draft);
-  const count = draft.count;
-  const receipt = draft.counting ? 'counting…'
-    : draft.error ? draft.error
-      : count == null ? (filtering ? 'choose a filter to preview the export' : 'every stored record')
-        : fmt(count) + (count === 1 ? ' record' : ' records') + ' · JSON, gzip';
-  const enabled = !filtering || (count != null && count > 0);
+  const receipt = ocExportReceiptText(draft);
+  const enabled = ocExportEnabled(draft);
   const rows = filtering
     ? `<div class="oc-group"><div class="oc-label">matching</div>` +
       ocExportFiltersHTML(draft) +
@@ -174,11 +173,18 @@ function ocRenderExport() {
 }
 
 let _ocExportTimer = 0;
+// ocScheduleExportCount is the one preview owner for both modes. All history
+// is the same predicate with no filter, so it is previewed the same way: the
+// console's promise is that the preview and the download use one predicate,
+// and a mode that skipped the count could not keep that promise.
 function ocScheduleExportCount() {
   clearTimeout(_ocExportTimer);
   const draft = ocDrafts.export;
-  if (!draft || draft.mode !== 'filter') return;
-  if (!ocFilterActive(draft)) {
+  if (!draft) return;
+  // Filter mode with nothing selected is not an export of everything: it is a
+  // mode waiting for a predicate. Counting the unfiltered set there would
+  // print a number beside a download that asks for a filter.
+  if (draft.mode === 'filter' && !ocFilterActive(draft)) {
     draft.count = null;
     draft.counting = false;
     draft.error = '';
@@ -212,34 +218,42 @@ async function ocRunExportCount() {
   }
 }
 
+// ocExportReceiptText is the one receipt sentence. Both the full section
+// render and the in-place painter read it, so the two cannot disagree about
+// whether a count exists.
+function ocExportReceiptText(draft) {
+  if (draft.counting) return 'counting…';
+  if (draft.error) return draft.error;
+  if (draft.count == null) {
+    return draft.mode === 'filter'
+      ? 'choose a filter to preview the export'
+      : 'counting stored records…';
+  }
+  return fmt(draft.count) + (draft.count === 1 ? ' record' : ' records') + ' · JSON, gzip';
+}
+
+// ocExportEnabled refuses a download of nothing, and refuses it while a count
+// it depends on is missing or pending.
+function ocExportEnabled(draft) {
+  return !draft.counting && !draft.error && draft.count != null && draft.count > 0;
+}
+
 function ocUpdateExportReceipt() {
   const draft = ocDrafts.export;
   const el = ocEl('oc-export-receipt');
   const btn = ocEl('oc-export-download');
   if (!draft || !el) return;
-  const filtering = draft.mode === 'filter';
-  const text = draft.counting ? 'counting…'
-    : draft.error ? draft.error
-      : draft.count == null ? (filtering ? 'choose a filter to preview the export' : 'every stored record')
-        : fmt(draft.count) + (draft.count === 1 ? ' record' : ' records') + ' · JSON, gzip';
-  el.textContent = text;
+  el.textContent = ocExportReceiptText(draft);
   el.dataset.tone = draft.error ? 'err' : '';
-  if (btn) {
-    btn.disabled = !!draft.counting || !!draft.error ||
-      (filtering && (draft.count == null || draft.count === 0));
-  }
+  if (btn) btn.disabled = !ocExportEnabled(draft);
 }
 
 function ocDownloadExport() {
   const draft = ocDrafts.export;
   if (!draft) return;
-  if (draft.mode === 'all') {
-    triggerDownload('/metrics/export', '');
-    ocRecordChange('downloaded every stored record', null, 'ok');
-    toast('downloading every stored record');
-    return;
-  }
-  if (draft.count == null || draft.count <= 0) {
+  // Both modes download through the predicate the receipt just counted, so
+  // neither can claim a total the other would not produce.
+  if (!ocExportEnabled(draft)) {
     ocScheduleExportCount();
     return;
   }
