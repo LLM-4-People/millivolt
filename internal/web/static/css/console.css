@@ -563,6 +563,9 @@ button.oc-chip[aria-pressed="true"]::before {
 
 .oc-banner {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  /* The pane is not a flex container, so this banner is the one child that
+     needs its own separation from the section head above it. */
+  margin: 0 0 8px;
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border));
   border-radius: 7px;
@@ -611,7 +614,7 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 
 .oc-empty {
-  padding: 18px 12px; border: 1px dashed var(--border2); border-radius: 8px;
+  padding: 14px 12px; border: 1px dashed var(--border2); border-radius: 8px;
   color: var(--muted); font: 10px/1.6 var(--sans);
 }
 .oc-empty strong { color: var(--text); font-weight: 600; }
@@ -621,7 +624,7 @@ button.oc-chip[aria-pressed="true"]::before {
   padding: 12px; border: 1px solid var(--border); border-radius: 9px;
   background: var(--panel2); min-width: 0; overflow: hidden;
 }
-.oc-card + .oc-card { margin-top: 2px; }
+.oc-card + .oc-card { margin-top: 6px; }
 .oc-card > .oc-label { margin-bottom: 6px; }
 .oc-card > .oc-note { margin-top: 0; }
 .oc-card > .btn { margin-top: 9px; }
@@ -756,7 +759,6 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc .oc-filter-row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
   .mn.oc .oc-filter-name { padding-top: 0; }
   .mn.oc .oc-receipt .oc-compose-ft .btn { flex: 1 1 auto; }
-  .mn.oc .oc-empty { padding: 14px 10px; }
   .mn.oc .oc-card .oc-compose-ft { margin: 10px -12px -12px; }
 }
 
