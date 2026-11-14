@@ -248,8 +248,12 @@ module.exports = async function operatorMenus(H) {
       pickKnown('providers', 'prov-a');
       pickKnown('models', 'model-a');
       pickKnown('clients', 'client-a');
-      // Conversations accept a free value. Key hashes deliberately do not:
-      // the key scope is the exact SHA-256 hashes already in the live ring.
+      // The requested "free-value field for a key hash" cannot be expressed:
+      // the console deliberately offers no free-value field for keys
+      // (operator_console.js ocScopePickerHTML sets canAdd = dim !== 'keyHashes'),
+      // because a key scope lists only hashes already present in the live
+      // record ring. The fixture record seeds that ring, so the key is picked
+      // from its row instead. Conversations do accept a typed value.
       pickCustom('conversations', 'conv-1');
       pickKnown('keyHashes', 'abcdef123456');
       check('the five scope conditions carry the picked values',
@@ -312,15 +316,16 @@ module.exports = async function operatorMenus(H) {
           providers: ['prov-a'], models: ['model-a'], clients: ['client-a'],
           keyHashes: ['abcdef123456'], conversations: ['conv-1'],
         });
-        // The row and the ledger must render the SAME shared phrase. The
-        // phrase itself currently doubles the key label ("key key abcdef12…")
-        // because ocScopePhrase prefixes "key" and ocScopeValueLabel prefixes
-        // it again; that is a production wording defect (operator_console.js
-        // ocScopeValueLabel), reported rather than pinned here.
+        // The row and the ledger must render the SAME shared phrase, and a key
+        // is named once: ocScopePhrase prefixes the dimension, so the value
+        // label must not prefix it again.
         check('the applied limit row reads the shared scope phrase',
           text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope') === scopePhrase &&
           ['provider prov-a', 'model model-a', 'client client-a', 'conversation conv-1']
             .every(part => scopePhrase.includes(part)));
+        check('a key is named once, by its hash prefix',
+          scopePhrase.includes('key abcdef12…') && !scopePhrase.includes('key key') &&
+          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope').includes('key abcdef12…'));
         check('the applied limit row names its budgets and schedule',
           text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-budget') ===
             '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00-06:00');
@@ -431,13 +436,20 @@ module.exports = async function operatorMenus(H) {
         eligible.anti_burst === true && eligible.ramp_duration === '10s' &&
         eligible.providers.length === 1);
 
+      // A draft armed before the scope widens must stop compiling anti_burst:
+      // ocLimitBody asks the same eligibility owner the control does, so the
+      // body can never carry a burst the server rejects.
+      {
+        const armed = evalJSON('ocLimitBody(ocDrafts.limit)');
+        evalJSON('ocDrafts.limit.scope.clients = ["client-a"]');
+        const widened = evalJSON('ocLimitBody(ocDrafts.limit)');
+        evalJSON('ocDrafts.limit.scope.clients = []');
+        check('a widened scope drops the armed burst from the compiled body',
+          armed.anti_burst === true && widened.anti_burst === false &&
+          widened.ramp_duration === '');
+      }
       // One fresh draft per disqualifier: the control is offered only for a
-      // single-provider rule without a schedule, and a draft that was never
-      // armed compiles anti_burst false. (A draft armed BEFORE the scope
-      // widens keeps antiBurst true while the checkbox is disabled, so its
-      // body would carry an anti_burst the server rejects. That is a
-      // production defect in operator_limits.js ocLimitBody / the scope
-      // toggle path: arming is not re-evaluated when the scope changes.)
+      // single-provider rule without a schedule.
       click('#oc-pane [data-oc-new="limit"]');
       pickKnown('providers', 'prov-a');
       pickKnown('providers', 'prov-b');
@@ -959,7 +971,10 @@ module.exports = async function operatorMenus(H) {
           !q('#oc-pane .oc-warning') && !d.getElementById('btn-restart-now').disabled);
       } finally {
         w.fetch = savedFetch;
-        w.eval("restartServerState = {...restartServerState, available: true}; syncRestartControls()");
+        // Restoring the whole document (not just `available`) keeps the
+        // started_at identity the restart poll compares against intact for
+        // the sections that follow.
+        w.eval('restartServerState = JSON.parse(' + JSON.stringify(savedRestartState) + '); syncRestartControls()');
       }
 
       // A stubbed confirmation proves the action asks before any POST.
@@ -1043,21 +1058,27 @@ module.exports = async function operatorMenus(H) {
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
         throttles: [{...policy, in_flight: 3, queued: 2}]});
       await settleUntil(() => q('#oc-pane [data-oc-field="requests"]')?.value === '37');
-      // The budget field's data-oc-key sits on its wrapping label
-      // (operator_console.js:582 `ocField` emits the key on <label>, and
-      // ocFocusKey resolves `active.closest('[data-oc-key]')`, so the focused
-      // input's key owner is the label). ocRestoreFocus then focuses that
-      // label, which is not focusable, and the input loses focus. The number
-      // input also has no selection API, so it cannot carry a caret. Both are
-      // production defects, reported rather than patched here; the nearest
-      // invariant the field can hold is that its typed value survives in the
-      // draft and in the rebuilt control.
+      // ocRender rebuilds the whole pane with innerHTML, so focus is restored,
+      // not retained: the keyed slot resolves its own control, and a number
+      // input has no caret to restore.
       check('a live occupancy sync keeps the typed request count in the draft and the field',
         w.eval('ocDrafts.limit.requests') === '37' &&
         q('#oc-pane [data-oc-field="requests"]').value === '37');
+      {
+        const field = q('#oc-pane [data-oc-field="requests"]');
+        field.focus();
+        field.value = '41';
+        field.dispatchEvent(new w.Event('input', {bubbles: true}));
+        w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
+          throttles: [{...policy, in_flight: 5, queued: 0}]});
+        check('a live sync returns focus to the rebuilt budget field',
+          await settleUntil(() => d.activeElement === q('#oc-pane [data-oc-field="requests"]')) &&
+          q('#oc-pane [data-oc-field="requests"]').value === '41');
+      }
 
-      // A keyed TEXT control is the case the caret contract can express: the
-      // picker filter input carries data-oc-key on the input itself.
+      // A keyed TEXT control carries the caret contract that the rebuilt
+      // pane can preserve: the picker filter's data-oc-key is on the input
+      // itself, so ocRestoreFocus can refocus it and restore the selection.
       openCond('providers');
       const filter = q('#oc-pane [data-oc-key="pick-filter-providers"]');
       filter.focus();
@@ -1168,7 +1189,14 @@ module.exports = async function operatorMenus(H) {
   } finally {
     // Leave the shared page on the empty baseline every later section
     // expects: no holds, sessions or limits, the console closed, blank
-    // drafts and the production globals restored.
+    // drafts and the production globals restored. A confirmation left open
+    // by a thrown assertion would keep the modal layer (and its focus trap)
+    // in force for the next section, so it is settled as a cancel first.
+    const leftover = d.getElementById('oc-confirm-dialog');
+    if (leftover) {
+      leftover.querySelector('[data-oc-confirm="cancel"]')?.click();
+      if (leftover.isConnected) leftover.remove();
+    }
     w.closeOperatorConsole();
     w.applyPauseState(EMPTY_PAUSE);
     w.applyDebugState(emptyDebug());
