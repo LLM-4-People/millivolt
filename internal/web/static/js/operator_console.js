@@ -744,7 +744,7 @@ function ocConfirm({ title, body, confirm, danger }) {
       `<h3 id="oc-confirm-title">${escapeHtml(title)}</h3>` +
       `<p class="oc-confirm-body">${escapeHtml(body)}</p>` +
       `<div class="operator-dialog-actions">` +
-      `<button type="button" class="btn" data-oc-confirm="cancel">Cancel</button>` +
+      `<button type="button" class="btn" data-oc-confirm="cancel">cancel</button>` +
       `<button type="button" class="btn ${danger ? 'btn-danger-solid' : 'btn-accent'}" data-oc-confirm="ok">${escapeHtml(confirm)}</button>` +
       `</div></div>`);
     let settled = false;

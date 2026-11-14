@@ -378,7 +378,7 @@ and byte facts for the current configuration.
 
 Removing a limit, resuming every hold, stopping every capture, draining the
 queue and restarting open the shared confirmation dialog. It states the
-consequence, focuses Cancel first, and names the action on its confirm button.
+consequence, focuses cancel first, and names the action on its confirm button.
 Individual resume and stop actions commit directly; an edit commits when its
 composer is applied. All are recorded.
 
