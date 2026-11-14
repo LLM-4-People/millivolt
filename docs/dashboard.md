@@ -47,6 +47,13 @@ of the chart: one to three buckets are too few to read a trend, and the totals
 strip still tells the story until a fourth point arrives. A span with no stored
 history says so; a span inside history with no requests says that instead.
 
+A failed chart request never blanks a good payload: one transient error should
+not hide the history you were reading. The context row states which of the two
+situations applies. With nothing drawn it reads `chart unavailable - retrying`;
+with a last-good payload still on screen it reads the window and `stale,
+retrying`, so old buckets are never presented as a current reading. Either way
+the next successful request clears it.
+
 The **In-flight** KPI tile separates sending work from parked work. Its summary
 names two totals that fit the narrowest tile - active and queued - and the
 composition rail under the value splits every live state by color: sending,
