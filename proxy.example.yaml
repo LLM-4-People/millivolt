@@ -788,14 +788,14 @@ mcp_query_max_rows: 200
 # Client-side cap on the encoded size of one query tool result. Keeps whole rows,
 # truncating with an explicit marker rather than silently. Restart required.
 # Hot-reload: NO (restart required).
-#   type: bytes · range >= 1B · default 128KiB
+#   type: bytes · range 1B..64MiB · default 128KiB
 mcp_query_max_bytes: 128KiB
 
 # Size above which a stored capture document is withheld whole from the audit_capture_get
 # tool; a document that large is more than a model should read in one call. Restart
 # required.
 # Hot-reload: NO (restart required).
-#   type: bytes · range >= 1B · default 256KiB
+#   type: bytes · range 1B..64MiB · default 256KiB
 mcp_capture_max_bytes: 256KiB
 
 # Bounds one proxy read the endpoint makes that is not the proxy's own bounded SQL reader

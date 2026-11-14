@@ -612,13 +612,26 @@ func validateMCPLimits(c *Config) error {
 				strconv.FormatInt(int64(limit.min), 10), strconv.FormatInt(int64(limit.max), 10), strconv.FormatInt(int64(limit.value), 10))
 		}
 	}
-	if c.MCPQueryMaxBytes < MCPQueryMaxBytesMin {
-		return fmt.Errorf("mcp_query_max_bytes: must be >= %s, got %s",
-			FormatByteSize(MCPQueryMaxBytesMin), FormatByteSize(int64(c.MCPQueryMaxBytes)))
-	}
-	if c.MCPCaptureMaxBytes < MCPCaptureMaxBytesMin {
-		return fmt.Errorf("mcp_capture_max_bytes: must be >= %s, got %s",
-			FormatByteSize(MCPCaptureMaxBytesMin), FormatByteSize(int64(c.MCPCaptureMaxBytes)))
+	// Both MCP byte budgets share one band: the client reads no more than
+	// MCPResponseBytesMax from any call, so a larger configured budget describes
+	// a result the transport can never deliver. Rejecting it here is honest;
+	// accepting it would leave a setting that silently does nothing.
+	for _, limit := range []struct {
+		key   string
+		value ByteSize
+	}{
+		{"mcp_query_max_bytes", c.MCPQueryMaxBytes},
+		{"mcp_capture_max_bytes", c.MCPCaptureMaxBytes},
+	} {
+		if limit.value < MCPQueryMaxBytesMin {
+			return fmt.Errorf("%s: must be >= %s, got %s",
+				limit.key, FormatByteSize(MCPQueryMaxBytesMin), FormatByteSize(int64(limit.value)))
+		}
+		if limit.value > MCPResponseBytesMax {
+			return errRange(limit.key,
+				FormatByteSize(MCPQueryMaxBytesMin), FormatByteSize(MCPResponseBytesMax),
+				FormatByteSize(int64(limit.value)))
+		}
 	}
 	return nil
 }

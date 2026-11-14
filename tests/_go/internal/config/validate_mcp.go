@@ -23,6 +23,11 @@ func TestMCPSettingsValidateRejections(t *testing.T) {
 		{"query rows above ceiling", func(c *Config) { c.MCPQueryMaxRows = 100001 }, "mcp_query_max_rows"},
 		{"query bytes below floor", func(c *Config) { c.MCPQueryMaxBytes = 0 }, "mcp_query_max_bytes"},
 		{"capture bytes below floor", func(c *Config) { c.MCPCaptureMaxBytes = 0 }, "mcp_capture_max_bytes"},
+		// The client reads no more than MCPResponseBytesMax from any call, so a
+		// larger configured budget would describe a result the transport can
+		// never deliver: a setting that silently does nothing.
+		{"query bytes above the read ceiling", func(c *Config) { c.MCPQueryMaxBytes = MCPResponseBytesMax + 1 }, "mcp_query_max_bytes"},
+		{"capture bytes above the read ceiling", func(c *Config) { c.MCPCaptureMaxBytes = MCPResponseBytesMax + 1 }, "mcp_capture_max_bytes"},
 		{"query timeout zero", func(c *Config) { c.MCPQueryTimeout = 0 }, "mcp_query_timeout"},
 		{"query timeout negative", func(c *Config) { c.MCPQueryTimeout = -time.Second }, "mcp_query_timeout"},
 		{"request timeout zero", func(c *Config) { c.MCPTimeout = 0 }, "mcp_timeout"},

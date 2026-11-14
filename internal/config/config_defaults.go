@@ -123,6 +123,13 @@ const (
 	MCPQueryMaxRowsMax    = 100000
 	MCPQueryMaxBytesMin   = 1
 	MCPCaptureMaxBytesMin = 1
+	// MCPResponseBytesMax is the largest response one MCP call reads back. A
+	// tool result above it cannot be delivered at all, so a per-surface byte
+	// budget above it is unreachable rather than generous: validation caps
+	// every MCP byte setting here, and the client reads no further. One number
+	// for both, because a setting that silently cannot take effect is worse
+	// than a rejected edit.
+	MCPResponseBytesMax = 64 << 20
 )
 
 // Discovery limits bound upstream metadata work, not total Go heap usage.
