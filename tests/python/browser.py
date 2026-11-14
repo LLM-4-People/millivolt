@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright
 from .. import browser_check as fixture
 from ..explorer_check import docs_directory, docs_snapshot, history_route, publish_images
 from ..browser_check import require
-from ..support import ROOT
+from ..support import ROOT, clip_js
 
 try:
     require(False, 'checks survive optimization')
@@ -198,11 +198,56 @@ origin = ThreadingHTTPServer(('127.0.0.1', 0), Origin)
 for server in (receiver, origin):
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
+async def clip_predicate_checks(browser):
+    """The layout probes' one clip predicate must classify by what a reader sees.
+
+    A scroll box that clips a rendered value is the defect the probes exist to
+    catch; an element that paints nothing by design - screen-reader-only text,
+    a closed disclosure, a zero-opacity surface - reports the same scroll
+    numbers while showing nothing, and is what made a correct chart toolbar fail.
+    """
+    context = await browser.new_context(service_workers='block')
+    try:
+        page = await context.new_page()
+        await page.set_content("""
+          <div id="card">
+            <span id="value" style="display:inline-block;max-width:14px;overflow:hidden;
+                  white-space:nowrap">1234567890</span>
+            <span id="hidden" style="position:absolute;width:1px;height:1px;overflow:hidden;
+                  clip:rect(0,0,0,0);clip-path:inset(50%);white-space:nowrap">long label</span>
+            <div style="display:none"><span id="gone" style="display:inline-block;max-width:14px;
+                  overflow:hidden;white-space:nowrap">1234567890</span></div>
+            <div style="opacity:0"><span id="invisible" style="display:inline-block;max-width:14px;
+                  overflow:hidden;white-space:nowrap">1234567890</span></div>
+            <div style="clip-path:inset(50%)"><span id="under-clip"
+                  style="display:inline-block;max-width:14px;overflow:hidden;
+                  white-space:nowrap">1234567890</span></div>
+          </div>""")
+        scan = clip_js("""async () => {
+          const ids = clipped(document.getElementById('card')).map(e => e.id).sort();
+          return {ids, raw: [...document.querySelectorAll('#card *')]
+            .filter(e => e.clientWidth && e.scrollWidth > e.clientWidth + 2)
+            .map(e => e.id).sort()};
+        }""")
+        state = await page.evaluate(scan)
+        require(state['ids'] == ['value'], ('clip predicate misclassified', state))
+        # The old comparison is what failed a correct page: it must still report
+        # these, or this pin would pass on a predicate that reports nothing.
+        require('hidden' in state['raw'], ('fixture no longer reproduces the false positive', state))
+        require('gone' not in state['ids'] and 'invisible' not in state['ids']
+                and 'under-clip' not in state['ids'],
+                ('paints-nothing ancestors are not exempt', state))
+        return state
+    finally:
+        await context.close()
+
+
 async def main():
     await history_method_checks()
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         try:
+            clip_state = await clip_predicate_checks(browser)
             context = await browser.new_context(service_workers='block')
             errors = []
             base = f'http://127.0.0.1:{origin.server_port}'
@@ -220,7 +265,7 @@ async def main():
             except Exception:
                 pass
             require(not hits and any('foreign origin' in error for error in errors), ('origin guard failed', hits, errors))
-            print('PASS: explicit guards, database namespace/restart, publication directories/modes, read-only dashboard capture, same-origin browser load, redirected/direct foreign browser origins blocked')
+            print('PASS: explicit guards, database namespace/restart, publication directories/modes, read-only dashboard capture, same-origin browser load, redirected/direct foreign browser origins blocked, clip predicate classifies hidden text as invisible')
         finally:
             await browser.close()
 try:

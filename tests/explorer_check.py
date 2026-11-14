@@ -26,8 +26,8 @@ from playwright.async_api import async_playwright
 from scripts.backup_db import verify_docs_copy
 from . import browser_check as guards
 from .browser_check import require
-from .support import (DOCS_CAPTURE_VIEWPORT, ROOT, operator_headers, operator_signin,
-                      pick_chart_control)
+from .support import (DOCS_CAPTURE_VIEWPORT, ROOT, clip_js, operator_headers,
+                      operator_signin, pick_chart_control)
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
 KEY = 'local-lineage-fixture-only'
@@ -358,12 +358,12 @@ async def capture_history(args):
 
 
 async def layout(page):
-    return await page.evaluate('''async () => {
+    return await page.evaluate(clip_js('''async () => {
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const targets = ['#explorer','#xp-rail','#xp-dim-trigger','.xp-rail-item',
             '.xp-node','.xp-node-foot','.xp-node-signals','.xp-conversation-parent'];
-        const overflow = [...document.querySelectorAll(targets.join(','))]
-            .filter(e => e.clientWidth && e.scrollWidth > e.clientWidth + 2)
+        const overflow = clipped(document).filter(e =>
+            targets.some(sel => e.matches(sel)))
             .map(e => ({selector:e.id||e.className, width:e.clientWidth, scroll:e.scrollWidth}));
         const gallery = document.querySelector('#xp-gallery');
         const cards = gallery ? [...gallery.children] : [];
@@ -375,7 +375,7 @@ async def layout(page):
         });
         return {viewport:innerWidth, documentOverflow:document.documentElement.scrollWidth > innerWidth+2,
             overflow, rowFullyVisible};
-    }''')
+    }'''))
 
 
 async def check(args):

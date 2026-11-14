@@ -18,6 +18,63 @@ def require(value, message):
         raise RuntimeError(message)
 
 
+# The layout probes ask one question: does an element clip content a reader is
+# meant to see? A scroll box reports scrollWidth > clientWidth for the text it
+# clips, which is the defect the probes exist to catch.
+#
+# An element that paints nothing by design reports the same numbers while
+# showing nothing, so it is not a clip. `.visually-hidden` is exactly that shape
+# - 1px, overflow hidden, clip-path inset(50%), which is what makes
+# screen-reader-only text work - and the three chart triggers gained such spans
+# when their accessible names moved to aria-labelledby. The probes then failed a
+# correct page. The same latent trap sits under the hidden live region: it is
+# empty today, and any status text would trip a probe the moment it is not.
+#
+# So the exclusion is a property of the reading, not of those spans: an element
+# whose own content is invisible (display none, visibility hidden, zero opacity,
+# a clip) or that sits inside a clipped or opacity-0 ancestor paints nothing.
+# Three probes and any future one share this one definition.
+CLIP_PROBE_JS = r"""
+const paintsNothing = e => {
+  const own = getComputedStyle(e);
+  // visibility inherits, so the element's own computed value already answers
+  // for an ancestor rule; a child that overrides it back to visible still
+  // paints and must not be excluded.
+  if (own.display === 'none' || own.visibility === 'hidden') return true;
+  for (let n = e; n && n.nodeType === 1; n = n.parentElement) {
+    const cs = getComputedStyle(n);
+    if (parseFloat(cs.opacity) === 0) return true;
+    if (cs.contentVisibility === 'hidden') return true;
+    // Both spellings: the modern clip-path and the clip-rect fallback the
+    // dashboard's visually-hidden rule still carries for older engines.
+    if (cs.clipPath === 'inset(50%)') return true;
+    const clip = (cs.clip || '').replace(/\s+/g, '');
+    if (clip === 'rect(0px,0px,0px,0px)' || clip === 'rect(0,0,0,0)') return true;
+  }
+  return false;
+};
+const clipsPaintedContent = (e, slop = 2) =>
+  e.clientWidth > 0 && e.scrollWidth > e.clientWidth + slop && !paintsNothing(e);
+const clipped = (root, slop = 2) =>
+  [...root.querySelectorAll('*')].filter(e => clipsPaintedContent(e, slop));
+"""
+
+
+def clip_js(script):
+    """Give one page probe the shared clip predicate.
+
+    Playwright calls the string form `async () => { ... }` as a function, so a
+    declaration prepended to the script would replace it with a statement whose
+    completion value is never invoked. The declaration goes inside the body,
+    where it is still a statement, and every probe then reads the same
+    definition instead of restating the comparison.
+    """
+    head = 'async () => {'
+    if not script.startswith(head):
+        raise RuntimeError('clip_js expects an async arrow function body: ' + script[:40])
+    return head + CLIP_PROBE_JS + script[len(head):]
+
+
 async def pick_chart_control(page, trigger, value):
     """Pick one value from a chart-head control.
 

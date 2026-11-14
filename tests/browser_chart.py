@@ -1,6 +1,6 @@
 """Chart canvas, overview, layout, table and content-fit checks."""
 
-from .support import pick_chart_control, require
+from .support import clip_js, pick_chart_control, require
 
 
 async def chart_checks(page, screenshot, results, layout_checks):
@@ -15,7 +15,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
             # window - built from one actual server bucket so the
             # case stays independent of calendar-minute
             # boundaries - paints both lines across the plot.
-            state = await page.evaluate('''async () => {
+            state = await page.evaluate(clip_js('''async () => {
                 const bucket = chartAgg.buckets.find(b => b.tps.every(Number.isFinite) && b.ttft.every(Number.isFinite) && b.dec.every(Number.isFinite));
                 if (!bucket) throw new Error('fixture has no percentile-bearing bucket');
                 const bm = chartAgg.bucket_ms;
@@ -59,7 +59,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                     if (pixels[i+2]>pixels[i]*1.3 && pixels[i+2]>pixels[i+1]*1.1) latency++;
                 }
                 const card=document.querySelector('.traffic-card');
-                const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>({id:e.id||e.className,cw:e.clientWidth,sw:e.scrollWidth,text:(e.textContent||'').trim().slice(0,80)}));
+                const overflow=clipped(card).map(e=>({id:e.id||e.className,cw:e.clientWidth,sw:e.scrollWidth,text:(e.textContent||'').trim().slice(0,80)}));
                 // The line-only domain must be the first and last
                 // sample exactly, so the series touches both plot
                 // edges instead of stranding a half bucket of dead
@@ -72,7 +72,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                                width: plotW };
                 return {sparseBlank, sparseH, mountedH, points:_up.data[0].length, speed, latency, overflow, edge,
                         legend:document.querySelector('#traffic-legend').textContent};
-            }''')
+            }'''))
             require(state['sparseBlank'], state)
             require(state['sparseH'] == state['mountedH'], state)
             require(state['points'] == 5 and state['speed'] and state['latency'], state)
@@ -140,7 +140,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                      {'width': 1366, 'height': 768}, {'width': 1366, 'height': 750},
                      {'width': 390, 'height': 844}):
         await page.set_viewport_size(viewport)
-        state = await page.evaluate("""async () => {
+        state = await page.evaluate(clip_js("""async () => {
             const full = window.__fullChart;
             const rlTotal = full.buckets.reduce((s,b)=>s+b.rl,0);
             const errTotal = full.buckets.reduce((s,b)=>s+b.err,0);
@@ -149,7 +149,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
             renderChart();
             await new Promise(requestAnimationFrame);
             const card=document.querySelector('.traffic-card');
-            const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
+            const overflow=clipped(card).map(e=>e.id||e.className);
             const errV=document.querySelector('#chart-totals .v-err');
             const rlV=document.querySelector('#chart-totals .v-rl');
             const ttftV=document.querySelector('#chart-totals .v-ttft');
@@ -194,7 +194,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                     cardSpill: cardRect.height > pairRect.height + 1 ||
                         cardRect.bottom > footerRect.top + 1,
                     legend:document.querySelector('#traffic-legend').textContent};
-        }""")
+        }"""))
         require(state['tilesOnly'] and not state['plot'] and not state['blank'] and state['wrapHidden'], state)
         require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
         require(state['reqTokensPair'] and state['cacheThird'], state)
