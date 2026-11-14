@@ -330,13 +330,31 @@ function clearFilterActive(f) {
   return f.provider || f.model || f.client || f.status_code || f.has_error || f.debug || f.before_ms;
 }
 
-// updateFilterCount POSTs /admin/purge/count for the delete-matching block
-// and writes the preview into elId / enables btnId.
-// phrase(count) is the label; the optional busy predicate lets a surface
-// disable its action while its own mutation is in flight. Each surface owns
-// its latest preview, including the exact older-than instant. Empty
-// selections invalidate it too. Actions reuse this predicate, never a newly
-// calculated Date.now() that would widen the confirmed deletion.
+// purgeCount is the one count reader for both purge surfaces: the console's
+// export preview and the Settings sheet's delete-matching block. Both must
+// preview with the exact predicate they act on, so the request, the fallback
+// message and the count validation live here once. It lives in this module
+// because this module loads first and owns the purge filter vocabulary; the
+// export module reads it rather than keeping a second copy.
+async function purgeCount(filter) {
+  const doc = await operatorJsonBody('/admin/purge/count', {
+    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(filter),
+  }, PURGE_COUNT_UNAVAILABLE);
+  if (!Number.isSafeInteger(doc.count) || doc.count < 0) {
+    throw new Error(doc.error || PURGE_COUNT_UNAVAILABLE);
+  }
+  return doc.count;
+}
+
+// The one sentence a failed or malformed count reports.
+const PURGE_COUNT_UNAVAILABLE = 'count unavailable';
+
+// updateFilterCount paints the delete-matching block's preview into elId and
+// gates btnId on it. phrase(count) is the label; the optional busy predicate
+// lets a surface disable its action while its own mutation is in flight. Each
+// surface owns its latest preview, including the exact older-than instant.
+// Empty selections invalidate it too. Actions reuse this predicate, never a
+// newly calculated Date.now() that would widen the confirmed deletion.
 const _filterPreviews = new Map();
 function filterSelection(prefix) { return JSON.stringify(filterFromUI(prefix, 0)); }
 function previewedFilter(prefix) {
@@ -344,7 +362,6 @@ function previewedFilter(prefix) {
   return preview && preview.count > 0 && preview.selection === filterSelection(prefix) ? preview : null;
 }
 async function updateFilterCount(prefix, elId, btnId, phrase, busy) {
-  const fail = 'count unavailable';
   const f = filterFromUI(prefix);
   const el = $(elId);
   const preview = {filter: f, selection: filterSelection(prefix), count: null};
@@ -353,15 +370,16 @@ async function updateFilterCount(prefix, elId, btnId, phrase, busy) {
   if (!clearFilterActive(f)) { el.textContent = ''; return; }
   el.textContent = 'counting…';
   try {
-    const d = await operatorJsonBody('/admin/purge/count', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(f) }, fail);
+    const count = await purgeCount(f);
     if (_filterPreviews.get(prefix) !== preview || preview.selection !== filterSelection(prefix)) return;
-    if (!Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || fail);
-    preview.count = d.count;
-    el.textContent = phrase(d.count);
-    $(btnId).disabled = d.count === 0 || !!(busy && busy());
+    preview.count = count;
+    el.textContent = phrase(count);
+    $(btnId).disabled = count === 0 || !!(busy && busy());
   } catch (e) {
+    // A reply that lands after the selection moved on says nothing about the
+    // current one, so it writes neither the count nor the failure.
     if (_filterPreviews.get(prefix) === preview && preview.selection === filterSelection(prefix)) {
-      el.textContent = String(e.message || fail);
+      el.textContent = String(e.message || PURGE_COUNT_UNAVAILABLE);
     }
   }
 }

@@ -85,17 +85,6 @@ function ocExportURL(filter) {
   return '/metrics/export' + (qs ? '?' + qs : '');
 }
 
-// purgeCount is the shared count owner for export previews and the Settings
-// delete block. Both surfaces must preview with the exact predicate they act
-// on, so the parse and validation live here once.
-async function purgeCount(filter) {
-  const doc = await operatorJsonBody('/admin/purge/count', {
-    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(filter),
-  }, 'count unavailable');
-  if (!Number.isSafeInteger(doc.count) || doc.count < 0) throw new Error(doc.error || 'count unavailable');
-  return doc.count;
-}
-
 function ocFilterActive(draft) {
   return !!(draft.provider || draft.model || draft.client || draft.conversation ||
     draft.status || draft.errors || draft.debug || draft.errorType || draft.age || draft.after);
@@ -275,7 +264,7 @@ async function ocRunExportCount() {
     if (ocDrafts.export !== draft) return;
     draft.count = null;
     draft.epoch = 0;
-    draft.error = String(err.message || 'count unavailable');
+    draft.error = String(err.message || PURGE_COUNT_UNAVAILABLE);
   } finally {
     draft.counting = false;
     ocUpdateExportReceipt();
