@@ -115,6 +115,12 @@ type throttleRuntime struct {
 	started      bool
 	closed       bool
 
+	// restoreDegraded records that a durable cap document existed but could not
+	// be decoded, so this process booted with none of the caps it had before the
+	// restart. Reported rather than only logged: a silently empty cap list reads
+	// as "no provider is capped", which is the opposite of what happened.
+	restoreDegraded bool
+
 	// persistMu lets concurrent persistence loops (operator edits and the one
 	// background writer) overlap, while a flush takes the exclusive side so no
 	// stale write can land after it. Every write is bounded by the store query
@@ -179,7 +185,12 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 		log.Printf("throttle: load: %v", err)
 		return
 	}
-	items := decodeThrottles(raw)
+	items, degraded := decodeThrottles(raw)
+	if degraded {
+		s.throttle.mu.Lock()
+		s.throttle.restoreDegraded = true
+		s.throttle.mu.Unlock()
+	}
 	if len(items) == 0 {
 		return
 	}
@@ -199,16 +210,20 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	}
 }
 
-func decodeThrottles(raw []byte) []persistedThrottle {
+// decodeThrottles reads the persisted cap document. The second result reports a
+// document that existed but could not be decoded: an empty store and a corrupt
+// one both yield no caps, and only the caller can tell the operator that the
+// difference means caps were lost rather than never installed.
+func decodeThrottles(raw []byte) (items []persistedThrottle, degraded bool) {
 	if len(raw) == 0 {
-		return nil
+		return nil, false
 	}
 	var doc persistedThrottleDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		log.Printf("throttle: decode: %v", err)
-		return nil
+		return nil, true
 	}
-	return doc.Throttles
+	return doc.Throttles, false
 }
 
 func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
@@ -1272,12 +1287,19 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 		})
 	}
 	known := sanitizeNameList(append(s.pause.providers.list(), throttleProviders(infos)...))
+	s.throttle.mu.Lock()
+	restoreDegraded := s.throttle.restoreDegraded
+	s.throttle.mu.Unlock()
 	return map[string]any{
 		"ok":              true,
 		"throttles":       throttles,
 		"known_providers": nullSlice(known),
 		"known_clients":   nullSlice(sanitizeNameList(s.pause.clients.list())),
 		"known_models":    nullSlice(sanitizeNameList(s.pause.models.list())),
+		// A durable cap document existed but could not be read, so no cap from
+		// before the restart is enforcing. Reported apart from an empty list,
+		// which would read as a deliberate, uncapped configuration.
+		"restore_degraded": restoreDegraded,
 		"active":          len(throttles) > 0,
 	}
 }

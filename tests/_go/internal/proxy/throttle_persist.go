@@ -46,7 +46,7 @@ func throttleGenerations(p *Server) (persistGen, persistedGen uint64) {
 
 func assertThrottleDocumentMatchesPolicy(t *testing.T, raw []byte, p *Server) []persistedThrottle {
 	t.Helper()
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	want := p.latestThrottleSnap()
 	gotJSON, err := json.Marshal(persistedThrottleDoc{Throttles: items})
 	if err != nil {
@@ -332,7 +332,7 @@ func TestThrottleStaleWriteRewritesLatest(t *testing.T) {
 	if count != 3 {
 		t.Fatalf("writes = %d, want stale write plus latest rewrite", count)
 	}
-	items := decodeThrottles(got)
+	items, _ := decodeThrottles(got)
 	if len(items) != 1 || items[0].Provider != "provider.example" || items[0].Concurrency != 2 {
 		t.Fatalf("final durable policy = %+v, want the latest concurrency 2", items)
 	}
@@ -522,7 +522,7 @@ func TestThrottleHeaderPersistenceRetriesAfterFailure(t *testing.T) {
 	if calls < 2 {
 		t.Fatalf("persistence calls = %d, want a retry after the first failure", calls)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Provider != "provider.example" || items[0].Concurrency != 2 {
 		t.Fatalf("retried document = %+v", items)
 	}
@@ -545,7 +545,7 @@ func TestThrottleHeaderPersistenceFlushRecoversAfterFailure(t *testing.T) {
 		t.Fatalf("flush after the sink recovered: %v", err)
 	}
 	_, raw := sink.stats()
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Concurrency != 3 {
 		t.Fatalf("recovered flush document = %+v", items)
 	}
@@ -629,7 +629,7 @@ func TestThrottlePersisterCloseIdempotent(t *testing.T) {
 	if saves != 1 {
 		t.Fatalf("concurrent closes wrote %d documents, want 1", saves)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Concurrency != 4 {
 		t.Fatalf("closed policy = %+v", items)
 	}
@@ -671,7 +671,7 @@ func TestThrottleProviderLabelBound(t *testing.T) {
 	if max > operatorPersistDocMaxBytes {
 		t.Fatalf("persisted document exceeded cap: %d", max)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 || items[0].Provider != normal {
 		t.Fatalf("overlong label changed the persisted document: %+v", items)
 	}

@@ -411,18 +411,36 @@ function refreshFooterState() {
     } else {
       state.textContent = streamLive ? 'live' : 'offline';
     }
-    // Storage health footnotes share the warning styling: durable drops,
-    // and a degraded boot scan (since-inception totals incomplete).
+    // Every health footnote the footer can add, in one table. Each row says
+    // what has to be true, the words it appends, and why it appended them; the
+    // chain this replaced was a nested ternary, so a third degraded state would
+    // have made the title and the words two places to get wrong.
+    //
+    // A degraded restore is the operator-state twin of a degraded boot scan:
+    // a durable hold or cap document existed and could not be read, so this
+    // process is running without state it had. It reads apart from "nothing is
+    // held", which is what an empty list would otherwise say.
     const dropped = storageState?.enabled ? storageState.dropped : 0;
-    const degraded = storageState?.totals_degraded === true;
-    state.classList.toggle('storage-warning', dropped > 0 || degraded);
-    state.title = dropped > 0
-      ? 'Records not saved durably since this process started (queue overflow, closed store, or write failure). Some may remain in the live ring.'
-      : degraded
-        ? 'The startup history scan failed, so since-inception totals only count rows committed since this process started.'
-        : '';
-    if (dropped > 0) state.textContent += ' · ' + fmt(dropped) + ' storage drops';
-    if (degraded) state.textContent += ' · totals degraded';
+    const footnotes = [
+      {
+        on: dropped > 0,
+        words: ' · ' + fmt(dropped) + ' storage drops',
+        why: 'Records not saved durably since this process started (queue overflow, closed store, or write failure). Some may remain in the live ring.',
+      },
+      {
+        on: storageState?.totals_degraded === true,
+        words: ' · totals degraded',
+        why: 'The startup history scan failed, so since-inception totals only count rows committed since this process started.',
+      },
+      {
+        on: pauseState.restore_degraded === true || throttleState.restore_degraded === true,
+        words: ' · state degraded',
+        why: 'A saved hold or limit document could not be read at startup, so rules saved before this restart are not in force. Check the pause and limits sections before relying on them.',
+      },
+    ].filter(note => note.on);
+    state.classList.toggle('storage-warning', footnotes.length > 0);
+    state.title = footnotes.map(note => note.why).join(' ');
+    for (const note of footnotes) state.textContent += note.words;
   }
 }
 

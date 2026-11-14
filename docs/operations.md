@@ -1627,9 +1627,15 @@ for a second state request. Live SSE carries pending progress and finalization;
 KPI/operator polling and configured aggregate refresh keep derived surfaces current.
 Reconnects use sequence/feed identity and fall back to full snapshots when replay
 cannot be trusted. The footer distinguishes live/offline, active holds/Debug,
-process-local storage drops and totals degraded by a failed startup history
-scan. An offline indicator alone does not prove inference
-is down. None of these mechanisms makes initial history preload instantaneous.
+process-local storage drops, totals degraded by a failed startup history scan,
+and a degraded operator-state restore. The last one is the difference between
+"nothing is held" and "a saved hold or limit document could not be read": the
+served `pause` and `throttle` snapshots carry `restore_degraded`, so a truncated
+document does not boot as a healthy, unpaused proxy with its saved rules silently
+gone. The unreadable document stays in place rather than being overwritten by the
+next operator write, so it can be inspected or replaced deliberately. An offline
+indicator alone does not prove inference is down. None of these mechanisms makes
+initial history preload instantaneous.
 
 For integrations, use the documented read routes rather than scraping the DOM.
 Bootstrap/live data is a recent observation window; scoped aggregate routes query

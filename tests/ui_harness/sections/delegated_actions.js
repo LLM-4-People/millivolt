@@ -175,6 +175,33 @@ module.exports = async function delegatedActions(H) {
       sw.applyBootstrapState({...state, storage: {enabled: true, dropped: 0}});
       check('a clean storage signal renders no degraded footnote',
         !sd.getElementById('f-state').textContent.includes('totals degraded') && !sd.getElementById('f-state').title);
+      // A degraded operator-state restore is the twin of a degraded boot scan:
+      // a durable hold or cap document existed and could not be read, so rules
+      // saved before the restart are not in force. It must read apart from
+      // "nothing is held", which is what an empty list would otherwise say.
+      {
+        const emptyPause = {ok: true, paused: false, holds: [], clients: [], providers: [],
+          known_clients: [], known_providers: [], until: null, queued: 0,
+          storm_waiters: 0, default_max_queued: 0};
+        sw.applyPauseState({...emptyPause, restore_degraded: true});
+        const footer = sd.getElementById('f-state');
+        check('a degraded hold restore is named in the footer, not read as "nothing is held"',
+          footer.textContent.includes('state degraded') &&
+          footer.title.includes('could not be read at startup') &&
+          !footer.textContent.includes('paused'));
+        sw.applyPauseState({...emptyPause, restore_degraded: false});
+        check('a healthy restore clears the degraded footnote',
+          !sd.getElementById('f-state').textContent.includes('state degraded'));
+        // The cap document reports the same fact through the same footnote.
+        sw.applyThrottleState({ok: true, active: false, throttles: [], known_providers: [],
+          known_clients: [], known_models: [], restore_degraded: true});
+        check('a degraded cap restore reaches the same footnote',
+          sd.getElementById('f-state').textContent.includes('state degraded'));
+        sw.applyThrottleState({ok: true, active: false, throttles: [], known_providers: [],
+          known_clients: [], known_models: [], restore_degraded: false});
+        check('the footnote clears once both documents restore cleanly',
+          !sd.getElementById('f-state').textContent.includes('state degraded'));
+      }
       const banner = sd.getElementById('storm-banner');
       check('embedded bootstrap exposes compact actionable provider storm summaries',
         banner && !banner.hidden && banner.getAttribute('role') === 'status' && banner.getAttribute('aria-live') === 'polite' &&

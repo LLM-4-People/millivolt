@@ -342,6 +342,10 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     queued: typeof st.queued === 'number' ? st.queued : 0,
     storm_waiters: typeof st.storm_waiters === 'number' ? st.storm_waiters : 0,
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
+    // A durable hold document existed but could not be read, so holds saved
+    // before this restart are not in force. It stays on the state rather than
+    // becoming a toast: the fact holds until the operator acts.
+    restore_degraded: st.restore_degraded === true,
   };
   refreshFooterState();
   resyncOperatorSurfaces('pause');
@@ -358,6 +362,12 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
     [KNOWN_CLIENTS_KEY]: Array.isArray(st[KNOWN_CLIENTS_KEY]) ? st[KNOWN_CLIENTS_KEY] : [],
     [KNOWN_MODELS_KEY]: Array.isArray(st[KNOWN_MODELS_KEY]) ? st[KNOWN_MODELS_KEY] : [],
     active: !!st.active,
+    // The cap document's half of the same degraded restore.
+    restore_degraded: st.restore_degraded === true,
   };
+  // The footer names both degraded documents, so it repaints from either
+  // snapshot. The cap arm used to skip this, so a throttle-only change left the
+  // footer showing the previous state until some unrelated live render ran.
+  refreshFooterState();
   resyncOperatorSurfaces('throttle');
 }

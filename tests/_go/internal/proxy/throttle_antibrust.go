@@ -117,7 +117,7 @@ func TestThrottleHeaderPreservesAntiBurstPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := decodeThrottles(raw)
+	items, _ := decodeThrottles(raw)
 	if len(items) != 1 {
 		t.Fatalf("persisted document = %s", raw)
 	}

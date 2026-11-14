@@ -193,6 +193,11 @@ type pauseRuntime struct {
 	holds      []persistedPause
 	timers     map[string]*time.Timer
 	persistGen uint64
+	// restoreDegraded records that a durable document existed but could not be
+	// read, so this process is running without the holds it had before the
+	// restart. It is a distinct fact from "no holds": a silent empty list reads
+	// as "nothing is held", while this says the state could not be recovered.
+	restoreDegraded bool
 }
 
 // nameSet is one operator-known dimension (clients, providers, canonical
@@ -447,19 +452,25 @@ func newPauseID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func decodePause(raw []byte) []persistedPause {
+// decodePause reads the persisted hold document. The second result reports a
+// document that existed but could not be decoded: an empty store and a corrupt
+// one both yield no holds, and only the caller can tell the operator that the
+// difference means state was lost rather than never written. A corrupt
+// document is left in place so the next write does not silently destroy the
+// only evidence of it.
+func decodePause(raw []byte) (holds []persistedPause, degraded bool) {
 	if len(raw) == 0 {
-		return nil
+		return nil, false
 	}
 	var doc persistedDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		log.Printf("pause: decode: %v", err)
-		return nil
+		return nil, true
 	}
 	if len(doc.Holds) == 0 {
-		return nil
+		return nil, false
 	}
-	return doc.Holds
+	return doc.Holds, false
 }
 
 // AttachPausePersist restores the hold from durable storage and seeds the
@@ -487,7 +498,12 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 	if err != nil {
 		log.Printf("pause: load: %v", err)
 	} else {
-		holds := decodePause(raw)
+		holds, degraded := decodePause(raw)
+		if degraded {
+			s.pause.mu.Lock()
+			s.pause.restoreDegraded = true
+			s.pause.mu.Unlock()
+		}
 		kept := holds[:0]
 		for _, h := range holds {
 			// KnownAtNew is the observed vocabulary snapshot the hold compared
@@ -1015,6 +1031,7 @@ func (s *Server) PauseSnapshot() map[string]any {
 	st := s.scheduler.Stats()
 	s.pause.mu.Lock()
 	holds := append([]persistedPause(nil), s.pause.holds...)
+	restoreDegraded := s.pause.restoreDegraded
 	s.pause.mu.Unlock()
 
 	var clients, providers []string
@@ -1069,6 +1086,12 @@ func (s *Server) PauseSnapshot() map[string]any {
 		// are reported apart because draining the queue cannot release them:
 		// only the gate opening or an operator resume does.
 		"storm_waiters": st.StormWaiters,
+		// A durable hold document existed but could not be read, so this
+		// process is running without state it had before the restart. It is a
+		// distinct fact from an empty holds list, which reads as "nothing is
+		// held" - the failure a silently truncated document would otherwise
+		// present as a healthy, unpaused proxy.
+		"restore_degraded": restoreDegraded,
 	}
 }
 

@@ -175,7 +175,7 @@ func TestThrottleConcurrentHeadersMergeLatestPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw, _ := store.LoadThrottle(context.Background())
-		items := decodeThrottles(raw)
+		items, _ := decodeThrottles(raw)
 		if len(items) != 1 {
 			t.Fatalf("persisted stale clear: %s", raw)
 		}
