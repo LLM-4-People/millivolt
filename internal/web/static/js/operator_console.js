@@ -127,6 +127,19 @@ function ocLimitEnforcing(policy) {
   return !!policy && policy.scheduled !== false;
 }
 
+// ocLimitOffSchedule is the same fact read the other way. Both rows need the
+// negative, and writing `policy.scheduled === false` at each row was a second
+// reading of one server field: a server that started answering null would
+// flip one surface and not the other. The positive test stays the primitive
+// and this is its complement, so they can never disagree.
+function ocLimitOffSchedule(policy) {
+  return !ocLimitEnforcing(policy);
+}
+
+// The one word both the readout and every row use for a policy outside its
+// window. It is not "scheduled": that asserts the opposite of the truth.
+const OC_OFF_SCHEDULE = 'off schedule';
+
 function ocRuleCounts() {
   const holds = typeof liveHolds === 'function' ? liveHolds().length : 0;
   const captures = typeof liveDebugSessions === 'function' ? liveDebugSessions().length : 0;
@@ -161,7 +174,7 @@ function ocReadoutSegments() {
   // separately rather than counted as a cap. The server's `scheduled` field
   // is true only while the window is open, so this segment counts the closed
   // ones: "off schedule", not "scheduled", which read as the opposite.
-  if (counts.parked > 0) segs.push('off schedule ' + counts.parked);
+  if (counts.parked > 0) segs.push(OC_OFF_SCHEDULE + ' ' + counts.parked);
   return segs;
 }
 

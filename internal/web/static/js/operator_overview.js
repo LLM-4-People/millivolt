@@ -30,7 +30,7 @@ function ocAllRuleRows() {
     // installed but enforcing nothing. Listing it as an ordinary row made the
     // same rule read as a live cap here, as "off schedule" in its section and
     // as `off schedule N` in the readout: three surfaces, two answers.
-    const offSchedule = policy.scheduled === false;
+    const offSchedule = ocLimitOffSchedule(policy);
     rows.push({
       kind: 'limit',
       section: 'limits',
@@ -42,7 +42,7 @@ function ocAllRuleRows() {
         conversations: policy.scope?.conversations,
       }),
       detail: [ocBudgetPhrase(policy), policy.schedule ? ocSchedulePhrase(policy.schedule) : '',
-        offSchedule ? 'off schedule' : ''].filter(Boolean).join(' · '),
+        offSchedule ? OC_OFF_SCHEDULE : ''].filter(Boolean).join(' · '),
     });
   }
   return rows;

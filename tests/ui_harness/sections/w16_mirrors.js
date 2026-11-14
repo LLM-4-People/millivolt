@@ -274,6 +274,26 @@ module.exports = async function w16Mirrors(H) {
         // request/token windows and the ramp from LIMIT_WINDOWS, so a caller
         // cannot re-derive a divergent token list.
         {
+        // One reading of ThrottleInfo.scheduled. It was tested twice with
+        // opposite polarity - `scheduled !== false` in the readout and
+        // `scheduled === false` in both row builders - so a server answering
+        // null would have flipped one surface and not the other.
+        const dir = path.join(STATIC, 'js');
+        const consoleSources = fs.readdirSync(dir)
+          .filter(name => /^operator_.*\\.js$/.test(name))
+          .map(name => fs.readFileSync(path.join(dir, name), 'utf8'));
+        check('the off-schedule test has one owner instead of two polarities',
+          !consoleSources.some(src => src.includes('policy.scheduled === false') ||
+            src.includes('policy.scheduled !== false') ||
+            src.includes("'off schedule'")));
+        check('the enforcing test and its complement can never disagree',
+          sw.ocLimitEnforcing({scheduled: true}) === true &&
+          sw.ocLimitOffSchedule({scheduled: true}) === false &&
+          sw.ocLimitEnforcing({scheduled: false}) === false &&
+          sw.ocLimitOffSchedule({scheduled: false}) === true &&
+          sw.ocLimitEnforcing(null) === false && sw.ocLimitOffSchedule(null) === true);
+      }
+      {
         // One budget sentence. The row, the overview and the ledger print
         // ocBudgetPhrase, and the composer preview now reads the same clause
         // list: it used to build a second sentence with its own plural rule
