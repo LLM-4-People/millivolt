@@ -86,7 +86,7 @@ function ocRenderOverview() {
   // them, so the operator is not offered a button that cannot help.
   const queue = queued ? `<div class="oc-group"><div class="oc-label">queue</div>` +
     `<p class="oc-note">${fmt(queued)} parked. Draining releases them with a retryable response; running streams finish.</p>` +
-    `<div class="oc-inline">${ocChipRow('drain-scope', ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
+    `<div class="oc-inline">${ocChipRow(OC_CHOICES.drainScope, ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
     (ocDrain.scope !== 'all' ? ocDrainValueHTML() : '') +
     `<button type="button" class="btn" data-oc-drain>drain</button></div></div>` : '';
   const gated = parked.gated ? `<div class="oc-group" data-oc-gate><div class="oc-label">gate</div>` +

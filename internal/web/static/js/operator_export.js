@@ -189,14 +189,14 @@ function ocRenderExport() {
     ? `<div class="oc-group"><div class="oc-label">matching</div>` +
       ocExportFiltersHTML(draft) +
       `<div class="oc-filter-pair">` +
-      `<div class="oc-filter-row"><span class="oc-filter-name">errors</span>${ocChipRow('export-errors', ['any', 'only'], draft.errors ? 'only' : 'any', v => v)}</div>` +
-      `<div class="oc-filter-row"><span class="oc-filter-name">debug</span>${ocChipRow('export-debug', ['any', 'only'], draft.debug ? 'only' : 'any', v => v)}</div>` +
+      `<div class="oc-filter-row"><span class="oc-filter-name">errors</span>${ocChipRow(OC_CHOICES.exportErrors, ['any', 'only'], draft.errors ? 'only' : 'any', v => v)}</div>` +
+      `<div class="oc-filter-row"><span class="oc-filter-name">debug</span>${ocChipRow(OC_CHOICES.exportDebug, ['any', 'only'], draft.debug ? 'only' : 'any', v => v)}</div>` +
       `</div>` +
       // Each age list is one of four labelled spans, so a select states the
       // choice in one line instead of wrapping four long chips.
       `<div class="oc-filter-pair">` +
-      `<div class="oc-filter-row"><span class="oc-filter-name">newer than</span>${ocChoiceSelect('export-after', OC_AFTER_CHOICES.map(([v]) => v), draft.after, v => OC_AFTER_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
-      `<div class="oc-filter-row"><span class="oc-filter-name">older than</span>${ocChoiceSelect('export-age', OC_AGE_CHOICES.map(([v]) => v), draft.age, v => OC_AGE_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
+      `<div class="oc-filter-row"><span class="oc-filter-name">newer than</span>${ocChoiceSelect(OC_CHOICES.exportAfter, OC_AFTER_CHOICES.map(([v]) => v), draft.after, v => OC_AFTER_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
+      `<div class="oc-filter-row"><span class="oc-filter-name">older than</span>${ocChoiceSelect(OC_CHOICES.exportAge, OC_AGE_CHOICES.map(([v]) => v), draft.age, v => OC_AGE_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
       `</div>` +
       `<label class="oc-field wide" data-oc-key="error-type"><span class="oc-field-name">error type</span><input type="text" data-oc-export-field="errorType" value="${escapeHtml(draft.errorType)}" placeholder="exact provider error type"></label>` +
       `</div>`
@@ -204,7 +204,7 @@ function ocRenderExport() {
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Stream matching request records as a gzip JSON artifact. The preview and the download use the same predicate.</p></div>` +
     `<div class="oc-group"><div class="oc-label">what to download</div>` +
-    ocChipRow('export-mode', ['all', 'filter'], draft.mode, v => v === 'all' ? 'all history' : 'matching records') +
+    ocChipRow(OC_CHOICES.exportMode, ['all', 'filter'], draft.mode, v => v === 'all' ? 'all history' : 'matching records') +
     `</div>` + rows +
     `<div class="oc-receipt"><div class="oc-receipt-main" id="oc-export-receipt" role="status" aria-live="polite">${escapeHtml(receipt)}</div>` +
     `<div class="oc-receipt-sub">Debug records carry their captured bodies. Treat every export as sensitive.</div>` +

@@ -74,7 +74,7 @@ function ocPauseComposerHTML(draft) {
   return `<section class="oc-compose" data-kind="pause">` +
     `<div class="oc-compose-hd"><span>${editing ? 'editing hold' : 'new hold'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">scope</div>` +
-    ocChipRow('pause-mode', ['named', 'new', 'all'], draft.mode, v =>
+    ocChipRow(OC_CHOICES.pauseMode, ['named', 'new', 'all'], draft.mode, v =>
       v === 'all' ? 'everything' : v === 'new' ? 'new clients' : 'named scope') +
     // The same five dimensions the limit composer offers. A hold that can only
     // name clients and providers cannot ask "park this model" while a limit can
@@ -86,7 +86,7 @@ function ocPauseComposerHTML(draft) {
         ? 'Clients unseen when this hold starts park. Requests already running finish.'
         : 'A dimension left empty matches any value; set dimensions combine.'}</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
-    ocChipRow('pause-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : PAUSE_DURS[0][1]) +
+    ocChipRow(OC_CHOICES.pauseDuration, [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : PAUSE_DURS[0][1]) +
     `</div>` +
     `<div class="oc-group"><label class="oc-check"><input type="checkbox" data-oc-field="pauseCapOn" ${draft.cap !== '' ? 'checked' : ''}><span>limit the hold queue</span></label>` +
     (draft.cap !== '' ? ocField('pauseCap', 'queued requests', draft.cap, { placeholder: String(ocPauseDefaultCap()) }) : '') +
@@ -340,7 +340,7 @@ function ocCaptureComposerHTML(draft) {
     ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, OC_CAPTURE_SCOPE_KEYS) +
     `<p class="oc-note">Captures can contain credentials and private content; keep the window short and download only what you need.</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
-    ocChipRow('capture-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : 'until stopped') +
+    ocChipRow(OC_CHOICES.captureDuration, [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : 'until stopped') +
     `</div>` +
     `<p class="oc-facts">${escapeHtml(ocCaptureFacts())}</p>` +
     (blocked ? `<p class="oc-warning" role="alert">Durable storage is off, so captures cannot start. Set db_path in Settings, then restart to apply it.` +

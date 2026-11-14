@@ -2310,6 +2310,64 @@ module.exports = async function operatorMenus(H) {
         evalJSON('Object.keys(OC_COMPOSERS).join()') === 'limit,pause,capture' &&
         w.eval('Object.values(OC_COMPOSERS).every(c => c.preview && c.apply && c.state && c.key)') &&
         evalJSON('!!ocComposeControls("limit")') === true);
+      // OC_CHOICES is the one table of closed-vocabulary controls: every row
+      // carries the name the control renders and the write it performs, so the
+      // markup and the dispatcher cannot disagree about either. The twelve
+      // names used to be spelled twice, and a rename in one half left a chip
+      // that toggled visually and changed no state.
+      check('one table owns every choice name and its write',
+        evalJSON('Object.values(OC_CHOICES).length') === 12 &&
+        w.eval('Object.values(OC_CHOICES).every(c => c.name && c.kind && (c.kind === "overview" || typeof c.set === "function"))') &&
+        evalJSON('Object.keys(OC_CHOICE_BY_NAME).length') === 12 &&
+        w.eval('Object.values(OC_CHOICES).every(c => OC_CHOICE_BY_NAME[c.name] === c)') &&
+        // A name the table does not own is a no-op, never a write into
+        // whichever draft happens to be open.
+        (() => {
+          const before = JSON.stringify(w.eval('ocDrafts.limit'));
+          w.eval('ocHandleChoice("not-a-choice", "x")');
+          return JSON.stringify(w.eval('ocDrafts.limit')) === before;
+        })());
+      // Every rendered choice control is one the table names, in every state
+      // that reveals one: the limit and pause windows only exist with a draft
+      // open, four export filters only in filter mode, and the drain scope only
+      // while something is parked. Both directions are asserted, so a control
+      // that renders without a row and a row nothing ever renders are both
+      // failures.
+      {
+        const registered = new Set(w.eval('Object.values(OC_CHOICES).map(c => c.name)'));
+        const rendered = new Set();
+        const collect = () => {
+          for (const el of d.querySelectorAll('#oc-pane [data-oc-choice]')) rendered.add(el.dataset.ocChoice);
+        };
+        w.openOperatorConsole('limits');
+        startNew('limit');
+        // The ramp window lives inside the burst-control disclosure, so the
+        // draft alone does not reveal it.
+        w.eval("ocDrafts.limit.advanced = true; ocRender()");
+        collect();
+        w.openOperatorConsole('pause');
+        startNew('pause');
+        collect();
+        w.openOperatorConsole('capture');
+        startNew('capture');
+        collect();
+        w.openOperatorConsole('export');
+        w.eval("ocDrafts.export.mode = 'filter'; ocDrafts.export.provider = 'p'; ocRender()");
+        collect();
+        w.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+          known_clients: [], known_providers: [], until: null, queued: 3,
+          storm_waiters: 0, default_max_queued: 0});
+        w.openOperatorConsole('overview');
+        collect();
+        w.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+          known_clients: [], known_providers: [], until: null, queued: 0,
+          storm_waiters: 0, default_max_queued: 0});
+        w.eval("ocDrafts.export = null; ocDrafts.limit = null; ocDrafts.pause = null; ocDrafts.capture = null; ocRender()");
+        check('every rendered choice control is registered and every registered name renders',
+          [...rendered].every(name => registered.has(name)) &&
+          [...registered].every(name => rendered.has(name)));
+        w.openOperatorConsole('limits');
+      }
       // OC_ACTION_HANDLERS is the one registry of delegated click actions: the
       // listener's selector is built from it, so an action cannot be
       // dispatched without being selected, or the reverse. The console carried

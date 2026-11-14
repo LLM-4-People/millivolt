@@ -179,6 +179,51 @@ const OC_COMPOSERS = {
   capture: { preview: 'oc-capture-preview', key: 'capture-preview', apply: 'oc-capture-apply', state: 'debug' },
 };
 
+// OC_CHOICES is the one table of every closed-vocabulary control in the
+// console: the name it renders and the field it writes. The markup emits the
+// name from here and ocHandleChoice resolves it here, so a control cannot be
+// renamed on one side and silently stop writing. Before this, the same twelve
+// names were spelled once where each control rendered and again in a chain of
+// `if (name === ...)` comparisons, so a rename in one half left a control that
+// toggled visually and changed nothing, with no error anywhere.
+//
+// `kind` is the section that owns the control, so a choice arriving from a
+// stale pane cannot write into another section's draft. `recount` marks the
+// controls whose write invalidates a derived read - every export filter
+// changes the predicate its receipt quotes - so the count is refreshed before
+// the repaint rather than after it.
+const OC_CHOICES = {
+  // The drain scope lives in the overview, which is not a composer kind.
+  drainScope: { name: 'drain-scope', kind: 'overview' },
+  requestWindow: { name: 'request-window', kind: 'limit', set: (d, v) => { d.requestWindow = v; } },
+  tokenWindow: { name: 'token-window', kind: 'limit', set: (d, v) => { d.tokenWindow = v; } },
+  ramp: { name: 'ramp', kind: 'limit', set: (d, v) => { d.ramp = v; } },
+  pauseMode: {
+    name: 'pause-mode', kind: 'pause',
+    // Switching mode discards the open picker: the dimensions it offered
+    // belong to the previous mode.
+    set: (d, v) => { d.mode = v; d.picker = null; },
+  },
+  pauseDuration: { name: 'pause-duration', kind: 'pause', set: (d, v) => { d.duration = v; } },
+  captureDuration: { name: 'capture-duration', kind: 'capture', set: (d, v) => { d.duration = v; } },
+  exportMode: {
+    name: 'export-mode', kind: 'export', recount: true,
+    // A mode switch also invalidates the count outright: the predicate the
+    // receipt quoted belonged to the previous mode, so keeping it would state
+    // a total beside a download that acts on a different one.
+    set: (d, v) => { d.mode = v; d.count = null; d.counting = false; d.error = ''; },
+  },
+  exportErrors: { name: 'export-errors', kind: 'export', recount: true, set: (d, v) => { d.errors = v === 'only'; } },
+  exportDebug: { name: 'export-debug', kind: 'export', recount: true, set: (d, v) => { d.debug = v === 'only'; } },
+  exportAfter: { name: 'export-after', kind: 'export', recount: true, set: (d, v) => { d.after = v; } },
+  exportAge: { name: 'export-age', kind: 'export', recount: true, set: (d, v) => { d.age = v; } },
+};
+
+// OC_CHOICE_BY_NAME resolves the rendered attribute back to its row, so the
+// dispatcher never compares against a name it spells itself.
+const OC_CHOICE_BY_NAME = Object.fromEntries(
+  Object.values(OC_CHOICES).map(choice => [choice.name, choice]));
+
 // ocComposeControls resolves the two nodes a composer's preview owns, or null
 // when the composer is not mounted.
 function ocComposeControls(kind) {
@@ -1200,7 +1245,8 @@ function ocConfirm({ title, body, confirm, danger }) {
 // ocChipRow is the one closed-vocabulary picker for short lists: a wrapping row
 // of pressed chips, where every choice is one click and all of them are
 // visible at once.
-function ocChipRow(name, values, current, labelOf) {
+function ocChipRow(choice, values, current, labelOf) {
+  const name = choice.name;
   return `<div class="oc-chips" role="group" aria-label="${escapeHtml(name)}">` +
     values.map(value => {
       const pressed = String(current) === String(value) ? 'true' : 'false';
@@ -1223,7 +1269,8 @@ function ocChipRow(name, values, current, labelOf) {
 // correctly described as 90s, and a save would have rewritten the window the
 // operator never meant to change. An off-list value therefore gets its own
 // selected option, labelled by the same label function.
-function ocChoiceSelect(name, values, current, labelOf, aria) {
+function ocChoiceSelect(choice, values, current, labelOf, aria) {
+  const name = choice.name;
   const list = values.map(String);
   const missing = current != null && current !== '' && !list.includes(String(current));
   const all = missing ? list.concat(String(current)) : list;
@@ -1579,53 +1626,27 @@ async function ocHandleAction(target) {
   await entry[1](target);
 }
 
-// ocHandleChoice writes a closed-vocabulary chip pick into the active draft.
+// ocHandleChoice writes a closed-vocabulary pick into the section that owns
+// the control. The section and the write both come from OC_CHOICES, so a
+// choice the table does not name is a no-op rather than a silent write into
+// whatever draft happens to be open.
 function ocHandleChoice(name, value) {
-  // The drain scope lives in the overview, which is not a composer kind.
-  if (name === 'drain-scope') {
+  const choice = OC_CHOICE_BY_NAME[name];
+  if (!choice) return;
+  if (choice.kind === 'overview') {
     ocDrain.scope = value;
     ocDrain.value = '';
     ocRender();
     return;
   }
-  const kind = ocCurrentKind();
-  if (kind === 'limit' && ocDrafts.limit) {
-    const draft = ocDrafts.limit;
-    if (name === 'request-window') draft.requestWindow = value;
-    if (name === 'token-window') draft.tokenWindow = value;
-    if (name === 'ramp') draft.ramp = value;
-    ocRender();
-    return;
-  }
-  if (kind === 'pause' && ocDrafts.pause) {
-    if (name === 'pause-mode') { ocDrafts.pause.mode = value; ocDrafts.pause.picker = null; }
-    if (name === 'pause-duration') ocDrafts.pause.duration = value;
-    ocRender();
-    return;
-  }
-  if (kind === 'capture' && ocDrafts.capture) {
-    if (name === 'capture-duration') ocDrafts.capture.duration = value;
-    ocRender();
-    return;
-  }
-  if (kind === 'export' && ocDrafts.export) {
-    const draft = ocDrafts.export;
-    // A mode switch invalidates the count: the predicate the receipt quoted
-    // belonged to the previous mode, so keeping it would state a total beside
-    // a download that acts on a different one.
-    if (name === 'export-mode') {
-      draft.mode = value;
-      draft.count = null;
-      draft.counting = false;
-      draft.error = '';
-    }
-    if (name === 'export-errors') draft.errors = value === 'only';
-    if (name === 'export-debug') draft.debug = value === 'only';
-    if (name === 'export-after') draft.after = value;
-    if (name === 'export-age') draft.age = value;
-    ocScheduleExportCount();
-    ocRender();
-  }
+  if (ocCurrentKind() !== choice.kind) return;
+  const draft = ocDrafts[choice.kind];
+  if (!draft) return;
+  choice.set(draft, value);
+  // A control whose write invalidates a derived read refreshes it before the
+  // repaint, so the receipt never quotes a count for the previous predicate.
+  if (choice.recount) ocScheduleExportCount();
+  ocRender();
 }
 
 function ocToggleFilterPick(dim) {
