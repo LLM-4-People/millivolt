@@ -73,9 +73,10 @@ class DrainWaitTests(unittest.TestCase):
         script = shell_harness('\nCONFIG_FILE="$1"\nstop_grace_tenths\n')
         return run_bash(script, str(path))
 
-    def test_duration_grammar_covers_every_proxy_shapecase(self):
-        """Table against Go's time.ParseDuration grammar, with the expected
-        tenths computed from the real parser (no margin here)."""
+    def test_duration_grammar_matches_go_time_duration(self):
+        """Table against Go's time.ParseDuration grammar: every unit, repeated
+        terms, a leading sign and decimal forms. The expected tenths are what
+        the real parser produces (no margin here)."""
         rows = (
             # The confirmed defect: the old sed accepted 1-3 digits then s/m.
             ("5s", 50),

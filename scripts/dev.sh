@@ -115,7 +115,7 @@ go_duration_tenths() {
   # bound, not an operator setting.
   local bound_hours=24 bound_ns
   local rest="$raw" negative=0 number whole fraction unit unit_ns
-  local digits scale fraction_ns unit_share unit_rest total_ns=0
+  local digits fraction_ns unit_share unit_rest total_ns=0
   bound_ns=$(( bound_hours * 3600 * 1000000000 ))
   [ -n "$raw" ] || die "$origin: shutdown_timeout is empty"
   case "$rest" in
@@ -160,10 +160,9 @@ go_duration_tenths() {
       # A nanosecond is the smallest value time.Duration holds, so a fraction
       # finer than 13 digits contributes nothing for any unit up to hours.
       digits="${fraction:0:13}"
-      scale=$(( 10 ** ${#digits} ))
-      # (digits * unit_ns) / scale without overflowing 64 bits: the unit is
-      # stripped to a small factor times a power of ten, so the product stays
-      # below the unit itself and the result is exact for every unit.
+      # (digits * unit_ns) / 10^len(digits) without overflowing 64 bits: the
+      # unit is stripped to a small factor times a power of ten, so the product
+      # stays below the unit itself and the result is exact for every unit.
       unit_share=$unit_ns unit_rest=0
       while (( unit_share % 10 == 0 )); do
         unit_share=$(( unit_share / 10 ))
