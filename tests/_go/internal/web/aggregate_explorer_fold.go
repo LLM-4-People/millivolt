@@ -828,9 +828,9 @@ func TestExplorerSyntheticOtherIsDistinctFromRealOther(t *testing.T) {
 // TestExplorerDistinctGroupsStayBounded pins the explorer's internal group
 // budget at one million distinct values. Exact per-value accumulators stop at
 // explorerGroupBudget and the remainder folds into the synthetic other card,
-// so neither the error affected-ID maps nor the conversation payload map
-// scales with history cardinality. The top cards and scope/rail totals remain
-// exact and the completed payload is stable across calls.
+// so no per-card request-ID set and no conversation payload map scales with
+// history cardinality. The top cards and scope/rail totals remain exact and
+// the completed payload is stable across calls.
 func TestExplorerDistinctGroupsStayBounded(t *testing.T) {
 	const distinct = 1_000_000
 	const maxAlloc = 64 << 20
@@ -950,8 +950,8 @@ func TestExplorerOverflowAffectedRequests(t *testing.T) {
 	if !f.overflow || len(f.groups) != explorerGroupBudget {
 		t.Fatalf("overflow = %v with %d tracked groups", f.overflow, len(f.groups))
 	}
-	if f.other.n != 4 || f.otherAffected != 2 || f.other.errFin != 2 || f.other.code != "" {
-		t.Fatalf("overflow accumulator = %+v (affected %d)", f.other, f.otherAffected)
+	if f.other.n != 4 || f.other.affectedN != 2 || f.other.errFin != 2 || f.other.code != "" {
+		t.Fatalf("overflow accumulator = %+v (affected %d)", f.other, f.other.affectedN)
 	}
 	card := f.payload().Groups[0]
 	if card.Name != explorerOtherName || card.N != 2 || card.ErrEvents != 4 || card.ErrFinal != 2 || card.Code != "" {

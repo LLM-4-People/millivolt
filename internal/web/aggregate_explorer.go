@@ -70,18 +70,22 @@ type entAcc struct {
 	tools             int64
 	errFin            int
 	rateLimitRequests int
-	lastRequest       string // first membership in the current row; no history-ID set
-	ttftS             []int64
-	tpsS              []float64
-	ttftN             int
-	tpsN              int
+	lastRequest       string // request owning the current run of visits
+	// affectedN is the error dim's distinct affected-request count. It is a
+	// counter, not a request-ID set: one row's visits are contiguous, so
+	// lastRequest above dedupes them, and the count stays bounded by the
+	// group budget instead of growing with history.
+	affectedN int
+	ttftS     []int64
+	tpsS      []float64
+	ttftN     int
+	tpsN      int
 	// cost-REPORTING in+out tokens: the blended-$ denominator (unpriced
 	// records add tokens but not cost, so they must not dilute).
 	costInOut float64
 	// error dim only
-	code     string
-	lastMs   int64
-	affected map[string]struct{}
+	code   string
+	lastMs int64
 }
 
 var validDims = func() map[string]bool {
@@ -203,7 +207,7 @@ func (s *explorerSelectedGroups) bucket(id uint32) uint8 {
 }
 
 // explorerFold accumulates the per-dimension breakdown (groups, rail
-// distinct-value counts, full-scope footer counts, error-affected sets) over
+// distinct-value counts, full-scope footer counts, error-affected counts) over
 // one stream of contributions. The footer never needs a second history scan.
 type explorerFold struct {
 	lineage       conversationLineage
@@ -221,11 +225,10 @@ type explorerFold struct {
 	// participates in ranking like a card but owns no per-value map: an error
 	// row's affected-request count comes from lastRequest, which is exact
 	// because one row's occurrences arrive contiguously.
-	other         entAcc
-	otherAffected int
-	overflow      bool
-	order         metricOrderSource
-	rowCount      int
+	other    entAcc
+	overflow bool
+	order    metricOrderSource
+	rowCount int
 	// Single-valued dimensions store one group id per projected row (4 bytes).
 	// Only tool/error need the flat multi-membership list + spans.
 	singleMember []uint32
@@ -452,26 +455,15 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	// the distinct affected-request count. Tool cards fold one contribution
 	// per request per tool name (a nonstream response repeats a name once per
 	// call), so their N, share and request-level accumulators are
-	// request-based while the calls KPI still sums ToolCalls. Error groups need
-	// the affected-ID set for their headline; the overflow bucket only needs
-	// the last ID because one row's visits are contiguous. Tool duplicates are
-	// contiguous too, so the same last-ID guard dedupes them.
-	var firstRequest bool
-	if e.dimIndex == dimError && g != &e.other {
-		if g.affected == nil {
-			g.affected = make(map[string]struct{})
-		}
-		_, duplicate := g.affected[c.id]
-		firstRequest = !duplicate
-		if firstRequest {
-			g.affected[c.id] = struct{}{}
-		}
-	} else {
-		firstRequest = g.n == 0 || g.lastRequest != c.id
-		g.lastRequest = c.id
-		if e.dimIndex == dimError && firstRequest {
-			e.otherAffected++
-		}
+	// request-based while the calls KPI still sums ToolCalls. One row's visits
+	// are contiguous, so the per-card last-request id is the whole dedupe
+	// state: it matches the old per-card request-ID set without holding a
+	// history-proportional map, and it is the SAME guard the overflow bucket
+	// uses.
+	firstRequest := g.n == 0 || g.lastRequest != c.id
+	g.lastRequest = c.id
+	if e.dimIndex == dimError && firstRequest {
+		g.affectedN++
 	}
 	if e.dimIndex == dimTool && !firstRequest {
 		return g, nil
@@ -556,10 +548,7 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 // separately in ErrEvents. Ranking and the wire N field read the same owner.
 func (e *explorerFold) groupCount(g *entAcc) int {
 	if e.dimIndex == dimError {
-		if g == &e.other {
-			return e.otherAffected
-		}
-		return len(g.affected)
+		return g.affectedN
 	}
 	return g.n
 }
