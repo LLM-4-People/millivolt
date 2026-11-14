@@ -166,24 +166,36 @@ function ocSelectSection(id, skipRender) {
 // ocFocusKey names the focused control across a full pane rebuild. Draft
 // values live in ocDrafts, so only the caret and the element identity need to
 // survive.
+// ocFocusTarget resolves the focusable control a keyed slot stands for. A key
+// may sit on the button itself or on a field's wrapping label, and a label is
+// not focusable, so the slot's own control wins when it has one.
+function ocFocusTarget(slot) {
+  if (!slot) return null;
+  if (slot.matches('button, input, select, textarea, [tabindex]')) return slot;
+  return slot.querySelector('button, input, select, textarea, [tabindex]');
+}
+
 function ocFocusKey() {
   const active = document.activeElement;
   if (!active || !ocShell()?.contains(active)) return null;
   const keyed = active.closest('[data-oc-key]');
   if (!keyed) return null;
-  return { key: keyed.dataset.ocKey, start: active.selectionStart, end: active.selectionEnd };
+  let start = null, end = null;
+  try { start = active.selectionStart; end = active.selectionEnd; } catch (e) { /* not a text input */ }
+  return { key: keyed.dataset.ocKey, start, end };
 }
 
 function ocRestoreFocus(saved) {
   if (!saved) return;
   const shell = ocShell();
   if (!shell) return;
-  const next = [...shell.querySelectorAll('[data-oc-key]')]
+  const slot = [...shell.querySelectorAll('[data-oc-key]')]
     .find(el => el.dataset.ocKey === saved.key);
+  const next = ocFocusTarget(slot);
   if (!next) return;
   next.focus({ preventScroll: true });
-  if (typeof next.setSelectionRange === 'function' && saved.start != null) {
-    try { next.setSelectionRange(saved.start, saved.end); } catch (e) { /* not a text input */ }
+  if (saved.start != null && typeof next.setSelectionRange === 'function') {
+    try { next.setSelectionRange(saved.start, saved.end); } catch (e) { /* number inputs reject a caret */ }
   }
 }
 
@@ -296,8 +308,11 @@ function ocScopePhrase(scope) {
   return bits.length ? bits.join(' · ') : 'every request';
 }
 
+// ocScopeValueLabel is the one shortening of a raw selector value. The
+// dimension name always comes from the surrounding sentence or row, so this
+// never repeats it: a key reads as its short hash, not "key key abcdef12".
 function ocScopeValueLabel(dim, value) {
-  if (dim === 'keyHashes') return 'key ' + String(value).slice(0, 8) + '…';
+  if (dim === 'keyHashes') return String(value).slice(0, 8) + '…';
   return String(value);
 }
 
@@ -581,7 +596,7 @@ function ocField(key, label, value, opts = {}) {
   const attrs = type === 'number' ? 'min="0" step="1" inputmode="numeric"' : '';
   return `<label class="oc-field${opts.wide ? ' wide' : ''}" data-oc-key="${escapeHtml(key)}">` +
     `<span class="oc-field-name">${escapeHtml(label)}</span>` +
-    `<input type="${type}" ${attrs} data-oc-field="${escapeHtml(key)}" value="${escapeHtml(String(value == null ? '' : value))}" placeholder="${escapeHtml(opts.placeholder || '')}" ${opts.disabled ? 'disabled' : ''}>` +
+    `<input type="${type}" ${attrs} data-oc-field="${escapeHtml(key)}" data-oc-key="field-${escapeHtml(key)}" value="${escapeHtml(String(value == null ? '' : value))}" placeholder="${escapeHtml(opts.placeholder || '')}" ${opts.disabled ? 'disabled' : ''}>` +
     (opts.hint ? `<span class="oc-field-hint">${escapeHtml(opts.hint)}</span>` : '') +
     `</label>`;
 }
@@ -622,6 +637,30 @@ function ocRenderSystem() {
     `<p class="oc-note">Queue bounds, retry budgets, storage, retention and dashboard cadence live in Settings.</p>` +
     `<button type="button" class="btn" data-oc-settings>open settings</button></div>` +
     `</div>`;
+}
+
+// ocSyncRestartVerdict patches the system section's eligibility sentence in
+// place. A status poll can flip the verdict while the operator is looking at
+// the section, and rebuilding the section there would schedule the next poll
+// from the render path.
+function ocSyncRestartVerdict() {
+  if (ocSection !== 'system' || !ocMounted) return;
+  const card = ocEl('oc-pane')?.querySelector('.oc-card');
+  if (!card) return;
+  const available = restartServerState.available !== false;
+  const existing = card.querySelector('.oc-warning');
+  if (available) {
+    if (existing) existing.remove();
+    return;
+  }
+  const reason = restartServerState.reason || 'This build cannot restart in place. Update the container or service externally.';
+  const para = existing || document.createElement('p');
+  para.className = 'oc-warning';
+  if (para.textContent !== reason) para.textContent = reason;
+  if (!existing) {
+    const steps = card.querySelector('#restart-steps');
+    if (steps) steps.after(para); else card.appendChild(para);
+  }
 }
 
 // A resize can cross the sheet breakpoint without a repaint, so the announced

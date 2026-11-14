@@ -67,14 +67,22 @@ function ocOpenLimitComposer(id) {
   ocRender();
 }
 
+// ocBurstAllowed is the one eligibility test for the anti-burst ramp: the
+// server accepts it only on a single-provider policy with no schedule, so the
+// composer both gates its control on this and refuses to send it. Two copies
+// of this rule would let a widened scope post a body the server rejects.
+function ocBurstAllowed(draft) {
+  return draft.scope.providers.length === 1 &&
+    draft.scope.models.length === 0 && draft.scope.clients.length === 0 &&
+    draft.scope.keyHashes.length === 0 && draft.scope.conversations.length === 0 &&
+    !draft.schedule;
+}
+
 function ocLimitComposerHTML(draft) {
   const editing = !!draft.id;
   const conds = ocScopeConditionsHTML(draft, ['providers', 'models', 'clients', 'keyHashes', 'conversations']);
   const global = !ocScopeHas(draft.scope);
-  const providerOnly = draft.scope.providers.length === 1 &&
-    draft.scope.models.length === 0 && draft.scope.clients.length === 0 &&
-    draft.scope.keyHashes.length === 0 && draft.scope.conversations.length === 0;
-  const burstAllowed = providerOnly && !draft.schedule;
+  const burstAllowed = ocBurstAllowed(draft);
   const scheduleOn = !!draft.schedule;
   const schedule = draft.schedule || { days: [], start: 540, end: 1020 };
   return `<section class="oc-compose" data-kind="limit" aria-label="${editing ? 'edit limit' : 'new limit'}">` +
@@ -212,6 +220,7 @@ function ocLimitRuleHTML(policy) {
 // meaningful: they clear a dimension, which is how the UI expresses a scope
 // shrink without deleting and recreating the rule.
 function ocLimitBody(draft) {
+  const burst = !!(draft.antiBurst && draft.concurrency && ocBurstAllowed(draft));
   const body = {
     providers: draft.scope.providers,
     models: draft.scope.models,
@@ -226,8 +235,8 @@ function ocLimitBody(draft) {
     request_window: draft.requests ? draft.requestWindow : '',
     tokens: ocNumber(draft.tokens),
     token_window: draft.tokens ? draft.tokenWindow : '',
-    anti_burst: !!(draft.antiBurst && draft.concurrency),
-    ramp_duration: draft.antiBurst && draft.concurrency ? draft.ramp : '',
+    anti_burst: burst,
+    ramp_duration: burst ? draft.ramp : '',
   };
   if (draft.id) body.id = draft.id;
   return body;

@@ -117,6 +117,11 @@ function fetchRestartStatus() {
       if (st && st.available === false) {
         setRestartStatus(st.reason || 'restart unavailable', true);
       }
+      // The count line and the action repaint in place, but the refusal
+      // sentence belongs to the system section's markup. Patch just that
+      // paragraph: a full section repaint would schedule another status fetch
+      // from the render path and chase its own tail.
+      if (typeof ocSyncRestartVerdict === 'function') ocSyncRestartVerdict();
       return st || {};
     })
     .catch(() => { setRestartStatus('could not check restart status', true); return {}; });
