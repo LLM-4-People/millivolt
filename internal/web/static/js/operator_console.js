@@ -70,6 +70,38 @@ function ocPauseDefaultCap() {
 // with no way to search. The filter appears only once a list is long enough to
 // need it, so a console with two rules never spends a row on an empty box.
 const OC_LIST_FILTER_MIN = 6;
+
+// A picker list is a 190px scroller: about seven rows are ever visible. The
+// row list was unbounded, so an export conversation picker over a record ring
+// at its configured ceiling emitted 10,001 rows - 30,083 nodes and 2.6MB of
+// HTML rebuilt on every keystroke, measured at 248-295ms - and the hidden
+// panel retained them after close. One cap bounds both pickers, and the
+// remainder is named so a truncated list never reads as a complete one.
+const OC_PICK_ROWS_MAX = 100;
+
+// ocPickRows renders a picker's value rows with the shared cap. `role` is
+// menuitemcheckbox for a multi-select dimension and menuitemradio for the
+// export filter's single choice; `tabStop` says whether row 0 owns the menu's
+// one tab stop, which the export picker gives to its "any" row instead.
+// Both pickers had their own copy of this row markup and had already drifted
+// on the empty note, so the shape lives here once.
+function ocPickRowsHTML(values, opts) {
+  const role = opts.role;
+  const shown = values.slice(0, OC_PICK_ROWS_MAX);
+  const rows = shown.map((value, index) => {
+    const on = !!opts.isOn(value);
+    const tab = opts.tabStop === false ? '-1' : (index === 0 ? '0' : '-1');
+    return `<button type="button" class="oc-pick-row" role="${role}" aria-checked="${on}" tabindex="${tab}" ${opts.attrs}="${escapeHtml(opts.dim)}" data-oc-value="${escapeHtml(value)}">` +
+      `<span class="oc-pick-check" aria-hidden="true">${on ? '✓' : ''}</span>` +
+      `<span class="oc-pick-label">${escapeHtml(opts.label(value))}</span></button>`;
+  }).join('');
+  // The filter input is the way to reach the rest, so the note names it
+  // only while the list is actually truncated by the cap.
+  const more = values.length > shown.length
+    ? `<p class="oc-pick-note">${fmt(values.length - shown.length)} more match. Type to narrow the list.</p>`
+    : '';
+  return rows + more;
+}
 const ocListFilter = { limits: '', pause: '', capture: '' };
 
 // ocRuleEditing reports whether a stored rule is the one open in its
@@ -727,13 +759,12 @@ function ocScopePickerHTML(draft, dim) {
   const known = all.filter(value =>
     !filter || ocScopeValueLabel(dim, value).toLowerCase().includes(filter));
   const selected = new Set(draft.scope[dim] || []);
-  const rows = known.map((value, index) => {
-    const on = selected.has(value);
-    const label = ocScopeValueLabel(dim, value);
-    // A menu is one tab stop: arrows move the cursor, Tab leaves the list.
-    return `<button type="button" class="oc-pick-row" role="menuitemcheckbox" aria-checked="${on}" tabindex="${index === 0 ? '0' : '-1'}" data-oc-pick-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
-      `<span class="oc-pick-check" aria-hidden="true">${on ? '✓' : ''}</span><span class="oc-pick-label">${escapeHtml(label)}</span></button>`;
-  }).join('');
+  // A menu is one tab stop: arrows move the cursor, Tab leaves the list.
+  const rows = ocPickRowsHTML(known, {
+    role: 'menuitemcheckbox', dim, attrs: 'data-oc-pick-value',
+    isOn: value => selected.has(value),
+    label: value => ocScopeValueLabel(dim, value),
+  });
   const empty = known.length ? '' : `<div class="oc-pick-empty">${NONE_YET_NOTE}</div>`;
   const canAdd = dim !== 'keyHashes';
   const showFilter = all.length > 6;

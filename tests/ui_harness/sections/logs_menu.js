@@ -103,6 +103,46 @@ module.exports = async function logsMenu(H) {
       ['export-errors', 'export-debug', 'export-age'].every(name =>
         !!d.querySelector(`#oc-pane [data-oc-choice="${name}"]`)));
 
+    // A picker list is a 190px scroller, so the rows beyond the visible band
+    // are pure layout work. The export conversation picker over a record ring
+    // at its configured ceiling emitted 10,001 rows: 30,083 nodes and 2.6MB of
+    // HTML rebuilt on every keystroke, measured at 248-295ms, and the hidden
+    // panel retained them after close.
+    {
+      const ring = [];
+      for (let i = 0; i < 400; i++) {
+        ring.push({id: 'r' + i, started_at: Date.now() - i, client: 'c',
+          provider: 'p', model: 'm', conversation_id: 'conv-' + String(i).padStart(4, '0'),
+          status: 200});
+      }
+      const savedData = w.eval('lastData');
+      w.eval('lastData = ' + JSON.stringify({records: ring}));
+      try {
+        w.eval("ocDrafts.export = ocBlankExportDraft(); ocDrafts.export.mode = 'filter';"
+          + " ocDrafts.export.picker = {dim: 'conversation', filter: ''}; ocRender();");
+        const list = d.querySelector('#oc-pane .oc-pick-list');
+        const cap = w.eval('OC_PICK_ROWS_MAX');
+        const valueRows = list
+          ? [...list.querySelectorAll('.oc-pick-row')].filter(row => row.dataset.ocValue !== '').length
+          : 0;
+        check('a picker caps its value rows at the shared ceiling',
+          cap > 0 && valueRows > 0 && valueRows <= cap &&
+          w.eval("ocFilterValues('conversation').length") > cap);
+        const note = d.querySelector('#oc-pane .oc-pick-note');
+        check('a truncated picker names the remainder instead of reading complete',
+          (note?.textContent || '').includes('more match') &&
+          (note?.textContent || '').includes('300 more'));
+        // Narrowing to one value must show it, not the cap's first page.
+        w.eval("ocDrafts.export.picker.filter = 'conv-0399'; ocRender();");
+        const narrowed = [...d.querySelectorAll('#oc-pane .oc-pick-row[data-oc-filter-value="conversation"]')]
+          .map(row => row.dataset.ocValue).filter(Boolean);
+        check('a narrowed picker still reaches a value past the cap',
+          narrowed.includes('conv-0399') && narrowed.length === 1);
+      } finally {
+        w.eval('lastData = ' + JSON.stringify(savedData));
+      }
+    }
+
     // FILTER_AGES is the one age vocabulary; the console renders its tokens
     // through the shared choice control and ocExportFilter reads them.
     check('FILTER_AGES offers canonical Go duration spellings',

@@ -152,13 +152,13 @@ function ocFilterPickerHTML(draft, dim) {
   const values = ocFilterValues(dim).filter(value =>
     !filter || String(value).toLowerCase().includes(filter));
   // The "any" row below is always first and always owns the menu's one tab
-  // stop, so every value row is reachable by arrow only. Numbering these from
-  // zero gave the first value the same tab stop as "any".
-  const rows = values.map(value => {
-    const on = String(draft[dim] || '') === String(value);
-    return `<button type="button" class="oc-pick-row" role="menuitemradio" aria-checked="${on}" tabindex="-1" data-oc-filter-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
-      `<span class="oc-pick-check" aria-hidden="true">${on ? '✓' : ''}</span><span class="oc-pick-label">${escapeHtml(ocFilterLabel(dim, value))}</span></button>`;
-  }).join('');
+  // stop, so every value row is reachable by arrow only. That is why tabStop is
+  // false here and true for the scope picker, which has no "any" row.
+  const rows = ocPickRowsHTML(values, {
+    role: 'menuitemradio', dim, attrs: 'data-oc-filter-value', tabStop: false,
+    isOn: value => String(draft[dim] || '') === String(value),
+    label: value => ocFilterLabel(dim, value),
+  });
   const empty = values.length ? '' : `<div class="oc-pick-empty">none yet - they appear as requests arrive</div>`;
   const custom = dim === 'provider' || dim === 'model' || dim === 'client' || dim === 'conversation';
   const customHint = dim === 'conversation' ? 'exact conversation id'
