@@ -387,12 +387,34 @@ The export section owns record exports. Choose all history or matching
 records. Matching records offers provider, model, client, conversation and
 status in the same one-strip selector the composer uses, then errors-only,
 debug-only, newer-than and older-than, plus an exact error type field. The
-receipt and its download stay in the same view as the filters that shape them. Provider, model, client and status choices come from the live
-record ring; conversation adds an exact conversation id field. For matching
-records, the receipt previews the count through the same predicate the download
-uses, and the download action is available once a nonzero count is ready.
+receipt and its download stay in the same view as the filters that shape them.
+
+Provider, model and client merge the server's known vocabularies with whatever
+the live record ring holds, so a quiet proxy or a fresh restart still offers
+them; all four accept a typed value as well, so a dimension the server has
+never seen is not a dead end. Status is the one list-only dimension, because a
+status code is not a name anyone can type reliably.
+
+Both modes preview through the same server count: all history is the same
+predicate with an empty filter. The receipt always names the number of records
+the download will carry, the download stays disabled until a nonzero count is
+ready, and the ledger repeats that number. A mode switch invalidates the count
+rather than quoting the previous mode's total, and filter mode with nothing
+selected asks for a filter instead of counting the unfiltered set.
+
 Downloads are gzip JSON artifacts. Configuration and database backups stay in
 Settings, and the console links there.
+
+### Request detail
+
+A request's detail drawer carries the two console prefills that record can
+seed: `hold this scope` and `capture this scope`. Both close the drawer and open
+a draft scoped to that request, so holding the client of a slow response does
+not require reading the value, closing the drawer and retyping it into a picker.
+They are prefills, not commits: the composer still gates every write, so no
+confirmation is added. The open is deferred one task, because the press that
+triggered it would otherwise reach the header's outside-press closer and
+dismiss the console it had just opened.
 
 ### System
 
