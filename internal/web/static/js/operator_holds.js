@@ -258,7 +258,7 @@ async function ocResumeHold(id) {
     const ok = await ocConfirm({
       title: 'Resume this hold?',
       body: fmt(Number(hold.queued)) + ' parked ' +
-        (Number(hold.queued) === 1 ? 'request is' : 'requests are') +
+        agree(Number(hold.queued), 'request is', 'requests are') +
         ' waiting behind it. Resuming releases them to the provider. In-flight streams finish normally.',
       confirm: 'resume',
       danger: true,
@@ -277,7 +277,7 @@ async function ocResumeAllHolds() {
   if (!holds.length) return;
   const ok = await ocConfirm({
     title: 'Resume every hold?',
-    body: holds.length + (holds.length === 1 ? ' hold is' : ' holds are') + ' parking new matching requests. Queued work is released to the provider. In-flight streams finish normally.',
+    body: holds.length + ' ' + agree(holds.length, 'hold is', 'holds are') + ' parking new matching requests. Queued work is released to the provider. In-flight streams finish normally.',
     confirm: 'resume all',
     danger: true,
   });
@@ -403,7 +403,7 @@ function ocRenderCapture() {
     // the remaining window, which is the same fact the row's action changes.
     const html = ocRuleRowHTML({
       kind: 'capture', id: session.id || '', scope, title: scope,
-      budget: [n + (n === 1 ? ' capture' : ' captures'), ran,
+      budget: [n + ' ' + agree(n, 'capture', 'captures'), ran,
         session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '),
       live: left,
       actions: `<button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
@@ -489,7 +489,7 @@ async function ocStopAllSessions() {
   if (!sessions.length) return;
   const ok = await ocConfirm({
     title: 'Stop every capture?',
-    body: sessions.length + (sessions.length === 1 ? ' session is' : ' sessions are') + ' storing request and response bodies. Retained captures stay readable until their retention window ends.',
+    body: sessions.length + ' ' + agree(sessions.length, 'session is', 'sessions are') + ' storing request and response bodies. Retained captures stay readable until their retention window ends.',
     confirm: 'stop all',
     danger: true,
   });

@@ -354,7 +354,9 @@ async function updateFilterCount(prefix, elId, btnId, phrase, busy) {
     }
   }
 }
-function recPhrase(n) { return fmt(n) + ' record' + (n === 1 ? '' : 's'); }
+// One shape, one owner: the count-agreement rule and the record noun both
+// live beside fmt, so this is a call rather than a second spelling.
+function recPhrase(n) { return countPhrase(n, 'record'); }
 // refreshAggregates invalidates and re-pulls the since-inception numeric
 // surfaces now so a purge (or any wipe) is visible before the next tick. The
 // invalidation clears the cached payloads and paints loading before each

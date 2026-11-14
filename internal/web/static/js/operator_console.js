@@ -236,11 +236,11 @@ function ocListEmptyNote(section, shown, total) {
   if (!total || (shown === total && !filtering)) return '';
   if (!shown) {
     return `<div class="oc-empty"><strong>No rule matches that filter.</strong> ` +
-      `${fmt(total)} ${total === 1 ? 'rule is' : 'rules are'} in force; ` +
+      `${fmt(total)} ${agree(total, 'rule is', 'rules are')} in force; ` +
       `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button> to see them.</div>`;
   }
   return `<div class="oc-list-note">` +
-    `${fmt(shown)} of ${fmt(total)} ${total === 1 ? 'rule' : 'rules'} shown. ` +
+    `${fmt(shown)} of ${fmt(total)} ${agree(total, 'rule', 'rules')} shown. ` +
     `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button></div>`;
 }
 

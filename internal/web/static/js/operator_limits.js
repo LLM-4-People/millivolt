@@ -450,8 +450,9 @@ async function ocRemoveLimit(id) {
     clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
     conversations: policy.scope?.conversations,
   });
-  const live = policy.in_flight ? ' ' + policy.in_flight + ' request' +
-    (policy.in_flight === 1 ? ' is' : 's are') + ' in flight and will finish.' : '';
+  const live = policy.in_flight
+    ? ' ' + policy.in_flight + ' ' + agree(policy.in_flight, 'request is', 'requests are') + ' in flight and will finish.'
+    : '';
   const ok = await ocConfirm({
     title: 'Remove this limit?',
     body: 'The limit on ' + scope + ' will stop applying.' + live + ' New matching requests run without this cap.',

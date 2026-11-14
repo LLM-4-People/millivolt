@@ -280,7 +280,7 @@ function ocExportReceiptText(draft) {
       ? 'choose a filter to preview the export'
       : 'counting stored records…';
   }
-  return fmt(draft.count) + (draft.count === 1 ? ' record' : ' records') + ' · JSON, gzip';
+  return countPhrase(draft.count, 'record') + ' · JSON, gzip';
 }
 
 // ocExportEnabled refuses a download of nothing, and refuses it while a count
@@ -318,6 +318,6 @@ function ocDownloadExport() {
   // "downloaded N records" therefore asserted an outcome nobody observed, and
   // the ledger kept that claim after a failed transfer. The phrase states the
   // action that was taken; the browser's own download UI reports how it went.
-  const phrase = 'downloading ' + fmt(draft.count) + (draft.count === 1 ? ' record' : ' records');
+  const phrase = 'downloading ' + countPhrase(draft.count, 'record');
   ocRecordChange(phrase, null, 'ok');
 }

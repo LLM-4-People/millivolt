@@ -309,6 +309,15 @@ const fmt = n => {
 };
 // fmtFull is the exact grouped form (698479531 → "698,479,531") for tooltips.
 const fmtFull = n => n == null ? '-' : Number(n).toLocaleString();
+// agree is the dashboard's one count-agreement rule: a count of exactly one
+// takes the singular form, anything else the plural. Ten console phrases and
+// two module helpers each spelled this ternary themselves, so "1 request is"
+// and "2 requests are" could drift from "1 request" and "2 requests".
+const agree = (n, singular, plural) => Number(n) === 1 ? singular : plural;
+// countPhrase is the frequent "1 record" / "2 records" shape over fmt, so a
+// count is formatted and agreed in one call instead of two conventions.
+const countPhrase = (n, singular, plural) =>
+  fmt(n) + ' ' + agree(n, singular, plural === undefined ? singular + 's' : plural);
 // fmtBytes is the single byte-size formatter for captured wire sizes and
 // long-text readouts. Exact below 1 KB, then the decimal KB/MB/GB ladder with
 // at most two decimals (1234 → "1.23 KB"). Exact counts stay recoverable

@@ -21,7 +21,7 @@ function ocAllRuleRows() {
       section: 'capture',
       id: session.id || '',
       scope: ocScopePhrase({ providers: session.providers, models: session.models, clients: session.clients }),
-      detail: [n + (n === 1 ? ' capture' : ' captures'), ocUntilPhrase(session.until) || session.duration || 'until stopped'].filter(Boolean).join(' · '),
+      detail: [n + ' ' + agree(n, 'capture', 'captures'), ocUntilPhrase(session.until) || session.duration || 'until stopped'].filter(Boolean).join(' · '),
     });
   }
   for (const policy of ((typeof throttleState !== 'undefined' && throttleState.throttles) || [])) {

@@ -208,7 +208,7 @@ function roSummaryValue(value) {
 }
 
 function roCountLabel(n, singular, plural) {
-  return `${n} ${n === 1 ? singular : plural || singular + 's'}`;
+  return `${n} ${agree(n, singular, plural || singular + 's')}`;
 }
 
 function roScopeSummary(r) {
