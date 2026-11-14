@@ -498,9 +498,12 @@ func TestLimitWindowMenuTokensAreServerAccepted(t *testing.T) {
 	// The ramp picker is the same window vocabulary plus its off token. Pin
 	// that derivation so a separate ramp list cannot drift from the parser.
 	// The limit composer owns the picker (operator_limits.js); the console
-	// shell no longer carries any section markup of its own.
+	// shell no longer carries any section markup of its own. The ramp reads
+	// ocWindowSelect, the one owner that derives from LIMIT_WINDOWS, so the
+	// pin names that derivation rather than a specific chip control.
 	limits := string(chromeMenuSource(t, "operator_limits.js"))
-	if !strings.Contains(limits, "ocChipRow('ramp', [''].concat(LIMIT_WINDOWS.map(([v]) => v))") {
+	if !strings.Contains(limits, "ocWindowSelect('ramp'") ||
+		!strings.Contains(limits, "const values = (withOff ? [''] : []).concat(LIMIT_WINDOWS.map(([v]) => v))") {
 		t.Fatal("ramp picker no longer derives its tokens from LIMIT_WINDOWS; give any own token its own acceptance rows")
 	}
 	for _, tok := range append([]string{""}, toks...) {

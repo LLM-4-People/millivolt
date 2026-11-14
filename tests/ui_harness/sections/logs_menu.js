@@ -64,15 +64,18 @@ module.exports = async function logsMenu(H) {
       ['export-errors', 'export-debug', 'export-age'].every(name =>
         !!d.querySelector(`#oc-pane [data-oc-choice="${name}"]`)));
 
-    // FILTER_AGES is the one age vocabulary; the console renders it as chips
-    // and ocExportFilter reads the same tokens.
+    // FILTER_AGES is the one age vocabulary; the console renders its tokens
+    // through the shared choice control and ocExportFilter reads them.
     check('FILTER_AGES offers canonical Go duration spellings',
       JSON.stringify(w.eval('FILTER_AGES')) === JSON.stringify([
         ['', 'any'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']]));
-    const ageChips = [...d.querySelectorAll('#oc-pane [data-oc-choice="export-age"]')]
-      .map(chip => chip.dataset.ocValue);
+    // The age list is four labelled spans, so it renders as a select; its
+    // options are still exactly the FILTER_AGES tokens.
+    const ageChoice = d.querySelector('#oc-pane [data-oc-choice="export-age"]');
     check('the console export age choices are the FILTER_AGES tokens',
-      JSON.stringify(ageChips) === JSON.stringify(w.eval('FILTER_AGES').map(([value]) => value)));
+      ageChoice.tagName === 'SELECT' &&
+      JSON.stringify([...ageChoice.options].map(option => option.value)) ===
+        JSON.stringify(w.eval('FILTER_AGES').map(([value]) => value)));
 
     const now = Date.now();
     const filter = w.ocExportFilter({
