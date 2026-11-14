@@ -40,6 +40,11 @@ const subConversationParamMaxBytes = 64
 const (
 	DashLogRowsMin = 10
 	DashLogRowsMax = 500
+	// MaxRetriesMax is the band for max_retries. Each retry is a billed upstream
+	// send for one client request, so an unbounded value turns a typo into a
+	// million upstream calls. The neighbouring retry knobs are bounded for the
+	// same reason; this one was the exception.
+	MaxRetriesMax = 100
 	// QualityRetriesMax is the band for quality_retries (0 disables).
 	QualityRetriesMax = 3
 	// ThinkingRetriesMax is the band for thinking_retries (0 disables).

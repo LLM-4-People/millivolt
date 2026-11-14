@@ -370,7 +370,7 @@ max_queue_wait: 10m
 # Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s
 # follow quota_pause_mode instead of this budget.
 # Hot-reload: yes.
-#   type: int · range >= 0 (0 = no retries) · default 5
+#   type: int · range 0..100 (0 = no retries) · default 5
 max_retries: 5
 
 # Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP

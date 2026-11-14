@@ -199,8 +199,11 @@ func (c *Config) Validate() error {
 	if c.MaxConnsPerHost > 0 && c.MaxIdleConnsPerHost > c.MaxConnsPerHost {
 		return fmt.Errorf("max_idle_conns_per_host (%d) cannot exceed max_conns_per_host (%d)", c.MaxIdleConnsPerHost, c.MaxConnsPerHost)
 	}
-	if c.MaxConcurrent < 0 || c.MaxQueueSize < 0 || c.MaxRetries < 0 {
-		return fmt.Errorf("max_concurrent/max_queue_size/max_retries: must be >= 0")
+	if c.MaxConcurrent < 0 || c.MaxQueueSize < 0 {
+		return fmt.Errorf("max_concurrent/max_queue_size: must be >= 0")
+	}
+	if c.MaxRetries < 0 || c.MaxRetries > MaxRetriesMax {
+		return fmt.Errorf("max_retries: must be 0..%d, got %d", MaxRetriesMax, c.MaxRetries)
 	}
 	if c.MaxInflightRequests < 0 || c.MaxInflightRequests > 1_000_000 {
 		return fmt.Errorf("max_inflight_requests: must be 0..1000000, got %d", c.MaxInflightRequests)

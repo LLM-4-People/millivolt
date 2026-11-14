@@ -243,7 +243,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindDuration, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_retries", Category: "queue", Label: "Max retries",
 			Help: "Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s follow quota_pause_mode instead of this budget.",
-			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "no retries"},
+			Kind: KindInt, HotReload: true, Min: num(0), Max: num(MaxRetriesMax), ZeroMeans: "no retries"},
 		{Key: "queue_retry_after", Category: "queue", Label: "Queue Retry-After",
 			Help: "Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP Retry-After is integer seconds, so the value must be a whole number of seconds.",
 			Kind: KindDuration, HotReload: true, Min: num(0), Max: num(float64(QueueRetryAfterMax))},

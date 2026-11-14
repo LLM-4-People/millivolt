@@ -198,6 +198,46 @@ func TestValidateNeverEchoesCredentialValues(t *testing.T) {
 	}
 }
 
+// TestMaxRetriesIsBounded pins the one retry budget that had no ceiling. Each
+// retry is a billed upstream send for a single client request, and the sibling
+// knobs (quality, thinking, storm) are all bounded, so an unbounded max_retries
+// turned a typo into a million upstream calls.
+func TestMaxRetriesIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value int
+		ok    bool
+	}{
+		{"zero disables retries", 0, true},
+		{"the default", Default().MaxRetries, true},
+		{"the ceiling", MaxRetriesMax, true},
+		{"one above the ceiling", MaxRetriesMax + 1, false},
+		{"negative", -1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			c.MaxRetries = tc.value
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Fatalf("max_retries = %d rejected: %v", tc.value, err)
+			}
+			if !tc.ok {
+				if err == nil {
+					t.Fatalf("max_retries = %d accepted, want a rejection", tc.value)
+				}
+				if !strings.Contains(err.Error(), "max_retries") {
+					t.Fatalf("rejection %q does not name max_retries", err.Error())
+				}
+			}
+		})
+	}
+	// The schema publishes the same band, so the Settings input clamps.
+	f := FieldByKey("max_retries")
+	if f == nil || f.Max == nil || int(*f.Max) != MaxRetriesMax {
+		t.Fatalf("max_retries schema max = %v, want %d", f, MaxRetriesMax)
+	}
+}
+
 func TestValidateProvidersErrorDeterministic(t *testing.T) {
 	yaml := `providers:
   zeta.example:
