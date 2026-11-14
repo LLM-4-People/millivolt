@@ -10,6 +10,13 @@ let stormSnapshot = {valid: false, enabled: false, storms: []};
 let stormDialogKey = '';
 let quotaResumeError = '';
 const stormIncidentKey = s => JSON.stringify([s.provider, s.scope, s.model]);
+// STORM_STATE_WORDS is the one reading of the two states the server publishes.
+// The banner and both dialog variants spelled this ternary themselves, so a
+// wording change reached one surface at a time and only the half-open branch was
+// ever asserted. The state names are the server's; the words are this
+// dashboard's.
+const STORM_STATE_WORDS = { open: 'Holding requests', half_open: 'Checking recovery' };
+const stormStateWord = state => STORM_STATE_WORDS[state] || state;
 function applyStormState(st) {
   const banner = $('storm-banner');
   if (!banner) return;
@@ -44,7 +51,7 @@ function applyStormState(st) {
     const detail = s.quota
       ? `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>Quota pause</span><span>${fmt(s.queued)} queued</span><span>${fmt(s.recovery_successes)} / ${fmt(s.recovery_required)} recovery probes</span>`
       : `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(pctValue(s.error_percent, 1, true))} failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span>`;
-    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail">${detail}</span>`;
+    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${escapeHtml(stormStateWord(s.state))}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail">${detail}</span>`;
     let row = existing.get(key);
     existing.delete(key);
     if (!row) {
@@ -135,12 +142,12 @@ function renderStormDetails() {
   if (title) title.textContent = s.quota ? 'Provider quota pause' : 'Error storm details';
   const entries = s.quota ? [
     ['Provider', s.provider], ['Model scope', 'All models'],
-    ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
+    ['State', stormStateWord(s.state)], ['Error', s.reason],
     ['Queued requests', fmt(s.queued)], ['Next retry', new Date(s.retry_at).toLocaleString()],
     ['Successful recovery probes', s.recovery_successes + ' / ' + s.recovery_required],
   ] : [
     ['Provider', s.provider], ['Model scope', s.scope === 'provider' ? 'All models' : s.model || '(unspecified model)'],
-    ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
+    ['State', stormStateWord(s.state)], ['Error', s.reason],
     ['Requests affected', fmt(s.error_requests)], ['Failed upstream attempts', fmt(s.failures)],
     ['Sampled upstream attempts', fmt(s.samples)], ['Upstream attempt failure rate', pctValue(s.error_percent, 1, true)],
     ['Detection window', fmtDur(s.window_ms)], ['Queued requests', fmt(s.queued)],

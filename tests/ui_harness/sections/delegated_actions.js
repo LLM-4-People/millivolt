@@ -180,7 +180,14 @@ module.exports = async function delegatedActions(H) {
         banner && !banner.hidden && banner.getAttribute('role') === 'status' && banner.getAttribute('aria-live') === 'polite' &&
         banner.textContent.includes('neutral.example · all models') && banner.textContent.includes('http_503') &&
         banner.textContent.includes('75% failed attempts') && banner.textContent.includes('9 requests affected') &&
-        banner.textContent.includes('4 queued') && banner.querySelector('button[aria-haspopup="dialog"]'));
+        banner.textContent.includes('4 queued') && banner.querySelector('button[aria-haspopup="dialog"]') &&
+        // Both state words come from one table now. Only the half-open branch
+        // was ever asserted, so the open branch - the one that says requests
+        // are still being held - went untested.
+        banner.textContent.includes('Holding requests') &&
+        sw.eval('stormStateWord("open")') === 'Holding requests' &&
+        sw.eval('stormStateWord("half_open")') === 'Checking recovery' &&
+        sw.eval('stormStateWord("unknown_state")') === 'unknown_state');
       const incidentButton = banner.querySelector('button');
       incidentButton.focus();
       incidentButton.click();
