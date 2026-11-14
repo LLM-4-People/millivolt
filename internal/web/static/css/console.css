@@ -452,7 +452,13 @@ button.oc-chip[aria-pressed="true"]::before {
      the pane's bottom edge on a phone. */
   overflow: clip;
 }
+/* The composer's title stays with the form while the pane scrolls. A scope
+   strip and three budget rows are taller than a phone pane, and the title
+   scrolling away left a screen of bare inputs with nothing saying what they
+   belong to. Sticky rather than fixed: it is inside the one scroll region,
+   so it leaves with the form and needs no second stacking context. */
 .oc-compose-hd {
+  position: sticky; top: 0; z-index: 2;
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 5px 10px; background: var(--rail); border-bottom: 1px solid var(--border);
   color: var(--text); font: 600 10px var(--mono);

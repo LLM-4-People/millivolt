@@ -280,14 +280,17 @@ function ocRenderLimits() {
   const rows = shown.map(entry => entry.html).join('');
   const filter = ocListFilterHTML('limits', policies.length);
   const hidden = ocListEmptyNote('limits', shown.length, policies.length);
+  const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
+  const editing = !!ocDrafts.limit?.id;
   // An empty list proves no limit rule exists. It does not prove admission:
   // the group queue still refuses with 429 when full (ErrQueueFull), and the
   // error-storm gate refuses its own backlog (ErrStormQueueFull). Saying
   // "every request is admitted" promised something the scheduler does not.
-  const empty = policies.length ? '' :
+  // An empty stored set is not an empty policy while a draft is open: the
+  // composer above is the working rule, and "No limits" beside it read as if
+  // the form had already been discarded.
+  const empty = policies.length || composing ? '' :
     `<div class="oc-empty"><strong>No limits.</strong> Nothing here caps a request. The admission queue and each provider's own rate limits still apply.</div>`;
-  const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
-  const editing = !!ocDrafts.limit?.id;
   // The composer footer is the one action row while a draft is open. A head
   // "start over" beside it was a second, silent discard of the same draft, and
   // it took the accent the commit needs. It stays only while editing a stored
