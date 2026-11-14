@@ -833,6 +833,27 @@ function ocScopeHas(scope) {
   return Object.values(scope).some(values => values.length > 0);
 }
 
+// ocHoldScopePhrase is the one reading of a hold's blast radius. A hold is one
+// of three shapes - everything, clients unseen when it started, or a named
+// selector - and the preview, both rule rows, the ledger phrase and the resume
+// confirmation each stated that choice themselves. One owner keeps "all
+// traffic" from becoming "everything" on one surface and "all" on another.
+function ocHoldScopePhrase(hold) {
+  if (!hold) return 'every request';
+  if (hold.all) return 'all traffic';
+  if (hold.new) return 'new clients';
+  return ocScopePhrase(ocScopeFromPolicy({ scope: hold }));
+}
+
+// ocHoldDraftScopePhrase is the same reading for a composer draft, whose mode
+// is a name rather than the two booleans a stored hold carries.
+function ocHoldDraftScopePhrase(draft) {
+  if (!draft) return 'every request';
+  if (draft.mode === 'all') return 'all traffic';
+  if (draft.mode === 'new') return 'new clients';
+  return ocScopePhrase(draft.scope);
+}
+
 // ocLimitSelectorKey is the client-side reading of the server's policy
 // identity. A limit is identified by its normalized scope plus schedule, not
 // by an id the console chose: re-applying the same selector is an edit, not a

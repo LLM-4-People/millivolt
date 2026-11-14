@@ -10,8 +10,7 @@ function ocAllRuleRows() {
       kind: 'pause',
       section: 'pause',
       id: hold.id || '',
-      scope: hold.all ? 'all traffic' : hold.new ? 'new clients'
-        : ocScopePhrase(ocScopeFromPolicy({ scope: hold })),
+      scope: ocHoldScopePhrase(hold),
       detail: [ocUntilPhrase(hold.until), hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean).join(' · '),
     });
   }

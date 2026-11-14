@@ -105,9 +105,7 @@ function ocPausePreview() {
   let text;
   if (empty) text = 'Pick at least one condition, or hold everything.';
   else {
-    const scope = draft.mode === 'all' ? 'all traffic'
-      : draft.mode === 'new' ? 'new clients'
-        : ocScopePhrase(draft.scope);
+    const scope = ocHoldDraftScopePhrase(draft);
     text = 'Hold ' + scope + (draft.duration ? ' for ' + ocDurationText(draft.duration) : ' until resumed') + '.';
   }
   el.textContent = text;
@@ -131,9 +129,7 @@ function ocRenderPause() {
       : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${escapeHtml(ocDurationText(ocQuickHoldDuration))}">hold all ${escapeHtml(ocQuickHoldDuration)}</button>` +
         `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
   const entries = holds.map(hold => {
-    const scope = hold.all ? 'all traffic'
-      : hold.new ? 'new clients'
-        : ocScopePhrase(ocScopeFromPolicy({ scope: hold }));
+    const scope = ocHoldScopePhrase(hold);
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
     const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
@@ -232,8 +228,7 @@ function ocApplyPause() {
   draft.error = '';
   const body = ocPauseBody(draft);
   const previous = draft.id ? liveHolds().find(h => h.id === draft.id) || null : null;
-  const phrase = (draft.id ? 'updated hold on ' : 'held ') + (body.all ? 'all traffic'
-    : body.new ? 'new clients' : ocScopePhrase(draft.scope));
+  const phrase = (draft.id ? 'updated hold on ' : 'held ') + ocHoldDraftScopePhrase(draft);
   // Undo must name the rule this write created. `find(h => h.id !== previous.id)`
   // looks right but is wrong on a create, where previous is null: it matches
   // whatever is first in the list, which is the oldest hold, not the new one.
@@ -254,8 +249,7 @@ function ocApplyPause() {
 async function ocResumeHold(id) {
   const hold = liveHolds().find(h => h.id === id);
   if (!hold) { ocRuleGone('hold'); return; }
-  const scope = hold.all ? 'all traffic'
-    : hold.new ? 'new clients' : ocScopePhrase(ocScopeFromPolicy({ scope: hold }));
+  const scope = ocHoldScopePhrase(hold);
   // Resuming a hold with parked work releases that backlog to the provider in
   // one burst, which is the same consequence `resume all` confirms. Asking
   // only in the bulk case taught the operator that the single resume was the
