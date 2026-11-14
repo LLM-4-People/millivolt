@@ -5,7 +5,12 @@
 // chrome_lists.js, which loads before this module because FILTER_AGES reads it
 // at initialization.
 
-const HEADER_MENUS = { 'btn-theme': 'theme-menu' };
+// HEADER_MENU_IDS names the one remaining header menu's two elements once. The
+// registry below pairs them, and theme.js - which owns that menu's contents -
+// reads the same two names instead of spelling them again at each lookup, so a
+// renamed element reaches both the lifecycle and the module that fills it.
+const HEADER_MENU_IDS = { themeTrigger: 'btn-theme', themeMenu: 'theme-menu' };
+const HEADER_MENUS = { [HEADER_MENU_IDS.themeTrigger]: HEADER_MENU_IDS.themeMenu };
 function closeHeaderMenus(except, restoreFocus = false) {
   if (except && except !== 'settings') closeSettings(true);
   // The console is the operator plane's one open surface: opening another

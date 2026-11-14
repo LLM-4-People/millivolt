@@ -105,7 +105,7 @@ function persistTheme() {
   // A blocked or quota-limited localStorage must not leave the static label
   // claiming a write that never happened. The intake stays quiet in the
   // normal case because the label already reads truthfully.
-  setText(document.getElementById('theme-saved'), saved
+  setText($('theme-saved'), saved
     ? 'Saved in this browser'
     : 'Not saved: browser storage unavailable');
   return saved;
@@ -126,7 +126,7 @@ function syncThemeColor() {
 // mere focus leave keeps the keyboard cursor's tab stop so Tab returns to the
 // row the user was previewing.
 function syncThemeMenu(resetCursor = true) {
-  const menu = document.getElementById('theme-menu');
+  const menu = $(HEADER_MENU_IDS.themeMenu);
   if (!menu) return;
   const theme = currentTheme();
   const mode = currentMode();
@@ -145,21 +145,21 @@ function syncThemeMenu(resetCursor = true) {
   for (const swatch of menu.querySelectorAll('.theme-swatch')) {
     swatch.dataset.mode = mode;
   }
-  const currentPane = document.getElementById('theme-current');
+  const currentPane = $('theme-current');
   if (currentPane) {
     currentPane.dataset.theme = theme;
     currentPane.dataset.mode = mode;
   }
-  const previewPane = document.getElementById('theme-preview');
+  const previewPane = $('theme-preview');
   if (previewPane) {
     previewPane.dataset.theme = theme;
     previewPane.dataset.mode = mode;
   }
-  setText(document.getElementById('theme-current-label'), `Current: ${themeLabel(theme)} / ${modeLabel(mode)}`);
-  const previewLabel = document.getElementById('theme-preview-label');
+  setText($('theme-current-label'), `Current: ${themeLabel(theme)} / ${modeLabel(mode)}`);
+  const previewLabel = $('theme-preview-label');
   setText(previewLabel, 'Preview: same');
   if (previewLabel) previewLabel.classList.remove('has-preview');
-  const button = document.getElementById('btn-theme');
+  const button = $(HEADER_MENU_IDS.themeTrigger);
   if (button) {
     button.setAttribute('aria-label', `Theme: ${themeLabel(theme)}, ${modeLabel(mode)}`);
   }
@@ -168,7 +168,7 @@ function syncThemeMenu(resetCursor = true) {
   // only, so storedPairMatches stays false and the Not saved label survives
   // syncThemeMenu until an actual write succeeds.
   if (storedPairMatches(theme, mode)) {
-    setText(document.getElementById('theme-saved'), 'Saved in this browser');
+    setText($('theme-saved'), 'Saved in this browser');
   }
   // Every reset of the panes also resets the polite candidate line. The menu
   // can be closed or focus can sit outside both groups by now.
@@ -179,11 +179,11 @@ function syncThemeMenu(resetCursor = true) {
 // current pane, the root, storage, the chart and the browser theme color stay
 // on the committed pair; only a commit moves them.
 function previewTheme(theme, mode) {
-  const menu = document.getElementById('theme-menu');
+  const menu = $(HEADER_MENU_IDS.themeMenu);
   if (!menu || menu.hidden) return;
   const candidateTheme = normalizeTheme(theme);
   const candidateMode = normalizeMode(mode);
-  const previewPane = document.getElementById('theme-preview');
+  const previewPane = $('theme-preview');
   if (previewPane) {
     previewPane.dataset.theme = candidateTheme;
     previewPane.dataset.mode = candidateMode;
@@ -197,7 +197,7 @@ function previewTheme(theme, mode) {
       option.dataset.modeId === candidateMode && candidateMode !== currentMode());
   }
   const changed = candidateTheme !== currentTheme() || candidateMode !== currentMode();
-  const previewLabel = document.getElementById('theme-preview-label');
+  const previewLabel = $('theme-preview-label');
   setText(previewLabel, changed
     ? `Preview: ${themeLabel(candidateTheme)} / ${modeLabel(candidateMode)}`
     : 'Preview: same');
@@ -214,7 +214,7 @@ function announceCandidate(theme, mode) {
   const candidateTheme = normalizeTheme(theme);
   const candidateMode = normalizeMode(mode);
   const changed = candidateTheme !== currentTheme() || candidateMode !== currentMode();
-  setText(document.getElementById('theme-status'), changed
+  setText($('theme-status'), changed
     ? `Preview: ${themeLabel(candidateTheme)} / ${modeLabel(candidateMode)}`
     : `Current: ${themeLabel(candidateTheme)} / ${modeLabel(candidateMode)}`);
 }
@@ -226,7 +226,7 @@ function announceCandidate(theme, mode) {
 // the pane, and focus outside both groups clears the line.
 function syncCandidateStatus() {
   const focused = focusedPreviewOption();
-  const status = document.getElementById('theme-status');
+  const status = $('theme-status');
   if (!focused) {
     setText(status, '');
     return;
@@ -247,7 +247,7 @@ function previewOption(option) {
 }
 
 function focusedPreviewOption() {
-  const menu = document.getElementById('theme-menu');
+  const menu = $(HEADER_MENU_IDS.themeMenu);
   const active = document.activeElement;
   if (!menu || menu.hidden || !active || !menu.contains(active)) return null;
   return active.closest?.('.theme-opt, .theme-mode-opt') || null;
@@ -258,7 +258,7 @@ function focusedPreviewOption() {
 // the focused candidate. Focus moving between tray options keeps that option's
 // preview; focus leaving the tray or landing on a non-preview control clears it.
 function clearThemePreview(event) {
-  const menu = document.getElementById('theme-menu');
+  const menu = $(HEADER_MENU_IDS.themeMenu);
   if (!menu) return;
   if (event && event.type === 'blur') {
     const next = event.relatedTarget;
@@ -302,7 +302,7 @@ function wirePreviewOption(option, preview) {
 // keyboard focus preview; click or native Enter/Space commits and leaves the
 // tray open.
 function renderModeMenu() {
-  const list = document.getElementById('theme-mode');
+  const list = $('theme-mode');
   if (!list) return;
   list.textContent = '';
   for (const mode of MODES) {
@@ -333,7 +333,7 @@ function renderModeMenu() {
 }
 
 function renderThemeMenu() {
-  const list = document.getElementById('theme-list');
+  const list = $('theme-list');
   if (!list) return;
   list.textContent = '';
   for (const theme of THEMES) {
@@ -425,14 +425,14 @@ function chooseMode(id) {
 
 function resetTheme() {
   applyState(DEFAULT_THEME, DEFAULT_MODE, true);
-  document.getElementById('theme-reset')?.focus();
+  $('theme-reset')?.focus();
 }
 
 function closeThemeMenu() {
   // hideHdrMenu runs the registered close cleanup, which restores the panes
   // and clears the candidate line before focus returns to the trigger.
-  hideHdrMenu('theme-menu');
-  document.getElementById('btn-theme')?.focus();
+  hideHdrMenu(HEADER_MENU_IDS.themeMenu);
+  $(HEADER_MENU_IDS.themeTrigger)?.focus();
 }
 
 // themeTriggerKey gives the closed trigger the usual disclosure entry: open
@@ -444,7 +444,7 @@ function themeTriggerKey(e) {
   if (e.altKey || e.ctrlKey || e.metaKey) return;
   if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
   e.preventDefault();
-  const menu = document.getElementById('theme-menu');
+  const menu = $(HEADER_MENU_IDS.themeMenu);
   if (!menu) return;
   if (menu.hidden) {
     toggleThemeMenu({ stopPropagation() {}, detail: 0 });
@@ -458,8 +458,8 @@ function themeTriggerKey(e) {
 }
 
 function toggleThemeMenu(e) {
-  toggleHdrMenu(e, 'theme-menu', syncThemeMenu);
-  const menu = document.getElementById('theme-menu');
+  toggleHdrMenu(e, HEADER_MENU_IDS.themeMenu, syncThemeMenu);
+  const menu = $(HEADER_MENU_IDS.themeMenu);
   if (!menu || menu.hidden) return;
   // Reopening must not restore an arbitrary previous scroll offset. Bring the
   // saved palette into view instead; on compact viewports the tray or header
@@ -489,11 +489,11 @@ function initTheme() {
   // shared header-menu close path (Escape, outside click, Close) runs. If
   // focus was inside the tray it must not stay on a hidden control.
   if (typeof onHeaderMenuClose === 'function') {
-    onHeaderMenuClose('theme-menu', () => {
-      const menu = document.getElementById('theme-menu');
+    onHeaderMenuClose(HEADER_MENU_IDS.themeMenu, () => {
+      const menu = $(HEADER_MENU_IDS.themeMenu);
       const focusWasInside = !!menu && menu.contains(document.activeElement);
       clearThemePreview();
-      if (focusWasInside) document.getElementById('btn-theme')?.focus();
+      if (focusWasInside) $(HEADER_MENU_IDS.themeTrigger)?.focus();
     });
   }
   renderModeMenu();
