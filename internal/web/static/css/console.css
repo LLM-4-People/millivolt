@@ -970,7 +970,12 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc .oc-link,
   .mn.oc .oc-field input,
   .mn.oc .oc-pick input,
-  .mn.oc .oc-inline input { min-height: var(--oc-ctl); }
+  .mn.oc .oc-inline input,
+  /* The window selects are the most-tapped controls in the policy form: a
+     limit states its budget and then its window, and on a phone they rendered
+     24px because the base rules cap them and this inventory never named them. */
+  .mn.oc .oc-select,
+  .mn.oc .oc-list-filter input { min-height: var(--oc-ctl); }
   .mn.oc .oc-chip { min-height: var(--oc-ctl); padding: var(--oc-chip-pad); }
   .mn.oc .oc-chip-x {
     min-width: var(--oc-ctl); min-height: var(--oc-ctl);

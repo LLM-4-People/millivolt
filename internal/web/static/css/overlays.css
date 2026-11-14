@@ -463,7 +463,6 @@
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
     .ro-head-actions { justify-content: flex-start; }
-    .ro-head-actions button { min-height: 24px; }
     .ro-rule .ro-scope, .ro-rule .ro-body { grid-template-columns: minmax(0, 1fr); }
     .ro-rule-body { padding-inline: 8px; }
   }
@@ -478,4 +477,18 @@
     /* The header controls are the way in and out of the sheet, so they take
        the same touch target as the rail and footer at every touch width. */
     .st-hd .btn, .st-hd input[type="search"] { min-height: var(--tap); }
+    /* The per-row controls are small on purpose at a fine pointer: they sit
+       inside a dense rule card and a mouse hits them reliably. A coarse
+       pointer does not, and these are the destructive and reordering actions -
+       removing a provider, a header override or a rule, and moving or parking
+       one - so a mis-tap costs real state. One inventory, every row action. */
+    .prov-x,
+    .mr-move button,
+    .mr-restore,
+    .ro-head-actions button,
+    .ro-add-btn,
+    .ro-tpl-item,
+    .mr-tools select { min-height: var(--tap); }
+    .mr-move button, .mr-restore { min-width: var(--tap); padding: 0 6px; }
+    .prov-x { min-width: var(--tap); min-height: var(--tap); }
   }

@@ -278,6 +278,11 @@
     .hdr-menu .btn,
     .hdr-menu select,
     .hdr-menu input:not([type="checkbox"]) { min-height: var(--tap); }
+    /* The credential dialog is the only way into the operator plane, and its
+       field and buttons were 42px: close enough to look right and short enough
+       to miss on the first tap. */
+    .operator-dialog input,
+    .operator-dialog-actions .btn { min-height: var(--tap); }
   }
   .clear-count { display: block; font-size: 11px; color: var(--warn); min-height: 15px; margin-bottom: 8px; }
   .htext { color: var(--muted); font-size: 11px; font-family: var(--mono); }

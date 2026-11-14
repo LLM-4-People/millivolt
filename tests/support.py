@@ -510,6 +510,88 @@ def spark_height_mirror_errors(pairs):
     return errors
 
 
+# A coarse pointer cannot hover, aim finely or recover a clipped value, so every
+# control a dense layout sizes below the shared target must be raised by the
+# coarse block that owns its surface. --tap is that target.
+TAP_TOKEN_PX = 44
+CSS_INTERACTIVE = re.compile(
+    r'(^|[\s>])(button|\.btn|select|input|\.[a-z][a-z0-9-]*-(btn|tab|row|item|chip|x|toggle|move|vis|restore|select))([\s,:.\[]|$)')
+
+
+def _css_blocks(text):
+    """(media context, selector, declarations) for every CSS block.
+
+    Comments are removed first: they contain braces and quoted selectors, and a
+    naive scan would attribute a declaration to whichever comment preceded it.
+    """
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    out, stack, token = [], [], ''
+    for char in text:
+        if char == '{':
+            stack.append(token.strip())
+            token = ''
+        elif char == '}':
+            if stack:
+                out.append((stack[-2] if len(stack) > 1 else '', stack[-1], token))
+            token = ''
+            if stack:
+                stack.pop()
+        else:
+            token += char
+    return out
+
+
+def tap_target_errors(pairs):
+    """Every interactive control a fine-pointer rule sizes below --tap must be
+    named by the coarse block for its surface.
+
+    A dense dashboard legitimately renders 20-28px rows: they are read at a desk
+    with a mouse. The same rules also reach a phone, where a mis-tap on the
+    remove, park or move control beside a rule costs real operator state. This
+    check asks the two questions a reviewer cannot: which controls are declared
+    short, and which of them some coarse block actually raises.
+    """
+    errors = []
+    for name, text in pairs:
+        if not name.startswith('internal/web/static/css/') or not name.endswith('.css'):
+            continue
+        blocks = _css_blocks(text)
+        if not blocks:
+            continue
+        short = {}
+        for media, selector, body in blocks:
+            if media:
+                continue
+            match = re.search(r'min-height:\s*(\d+)px', body)
+            if not match or int(match.group(1)) >= TAP_TOKEN_PX:
+                continue
+            for part in selector.split(','):
+                part = part.strip()
+                if part and CSS_INTERACTIVE.search(part):
+                    short.setdefault(part, int(match.group(1)))
+        if not short:
+            continue
+        covered = set()
+        for media, selector, body in blocks:
+            if 'pointer: coarse' not in media and 'hover: none' not in media:
+                continue
+            for part in selector.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                # A coarse rule may name the control itself or qualify it with
+                # its surface prefix; either reaches the same element.
+                covered.add(part)
+                covered.add(part.split()[-1])
+        for selector, px in sorted(short.items()):
+            if selector in covered or selector.split()[-1] in covered:
+                continue
+            errors.append(name + ': ' + selector + ' is ' + str(px)
+                          + 'px at a fine pointer and no coarse block raises it to the '
+                          + str(TAP_TOKEN_PX) + 'px target')
+    return errors
+
+
 PALETTE_OWNER = 'internal/web/static/css/dashboard.css'
 PALETTE_MIRRORS = ('internal/web/static/favicon.svg', 'internal/web/static/index.html',
                    'internal/web/static/manifest.webmanifest', 'internal/web/static/sw.js',

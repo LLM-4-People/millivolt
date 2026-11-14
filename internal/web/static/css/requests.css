@@ -76,6 +76,9 @@
      full target instead of the dense desktop box. */
   @media (max-width: 800px), (hover: none), (pointer: coarse) {
     .req-status { min-height: var(--tap); padding: 0 10px; }
+    /* Each legend row toggles one series on or off. It is a button, not a
+       label, and a mis-tap on a phone hides the line the operator is reading. */
+    .legend .leg-item { min-height: var(--tap); }
   }
 
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }

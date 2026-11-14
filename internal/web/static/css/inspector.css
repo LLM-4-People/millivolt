@@ -296,6 +296,11 @@
     .toast { bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
   }
   @media (hover: none), (pointer: coarse) {
+    /* A copy target is a small square icon, so it keeps its own size class
+       rather than the full row height. */
     .copy-btn { opacity: .65; width: 32px; height: 32px; }
     .detail-sec-hd > .detail-sec-actions .copy-btn { opacity: .7; }
+    /* The console prefills and the row's small actions are real targets, not
+       icons: a mis-tap seeds the wrong draft or opens the wrong attempt. */
+    .d-ops .btn, .mini-btn, .d-tab { min-height: var(--tap); }
   }
