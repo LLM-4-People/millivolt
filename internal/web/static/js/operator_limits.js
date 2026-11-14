@@ -171,11 +171,14 @@ function ocLimitComposerHTML(draft) {
       `<span class="oc-field-hint">server local time</span></div>` +
       `</div>` : '') +
     `</div>` +
-    `<p class="oc-preview" id="oc-lim-preview" data-oc-key="lim-preview"></p>` +
+    `<p class="oc-preview" id="oc-lim-preview" data-oc-key="lim-preview" role="status"></p>` +
     (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
     `<div class="oc-compose-ft">` +
     `<button type="button" class="btn" data-oc-cancel>cancel</button>` +
-    `<button type="button" class="btn btn-accent" id="oc-lim-apply" data-oc-apply="limit">${editing ? 'save limit' : 'apply limit'}</button>` +
+    // The button is disabled until the draft is valid, and a disabled control
+    // leaves the tab order: without this reference a screen-reader operator
+    // can never reach the reason the button is unavailable.
+    `<button type="button" class="btn btn-accent" id="oc-lim-apply" data-oc-apply="limit" aria-describedby="oc-lim-preview" aria-busy="${operatorState.throttle.busy ? 'true' : 'false'}">${editing ? 'save limit' : 'apply limit'}</button>` +
     `</div></section>`;
 }
 

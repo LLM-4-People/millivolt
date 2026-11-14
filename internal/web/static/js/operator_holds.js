@@ -83,10 +83,11 @@ function ocPauseComposerHTML(draft) {
     `<div class="oc-group"><label class="oc-check"><input type="checkbox" data-oc-field="pauseCapOn" ${draft.cap !== '' ? 'checked' : ''}><span>limit the hold queue</span></label>` +
     (draft.cap !== '' ? ocField('pauseCap', 'queued requests', draft.cap, { placeholder: String(pauseState.default_max_queued || 1024) }) : '') +
     `</div>` +
-    `<p class="oc-preview" id="oc-pause-preview" data-oc-key="pause-preview"></p>` +
+    `<p class="oc-preview" id="oc-pause-preview" data-oc-key="pause-preview" role="status"></p>` +
     (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
     `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-cancel>cancel</button>` +
-    `<button type="button" class="btn btn-accent" id="oc-pause-apply" data-oc-apply="pause">${editing ? 'save hold' : 'hold traffic'}</button></div>` +
+    // See the limits composer: a disabled commit must still be explainable.
+    `<button type="button" class="btn btn-accent" id="oc-pause-apply" data-oc-apply="pause" aria-describedby="oc-pause-preview" aria-busy="${operatorState.pause.busy ? 'true' : 'false'}">${editing ? 'save hold' : 'hold traffic'}</button></div>` +
     `</section>`;
 }
 
@@ -299,10 +300,12 @@ function ocCaptureComposerHTML(draft) {
     `<p class="oc-facts">${escapeHtml(ocCaptureFacts())}</p>` +
     (blocked ? `<p class="oc-warning" role="alert">Durable storage is off, so captures cannot start. Set db_path in Settings, then restart to apply it.` +
       `<button type="button" class="oc-link" data-oc-settings="server">open server settings</button></p>` : '') +
-    `<p class="oc-preview" id="oc-capture-preview" data-oc-key="capture-preview"></p>` +
+    `<p class="oc-preview" id="oc-capture-preview" data-oc-key="capture-preview" role="status"></p>` +
     (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
     `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-cancel>cancel</button>` +
-    `<button type="button" class="btn btn-accent" id="oc-capture-apply" data-oc-apply="capture">${editing ? 'save capture' : 'start capture'}</button></div>` +
+    // A blocked capture can be refused by the preview or by the storage
+    // warning above it, so the button names both reasons.
+    `<button type="button" class="btn btn-accent" id="oc-capture-apply" data-oc-apply="capture" aria-describedby="oc-capture-preview" aria-busy="${operatorState.debug.busy ? 'true' : 'false'}">${editing ? 'save capture' : 'start capture'}</button></div>` +
     `</section>`;
 }
 
