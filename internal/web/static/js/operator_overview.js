@@ -11,7 +11,9 @@ function ocAllRuleRows() {
       section: 'pause',
       id: hold.id || '',
       scope: ocHoldScopePhrase(hold),
-      detail: [ocUntilPhrase(hold.until), hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean).join(' · '),
+      detail: [ocUntilPhrase(hold.until),
+        hold.queued ? ocPopulation(hold.queued, OC_POPULATIONS.queued) : '',
+        hold.reason || ''].filter(Boolean).join(' · '),
     });
   }
   for (const session of liveDebugSessions()) {

@@ -439,7 +439,7 @@ function ocReadoutSegments() {
   // admission queue nor the send gate, so without this segment a proxy
   // refusing every new request still read `steady`.
   const gated = ocGatedCount();
-  if (gated > 0) segs.push('gated ' + gated);
+  if (gated > 0) segs.push(ocPopulationLead(gated, OC_POPULATIONS.gated));
   return segs;
 }
 
@@ -862,7 +862,7 @@ function ocBudgetPhrase(policy) {
   const req = num(policy.requests);
   const tok = num(policy.tokens);
   const bits = [];
-  if (conc > 0) bits.push(fmt(conc) + ' in flight');
+  if (conc > 0) bits.push(ocPopulation(conc, OC_POPULATIONS.inFlight));
   if (req > 0) bits.push(fmt(req) + (req === 1 ? ' request / ' : ' requests / ') + reqWindow);
   if (tok > 0) bits.push(fmt(tok) + (tok === 1 ? ' token / ' : ' tokens / ') + tokWindow);
   if (!bits.length) return 'no caps';

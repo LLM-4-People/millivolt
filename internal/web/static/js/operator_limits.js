@@ -294,10 +294,11 @@ function ocRenderLimits() {
 function ocLimitRuleHTML(policy) {
   const scope = ocPolicyScopePhrase(policy);
   const live = [];
-  if (policy.in_flight) live.push(policy.in_flight + ' in flight');
-  if (policy.queued) live.push(policy.queued + ' queued');
+  if (policy.in_flight) live.push(ocPopulation(policy.in_flight, OC_POPULATIONS.inFlight));
+  if (policy.queued) live.push(ocPopulation(policy.queued, OC_POPULATIONS.queued));
   if (policy.requests && policy.requests_capacity) {
-    live.push(Math.max(0, Math.round(policy.requests_remaining)) + ' of ' + Math.round(policy.requests_capacity) + ' requests left');
+    live.push(fmt(Math.max(0, Math.round(policy.requests_remaining))) + ' of ' +
+      fmt(Math.round(policy.requests_capacity)) + ' requests left');
   }
   if (policy.tokens && policy.tokens_capacity) {
     live.push(fmt(Math.max(0, Math.round(policy.tokens_remaining))) + ' of ' + fmt(Math.round(policy.tokens_capacity)) + ' tokens left');
@@ -423,8 +424,10 @@ async function ocRemoveLimit(id) {
   const policy = ocLimitById(id);
   if (!policy) { ocRuleGone('limit'); return; }
   const scope = ocPolicyScopePhrase(policy);
+  // The confirmation's count agrees with its verb, so it states the number
+  // through the shared formatter but keeps its own sentence.
   const live = policy.in_flight
-    ? ' ' + policy.in_flight + ' ' + agree(policy.in_flight, 'request is', 'requests are') + ' in flight and will finish.'
+    ? ' ' + fmt(policy.in_flight) + ' ' + agree(policy.in_flight, 'request is', 'requests are') + ' in flight and will finish.'
     : '';
   const ok = await ocConfirm({
     title: 'Remove this limit?',

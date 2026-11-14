@@ -371,7 +371,7 @@ function derive(data) {
   let flightLeft = '', flightRight = '', flightRightCls = '';
   if (queuedLive) {
     if (activeLive) flightLeft = fmt(activeLive) + ' active';
-    flightRight = fmt(queuedLive) + ' queued';
+    flightRight = ocPopulation(queuedLive, OC_POPULATIONS.queued);
     flightRightCls = liveBuckets.throttled ? 'q-throttled' : 'q-paused';
   } else if (activeLive) {
     flightLeft = fmt(activeLive) + ' ' +

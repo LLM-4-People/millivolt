@@ -132,7 +132,8 @@ function ocRenderPause() {
     const scope = ocHoldScopePhrase(hold);
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
-    const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
+    const meta = [hold.queued ? ocPopulation(hold.queued, OC_POPULATIONS.queued) : '',
+      hold.reason || ''].filter(Boolean);
     return ocRuleRowHTML({
       kind: 'pause', id: hold.id || '', scope, title: scope,
       // A stored 0 is the server's "no cap on this hold", not "use the

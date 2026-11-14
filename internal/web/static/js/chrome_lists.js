@@ -328,13 +328,25 @@ function parkedCounts() {
 // footer renders. The footer's hold variant inserts the live-hold scope bits
 // before the queued count; only that surface renders scope, so its call site
 // passes them in.
+//
+// OC_POPULATIONS is the one vocabulary for a count of requests in a state.
+// None of these words inflect, so the count is stated through the shared count
+// owner with the same word twice rather than through a second formatter. This
+// is what stops the same population printing "1K in flight" on a rule's budget
+// line and "1000 in flight" in the live column beside it: both read fmt now.
+const OC_POPULATIONS = { inFlight: 'in flight', queued: 'queued', gated: 'gated' };
+// ocPopulation states a count with its word: "3 in flight", "1K queued".
+const ocPopulation = (n, word) => countPhrase(n, word, word);
+// ocPopulationLead states it word-first, the order a status line uses: "queued 3".
+const ocPopulationLead = (n, word) => word + ' ' + fmt(n);
+
 function pauseStatusBits(scopeBits = []) {
   const bits = ['paused', ...scopeBits];
   const parked = parkedCounts();
-  if (parked.drainable > 0) bits.push('queued ' + parked.drainable);
+  if (parked.drainable > 0) bits.push(ocPopulationLead(parked.drainable, OC_POPULATIONS.queued));
   // A gated request is parked by a gate no hold in this list owns, so the
   // footer names it instead of folding it into the hold's own queued count.
-  if (parked.gated > 0) bits.push('gated ' + parked.gated);
+  if (parked.gated > 0) bits.push(ocPopulationLead(parked.gated, OC_POPULATIONS.gated));
   const left = pauseUntilLabel(pauseState.until);
   if (left) bits.push(left);
   return bits;
