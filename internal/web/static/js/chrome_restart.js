@@ -64,14 +64,17 @@ const RESTART_STEPS = [
 // remaining choreography or the fallback gives up while the server is still
 // draining: the server bounds the build (restartBuildTimeout, 5 minutes) and
 // the child's ready wait (restartReadyTimeout, 5 minutes) on its side, and
-// the status document carries the drain bound as drain_timeout_ms (the
-// configured restart_drain_timeout; 0 = the server waits indefinitely).
-// RESTART_DRAIN_FALLBACK_MS mirrors the server-side default drain timeout
-// (internal/config Default: RestartDrainTimeout, 10 minutes) for documents
-// that omit the bound or report an unbounded drain.
+// the status document carries the drain bound as drain_timeout_ms.
+//
+// A drain of 0 means the operator configured restart_drain_timeout: 0, which
+// the server documents as "wait indefinitely". This client used to substitute
+// a 10-minute fallback for that case and then report "restart did not
+// complete in time" while the server was still correctly draining, inviting
+// the operator to intervene in a healthy handoff. An unbounded drain simply
+// has no deadline: the watch stream and the fresh process's own started_at
+// are the completion evidence.
 const RESTART_BUILD_BUDGET_MS = 300000;
 const RESTART_READY_BUDGET_MS = 300000;
-const RESTART_DRAIN_FALLBACK_MS = 600000;
 // Poll cadence while the choreography runs; each poll is raced against the
 // hang bound because drain-phase polls sit unanswered in the inherited
 // socket's backlog.
@@ -215,8 +218,13 @@ async function restartProxy() {
     // each is raced against the hang bound. The deadline derives from the
     // status document's drain_timeout_ms plus the server's own build and
     // ready budgets, so a long drain never reads as a timeout.
-    const drainMs = Number(doc.drain_timeout_ms) > 0 ? Number(doc.drain_timeout_ms) : RESTART_DRAIN_FALLBACK_MS;
-    const deadline = Date.now() + RESTART_BUILD_BUDGET_MS + drainMs + RESTART_READY_BUDGET_MS;
+    const drainMs = Number(doc.drain_timeout_ms);
+    // Infinity for a server-declared unbounded drain: the loop below then
+    // exits only on real evidence (a new started_at, a failure, or an abort
+    // through restartFailed), which is exactly what the server promised.
+    const deadline = Number.isFinite(drainMs) && drainMs > 0
+      ? Date.now() + RESTART_BUILD_BUDGET_MS + drainMs + RESTART_READY_BUDGET_MS
+      : Infinity;
     const pollDone = (async () => {
       while (Date.now() < deadline) {
         await new Promise(res => setTimeout(res, RESTART_POLL_INTERVAL_MS));
