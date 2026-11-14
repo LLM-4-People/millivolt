@@ -206,6 +206,13 @@ function ocComposing(kind) {
 // surfaces wrote the wrapper by hand - three sections, the filter's no-match
 // note and the overview - so the frame could drift between them. The words
 // stay with the surface that owns them.
+//
+// The two arguments are trusted differently, on purpose. `title` is a plain
+// phrase and is escaped here. `body` is markup the caller composes and may
+// carry a real control - the filter's no-match note embeds its clear action -
+// so it is inserted as written and every caller must escape the values it
+// interpolates. A body passed as plain text needs no escaping because it has
+// no markup to break.
 function ocEmptyHTML(title, body) {
   return `<div class="oc-empty"><strong>${escapeHtml(title)}</strong> ${body}</div>`;
 }

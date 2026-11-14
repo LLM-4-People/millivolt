@@ -2337,6 +2337,73 @@ module.exports = async function operatorMenus(H) {
         parking({paused: true, holds: [{id: 'p1', all: true}]}) === true &&
         parking({storm_waiters: 2}) === true &&
         parking({}) === false);
+      // OC_SCOPE_DIMS is the one table of selector dimensions. Every derived
+      // list and every spelling of a dimension must come from it, or a rename
+      // reaches one reader and silently misses the wire name or the record
+      // field.
+      check('the scope table owns every spelling of every dimension',
+        JSON.stringify(w.eval('OC_SCOPE_DIMS.map(d => d.key)')) === JSON.stringify(w.eval('OC_SCOPE_KEYS')) &&
+        // The capture subset is derived in table order, not re-listed in the
+        // order the old composer happened to write it.
+        JSON.stringify(w.eval('OC_CAPTURE_SCOPE_KEYS')) === JSON.stringify(['providers', 'models', 'clients']) &&
+        w.eval('OC_SCOPE_DIMS.every(d => d.key && d.wire && d.one && d.many && d.record)') &&
+        w.eval('OC_SCOPE_DIMS.every(d => ocDimLabel(d.key) === d.one)') &&
+        // The wire name is what the server document calls the dimension, and
+        // the composer bodies must send exactly that.
+        w.eval('OC_SCOPE_DIMS.every(d => Object.prototype.hasOwnProperty.call(ocScopeToWire(ocNewScope()), d.wire))'));
+      // The phrase reads the table: a single value takes the singular word, a
+      // key is shortened, and several values take the count and the plural.
+      check('the scope phrase reads its words and shortening from the table',
+        w.eval('ocScopePhrase({providers: ["p"], models: ["a", "b"], keyHashes: ["abcdef1234567"]})') ===
+          'provider p · 2 models · key abcdef12…' &&
+        w.eval('ocScopePhrase(ocNewScope())') === 'every request' &&
+        w.eval('ocScopePhrase(null)') === 'every request');
+      // A stored policy nests its selector while a hold carries the dimensions
+      // flat; the reader accepts both so no caller wraps a hold by hand.
+      check('the scope reader accepts a nested selector and a flat document',
+        JSON.stringify(evalJSON('ocScopeFromPolicy({scope: {providers: ["n"], key_hashes: ["k"]}})')) ===
+          JSON.stringify({providers: ['n'], models: [], clients: [], keyHashes: ['k'], conversations: []}) &&
+        JSON.stringify(evalJSON('ocScopeFromPolicy({providers: ["f"]})')) ===
+          JSON.stringify({providers: ['f'], models: [], clients: [], keyHashes: [], conversations: []}));
+      // A schedule is one phrase with three shapes; the day letters come from
+      // the same weekday table the chips use, so two chosen days join into one
+      // run of letters rather than a spaced list.
+      check('the schedule phrase names days, hours and the all-day case',
+        w.eval('ocSchedulePhrase({days: [1], start_minute: 0, end_minute: 0})') === 'M · all day' &&
+        w.eval('ocSchedulePhrase({days: [], start_minute: 540, end_minute: 1020})') === 'every day · 09:00-17:00' &&
+        w.eval('ocSchedulePhrase({days: [0, 6], start: 60, end: 120})') === 'SS · 01:00-02:00' &&
+        // A stored document names its minutes and a draft names its hours; the
+        // reader accepts both spellings of the same window.
+        w.eval('ocSchedulePhrase({days: [1], start: 540, end: 1020})') ===
+          w.eval('ocSchedulePhrase({days: [1], start_minute: 540, end_minute: 1020})') &&
+        evalJSON('OC_DAYS.map(d => d.name).join()') ===
+          'Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday');
+      // The empty frame has one shape, whatever the surface's words are. Its
+      // two parts are trusted differently: the lead is escaped here, while the
+      // body is caller markup that may embed a real control (the filter's
+      // no-match note carries its clear action), so a body is asserted as
+      // written rather than escaped.
+      check('the empty frame wraps an escaped lead and a caller-built body',
+        w.eval('ocEmptyHTML("No holds.", "Nothing is parked.")') ===
+          '<div class="oc-empty"><strong>No holds.</strong> Nothing is parked.</div>' &&
+        w.eval('ocEmptyHTML("<b>x</b>", "a &amp; b")') ===
+          '<div class="oc-empty"><strong>&lt;b&gt;x&lt;/b&gt;</strong> a &amp; b' + '</div>');
+      // Count agreement is one rule for every surface that states a count.
+      check('count agreement is one rule, not one ternary per phrase',
+        w.eval('agree(1, "rule is", "rules are")') === 'rule is' &&
+        w.eval('agree(2, "rule is", "rules are")') === 'rules are' &&
+        w.eval('agree(0, "rule is", "rules are")') === 'rules are' &&
+        w.eval('countPhrase(1, "record")') === '1 record' &&
+        w.eval('countPhrase(7, "record")') === '7 records');
+      // The export's window choices are the delete filter's tokens with their
+      // own wording: an exclusion reads "older than", an inclusion "last".
+      check('the export window choices derive from the history token list',
+        JSON.stringify(w.eval('OC_AGE_CHOICES.map(c => c[0])')) ===
+          JSON.stringify(w.eval('FILTER_AGE_TOKENS')) &&
+        JSON.stringify(w.eval('OC_AFTER_CHOICES.map(c => c[0])')) ===
+          JSON.stringify(w.eval('FILTER_AGE_TOKENS')) &&
+        w.eval('OC_AGE_CHOICES[3][1]') === 'older than 1 week' &&
+        w.eval('OC_AFTER_CHOICES[3][1]') === 'last week');
       // ocRecordChange is also the one announcement owner. The footer ledger
       // and the toast are both polite live regions, so a caller that recorded
       // a change and then toasted the same phrase spoke it twice. The ledger
