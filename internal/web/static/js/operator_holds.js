@@ -121,7 +121,7 @@ function ocPausePreview() {
 function ocRenderPause() {
   const holds = liveHolds();
   if (!ocDrafts.pause) ocDrafts.pause = ocBlankPauseDraft();
-  const composing = ocDrafts.pause && (ocDrafts.pause.id || ocView.kind === 'pause');
+  const composing = ocComposing('pause');
   // One action row while a draft is open: the composer footer owns cancel and
   // commit. A head "start over" beside it was a second, silent discard of the
   // same draft. It stays only while editing a stored hold.
@@ -160,8 +160,8 @@ function ocRenderPause() {
   const hidden = ocListEmptyNote('pause', shown.length, holds.length);
   // "As fast as it allows" was only true when no limit and no queue bound
   // applied, and this section cannot see either. It states what it knows.
-  const empty = holds.length ? '' :
-    `<div class="oc-empty"><strong>No holds.</strong> Nothing is parked. New requests go straight to admission, where limits and the queue can still delay them.</div>`;
+  const empty = ocSectionEmpty('pause', holds.length,
+    `<div class="oc-empty"><strong>No holds.</strong> Nothing is parked. New requests go straight to admission, where limits and the queue can still delay them.</div>`);
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Park new matching requests without cancelling work that is already running.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
@@ -397,7 +397,7 @@ function ocCapturePreview() {
 function ocRenderCapture() {
   const sessions = liveDebugSessions();
   if (!ocDrafts.capture) ocDrafts.capture = ocBlankCaptureDraft();
-  const composing = ocDrafts.capture && (ocDrafts.capture.id || ocView.kind === 'capture');
+  const composing = ocComposing('capture');
   // One action row while a draft is open: the composer footer. See the pause
   // section for why the head keeps "start over" only while editing.
   const headAction = ocDrafts.capture?.id
@@ -430,8 +430,8 @@ function ocRenderCapture() {
   // prompt/response preview even with no session running, and captures from
   // earlier sessions stay readable until their retention window ends - the
   // stop-all dialog says exactly that.
-  const empty = sessions.length ? '' :
-    `<div class="oc-empty"><strong>No captures running.</strong> Nothing new is being recorded. Earlier captures stay readable until their retention window ends.</div>`;
+  const empty = ocSectionEmpty('capture', sessions.length,
+    `<div class="oc-empty"><strong>No captures running.</strong> Nothing new is being recorded. Earlier captures stay readable until their retention window ends.</div>`);
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +

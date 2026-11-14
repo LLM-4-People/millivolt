@@ -114,6 +114,26 @@ function ocRuleEditing(kind, id) {
   return ' data-oc-editing="1" aria-current="true"';
 }
 
+// ocComposing reports whether a section is showing its editor. The three
+// sections spelled the same expression out separately (a draft exists AND is
+// either an edit of a stored rule or a fresh one for this section); one owner
+// keeps "is a form open here" from drifting between them.
+function ocComposing(kind) {
+  const draft = ocDrafts[kind];
+  return !!draft && (!!draft.id || ocView.kind === kind);
+}
+
+// ocSectionEmpty is the one rule for a section's empty state: it describes a
+// policy with no rules, and an open draft is already the answer to "what does
+// this section do now". Only the limits section honoured that, so pause and
+// capture printed "No holds." / "No captures running." underneath a live form,
+// where the pane's pinned action row cut across the sentence. Each section
+// still owns its own words.
+function ocSectionEmpty(kind, total, html) {
+  if (total || ocComposing(kind)) return '';
+  return html;
+}
+
 // ocFilterRows narrows a section's rows by the text each one renders. Matching
 // the rendered reading, rather than re-deriving the scope here, keeps one
 // search rule for every row shape and makes a new field searchable for free.
