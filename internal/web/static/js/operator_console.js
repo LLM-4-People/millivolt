@@ -53,6 +53,17 @@ let ocPickerFocus = '';
 
 function ocEl(id) { return document.getElementById(id); }
 
+// ocPauseDefaultCap is the one client reader of the server's default hold
+// queue cap. The number belongs to config.MaxQueueSize and the pause snapshot
+// publishes it as default_max_queued, so the panel must never carry a second
+// copy: a hardcoded fallback would silently disagree with a configured
+// max_queue_size, and it would apply exactly when the pause document has not
+// arrived yet. Zero means the server reports no default.
+function ocPauseDefaultCap() {
+  const n = typeof pauseState === 'object' && pauseState ? Number(pauseState.default_max_queued) : NaN;
+  return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+}
+
 // ---------- long rule lists ----------
 // A rule list that outgrows the 560px panel is only usable if it can be
 // narrowed: fourteen limits fill the pane and finding one becomes a scroll
@@ -1352,7 +1363,7 @@ document.addEventListener('change', event => {
     return;
   }
   if (target.dataset.ocField === 'pauseCapOn') {
-    if (ocDrafts.pause) { ocDrafts.pause.cap = target.checked ? String(pauseState.default_max_queued || 1024) : ''; ocRender(); }
+    if (ocDrafts.pause) { ocDrafts.pause.cap = target.checked ? String(ocPauseDefaultCap()) : ''; ocRender(); }
     return;
   }
   if (target.dataset.ocTime && ocDrafts.limit?.schedule) {

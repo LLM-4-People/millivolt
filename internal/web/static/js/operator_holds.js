@@ -81,7 +81,7 @@ function ocPauseComposerHTML(draft) {
     ocChipRow('pause-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : PAUSE_DURS[0][1]) +
     `</div>` +
     `<div class="oc-group"><label class="oc-check"><input type="checkbox" data-oc-field="pauseCapOn" ${draft.cap !== '' ? 'checked' : ''}><span>limit the hold queue</span></label>` +
-    (draft.cap !== '' ? ocField('pauseCap', 'queued requests', draft.cap, { placeholder: String(pauseState.default_max_queued || 1024) }) : '') +
+    (draft.cap !== '' ? ocField('pauseCap', 'queued requests', draft.cap, { placeholder: String(ocPauseDefaultCap()) }) : '') +
     `</div>` +
     `<p class="oc-preview" id="oc-pause-preview" data-oc-key="pause-preview" role="status"></p>` +
     (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +

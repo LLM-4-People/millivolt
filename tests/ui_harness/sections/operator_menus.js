@@ -1041,6 +1041,23 @@ module.exports = async function operatorMenus(H) {
         capToggle.dispatchEvent(new w.Event('change', {bubbles: true}));
         check('the queue cap field starts at the server default',
           q('#oc-pane [data-oc-field="pauseCap"]').value === '16');
+        // The number is config.MaxQueueSize, published by the pause snapshot
+        // as default_max_queued. A client-side fallback would be a second copy
+        // of a server default, and it would apply exactly when the document
+        // has not arrived.
+        {
+          const src = fs.readFileSync(path.join(STATIC, 'js', 'operator_console.js'), 'utf8')
+            + fs.readFileSync(path.join(STATIC, 'js', 'operator_holds.js'), 'utf8');
+          check('no console file carries its own copy of the default queue cap',
+            !/default_max_queued\s*\|\|\s*\d/.test(src) &&
+            !/\b1024\b/.test(src) &&
+            typeof w.ocPauseDefaultCap === 'function');
+          const saved = w.eval('pauseState.default_max_queued');
+          w.eval('pauseState.default_max_queued = 64');
+          check('the default queue cap is read from the server document',
+            w.ocPauseDefaultCap() === 64);
+          w.eval('pauseState.default_max_queued = ' + JSON.stringify(saved));
+        }
         input('#oc-pane [data-oc-field="pauseCap"]', '-1');
         click('#oc-pause-apply');
         check('a negative queue cap is refused with no POST',
