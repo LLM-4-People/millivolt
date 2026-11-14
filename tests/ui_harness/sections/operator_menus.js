@@ -2505,6 +2505,37 @@ module.exports = async function operatorMenus(H) {
       w.eval('ocRecordChange(' + JSON.stringify(openPhrase) + ', null, "ok")');
       check('a change recorded with the console open is not spoken twice',
         text('#oc-change') === openPhrase && text('#toast') === toastBefore);
+      // The rule is not just "the owner toasts": a caller must never toast its
+      // own phrase either, or the two channels speak together again the moment
+      // the owner's guard decides the ledger is audible. A source scan over the
+      // console modules is the only assertion that covers callers the tests do
+      // not drive, and it names every one this suite does.
+      {
+        const {readFileSync, readdirSync} = require('fs');
+        const {join: joinPath} = require('path');
+        const dir = joinPath(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
+        const sources = readdirSync(dir).filter(n => /^operator_.*\.js$/.test(n))
+          .map(n => [n, readFileSync(joinPath(dir, n), 'utf8')]);
+        const offenders = [];
+        for (const [name, src] of sources) {
+          const code = src.replace(/\/\/.*$/gm, '');
+          // Every ocRecordChange( call: walk its argument list, then look at the
+          // statement that follows for a toast of the same phrase.
+          let at = code.indexOf('ocRecordChange(');
+          while (at >= 0) {
+            let depth = 0, i = at + 'ocRecordChange'.length;
+            for (; i < code.length; i++) {
+              if (code[i] === '(') depth++;
+              else if (code[i] === ')') { depth--; if (depth === 0) break; }
+            }
+            const after = code.slice(i + 1, i + 220);
+            if (/^[\s;]*toast\(/.test(after)) offenders.push(name);
+            at = code.indexOf('ocRecordChange(', at + 1);
+          }
+        }
+        check('no console caller toasts the phrase its change record already announces',
+          sources.length >= 4 && offenders.length === 0);
+      }
       // The ledger is a polite live region that repaints on every accepted
       // operator poll and every console render. An unconditional assignment
       // replaces the text node, so a console left open would re-announce the

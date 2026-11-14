@@ -443,7 +443,9 @@ async function ocRemoveLimit(id) {
       await fetchBootstrap('none');
       applyThrottleState(await operatorJson('/admin/throttle'));
     }, 'ok');
-    toast(phrase);
+    // No toast here: ocRecordChange is the one announcement owner and already
+    // raises the phrase when the ledger cannot be heard. Toasting it as well
+    // spoke the same sentence twice whenever the console was open.
     ocRender();
   });
 }
