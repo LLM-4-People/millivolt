@@ -57,6 +57,38 @@ module.exports = async function logsMenu(H) {
       JSON.stringify(exportValues('client')) === JSON.stringify(delValues('client')));
     check('settings delete and console export derive the same status values',
       JSON.stringify(exportValues('status')) === JSON.stringify(delValues('status')));
+    // Exporting history is the section's purpose, and after a restart the
+    // live ring is empty while the server still knows what ran. A dimension
+    // fed only from the ring would have nothing to offer and no way to type.
+    {
+      const savedRecords = w.eval('lastData.records');
+      w.applyThrottleState({ok: true, active: true,
+        known_providers: ['p'], known_clients: ['c'], known_models: ['glm-5.3'],
+        throttles: []});
+      w.eval('lastData.records = []');
+      w.openOperatorConsole('export');
+      d.querySelector('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]').click();
+      const offered = dim => {
+        d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+        const values = [...d.querySelectorAll(`#oc-pane [data-oc-filter-value="${dim}"]`)]
+          .map(row => row.dataset.ocValue).filter(value => value !== '');
+        d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+        return values;
+      };
+      check('an empty record ring still offers the server provider and client vocabularies',
+        offered('provider').includes('p') && offered('client').includes('c'));
+      // offered() repaints through the section, which closes the picker, so
+      // open one directly and read the fallback field it renders.
+      const typedField = dim => {
+        d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+        const field = d.querySelector(`#oc-pane [data-oc-filter-custom="${dim}"]`);
+        return !!field;
+      };
+      check('a quiet proxy can still filter an export by a typed model or provider',
+        typedField('model') && typedField('provider') && typedField('client'));
+      w.eval('lastData.records = ' + JSON.stringify(savedRecords || null));
+    }
+
     check('the console shares the settings sentence-case filter dimensions',
       ['provider', 'model', 'client', 'status'].every(dim =>
         !!d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`)) &&
