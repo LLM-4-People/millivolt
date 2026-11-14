@@ -386,6 +386,17 @@ function ocLimitOffSchedule(policy) {
 // window. It is not "scheduled": that asserts the opposite of the truth.
 const OC_OFF_SCHEDULE = 'off schedule';
 
+// OC_OFF_SCHEDULE_ATTR is the one marker a row carries for that state, and
+// ocOffScheduleMark is the one way to emit it. Both the rule row and the
+// overview row wrote the attribute by hand, so its name was a third copy of
+// the same fact beside the word and the verdict. It is an attribute rather than
+// a class so the styling hook and the test hook are the same thing: a marker
+// nothing paints would be dead markup that only a test reads.
+const OC_OFF_SCHEDULE_ATTR = 'data-oc-off-schedule';
+function ocOffScheduleMark(off) {
+  return off ? ' ' + OC_OFF_SCHEDULE_ATTR + '="1"' : '';
+}
+
 function ocRuleCounts() {
   const holds = typeof liveHolds === 'function' ? liveHolds().length : 0;
   const captures = typeof liveDebugSessions === 'function' ? liveDebugSessions().length : 0;

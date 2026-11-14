@@ -316,7 +316,7 @@ function ocLimitRuleHTML(policy) {
     kind: 'limit', id: policy.id, scope, title: scope + ' · ' + source,
     budget: ocBudgetPhrase(policy) + schedule,
     live: offSchedule ? OC_OFF_SCHEDULE : (live.join(' · ') || 'idle'),
-    attrs: offSchedule ? ' data-oc-off-schedule="1"' : '',
+    attrs: ocOffScheduleMark(offSchedule),
     // The whole row is the edit target, so a separate edit action would
     // duplicate it and take width the scope needs.
     actions: `<button type="button" class="oc-icon-btn" data-oc-copy="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="copy this limit's scope into a new limit" title="copy this scope into a new limit">copy</button>` +

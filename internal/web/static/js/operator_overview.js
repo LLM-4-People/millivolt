@@ -72,7 +72,7 @@ function ocRenderOverview() {
   const quotaProviders = typeof quotaPausedProviders === 'function' ? quotaPausedProviders() : [];
   const list = rows.length ? rows.map(row =>
     `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-target="${escapeHtml(row.id)}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
-    `<span class="oc-ov-kind" data-kind="${row.kind}"${row.offSchedule ? ' data-oc-off-schedule="1"' : ''}>${row.kind}</span>` +
+    `<span class="oc-ov-kind" data-kind="${row.kind}"${ocOffScheduleMark(row.offSchedule)}>${row.kind}</span>` +
     `<span class="oc-ov-scope">${escapeHtml(row.scope)}</span>` +
     `<span class="oc-ov-detail">${escapeHtml(row.detail)}</span></button>`).join('')
     : ocEmptyHTML('Nothing is in force.',

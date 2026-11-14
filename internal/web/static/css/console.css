@@ -686,6 +686,10 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-ov-kind[data-kind="limit"] { color: var(--accent); }
 .oc-ov-kind[data-kind="pause"] { color: var(--warn); }
 .oc-ov-kind[data-kind="capture"] { color: var(--cyan); }
+/* An off-schedule limit is installed but enforcing nothing, so its kind takes
+   the same warn tone the rule row's state column takes. The marker existed on
+   this row before the rule did, which made it markup only a test could see. */
+.oc-ov-kind[data-oc-off-schedule="1"] { color: var(--warn); }
 .oc-ov-scope {
   flex: 0 1 auto; min-width: 0;
   color: var(--text); font: 600 10px/1.4 var(--mono);
