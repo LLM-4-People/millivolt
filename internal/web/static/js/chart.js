@@ -89,11 +89,6 @@ const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
 // range; the shared trailing unit is stated once so the pair fits one tile.
 // fmtTPSCompact and tpsUnitAfter are the shared owners in core.js.
 
-// hm is the single HH:MM local-time label (x ticks + hover chip).
-const hm = t => {
-  const d = new Date(t);
-  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-};
 // chartWindowEnd is the payload's resolved window end: to_ms is the
 // exclusive right edge (the clock-clamped requested end for calendar views),
 // with now_ms as the fallback for a payload that predates the field. Span
@@ -115,9 +110,9 @@ function chartXTick(t) {
   if (span > CHART_DAY_MS + (chartAgg?.bucket_ms || 0)) {
     const d = new Date(t);
     const date = (d.getMonth() + 1) + '/' + d.getDate() + (chartSpansYears() ? '/' + d.getFullYear() : '');
-    return date + (chartAgg.bucket_ms < CHART_DAY_MS ? ' ' + hm(t) : '');
+    return date + (chartAgg.bucket_ms < CHART_DAY_MS ? ' ' + fmtClockMs(t) : '');
   }
-  return hm(t);
+  return fmtClockMs(t);
 }
 
 // A multi-day bucket must name both dates; clock-only end labels would make
@@ -128,7 +123,7 @@ function chartBucketRange(t0, t1) {
   const formatter = chartSpansYears() || start.getFullYear() !== end.getFullYear()
     ? CHART_FULL_DATE_FORMAT : CHART_DATE_FORMAT;
   const endDate = start.toDateString() !== end.toDateString() ? formatter.format(end) + ' · ' : '';
-  return formatter.format(start) + ' · ' + hm(t0) + '–' + endDate + hm(t1);
+  return formatter.format(start) + ' · ' + fmtClockMs(t0) + '–' + endDate + fmtClockMs(t1);
 }
 
 // asinhTickLadder returns round decade values (1…1e15) for the arcsinh bars

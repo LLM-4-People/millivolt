@@ -370,6 +370,21 @@ const fmtDur = ms => {
 // positives are rounded up to 1ms.
 // fmtDur(0) stays "0ms" for real durations (axes, elapsed time).
 const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
+// pad2 is the one zero-pad for a clock or date field. Four surfaces joined
+// two padded numbers into HH:MM and two more padded date parts by hand, so a
+// change to the padding reached one surface at a time.
+const pad2 = n => String(n).padStart(2, '0');
+// fmtClock is the one HH:MM form, given the two fields. Callers own how they
+// derive them, because a schedule holds minutes since midnight while a chart
+// tick and a log stamp hold an instant; the join and the width are shared.
+const fmtClock = (h, m) => pad2(h) + ':' + pad2(m);
+// fmtClockMs renders an epoch-ms instant as local HH:MM.
+const fmtClockMs = ms => {
+  const d = new Date(ms);
+  return fmtClock(d.getHours(), d.getMinutes());
+};
+// fmtClockOfDay renders minutes since local midnight as HH:MM.
+const fmtClockOfDay = minutes => fmtClock(Math.floor(minutes / 60), minutes % 60);
 // TPS_UNIT is the one compact generation-speed unit for narrow surfaces (the
 // KPI band and the summary timing tile). Chart axes, legends and tooltips keep
 // the full "tok/s" label where there is room.

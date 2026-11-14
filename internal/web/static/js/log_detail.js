@@ -23,9 +23,8 @@ function fmtStamp(t) {
   if (!t) return '';
   const d = new Date(t);
   if (isNaN(d) || d.getTime() < 86400000) return '';
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
-    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.` +
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +
+    `${fmtClock(d.getHours(), d.getMinutes())}:${pad2(d.getSeconds())}.` +
     String(d.getMilliseconds()).padStart(3, '0');
 }
 

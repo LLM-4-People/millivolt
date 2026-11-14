@@ -152,8 +152,8 @@ function backupWhen(v) {
   if (v == null || v === '' || v === 0) return '';
   const d = new Date(typeof v === 'number' ? v : String(v));
   if (Number.isNaN(d.getTime())) return '';
-  const p = n => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) +
+    ' ' + fmtClock(d.getHours(), d.getMinutes());
 }
 
 function backupSpan(lo, hi) {

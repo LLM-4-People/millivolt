@@ -880,8 +880,7 @@ function ocSchedulePhrase(schedule) {
   const days = Array.isArray(schedule.days) && schedule.days.length
     ? schedule.days.map(d => OC_DAY_LABELS[d] || '?').join('') : 'every day';
   if (start === end) return days + ' · all day';
-  const clock = m => String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
-  return days + ' · ' + clock(start) + '-' + clock(end);
+  return days + ' · ' + fmtClockOfDay(start) + '-' + fmtClockOfDay(end);
 }
 
 // ocUntilPhrase is the console's wording for a server deadline. The
@@ -1311,8 +1310,7 @@ function ocField(key, label, value, opts = {}) {
 
 function ocTimeValue(minutes) {
   if (minutes == null) return '';
-  const m = Math.max(0, Math.min(1439, Number(minutes) || 0));
-  return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0');
+  return fmtClockOfDay(Math.max(0, Math.min(1439, Number(minutes) || 0)));
 }
 
 function ocParseTime(value) {

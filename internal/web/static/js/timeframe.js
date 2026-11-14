@@ -126,15 +126,14 @@ function tfResolve(token, nowMs) {
   return { token: entry.token, kind: 'range', fromMs: span.fromMs, toMs: span.toMs, label: entry.short, long: entry.long };
 }
 
-// tfClock and tfSince are the control's whole formatting surface: fmtDur
-// (core.js) owns every duration, tfClock is the note's HH:MM stamp and
-// tfSince picks the clock form for today, a short date otherwise.
-const tfClock = ms => String(new Date(ms).getHours()).padStart(2, '0') + ':' + String(new Date(ms).getMinutes()).padStart(2, '0');
+// tfSince is the control's date selection: fmtDur (core.js) owns every
+// duration, fmtClockMs (core.js) the HH:MM stamp, and this picks the clock
+// form for today, a short date otherwise.
 function tfSince(ms) {
   const d = new Date(ms);
   const now = new Date();
   if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
-    return tfClock(ms);
+    return fmtClockMs(ms);
   }
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
