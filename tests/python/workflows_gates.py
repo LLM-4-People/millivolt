@@ -348,8 +348,11 @@ def escalation_proof_errors(job: dict) -> list[str]:
     if job_if != ESCALATION_PROOF_IF:
         errors.append("check.yml: escalation proof condition must be exactly "
                       + ESCALATION_PROOF_IF)
-    if job.get("timeout-minutes") != 60:
-        errors.append("check.yml: escalation proof must keep its sixty-minute budget")
+    # The budget is not pinned to a literal: it must exceed the wait it
+    # contains (asserted below against the step), so the exact number belongs to
+    # that relationship rather than to a second independent constant.
+    if not isinstance(job.get("timeout-minutes"), int):
+        errors.append("check.yml: escalation proof must declare a numeric job budget")
     if job.get("runs-on") != "ubuntu-24.04":
         errors.append("check.yml: escalation proof must run on ubuntu-24.04")
     if any(str(step.get("uses", "")).startswith("actions/checkout@")
@@ -374,7 +377,8 @@ def escalation_proof_errors(job: dict) -> list[str]:
         'select(.name == "race")',
         "if $success != 0",
         "for attempt in 1 2 3 4",
-        "for attempt in $(seq 1 200)",
+        'wait_attempts=200',
+        'for attempt in $(seq 1 "$wait_attempts")',
         "sleep 30",
         "--argjson suite",
         'echo "::error::No escalation.yml pull_request run on testing exists for $HEAD_SHA."',
@@ -384,13 +388,16 @@ def escalation_proof_errors(job: dict) -> list[str]:
     ):
         if needle not in run:
             errors.append("check.yml: escalation proof is missing " + needle)
-    # The proof's bounded wait must cover the budget of the run it proves. A
-    # shorter bound fails a healthy run that is merely slow, which reads as a
-    # real failure and blocks a promotion for no reason.
+    # The wait must satisfy two relationships at once, and only one of them was
+    # ever asserted. It must cover the budget of the run it proves (or a healthy
+    # slow run fails), and it must fit inside this job's own budget (or the loop
+    # is killed before it can report its designed "still pending" failure, and
+    # the operator sees a generic cancellation instead).
     escalation = load(WORKFLOWS / "escalation.yml")
     race = ((escalation.get("jobs") or {}).get("race") or {})
     budget = race.get("timeout-minutes")
-    attempts = re.search(r"for attempt in \$\(seq 1 (\d+)\)", run)
+    job_budget = job.get("timeout-minutes")
+    attempts = re.search(r"wait_attempts=(\d+)", run)
     pause = re.search(r"\bsleep (\d+)\b", run)
     if not isinstance(budget, int) or not attempts or not pause:
         errors.append("check.yml: escalation proof wait cannot be checked against the "
@@ -401,6 +408,13 @@ def escalation_proof_errors(job: dict) -> list[str]:
             errors.append("check.yml: escalation proof waits "
                           + ("%.0f" % wait_minutes) + " minutes for a run whose own budget is "
                           + str(budget) + "; the wait must cover it")
+        if not isinstance(job_budget, int):
+            errors.append("check.yml: escalation proof job must declare its own timeout "
+                          "so the wait can be bounded by it")
+        elif wait_minutes >= job_budget:
+            errors.append("check.yml: escalation proof waits "
+                          + ("%.0f" % wait_minutes) + " minutes inside a job bounded at "
+                          + str(job_budget) + "; the wait can never report its own failure")
     if "gh workflow run" in run or "actions: write" in run:
         errors.append("check.yml: escalation proof must not dispatch or write workflow runs")
     if step.get("env") != {
