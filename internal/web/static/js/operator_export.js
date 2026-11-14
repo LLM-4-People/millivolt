@@ -183,7 +183,9 @@ function ocRenderExport() {
     `<div class="oc-receipt"><div class="oc-receipt-main" id="oc-export-receipt" role="status" aria-live="polite">${escapeHtml(receipt)}</div>` +
     `<div class="oc-receipt-sub">Debug records carry their captured bodies. Treat every export as sensitive.</div>` +
     `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-reset-export>reset</button>` +
-    `<button type="button" class="btn btn-accent" id="oc-export-download" data-oc-download ${enabled ? '' : 'disabled'}>download</button></div></div>` +
+    // Same rule as the composer commits: a disabled button leaves the tab
+    // order, so the receipt that says why must be its description.
+    `<button type="button" class="btn btn-accent" id="oc-export-download" data-oc-download aria-describedby="oc-export-receipt" ${enabled ? '' : 'disabled'}>download</button></div></div>` +
     // Backups are not an export; the cross-link is one row, not a card.
     `<div class="oc-inline oc-export-more"><span class="oc-note">Configuration and database backups live in Settings.</span>` +
     `<button type="button" class="btn" data-oc-settings>open settings</button></div>` +
