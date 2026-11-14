@@ -210,8 +210,11 @@ function ocRuleCounts() {
   const captures = typeof liveDebugSessions === 'function' ? liveDebugSessions().length : 0;
   const policies = (typeof throttleState !== 'undefined' && throttleState.throttles) || [];
   const limits = policies.filter(ocLimitEnforcing).length;
-  return { holds, captures, limits, parked: policies.length - limits,
-    installed: policies.length, total: holds + captures + limits };
+  // `parked` is the complement of `limits`, so every count here answers a
+  // question a surface asks. A total and an installed count were computed
+  // alongside them for a badge design that never shipped: a second way to say
+  // policies.length, which the limits section already reads directly.
+  return { holds, captures, limits, parked: policies.length - limits };
 }
 
 function ocRestartActive() {
@@ -909,7 +912,9 @@ function ocRevealComposer(pane) {
 // menus' core failure.
 function ocRecordChange(phrase, undo, tone) {
   ocError = '';
-  ocChanges.push({ phrase, undo: typeof undo === 'function' ? undo : null, tone: tone || '', at: Date.now() });
+  // No timestamp: the ledger is a bounded LIFO of the newest changes, and
+  // nothing renders or serialises when each one happened.
+  ocChanges.push({ phrase, undo: typeof undo === 'function' ? undo : null, tone: tone || '' });
   if (ocChanges.length > OC_CHANGE_LIMIT) ocChanges.shift();
   ocRenderFoot();
   refreshOperatorReadout();
@@ -995,7 +1000,7 @@ function ocChipRow(name, values, current, labelOf) {
   return `<div class="oc-chips" role="group" aria-label="${escapeHtml(name)}">` +
     values.map(value => {
       const pressed = String(current) === String(value) ? 'true' : 'false';
-      return `<button type="button" class="oc-chip oc-chip-pick" aria-pressed="${pressed}" data-oc-choice="${escapeHtml(name)}" data-oc-value="${escapeHtml(String(value))}">${escapeHtml(labelOf(value))}</button>`;
+      return `<button type="button" class="oc-chip" aria-pressed="${pressed}" data-oc-choice="${escapeHtml(name)}" data-oc-value="${escapeHtml(String(value))}">${escapeHtml(labelOf(value))}</button>`;
     }).join('') + `</div>`;
 }
 
@@ -1039,16 +1044,17 @@ function ocNumber(value) {
 // ocField is the one labelled input. A bare field carries its name as an
 // aria-label instead of a visible line: the surrounding row already names the
 // dimension, and a second caption above every number is pure noise.
+// ocField is the one numeric field. Every caller is a whole-number budget, so
+// the input type, the numeric inputmode and the arming placeholder are fixed
+// here rather than offered as options no call site set. Wide and hint spans
+// exist in the stylesheet for the markup that writes them directly.
 function ocField(key, label, value, opts = {}) {
-  const type = opts.type || 'number';
-  const attrs = type === 'number' ? 'min="0" step="1" inputmode="numeric"' : '';
   const name = opts.aria || label;
-  return `<label class="oc-field${opts.wide ? ' wide' : ''}${opts.bare ? ' bare' : ''}" data-oc-key="${escapeHtml(key)}">` +
+  return `<label class="oc-field${opts.bare ? ' bare' : ''}" data-oc-key="${escapeHtml(key)}">` +
     (opts.bare ? '' : `<span class="oc-field-name">${escapeHtml(label)}</span>`) +
-    `<input type="${type}" ${attrs} data-oc-field="${escapeHtml(key)}" data-oc-key="field-${escapeHtml(key)}"` +
+    `<input type="number" min="0" step="1" inputmode="numeric" data-oc-field="${escapeHtml(key)}" data-oc-key="field-${escapeHtml(key)}"` +
     (name ? ` aria-label="${escapeHtml(name)}"` : '') +
     ` value="${escapeHtml(String(value == null ? '' : value))}" placeholder="${escapeHtml(opts.placeholder || '')}" ${opts.disabled ? 'disabled' : ''}>` +
-    (opts.hint ? `<span class="oc-field-hint">${escapeHtml(opts.hint)}</span>` : '') +
     `</label>`;
 }
 
@@ -1373,7 +1379,6 @@ function ocHandleChoice(name, value) {
     if (name === 'request-window') draft.requestWindow = value;
     if (name === 'token-window') draft.tokenWindow = value;
     if (name === 'ramp') draft.ramp = value;
-    if (name === 'concurrency') draft.concurrency = value;
     ocRender();
     return;
   }
