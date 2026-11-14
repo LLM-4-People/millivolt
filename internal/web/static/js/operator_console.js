@@ -23,6 +23,14 @@ const OC_CHANGE_LIMIT = 8;
 const OC_MINUTE = 60000;
 const OC_DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
+// ocNewSchedule is the one schedule a limit starts with when the operator
+// opens the schedule disclosure: no days chosen yet, 09:00 to 17:00 in the
+// server's local clock. The composer's preview fallback and the disclosure
+// handler both read it, so the form cannot show one window and open another.
+function ocNewSchedule() {
+  return { days: [], start: 540, end: 1020 };
+}
+
 let ocSection = 'overview';
 try {
   const saved = sessionStorage.getItem(OC_STORAGE_KEY);
@@ -1371,11 +1379,23 @@ function ocTogglePicker(draft, dim) {
   ocRender();
 }
 
-async function ocHandleAction(target) {
-  const section = target.dataset.ocSection;
-  if (section) {
+// ---------- delegated actions ----------
+// OC_ACTION_HANDLERS is the one registry of console click actions: the
+// data-oc-* attribute that names each action, in dispatch order, paired with
+// the handler that runs it. The listener's selector is built from these keys,
+// so an action cannot be added to the dispatch chain and left out of the
+// selector, or the reverse. The console carried those same 33 names in two
+// lists, and adding one meant editing both.
+//
+// Every delegated control carries exactly one action attribute, which the
+// harness pins, so the first match is the action and no precedence is
+// improvised. Handlers receive the clicked element and read the values they
+// need from it, exactly as the branches they replace did.
+const OC_ACTION_HANDLERS = [
+  ['data-oc-section', target => {
     // An overview row names one rule, so it opens that rule rather than
     // dropping the operator at the top of the section's list to search for it.
+    const section = target.dataset.ocSection;
     const rule = target.dataset.ocTarget || '';
     ocSelectSection(section);
     if (rule) {
@@ -1383,178 +1403,165 @@ async function ocHandleAction(target) {
       if (section === 'pause') ocOpenPauseComposer(rule);
       if (section === 'capture') ocOpenCaptureComposer(rule);
     }
-    return;
-  }
-  if (target.hasAttribute('data-oc-list-clear')) {
+  }],
+  ['data-oc-list-clear', target => {
     ocListFilter[target.dataset.ocListClear] = '';
     ocRender();
-    return;
-  }
-  if (target.hasAttribute('data-oc-error-dismiss')) { ocOperatorErrorClear(); return; }
-  if (target.hasAttribute('data-oc-close')) { closeOperatorConsole(true); return; }
-  if (target.hasAttribute('data-oc-cancel')) { ocClearComposer(); ocRender(); return; }
-  const newKind = target.dataset.ocNew;
-  if (newKind) {
-    if (newKind === 'limit') ocOpenLimitComposer('');
-    if (newKind === 'pause') ocOpenPauseComposer('');
-    if (newKind === 'capture') ocOpenCaptureComposer('');
-    return;
-  }
+  }],
+  ['data-oc-error-dismiss', () => ocOperatorErrorClear()],
+  ['data-oc-close', () => closeOperatorConsole(true)],
+  ['data-oc-cancel', () => { ocClearComposer(); ocRender(); }],
+  ['data-oc-new', target => {
+    const kind = target.dataset.ocNew;
+    if (kind === 'limit') ocOpenLimitComposer('');
+    if (kind === 'pause') ocOpenPauseComposer('');
+    if (kind === 'capture') ocOpenCaptureComposer('');
+  }],
+  ['data-oc-quick-hold', () => ocQuickHold()],
   // A copy reuses the source rule's scope and schedule with no budgets, so a
   // follow-up rule starts from what already worked instead of four pickers.
-  if (target.hasAttribute('data-oc-quick-hold')) { ocQuickHold(); return; }
-  const copyKind = target.dataset.ocCopy;
-  if (copyKind) {
+  ['data-oc-copy', target => {
+    const kind = target.dataset.ocCopy;
     const id = target.dataset.ocId || '';
-    if (copyKind === 'limit') ocOpenLimitComposer(id, true);
-    if (copyKind === 'pause') ocOpenPauseComposer(id, true);
-    if (copyKind === 'capture') ocOpenCaptureComposer(id, true);
-    return;
-  }
-  const editKind = target.dataset.ocEdit;
-  if (editKind) {
+    if (kind === 'limit') ocOpenLimitComposer(id, true);
+    if (kind === 'pause') ocOpenPauseComposer(id, true);
+    if (kind === 'capture') ocOpenCaptureComposer(id, true);
+  }],
+  ['data-oc-edit', target => {
+    const kind = target.dataset.ocEdit;
     const id = target.dataset.ocId || '';
-    if (editKind === 'limit') ocOpenLimitComposer(id);
-    if (editKind === 'pause') ocOpenPauseComposer(id);
-    if (editKind === 'capture') ocOpenCaptureComposer(id);
-    return;
-  }
-  const removeKind = target.dataset.ocRemove;
-  if (removeKind) {
-    if (removeKind === 'limit') ocRemoveLimit(target.dataset.ocId || '');
-    return;
-  }
-  const resume = target.getAttribute('data-oc-resume');
-  if (resume) { ocResumeHold(resume); return; }
-  if (target.hasAttribute('data-oc-resume-all')) { ocResumeAllHolds(); return; }
-  const stop = target.getAttribute('data-oc-stop');
-  if (stop) { ocStopSession(stop); return; }
-  if (target.hasAttribute('data-oc-stop-all')) { ocStopAllSessions(); return; }
-  const apply = target.dataset.ocApply;
-  if (apply === 'limit') { ocApplyLimit(); return; }
-  if (apply === 'pause') { ocApplyPause(); return; }
-  if (apply === 'capture') { ocApplyCapture(); return; }
-  const pick = target.dataset.ocPick;
-  if (pick) {
+    if (kind === 'limit') ocOpenLimitComposer(id);
+    if (kind === 'pause') ocOpenPauseComposer(id);
+    if (kind === 'capture') ocOpenCaptureComposer(id);
+  }],
+  ['data-oc-remove', target => {
+    if (target.dataset.ocRemove === 'limit') ocRemoveLimit(target.dataset.ocId || '');
+  }],
+  ['data-oc-resume', target => {
+    const id = target.getAttribute('data-oc-resume');
+    if (id) ocResumeHold(id);
+  }],
+  ['data-oc-resume-all', () => ocResumeAllHolds()],
+  ['data-oc-stop', target => {
+    const id = target.getAttribute('data-oc-stop');
+    if (id) ocStopSession(id);
+  }],
+  ['data-oc-stop-all', () => ocStopAllSessions()],
+  ['data-oc-apply', target => {
+    const kind = target.dataset.ocApply;
+    if (kind === 'limit') ocApplyLimit();
+    if (kind === 'pause') ocApplyPause();
+    if (kind === 'capture') ocApplyCapture();
+  }],
+  ['data-oc-pick', target => {
     const draft = ocActiveDraft();
     if (!draft) return;
-    ocTogglePicker(draft, pick);
-    return;
-  }
-  if (target.dataset.ocScopeRemove) {
+    ocTogglePicker(draft, target.dataset.ocPick);
+  }],
+  ['data-oc-scope-remove', target => {
     const draft = ocActiveDraft();
     if (!draft) return;
     ocScopeToggle(ocDraftScope(draft), target.dataset.ocScopeRemove, target.dataset.ocValue || '');
     draft.picker = null;
     ocRender();
-    return;
-  }
-  const pickValue = target.dataset.ocPickValue;
-  if (pickValue) {
+  }],
+  ['data-oc-pick-value', target => {
     const draft = ocActiveDraft();
     if (!draft) return;
-    ocScopeToggle(ocDraftScope(draft), pickValue, target.dataset.ocValue || '');
+    ocScopeToggle(ocDraftScope(draft), target.dataset.ocPickValue, target.dataset.ocValue || '');
     ocRender();
-    return;
-  }
-  const pickAdd = target.dataset.ocPickAdd;
-  if (pickAdd) {
+  }],
+  ['data-oc-pick-add', target => {
     const draft = ocActiveDraft();
-    const input = ocShell()?.querySelector(`[data-oc-pick-custom="${pickAdd}"]`);
+    const dim = target.dataset.ocPickAdd;
+    const input = ocShell()?.querySelector(`[data-oc-pick-custom="${dim}"]`);
     const value = (input?.value || '').trim();
-    if (draft && value) { ocScopeToggle(ocDraftScope(draft), pickAdd, value); ocRender(); }
-    return;
-  }
-  const toggle = target.dataset.ocToggle;
-  if (toggle === 'advanced') {
-    if (ocDrafts.limit) { ocDrafts.limit.advanced = !ocDrafts.limit.advanced; ocRender(); }
-    return;
-  }
-  if (toggle === 'schedule') {
-    if (ocDrafts.limit) {
-      ocDrafts.limit.schedule = ocDrafts.limit.schedule ? null : { days: [], start: 540, end: 1020 };
-      if (!ocDrafts.limit.schedule && ocDrafts.limit.antiBurst) ocDrafts.limit.antiBurst = false;
-      ocRender();
+    if (draft && value) { ocScopeToggle(ocDraftScope(draft), dim, value); ocRender(); }
+  }],
+  ['data-oc-toggle', target => {
+    const toggle = target.dataset.ocToggle;
+    if (toggle === 'advanced') {
+      if (ocDrafts.limit) { ocDrafts.limit.advanced = !ocDrafts.limit.advanced; ocRender(); }
+      return;
     }
-    return;
-  }
-  const day = target.getAttribute('data-oc-day');
-  if (day != null && ocDrafts.limit?.schedule) {
+    if (toggle === 'schedule') {
+      if (ocDrafts.limit) {
+        ocDrafts.limit.schedule = ocDrafts.limit.schedule ? null : ocNewSchedule();
+        if (!ocDrafts.limit.schedule && ocDrafts.limit.antiBurst) ocDrafts.limit.antiBurst = false;
+        ocRender();
+      }
+    }
+  }],
+  ['data-oc-day', target => {
+    const day = target.getAttribute('data-oc-day');
+    if (day == null || !ocDrafts.limit?.schedule) return;
     const days = ocDrafts.limit.schedule.days;
     const n = Number(day);
     const at = days.indexOf(n);
     if (at >= 0) days.splice(at, 1); else days.push(n);
     ocRender();
-    return;
-  }
-  const choice = target.dataset.ocChoice;
-  if (choice) { ocHandleChoice(choice, target.dataset.ocValue || ''); return; }
-  if (target.dataset.ocFilterPick) { ocToggleFilterPick(target.dataset.ocFilterPick); return; }
-  if (target.dataset.ocFilterValue != null) {
+  }],
+  ['data-oc-choice', target => ocHandleChoice(target.dataset.ocChoice, target.dataset.ocValue || '')],
+  ['data-oc-filter-pick', target => ocToggleFilterPick(target.dataset.ocFilterPick)],
+  ['data-oc-filter-value', target => {
     const draft = ocDrafts.export;
-    if (draft) {
-      draft[target.dataset.ocFilterValue] = target.dataset.ocValue || '';
-      draft.picker = null;
-      ocScheduleExportCount();
-      ocRender();
-    }
-    return;
-  }
-  if (target.dataset.ocFilterClear) {
+    if (!draft) return;
+    draft[target.dataset.ocFilterValue] = target.dataset.ocValue || '';
+    draft.picker = null;
+    ocScheduleExportCount();
+    ocRender();
+  }],
+  ['data-oc-filter-clear', target => {
     const draft = ocDrafts.export;
-    if (draft) {
-      draft[target.dataset.ocFilterClear] = '';
-      draft.picker = null;
-      ocScheduleExportCount();
-      ocRender();
-    }
-    return;
-  }
-  if (target.dataset.ocFilterAdd) {
+    if (!draft) return;
+    draft[target.dataset.ocFilterClear] = '';
+    draft.picker = null;
+    ocScheduleExportCount();
+    ocRender();
+  }],
+  ['data-oc-filter-add', target => {
     const dim = target.dataset.ocFilterAdd;
     const input = ocShell()?.querySelector(`[data-oc-filter-custom="${dim}"]`);
     const value = (input?.value || '').trim();
-    if (value && ocDrafts.export) {
-      ocDrafts.export[dim] = value;
-      ocDrafts.export.picker = null;
-      ocScheduleExportCount();
-      ocRender();
-    }
-    return;
-  }
-  if (target.hasAttribute('data-oc-download')) { ocDownloadExport(); return; }
-  if (target.hasAttribute('data-oc-reset-export')) {
-    ocDrafts.export = ocBlankExportDraft();
+    if (!value || !ocDrafts.export) return;
+    ocDrafts.export[dim] = value;
+    ocDrafts.export.picker = null;
+    ocScheduleExportCount();
     ocRender();
-    return;
-  }
-  if (target.hasAttribute('data-oc-settings')) {
+  }],
+  ['data-oc-download', () => ocDownloadExport()],
+  ['data-oc-reset-export', () => { ocDrafts.export = ocBlankExportDraft(); ocRender(); }],
+  ['data-oc-settings', target => {
     // A warning that names one setting carries the category, so the sheet
     // opens on the pane that holds it instead of its first pane.
     const category = target.dataset.ocSettings || '';
     closeOperatorConsole();
     if (category && typeof openSettingsAt === 'function') openSettingsAt(category);
     else toggleSettings();
-    return;
-  }
-  if (target.hasAttribute('data-oc-drain')) { ocDrainQueue(); return; }
-  if (target.dataset.ocQuotaResume) {
+  }],
+  ['data-oc-drain', () => ocDrainQueue()],
+  ['data-oc-quota-resume', target => {
     // The resume owner answers whether the gate was released, so a refusal is
     // named in the pane the operator is looking at rather than in the storm
     // dialog, which may not be open at all.
     const provider = target.dataset.ocQuotaResume;
     target.disabled = true;
-    Promise.resolve(resumeQuotaProvider(provider)).then(ok => {
+    return Promise.resolve(resumeQuotaProvider(provider)).then(ok => {
       if (!ok) ocOperatorError(quotaResumeError || 'could not resume ' + provider);
       ocRender();
     });
-    return;
-  }
-  if (target.hasAttribute('data-oc-restart')) {
-    if (typeof restartProxy === 'function') restartProxy();
-    return;
-  }
-  if (target.hasAttribute('data-oc-undo')) { ocUndoLast(); return; }
+  }],
+  ['data-oc-restart', () => { if (typeof restartProxy === 'function') restartProxy(); }],
+  ['data-oc-undo', () => ocUndoLast()],
+];
+
+// The listener selector and the dispatch table are the same list.
+const OC_ACTION_SELECTOR = OC_ACTION_HANDLERS.map(([attr]) => '[' + attr + ']').join(',');
+
+async function ocHandleAction(target) {
+  const entry = OC_ACTION_HANDLERS.find(([attr]) => target.hasAttribute(attr));
+  if (!entry) return;
+  await entry[1](target);
 }
 
 // ocHandleChoice writes a closed-vocabulary chip pick into the active draft.
@@ -1812,7 +1819,7 @@ document.addEventListener('click', event => {
   // delegated action handler must not preventDefault its click. Its change
   // event carries the selection instead.
   if (event.target?.dataset?.ocChoice && event.target.tagName === 'SELECT') return;
-  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-list-clear],[data-oc-edit],[data-oc-copy],[data-oc-quick-hold],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-quota-resume],[data-oc-restart],[data-oc-undo]');
+  const target = event.target.closest?.(OC_ACTION_SELECTOR);
   if (!target || !ocShell()?.contains(target)) return;
   event.preventDefault();
   ocHandleAction(target);

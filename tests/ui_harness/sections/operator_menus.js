@@ -2300,6 +2300,31 @@ module.exports = async function operatorMenus(H) {
         evalJSON('Object.keys(OC_COMPOSERS).join()') === 'limit,pause,capture' &&
         w.eval('Object.values(OC_COMPOSERS).every(c => c.preview && c.apply && c.state && c.key)') &&
         evalJSON('!!ocComposeControls("limit")') === true);
+      // OC_ACTION_HANDLERS is the one registry of delegated click actions: the
+      // listener's selector is built from it, so an action cannot be
+      // dispatched without being selected, or the reverse. The console carried
+      // those names in two lists and adding one meant editing both.
+      check('one registry owns both the action selector and the dispatch order',
+        w.eval('OC_ACTION_SELECTOR') === w.eval('OC_ACTION_HANDLERS.map(([a]) => "[" + a + "]").join(",")') &&
+        evalJSON('OC_ACTION_HANDLERS.length') >= 33 &&
+        w.eval('OC_ACTION_HANDLERS.every(([a, fn]) => a.startsWith("data-oc-") && typeof fn === "function")') &&
+        evalJSON('new Set(OC_ACTION_HANDLERS.map(([a]) => a)).size') ===
+          evalJSON('OC_ACTION_HANDLERS.length'));
+      // Every delegated control carries exactly one action attribute, which is
+      // what lets the dispatcher take the first match instead of improvising
+      // precedence between two actions on one element.
+      w.openOperatorConsole('limits');
+      startNew('limit');
+      {
+        const actionAttrs = w.eval('OC_ACTION_HANDLERS.map(([a]) => a)');
+        const offenders = [];
+        for (const el of d.querySelectorAll('#oc-pane button, #oc-pane a')) {
+          const hits = actionAttrs.filter(attr => el.hasAttribute(attr));
+          if (hits.length > 1) offenders.push(el.textContent.trim().slice(0, 20) + ': ' + hits.join('+'));
+        }
+        check('no delegated control carries two action attributes',
+          offenders.length === 0);
+      }
       w.closeOperatorConsole();
       // ocParking is the one answer to "is traffic being held": a hold parks,
       // and so does the gate, which is why the readout tone cannot be derived

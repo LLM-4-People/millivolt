@@ -149,7 +149,7 @@ function ocLimitComposerHTML(draft) {
   const global = !ocScopeHas(draft.scope);
   const burstAllowed = ocBurstAllowed(draft);
   const scheduleOn = !!draft.schedule;
-  const schedule = draft.schedule || { days: [], start: 540, end: 1020 };
+  const schedule = draft.schedule || ocNewSchedule();
   return `<section class="oc-compose" data-kind="limit" aria-label="${editing ? 'edit limit' : 'new limit'}">` +
     `<div class="oc-compose-hd"><span>${editing ? 'editing limit' : 'new limit'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">applies to</div>${conds}` +
