@@ -43,7 +43,11 @@ const DURATION_LABELS = {
 };
 // durationPairs builds [value, label] select pairs from DURATION_LABELS.
 const durationPairs = (...vals) => vals.map(v => [v, DURATION_LABELS[v]]);
-const PAUSE_DURS = [['', 'I resume']].concat(durationPairs('15m', '1h', '6h', '12h', '24h'));
+// The empty token is the open-ended choice. Its label is the pause surface's
+// wording because that is the canonical reading; a capture names its own,
+// because "until stopped" is the truth there. Tokens are shared, the
+// open-ended sentence is per kind.
+const PAUSE_DURS = [['', 'until resumed']].concat(durationPairs('15m', '1h', '6h', '12h', '24h'));
 function liveDebugSessions() {
   return (debugState.sessions || []).filter(holdLive);
 }

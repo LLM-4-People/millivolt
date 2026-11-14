@@ -251,7 +251,7 @@ module.exports = async function w16Mirrors(H) {
       // LIMIT_WINDOWS, so DEBUG_DURS and LIMIT_RAMPS must not come back.
       check('PAUSE_DURS offers exactly the server-accepted hold durations',
         JSON.stringify(sw.eval('PAUSE_DURS')) === JSON.stringify([
-          ['', 'I resume'], ['15m', '15 minutes'], ['1h', '1 hour'],
+          ['', 'until resumed'], ['15m', '15 minutes'], ['1h', '1 hour'],
           ['6h', '6 hours'], ['12h', '12 hours'], ['24h', '24 hours']]));
       check('DEBUG_DURS is gone: the capture composer reuses PAUSE_DURS',
         sw.eval('typeof DEBUG_DURS') === 'undefined');
