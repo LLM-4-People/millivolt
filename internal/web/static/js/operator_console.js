@@ -1418,6 +1418,10 @@ function ocClearComposer() {
   ocView = { kind: '', id: '' };
 }
 
+// ocTogglePicker is the one open/close for every dimension picker: the scope
+// composers and the export filter share it. Opening stores the dimension and
+// arms the one-shot focus handoff ocRender consumes; closing clears both so a
+// later repaint does not try to land on a row that is gone.
 function ocTogglePicker(draft, dim) {
   if (!draft) return;
   if (draft.picker && draft.picker.dim === dim) {
@@ -1427,6 +1431,21 @@ function ocTogglePicker(draft, dim) {
     draft.picker = { dim, filter: '' };
     ocPickerFocus = dim;
   }
+  ocRender();
+}
+
+// ocSetExportFilter is the one write of an export filter dimension. Every path
+// that chooses a value - a picker row, the clear control, the typed value and
+// its Enter key - did the same four things by hand: store, close the picker,
+// re-count, repaint. A fifth path that forgot the re-count would have left the
+// receipt quoting the previous predicate next to a download that used the new
+// one.
+function ocSetExportFilter(dim, value) {
+  const draft = ocDrafts.export;
+  if (!draft || !dim) return;
+  draft[dim] = value || '';
+  draft.picker = null;
+  ocScheduleExportCount();
   ocRender();
 }
 
@@ -1553,32 +1572,16 @@ const OC_ACTION_HANDLERS = [
     ocRender();
   }],
   ['data-oc-choice', target => ocHandleChoice(target.dataset.ocChoice, target.dataset.ocValue || '')],
-  ['data-oc-filter-pick', target => ocToggleFilterPick(target.dataset.ocFilterPick)],
-  ['data-oc-filter-value', target => {
-    const draft = ocDrafts.export;
-    if (!draft) return;
-    draft[target.dataset.ocFilterValue] = target.dataset.ocValue || '';
-    draft.picker = null;
-    ocScheduleExportCount();
-    ocRender();
-  }],
-  ['data-oc-filter-clear', target => {
-    const draft = ocDrafts.export;
-    if (!draft) return;
-    draft[target.dataset.ocFilterClear] = '';
-    draft.picker = null;
-    ocScheduleExportCount();
-    ocRender();
-  }],
+  ['data-oc-filter-pick', target => ocTogglePicker(ocDrafts.export, target.dataset.ocFilterPick)],
+  ['data-oc-filter-value', target =>
+    ocSetExportFilter(target.dataset.ocFilterValue, target.dataset.ocValue || '')],
+  ['data-oc-filter-clear', target => ocSetExportFilter(target.dataset.ocFilterClear, '')],
   ['data-oc-filter-add', target => {
     const dim = target.dataset.ocFilterAdd;
     const input = ocShell()?.querySelector(`[data-oc-filter-custom="${dim}"]`);
     const value = (input?.value || '').trim();
-    if (!value || !ocDrafts.export) return;
-    ocDrafts.export[dim] = value;
-    ocDrafts.export.picker = null;
-    ocScheduleExportCount();
-    ocRender();
+    if (!value) return;
+    ocSetExportFilter(dim, value);
   }],
   ['data-oc-download', () => ocDownloadExport()],
   ['data-oc-reset-export', () => { ocDrafts.export = ocBlankExportDraft(); ocRender(); }],
@@ -1635,19 +1638,6 @@ function ocHandleChoice(name, value) {
   // A control whose write invalidates a derived read refreshes it before the
   // repaint, so the receipt never quotes a count for the previous predicate.
   if (choice.recount) ocScheduleExportCount();
-  ocRender();
-}
-
-function ocToggleFilterPick(dim) {
-  const draft = ocDrafts.export;
-  if (!draft) return;
-  if (draft.picker && draft.picker.dim === dim) {
-    draft.picker = null;
-    ocPickerFocus = '';
-  } else {
-    draft.picker = { dim, filter: '' };
-    ocPickerFocus = dim;
-  }
   ocRender();
 }
 
@@ -1757,15 +1747,10 @@ document.addEventListener('keydown', event => {
       }
     }
     if (target.dataset.ocFilterCustom) {
-      const dim = target.dataset.ocFilterCustom;
       const value = target.value.trim();
-      if (value && ocDrafts.export) {
-        event.preventDefault();
-        ocDrafts.export[dim] = value;
-        ocDrafts.export.picker = null;
-        ocScheduleExportCount();
-        ocRender();
-      }
+      if (!value) return;
+      event.preventDefault();
+      ocSetExportFilter(target.dataset.ocFilterCustom, value);
     }
     return;
   }
