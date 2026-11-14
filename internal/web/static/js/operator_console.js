@@ -1538,6 +1538,18 @@ async function ocHandleAction(target) {
     return;
   }
   if (target.hasAttribute('data-oc-drain')) { ocDrainQueue(); return; }
+  if (target.dataset.ocQuotaResume) {
+    // The resume owner answers whether the gate was released, so a refusal is
+    // named in the pane the operator is looking at rather than in the storm
+    // dialog, which may not be open at all.
+    const provider = target.dataset.ocQuotaResume;
+    target.disabled = true;
+    Promise.resolve(resumeQuotaProvider(provider)).then(ok => {
+      if (!ok) ocOperatorError(quotaResumeError || 'could not resume ' + provider);
+      ocRender();
+    });
+    return;
+  }
   if (target.hasAttribute('data-oc-restart')) {
     if (typeof restartProxy === 'function') restartProxy();
     return;
@@ -1800,7 +1812,7 @@ document.addEventListener('click', event => {
   // delegated action handler must not preventDefault its click. Its change
   // event carries the selection instead.
   if (event.target?.dataset?.ocChoice && event.target.tagName === 'SELECT') return;
-  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-list-clear],[data-oc-edit],[data-oc-copy],[data-oc-quick-hold],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
+  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-list-clear],[data-oc-edit],[data-oc-copy],[data-oc-quick-hold],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-quota-resume],[data-oc-restart],[data-oc-undo]');
   if (!target || !ocShell()?.contains(target)) return;
   event.preventDefault();
   ocHandleAction(target);

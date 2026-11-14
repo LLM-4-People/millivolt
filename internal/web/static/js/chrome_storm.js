@@ -160,10 +160,12 @@ function renderStormDetails() {
 
 // resumeQuotaProvider is the retry-mode quota gate's operator action: the
 // confirmed response is the shared storm snapshot, so the banner and dialog
-// repaint from the same authoritative state; a failure keeps the dialog open
-// with the message beside the button.
+// repaint from the same authoritative state; a failure leaves the message in
+// quotaResumeError for the dialog. It answers whether the gate was released so
+// a caller with its own surface (the console overview) can report in place
+// instead of reading the dialog's private error slot.
 async function resumeQuotaProvider(provider) {
-  if (!provider) return;
+  if (!provider) return false;
   try {
     const st = await operatorJsonBody('/admin/quota', {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({provider, resume: true}),
@@ -171,8 +173,24 @@ async function resumeQuotaProvider(provider) {
     if (!st || !Array.isArray(st.storms)) throw new Error('unexpected resume response');
     quotaResumeError = '';
     applyStormState(st);
+    return true;
   } catch (err) {
     quotaResumeError = String(err.message || 'resume failed');
+    return false;
+  } finally {
+    renderStormDetails();
   }
-  renderStormDetails();
+}
+
+// quotaPausedProviders is the one reading of which providers a durable
+// quota/billing gate is parking. The banner honours storm_banner_enabled, so it
+// cannot be the only surface: with the banner off, these providers were parked
+// with no reachable resume anywhere in the dashboard. The snapshot itself keeps
+// every incident regardless of that display switch.
+function quotaPausedProviders() {
+  if (!stormSnapshot.valid || !stormSnapshot.enabled) return [];
+  return [...new Set(stormSnapshot.storms
+    .filter(s => s.quota)
+    .map(s => s.provider)
+    .filter(Boolean))].sort();
 }

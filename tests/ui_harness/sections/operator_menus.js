@@ -222,6 +222,48 @@ module.exports = async function operatorMenus(H) {
       check('a gate-only park offers no drain control',
         out() === 'gated 4' && !q('#oc-pane [data-oc-drain]') &&
         text('#oc-pane .oc-group[data-oc-gate] .oc-note').includes('4 waiting'));
+      // The incident banner honours storm_banner_enabled, so it cannot be the
+      // only place a quota pause can be resumed: with the banner off, a
+      // provider parked by a durable quota gate had no reachable resume
+      // anywhere in the dashboard. The snapshot keeps every incident
+      // regardless of that display switch, so the console offers the action.
+      {
+        const quotaStorm = {enabled: true, banner_enabled: false, storms: [{
+          provider: 'prov-a', model: '', scope: 'provider', state: 'open',
+          reason: 'insufficient_quota', quota: true, error_percent: 0,
+          error_requests: 0, failures: 0, samples: 0, window_ms: 60000,
+          queued: 3, active_models: 0, affected_models: 0,
+          affected_model_percent: 0, retry_at: '2026-11-14T12:00:00Z',
+          recovery_successes: 0, recovery_required: 1,
+        }]};
+        w.applyStormState(quotaStorm);
+        check('a quota pause stays reachable when the incident banner is off',
+          !d.getElementById('storm-banner').textContent.includes('prov-a') &&
+          evalJSON('quotaPausedProviders().join()') === 'prov-a');
+        w.operatorConsoleSync('pause');
+        const resume = q('#oc-pane [data-oc-quota-resume="prov-a"]');
+        check('the overview offers the quota resume the banner cannot',
+          !!resume &&
+          text('#oc-pane .oc-group[data-oc-gate] .oc-note').includes('resumed now'));
+        const savedFetch = w.fetch;
+        let resumed = null;
+        w.fetch = (url, options) => {
+          if (String(url).includes('/admin/quota') && options && options.method === 'POST') {
+            resumed = JSON.parse(options.body);
+            return Promise.resolve({ok: true, json: async () => ({...quotaStorm, storms: []})});
+          }
+          return savedFetch(url, options);
+        };
+        try {
+          click('#oc-pane [data-oc-quota-resume="prov-a"]');
+          check('the console resume posts the same quota document the banner does',
+            await settleUntil(() => resumed !== null) &&
+            stable(resumed) === stable({provider: 'prov-a', resume: true}));
+        } finally {
+          w.fetch = savedFetch;
+          w.applyStormState({enabled: false, banner_enabled: false, storms: []});
+        }
+      }
       w.applyPauseState(EMPTY_PAUSE);
       w.refreshOperatorReadout();
 

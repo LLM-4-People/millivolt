@@ -72,6 +72,7 @@ function ocRenderOverview() {
   const rows = ocAllRuleRows();
   const parked = parkedCounts();
   const queued = parked.drainable;
+  const quotaProviders = typeof quotaPausedProviders === 'function' ? quotaPausedProviders() : [];
   const list = rows.length ? rows.map(row =>
     `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-target="${escapeHtml(row.id)}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
     `<span class="oc-ov-kind" data-kind="${row.kind}"${row.offSchedule ? ' data-oc-off-schedule="1"' : ''}>${row.kind}</span>` +
@@ -93,8 +94,15 @@ function ocRenderOverview() {
     (ocDrain.scope !== 'all' ? ocDrainValueHTML() : '') +
     `<button type="button" class="btn" data-oc-drain>drain</button></div></div>` : '';
   const gated = parked.gated ? `<div class="oc-group" data-oc-gate><div class="oc-label">gate</div>` +
-    `<p class="oc-note">${fmt(parked.gated)} waiting on error storm or quota protection. They are parked before admission, so a drain cannot release them: the gate opens on its own once the provider recovers, or a quota pause can be resumed from the banner. ` +
-    `<button type="button" class="oc-link" data-oc-section="limits">view limits</button></p></div>` : '';
+    `<p class="oc-note">${fmt(parked.gated)} waiting on error storm or quota protection. They are parked before admission, so a drain cannot release them: an error storm opens on its own once the provider recovers.` +
+    (quotaProviders.length ? ' A quota pause can also be resumed now.' : '') + ` ` +
+    `<button type="button" class="oc-link" data-oc-section="limits">view limits</button></p>` +
+    // A quota gate outlives the incident banner's display switch, so the
+    // console offers the resume itself instead of pointing at a banner that
+    // may be turned off.
+    (quotaProviders.length ? `<div class="oc-inline">` + quotaProviders.map(provider =>
+      `<button type="button" class="btn" data-oc-quota-resume="${escapeHtml(provider)}">resume ${escapeHtml(provider)}</button>`).join('') +
+      `</div>` : '') + `</div>` : '';
   return `<div class="oc-sec">` +
     restart +
     `<div class="oc-ov-list">${list}</div>` +
