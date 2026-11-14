@@ -156,7 +156,13 @@
 /* ---------- body: one horizontal section strip over the pane ----------
    The panel is a popover, so the sections read as a chip row instead of a
    full-height rail that would cost 152px of a 520px box. */
-.oc-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+/* The console is a three-part flex column: header, body, ledger. The body is
+   the part that must absorb the sheet's height. It had no flex grow, so it was
+   content-sized inside the definite sheet: on a phone the rail ate the height
+   and the pane was left with a 99px strip, while the form's tail was clipped
+   by the shell's overflow. Growing here is what makes the pane the exact
+   remainder instead of whatever the content happened to measure. */
+.oc-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
 .oc-rail {
   display: flex; gap: 1px; flex: none; min-height: 0;
   padding: 5px 6px; overflow-x: auto; overflow-y: hidden;
@@ -198,6 +204,10 @@
 }
 .oc-pane {
   min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  /* Grow into whatever the head, rail and ledger leave. Without this the pane
+     is content-sized inside a definite-height sheet, leaving dead space on a
+     short section and an unreachable tail on a tall one. */
+  flex: 1 1 auto;
   padding: 9px 10px 11px; scrollbar-width: thin;
 }
 .oc-pane:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
@@ -771,15 +781,29 @@ button.oc-chip[aria-pressed="true"]::before {
      list three pane-heights away. At 88dvh the pane is 402px - two more rows
      above the pinned commit, and the list is reachable. The remaining 12% plus
      the bottom inset still leaves an outside-press strip for dismissal. */
+  /* A definite height, not just a cap. With max-height alone the flex column
+     was content-sized, so the pane never received the remaining space and
+     .mn.oc's overflow:hidden clipped the bottom of a tall composer: the form
+     ran past the visible panel with no way to reach it. Height makes the pane
+     the exact remainder below the rail and above the ledger. */
   .mn.oc[data-placement="sheet"] {
+    height: min(88dvh, calc(100dvh - 16px));
     max-height: min(88dvh, calc(100dvh - 16px));
   }
-  /* Six fixed destinations never fit one phone row: measured at 390 the strip
-     showed "system" as 3.4px of its 33px label under the fade, and at 320
-     both export and system were 0px wide. A hidden scrollbar with two unnamed
-     destinations is not a navigation control. Two even rows fit instead: at
-     390 a three-column grid gives 113px cells against a 76px widest chip, and
-     the whole strip costs one extra 38px row. */
+  .mn.oc .oc-hd { padding: 8px 10px 9px; }
+  .mn.oc .oc-pane { padding: 9px 10px 12px; }
+  .mn.oc .oc-ft { padding: 6px 10px; }
+  .oc-sec-head { flex-wrap: wrap; }
+}
+
+/* The rail becomes a grid only when one row genuinely cannot hold six
+   destinations - not merely because the viewport is narrow. Six chips plus
+   their badges measure about 320px, so at 320 and 390 the strip clipped
+   "system" to nothing and the grid is right. A landscape phone is 640-844
+   wide: the strip fits there with room to spare, and taking a second 38px row
+   out of a 317px sheet left the pane 125px. The threshold is the content, not
+   the device class. */
+@media (max-width: 560px) {
   .mn.oc .oc-rail {
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 3px; padding: 5px 6px;
@@ -793,10 +817,20 @@ button.oc-chip[aria-pressed="true"]::before {
     justify-content: center; min-width: 0;
   }
   .mn.oc .oc-rail-label { overflow: visible; }
-  .mn.oc .oc-hd { padding: 8px 10px 9px; }
-  .mn.oc .oc-pane { padding: 9px 10px 12px; }
-  .mn.oc .oc-ft { padding: 6px 10px; }
-  .oc-sec-head { flex-wrap: wrap; }
+}
+
+/* A landscape phone is wide but very short. Every pixel the fixed chrome takes
+   is a pixel the form and the rule list lose, so the header and the ledger
+   tighten and the sheet keeps only a 4px dismissal gap instead of 12%. */
+@media (max-width: 800px) and (max-height: 500px) {
+  .mn.oc[data-placement="sheet"] {
+    height: calc(100dvh - 8px);
+    max-height: calc(100dvh - 8px);
+  }
+  .mn.oc .oc-hd { padding: 5px 8px; }
+  .mn.oc .oc-ft { padding: 4px 8px; }
+  .mn.oc .oc-rail { padding: 4px 6px; }
+  .mn.oc .oc-pane { padding: 7px 8px 10px; }
 }
 
 @media (max-width: 640px) {
@@ -825,8 +859,13 @@ button.oc-chip[aria-pressed="true"]::before {
     padding: 0 6px 4px 44px;
   }
   .mn.oc .oc-rule-scope { white-space: normal; overflow: visible; }
-  .mn.oc .oc-budget { grid-template-columns: minmax(0, 1fr); }
-  .mn.oc .oc-budget .oc-field { grid-column: auto; }
+  /* Label, value and window stay on one line. Stacking them tripled every
+     budget row (92-120px each, 332px for three), which is what pushed the
+     composer to 2-3 pane-heights on a phone and hid the commit action below
+     the fold. The tracks shrink instead of the layout changing shape. */
+  .mn.oc .oc-budget {
+    grid-template-columns: minmax(0, max-content) 58px minmax(0, 1fr);
+  }
   .mn.oc .oc-compose .oc-group { padding: 9px 10px; }
   .mn.oc .oc-compose > .oc-facts,
   .mn.oc .oc-compose > .oc-warning { margin-left: 10px; margin-right: 10px; }
