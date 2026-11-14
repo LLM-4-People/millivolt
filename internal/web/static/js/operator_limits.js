@@ -109,18 +109,22 @@ function ocLimitComposerHTML(draft) {
     ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: draft.tokens === '', placeholder: '100000' }) +
     `<div class="oc-window">${ocWindowSelect('token-window', draft.tokenWindow, 'token window')}</div></div>` +
     `</div>` +
-    `<div class="oc-group"><button type="button" class="oc-disclosure" data-oc-toggle="advanced" aria-expanded="${draft.advanced ? 'true' : 'false'}">` +
+    // Both optional modifiers sit on one row: they are peers, each closed by
+    // default, and two stacked full-width bands spent 45px of the panel on two
+    // words. The opened body still takes the full width below the pair.
+    `<div class="oc-group"><div class="oc-disclosures">` +
+    `<button type="button" class="oc-disclosure" data-oc-toggle="advanced" aria-expanded="${draft.advanced ? 'true' : 'false'}">` +
     `<span>burst control</span><span aria-hidden="true">${draft.advanced ? '▴' : '▾'}</span></button>` +
+    `<button type="button" class="oc-disclosure" data-oc-toggle="schedule" aria-expanded="${scheduleOn ? 'true' : 'false'}">` +
+    `<span>schedule</span><span class="oc-disclosure-state">${scheduleOn ? escapeHtml(ocSchedulePhrase(draft.schedule)) : 'always active'}</span>` +
+    `<span aria-hidden="true">${scheduleOn ? '▴' : '▾'}</span></button>` +
+    `</div>` +
     (draft.advanced ? `<div class="oc-advanced">` +
       `<label class="oc-check"><input type="checkbox" data-oc-field="antiBurst" ${draft.antiBurst ? 'checked' : ''} ${burstAllowed ? '' : 'disabled'}>` +
       `<span>ramp each new key from one to the concurrency target</span></label>` +
       `<div class="oc-window">${ocWindowSelect('ramp', draft.ramp, 'ramp duration', true)}</div>` +
       (burstAllowed ? '' : `<p class="oc-note">Burst control needs a single-provider limit without a schedule.</p>`) +
       `</div>` : '') +
-    `</div>` +
-    `<div class="oc-group"><button type="button" class="oc-disclosure" data-oc-toggle="schedule" aria-expanded="${scheduleOn ? 'true' : 'false'}">` +
-    `<span>schedule</span><span class="oc-disclosure-state">${scheduleOn ? escapeHtml(ocSchedulePhrase(draft.schedule)) : 'always active'}</span>` +
-    `<span aria-hidden="true">${scheduleOn ? '▴' : '▾'}</span></button>` +
     (scheduleOn ? `<div class="oc-advanced">` +
       `<div class="oc-days" role="group" aria-label="days">` + OC_DAY_LABELS.map((label, day) =>
         `<button type="button" class="oc-chip oc-chip-day" aria-pressed="${schedule.days.includes(day) ? 'true' : 'false'}" data-oc-day="${day}">${label}</button>`).join('') + `</div>` +

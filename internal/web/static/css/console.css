@@ -291,15 +291,20 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-times { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
 .oc-times .oc-field { width: 108px; }
 .oc-times .oc-field-hint { align-self: center; padding-bottom: 6px; }
-.oc-disclosure {
-  display: flex; align-items: center; gap: 8px; width: 100%; min-height: 30px;
-  padding: 4px 0; border: 0; background: none; text-align: left;
-  color: var(--text); font: 10.5px var(--mono); cursor: pointer;
+/* The composer's optional modifiers share one row as peers. */
+.oc-disclosures {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; min-width: 0;
 }
-.oc-disclosure > span:first-child { flex: 1; min-width: 0; }
+.oc-disclosure {
+  display: flex; align-items: center; gap: 8px; width: auto; min-height: 24px;
+  padding: 2px 0; border: 0; background: none; text-align: left;
+  color: var(--muted); font: 10px var(--mono); cursor: pointer;
+}
+.oc-disclosure[aria-expanded="true"] { color: var(--text); }
+.oc-disclosure > span:first-child { flex: 0 1 auto; min-width: 0; }
 .oc-disclosure > span:last-child { flex: none; color: var(--muted); }
 .oc-disclosure-state {
-  max-width: 52%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--muted); font-size: 9.5px;
 }
 .oc-disclosure:hover .oc-disclosure-state,
