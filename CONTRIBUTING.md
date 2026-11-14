@@ -433,9 +433,9 @@ staged before publication, and the exit trap stops the private process. Review
 every gallery image before committing. SSE is deliberately disabled, so the images'
 offline indicator describes a static capture session, not current service health.
 Captures keep the same category folders under `docs/images/`: `overview`,
-`charts`, `explorer`, `requests`, `console` and `settings`. The retired `menus`
-files stay on disk for history only and no page links them. Update the existing
-capture owner and Markdown links together when adding a view.
+`charts`, `explorer`, `requests`, `console` and `settings`. Update the existing
+capture owner and Markdown links together when adding a view; a published image
+with no consumer fails the site check.
 
 The independent `--docs-images` option remains a strict synthetic regression.
 Run it only with `DEV_COPY_DB=0` and direct those two images to a scratch directory,

@@ -380,9 +380,9 @@ dashboard cadence are Settings fields, not console policies; the section links
 there instead of duplicating them.
 
 Static captures of the operator console publish to `docs/images/console/` from
-the same authorized history workflow as the rest of the gallery. The older
-`docs/images/menus/` files stay for history only: the five header menus they
-pictured no longer exist and no page links them.
+the same authorized history workflow as the rest of the gallery. The retired
+menu screenshots were removed with the menus they pictured; git history keeps
+them.
 
 See [operations](operations.md) for exact admission, persistence, filtering,
 restart and failure behavior before using these controls.
