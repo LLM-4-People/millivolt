@@ -83,6 +83,17 @@ function ocLimitById(id) {
     .find(t => t && t.id === id) || null;
 }
 
+// ocLimitBySelector finds the stored rule a create would actually edit. The
+// server identifies a limit by its selector, so posting a new draft whose
+// scope and schedule match an existing rule updates that rule in place. The
+// console must know that before it writes: "copy" keeps the source selector,
+// so a copy that only changed the budgets silently replaced the original.
+function ocLimitBySelector(scope, schedule) {
+  const key = ocLimitSelectorKey(scope, schedule);
+  return ((typeof throttleState !== 'undefined' && throttleState.throttles) || [])
+    .find(t => t && ocLimitSelectorKey(ocScopeFromPolicy(t), ocLimitScheduleKey(t)) === key) || null;
+}
+
 function ocOpenLimitComposer(id, copy) {
   if (copy) {
     const source = ocLimitById(id);
@@ -232,9 +243,17 @@ function ocLimitPreview() {
     if (draft.schedule) text += ' Active ' + ocSchedulePhrase(draft.schedule) + '.';
     if (draft.antiBurst && draft.ramp) text += ' Each new key ramps over ' + ocWindowLabel(draft.ramp) + '.';
   }
+  // A create whose selector already belongs to a stored rule is an edit to
+  // that rule, because the server owns identity and identity is the selector.
+  // The panel must say so rather than report "added" for a replacement.
+  let collision = null;
+  if (!bad && any && !draft.id) collision = ocLimitBySelector(draft.scope, draft.schedule);
+  if (collision) {
+    text = 'This selector already has a limit. Change the scope or schedule to add a second rule, or open the existing one to edit it.';
+  }
   el.textContent = text;
-  el.dataset.tone = bad ? 'err' : '';
-  apply.disabled = !!operatorState.throttle.busy || bad || !any;
+  el.dataset.tone = bad || collision ? 'err' : '';
+  apply.disabled = !!operatorState.throttle.busy || bad || !any || !!collision;
 }
 
 function ocRenderLimits() {

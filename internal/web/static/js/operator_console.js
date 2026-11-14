@@ -532,6 +532,41 @@ function ocScopeHas(scope) {
   return Object.values(scope).some(values => values.length > 0);
 }
 
+// ocLimitSelectorKey is the client-side reading of the server's policy
+// identity. A limit is identified by its normalized scope plus schedule, not
+// by an id the console chose: re-applying the same selector is an edit, not a
+// second rule with the same meaning. Normalization mirrors
+// scheduler.PolicyID - trim, drop blanks, dedupe, sort, collapse a seven-day
+// week to "every day" - so the console can tell an edit from a create before
+// it writes, instead of discovering it afterwards.
+function ocLimitSelectorKey(scope, schedule) {
+  const dims = {};
+  for (const key of ['providers', 'models', 'clients', 'keyHashes', 'conversations']) {
+    const values = [...new Set((scope?.[key] || []).map(v => String(v).trim()).filter(Boolean))].sort();
+    dims[key] = values;
+  }
+  const days = [...new Set((schedule?.days || []).filter(d => Number.isInteger(d) && d >= 0 && d <= 6))]
+    .sort((a, b) => a - b);
+  const clamp = m => (Number.isInteger(m) && m >= 0 && m < 1440) ? m : 0;
+  const start = schedule ? clamp(schedule.start) : 0;
+  const end = schedule ? clamp(schedule.end) : 0;
+  const week = days.length === 7 ? [] : days;
+  dims.schedule = week.length === 0 && start === end ? null : { days: week, start, end };
+  return JSON.stringify(dims);
+}
+
+// ocLimitScheduleKey reads a stored policy's schedule in the draft's shape, so
+// the same key function serves both sides of the comparison.
+function ocLimitScheduleKey(policy) {
+  const schedule = policy?.schedule;
+  if (!schedule) return null;
+  return {
+    days: Array.isArray(schedule.days) ? schedule.days : [],
+    start: schedule.start_minute != null ? schedule.start_minute : 0,
+    end: schedule.end_minute != null ? schedule.end_minute : 0,
+  };
+}
+
 // ocDraftScope is the one selector accessor across the three composer drafts.
 // Limit drafts carry a nested scope; pause and capture drafts keep the same
 // dimension names at the top level. The picker never needs to know which.

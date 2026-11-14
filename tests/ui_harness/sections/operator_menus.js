@@ -578,6 +578,41 @@ module.exports = async function operatorMenus(H) {
         copied.window === '1h' &&
         text('#oc-lim-apply') === 'apply limit' &&
         d.getElementById('oc-lim-apply').disabled);
+      // A copy keeps the source selector, and the server identifies a limit
+      // by that selector, so a copy that only changed the budgets would
+      // silently replace the rule it was copied from while the console
+      // reported "added". The panel now refuses the write and says why.
+      check('a copied selector that still matches its source refuses to write',
+        (() => {
+          const key = w.ocLimitSelectorKey;
+          return typeof key === 'function' &&
+            key(evalJSON('ocScopeFromPolicy(throttleState.throttles[0])'),
+              evalJSON('ocLimitScheduleKey(throttleState.throttles[0])')) ===
+            key(evalJSON('ocDrafts.limit.scope'), evalJSON('ocDrafts.limit.schedule'));
+        })());
+      {
+        for (const key of ['concurrency', 'requests', 'tokens']) {
+          const box = q(`#oc-pane [data-oc-budget="${key}"]`);
+          if (box && !box.checked) box.click();
+        }
+        input('#oc-pane [data-oc-field="concurrency"]', '2');
+        input('#oc-pane [data-oc-field="requests"]', '5');
+        input('#oc-pane [data-oc-field="tokens"]', '500');
+        w.eval('ocLimitPreview()');
+        check('the gate names the existing selector instead of applying a replacement',
+          d.getElementById('oc-lim-apply').disabled &&
+          text('#oc-lim-preview').includes('already has a limit') &&
+          q('#oc-lim-preview').dataset.tone === 'err');
+        // Changing one dimension makes it a genuinely new rule again. The
+        // fixture's model vocabulary holds only model-a, so the extra value is
+        // added the way the free-value field would add it.
+        w.eval("ocScopeToggle(ocDrafts.limit.scope, 'models', 'model-b'); ocRender()");
+        w.eval('ocLimitPreview()');
+        check('changing a dimension clears the collision and re-enables apply',
+          !d.getElementById('oc-lim-apply').disabled &&
+          !text('#oc-lim-preview').includes('already has a limit'));
+        w.eval("ocDrafts.limit = null; ocView = {kind: '', id: ''}; ocRender()");
+      }
       click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
 
       const savedFetch = w.fetch;
