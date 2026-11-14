@@ -35,12 +35,15 @@ module.exports = async function menusScroll(H) {
       };
       set(367, 302, 0);
       check('an overflowing section strip marks that more sections remain',
-        rail.dataset.more === '1');
+        rail.dataset.more === '1' &&
+        (w.getComputedStyle(rail).maskImage || w.getComputedStyle(rail).webkitMaskImage || 'none') !== 'none');
       set(367, 302, 65);
       check('a strip scrolled to its end drops the overflow marker',
         rail.dataset.more === '0');
       set(302, 302, 0);
-      check('a strip that fits marks no overflow', rail.dataset.more === '0');
+      check('a strip that fits marks no overflow',
+        rail.dataset.more === '0' &&
+        (w.getComputedStyle(rail).maskImage || w.getComputedStyle(rail).webkitMaskImage || 'none') === 'none');
     }
     check('the console action rows are its own flex rows, not the retired clear-actions strip',
       w.getComputedStyle(d.getElementById('oc-change').parentElement).display === 'flex' &&
