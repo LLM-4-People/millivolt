@@ -1365,11 +1365,27 @@ module.exports = async function operatorMenus(H) {
       try {
         click('#oc-lim-apply');
         await settleUntil(() => !!q('#oc-pane .oc-banner[role="alert"]'));
-        check('a rejected write is named in the open pane',
+        // One surface, not two. The banner is the visible rejection while the
+        // console is open; also firing a toast spoke the same sentence twice
+        // to a screen reader.
+        // The toast element persists across the suite and may still be
+        // showing an unrelated earlier confirmation, so the assertion is that
+        // it never carries this rejection, not that it is hidden.
+        check('a rejected write is named once, in the open pane',
           text('#oc-pane .oc-banner[role="alert"] span') === 'rule rejected' &&
-          text('#toast') === 'rule rejected' &&
-          d.getElementById('toast').classList.contains('show') &&
-          d.getElementById('toast').classList.contains('err'));
+          !text('#toast').includes('rule rejected'));
+        {
+          // Every unrelated repaint used to re-insert a fresh role="alert"
+          // carrying the same sentence, so assistive tech re-announced the
+          // rejection on each poll. The node is now stable.
+          const before = q('#oc-pane .oc-banner[role="alert"]');
+          w.operatorConsoleSync('throttle');
+          w.eval('ocRender()');
+          const after = q('#oc-pane .oc-banner[role="alert"]');
+          check('a repaint keeps the same rejection node instead of re-announcing it',
+            !!after && after === before &&
+            text('#oc-pane .oc-banner[role="alert"] span') === 'rule rejected');
+        }
         click('#oc-pane [data-oc-error-dismiss]');
         check('dismissing the banner clears the stored error',
           !q('#oc-pane .oc-banner') && w.eval('ocError') === '');

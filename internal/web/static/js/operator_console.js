@@ -275,10 +275,18 @@ function ocRender() {
       export: ocRenderExport,
       system: ocRenderSystem,
     }[ocSection];
-    pane.innerHTML = (ocError
-      ? `<div class="oc-banner" data-tone="err" role="alert"><span>${escapeHtml(ocError)}</span>` +
-        `<button type="button" class="oc-link" data-oc-error-dismiss>dismiss</button></div>`
-      : '') + (render ? render() : '');
+    // The pane keeps two children: a stable rejection banner and a body that
+    // every render replaces wholesale. The banner used to ride the rebuilt
+    // markup, so each unrelated poll created a fresh role="alert" and a screen
+    // reader re-announced the same rejection for as long as it stayed up.
+    let body = pane.querySelector(':scope > #oc-pane-body');
+    if (!body) {
+      body = document.createElement('div');
+      body.id = 'oc-pane-body';
+      pane.appendChild(body);
+    }
+    body.innerHTML = render ? render() : '';
+    ocSyncErrorBanner(pane);
     pane.dataset.section = ocSection;
     pane.setAttribute('aria-labelledby', 'oc-tab-' + ocSection);
     // The previews are the operator's proof of what will be enforced, so they
@@ -579,9 +587,42 @@ function ocScopePickerHTML(draft, dim) {
 // ocOperatorError is the console's one server-error surface. chrome_operator's
 // mutation gate calls it so a rejected write is named in the pane the operator
 // is looking at, not painted into a hidden menu line.
+// ocSyncErrorBanner owns the rejection banner as one stable node.
+//
+// The banner sits directly in the pane and the section's markup goes into
+// #oc-pane-body, which every render replaces. That split is what keeps the
+// banner's node identity: a banner that rode the rebuilt markup was a fresh
+// role="alert" on every unrelated poll, so assistive tech re-announced the
+// same rejection for as long as it stayed up. It is created when an error
+// appears, patched in place when the text changes, and removed when the error
+// clears, so each rejection is announced exactly once.
+function ocSyncErrorBanner(pane) {
+  if (!pane) return;
+  const existing = pane.querySelector(':scope > .oc-banner[data-tone="err"]');
+  if (!ocError) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) {
+    const text = existing.querySelector('span');
+    if (text && text.textContent !== ocError) text.textContent = ocError;
+    return;
+  }
+  const banner = document.createElement('div');
+  banner.className = 'oc-banner';
+  banner.dataset.tone = 'err';
+  banner.setAttribute('role', 'alert');
+  banner.innerHTML = `<span>${escapeHtml(ocError)}</span>` +
+    `<button type="button" class="oc-link" data-oc-error-dismiss>dismiss</button>`;
+  pane.insertBefore(banner, pane.firstChild);
+}
+
 function ocOperatorError(message) {
   ocError = String(message || 'the change was rejected');
-  toast(ocError, 'err');
+  // The banner is the rejection's visible surface while the console is open,
+  // so a toast would announce the same sentence twice. A closed console has no
+  // banner to show, and there the toast is the only way the operator learns.
+  if (!ocMounted) toast(ocError, 'err');
   if (ocMounted) ocRender();
 }
 

@@ -575,8 +575,8 @@ button.oc-chip[aria-pressed="true"]::before {
 
 .oc-banner {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
-  /* The pane is not a flex container, so this banner is the one child that
-     needs its own separation from the section head above it. */
+  /* A direct child of a pane that is not a flex container: this banner is the
+     one element that needs its own separation from the section head. */
   margin: 0 0 8px;
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border));
