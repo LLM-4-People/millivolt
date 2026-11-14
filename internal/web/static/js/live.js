@@ -1066,6 +1066,20 @@ onNavigate(() => {
 // resync must never re-apply pre-purge rows after the fresh snapshot landed.
 let _bootReq = 0;
 let _bootFull = null; // mandatory replacement; ordinary polls join instead of superseding it
+// _bootLastOk is the last accepted bootstrap response. The poll is the only
+// source for operator policy state, and its failure branch used to swallow
+// everything: holders, limits and captures kept their last values with no
+// marker, so the header readout presented minutes-old policy as current. The
+// timestamp is what lets the readout say it is not current.
+let _bootLastOk = 0;
+// operatorPollStale reports whether the periodic poll has been failing long
+// enough that operator surfaces may show values the server no longer holds.
+// A page that has never polled successfully is still loading, not stale.
+function operatorPollStale() {
+  if (!_bootLastOk) return false;
+  const poll = (typeof dashCfg === 'object' && dashCfg && dashCfg.poll_ms) || 5000;
+  return Date.now() - _bootLastOk > Math.max(poll * 3, 15000);
+}
 function refreshDashboardVersion(version) {
   if (dashboardReloading) return true;
   if (typeof version !== 'string' || !DASHBOARD_VERSION_RE.test(version) ||
@@ -1135,6 +1149,7 @@ function fetchBootstrap(mode, after) {
             (p.feed_id === feedId && !p.incremental && (p.seq < lastSeq || p.pending_revision < _pendingRevision))) {
           return fetchBootstrap('full');
         }
+        _bootLastOk = Date.now();
         applyBootstrapState(p, operatorRevisions);
         const stateChanged = previous && (previous._rev || 0) !== revision;
         if (mode !== 'none' && !applySnapshotPayload(p, true)) return _bootFull;
@@ -1150,6 +1165,10 @@ function fetchBootstrap(mode, after) {
       // Failed boot/resync falls back to the stream's full snapshot. Only the
       // latest mandatory replacement may reopen; an older failure stays inert.
       if (mode === 'full' && _bootFull === request && !dashboardReloading) startStream(0, feedId);
+      // The operator surfaces now hold values the server has not confirmed.
+      // Repaint the readout so it says so instead of waiting for the next
+      // unrelated render to notice.
+      if (typeof refreshOperatorReadout === 'function') refreshOperatorReadout();
       return null;
     })
     .finally(() => { if (_bootFull === request) _bootFull = null; })

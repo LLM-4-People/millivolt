@@ -224,6 +224,51 @@ module.exports = async function operatorMenus(H) {
       w.refreshOperatorReadout();
     }
 
+    // ---- a failed poll must not present stale policy as current ----
+    {
+      // The bootstrap poll is the only source for operator policy state, and
+      // its failure branch used to swallow everything. Holds, limits and
+      // captures kept their last values with no marker, so the always-visible
+      // readout presented minutes-old policy as a live reading. The stream
+      // can be healthy while the poll is down, so this is not `offline`.
+      w.applyThrottleState({ok: true, active: true, known_providers: [],
+        throttles: [{id: 'stale-limit', scope: {providers: ['prov-a']},
+          concurrency: 2, scheduled: true}]});
+      w.refreshOperatorReadout();
+      const fresh = {
+        text: d.getElementById('op-readout-state').textContent,
+        state: d.getElementById('op-readout').dataset.state,
+        stale: w.eval('operatorPollStale()'),
+      };
+      check('a fresh poll reads as current, not stale',
+        fresh.text === 'limits 1' && fresh.state === 'active' && fresh.stale === false);
+
+      // A poll that has not succeeded inside its window is stale. The clock
+      // is moved, not the test's patience.
+      w.eval('_bootLastOk = Date.now() - 60000');
+      w.refreshOperatorReadout();
+      const stale = {
+        text: d.getElementById('op-readout-state').textContent,
+        state: d.getElementById('op-readout').dataset.state,
+        stale: w.eval('operatorPollStale()'),
+      };
+      check('a poll that stopped landing says the counts are stale',
+        stale.stale === true && stale.state === 'stale' &&
+        stale.text === 'limits 1 · stale' &&
+        d.getElementById('btn-controls').dataset.state === 'stale');
+      // The words stay the last known truth; only the currency disclaimer is
+      // added, so the operator keeps the counts and learns not to trust them.
+      check('the stale line keeps the last known counts',
+        d.getElementById('op-readout-state').textContent.includes('limits 1'));
+
+      w.eval('_bootLastOk = Date.now()');
+      w.applyThrottleState(EMPTY_THROTTLE);
+      w.refreshOperatorReadout();
+      check('a recovered poll clears the stale word',
+        d.getElementById('op-readout-state').textContent === 'steady' &&
+        d.getElementById('op-readout').dataset.state === 'steady');
+    }
+
     // ---- empty states state only what the server can prove ----
     {
       // Each empty state used to promise admission - "every request is

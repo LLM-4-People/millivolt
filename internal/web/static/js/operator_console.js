@@ -169,7 +169,12 @@ function refreshOperatorReadout() {
   // Only a connection that was open and then dropped makes the line stale;
   // a page that has not connected yet is still loading, not wrong.
   const offline = typeof streamSeen !== 'undefined' && streamSeen && !streamLive;
-  const state = offline ? 'stale'
+  // A poll that has been failing means the policy documents are the last ones
+  // the server sent, not the current ones. The line must not claim currency
+  // for them. The stream can be healthy while the poll is down, so this is
+  // separate from `offline`.
+  const stale = typeof operatorPollStale === 'function' && operatorPollStale();
+  const state = (offline || stale) ? 'stale'
     : ocRestartActive() ? 'busy'
       : ocRuleCounts().holds > 0 ? 'paused'
         : segs.length ? 'active' : 'steady';
@@ -177,7 +182,7 @@ function refreshOperatorReadout() {
   // The words stay the last known truth and say they are not current, so the
   // counts are never silently presented as a live reading.
   const words = segs.length ? segs.join(' · ') : 'steady';
-  const text = offline ? words + ' · offline' : words;
+  const text = offline ? words + ' · offline' : stale ? words + ' · stale' : words;
   const label = ocEl('op-readout-state');
   if (label && label.textContent !== text) label.textContent = text;
   const trigger = ocEl('btn-controls');
