@@ -184,7 +184,7 @@ function ocRenderLimits() {
   if (!ocDrafts.limit) ocDrafts.limit = ocBlankLimitDraft();
   const rows = policies.map(policy => ocLimitRuleHTML(policy)).join('');
   const empty = policies.length ? '' :
-    `<div class="oc-empty"><strong>No limits in force.</strong> Traffic follows provider behavior and the queue settings in Settings.</div>`;
+    `<div class="oc-empty"><strong>No limits in force.</strong> Every request is admitted, at whatever rate its provider accepts.</div>`;
   const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><div><h2 class="oc-h2">limits</h2>` +

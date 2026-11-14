@@ -102,7 +102,7 @@ function ocRenderPause() {
       `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
   }).join('');
   const empty = holds.length ? '' :
-    `<div class="oc-empty"><strong>Traffic is flowing.</strong> A hold parks new matching requests and leaves running streams alone.</div>`;
+    `<div class="oc-empty"><strong>Traffic is flowing.</strong> Nothing is held, so requests reach their provider as fast as it allows.</div>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><div><h2 class="oc-h2">pause</h2>` +
     `<p class="oc-sub">Park new matching requests without cancelling work that is already running.</p></div>` +
@@ -292,7 +292,7 @@ function ocRenderCapture() {
       `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button></div></div></div>`;
   }).join('');
   const empty = sessions.length ? '' :
-    `<div class="oc-empty"><strong>No capture sessions.</strong> A session stores matching request and response bodies until it stops or its retention window ends.</div>`;
+    `<div class="oc-empty"><strong>No capture sessions.</strong> Nothing is being recorded, so stored records hold only headers and metrics.</div>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><div><h2 class="oc-h2">capture</h2>` +
     `<p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p></div>` +
