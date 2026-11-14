@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +38,13 @@ class RepositoryChecks(unittest.TestCase):
         # one owner; EVERY entry point npm test runs must arm it. The first
         # version of this fix armed two of four, because it was written against
         # "both entry points" while package.json runs four.
+        #
+        # Presence of the call text is not enough: an entry point that called
+        # watchdog(WATCHDOG_MS, ...) without importing WATCHDOG_MS threw
+        # ReferenceError before a single check ran, and a substring pin stayed
+        # green. Each entry is therefore LOADED far enough to resolve the
+        # binding it destructures, and the run below proves the loaded module
+        # refuses a drain.
         owner = check.ROOT / "tests" / "watchdog.js"
         self.assertIn("function watchdog(", owner.read_text())
         scripts = json.loads((check.ROOT / "package.json").read_text())["scripts"]
@@ -51,18 +59,47 @@ class RepositoryChecks(unittest.TestCase):
                 self.assertIn("clearWatchdog()", text)
                 # The timer must not be re-implemented per suite.
                 self.assertNotIn("setTimeout(() => {\n    console.error('watchdog", text)
+                # Every identifier the entry passes to watchdog() must be
+                # imported by the same file, so a dropped binding cannot ship.
+                # A qualified form (harness.WATCHDOG_MS) is satisfied by the
+                # namespace import itself, which is what resolves it.
+                imported = set()
+                for match in re.finditer(r"const\s*\{([^}]*)\}\s*=\s*require\(", text):
+                    imported.update(name.strip().split(":")[0].strip()
+                                    for name in match.group(1).split(","))
+                for match in re.finditer(r"const\s+([A-Za-z_$][\w$]*)\s*=\s*require\(", text):
+                    imported.add(match.group(1))
+                for call in re.finditer(r"watchdog\(([^,]+),", text):
+                    arg = call.group(1)
+                    for name in re.findall(r"[A-Za-z_$][\w$]*", arg):
+                        with self.subTest(entry=entry, binding=name):
+                            # A qualified form (harness.WATCHDOG_MS) resolves
+                            # through the namespace binding, which is imported;
+                            # only a bare identifier must be in the destructure.
+                            if re.search(r"\." + re.escape(name) + r"\b", arg):
+                                continue
+                            self.assertIn(name, imported,
+                                          entry + " passes " + name
+                                          + " to watchdog() without importing it")
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not installed")
         with tempfile.TemporaryDirectory(prefix="watchdog-") as temp:
             hang = Path(temp) / "hang.js"
+            # A one-hour bound: the timer cannot be what ends this run, so the
+            # only way to exit 1 is the drain path itself.
             hang.write_text(
                 "const {watchdog} = require(" + repr(str(owner)) + ");\n"
-                + "watchdog(300, 'pin');\n"
+                + "watchdog(3600000, 'pin-drain');\n"
                 + "(async () => { await new Promise(() => {}); })();\n")
+            started = time.monotonic()
             result = subprocess.run([node, str(hang)], capture_output=True, text=True, timeout=30)
+            elapsed = time.monotonic() - started
             self.assertEqual(result.returncode, 1, result.stderr)
-            self.assertIn("watchdog: pin did not finish", result.stderr)
+            self.assertIn("the event loop emptied", result.stderr)
+            # Reporting immediately is the whole point: the unrefed timer plus
+            # beforeExit must not wait out the bound.
+            self.assertLess(elapsed, 20, "the drain path waited " + str(round(elapsed, 1)) + "s")
             clean = Path(temp) / "clean.js"
             clean.write_text(
                 "const {watchdog} = require(" + repr(str(owner)) + ");\n"
@@ -70,6 +107,15 @@ class RepositoryChecks(unittest.TestCase):
                 + "done(); process.exit(0);\n")
             self.assertEqual(
                 subprocess.run([node, str(clean)], capture_output=True, timeout=30).returncode, 0)
+            # A suite that records its verdict as exitCode = 0 is a pass, not a
+            # drain: the falsy zero once made the guard report it as a failure.
+            zero = Path(temp) / "zero.js"
+            zero.write_text(
+                "const {watchdog} = require(" + repr(str(owner)) + ");\n"
+                + "watchdog(3600000, 'pin-zero');\n"
+                + "process.exitCode = 0;\n")
+            self.assertEqual(
+                subprocess.run([node, str(zero)], capture_output=True, timeout=30).returncode, 0)
 
     def test_test_source_layout(self):
         for name in ("internal/unit_test.go", "scripts/browser_check.py", "ui_check.js", "other.spec.js"):

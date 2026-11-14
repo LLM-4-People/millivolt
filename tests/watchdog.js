@@ -26,8 +26,11 @@
 // reached its verdict calls the returned clear, which retires both.
 //
 // A drain is only this module's business when it would otherwise read as
-// success. A suite whose own catch already set a nonzero exit code failed
-// loudly and is allowed to exit; reporting over it would bury its message.
+// success. The verdict is explicit: `clear()` means the suite finished, and a
+// nonzero `process.exitCode` means it failed loudly and is allowed to exit -
+// reporting over it would bury its message. `exitCode === 0` is also a
+// verdict, because a suite may record success that way; treating the falsy zero
+// as "no verdict" reported a passing suite as a failure.
 function watchdog(ms, label) {
   let settled = false;
   const fail = reason => {
@@ -40,7 +43,9 @@ function watchdog(ms, label) {
     () => fail('still running after ' + Math.round(ms / 1000) + 's'), ms);
   timer.unref();
   const onDrain = () => {
-    if (!process.exitCode) fail('the event loop emptied with no verdict');
+    if (process.exitCode !== undefined) return;
+    fail('the event loop emptied with no verdict; a suite that finished must '
+      + 'call the clear function it was given');
   };
   process.once('beforeExit', onDrain);
   return () => {
