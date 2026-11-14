@@ -608,6 +608,103 @@ func TestMapByteSizesAreStrings(t *testing.T) {
 	}
 }
 
+// TestSchemaBandsMatchValidate is the generic guard the per-field range checks
+// never had. Schema's Min/Max are the Settings hint; Validate is the deny-by-
+// default gate. A field whose two owners disagree either offers an input the
+// server refuses or accepts a value the UI calls invalid - and with five pairs
+// named by hand, the sixth field to drift was invisible.
+//
+// It reads the struct by yaml tag, sets the field to each declared bound and one
+// step outside it, and requires Validate to agree with the schema. Only integer
+// and byte fields are driven: a duration's canonical nanosecond value is easy to
+// step wrongly, and its bounds already have their own formatter pin.
+//
+// A few fields are bounded relative to another field rather than by a fixed
+// range, so their declared band is only one half of the rule. Those are listed
+// below with the check they belong to and are exercised by that check's own
+// test; driving them here would assert a half-rule the server never claims.
+// The list is the point: a new coupled field must be added deliberately rather
+// than silently weakening the guard.
+func TestSchemaBandsMatchValidate(t *testing.T) {
+	rt := reflect.TypeOf(Config{})
+	byTag := map[string]reflect.StructField{}
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		tag := strings.Split(sf.Tag.Get("yaml"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		byTag[tag] = sf
+	}
+	// Fields whose validity depends on another field, and the Validate site that
+	// owns the pair. Each is covered where that pair is tested.
+	coupled := map[string]string{
+		"translated_response_max_bytes": "cannot exceed max_inflight_response_bytes",
+		"max_inflight_response_bytes":   "bounds translated_response_max_bytes",
+		"storage_write_chan_cap":        "bounds storage_batch_cap",
+		"storage_batch_cap":             "bounded by storage_write_chan_cap",
+		"max_idle_conns_per_host":       "cannot exceed max_conns_per_host",
+		"max_conns_per_host":            "bounds max_idle_conns_per_host",
+	}
+	checked := 0
+	for _, f := range Schema() {
+		if _, isCoupled := coupled[f.Key]; isCoupled {
+			continue
+		}
+		if f.Min == nil || f.Max == nil {
+			continue
+		}
+		if f.Kind != KindInt && f.Kind != KindBytes {
+			continue
+		}
+		sf, ok := byTag[f.Key]
+		if !ok {
+			continue
+		}
+		low, high := int64(*f.Min), int64(*f.Max)
+		if high <= low {
+			t.Errorf("%s: schema band %d..%d is empty", f.Key, low, high)
+			continue
+		}
+		// The direction that matters is the one the Settings input takes: a
+		// value the schema calls valid must pass Validate. Asserting only the
+		// reverse would pass whenever Validate is the stricter owner, which is
+		// exactly how a schema-only widening went unnoticed.
+		for _, tc := range []struct {
+			name  string
+			value int64
+			ok    bool
+		}{
+			{"the declared minimum", low, true},
+			{"the declared maximum", high, true},
+			{"below the minimum", low - 1, false},
+			{"above the maximum", high + 1, false},
+		} {
+			c := Default()
+			field := reflect.ValueOf(c).Elem().FieldByName(sf.Name)
+			switch field.Kind() {
+			case reflect.Int, reflect.Int64:
+				field.SetInt(tc.value)
+			default:
+				continue
+			}
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Errorf("%s: schema band %d..%d offers %d (%s) but Validate refuses it: %v",
+					f.Key, low, high, tc.value, tc.name, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("%s: schema band %d..%d but Validate accepted %d (%s)",
+					f.Key, low, high, tc.value, tc.name)
+			}
+			checked++
+		}
+	}
+	if checked < 40 {
+		t.Fatalf("only %d schema bands were driven; the reflection lost its mapping", checked)
+	}
+}
+
 func TestSchemaZeroTokenMatchesFormatters(t *testing.T) {
 	for _, f := range Schema() {
 		switch f.Kind {
