@@ -108,7 +108,7 @@ function ocRenderPause() {
     `<p class="oc-sub">Park new matching requests without cancelling work that is already running.</p></div>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
     `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button></div></div>` +
-    (rows || empty) + (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + `</div>`;
+    (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + (rows || empty) + `</div>`;
 }
 
 function ocPauseBody(draft) {
@@ -296,7 +296,7 @@ function ocRenderCapture() {
     `<p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p></div>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
     `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button></div></div>` +
-    (rows || empty) + (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + `</div>`;
+    (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + (rows || empty) + `</div>`;
 }
 
 function ocCaptureBody(draft) {

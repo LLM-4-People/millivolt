@@ -187,8 +187,8 @@ function ocRenderLimits() {
     `<div class="oc-sec-head"><div><h2 class="oc-h2">limits</h2>` +
     `<p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p></div>` +
     `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button></div>` +
-    (rows || empty) +
     (composing ? ocLimitComposerHTML(ocDrafts.limit) : '') +
+    (rows || empty) +
     `</div>`;
 }
 
