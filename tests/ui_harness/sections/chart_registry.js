@@ -232,12 +232,21 @@ module.exports = async function chartRegistry(H) {
     // Every scope dimension is restated, because the server treats a supplied
     // array as a replacement and an omitted one as "keep". An empty array here
     // is the operator's "any value" on that dimension, not a dropped field.
+    //
+    // Compared structurally: the dimension fields come from the shared scope
+    // table, so their key order follows the table's display order rather than
+    // the order the old hand-written body happened to assign them in, and JSON
+    // object key order carries no meaning to the server.
+    const settledKeys = value => JSON.parse(JSON.stringify(value, (_k, v) =>
+      v && typeof v === 'object' && !Array.isArray(v)
+        ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
+        : v));
     check('a named hold sends every explicit scope dimension and no all flag',
-      JSON.stringify(namedBody) === JSON.stringify({
+      JSON.stringify(settledKeys(namedBody)) === JSON.stringify(settledKeys({
         paused: true, all: false, duration: '', new: false,
         clients: ['client-a'], providers: ['old.example'],
         models: [], key_hashes: [], conversations: [],
-      }));
+      })));
     // The named hold arrives through a poll after the previous mutation has
     // settled; applyPauseState deliberately drops a snapshot that lands while
     // the gate is busy, so wait for the gate to clear first.

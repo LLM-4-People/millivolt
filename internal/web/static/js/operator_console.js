@@ -773,18 +773,11 @@ function ocRenderFoot() {
 function ocScopePhrase(scope) {
   if (!scope) return 'every request';
   const bits = [];
-  const dims = [
-    ['providers', 'provider', 'providers'],
-    ['models', 'model', 'models'],
-    ['clients', 'client', 'clients'],
-    ['keyHashes', 'key', 'keys'],
-    ['conversations', 'conversation', 'conversations'],
-  ];
-  for (const [key, singular, plural] of dims) {
-    const values = scope[key] || [];
+  for (const dim of OC_SCOPE_DIMS) {
+    const values = scope[dim.key] || [];
     if (!values.length) continue;
-    if (values.length === 1) bits.push(singular + ' ' + ocScopeValueLabel(key, values[0]));
-    else bits.push(values.length + ' ' + plural);
+    if (values.length === 1) bits.push(dim.one + ' ' + ocScopeValueLabel(dim.key, values[0]));
+    else bits.push(values.length + ' ' + dim.many);
   }
   return bits.length ? bits.join(' · ') : 'every request';
 }
@@ -850,23 +843,76 @@ function ocDurationText(value) {
 }
 
 // ---------- scope editor ----------
-function ocNewScope() {
-  return { providers: [], models: [], clients: [], keyHashes: [], conversations: [] };
+// OC_SCOPE_DIMS is the one table of selector dimensions, in display order.
+// A limit, a hold and a capture all match a request by the same identity, so
+// every spelling of a dimension lives on its one row:
+//
+//   key    the client's field name, which the editors and drafts use
+//   wire   the server document's name, which the store and the POST body use
+//   one    the word a sentence uses for a single value
+//   many   the word a sentence uses for several
+//   record the request record field that carries the value
+//
+// The phrase readers, the selector key, the record matchers, the composer
+// bodies and the picker labels all read this table. Adding a dimension is one
+// row here instead of eight edits that can disagree about the wire name or the
+// singular word.
+const OC_SCOPE_DIMS = [
+  { key: 'providers', wire: 'providers', one: 'provider', many: 'providers', record: 'provider' },
+  { key: 'models', wire: 'models', one: 'model', many: 'models', record: 'model' },
+  { key: 'clients', wire: 'clients', one: 'client', many: 'clients', record: 'client' },
+  { key: 'keyHashes', wire: 'key_hashes', one: 'key', many: 'keys', record: 'key_hash' },
+  { key: 'conversations', wire: 'conversations', one: 'conversation', many: 'conversations', record: 'conversation_id' },
+];
+
+// OC_SCOPE_KEYS is the table's client-side order, the shape every composer and
+// chip strip iterates.
+const OC_SCOPE_KEYS = OC_SCOPE_DIMS.map(dim => dim.key);
+
+// OC_CAPTURE_SCOPE_KEYS is the subset a capture session can select on. It is
+// narrower on purpose: the server's debug scope carries clients, providers and
+// models, while a limit and a hold also match a key hash and a conversation.
+// It is derived from the table so a dimension rename reaches it too.
+const OC_CAPTURE_SCOPE_KEYS = OC_SCOPE_DIMS
+  .filter(dim => ['clients', 'providers', 'models'].includes(dim.key))
+  .map(dim => dim.key);
+
+function ocScopeDim(key) {
+  return OC_SCOPE_DIMS.find(dim => dim.key === key || dim.wire === key) || null;
 }
 
-// OC_SCOPE_DIMS is the one ordered list of selector dimensions. Every kind
-// that matches requests uses it: a limit, a hold and a capture offer the same
-// depth because the server matches all three against the same request identity.
-// A new dimension is added here once, not in three composers.
-const OC_SCOPE_DIMS = ['providers', 'models', 'clients', 'keyHashes', 'conversations'];
-
-function ocScopeFromPolicy(policy) {
-  const scope = ocNewScope();
-  for (const key of Object.keys(scope)) {
-    const values = policy?.scope?.[key === 'keyHashes' ? 'key_hashes' : key] || [];
-    scope[key] = [...values];
-  }
+function ocNewScope() {
+  const scope = {};
+  for (const dim of OC_SCOPE_DIMS) scope[dim.key] = [];
   return scope;
+}
+
+// ocScopeFromPolicy reads a stored document into the draft shape. A limit
+// nests its selector under `scope`; a hold and a capture session carry the same
+// dimensions flat, so both shapes are accepted and the caller passes the
+// document it has.
+function ocScopeFromPolicy(policy) {
+  const raw = policy?.scope || policy || {};
+  const scope = ocNewScope();
+  for (const dim of OC_SCOPE_DIMS) scope[dim.key] = [...(raw[dim.wire] || [])];
+  return scope;
+}
+
+// ocScopeToWire turns a draft's selector into the document's field names. The
+// bodies send every dimension explicitly, because the server treats a supplied
+// array as a replacement and an omitted one as "keep".
+function ocScopeToWire(scope) {
+  const wire = {};
+  for (const dim of OC_SCOPE_DIMS) wire[dim.wire] = scope[dim.key] || [];
+  return wire;
+}
+
+// ocPolicyScopePhrase is the phrase for a stored server document, which nests
+// its selector. Every surface that shows a rule's blast radius reads this, so
+// the row, the removal confirmation and the overview cannot re-derive it
+// differently.
+function ocPolicyScopePhrase(policy) {
+  return ocScopePhrase(ocScopeFromPolicy(policy));
 }
 
 function ocScopeHas(scope) {
@@ -903,7 +949,7 @@ function ocHoldDraftScopePhrase(draft) {
 // it writes, instead of discovering it afterwards.
 function ocLimitSelectorKey(scope, schedule) {
   const dims = {};
-  for (const key of ['providers', 'models', 'clients', 'keyHashes', 'conversations']) {
+  for (const key of OC_SCOPE_KEYS) {
     const values = [...new Set((scope?.[key] || []).map(v => String(v).trim()).filter(Boolean))].sort();
     dims[key] = values;
   }
@@ -976,10 +1022,7 @@ function ocKnownValues(dim) {
 }
 
 function ocDimLabel(dim) {
-  return {
-    providers: 'provider', models: 'model', clients: 'client',
-    keyHashes: 'key', conversations: 'conversation',
-  }[dim] || dim;
+  return ocScopeDim(dim)?.one || dim;
 }
 
 function ocScopeChipsHTML(scope, dim) {
@@ -1894,10 +1937,10 @@ document.addEventListener('click', event => {
 
 function ocPolicyMatchesRecord(policy, record) {
   const scope = policy?.scope || {};
-  const ok = (values, value) => !(values || []).length || (values || []).includes(value || '');
-  return ok(scope.providers, record.provider) && ok(scope.models, record.model) &&
-    ok(scope.clients, record.client) && ok(scope.key_hashes, record.key_hash) &&
-    ok(scope.conversations, record.conversation_id);
+  return OC_SCOPE_DIMS.every(dim => {
+    const values = scope[dim.wire] || [];
+    return !values.length || values.includes(record[dim.record] || '');
+  });
 }
 
 // ocScopeWeight ranks matches so a model rule outranks the global rule when
@@ -1905,8 +1948,7 @@ function ocPolicyMatchesRecord(policy, record) {
 // make the choice stable without inventing a precedence the server has not
 // promised.
 function ocScopeWeight(scope) {
-  return ['providers', 'models', 'clients', 'key_hashes', 'conversations']
-    .reduce((n, key) => n + ((scope?.[key] || []).length ? 1 : 0), 0);
+  return OC_SCOPE_DIMS.reduce((n, dim) => n + ((scope?.[dim.wire] || []).length ? 1 : 0), 0);
 }
 
 // ocHoldMatchesRecord mirrors scheduler.holdSnap.matches: AND across the
@@ -1930,21 +1972,16 @@ function ocHoldMatchesRecord(hold, record) {
   } else if (hold.new && known.includes(client)) {
     return false;
   }
-  const values = {
-    providers: record.provider || '',
-    models: record.model || '',
-    keyHashes: record.key_hash || '',
-    conversations: record.conversation_id || '',
-  };
-  for (const dim of ['providers', 'models', 'keyHashes', 'conversations']) {
-    const set = scope[dim];
-    if (set.length && !set.includes(values[dim])) return false;
+  for (const dim of OC_SCOPE_DIMS) {
+    // The client dimension was decided above, where New participates.
+    if (dim.key === 'clients') continue;
+    const set = scope[dim.key];
+    if (set.length && !set.includes(record[dim.record] || '')) return false;
   }
   // A hold with no named dimension at all is inactive; the server never
   // installs one, and a row for it would claim a park that does not happen.
-  return named || hold.new || scope.providers.length > 0 ||
-    scope.models.length > 0 || scope.keyHashes.length > 0 ||
-    scope.conversations.length > 0;
+  return named || hold.new || OC_SCOPE_DIMS.some(dim =>
+    dim.key !== 'clients' && (scope[dim.key] || []).length > 0);
 }
 
 function ocCaptureMatchesRecord(session, record) {
@@ -2018,13 +2055,12 @@ function ocCaptureForRecord(record) {
 // already share. Record-match seeds read it so a new dimension is offered by
 // every prefill at once instead of being added at each call site.
 function ocRecordScope(record) {
-  return {
-    providers: record.provider ? [record.provider] : [],
-    models: record.model ? [record.model] : [],
-    clients: record.client ? [record.client] : [],
-    key_hashes: record.key_hash ? [record.key_hash] : [],
-    conversations: record.conversation_id ? [record.conversation_id] : [],
-  };
+  const scope = {};
+  for (const dim of OC_SCOPE_DIMS) {
+    const value = record?.[dim.record];
+    scope[dim.wire] = value ? [value] : [];
+  }
+  return scope;
 }
 
 // ocOpenOperatorForRecord is the one dispatch for the three record pills.

@@ -145,7 +145,7 @@ function ocBudgetPlaceholder(draft, key, example) {
 
 function ocLimitComposerHTML(draft) {
   const editing = !!draft.id;
-  const conds = ocScopeConditionsHTML(draft, ['providers', 'models', 'clients', 'keyHashes', 'conversations']);
+  const conds = ocScopeConditionsHTML(draft, OC_SCOPE_KEYS);
   const global = !ocScopeHas(draft.scope);
   const burstAllowed = ocBurstAllowed(draft);
   const scheduleOn = !!draft.schedule;
@@ -339,11 +339,7 @@ function ocLimitRuleHTML(policy) {
 function ocLimitBody(draft) {
   const burst = !!(draft.antiBurst && draft.concurrency && ocBurstAllowed(draft));
   const body = {
-    providers: draft.scope.providers,
-    models: draft.scope.models,
-    clients: draft.scope.clients,
-    key_hashes: draft.scope.keyHashes,
-    conversations: draft.scope.conversations,
+    ...ocScopeToWire(draft.scope),
     days: draft.schedule ? draft.schedule.days : [],
     start_minute: draft.schedule ? draft.schedule.start : 0,
     end_minute: draft.schedule ? draft.schedule.end : 0,
@@ -419,11 +415,7 @@ async function ocUndoLimit(newId, previous) {
 // removed would answer 404 instead of recreating the rule.
 function ocLimitPolicyBody(policy) {
   return {
-    providers: policy.scope?.providers || [],
-    models: policy.scope?.models || [],
-    clients: policy.scope?.clients || [],
-    key_hashes: policy.scope?.key_hashes || [],
-    conversations: policy.scope?.conversations || [],
+    ...ocScopeToWire(ocScopeFromPolicy(policy)),
     days: policy.schedule?.days || [],
     start_minute: policy.schedule?.start_minute || 0,
     end_minute: policy.schedule?.end_minute || 0,

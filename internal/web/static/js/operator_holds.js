@@ -79,7 +79,7 @@ function ocPauseComposerHTML(draft) {
     // The same five dimensions the limit composer offers. A hold that can only
     // name clients and providers cannot ask "park this model" while a limit can
     // cap it, which is a difference the operator cannot account for.
-    (named ? ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, OC_SCOPE_DIMS) : '') +
+    (named ? ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, OC_SCOPE_KEYS) : '') +
     `<p class="oc-note">${draft.mode === 'all'
       ? 'Every new request parks. In-flight work always finishes.'
       : draft.mode === 'new'
@@ -189,12 +189,9 @@ function ocPauseBody(draft) {
     body.new = draft.mode === 'new';
     // Every dimension is restated, because the server treats a supplied array
     // as a replacement and an omitted one as "keep". A narrow hold must not
-    // leave a previous broader dimension in place.
-    body.clients = draft.scope.clients;
-    body.providers = draft.scope.providers;
-    body.models = draft.scope.models;
-    body.key_hashes = draft.scope.keyHashes;
-    body.conversations = draft.scope.conversations;
+    // leave a previous broader dimension in place. The field names come from
+    // the scope table, so a dimension rename reaches the request body too.
+    Object.assign(body, ocScopeToWire(draft.scope));
   }
   // An omitted cap means different things on the two paths. On a create the
   // server writes the configured queue size, which is what an unchecked box
@@ -341,7 +338,7 @@ function ocCaptureComposerHTML(draft) {
   return `<section class="oc-compose" data-kind="capture">` +
     `<div class="oc-compose-hd"><span>${editing ? 'editing capture' : 'new capture'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">capture</div>` +
-    ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, ['clients', 'providers', 'models']) +
+    ocScopeConditionsHTML({ scope: draft.scope, picker: draft.picker }, OC_CAPTURE_SCOPE_KEYS) +
     `<p class="oc-note">Captures can contain credentials and private content; keep the window short and download only what you need.</p></div>` +
     `<div class="oc-group"><div class="oc-label">until</div>` +
     ocChipRow('capture-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : 'until stopped') +
