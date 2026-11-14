@@ -270,7 +270,12 @@ try {
     <button class="btn oc-close" type="button" data-oc-close aria-label="close operator console">✕<span class="d-key">esc</span></button>
   </div>
   <div class="oc-body">
-    <nav class="oc-rail" id="oc-rail" role="tablist" aria-label="operator sections" aria-orientation="vertical"></nav>
+    <!-- aria-orientation is owned by operator_console.js (OC_RAIL_ORIENTATION):
+         the strip is one horizontal row at every width, and a hardcoded
+         attribute here announced the wrong axis until the first render. The
+         ARIA default for a tablist is horizontal, which is what the owner
+         sets, so omitting it is never wrong. -->
+    <nav class="oc-rail" id="oc-rail" role="tablist" aria-label="operator sections"></nav>
     <div class="oc-pane" id="oc-pane" role="tabpanel" tabindex="-1"></div>
   </div>
   <div class="oc-ft">
