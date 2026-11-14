@@ -1,13 +1,14 @@
 # Dashboard guide
 
 The [overview](../README.md#dashboard-overview) shows the complete dashboard.
-Use this guide to follow its charts, explorer, request drawer, operator menus
+Use this guide to follow its charts, explorer, request drawer, operator console
 and Settings without hunting through the interface.
 
 These are real application captures from explicitly authorized local history.
 Recorded timing, token and cost values are retained; identifiers are replaced,
 and request content, retained headers, debug captures and operator state are
-removed. Settings and menus show the public example, not private configuration.
+removed. Settings and the theme tray show the public example, not private
+configuration.
 No requests, holds, limits or debug sessions were created to make the pictures.
 The capture session blocks external requests and disables live SSE, so its
 **offline** indicator describes a static screenshot session, not service health.
@@ -272,84 +273,121 @@ captures remain sensitive.
 
 ![The same request drawer showing token and performance measurements](images/requests/performance.png)
 
-## Operator menus
+## Operator console
 
-The top-right buttons open these menus. Opening a menu does not execute its
-actions. The pictures show an idle isolated instance with recorded history,
-not active operator policies from the source instance.
+The header's operator readout is the one control surface. It stays in the
+header rail at every width, including the phone header; the theme tray and
+Settings sit behind the actions flyout there. It reads `steady` when no hold or
+capture is active, no limit policy is stored and no restart is running, then one
+segment per active hold (`paused 1`), capture session (`capture 1`) and stored
+limit policy (`limits 2`). While a rebuild runs, `restarting` comes first, with
+` · step N` when the server reports the step. The counts are live state: a hold
+that expires, a stopped capture or a cleared limit leaves on the next state
+repaint. A scheduled limit still counts as a stored policy while its window is
+closed. The header readout is not a live region; it updates when operator state
+or restart status changes, and the trigger's accessible label carries the same
+words. The open console's head line repeats those words without a second total
+and is a polite live region.
 
-### Pause
+Activating the readout opens the console. On a wide viewport it is an anchored
+panel under the trigger, up to 940px wide and 680px tall. At 800px or narrower
+it becomes a bottom sheet of up to 86dvh, and the section rail becomes one
+horizontally scrollable strip. Escape, an outside press, the close button, or
+opening the theme tray or Settings closes it; opening the console closes the
+theme tray and Settings first. The session remembers the last section, so
+reopening returns where the operator left. Opening the console itself performs
+no action.
 
-Pause queues newly admitted matching work by scope rather than canceling streams
-already running. The menu exposes scopes, durations and current holds, including
-resume/edit controls when applicable. The scope select explains the current
-choice, each checklist header reports how many names are selected or `any`, the
-pending action is written out above the buttons, and the queue cap sits under
-`Queue options`. Resume all asks for a second click before it releases every
-hold. Queue limits still apply.
+The rail names six sections: overview, limits, pause, capture, export and
+system. Limits, pause and capture carry a count badge for the rules in that
+section. The overview is the summary: rules, holds, limits and queued KPI
+tiles, an in-force list whose rows jump to the owning section, the queue drain
+control, and this session's changes with their times. Limits, pause and capture
+hold rule rows and one composer; export holds the download builder, and system
+holds the restart and Settings cards.
 
-![Pause menu with scope and duration controls and recorded client/provider choices](images/menus/pause.png)
+### Rule rows
 
-### Debug
+Every rule is one calibration line: a kind tag in its state color, the human
+scope, the caps or schedule and, for a limit, who set it, plus a live column for
+occupancy and actions. The scope sentence is generated from the selector the server enforces,
+so an empty dimension reads inside the sentence instead of as a separate
+checklist. A limit row names its source (`set by header` or `set in the
+console`), its schedule when one exists, and any remaining request and token
+budget. A hold row names its remaining time, queue cap and queued count. A
+capture row names its retained count, run time and stop time. A row opens its
+composer in edit mode; remove, resume and stop sit in the row's action column.
 
-Debug starts a scoped capture session with timed or manual stop. Retained
-captures have separate size and lifetime limits, and the menu states the
-current retention window and byte budget beside the sensitivity warning. The
-session rows report captures rather than requests. Start is disabled with an
-explanation when durable storage is off. It is opt-in and can retain sensitive
-request/response bodies even when known secret headers are redacted. Stop all
-asks for a second click. No debug session was enabled for this screenshot.
+### Composer anatomy
 
-![Debug menu with scoped capture controls and session limits](images/menus/debug.png)
+Limits, pause and capture share one composer: a titled bench, scope conditions,
+budget or duration controls, a live preview sentence, and a footer with cancel
+and the one commit action. Scope conditions are disclosures. A closed row shows
+its chips or `any`; an open row shows a filter, the known values as checkable
+rows, and a free-value field except for key hashes. Provider, model, client and
+conversation scopes accept a typed value; the key scope lists only SHA-256
+hashes already present in the live record ring. The preview states what the
+commit will enforce.
 
-### Limits
+Limits add concurrency, request and token budgets with their windows, an
+optional anti-burst ramp, and an optional day-of-week schedule with
+server-local from and to times. The ramp is offered only on a single-provider
+rule without a schedule. Equal from and to times mean all day, and a window
+that starts after its end spans midnight. Pause adds everything, new-clients
+and named clients/providers modes, a duration or until-resumed choice, and an
+optional queue cap. Capture starts a scoped Debug session and adds client,
+provider and model scopes, a duration or until-stopped choice, and the retention
+and byte facts for the current configuration.
 
-Limits sets provider-wide request, token and concurrency budgets, plus an
-opt-in anti-burst ramp that grows each provider+key group's allowance from one
-to the concurrency target. The request budget is a strict sliding window: no
-window of the configured length admits more than the configured count, so a
-`100 per 1m` policy stays at or below 100 in any rolling minute instead of
-spending a whole burst and refilling through the same span. The token budget
-refills continuously and can go into debt on an oversized reservation. These
-limits are distinct from key-scoped scheduling
-and upstream rate-limit observations. The menu shows the selected provider's
-configured controls and active policies, including the anti-burst checkbox and
-ramp select, and its count line names the policy source and adds an anti-burst
-hint when the ramp is enabled. A stored ramp with the flag off is labeled
-inactive instead of disappearing. The summary above the buttons spells out the
-pending policy, Apply is disabled when no dimension is set, and Clear (which
-asks for a second click) is the only removal path. The queue section has its
-own scope select: everything, the selected provider, one model, or one client.
+### Confirmation and the change ledger
 
-![Limits menu with provider-wide request, token and concurrency controls](images/menus/limits.png)
+Removing a limit, resuming every hold, stopping every capture, draining the
+queue and restarting open the shared confirmation dialog. It states the
+consequence, focuses Cancel first, and names the action on its confirm button.
+Individual resume and stop actions commit directly; an edit commits when its
+composer is applied. All are recorded.
 
-(The static capture predates the anti-burst controls.)
+The console footer is a bounded session ledger. It shows the newest change and
+offers Undo while that change has a defined inverse. Undo applies it once and
+appends an `undid: ...` receipt; the next change becomes the new undo target.
+The overview lists the same receipts with their times. Up to eight changes are
+retained for the page session. Changes without an inverse, such as a download
+or a restart, are recorded without an undo action. The ledger is browser
+memory, clears on reload and is not an audit log. A rejected write is named in
+the open pane, not hidden behind a closed panel.
 
-### Logs
+### Export
 
-Logs selects a full-history export using the shared provider, model, client,
-status, error, debug and age filters. The menu's count preview is separate from
-the recent rows currently loaded in the browser; the state line names whether
-the export reads durable history or the live buffer. In-flight status 0 is not
-offered as a filter, Reset filters clears the whole set in one click, and both
-download actions are neutral read-only controls. No export was downloaded here.
+The export section owns record exports. Choose all history or matching
+records. Matching records offers provider, model, client, conversation, status,
+errors-only, debug-only, newer-than and older-than rows, plus an exact error
+type field. Provider, model, client and status choices come from the live
+record ring; conversation adds an exact conversation id field. For matching
+records, the receipt previews the count through the same predicate the download
+uses, and the download action is available once a nonzero count is ready.
+Downloads are gzip JSON artifacts. Configuration and database backups stay in
+Settings, and the console links there.
 
-![Logs menu with full-history export filters and download actions](images/menus/logs.png)
+### System
 
-### Restart
+The system section owns restart and the console's link to Settings. It explains
+the rebuild and handoff, lists the four steps as they actually start (`rebuild
+from source`, `finish in-flight streams`, `flush metrics to disk`, `start the
+new process`), and disables restart while a run is active or the build cannot
+restart in place. A restart asks for confirmation and is recorded in the ledger
+without an undo action. Queue bounds, retry budgets, storage, retention and
+dashboard cadence are Settings fields, not console policies; the section links
+there instead of duplicating them.
 
-Source deployments can rebuild and restart through a staged handoff. The menu
-explains the operation; the action is disabled while a restart is underway.
-Status updates refresh the dashboard automatically. Container images do not
-contain the source/compiler and require an external container update/restart.
-This screenshot only opens the menu and does not start a restart.
-
-![Restart menu with the operation description and restart action](images/menus/restart.png)
+Static captures of the operator console publish to `docs/images/console/` from
+the same authorized history workflow as the rest of the gallery. The older
+`docs/images/menus/` files stay for history only: the five header menus they
+pictured no longer exist and no page links them.
 
 See [operations](operations.md) for exact admission, persistence, filtering,
 restart and failure behavior before using these controls.
 
-### Theme
+## Theme
 
 Theme has two surfaces and eight palettes. Each palette owns a complete
 surface family (base, panels, rail and borders), its accent family, and its

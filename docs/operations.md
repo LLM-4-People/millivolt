@@ -885,7 +885,7 @@ both.
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
-| `GET/POST /admin/throttle` | Inspect/provider-limit updates. POST requires provider and accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge; `clear:true` removes policy. |
+| `GET/POST /admin/throttle` | Inspect and edit limits. A policy is named by its opaque `id` or by its selector. Scope dimensions `providers` (the singular `provider` field is still accepted), `models`, `clients`, `key_hashes` and `conversations` intersect; an empty dimension matches any value. An optional schedule uses `days` (0 = Sunday), `start_minute` and `end_minute` in server-local time; equal minutes mean all day and a start after the end spans midnight. POST accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge, `0` or an empty window turns a dimension off, and `clear:true` removes the policy. Anti-burst and its ramp require a single-provider policy without a schedule. GET also returns `known_providers`, `known_clients` and `known_models` for selector pickers. |
 | `POST /admin/queue/drain` | Release parked requests without waiting for their limit, pause hold or retry window, covering both the admission queue and the send gate. Requires exactly one scope: `all:true`, `provider`, `model` or `client`. Released requests answer with a retryable 503, never a provider error; a request already exchanging bytes with the provider finishes normally. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
@@ -1025,10 +1025,10 @@ so run the proxy under a dedicated account.
 
 Pause creates holds; it does not disconnect already-running sends. Matching new
 sends and retries wait until the hold expires or is resumed. Choose all traffic,
-named clients/providers, or clients that were unseen when a New-clients hold was
+named clients/providers, or clients that were unseen when a new-clients hold was
 created. "New" does not mean new requests or new conversations. Multiple names
 within a dimension are alternatives; provider and client constraints intersect.
-When named clients and New are combined, either client condition may match.
+When named clients and new are combined, either client condition may match.
 
 A hold has its own duration and queue cap; the cap defaults to `max_queue_size`
 when the hold does not set one. Excess waiting work can be refused;
@@ -1044,9 +1044,9 @@ than the caller named. `all:true` cannot be combined with `new`, `clients` or
 remains a valid union. These are enforced by the handler, not only by the MCP
 and CLI wrappers.
 
-The known client/provider/model vocabularies (the pause and debug pickers, and
-the snapshot a New-clients hold compares against) are bounded at 4096 names per
-dimension. Client labels and model ids come from the request, so they are
+The known client/provider/model vocabularies (the pause and capture pickers,
+and the snapshot a new-clients hold compares against) are bounded at 4096 names
+per dimension. Client labels and model ids come from the request, so they are
 evictable: past the cap the least recently observed name makes room for the
 newest, so a client that keeps sending requests outlives a burst of one-shot
 labels that arrived after it. Names an operator documents - a hold scope or a
@@ -1063,14 +1063,35 @@ tools from each other, not trusted callers from untrusted ones; a caller that
 sends another client's label is parked, or not parked, as that client. See
 [client identity](../SECURITY.md#client-identity-is-a-claim-not-an-authentication).
 
-Limits applies to a provider across all clients and keys, independently of the
-per-key concurrency/queue settings. Choose concurrency, requests per window,
-tokens per window and the optional anti-burst ramp, then Apply; Clear removes
-that provider policy. `clear:true` cannot be combined with a limit dimension:
-the handler refuses the ambiguity instead of dropping the supplied value and
-reporting success. The menu shows whether a policy came from the UI or a
-request header, together with available budget and in-flight/queued state.
-Queued counts every request the scheduler parks for that provider - admission
+Limits applies to an intersection of conditions: providers, models, clients,
+key hashes and conversations. Values inside one condition are alternatives; an
+empty condition matches any value, so a rule with no condition covers every
+request. A request must satisfy every non-empty condition, and every matching
+policy charges its own lease, so the tightest cap wins. A provider-only rule
+keeps the per-key concurrency and fairness behavior below; adding any other
+condition narrows the same machinery without changing it. Conditions select the
+request's recorded identity, so models match the request spelling, keys match
+the SHA-256 digest, and conversations match the selected leaf.
+
+A rule may also carry a recurring schedule: `days` (0 = Sunday), `start_minute`
+and `end_minute` in the server's local timezone. Equal minutes mean all day, and
+a start after the end spans midnight, with the after-midnight portion belonging
+to the previous day. An empty schedule is always active. Outside a rule's window
+it does not charge, settle or queue, and a request that matches no other rule
+proceeds normally.
+
+A policy's identity is the digest of its normalized conditions and schedule.
+Editing either one therefore creates a new identity, and two rules cannot
+silently share counters. Provider-only policies keep the version 1 persisted
+shape and still accept the singular `provider` field; a rule with any other
+condition persists its selector arrays. `clear:true` removes the whole policy
+and cannot be combined with a limit dimension: the handler refuses the
+ambiguity instead of dropping the supplied value and reporting success.
+
+Choose concurrency, requests per window, tokens per window and the optional
+anti-burst ramp. The console shows whether a policy came from the console or a
+request header, its schedule, and available budget and in-flight/queued state.
+Queued counts every request the scheduler parks for that policy - admission
 waits and send-gate waits behind a 429/5xx pacing window alike - not only work
 blocked by the configured cap. Send-gate waits are paced by the provider's retry
 hint and the retry budget; `max_queue_size` and `max_queue_wait` bound only the
@@ -1084,21 +1105,24 @@ a grant refills a saturated provider concurrency cap. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
-**Drain queued** releases every request the scheduler has parked, or only the
-model/client named in the menu fields, without waiting for a limit window, pause
-hold or retry pacing to open. The provider selector scopes limits only: a
-provider can hold queued work without a limit row (for example, send-gate waits
-behind an upstream 429), so it never narrows the drain. The line above the
-buttons shows the total parked count. Each released request answers with a
-retryable 503 and is recorded as `queue_drained`, never as a provider error; a
-request already exchanging bytes with the provider finishes normally. The API
-also accepts a `provider` scope for scripted drains.
+**Drain queue** releases every request the scheduler has parked, or only those
+whose recorded provider, model or client matches the one named in the console,
+without waiting for a limit window, pause hold or retry pacing to open. The
+selector reads each parked request's own identity, so it also releases work
+parked by a hold, by pacing, or by a provider without a limit row. The overview
+shows the total parked count. Each released request answers with a retryable 503
+and is recorded as `queue_drained`, never as a provider error; a request already
+exchanging bytes with the provider finishes normally. The API also accepts the
+same three scopes for scripted drains.
 
-Anti-burst is opt-in and scoped to each provider+key group. With `anti_burst`
-enabled and a concurrency target of at least 2, a group starts at one
-concurrent request and gains allowance linearly until it reaches the provider's
-`concurrency` target after `ramp_duration`. It is inert unless all three are
-set: the flag, a target of at least 2, and a duration above zero.
+Anti-burst is opt-in and scoped to each provider+key group. It is available
+only on a single-provider rule without a schedule, because a ramp is defined
+over the provider-plus-key groups the scheduler owns; the server rejects the
+pair on any other rule. With `anti_burst` enabled and a concurrency target of at
+least 2, a group starts at one concurrent request and gains allowance linearly
+until it reaches the rule's `concurrency` target after `ramp_duration`. It is
+inert unless all three are set: the flag, a target of at least 2, and a duration
+above zero.
 `ramp_duration` accepts the same 1s..24h window grammar as request and token
 windows, including `1d`; empty, `0` or `0s` turns it off. Requests beyond the
 current allowance stay in the existing per-key FIFO. A fully idle group whose
@@ -1108,8 +1132,8 @@ already has in-flight work anchors its epoch at the current occupancy, so
 running streams are not stalled. Changing the flag, duration or concurrency
 target resets every group's epoch. Header updates change only the three cap
 dimensions and preserve the stored anti-burst pair. Clearing the last active cap
-drops the whole provider policy, ramp included. The Limits menu carries the
-checkbox and ramp select; Apply sends both, and a form whose caps are all zero
+drops the whole policy, ramp included. The limit composer carries the checkbox
+and the ramp chips; applying sends both, and a form whose caps are all zero
 sends the pair off rather than an invalid on-ramp.
 
 Operator limit edits persist synchronously and report a warning when the store
@@ -1350,13 +1374,16 @@ even when credential headers are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
 
-### Logs and deletion
+### Export and deletion
 
-Logs downloads finalized request records as JSON, not the process's stderr log
-and not a complete administrative audit trail. With durable storage it reads the
-database; otherwise it uses available ring records. Open the menu, choose a
-filter and review its matching count before Download matching, or deliberately
-choose Download all. A debug-only export can include retained capture sidecars.
+The operator console's export section downloads finalized request records as
+JSON, not the process's stderr log and not a complete administrative audit
+trail. With durable storage it reads the database; otherwise it uses available
+ring records. Open export, choose either all history or matching records, and
+review the previewed count before downloading. Provider, model, client and
+status choices come from the live record ring; conversation adds an exact
+conversation id field. A debug-only export can include retained capture
+sidecars.
 
 The download is always a gzip artifact named `millivolt-logs-<timestamp>.json.gz`;
 gunzip it to read the JSON array of records. Compression is applied at the
@@ -1386,7 +1413,7 @@ Both actions are irreversible without a backup.
 
 Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
-beyond the menu's common choices. See the shared
+beyond the console's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
 [PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
 deliberate and destructive; never use malformed JSON as an all-records command.
@@ -1404,13 +1431,14 @@ Settings only reads configuration when opened. Its search, category rail and
 structured editors work on a local draft; Apply uses the
 [revision-checked save contract](#saving-settings-safely).
 
-Opening Restart reads availability and status. Restart now is disabled while a
-restart is in progress or rebuilding is unavailable. Progress reports actual
-build/drain/flush/handoff phases; it is not a simulated timer. After a successful
-handoff, reconnect/bootstrap refreshes history, aggregates, operator state and
-config. Changed embedded frontend assets trigger a page reload through that same
-refresh owner. The [lifecycle section](#reload-restart-and-shutdown) distinguishes
-source rebuilds from container replacement and ordinary shutdown.
+The console's system section reads restart availability and status when opened.
+The restart action is disabled while a restart is in progress or rebuilding is
+unavailable. Progress reports actual build/drain/flush/handoff phases; it is not
+a simulated timer. After a successful handoff, reconnect/bootstrap refreshes
+history, aggregates, operator state and config. Changed embedded frontend assets
+trigger a page reload through that same refresh owner. The
+[lifecycle section](#reload-restart-and-shutdown) distinguishes source rebuilds
+from container replacement and ordinary shutdown.
 
 ## Dashboard data and request inspection
 

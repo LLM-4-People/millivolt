@@ -433,7 +433,8 @@ staged before publication, and the exit trap stops the private process. Review
 every gallery image before committing. SSE is deliberately disabled, so the images'
 offline indicator describes a static capture session, not current service health.
 Captures keep the same category folders under `docs/images/`: `overview`,
-`charts`, `explorer`, `requests`, `menus` and `settings`. Update the existing
+`charts`, `explorer`, `requests`, `console` and `settings`. The retired `menus`
+files stay on disk for history only and no page links them. Update the existing
 capture owner and Markdown links together when adding a view.
 
 The independent `--docs-images` option remains a strict synthetic regression.

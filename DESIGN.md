@@ -150,7 +150,7 @@ components:
 
 The dashboard is a precision measurement instrument, not a content site. It borrows the physical language of a bench instrument: a warm near-black case, hairline seams, engraved mono labels, one blue indicator lamp, and a graduated scale printed along the edges. It is dense because the operator reads it at a glance, not because density is a style.
 
-One instrument, one ruler. The menu-like surfaces share one box recipe and, in most cases, one anatomy: a titled head, a grouped body and an optional action foot; the chart, timeframe and provider pickers also share one open and close lifecycle. Time is a ruler drawn over the stored history rather than a dropdown of abstract windows. The world extends the incumbent dashboard: the same warm panels, mono readouts, blue chrome ink and the 1px/7px tick rail. Nothing here introduces a second visual world.
+One instrument, one ruler. The menu-like surfaces share one box recipe and, in most cases, one anatomy: a titled head, a grouped body and an optional action foot; the chart, timeframe and provider pickers also share one open and close lifecycle. The operator console is the one policy surface: it adopts the same `.mn` lifecycle and box, then adds its own rail, workspace pane and session ledger. Time is a ruler drawn over the stored history rather than a dropdown of abstract windows. The world extends the incumbent dashboard: the same warm panels, mono readouts, blue chrome ink and the 1px/7px tick rail. Nothing here introduces a second visual world.
 
 Depth is tone first. Panels are flat, separated by a hairline and a very wide, low-alpha ambient shadow; the stronger lifts belong to menus, sheets and the drawer. There are no decorative gradient backdrops, no glow blobs, no hard offset blocks and no deck of rounded cards.
 
@@ -159,7 +159,7 @@ Depth is tone first. Panels are flat, separated by a hairline and a very wide, l
 - One blue chrome accent; violet, teal and status hues speak only as data or state.
 - Mono for every number, status and menu row; sans only for prose, setting names, titles and narrow header action labels.
 - Hairline borders and the graduated 1px/7px tick rail as the recurring motif.
-- 44px touch targets on the shared controls (menu rows and chips, triggers, the status filter, provider fields, sheet actions) wherever the pointer is coarse or the viewport is narrow.
+- 44px touch targets on the shared controls (menu rows and chips, triggers, the status filter, provider fields, sheet actions) on coarse pointers, with the console keeping its 38px rung on a narrow fine pointer.
 - The one-screen side-by-side lock exists only at 1200px by 750px and larger.
 
 ## Colors
@@ -243,14 +243,14 @@ Only a viewport at least 1200px wide and 750px tall locks the whole page to the 
 Responsive steps:
 - 1200px by 750px: enter the locked one-screen instrument.
 - 900px: explorer rail becomes the dimension picker.
-- 800px: header actions become a full-width flyout under the rail; chart and provider menus become bottom sheets while the dimension picker stays a dropdown under its trigger; menu rows and chips, triggers, the status filter, provider fields and sheet actions reach 44px.
+- 800px: the operator readout stays in the header, where it is the one always-visible operator state; the theme and Settings triggers move into a full-width actions flyout under the rail. Activating the readout opens the operator console as a bottom sheet, while the theme tray stays an inline panel in the flyout. Chart and provider menus become bottom sheets while the dimension picker stays a dropdown under its trigger; the flyout's controls and the shared menu rows and chips reach 44px. The console workspace keeps its 38px rung on a fine pointer and takes 44px on a coarse pointer.
 - 720px: settings sheet goes single column, drawer goes full width.
 - 640px: phone padding (14px by 10px), 12px card padding, two-column KPI band, footer wraps.
 - 480px: chart totals widen their floor and wrap.
 - 440px: an odd final KPI tile spans the row.
 - 360px: the theme caption bar stacks.
 
-Touch follows `--tap` (44px) for menu rows and chips, triggers, the status filter, provider fields and sheet actions at 800px and below or on any coarse pointer; small utility affordances (copy, collapse, drawer navigation) keep their 32px to 38px boxes. Dense 24px to 28px controls remain on a fine pointer at desktop width.
+Touch follows `--tap` (44px) for menu rows and chips, triggers, the status filter, provider fields and sheet actions at 800px and below or on any coarse pointer; the console workspace uses a 38px rung at 800px and below on a fine pointer and the 44px target on any coarse pointer. Small utility affordances (copy, collapse, drawer navigation) keep their 32px to 38px boxes. Dense 24px to 28px controls remain on a fine pointer at desktop width.
 
 ## Elevation & Depth
 
@@ -295,12 +295,12 @@ Quiet machine controls: small mono labels, a raised panel fill, a hairline borde
 
 - **Shape:** softly squared (8px), 5px by 12px padding, 11px mono.
 - **Base:** raised fill (`panel-raised`), hairline border (`hairline-strong`), muted ink; hover moves ink to primary and the border to Signal Blue with a 3px halo.
-- **Accent:** Signal Blue fill with case-colored ink and 600 weight; hover uses Signal Blue Hover. Reserved for commit actions such as Apply and Restart now.
-- **Danger:** three weights, a 16% tint fill, a 7% outline and a solid Fault Coral fill. The most destructive action on a surface wears the solid fill.
+- **Accent:** Signal Blue fill with case-colored ink and 600 weight; hover uses Signal Blue Hover. Reserved for the one commit action on a surface, such as `apply limit`, `hold traffic`, `start capture`, `download`, `apply` or `restart now`.
+- **Danger:** two weights, a 16% tint fill for a repeatable scoped action and a solid Fault Coral fill for the one irreversible action on a surface. A confirmation dialog pairs a neutral Cancel with the solid weight.
 - **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 45% opacity with the neutral skin.
 
 ### Menu Panel
-The shared panel language the chart and timeframe controls use, and the box recipe the converted menus follow: one titled head, one grouped body and an optional action foot. Placement is JS-owned; the box is the same whether it is anchored or a bottom sheet.
+The shared `.mn` foundation the timeframe control and generated choice menus use, and the box the operator console extends: one titled head, one grouped body and an optional action foot. Placement, sheet conversion, dismissal and focus are JS-owned; the box is the same whether it is anchored or a bottom sheet. The theme tray keeps the older header-panel box.
 
 - **Shape:** 10px radius (12px as a sheet), 1px `hairline-strong` border, Case Panel fill, menu shadow. Width defaults to 340px, clamped to `calc(100vw - 16px)`.
 - **Head:** 11px/600 mono title with an optional 10px muted subline, 10px top and 12px side padding.
@@ -309,6 +309,17 @@ The shared panel language the chart and timeframe controls use, and the box reci
 - **Chips:** 26px high at a 10.5px mono size, 7px radius, raised fill; pressed takes an accent border and a 10% accent tint. Chips grow to 38px at 800px and 44px on coarse pointers.
 - **Foot:** a 1px top hairline and space-between actions; only surfaces with a commit step use it.
 - **Open:** fades in from 4px above over 160ms ease-out. As a sheet it sits 8px from the window edges over a 35% scrim.
+
+### Operator Console
+The header's one operator surface. A compact readout button carries a state dot and the current state words: `steady`, `paused 1 · capture 1 · limits 2`, or `restarting · step N`. The dot is muted at steady, accent when a policy is active and amber and pulsing during a restart; the trigger border follows the same state. It is a status summary, not a live region, and its accessible label carries the same words.
+
+- **Frame:** `.mn.oc` uses the shared panel shell at a 940px preferred width and `min(680px, 100dvh - 32px)` height. At 800px and below it is a bottom sheet of up to 86dvh over the shared scrim.
+- **Head:** console mark, 15px mono title and a 10px state line, the shared close button with its `esc` hint, and a 5px tick strip along the bottom edge.
+- **Rail:** six lowercase sections (overview, limits, pause, capture, export, system) in a 152px column. The active row takes the accent left edge; limits, pause and capture carry a tabular count badge. As a sheet the rail is one horizontal, thumb-scrollable strip and the active row takes an accent bottom edge.
+- **Pane:** the section workspace scrolls on its own inside the fixed frame. Rule rows are one calibration line: a 56px kind tag in the state color, the scope, the budget or schedule, and a live column with actions.
+- **Foot:** the bounded session ledger, one line of mono receipt text and an Undo button. The ledger is page-session memory, not a durable log.
+- **Confirmation:** consequential actions use the shared operator dialog, not a second click on the trigger. Cancel takes initial focus and the confirm button names the action.
+- **Touch:** 38px controls at 800px and below on a fine pointer; the 44px target on any coarse pointer.
 
 ### Timeframe Control
 Time is a ruler over real stored history. The panel draws the coverage rail, the zoom ladder and the calendar presets, and it disables any window wider than the data.
@@ -374,7 +385,7 @@ Settings reads as an explorer topology, not a form dump: a modal sheet with a fi
 - **Do** set every measured value in mono with `font-variant-numeric: tabular-nums`, and keep numerals from shifting as live data lands.
 - **Do** keep Signal Blue to chrome and one filled commit action for the decision at hand; let rarity carry the meaning.
 - **Do** wear the graduated tick rail at rail edges, readout bands and day rules, feathered by a directional mask.
-- **Do** hold 44px targets on menu rows and chips, triggers, the status filter, provider fields and sheet actions at coarse pointers and at 800px and below, while keeping the dense 24px to 28px controls on a fine desktop pointer.
+- **Do** hold 44px targets on menu rows and chips, triggers, the status filter, provider fields and sheet actions at coarse pointers and at 800px and below, while keeping the dense 24px to 28px controls on a fine desktop pointer; the console uses its 38px narrow rung on a fine pointer.
 - **Do** keep the side-by-side pair for viewports at least 1200px wide and 750px tall, and stack everything below that.
 - **Do** write sentence case and lowercase labels, preserve identifiers, protocol names and acronyms, and use sentence punctuation instead of em dashes.
 - **Do** treat a status pill's tint as 13% of its own status hue, strengthening to 16% only when the state needs operator attention.
@@ -383,7 +394,7 @@ Settings reads as an explorer topology, not a form dump: a modal sheet with a fi
 - **Don't** introduce a second accent wash, a gradient hero or a deck of rounded, shadowed cards; the band and cards are one instrument.
 - **Don't** hard-code a new palette, font or shadow color; `themes.css` theme blocks own surfaces, accents and material hues for both modes.
 - **Don't** restyle or replace the native request-status popup; the closed control is the designed surface.
-- **Don't** nest a second scroller inside the 800px header flyout or inside a menu panel; one surface owns vertical scrolling.
+- **Don't** nest a second scroller inside the 800px header flyout or inside a menu panel; one surface owns vertical scrolling. The operator console is the workspace exception: its frame stays fixed while the rail and the active pane own their scroll.
 - **Don't** use a hard offset shadow, a 3px decorative side tab or a colored glow blob as structure; use tone, a hairline and the soft leading tick.
 - **Don't** set copy or labels below 9px, drop tabular numerals, or set prose in mono; the rule-trace annotation at 8.5px is the single exception.
 - **Don't** use uppercase or letter-spaced eyebrows as decoration; labels are lowercase or sentence case and earn their tracking from function.

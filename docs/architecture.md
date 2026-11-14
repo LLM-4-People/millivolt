@@ -15,7 +15,7 @@ defines their supported combinations.
 | [internal/config](../internal/config/config.go) | Config/defaults/validation, split by subject into `config_types.go`, `config_defaults.go`, `config_clone.go`, `config_load.go`, `config_validate.go` and `config_validate_overrides.go`; schema, YAML generation, revision-checked Settings, model-rule execution, and the credential-class header vocabulary and redactor in `credentials.go`. |
 | [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. `params/params.go` owns the backup/restore query keys, boolean spelling, restore modes and archive magic shared by the HTTP handlers and `mvctl`; the leaf imports no encoder, SQLite or zstd. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; inbound/outbound protocol selection and canonical paths in [protocol.go](../internal/proxy/protocol.go); the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
-| [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
+| [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds, and limit policies selected by provider, model, client, key hash and conversation with optional recurring schedules; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)), split into decode, feed, usage, terminal, error, fill and report modules; client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit wire codecs (Chat, Responses, Anthropic) over the canonical [IR](../internal/format/ir/ir.go), Connect/protobuf framing, and the same-protocol translation facade. |
@@ -102,8 +102,12 @@ translated-anthropic or cursor body, and they fire with any override and
 strip actions through one document decode.
 
 Immutable config/client snapshots hot-swap for new work; old transports finish
-active requests. Admission is provider+key scoped, with provider-wide token,
-request and concurrency limits layered at the same grant owner. Acquisition
+active requests. Admission is provider+key scoped, with persistent limit
+policies layered at the same grant owner. A policy intersects its non-empty
+selector dimensions and an empty dimension matches any value, so a provider-only
+rule is the provider-wide cap while a narrower rule reuses the same machinery.
+Every matching policy charges its own lease, and a scheduled policy outside its
+window neither charges nor queues. Acquisition
 release settles exactly once. The provider gate and token-bucket epoch captured
 at admission keep clearing/replacing a cap from charging another generation's
 reservation. A provider-to-groups index in `Scheduler` keeps each group's slot
@@ -592,11 +596,20 @@ Vanilla modules under [static/js](../internal/web/static/js) have distinct owner
 `core` formatters/shared state, `feedback` the one clipboard and toast path,
 `entities` identities/record labels, `explorer` routing/cards, `chart` uPlot
 plans, `menu` the one open/close, placement, dismissal and focus contract for
-menu panels, `timeframe` the chart time vocabulary, stored-extent availability
-and the timeframe control, `log` window/drawer, `log_detail` detail rows,
-classified group tabs,
+menu panels, `chrome_menus` the header menu registry and the remaining theme
+tray, nav and dimension class menus, `operator_console` the header readout,
+console shell, section rail, shared wording and bounded session change ledger,
+its four policy modules `operator_limits`, `operator_holds`, `operator_export`
+and `operator_overview` owning their own sections, with `chrome_operator`
+owning the mutation gate and request shape, `chrome_lists`
+the operator vocabularies, model grouping, capture storage gate and footer
+words, `chrome_restart` the restart choreography, and `chrome_settings` the
+Settings shell and trigger, the accepted debug snapshot, hold liveness and the
+download paths, `timeframe` the chart time vocabulary, stored-extent
+availability and the timeframe control, `log` window/drawer, `log_detail` detail
+rows, classified group tabs,
 cards and long-text surfaces,
-`chrome` operator shell, `theme` the surface/palette registry and preview tray,
+`theme` the surface/palette registry and preview tray,
 `settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
 state. `theme.js` owns
 the mode/palette registry, normalization, the single persistence shape, the
@@ -615,8 +628,9 @@ chrome and the theme tray, including the comparator/caption-bar layout. The
 dashboard sheet is split by surface, linked in this order: `dashboard.css`
 (palette, base, chrome and KPI band), `explorer.css`, `overlays.css` (drawer
 and settings sheet), `charts.css`, `requests.css` (including the shared
-semantic status fills) and `inspector.css`, with `themes.css` last among the
-dashboard modules and the vendored uPlot sheet after it. The link order is the
+semantic status fills) and `inspector.css`, with `themes.css` next, then
+`console.css` for the readout and operator console only, and the vendored uPlot
+sheet last. The link order is the
 cascade; `dashboard.css` remains the `:root` palette owner. Each palette owns
 `--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
 cool Clear palettes get cool elevation and scrims. `chrome_settings.js` owns

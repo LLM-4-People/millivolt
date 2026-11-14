@@ -177,7 +177,10 @@ only the hold id because the proxy has no scope-selective resume.
 
 `throttle set` flags are `--concurrency`, `--requests`, `--request-window`,
 `--tokens`, `--token-window`, `--anti-burst` and `--ramp-duration`. Windows and
-ramps take a duration such as `1m`. At least one dimension is required.
+ramps take a duration such as `1m`. At least one dimension is required. The
+set and clear commands are provider-only. Scoped selectors and recurring
+schedules are available through the HTTP API (`/admin/throttle`) and the
+dashboard console, not through this CLI.
 
 ### Queue and capture
 

@@ -151,7 +151,9 @@ they never leave the process and the gate re-validates the forwarded Bearer.
 `ramp_duration`; omitted dimensions keep their value, and `clear: true` drops
 the whole policy. `clear` cannot be combined with a dimension. The proxy owns
 the duration grammar and band and refuses an explicit on-ramp without an
-active limit.
+active limit. This tool addresses one provider and has no selector or schedule
+fields. Scoped selectors and recurring schedules are available through the HTTP
+API (`/admin/throttle`) and the dashboard console, not through MCP.
 
 `set_pause` refuses a resume that carries a scope, and refuses `all` combined
 with `new`, `clients` or `providers`. `config_get` and the `set_config` echo

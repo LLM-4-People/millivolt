@@ -77,7 +77,7 @@ Routing validation and request construction live in
 | `X-Proxy-Client` | Observability/client label; one that only repeats the user agent's product name records the fuller user-agent identity instead. Otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise a configured tracked body param or automatic grouping applies. |
 | `X-Proxy-Parent-Session` | Direct declared parent; requires an explicit own session on the same request. |
-| `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent provider-wide control, and not applied to model discovery, which returns before inference admission. |
+| `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent operator limit policy, and not applied to model discovery, which returns before inference admission. |
 | `X-Proxy-Limit-Concurrency` | Sticky provider-wide in-flight cap. |
 | `X-Proxy-Limit-Requests` | Sticky provider-wide request rate as `COUNT/WINDOW`. |
 | `X-Proxy-Limit-Tokens` | Sticky provider-wide token rate as `COUNT/WINDOW`. |
@@ -120,8 +120,10 @@ dashboard and MCP), not header-driven; a header update changes only the three
 caps and preserves the stored pair. The ramp is inert unless `anti_burst` is
 true, the concurrency target is at least 2 and `ramp_duration` is above 0, and
 its duration uses that same window grammar. Malformed limit values reject the
-request without applying any of its limit headers. The Limits menu shows the
-policy and its source. Request rates are strict sliding windows over the
+request without applying any of its limit headers. A header update edits only
+that provider's single-provider, unscheduled rule; operator rules scoped by
+model, client, key hash, conversation or schedule are untouched. The operator
+console shows every policy, its schedule and its source. Request rates are strict sliding windows over the
 configured length, so no window ever admits more than the configured count;
 token rates remain continuously refilled budgets. See
 [Pause and Limits](operations.md#pause-and-limits) for charging and window
@@ -399,11 +401,13 @@ changes; the client-visible contract is unchanged.
 ### Scheduling and timing
 
 The provider-plus-key group controls simultaneous upstream sends and its waiting
-queue. The separate provider-wide Limits policy combines all keys and clients.
-Queue capacity and wait limits can reject work locally; the configured
-`queue_retry_after` duration (for example `2s`, never a bare integer) supplies
-the caller's retry hint. Operator-hold time is
-excluded from the ordinary queue-wait limit. A hold's own queue cap still applies.
+queue. A separate limit policy can apply to the whole provider or narrow to
+models, clients, key hashes and conversations, with an optional recurring
+server-local schedule; a provider-only rule combines all keys and clients.
+Queue capacity and wait limits can reject work locally;
+the configured `queue_retry_after` duration (for example `2s`, never a bare
+integer) supplies the caller's retry hint. Operator-hold time is excluded from
+the ordinary queue-wait limit. A hold's own queue cap still applies.
 
 For the HTTP relay, `upstream_timeout` limits waiting for response headers,
 not the streaming body.
