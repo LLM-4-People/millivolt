@@ -256,7 +256,7 @@ h1 {
 .cp-rail button {
   display: flex; align-items: center; gap: 4px; width: 100%;
   padding: 3px 6px; cursor: pointer; text-align: left;
-  border: 1px solid transparent; border-left: 2px solid transparent;
+  border: 1px solid transparent; border-left: 1px solid transparent;
   border-radius: 5px; background: none;
   color: var(--muted); font: 9.5px/1.7 var(--mono);
 }
@@ -287,8 +287,8 @@ h1 {
 .cp-kind {
   grid-column: 1; grid-row: 1 / span 2; align-self: stretch;
   display: flex; align-items: center; justify-content: center;
-  color: var(--_k); border-left: 2px solid var(--_k); border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--_k) 7%, transparent);
+  color: var(--_k); border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--_k) 10%, transparent);
   font: 600 8px/1.2 var(--mono); letter-spacing: .04em;
 }
 .cp-scope {
