@@ -128,7 +128,7 @@ function ocRenderPause() {
       // the composer beside it, and its blast radius lived only in the title,
       // which a touch operator never sees. It stays one click: this is the
       // incident shortcut, and a dialog would defeat it.
-      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold all ${ocQuickHoldMinutes}m</button>` +
+      : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${escapeHtml(ocDurationText(ocQuickHoldDuration))}">hold all ${escapeHtml(ocQuickHoldDuration)}</button>` +
         `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
   const entries = holds.map(hold => {
     const scope = hold.all ? 'all traffic'
@@ -166,10 +166,17 @@ function ocRenderPause() {
     hidden + `</div>`;
 }
 
-// ocQuickHoldMinutes is the bounded duration the one-click hold uses. A quick
+// ocQuickHoldDuration is the bounded duration the one-click hold uses. A quick
 // action must not be able to leave traffic parked indefinitely: the indefinite
 // hold exists, but it goes through the composer where the operator chooses it.
-const ocQuickHoldMinutes = 15;
+//
+// It is the token itself, not a number that gets a unit appended. PAUSE_DURS is
+// the console's copy of the server's allowlist, and a Go test posts every token
+// on it through both operator handlers, so naming the token here keeps the
+// quick hold inside that contract. Composing "15" + "m" would reintroduce a
+// literal that no pin covers, and a token the server rejects would fail at the
+// click rather than in the suite.
+const ocQuickHoldDuration = '15m';
 
 // ocQuickHold parks all traffic for a fixed window in one click. It writes the
 // same document the composer writes, through the same gate and ledger, so undo
@@ -177,7 +184,7 @@ const ocQuickHoldMinutes = 15;
 function ocQuickHold() {
   const draft = ocBlankPauseDraft();
   draft.mode = 'all';
-  draft.duration = String(ocQuickHoldMinutes) + 'm';
+  draft.duration = ocQuickHoldDuration;
   ocDrafts.pause = draft;
   ocApplyPause();
 }
