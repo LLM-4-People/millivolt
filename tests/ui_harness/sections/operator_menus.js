@@ -150,14 +150,14 @@ module.exports = async function operatorMenus(H) {
       w.eval('streamSeen = true; streamLive = false');
       w.refreshOperatorReadout();
       check('a dropped stream names the last known state as offline',
-        out() === 'paused 1 · capture 1 · limits 1 · offline' &&
+        out() === 'paused 1 · captures 1 · limits 1 · offline' &&
         trigger.dataset.state === 'stale');
       // The connectivity owner repaints both surfaces, so a reconnect clears
       // the stale words from the header without waiting for a policy poll.
       w.eval('setFooterLive(true)');
       w.refreshOperatorReadout();
-      check('a reconnect clears the offline words', out() === 'paused 1 · capture 1 · limits 1');
-      const activeText = 'paused 1 · capture 1 · limits 1';
+      check('a reconnect clears the offline words', out() === 'paused 1 · captures 1 · limits 1');
+      const activeText = 'paused 1 · captures 1 · limits 1';
       // A hold outranks a routine cap in the readout's tone: it is the one
       // state that stops live traffic.
       check('one hold, one capture session and one limit read as three segments',

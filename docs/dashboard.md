@@ -279,7 +279,7 @@ The header's operator readout is the one control surface. It stays in the
 header rail at every width, including the phone header; the theme tray and
 Settings sit behind the actions flyout there. It reads `steady` when no hold or
 capture is active, no limit policy is enforcing and no restart is running, then
-one segment per active hold (`paused 1`), capture session (`capture 1`) and
+one segment per active hold (`paused 1`), capture session (`captures 1`) and
 enforcing limit policy (`limits 2`). A stored policy whose schedule window is
 closed enforces nothing, so it is named separately as `off schedule N` instead
 of being counted as a cap; the server owns that verdict and reports it per

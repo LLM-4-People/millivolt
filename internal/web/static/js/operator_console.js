@@ -142,7 +142,9 @@ function ocReadoutSegments() {
   }
   const counts = ocRuleCounts();
   if (counts.holds > 0) segs.push('paused ' + counts.holds);
-  if (counts.captures > 0) segs.push('capture ' + counts.captures);
+  // `limits 1` is a noun and a count; `capture 1` was a verb and a count in
+  // the same sentence. The plural noun makes the line read as one list.
+  if (counts.captures > 0) segs.push('captures ' + counts.captures);
   if (counts.limits > 0) segs.push('limits ' + counts.limits);
   // A stored policy outside its schedule enforces nothing, so it is named
   // separately rather than counted as a cap. The server's `scheduled` field
