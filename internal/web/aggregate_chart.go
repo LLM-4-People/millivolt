@@ -338,6 +338,13 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid filter")
 		return
 	}
+	// The chart folds finalized contributions only, so a live in-flight class
+	// can never be answered here. Refuse it instead of serving a zeroed grid
+	// that reads as "no traffic" for an impossible filter.
+	if liveStatusOnlyScope(statusCode) {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid scope")
+		return
+	}
 	ctx, cancel := a.queryCtx(r)
 	defer cancel()
 

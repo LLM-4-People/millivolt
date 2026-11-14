@@ -129,6 +129,31 @@ func parseScope(q url.Values) (fs []scopeFilter, statusCode string, ok bool) {
 	return fs, statusCode, true
 }
 
+// liveStatusOnlyScope reports whether a parsed scope's s= status selector names
+// an in-flight class (streaming/paused/throttled/pending) and can therefore be
+// answered only by the pending registry: no durable row ever carries one.
+//
+// This is the one owner of the rule, so each handler states its own contract
+// instead of re-deriving the class list:
+//   - the chart refuses the selector. It folds finalized contributions only,
+//     so an accepted class can only produce a zeroed bucket grid, which reads
+//     as "no traffic" for a filter that is impossible there;
+//   - the durable log page keeps its standing empty page (200, no rows). The
+//     archive pager treats a non-2xx page as "history unavailable" and stops,
+//     so it must not refuse a scope its sibling surfaces accept;
+//   - the explorer folds the live pending registry (eachPending) and keeps
+//     matching the class, which is why it does not call this helper.
+//
+// The f=status: dimension is deliberately not covered. A live class there is a
+// selectable gallery card (the explorer groups pending rows by status), so
+// refusing the chart would strand a legitimate click in its retry state; the
+// s= selector is the Requests-card filter this rule exists for.
+//
+// statusCode is already canonical (parseScope's output).
+func liveStatusOnlyScope(statusCode string) bool {
+	return liveStatusFilter(statusCode)
+}
+
 // canonicalStatusSelector is the one status-spelling owner for every web
 // surface: a live in-flight class stays verbatim, and an exact numeric code is
 // rendered in canonical decimal form. "0200" and "+200" therefore match the

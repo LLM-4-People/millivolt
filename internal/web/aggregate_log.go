@@ -246,8 +246,9 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 
 	// A live-only status class can never match durable history (those classes
 	// describe the in-memory pending set). Return the empty page without
-	// decoding up to logScanMax rows that the Go matcher would reject.
-	if liveStatusFilter(statusCode) {
+	// decoding up to logScanMax rows that the Go matcher would reject. The
+	// refusal lives in liveStatusOnlyScope, shared with the chart.
+	if liveStatusOnlyScope(statusCode) {
 		writeJSON(w, map[string]any{
 			"records":     []metrics.ObservedRecord{},
 			"model_canon": a.ObserveModels(false, nil),
