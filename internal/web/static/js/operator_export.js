@@ -103,7 +103,7 @@ function ocFilterRowHTML(draft, dim) {
   const open = !!draft.picker && draft.picker.dim === dim;
   return ocDimChipHTML({
     dim, label: dim, open, set: !!value,
-    attr: 'data-oc-filter-pick', key: 'filter-' + dim,
+    attr: 'data-oc-filter-pick', key: 'filter-' + dim, menuId: 'oc-filter-menu-' + dim,
     valuesHTML: value
       ? `<span class="oc-cond-values"><span class="oc-chip">${escapeHtml(ocFilterLabel(dim, value))}` +
         `<button type="button" class="oc-chip-x" data-oc-filter-clear="${dim}" aria-label="clear ${dim} filter">×</button></span></span>`
@@ -127,9 +127,12 @@ function ocFilterPickerHTML(draft, dim) {
   // dimension, and a typed filter can never throw on a numeric vocabulary.
   const values = ocFilterValues(dim).filter(value =>
     !filter || String(value).toLowerCase().includes(filter));
+  // The "any" row below is always first and always owns the menu's one tab
+  // stop, so every value row is reachable by arrow only. Numbering these from
+  // zero gave the first value the same tab stop as "any".
   const rows = values.map(value => {
     const on = String(draft[dim] || '') === String(value);
-    return `<button type="button" class="oc-pick-row" role="menuitemradio" aria-checked="${on}" data-oc-filter-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
+    return `<button type="button" class="oc-pick-row" role="menuitemradio" aria-checked="${on}" tabindex="-1" data-oc-filter-value="${dim}" data-oc-value="${escapeHtml(value)}">` +
       `<span class="oc-pick-check" aria-hidden="true">${on ? '✓' : ''}</span><span class="oc-pick-label">${escapeHtml(ocFilterLabel(dim, value))}</span></button>`;
   }).join('');
   const empty = values.length ? '' : `<div class="oc-pick-empty">none yet - they appear as requests arrive</div>`;
@@ -139,8 +142,8 @@ function ocFilterPickerHTML(draft, dim) {
       : dim === 'model' ? 'model name' : 'client name';
   return `<div class="oc-pick">` +
     `<input type="search" class="oc-pick-filter" data-oc-filter-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${escapeHtml(dim)}" aria-label="filter ${escapeHtml(dim)}" data-oc-key="filter-pick-${dim}">` +
-    `<div class="oc-pick-list" role="menu" aria-label="${escapeHtml(dim)} values">` +
-    `<button type="button" class="oc-pick-row" role="menuitemradio" aria-checked="${!draft[dim]}" data-oc-filter-value="${dim}" data-oc-value=""><span class="oc-pick-check" aria-hidden="true">${!draft[dim] ? '✓' : ''}</span><span class="oc-pick-label">any</span></button>` +
+    `<div class="oc-pick-list" id="oc-filter-menu-${escapeHtml(dim)}" role="menu" aria-label="${escapeHtml(dim)} values">` +
+    `<button type="button" class="oc-pick-row" role="menuitemradio" aria-checked="${!draft[dim]}" tabindex="0" data-oc-filter-value="${dim}" data-oc-value=""><span class="oc-pick-check" aria-hidden="true">${!draft[dim] ? '✓' : ''}</span><span class="oc-pick-label">any</span></button>` +
     rows + empty + `</div>` +
     (custom ? `<div class="oc-pick-custom"><input type="text" data-oc-filter-custom="${dim}" placeholder="${escapeHtml(customHint)}" aria-label="${escapeHtml(customHint)}" data-oc-key="filter-custom-${dim}"><button type="button" class="btn" data-oc-filter-add="${dim}">use</button></div>` : '') +
     `</div>`;

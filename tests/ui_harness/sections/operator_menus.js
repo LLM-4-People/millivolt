@@ -1129,6 +1129,17 @@ module.exports = async function operatorMenus(H) {
       check('a typed status filter narrows the numeric vocabulary',
         JSON.stringify(qa('#oc-pane [data-oc-filter-value="status"]')
           .map(row => row.dataset.ocValue)) === JSON.stringify(['', '499']));
+      // The export filter renders through the same row markup as the scope
+      // picker, so it owes the same one-tab-stop contract.
+      {
+        const chip = q('#oc-pane [data-oc-filter-pick="status"]');
+        const list = q('#oc-pane [role="menu"]');
+        const rows = qa('#oc-pane [data-oc-filter-value="status"]');
+        check('the export filter chip announces its menu and keeps one tab stop',
+          chip.getAttribute('aria-haspopup') === 'menu' &&
+          chip.getAttribute('aria-controls') === list.id &&
+          rows[0].tabIndex === 0 && rows.slice(1).every(row => row.tabIndex === -1));
+      }
       w.closeOperatorConsole();
     }
 
@@ -1442,6 +1453,15 @@ module.exports = async function operatorMenus(H) {
       {
         openCond('providers');
         const rows = qa('#oc-pane [data-oc-pick-value="providers"]');
+        // The chip must announce the menu it opens. Without the pair a
+        // screen reader said only "collapsed", so the arrow keys the picker
+        // implements were undiscoverable from the control that opens it.
+        const chip = q('#oc-pane [data-oc-pick="providers"]');
+        const list = q('#oc-pane [role="menu"]');
+        check('the dimension chip announces the menu it opens by name',
+          chip.getAttribute('aria-haspopup') === 'menu' &&
+          !!list && chip.getAttribute('aria-controls') === list.id &&
+          !!list.id);
         check('a menu picker keeps one tab stop and removes the rest',
           rows.length > 1 && rows[0].tabIndex === 0 &&
           rows.slice(1).every(row => row.tabIndex === -1));

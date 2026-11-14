@@ -518,8 +518,14 @@ function ocScopeChipsHTML(scope, dim) {
 // picker, carrying the chosen value chips inside it. A dimension with nothing
 // chosen stays a dim chip, so the strip never grows an "any" word per row.
 function ocDimChipHTML(opt) {
+  // A chip that opens a menu says so and names it. Without the pair, a screen
+  // reader announced only "collapsed" and never that choosing a value opens a
+  // menu at all, so the arrow keys the picker implements were undiscoverable.
+  const menu = opt.menuId
+    ? ` aria-haspopup="menu" aria-controls="${escapeHtml(opt.menuId)}"`
+    : '';
   return `<div class="oc-cond" data-open="${opt.open ? '1' : '0'}" data-set="${opt.set ? '1' : '0'}">` +
-    `<button type="button" class="oc-cond-btn" ${opt.attr}="${escapeHtml(opt.dim)}" data-oc-key="${escapeHtml(opt.key)}" aria-expanded="${opt.open ? 'true' : 'false'}">` +
+    `<button type="button" class="oc-cond-btn" ${opt.attr}="${escapeHtml(opt.dim)}" data-oc-key="${escapeHtml(opt.key)}" aria-expanded="${opt.open ? 'true' : 'false'}"${menu}>` +
     `<span class="oc-cond-name">${escapeHtml(opt.label)}</span>` +
     `<span class="oc-cond-chev" aria-hidden="true">${opt.open ? '▴' : '▾'}</span></button>` +
     (opt.valuesHTML || '') + `</div>`;
@@ -543,7 +549,7 @@ function ocScopeConditionsHTML(draft, dims) {
     if (open) picker = ocScopePickerHTML(draft, dim);
     return ocDimChipHTML({
       dim, label: ocDimLabel(dim), open, set: values.length > 0,
-      attr: 'data-oc-pick', key: 'cond-' + dim,
+      attr: 'data-oc-pick', key: 'cond-' + dim, menuId: 'oc-pick-menu-' + dim,
       valuesHTML: values.length ? `<span class="oc-cond-values">${ocScopeChipsHTML(draft.scope, dim)}</span>` : '',
     });
   });
@@ -578,7 +584,7 @@ function ocScopePickerHTML(draft, dim) {
     `<p class="oc-pick-note">Nothing selected, so ${ocDimLabel(dim)} does not narrow this rule.</p>`;
   return `<div class="oc-pick" data-oc-key="pick-${dim}">` +
     (showFilter ? `<input type="search" class="oc-pick-filter" data-oc-pick-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${ocDimLabel(dim)}s" aria-label="filter ${ocDimLabel(dim)}s" data-oc-key="pick-filter-${dim}">` : '') +
-    `<div class="oc-pick-list" role="menu" aria-label="${ocDimLabel(dim)} values">${rows}${empty}</div>` +
+    `<div class="oc-pick-list" id="oc-pick-menu-${dim}" role="menu" aria-label="${ocDimLabel(dim)} values">${rows}${empty}</div>` +
     wide +
     (canAdd ? `<div class="oc-pick-custom"><input type="text" data-oc-pick-custom="${dim}" placeholder="add a ${ocDimLabel(dim)}" aria-label="add a ${ocDimLabel(dim)}" data-oc-key="pick-custom-${dim}"><button type="button" class="btn" data-oc-pick-add="${dim}">add</button></div>` : '') +
     `</div>`;
