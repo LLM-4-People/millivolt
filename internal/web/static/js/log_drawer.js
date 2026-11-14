@@ -56,6 +56,24 @@ function detailHero(r) {
     `<div class="d-hero-top">${status}${method}${pathRow}</div>` +
     (ident.length ? `<div class="d-hero-ident">${ident.join('<span class="d-sep" aria-hidden="true">·</span>')}</div>` : '') +
     (stats.length ? `<div class="d-stats">${stats.join('')}</div>` : '') +
+    detailOperatorActions(r) +
+    `</div>`;
+}
+
+// detailOperatorActions offers the two console prefills a request record can
+// seed. They are prefills, not commits: the composer still gates every write.
+// Without them the operator had to read the client or model here, close the
+// drawer, open the console and retype it into a picker.
+function detailOperatorActions(r) {
+  if (!r || !r.id) return '';
+  const canHold = !!(r.client || r.provider);
+  const canCapture = !!(r.client || r.provider || r.model);
+  if (!canHold && !canCapture) return '';
+  return `<div class="d-ops">` +
+    (canHold ? `<button class="btn" type="button" data-drawer-operator="pause"` +
+      ` title="open a named hold scoped to this request">hold this scope</button>` : '') +
+    (canCapture ? `<button class="btn" type="button" data-drawer-operator="capture"` +
+      ` title="open a capture scoped to this request">capture this scope</button>` : '') +
     `</div>`;
 }
 
@@ -570,6 +588,24 @@ function openAttemptLink(el) {
   else openDrawer(el.dataset.openReq);
 }
 $('drawer-body').addEventListener('click', e => {
+  // A drawer operator action seeds a console draft. The drawer is modal and
+  // marks every other body child inert, so it must close first: opening the
+  // console over it would leave a visible but unfocusable panel.
+  const op = e.target.closest('[data-drawer-operator]');
+  if (op) {
+    const record = recordById(drawerId);
+    const kind = op.dataset.drawerOperator;
+    closeDrawer();
+    // The press that got here is still propagating. chrome_menus' outside-press
+    // handler runs after it, does not recognise a drawer button as part of the
+    // console, and would close the console this click just opened. Opening on
+    // the next task lets that handler finish first.
+    if (record && typeof ocOpenOperatorForRecord === 'function') {
+      const open = () => ocOpenOperatorForRecord(kind, record);
+      if (typeof queueMicrotask === 'function') queueMicrotask(open); else setTimeout(open, 0);
+    }
+    return;
+  }
   const el = e.target.closest('.attempt-link[data-open-req]');
   if (el) openAttemptLink(el);
 });

@@ -37,6 +37,11 @@
   .d-stat:first-child { border-left: 0; padding-left: 0; }
   .d-stat-k { color: var(--muted); font-size: 9px; letter-spacing: .05em; }
   .d-stat-v { color: var(--text); font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  /* Two console prefills seeded from this record. They sit under the readings
+     as one quiet row: prefills, not commits, so they carry the neutral button,
+     not the accent. */
+  .d-ops { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .d-ops .btn { min-height: 26px; }
 
   /* The final failure reads as one alert, not a buried key/value block. */
   .d-alert {

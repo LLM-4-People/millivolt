@@ -304,6 +304,39 @@ module.exports = async function drawerRedesign(H) {
   check('the error block copies its type, code and message together',
     copied.includes('code: dial_timeout') && copied.includes('message: dial tcp'));
 
+  // Two console prefills sit under the readings. They are the only operator
+  // affordance a healthy record has, and the drawer must close before the
+  // console opens, because the modal marks every other body child inert.
+  {
+    const holdBtn = body.querySelector('[data-drawer-operator="pause"]');
+    const capBtn = body.querySelector('[data-drawer-operator="capture"]');
+    check('a request record offers the two console prefills it can seed',
+      !!holdBtn && !!capBtn &&
+      holdBtn.textContent === 'hold this scope' && capBtn.textContent === 'capture this scope');
+    holdBtn.click();
+    // The console opens on the task after the press, so that the outside-press
+    // closer cannot dismiss the surface this click just opened.
+    check('a drawer hold prefill closes the drawer and opens a scoped console',
+      await settleUntil(() => w.eval('ocMounted') === true, 2000) &&
+      d.getElementById('drawer').classList.contains('open') === false &&
+      !d.getElementById('operator-console').hidden &&
+      w.eval('ocDrafts.pause && ocDrafts.pause.mode') === 'named' &&
+      JSON.stringify(w.eval('ocDrafts.pause && ocDrafts.pause.clients')) ===
+        JSON.stringify(['client-long/1.2.3']));
+    w.closeOperatorConsole();
+    w.openDrawer('redesign');
+    const capBtn2 = d.getElementById('drawer-body').querySelector('[data-drawer-operator="capture"]');
+    capBtn2.click();
+    check('a drawer capture prefill seeds the client, provider and model scope',
+      await settleUntil(() => w.eval('ocMounted') === true &&
+        !!w.eval('ocDrafts.capture'), 2000) &&
+      w.eval('ocDrafts.capture.id') === '' &&
+      JSON.stringify(w.eval('ocDrafts.capture.models')) ===
+        JSON.stringify(['family/model-2026-10-29']));
+    w.closeOperatorConsole();
+    w.openDrawer('redesign');
+  }
+
   w.drawerCopyRecord();
   await settleUntil(() => { try { return JSON.parse(copied).id === 'redesign'; } catch (e) { return false; } });
   check('copy request JSON carries the live record', JSON.parse(copied).id === 'redesign');
