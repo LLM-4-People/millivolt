@@ -131,8 +131,8 @@
       <div class="control-copy">
         <p class="eyebrow">operator surface</p>
         <h2>Control from one console.</h2>
-        <p>The header readout answers one question before you click: is anything in force. The console answers the rest, and every write leaves a sentence you can undo.</p>
-        <p class="control-fine">Six sections, one surface. Operator actions, not per-user permissions; inference stays transparent.</p>
+        <p>One readout says whether anything is in force. One console holds every policy, the export and the restart, and each write leaves a sentence you can undo.</p>
+        <p class="control-fine">Operator actions, not per-user permissions. Inference stays transparent.</p>
         <a class="text-link" href="docs/operations.html#operator-and-data-routes">Read operator workflows</a>
       </div>
       <figure class="console-plate">
@@ -143,38 +143,58 @@
             <span class="cp-live">paused 1 · capture 1 · limits 3</span>
           </div>
           <div class="cp-body">
-            <div class="cp-rail" aria-hidden="true">
-              <span>overview</span>
-              <span class="is-on">limits<b>3</b></span>
-              <span>pause<b>1</b></span>
-              <span>capture<b>1</b></span>
-              <span>export</span>
-              <span>system</span>
+            <div class="cp-rail" role="tablist" aria-label="operator console sections">
+              <button type="button" role="tab" id="cp-tab-overview" aria-controls="cp-pane-overview" aria-selected="true" tabindex="0">overview</button>
+              <button type="button" role="tab" id="cp-tab-limits" aria-controls="cp-pane-limits" aria-selected="false" tabindex="-1">limits<b>3</b></button>
+              <button type="button" role="tab" id="cp-tab-pause" aria-controls="cp-pane-pause" aria-selected="false" tabindex="-1">pause<b>1</b></button>
+              <button type="button" role="tab" id="cp-tab-capture" aria-controls="cp-pane-capture" aria-selected="false" tabindex="-1">capture<b>1</b></button>
+              <button type="button" role="tab" id="cp-tab-export" aria-controls="cp-pane-export" aria-selected="false" tabindex="-1">export</button>
+              <button type="button" role="tab" id="cp-tab-system" aria-controls="cp-pane-system" aria-selected="false" tabindex="-1">system</button>
             </div>
-            <div class="cp-pane" aria-hidden="true">
-              <div class="cp-row" data-kind="limit">
-                <span class="cp-kind">limit</span>
-                <span class="cp-scope">provider cursor.sh · model gpt-5</span>
-                <span class="cp-budget">120 requests / 1m · MTWTF · 09:00-17:00</span>
-                <span class="cp-live-cell">118 of 120 left</span>
+            <div class="cp-panes">
+              <div class="cp-pane" role="tabpanel" id="cp-pane-overview" aria-labelledby="cp-tab-overview">
+                <p class="cp-line"><b>4 in force</b><span>3 limits, 1 hold</span><span class="cp-val">0 queued</span></p>
+                <p class="cp-line"><span>last change</span><span class="cp-val">added limit · undo</span></p>
               </div>
-              <div class="cp-row" data-kind="limit">
-                <span class="cp-kind">limit</span>
-                <span class="cp-scope">model glm-5.3</span>
-                <span class="cp-budget">100K tokens / 1h</span>
-                <span class="cp-live-cell">42K of 100K left</span>
+              <div class="cp-pane" role="tabpanel" id="cp-pane-limits" aria-labelledby="cp-tab-limits" hidden>
+                <div class="cp-row" data-kind="limit">
+                  <span class="cp-kind">limit</span>
+                  <span class="cp-scope">provider cursor.sh · model gpt-5</span>
+                  <span class="cp-budget">120 requests / 1m · MTWTF · 09:00-17:00</span>
+                  <span class="cp-live-cell">118 of 120 left</span>
+                </div>
+                <div class="cp-row" data-kind="limit">
+                  <span class="cp-kind">limit</span>
+                  <span class="cp-scope">model glm-5.3</span>
+                  <span class="cp-budget">100K tokens / 1h</span>
+                  <span class="cp-live-cell">42K of 100K left</span>
+                </div>
               </div>
-              <div class="cp-row" data-kind="pause">
-                <span class="cp-kind">pause</span>
-                <span class="cp-scope">client claude-code</span>
-                <span class="cp-budget">queue cap 1.02K</span>
-                <span class="cp-live-cell">58m left</span>
+              <div class="cp-pane" role="tabpanel" id="cp-pane-pause" aria-labelledby="cp-tab-pause" hidden>
+                <div class="cp-row" data-kind="pause">
+                  <span class="cp-kind">pause</span>
+                  <span class="cp-scope">client claude-code</span>
+                  <span class="cp-budget">queue cap 1.02K</span>
+                  <span class="cp-live-cell">58m left</span>
+                </div>
+                <p class="cp-line"><span>in-flight streams finish</span></p>
               </div>
-              <div class="cp-row" data-kind="capture">
-                <span class="cp-kind">capture</span>
-                <span class="cp-scope">client claude-code</span>
-                <span class="cp-budget">6 captures · ran 9m</span>
-                <span class="cp-live-cell">15m left</span>
+              <div class="cp-pane" role="tabpanel" id="cp-pane-capture" aria-labelledby="cp-tab-capture" hidden>
+                <div class="cp-row" data-kind="capture">
+                  <span class="cp-kind">capture</span>
+                  <span class="cp-scope">client claude-code</span>
+                  <span class="cp-budget">6 captures · ran 9m</span>
+                  <span class="cp-live-cell">15m left</span>
+                </div>
+                <p class="cp-line"><span>captured bodies stay sensitive</span></p>
+              </div>
+              <div class="cp-pane" role="tabpanel" id="cp-pane-export" aria-labelledby="cp-tab-export" hidden>
+                <p class="cp-line"><b>7 records</b><span>JSON, gzip</span><span class="cp-val">download</span></p>
+                <p class="cp-line"><span>preview and download share one predicate</span></p>
+              </div>
+              <div class="cp-pane" role="tabpanel" id="cp-pane-system" aria-labelledby="cp-tab-system" hidden>
+                <p class="cp-line"><b>rebuild and restart</b><span class="cp-val">4 steps</span></p>
+                <p class="cp-line"><span>queue, retry and retention live in Settings</span></p>
               </div>
             </div>
           </div>
@@ -183,7 +203,7 @@
             <span class="cp-undo">undo</span>
           </div>
         </div>
-        <figcaption><code>steady</code> when nothing is in force, otherwise one segment per hold, capture and limit. A scheduled limit still counts while its window is closed.</figcaption>
+        <figcaption>This miniature is the real surface: pick a section. The header reads <code>steady</code> when nothing is in force, otherwise one segment per hold, capture and limit.</figcaption>
       </figure>
     </div>
   </section>

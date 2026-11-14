@@ -215,8 +215,8 @@ h1 {
    same rail, same rule rows, same ledger foot. It is drawn with the generated
    dashboard tokens, so a palette change moves the plate with the product. */
 .console-plate { margin: 0; min-width: 0; }
-/* The frame is the console itself: its case, radius and shadow. The caption
-   belongs to the page, so it sits outside that case. */
+/* The frame is the console: its case, radius and shadow. The caption belongs
+   to the page, so it sits outside that case. */
 .cp-frame {
   overflow: hidden; background: var(--panel);
   border: 1px solid var(--border2); border-radius: 12px;
@@ -246,17 +246,22 @@ h1 {
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border2));
   font: 500 9px/1.5 var(--mono); font-variant-numeric: tabular-nums;
 }
-.cp-body { display: grid; grid-template-columns: 96px minmax(0, 1fr); }
+/* One fixed body height for every section: switching tabs must never make the
+   plate, or the page beneath it, jump. */
+.cp-body { display: grid; grid-template-columns: 96px minmax(0, 1fr); min-height: 168px; }
 .cp-rail {
   display: flex; flex-direction: column; gap: 1px; padding: 8px 6px;
   background: var(--rail); border-right: 1px solid var(--border);
 }
-.cp-rail span {
-  display: flex; align-items: center; gap: 4px; padding: 3px 6px;
+.cp-rail button {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: 3px 6px; cursor: pointer; text-align: left;
   border: 1px solid transparent; border-left: 2px solid transparent;
-  border-radius: 5px; color: var(--muted); font: 9.5px/1.7 var(--mono);
+  border-radius: 5px; background: none;
+  color: var(--muted); font: 9.5px/1.7 var(--mono);
 }
-.cp-rail span.is-on {
+.cp-rail button:hover { color: var(--text); background: var(--panel2); }
+.cp-rail button[aria-selected="true"] {
   color: var(--text); font-weight: 600; background: var(--panel2);
   border-color: var(--border2); border-left-color: var(--accent);
 }
@@ -265,7 +270,12 @@ h1 {
   color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
   font: 600 8.5px/1.5 var(--mono);
 }
-.cp-pane { display: flex; flex-direction: column; gap: 5px; padding: 8px; min-width: 0; }
+.cp-panes { display: grid; min-width: 0; }
+.cp-pane {
+  grid-area: 1 / 1; display: flex; flex-direction: column; gap: 5px;
+  padding: 8px; min-width: 0;
+}
+.cp-pane[hidden] { display: none; }
 .cp-row {
   display: grid; grid-template-columns: 36px minmax(0, 1fr) auto;
   grid-template-rows: auto auto; align-items: center; gap: 0 7px;
@@ -296,6 +306,14 @@ h1 {
   color: var(--text); font: 8.5px/1.4 var(--mono); font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* A plain one-line fact: the same anatomy as a rule row, without a kind tag. */
+.cp-line {
+  display: flex; align-items: baseline; gap: 8px; margin: 0;
+  padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); color: var(--muted); font: 8.5px/1.5 var(--mono);
+}
+.cp-line b { color: var(--text); font-weight: 600; }
+.cp-line .cp-val { margin-left: auto; color: var(--text); white-space: nowrap; }
 .cp-foot {
   display: flex; align-items: center; gap: 10px; padding: 8px 12px;
   border-top: 1px solid var(--border); background: var(--rail);
@@ -506,10 +524,15 @@ h1 {
   .control-layout { grid-template-columns: 1fr; gap: 26px; align-items: start; }
   .control-copy { max-width: none; }
   .console-plate { max-width: 640px; }
-  /* The plate keeps its own two-line rows on a phone; the live cell drops to
-     the second line so the scope never competes with it for width. */
-  .cp-live-cell { grid-column: 2; grid-row: 2; justify-self: end; padding: 0 6px 6px 0; }
-  .cp-budget { padding-right: 84px; }
+  /* The plate keeps its two-line rows on a phone; the live cell drops to the
+     second line so the scope never competes with it for width. The budget
+     reserves the live cell's track, so the two never overlap. */
+  .cp-live-cell {
+    grid-column: 2; grid-row: 2; justify-self: end; align-self: end;
+    padding: 0 6px 6px 0;
+  }
+  .cp-budget { padding-right: 7.5em; }
+  .cp-body { grid-template-columns: 84px minmax(0, 1fr); }
   .feature-grid { grid-template-columns: 1fr; border-top: 1px solid var(--border2); }
   .feature { padding: 22px 0 20px; border-right: 0; border-bottom: 1px solid var(--border); }
   .feature:last-child { border-bottom: 0; }
