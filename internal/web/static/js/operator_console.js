@@ -587,10 +587,17 @@ function ocDimLabel(dim) {
 
 function ocScopeChipsHTML(scope, dim) {
   const values = scope[dim] || [];
-  return values.map(value =>
-    `<span class="oc-chip">${escapeHtml(ocScopeValueLabel(dim, value))}` +
-    `<button type="button" class="oc-chip-x" data-oc-scope-remove="${dim}" data-oc-value="${escapeHtml(value)}" aria-label="remove ${escapeHtml(ocScopeValueLabel(dim, value))}">×</button></span>`
-  ).join('');
+  return values.map(value => {
+    const label = ocScopeValueLabel(dim, value);
+    // The label is its own box so it can ellipsize. As a bare text node in a
+    // nowrap chip it could not shrink, so a long value pushed the remove
+    // button past the chip's max-width and out of reach: a provider or model
+    // name of nineteen characters left the control with no clickable area at
+    // all. The title keeps the whole value readable where hover exists.
+    return `<span class="oc-chip" title="${escapeHtml(label)}">` +
+      `<span class="oc-chip-text">${escapeHtml(label)}</span>` +
+      `<button type="button" class="oc-chip-x" data-oc-scope-remove="${dim}" data-oc-value="${escapeHtml(value)}" aria-label="remove ${escapeHtml(label)}">×</button></span>`;
+  }).join('');
 }
 
 // ocDimChipHTML is one dimension in a selector strip: a chip that opens its

@@ -400,10 +400,15 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-cond-name { min-width: 0; white-space: nowrap; }
 .oc-cond-chev { flex: none; color: var(--muted); font-size: 9px; }
 .oc-cond-values { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; min-width: 0; }
-.oc-cond-values .oc-chip {
-  max-width: 12em; color: var(--text); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
+/* A value chip holds a label and a remove button. Only the label may give
+   way: with the text as a bare flex item it could not shrink, so a value of
+   nineteen characters or more pushed the button past the max-width, where it
+   had no clickable area and floated over the next dimension chip. */
+.oc-cond-values .oc-chip { max-width: 12em; color: var(--text); }
+.oc-chip-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.oc-cond-values .oc-chip-x { flex: none; }
 /* The picker takes the full width of the strip, below every chip. */
 .oc-conds > .oc-pick { flex: 1 0 100%; margin-top: 2px; }
 .oc-pick {
@@ -850,6 +855,10 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc .oc-ov-row { min-height: var(--tap); }
   .mn.oc .oc-chip { min-height: var(--tap); padding: 0 14px; }
   .mn.oc .oc-chip-x { min-width: var(--tap); min-height: var(--tap); }
+  /* A 12em cap leaves almost nothing for the value once the remove button
+     takes a 44px tap target beside 28px of padding. A phone has no hover to
+     recover a clipped value, so the chip may use the strip's full width. */
+  .mn.oc .oc-cond-values .oc-chip { max-width: 100%; }
   .mn.oc .oc-check { min-height: var(--tap); }
   .mn.oc .oc-check input[type="checkbox"] { width: 20px; height: 20px; }
   .mn.oc .oc-field input,

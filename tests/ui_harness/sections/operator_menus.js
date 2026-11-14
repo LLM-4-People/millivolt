@@ -410,6 +410,19 @@ module.exports = async function operatorMenus(H) {
           providers: ['prov-a'], models: ['model-a'], clients: ['client-a'],
           keyHashes: ['abcdef123456'], conversations: ['conv-1'],
         }));
+      // A value chip holds a label and a remove button. The label has to be
+      // its own shrinking box: as a bare nowrap text node it could not give
+      // way, so a value of nineteen characters or more pushed the remove
+      // button outside the chip, where it had no clickable area and painted
+      // over the next dimension chip.
+      {
+        const chips = qa('#oc-pane .oc-cond-values .oc-chip');
+        check('a value chip keeps its remove button inside the chip',
+          chips.length > 0 &&
+          chips.every(chip => !!chip.querySelector('.oc-chip-text') &&
+            !!chip.querySelector('.oc-chip-x') &&
+            chip.getAttribute('title') === chip.querySelector('.oc-chip-text').textContent));
+      }
       for (const key of ['concurrency', 'requests', 'tokens']) {
         click(`#oc-pane [data-oc-budget="${key}"]`);
       }

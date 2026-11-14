@@ -105,7 +105,11 @@ function ocFilterRowHTML(draft, dim) {
     dim, label: dim, open, set: !!value,
     attr: 'data-oc-filter-pick', key: 'filter-' + dim, menuId: 'oc-filter-menu-' + dim,
     valuesHTML: value
-      ? `<span class="oc-cond-values"><span class="oc-chip">${escapeHtml(ocFilterLabel(dim, value))}` +
+      // Same shape as a scope chip: one shrinking label box and a remove
+      // button that keeps its own width, so a long value cannot push the
+      // control out of the chip.
+      ? `<span class="oc-cond-values"><span class="oc-chip" title="${escapeHtml(ocFilterLabel(dim, value))}">` +
+        `<span class="oc-chip-text">${escapeHtml(ocFilterLabel(dim, value))}</span>` +
         `<button type="button" class="oc-chip-x" data-oc-filter-clear="${dim}" aria-label="clear ${dim} filter">×</button></span></span>`
       : '',
   });
