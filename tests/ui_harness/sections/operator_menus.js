@@ -1021,6 +1021,48 @@ module.exports = async function operatorMenus(H) {
       w.closeOperatorConsole();
     }
 
+    // ---- long rule lists stay navigable ----
+    {
+      // A console with two rules has no use for a search box, and one with
+      // fourteen cannot be used without it: the pane overflows and finding a
+      // rule became a scroll. The filter appears at the threshold, narrows on
+      // the text each row already renders, and states that it hid rows rather
+      // than letting an empty filter read as an empty policy.
+      const many = [];
+      for (let i = 0; i < 8; i++) {
+        many.push({id: 'flt-' + i, scope: {models: ['m-' + i]}, concurrency: 2,
+          requests: 0, request_window: '', tokens: 0, token_window: '',
+          anti_burst: false, ramp_duration: '', source: 'ui', in_flight: 0, queued: 0});
+      }
+      throttleDoc({ok: true, active: true, known_providers: [], throttles: many.slice(0, 2)});
+      w.openOperatorConsole('limits');
+      check('a short rule list does not grow a filter row',
+        !q('#oc-pane [data-oc-list-filter]') && qa('#oc-pane .oc-rule').length === 2);
+
+      throttleDoc({ok: true, active: true, known_providers: [], throttles: many});
+      w.operatorConsoleSync('throttle');
+      check('a long rule list offers a filter naming how many rules it holds',
+        !!q('#oc-pane [data-oc-list-filter="limits"]') &&
+        qa('#oc-pane .oc-rule').length === 8 &&
+        q('#oc-pane [data-oc-list-filter="limits"]').placeholder === 'filter 8 rules');
+
+      input('#oc-pane [data-oc-list-filter="limits"]', 'm-3');
+      check('the filter narrows the list to the rule whose reading matches',
+        qa('#oc-pane .oc-rule').length === 1 &&
+        text('#oc-pane .oc-rule .oc-rule-scope') === 'model m-3');
+
+      input('#oc-pane [data-oc-list-filter="limits"]', 'nothing matches this');
+      check('a filter that hides every rule says so instead of reading as empty',
+        qa('#oc-pane .oc-rule').length === 0 &&
+        text('#oc-pane .oc-empty').includes('No rule matches that filter') &&
+        text('#oc-pane .oc-empty').includes('8 rules are in force'));
+      click('#oc-pane [data-oc-list-clear="limits"]');
+      check('clearing the filter restores every rule and the filter row',
+        qa('#oc-pane .oc-rule').length === 8 &&
+        q('#oc-pane [data-oc-list-filter="limits"]').value === '');
+      w.closeOperatorConsole();
+    }
+
     // ---- 10. export builder ----
     {
       w.__ocExportRecords = [{

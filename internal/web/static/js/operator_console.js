@@ -47,6 +47,43 @@ let ocDrain = { scope: 'all', value: '' };
 
 function ocEl(id) { return document.getElementById(id); }
 
+// ---------- long rule lists ----------
+// A rule list that outgrows the 560px panel is only usable if it can be
+// narrowed: fourteen limits fill the pane and finding one becomes a scroll
+// with no way to search. The filter appears only once a list is long enough to
+// need it, so a console with two rules never spends a row on an empty box.
+const OC_LIST_FILTER_MIN = 6;
+const ocListFilter = { limits: '', pause: '', capture: '' };
+
+// ocFilterRows narrows a section's rows by the text each one renders. Matching
+// the rendered reading, rather than re-deriving the scope here, keeps one
+// search rule for every row shape and makes a new field searchable for free.
+function ocFilterRows(section, rows) {
+  const needle = (ocListFilter[section] || '').trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter(row => (row.text || '').toLowerCase().includes(needle));
+}
+
+function ocListFilterHTML(section, total) {
+  if (total < OC_LIST_FILTER_MIN) return '';
+  const value = ocListFilter[section] || '';
+  return `<div class="oc-list-filter">` +
+    `<input type="search" data-oc-list-filter="${section}" value="${escapeHtml(value)}"` +
+    ` placeholder="filter ${total} rules" aria-label="filter the ${section} rules"` +
+    ` data-oc-key="list-filter-${section}">` +
+    (value ? `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear</button>` : '') +
+    `</div>`;
+}
+
+// ocListEmptyNote states that a filter hid the section's rules, so an empty
+// list never reads as an empty policy.
+function ocListEmptyNote(section, shown, total) {
+  if (!total || shown) return '';
+  return `<div class="oc-empty"><strong>No rule matches that filter.</strong> ` +
+    `${fmt(total)} ${total === 1 ? 'rule is' : 'rules are'} in force; ` +
+    `<button type="button" class="oc-link" data-oc-list-clear="${section}">clear the filter</button> to see them.</div>`;
+}
+
 // ---------- status readout ----------
 // ocRuleCounts is the one summary of everything in force. Restart is included
 // because it is the one transient state that must stay visible after the
@@ -909,6 +946,11 @@ async function ocHandleAction(target) {
     }
     return;
   }
+  if (target.hasAttribute('data-oc-list-clear')) {
+    ocListFilter[target.dataset.ocListClear] = '';
+    ocRender();
+    return;
+  }
   if (target.hasAttribute('data-oc-error-dismiss')) { ocOperatorErrorClear(); return; }
   if (target.hasAttribute('data-oc-close')) { closeOperatorConsole(true); return; }
   if (target.hasAttribute('data-oc-cancel')) { ocClearComposer(); ocRender(); return; }
@@ -1159,6 +1201,11 @@ document.addEventListener('input', event => {
     if (ocDrafts.export?.picker) { ocDrafts.export.picker.filter = target.value; ocRender(); }
     return;
   }
+  if (target.dataset.ocListFilter) {
+    ocListFilter[target.dataset.ocListFilter] = target.value;
+    ocRender();
+    return;
+  }
   if (target.dataset.ocExportField) {
     ocInputField(target.dataset.ocExportField, target.value);
     return;
@@ -1310,7 +1357,7 @@ document.addEventListener('click', event => {
   // delegated action handler must not preventDefault its click. Its change
   // event carries the selection instead.
   if (event.target?.dataset?.ocChoice && event.target.tagName === 'SELECT') return;
-  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-edit],[data-oc-copy],[data-oc-quick-hold],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
+  const target = event.target.closest?.('[data-oc-section],[data-oc-close],[data-oc-error-dismiss],[data-oc-cancel],[data-oc-new],[data-oc-list-clear],[data-oc-edit],[data-oc-copy],[data-oc-quick-hold],[data-oc-remove],[data-oc-resume],[data-oc-resume-all],[data-oc-stop],[data-oc-stop-all],[data-oc-apply],[data-oc-pick],[data-oc-scope-remove],[data-oc-pick-value],[data-oc-pick-add],[data-oc-toggle],[data-oc-day],[data-oc-choice],[data-oc-filter-pick],[data-oc-filter-value],[data-oc-filter-clear],[data-oc-filter-add],[data-oc-download],[data-oc-reset-export],[data-oc-settings],[data-oc-drain],[data-oc-restart],[data-oc-undo]');
   if (!target || !ocShell()?.contains(target)) return;
   event.preventDefault();
   ocHandleAction(target);

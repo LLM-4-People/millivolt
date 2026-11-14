@@ -122,28 +122,33 @@ function ocRenderPause() {
     : composing ? ''
       : `<button type="button" class="btn" data-oc-quick-hold title="hold all traffic for ${ocQuickHoldMinutes} minutes">hold ${ocQuickHoldMinutes}m</button>` +
         `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`;
-  const rows = holds.map(hold => {
+  const entries = holds.map(hold => {
     const scope = hold.all ? 'all traffic'
       : hold.new ? 'new clients'
         : ocScopePhrase({ providers: hold.providers, clients: hold.clients, models: [], keyHashes: [], conversations: [] });
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
     const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
-    return `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}">` +
+    const html = `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}">` +
       `<button type="button" class="oc-rule-main" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}" data-oc-key="rule-${escapeHtml(hold.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
       `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue', ...meta].join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(ocUntilPhrase(hold.until) || 'open')}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
       `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
-  }).join('');
+    return { html, text: scope + ' ' + (hold.reason || '') + ' ' + (hold.max_queued || '') };
+  });
+  const shown = ocFilterRows('pause', entries);
+  const rows = shown.map(entry => entry.html).join('');
+  const filter = ocListFilterHTML('pause', holds.length);
+  const hidden = ocListEmptyNote('pause', shown.length, holds.length);
   const empty = holds.length ? '' :
     `<div class="oc-empty"><strong>Traffic is flowing.</strong> Nothing is held, so requests reach their provider as fast as it allows.</div>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Park new matching requests without cancelling work that is already running.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
     headAction + `</div></div>` +
-    (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + (rows || empty) + `</div>`;
+    (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + filter + (rows || hidden || empty) + `</div>`;
 }
 
 // ocQuickHoldMinutes is the bounded duration the one-click hold uses. A quick
@@ -343,7 +348,7 @@ function ocRenderCapture() {
     ? `<button type="button" class="btn" data-oc-new="capture">start over</button>`
     : composing ? ''
       : `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button>`;
-  const rows = sessions.map(session => {
+  const entries = sessions.map(session => {
     const scope = ocScopePhrase({
       providers: session.providers, models: session.models, clients: session.clients,
       keyHashes: [], conversations: [],
@@ -354,7 +359,7 @@ function ocRenderCapture() {
     const n = typeof session.captures === 'number' ? session.captures : 0;
     // Capture count and elapsed time own the budget line; the side column owns
     // the remaining window, which is the same fact the row's action changes.
-    return `<div class="oc-rule" data-kind="capture" data-oc-rule="${escapeHtml(session.id || '')}">` +
+    const html = `<div class="oc-rule" data-kind="capture" data-oc-rule="${escapeHtml(session.id || '')}">` +
       `<button type="button" class="oc-rule-main" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}" data-oc-key="rule-${escapeHtml(session.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
       `<span class="oc-rule-budget">${escapeHtml([n + (n === 1 ? ' capture' : ' captures'), ran,
@@ -362,14 +367,19 @@ function ocRenderCapture() {
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(left)}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
       `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button></div></div></div>`;
-  }).join('');
+    return { html, text: scope + ' ' + n + ' captures ' + left };
+  });
+  const shown = ocFilterRows('capture', entries);
+  const rows = shown.map(entry => entry.html).join('');
+  const filter = ocListFilterHTML('capture', sessions.length);
+  const hidden = ocListEmptyNote('capture', shown.length, sessions.length);
   const empty = sessions.length ? '' :
     `<div class="oc-empty"><strong>No capture sessions.</strong> Nothing is being recorded, so stored records hold only headers and metrics.</div>`;
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
     headAction + `</div></div>` +
-    (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + (rows || empty) + `</div>`;
+    (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + filter + (rows || hidden || empty) + `</div>`;
 }
 
 function ocCaptureBody(draft) {

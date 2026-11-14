@@ -502,6 +502,23 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 .oc-compose-ft .btn { min-height: 26px; }
 
+/* A rule list that outgrows the panel is only usable if it can be narrowed.
+   The row appears only once a section holds enough rules to need it. */
+.oc-list-filter { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.oc-list-filter input {
+  flex: 1 1 auto; min-width: 0; min-height: 26px; padding: 3px 8px;
+  color: var(--text); background: var(--rail);
+  border: 1px solid var(--border); border-radius: 6px;
+  font: 10px/1.4 var(--mono);
+}
+.oc-list-filter input::placeholder { color: var(--muted); opacity: 1; }
+.oc-list-filter input:hover { border-color: var(--border2); }
+.oc-list-filter input:focus {
+  border-color: var(--accent); outline: var(--focus-outline); outline-offset: 1px;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.oc-list-filter .oc-link { flex: none; }
+
 /* ---------- rule rows: one calibrated line, one live column ---------- */
 /* One rule is one line: kind tag, scope, budget, then the live figure. The
    actions appear on hover and focus so they cost no width at rest, and the

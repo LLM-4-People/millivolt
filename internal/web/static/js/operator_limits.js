@@ -229,7 +229,21 @@ function ocLimitPreview() {
 function ocRenderLimits() {
   const policies = ((typeof throttleState !== 'undefined' && throttleState.throttles) || []);
   if (!ocDrafts.limit) ocDrafts.limit = ocBlankLimitDraft();
-  const rows = policies.map(policy => ocLimitRuleHTML(policy)).join('');
+  // Each row carries the text it renders, so the shared list filter searches
+  // what the operator can actually read instead of re-deriving a predicate.
+  const entries = policies.map(policy => {
+    const html = ocLimitRuleHTML(policy);
+    const scope = ocScopePhrase({
+      providers: policy.scope?.providers, models: policy.scope?.models,
+      clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,
+      conversations: policy.scope?.conversations,
+    });
+    return { html, text: scope + ' ' + ocBudgetPhrase(policy) + ' ' + (policy.source || '') };
+  });
+  const shown = ocFilterRows('limits', entries);
+  const rows = shown.map(entry => entry.html).join('');
+  const filter = ocListFilterHTML('limits', policies.length);
+  const hidden = ocListEmptyNote('limits', shown.length, policies.length);
   const empty = policies.length ? '' :
     `<div class="oc-empty"><strong>No limits in force.</strong> Every request is admitted, at whatever rate its provider accepts.</div>`;
   const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
@@ -247,7 +261,8 @@ function ocRenderLimits() {
     `<div class="oc-sec-head"><p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p>` +
     headAction + `</div>` +
     (composing ? ocLimitComposerHTML(ocDrafts.limit) : '') +
-    (rows || empty) +
+    filter +
+    (rows || hidden || empty) +
     `</div>`;
 }
 
