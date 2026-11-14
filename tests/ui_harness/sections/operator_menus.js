@@ -2195,6 +2195,62 @@ module.exports = async function operatorMenus(H) {
           .map(row => row.dataset.ocValue)) === JSON.stringify(['prov-a']));
       w.closeOperatorConsole();
     }
+
+    // ---- 17. the shared console owners are one owner each ----
+    {
+      // ocControlSignature names an unkeyed control by what it is, not where
+      // it sits. If two distinct controls could share a signature, focus
+      // restoration would land on the wrong one; the index disambiguates only
+      // genuinely identical controls (seven day chips, two rules' copy).
+      // w.eval takes one expression string, so the element is resolved inside
+      // the page rather than passed across.
+      const sigAt = (selector, index = 0) => w.eval(
+        'ocControlSignature(document.querySelectorAll(' + JSON.stringify(selector) + ')[' + index + '])');
+      throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
+      w.openOperatorConsole('limits');
+      startNew('limit');
+      check('two budget checkboxes of one composer do not share a signature',
+        qa('#oc-pane [data-oc-budget]').length >= 2 &&
+        sigAt('#oc-pane [data-oc-budget]', 0) !== sigAt('#oc-pane [data-oc-budget]', 1));
+      check('two disclosures of one composer do not share a signature',
+        sigAt('#oc-pane [data-oc-toggle="advanced"]') !==
+        sigAt('#oc-pane [data-oc-toggle="schedule"]'));
+      // The rebuild path must resolve the same signature after the pane is
+      // replaced, which is what lets an unkeyed control keep focus.
+      const before = sigAt('#oc-pane [data-oc-budget="requests"]');
+      w.operatorConsoleSync('throttle');
+      check('a control signature is stable across a pane rebuild',
+        before !== '' && before === sigAt('#oc-pane [data-oc-budget="requests"]'));
+      check('a control signature omits the row key it is stamped beside',
+        sigAt('#oc-pane [data-oc-apply="limit"]') !== '' &&
+        !sigAt('#oc-pane [data-oc-apply="limit"]').includes('data-oc-key'));
+      // ocRailBadgeCount is the one reading of a destination's count, so the
+      // badge and the section cannot disagree about which kinds carry one.
+      check('only the three rule sections carry a rail count',
+        evalJSON('["limits","pause","capture"].map(s => ocRailBadgeCount(s, {limits: 2, holds: 3, captures: 4}))')
+          .join() === '2,3,4' &&
+        evalJSON('["overview","export","system"].map(s => ocRailBadgeCount(s, {limits: 2, holds: 3, captures: 4}))')
+          .join() === '0,0,0');
+      // ocComposeControls reads the same table the markup is emitted from: an
+      // id that only one of the two knew about would detach the preview from
+      // its commit button.
+      check('the composer table names three kinds and both nodes resolve',
+        evalJSON('Object.keys(OC_COMPOSERS).join()') === 'limit,pause,capture' &&
+        w.eval('Object.values(OC_COMPOSERS).every(c => c.preview && c.apply && c.state && c.key)') &&
+        evalJSON('!!ocComposeControls("limit")') === true);
+      w.closeOperatorConsole();
+      // ocParking is the one answer to "is traffic being held": a hold parks,
+      // and so does the gate, which is why the readout tone cannot be derived
+      // from the hold count alone.
+      const parking = doc => {
+        w.applyPauseState({...EMPTY_PAUSE, ...doc});
+        return evalJSON('ocParking()');
+      };
+      check('parking is true for a hold, for a gate waiter, and false for neither',
+        parking({paused: true, holds: [{id: 'p1', all: true}]}) === true &&
+        parking({storm_waiters: 2}) === true &&
+        parking({}) === false);
+    }
   } finally {
     // Leave the shared page on the empty baseline every later section
     // expects: no holds, sessions or limits, the console closed, blank
