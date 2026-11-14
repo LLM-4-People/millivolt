@@ -226,6 +226,12 @@ function openOperatorConsole(section, view) {
       onClose: () => { ocMounted = false; ocSyncTriggerName(); },
     });
   }
+  // The render above ran while the panel was still hidden, where every box
+  // measures zero. The rail's overflow flag was therefore computed against a
+  // 0-width strip and stayed "0": on a phone the last sections were cut off
+  // with no fade to say more existed. Re-measure now that the panel is laid
+  // out.
+  ocSyncRailOverflow();
   refreshOperatorReadout();
 }
 
