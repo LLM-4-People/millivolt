@@ -22,6 +22,26 @@ module.exports = async function menusScroll(H) {
     check('the console pane owns vertical scrolling and the strip scrolls sideways',
       paneStyle.overflowY === 'auto' && railStyle.overflowY === 'hidden' &&
       railStyle.overflowX === 'auto');
+    // A narrow panel cannot fit six sections. The strip must say it
+    // continues, or the last ones are unreachable with no visible affordance.
+    // jsdom reports zero widths, so drive the owner's own inputs.
+    {
+      const rail = d.getElementById('oc-rail');
+      const set = (scrollWidth, clientWidth, scrollLeft) => {
+        Object.defineProperty(rail, 'scrollWidth', {configurable: true, value: scrollWidth});
+        Object.defineProperty(rail, 'clientWidth', {configurable: true, value: clientWidth});
+        rail.scrollLeft = scrollLeft;
+        rail.dispatchEvent(new w.Event('scroll', {bubbles: true}));
+      };
+      set(367, 302, 0);
+      check('an overflowing section strip marks that more sections remain',
+        rail.dataset.more === '1');
+      set(367, 302, 65);
+      check('a strip scrolled to its end drops the overflow marker',
+        rail.dataset.more === '0');
+      set(302, 302, 0);
+      check('a strip that fits marks no overflow', rail.dataset.more === '0');
+    }
     check('the console action rows are its own flex rows, not the retired clear-actions strip',
       w.getComputedStyle(d.getElementById('oc-change').parentElement).display === 'flex' &&
       !d.querySelector('.clear-actions'));

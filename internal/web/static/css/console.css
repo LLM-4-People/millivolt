@@ -117,6 +117,15 @@
   background: var(--rail); border-bottom: 1px solid var(--border);
 }
 .oc-rail::-webkit-scrollbar { display: none; }
+/* A narrow panel cannot fit six sections, and a hidden scrollbar with no
+   affordance hides the last ones entirely: system sat fully outside a 320px
+   panel. Fade the trailing edge while more sections remain, and drop the fade
+   once the strip is scrolled to its end. */
+.oc-rail { position: relative; }
+.oc-rail[data-more="1"] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+}
 .oc-rail-item {
   display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
   min-height: 24px; padding: 3px 7px; text-align: left; cursor: pointer;
@@ -664,12 +673,24 @@ button.oc-chip[aria-pressed="true"]::before {
 @media (max-width: 640px) {
   .mn.oc .oc-sec-head { flex-direction: column; align-items: stretch; gap: 8px; }
   .mn.oc .oc-head-actions { justify-content: flex-start; flex-wrap: wrap; }
-  /* A phone keeps the single line and drops the budget before it drops the
-     scope. */
-  .mn.oc .oc-rule { grid-template-columns: 36px minmax(0, 1fr) auto; }
-  .mn.oc .oc-rule-main { padding: 7px 8px; }
+  /* A phone has no room for a four-part instrument line: the kind and scope
+     take the first line at full width, and the live figure and actions share
+     the second. Squeezing all four onto one line clipped the scope to
+     "model glm…", which is the one field the operator must read. */
+  .mn.oc .oc-rule {
+    grid-template-columns: 36px minmax(0, 1fr);
+    grid-template-areas: "kind main" "side side";
+  }
+  /* The kind tag names the rule's first line, so it stays in that line's
+     height instead of stretching a tinted block beside both lines. */
+  .mn.oc .oc-rule::before { grid-area: kind; align-self: stretch; }
+  .mn.oc .oc-rule-main { grid-area: main; padding: 7px 8px; }
   .mn.oc .oc-rule-budget { display: none; }
-  .mn.oc .oc-rule-side { padding: 0 6px 0 0; }
+  .mn.oc .oc-rule-side {
+    grid-area: side; justify-content: space-between;
+    padding: 0 6px 4px 44px;
+  }
+  .mn.oc .oc-rule-scope { white-space: normal; overflow: visible; }
   .mn.oc .oc-budget { grid-template-columns: minmax(0, 1fr); }
   .mn.oc .oc-budget .oc-field { grid-column: auto; }
   .mn.oc .oc-compose .oc-group { padding: 9px 10px; }
@@ -678,7 +699,13 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc .oc-compose > .oc-preview,
   .mn.oc .oc-compose > .oc-error { margin-left: 10px; margin-right: 10px; }
   .mn.oc .oc-compose-hd { padding: 8px 10px; }
-  .mn.oc .oc-compose-ft { padding: 9px 10px; }
+  /* A phone pane scrolls, so the commit sits on its bottom edge: the action
+     the operator came for was 600px below the fold when a composer opened. */
+  .mn.oc .oc-compose-ft {
+    position: sticky; bottom: -12px; z-index: 2;
+    padding: 9px 10px; background: var(--rail);
+    border-top: 1px solid var(--border2);
+  }
   .mn.oc .oc-compose-ft .btn { flex: 1 1 auto; }
   .mn.oc .oc-times .oc-field { width: calc(50% - 4px); min-width: 96px; }
   .mn.oc .oc-ov-row { grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; }

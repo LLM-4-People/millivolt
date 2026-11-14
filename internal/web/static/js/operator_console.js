@@ -236,6 +236,7 @@ function ocRender() {
   if (tab && typeof tab.scrollIntoView === 'function') {
     tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
+  ocSyncRailOverflow();
 }
 
 function ocRenderHead() {
@@ -256,6 +257,17 @@ const OC_RAIL_ORIENTATION = 'horizontal';
 function ocSyncRailOrientation() {
   const rail = ocEl('oc-rail');
   if (rail) rail.setAttribute('aria-orientation', OC_RAIL_ORIENTATION);
+}
+
+// ocSyncRailOverflow marks whether the section strip has more to show. A
+// narrow panel cannot fit six sections, and a hidden scrollbar with no cue
+// left the last one entirely outside the frame. The CSS fades the trailing
+// edge only while data-more is set.
+function ocSyncRailOverflow() {
+  const rail = ocEl('oc-rail');
+  if (!rail) return;
+  const more = rail.scrollWidth - rail.clientWidth - Math.round(rail.scrollLeft) > 1;
+  rail.dataset.more = more ? '1' : '0';
 }
 
 function ocRenderRail() {
@@ -707,8 +719,13 @@ function ocSyncRestartVerdict() {
 // A resize can cross the sheet breakpoint without a repaint, so the announced
 // orientation is resynced from the same owner the render path uses.
 window.addEventListener('resize', () => {
-  if (ocMounted) ocSyncRailOrientation();
+  if (ocMounted) { ocSyncRailOrientation(); ocSyncRailOverflow(); }
 });
+
+// The strip's own scroll changes whether more sections remain.
+document.addEventListener('scroll', event => {
+  if (event.target?.id === 'oc-rail') ocSyncRailOverflow();
+}, true);
 
 // ---------- live sync ----------
 // operatorConsoleSync is the operator state registry's one repaint hook. It
