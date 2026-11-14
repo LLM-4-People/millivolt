@@ -12,6 +12,7 @@ const {
   bootChecks,
   loaded,
   watchdog,
+  WATCHDOG_MS,
 } = require('./theme_check_boot');
 
 // The same bound the functional suite uses: an unsettled promise would
