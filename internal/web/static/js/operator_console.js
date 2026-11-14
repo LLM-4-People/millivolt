@@ -596,12 +596,12 @@ function ocSchedulePhrase(schedule) {
   return days + ' · ' + clock(start) + '-' + clock(end);
 }
 
+// ocUntilPhrase is the console's wording for a server deadline. The
+// arithmetic belongs to untilLeft, which the footer and the hold matcher also
+// read; only the expired word is the console's own, because a rule row has to
+// say something where a footer can simply omit the bit.
 function ocUntilPhrase(until) {
-  if (!until) return '';
-  const ms = new Date(until).getTime() - Date.now();
-  if (!Number.isFinite(ms) || ms <= 0) return 'expired';
-  const minutes = Math.max(1, Math.ceil(ms / OC_MINUTE));
-  return hmBreakdown(minutes) + ' left';
+  return untilLeft(until, 'expired');
 }
 
 function ocDurationText(value) {

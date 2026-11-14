@@ -227,7 +227,13 @@ function captureOperatorRevisions() {
 }
 function acceptOperator(kind, st, revision) {
   const gate = operatorState[kind];
-  return !gate.busy && revision === gate.revision && gate.valid(st);
+  const accepted = !gate.busy && revision === gate.revision && gate.valid(st);
+  // Every operator document carries the server instant its deadlines are
+  // measured against, and this is the one gate the bootstrap and every poll
+  // pass through. Anchoring here means no surface can read a server-owned
+  // deadline with the workstation clock.
+  if (accepted) anchorOperatorClock(st?.server_ms);
+  return accepted;
 }
 // operatorError is the one rejected-write surface. The console names the
 // rejection in the pane the operator is working in; when it is not loaded (a

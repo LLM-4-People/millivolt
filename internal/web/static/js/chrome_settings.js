@@ -249,9 +249,8 @@ function toggleHdrMenu(e, menuId, prepare, after) {
 
 function holdLive(h) {
   if (!h) return false;
-  if (!h.until) return true;
-  const ms = new Date(h.until).getTime() - Date.now();
-  return Number.isFinite(ms) && ms > 0;
+  const ms = untilRemainingMs(h.until);
+  return ms === null || ms > 0;
 }
 
 function liveHolds() {

@@ -147,6 +147,14 @@ func (s *Server) writeOperatorEditError(w http.ResponseWriter, err, overlap, not
 	adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 }
 
+// serverClockMs is the operator documents' clock anchor: this server's own
+// instant, in epoch milliseconds. Every hold and capture deadline is absolute
+// server time, so a browser that evaluated it with its own clock could hide a
+// live hold (and then report "steady" while traffic was parked) or claim an
+// expired one. Epoch milliseconds is the one wire form every JS engine parses
+// without ambiguity; RFC 3339 with sub-second digits is not.
+func serverClockMs() int64 { return time.Now().UnixMilli() }
+
 // rfc3339OrNil renders an operator-state timestamp: RFC 3339 UTC, or nil for
 // the zero value. The snapshot maps are marshalled directly, so a nil value
 // renders "until":null, never an omitted key (map values have no omitempty);

@@ -81,6 +81,50 @@ function debugScopeLabel(h) {
   return bits.join(' + ') || 'session';
 }
 
+// ---------- operator clock ----------
+// Every hold and capture deadline is absolute server time, and the server is
+// the only clock that can decide whether one has passed. Reading a deadline
+// with Date.now() let a workstation that ran ahead hide a live hold: the row
+// disappeared, the readout said "steady", and the proxy went on parking
+// traffic. Each operator document carries server_ms, so one anchor is recorded
+// when a document is accepted and every deadline is measured against it.
+let _opClockOffsetMs = 0;
+let _opClockAnchored = false;
+
+function anchorOperatorClock(serverMs) {
+  if (!Number.isFinite(serverMs) || serverMs <= 0) return;
+  _opClockOffsetMs = serverMs - Date.now();
+  _opClockAnchored = true;
+}
+
+// operatorNowMs is the server's current instant as well as this page can know
+// it. Before any anchor arrives it is the local clock, which is what every
+// surface used to read unconditionally.
+function operatorNowMs() {
+  return Date.now() + (_opClockAnchored ? _opClockOffsetMs : 0);
+}
+
+// untilRemainingMs is the one arithmetic for an absolute operator deadline:
+// null when none is set, otherwise milliseconds remaining, negative once past.
+// holdLive, the footer's remaining-time bit and the console's rule rows all read
+// this, so they cannot disagree about whether a rule is still in force.
+function untilRemainingMs(until) {
+  if (!until) return null;
+  const t = new Date(until).getTime();
+  if (!Number.isFinite(t)) return null;
+  return t - operatorNowMs();
+}
+
+// untilLeft is the one remaining-time sentence. `past` is what an already
+// expired deadline reads as: a rule row says "expired", while the footer omits
+// the bit rather than asserting a state it does not track.
+function untilLeft(until, past = '') {
+  const ms = untilRemainingMs(until);
+  if (ms === null) return '';
+  if (ms <= 0) return past;
+  return hmBreakdown(Math.max(1, Math.ceil(ms / 60000))) + ' left';
+}
+
 // hmBreakdown is the one compact H/M breakdown for remaining-time labels:
 // whole minutes below an hour, hours plus remaining minutes above. Callers
 // own the rounding of their minute count and any suffix - pause holds say
@@ -98,10 +142,7 @@ const LIMIT_WINDOWS = [
 // The fallback window when a limit carries none (fillLimitWindows' default
 // and the apply body's missing-select fallback): '1m', named once.
 function pauseUntilLabel(until) {
-  if (!until) return '';
-  const ms = new Date(until).getTime() - Date.now();
-  if (!Number.isFinite(ms) || ms <= 0) return '';
-  return hmBreakdown(Math.ceil(ms / 60000)) + ' left';
+  return untilLeft(until);
 }
 
 // pauseStatusBits and debugStatusBits own the operator status word lists the

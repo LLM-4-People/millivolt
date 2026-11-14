@@ -1047,7 +1047,10 @@ func (s *Server) PauseSnapshot() map[string]any {
 		})
 	}
 	return map[string]any{
-		"ok":                 true,
+		"ok": true,
+		// The clock every deadline in this document is measured against. It is
+		// not state: the client uses only its own elapsed time anchored here.
+		"server_ms":          serverClockMs(),
 		"paused":             len(outHolds) > 0,
 		"clients":            nullSlice(sanitizeNameList(clients)),
 		"providers":          nullSlice(sanitizeNameList(providers)),

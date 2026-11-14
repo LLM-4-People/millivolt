@@ -656,7 +656,10 @@ func (s *Server) DebugSnapshot() map[string]any {
 	}
 	knownModels := s.pause.models.list()
 	state := map[string]any{
-		"ok":              true,
+		"ok": true,
+		// Same clock anchor as the pause document: a capture window is also
+		// absolute server time.
+		"server_ms":       serverClockMs(),
 		"enabled":         active > 0,
 		"sessions":        out,
 		"known_clients":   nullSlice(s.pause.clients.list()),
