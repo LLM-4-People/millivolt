@@ -11,23 +11,25 @@ function ocBlankExportDraft() {
     mode: 'all', provider: '', model: '', client: '', conversation: '',
     status: '', errors: false, debug: false, errorType: '', age: '', after: '',
     count: null, counting: false, error: '', picker: null,
+    // The instant the current count measured its relative ages from. The
+    // download reuses it so the file and the receipt describe one window.
+    epoch: 0,
   };
 }
 
-// ocExportFilter is the one predicate owner for the preview and the download.
-// All history means no predicate at all: the filter fields persist across a
-// mode switch so returning to matching records restores the work, but they
-// must not reach the predicate while the mode says all history. A mode chip
-// that says one thing while the URL carries another is the export lying about
-// what it will download.
-function ocExportFilter(draft) {
+// ocExportFields is the predicate without its clock: the dimensions the
+// operator chose. It is what changes when the filter changes, so it is also
+// the right thing to compare when deciding whether a reply is still current.
+// An age filter's absolute bounds move every millisecond, which made the
+// staleness check below reject every reply and left the receipt reading
+// "choose a filter to preview the export" forever.
+function ocExportFields(draft) {
   if (draft.mode === 'all') {
     return {
       provider: '', model: '', client: '', conversation_id: '', error_type: '',
-      status_code: 0, has_error: false, debug: false, before_ms: 0, after_ms: 0,
+      status_code: 0, has_error: false, debug: false,
     };
   }
-  const now = Date.now();
   return {
     provider: draft.provider || '',
     model: draft.model || '',
@@ -37,8 +39,26 @@ function ocExportFilter(draft) {
     status_code: draft.status ? Number(draft.status) : 0,
     has_error: !!draft.errors,
     debug: !!draft.debug,
-    before_ms: draft.age ? now - parseGoDuration(draft.age) : 0,
-    after_ms: draft.after ? now - parseGoDuration(draft.after) : 0,
+  };
+}
+
+// ocExportFilter is the one predicate owner for the preview and the download.
+// All history means no predicate at all: the filter fields persist across a
+// mode switch so returning to matching records restores the work, but they
+// must not reach the predicate while the mode says all history. A mode chip
+// that says one thing while the URL carries another is the export lying about
+// what it will download.
+// `epoch` is the instant the relative ages are measured from. The count names
+// its epoch and the download reuses it, so the receipt and the file describe
+// the same window instead of two instants a few milliseconds apart.
+function ocExportFilter(draft, epoch) {
+  const at = Number.isFinite(epoch) ? epoch : Date.now();
+  const fields = ocExportFields(draft);
+  if (draft.mode === 'all') return { ...fields, before_ms: 0, after_ms: 0 };
+  return {
+    ...fields,
+    before_ms: draft.age ? at - parseGoDuration(draft.age) : 0,
+    after_ms: draft.after ? at - parseGoDuration(draft.after) : 0,
   };
 }
 
@@ -223,18 +243,25 @@ function ocScheduleExportCount() {
 async function ocRunExportCount() {
   const draft = ocDrafts.export;
   if (!draft) return;
-  const filter = ocExportFilter(draft);
-  const token = JSON.stringify(filter);
+  // The epoch is frozen for the whole count. Comparing the full predicate
+  // would compare two moving clocks: an age filter's absolute bounds advance
+  // every millisecond, so every reply looked stale and the receipt never left
+  // "choose a filter to preview the export". The dimensions the operator
+  // chose are what decide whether a reply is still current.
+  const epoch = Date.now();
+  const token = JSON.stringify(ocExportFields(draft));
   draft.counting = true;
   ocUpdateExportReceipt();
   try {
-    const count = await purgeCount(filter);
-    if (ocDrafts.export !== draft || JSON.stringify(ocExportFilter(draft)) !== token) return;
+    const count = await purgeCount(ocExportFilter(draft, epoch));
+    if (ocDrafts.export !== draft || JSON.stringify(ocExportFields(draft)) !== token) return;
     draft.count = count;
+    draft.epoch = epoch;
     draft.error = '';
   } catch (err) {
     if (ocDrafts.export !== draft) return;
     draft.count = null;
+    draft.epoch = 0;
     draft.error = String(err.message || 'count unavailable');
   } finally {
     draft.counting = false;
@@ -281,7 +308,10 @@ function ocDownloadExport() {
     ocScheduleExportCount();
     return;
   }
-  triggerDownload(ocExportURL(ocExportFilter(draft)), '');
+  // The receipt counted a window that starts at draft.epoch. Recomputing the
+  // age bounds here would move both edges forward and download a slightly
+  // different set than the one the operator was shown.
+  triggerDownload(ocExportURL(ocExportFilter(draft, draft.epoch || Date.now())), '');
   const phrase = 'downloaded ' + fmt(draft.count) + (draft.count === 1 ? ' record' : ' records');
   ocRecordChange(phrase, null, 'ok');
   toast(phrase);

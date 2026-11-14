@@ -1346,6 +1346,51 @@ module.exports = async function operatorMenus(H) {
       const typed = q('#oc-pane [data-oc-filter-filter="status"]');
       typed.value = '49';
       typed.dispatchEvent(new w.Event('input', {bubbles: true}));
+      // An age filter's absolute bounds move every millisecond. The count's
+      // staleness guard used to compare the whole predicate, so every reply
+      // looked stale, the count never landed, and the receipt stayed on
+      // "choose a filter to preview the export" while download stayed off.
+      {
+        const savedFetch = w.fetch;
+        let seen = null;
+        w.fetch = async (url, options) => {
+          if (String(url).includes('/admin/purge/count')) {
+            seen = JSON.parse(options.body);
+            // A realistic round trip: the reply arrives after the clock moved.
+            await new Promise(r => setTimeout(r, 5));
+            return {ok: true, json: async () => ({ok: true, count: 12})};
+          }
+          return savedFetch(url, options);
+        };
+        try {
+          w.eval("ocDrafts.export = ocBlankExportDraft(); ocDrafts.export.mode = 'filter';"
+            + " ocDrafts.export.age = '1h'; ocDrafts.export.provider = 'prov-a';"
+            + " ocScheduleExportCount();");
+          check('an age filter still lands its count after a round trip',
+            await settleUntil(() => text('#oc-export-receipt') === '12 records · JSON, gzip', 3000) &&
+            !d.getElementById('oc-export-download').disabled &&
+            !!seen && seen.before_ms > 0 && seen.after_ms === 0);
+          // The download must reuse the epoch the count measured, not the
+          // current clock: otherwise the file describes a slightly later
+          // window than the receipt the operator just read.
+          const epoch = w.eval('ocDrafts.export.epoch');
+          const urls = [];
+          const savedDownload = w.triggerDownload;
+          w.triggerDownload = href => { urls.push(href); };
+          try {
+            w.eval('ocDownloadExport()');
+          } finally {
+            w.triggerDownload = savedDownload;
+          }
+          const last = urls[urls.length - 1] || '';
+          check('the download reuses the count\'s epoch instead of the current clock',
+            epoch > 0 && last.includes('before_ms=' + (epoch - 3600000)) &&
+            !last.includes('after_ms='));
+        } finally {
+          w.fetch = savedFetch;
+        }
+      }
+
       check('a typed status filter narrows the numeric vocabulary',
         JSON.stringify(qa('#oc-pane [data-oc-filter-value="status"]')
           .map(row => row.dataset.ocValue)) === JSON.stringify(['', '499']));
