@@ -94,8 +94,7 @@ function ocLimitComposerHTML(draft) {
   const scheduleOn = !!draft.schedule;
   const schedule = draft.schedule || { days: [], start: 540, end: 1020 };
   return `<section class="oc-compose" data-kind="limit" aria-label="${editing ? 'edit limit' : 'new limit'}">` +
-    `<div class="oc-compose-hd"><span>${editing ? 'edit limit' : 'new limit'}</span>` +
-    `<button type="button" class="oc-link" data-oc-cancel>cancel</button></div>` +
+    `<div class="oc-compose-hd"><span>${editing ? 'editing limit' : 'new limit'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">applies to</div>${conds}` +
     (global ? `<p class="oc-note">No condition selected, so this limit applies to every request that crosses the proxy.</p>` : '') +
     `</div>` +
@@ -190,7 +189,9 @@ function ocRenderLimits() {
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><div><h2 class="oc-h2">limits</h2>` +
     `<p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p></div>` +
-    `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button></div>` +
+    (composing
+      ? `<button type="button" class="btn" data-oc-new="limit">start over</button>`
+      : `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button>`) + `</div>` +
     (composing ? ocLimitComposerHTML(ocDrafts.limit) : '') +
     (rows || empty) +
     `</div>`;

@@ -40,7 +40,7 @@ function ocPauseComposerHTML(draft) {
   const named = draft.mode === 'named';
   const scope = { providers: draft.providers, models: [], clients: draft.clients, keyHashes: [], conversations: [] };
   return `<section class="oc-compose" data-kind="pause">` +
-    `<div class="oc-compose-hd"><span>${editing ? 'edit hold' : 'new hold'}</span><button type="button" class="oc-link" data-oc-cancel>cancel</button></div>` +
+    `<div class="oc-compose-hd"><span>${editing ? 'editing hold' : 'new hold'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">scope</div>` +
     ocChipRow('pause-mode', ['named', 'new', 'all'], draft.mode, v =>
       v === 'all' ? 'everything' : v === 'new' ? 'new clients' : 'named clients and providers') +
@@ -107,7 +107,9 @@ function ocRenderPause() {
     `<div class="oc-sec-head"><div><h2 class="oc-h2">pause</h2>` +
     `<p class="oc-sub">Park new matching requests without cancelling work that is already running.</p></div>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
-    `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button></div></div>` +
+    (composing
+      ? `<button type="button" class="btn" data-oc-new="pause">start over</button>`
+      : `<button type="button" class="btn btn-accent" data-oc-new="pause">new hold</button>`) + `</div></div>` +
     (composing ? ocPauseComposerHTML(ocDrafts.pause) : '') + (rows || empty) + `</div>`;
 }
 
@@ -225,7 +227,7 @@ function ocCaptureComposerHTML(draft) {
   const editing = !!draft.id;
   const blocked = debugStorageDisabled();
   return `<section class="oc-compose" data-kind="capture">` +
-    `<div class="oc-compose-hd"><span>${editing ? 'edit capture' : 'new capture'}</span><button type="button" class="oc-link" data-oc-cancel>cancel</button></div>` +
+    `<div class="oc-compose-hd"><span>${editing ? 'editing capture' : 'new capture'}</span></div>` +
     `<div class="oc-group"><div class="oc-label">capture</div>` +
     ocScopeConditionsHTML({ scope: { providers: draft.providers, models: draft.models, clients: draft.clients, keyHashes: [], conversations: [] }, picker: draft.picker }, ['clients', 'providers', 'models']) +
     `<p class="oc-note">Pick at least one client, provider or model. Captures can contain credentials and private content; keep the window short and download only what you need.</p></div>` +
@@ -295,7 +297,9 @@ function ocRenderCapture() {
     `<div class="oc-sec-head"><div><h2 class="oc-h2">capture</h2>` +
     `<p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p></div>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
-    `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button></div></div>` +
+    (composing
+      ? `<button type="button" class="btn" data-oc-new="capture">start over</button>`
+      : `<button type="button" class="btn btn-accent" data-oc-new="capture">new capture</button>`) + `</div></div>` +
     (composing ? ocCaptureComposerHTML(ocDrafts.capture) : '') + (rows || empty) + `</div>`;
 }
 
