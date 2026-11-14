@@ -496,6 +496,53 @@ func (t *throttleRuntime) signal() {
 	}
 }
 
+// persistThrottleSnapshot writes the policy generation it observed, exactly
+// once, and never chases a newer one.
+//
+// This is the background writer's owner. The converging loop below is for
+// callers that need a barrier - an operator edit that must be durable before it
+// returns, or a restart handoff that must flush before the child opens the
+// database. A background writer has no such caller: chasing a moving generation
+// means one whole-document write per change that lands during a write, so under
+// sustained header traffic it wrote as fast as traffic arrived and, because it
+// ran on context.Background(), had no bound at all. A newer change now leaves
+// the generation dirty and its own wake signal drives the next write, so one
+// wake produces at most one document.
+func (s *Server) persistThrottleSnapshot(ctx context.Context) error {
+	s.throttle.persistMu.RLock()
+	defer s.throttle.persistMu.RUnlock()
+	t := &s.throttle
+	t.mu.Lock()
+	gen := t.persistGen
+	if gen == t.persistedGen {
+		t.mu.Unlock()
+		return nil
+	}
+	target := t.persist
+	t.mu.Unlock()
+	if target == nil {
+		// Memory-only policy: leave the generation dirty so a later attach can
+		// persist it, and report success to callers.
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	snap := s.latestThrottleSnap()
+	if err := s.writeThrottleSnap(ctx, target, snap); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	// Only claim the generation this write actually captured. A change that
+	// landed mid-write keeps the generation dirty and is picked up by the wake
+	// it raised.
+	if t.persistGen == gen {
+		t.persistedGen = gen
+	}
+	t.mu.Unlock()
+	return nil
+}
+
 // persistThrottleLatest writes the newest policy generation. Concurrent
 // loops may overlap; the generation check after each write means a stale
 // snapshot is always followed by the latest policy before that loop returns.
@@ -553,10 +600,18 @@ func (s *Server) persistThrottleLatestLocked(ctx context.Context) error {
 }
 
 // runThrottlePersister is the single background writer. It waits for a dirty
-// signal, coalesces a burst for the debounce window, then persists until the
-// latest generation is durable. A failed write is retried with exponential
-// backoff; the dirty generation is never cleared by a failure. The stop
-// channel is the only exit path, so Close can join it without a busy loop.
+// signal, coalesces a burst for the debounce window, then writes the policy
+// generation it then observes - one document per wake. A failed write is
+// retried with exponential backoff; the dirty generation is never cleared by a
+// failure. The stop channel is the only exit path, so Close can join it
+// without a busy loop.
+//
+// It writes through persistThrottleSnapshot, not persistThrottleLatest: the
+// converging loop belongs to callers that need a barrier (an operator edit, a
+// restart handoff), while a background writer that chased a moving generation
+// wrote one whole document per change arriving mid-write and had no bound. A
+// change that lands during a write raises its own wake, so the next pass picks
+// it up and a quiet policy still ends durable.
 func (s *Server) runThrottlePersister() {
 	t := &s.throttle
 	defer close(t.done)
@@ -571,7 +626,7 @@ func (s *Server) runThrottlePersister() {
 		}
 		backoff := t.retryMin
 		for {
-			err := s.persistThrottleLatest(context.Background())
+			err := s.persistThrottleSnapshot(context.Background())
 			if err == nil {
 				break
 			}
