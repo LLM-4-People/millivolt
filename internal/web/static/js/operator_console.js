@@ -758,6 +758,15 @@ function ocOperatorError(message) {
   if (ocMounted) ocRender();
 }
 
+// ocRuleGone is the one answer to a control whose rule disappeared between
+// paint and click. A poll can drop a hold, a capture or a limit while its row
+// is still on screen, and the lookup then returned early: the click produced
+// no banner, no toast and no repaint, so it read as a control that does not
+// work.
+function ocRuleGone(noun) {
+  ocOperatorError('that ' + noun + ' is no longer in force');
+}
+
 function ocOperatorErrorClear() {
   if (!ocError) return;
   ocError = '';

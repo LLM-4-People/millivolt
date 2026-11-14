@@ -97,7 +97,7 @@ function ocLimitBySelector(scope, schedule) {
 function ocOpenLimitComposer(id, copy) {
   if (copy) {
     const source = ocLimitById(id);
-    if (!source) return;
+    if (!source) { ocRuleGone('limit'); return; }
     ocDrafts.limit = ocLimitDraftCopy(source);
     ocView = { kind: 'limit', id: '' };
     ocSection = 'limits';
@@ -106,7 +106,7 @@ function ocOpenLimitComposer(id, copy) {
   }
   if (id) {
     const policy = ocLimitById(id);
-    if (!policy) return;
+    if (!policy) { ocRuleGone('limit'); return; }
     ocDrafts.limit = ocLimitDraftFromPolicy(policy);
     ocView = { kind: 'limit', id };
   } else {
@@ -445,7 +445,7 @@ function ocLimitPolicyBody(policy) {
 
 async function ocRemoveLimit(id) {
   const policy = ocLimitById(id);
-  if (!policy) return;
+  if (!policy) { ocRuleGone('limit'); return; }
   const scope = ocScopePhrase({
     providers: policy.scope?.providers, models: policy.scope?.models,
     clients: policy.scope?.clients, keyHashes: policy.scope?.key_hashes,

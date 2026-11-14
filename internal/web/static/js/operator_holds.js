@@ -42,7 +42,7 @@ function ocCaptureDraftCopy(session) {
 function ocOpenPauseComposer(id, copy) {
   if (copy) {
     const source = liveHolds().find(h => h.id === id);
-    if (!source) return;
+    if (!source) { ocRuleGone('hold'); return; }
     ocDrafts.pause = ocPauseDraftCopy(source);
     ocView = { kind: 'pause', id: '' };
     ocSection = 'pause';
@@ -51,7 +51,7 @@ function ocOpenPauseComposer(id, copy) {
   }
   if (id) {
     const hold = liveHolds().find(h => h.id === id);
-    if (!hold) return;
+    if (!hold) { ocRuleGone('hold'); return; }
     ocDrafts.pause = ocPauseDraftFromHold(hold);
     ocView = { kind: 'pause', id };
   } else {
@@ -237,7 +237,7 @@ function ocApplyPause() {
 
 async function ocResumeHold(id) {
   const hold = liveHolds().find(h => h.id === id);
-  if (!hold) return;
+  if (!hold) { ocRuleGone('hold'); return; }
   const scope = hold.all ? 'all traffic'
     : hold.new ? 'new clients' : ocScopePhrase({ providers: hold.providers, clients: hold.clients });
   // Resuming a hold with parked work releases that backlog to the provider in
@@ -303,7 +303,7 @@ function ocCaptureDraftFromSession(session) {
 function ocOpenCaptureComposer(id, copy) {
   if (copy) {
     const source = liveDebugSessions().find(s => s.id === id);
-    if (!source) return;
+    if (!source) { ocRuleGone('capture'); return; }
     ocDrafts.capture = ocCaptureDraftCopy(source);
     ocView = { kind: 'capture', id: '' };
     ocSection = 'capture';
@@ -312,7 +312,7 @@ function ocOpenCaptureComposer(id, copy) {
   }
   if (id) {
     const session = liveDebugSessions().find(s => s.id === id);
-    if (!session) return;
+    if (!session) { ocRuleGone('capture'); return; }
     ocDrafts.capture = ocCaptureDraftFromSession(session);
     ocView = { kind: 'capture', id };
   } else {
@@ -472,7 +472,7 @@ function ocApplyCapture() {
 
 async function ocStopSession(id) {
   const session = liveDebugSessions().find(s => s.id === id);
-  if (!session) return;
+  if (!session) { ocRuleGone('capture'); return; }
   const scope = ocScopePhrase({ providers: session.providers, models: session.models, clients: session.clients });
   const phrase = 'stopped capture on ' + scope;
   mutateOperator('debug', { enabled: false, id }, () => {

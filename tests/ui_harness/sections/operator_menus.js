@@ -1743,6 +1743,31 @@ module.exports = async function operatorMenus(H) {
       w.closeOperatorConsole();
     }
 
+    // ---- a control whose rule vanished must answer the click ----
+    {
+      // A poll can drop a rule while its row is still painted. The lookup then
+      // returned early, so the click gave no banner, no toast and no repaint:
+      // it read as a control that does not work.
+      const policy = {
+        id: 'pol-gone', scope: {providers: ['prov-a']}, schedule: null,
+        concurrency: 2, requests: 0, request_window: '', tokens: 0, token_window: '',
+        anti_burst: false, ramp_duration: '', source: 'ui', in_flight: 0, queued: 0,
+      };
+      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [policy]});
+      w.openOperatorConsole('limits');
+      w.eval('ocOperatorErrorClear()');
+      const stale = q('#oc-pane [data-oc-remove="limit"][data-oc-id="pol-gone"]');
+      // Drop the rule without a render, exactly as a poll landing between the
+      // paint and the click would.
+      w.eval('throttleState.throttles = [];');
+      stale.click();
+      check('a click on a rule that is gone says so instead of doing nothing',
+        await settleUntil(() => !!q('#oc-pane .oc-banner[role="alert"]')) &&
+        text('#oc-pane .oc-banner[role="alert"] span') === 'that limit is no longer in force');
+      w.eval('ocOperatorErrorClear()');
+      w.closeOperatorConsole();
+    }
+
     // ---- 14. live repaints keep the operator's place ----
     {
       const policy = {
