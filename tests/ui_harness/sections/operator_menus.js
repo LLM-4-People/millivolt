@@ -1135,10 +1135,14 @@ module.exports = async function operatorMenus(H) {
             id: 'sess-created', clients: body.clients, providers: body.providers,
             models: body.models, duration: body.duration,
           }];
-          return {ok: true, json: async () => debugDoc({ok: true,
+          const doc = debugDoc({ok: true,
             enabled: sessions.length > 0, sessions,
             known_clients: ['client-a'], known_providers: ['prov-a'], known_models: ['model-a'],
-            ttl: '24h', max_bytes: '1MiB'})};
+            ttl: '24h', max_bytes: '1MiB'});
+          // The debug route returns created_id on a create, exactly so the
+          // client never has to infer which session its write installed.
+          if (body.enabled !== false && !body.id) doc.created_id = 'sess-created';
+          return {ok: true, json: async () => doc};
         }
         return savedFetch(url, options);
       };
@@ -1152,12 +1156,35 @@ module.exports = async function operatorMenus(H) {
         check('the capture start is recorded',
           await settleUntil(() => text('#oc-change').startsWith('capturing ')) &&
           text('#oc-change') === 'capturing model model-a · client client-a');
+        // The undo closes the session this write installed. It used to infer
+        // that session from a before/after set difference, which picks the
+        // wrong one when another operator starts a capture at the same time.
+        // The route returns created_id for exactly this, so the undo must
+        // follow it rather than the list order.
+        {
+          const undoWorks = await (async () => {
+            const before = posts.length;
+            click('#oc-undo');
+            const settled = await settleUntil(() => posts.length > before, 2000);
+            const last = posts[posts.length - 1];
+            return settled && last.enabled === false && last.id === 'sess-created';
+          })();
+          check('the capture undo closes the session the reply named', undoWorks);
+        }
 
+        // The undo above closed the session, so restore the fixture before the
+        // stop path is exercised. The undo closure has already been consumed,
+        // which is the behaviour under test.
         await settleUntil(() => w.eval('operatorState.debug.busy') === false);
+        w.applyDebugState(debugDoc({ok: true, enabled: true,
+          sessions: [{id: 'sess-created', clients: ['client-a'], models: ['model-a']}],
+          known_clients: ['client-a'], known_providers: ['prov-a'], known_models: ['model-a'],
+          ttl: '24h', max_bytes: '1MiB'}));
+        const beforeStop = posts.length;
         click('#oc-pane [data-oc-stop="sess-created"]');
         check('stopping one capture posts only its id',
-          await settleUntil(() => posts.length === 2) &&
-          stable(posts[1]) === stable({enabled: false, id: 'sess-created'}));
+          await settleUntil(() => posts.length === beforeStop + 1) &&
+          stable(posts[beforeStop]) === stable({enabled: false, id: 'sess-created'}));
         check('the capture stop is recorded',
           await settleUntil(() => text('#oc-change').startsWith('stopped capture on ')) &&
           text('#oc-change') === 'stopped capture on model model-a · client client-a');
@@ -1172,7 +1199,7 @@ module.exports = async function operatorMenus(H) {
         check('stopping every capture asks for confirmation first',
           text('#oc-confirm-title') === 'Stop every capture?' &&
           d.querySelector('.oc-confirm-body').textContent.includes('2 sessions are') &&
-          posts.length === 2);
+          posts.length === beforeStop + 1);
         click('#oc-confirm-dialog [data-oc-confirm="cancel"]');
         check('cancelling stop-all leaves both sessions', w.eval('debugState.sessions.length') === 2);
       } finally {

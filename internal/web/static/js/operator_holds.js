@@ -451,11 +451,14 @@ function ocApplyCapture() {
     keyHashes: [], conversations: [],
   });
   const phrase = (draft.id ? 'updated capture on ' : 'capturing ') + scope;
-  // Same set-difference identity as the hold path: an edit keeps its id, a
-  // create is whatever id did not exist before this write.
-  const beforeIds = new Set(liveDebugSessions().map(s => s.id));
-  mutateOperator('debug', body, () => {
-    const created = liveDebugSessions().find(s => !beforeIds.has(s.id)) || null;
+  mutateOperator('debug', body, st => {
+    // The debug route returns created_id for a create, so the session this
+    // write installed is known exactly. Inferring it from a before/after set
+    // difference picked whichever session appeared first, which is another
+    // operator's session when two starts land together, and then the undo
+    // closed the wrong capture.
+    const createdId = st && st.created_id ? String(st.created_id) : '';
+    const created = createdId ? (liveDebugSessions().find(s => s.id === createdId) || null) : null;
     const undo = created
       ? () => mutateOperator('debug', { enabled: false, id: created.id })
       : previous ? () => mutateOperator('debug', ocCaptureBody(ocCaptureDraftFromSession(previous))) : null;

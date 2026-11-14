@@ -290,7 +290,12 @@ async function mutateOperator(kind, body, after) {
       // The gate's revision was advanced above and again before this call, so
       // the defaulted revision is the one acceptOperator expects.
       gate.apply(confirmed);
-      if (after) after();
+      // The confirmed document is the server's own answer for this write. A
+      // callback that needs the identity the write created reads it from
+      // here (the capture route returns created_id) instead of inferring it
+      // from a before/after list difference, which picks the wrong object
+      // when someone else creates one at the same time.
+      if (after) after(confirmed);
       if (confirmed.warning) {
         // Persistence warnings are non-fatal: the runtime state is confirmed,
         // so the console names the warning in place and stays exactly where
