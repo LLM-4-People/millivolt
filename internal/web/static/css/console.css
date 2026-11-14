@@ -85,6 +85,18 @@
 }
 .op-readout-btn[data-state="busy"]:hover .op-readout-state { color: var(--warn); }
 .op-readout-btn[data-state="busy"] .op-readout-chev { color: var(--warn); }
+/* An offline stream is not a quiet state: the words are the last known truth,
+   so the line says so and the dot hollows out instead of glowing. */
+#op-readout[data-state="stale"] .op-readout-state { color: var(--muted); }
+#op-readout[data-state="stale"] .op-readout-dot {
+  border-color: var(--muted); background: transparent;
+  box-shadow: none; animation: none;
+}
+.op-readout-btn[data-state="stale"] {
+  border-color: var(--border2);
+  background: var(--panel2);
+}
+.op-readout-btn[data-state="stale"] .op-readout-chev { color: var(--muted); }
 .op-readout-btn[aria-expanded="true"] .op-readout-chev { transform: rotate(180deg); }
 
 /* ---------- console frame ----------

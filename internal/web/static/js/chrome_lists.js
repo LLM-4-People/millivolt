@@ -129,7 +129,11 @@ function debugStatusBits() {
 // scan), and "offline" when the live stream drops.
 function setFooterLive(live) {
   streamLive = !!live;
+  if (streamLive) streamSeen = true;
   refreshFooterState();
+  // Connectivity is one fact, and the header readout reports it too. Repaint
+  // both from this owner so neither can lag the other.
+  if (typeof refreshOperatorReadout === 'function') refreshOperatorReadout();
 }
 
 function refreshFooterState() {

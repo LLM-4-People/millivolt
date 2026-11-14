@@ -99,21 +99,29 @@ function ocReadoutSegments() {
 function refreshOperatorReadout() {
   const box = ocEl('op-readout');
   if (!box) return;
+  // ocSyncTriggerName at the end reads the painted words, so the label always
+  // matches what is on screen.
   const segs = ocReadoutSegments();
   // A hold is the one state that stops live traffic, so it outranks a routine
-  // cap in the readout's own tone. Restart outranks both.
-  const state = ocRestartActive() ? 'busy'
-    : ocRuleCounts().holds > 0 ? 'paused'
-      : segs.length ? 'active' : 'steady';
+  // cap in the readout's own tone. Restart outranks both. An offline stream
+  // outranks everything: a stale line must not claim "steady".
+  // Only a connection that was open and then dropped makes the line stale;
+  // a page that has not connected yet is still loading, not wrong.
+  const offline = typeof streamSeen !== 'undefined' && streamSeen && !streamLive;
+  const state = offline ? 'stale'
+    : ocRestartActive() ? 'busy'
+      : ocRuleCounts().holds > 0 ? 'paused'
+        : segs.length ? 'active' : 'steady';
   box.dataset.state = state;
-  const text = segs.length ? segs.join(' · ') : 'steady';
+  // The words stay the last known truth and say they are not current, so the
+  // counts are never silently presented as a live reading.
+  const words = segs.length ? segs.join(' · ') : 'steady';
+  const text = offline ? words + ' · offline' : words;
   const label = ocEl('op-readout-state');
   if (label && label.textContent !== text) label.textContent = text;
   const trigger = ocEl('btn-controls');
-  if (trigger) {
-    trigger.dataset.state = state;
-    trigger.setAttribute('aria-label', 'operator state: ' + text + '. Open the operator console.');
-  }
+  if (trigger) trigger.dataset.state = state;
+  ocSyncTriggerName();
   box.setAttribute('aria-label', 'operator state: ' + text + '.');
   const dot = ocEl('op-readout-dot');
   if (dot) dot.setAttribute('title', text);
@@ -122,6 +130,18 @@ function refreshOperatorReadout() {
 // ---------- console lifecycle ----------
 function ocShell() {
   return ocEl('operator-console');
+}
+
+// ocSyncTriggerName repaints the readout's accessible name after the console
+// opens or closes, because the name states the action the trigger performs
+// now. menu.js owns aria-expanded; this only follows it.
+function ocSyncTriggerName() {
+  const trigger = ocEl('btn-controls');
+  if (!trigger) return;
+  const text = (ocEl('op-readout-state')?.textContent || 'steady').trim();
+  const open = trigger.getAttribute('aria-expanded') === 'true';
+  trigger.setAttribute('aria-label', 'operator state: ' + text + '. '
+    + (open ? 'Close the operator console.' : 'Open the operator console.'));
 }
 
 function openOperatorConsole(section, view) {
@@ -146,7 +166,7 @@ function openOperatorConsole(section, view) {
       // Escape and an outside press close through menu.js; this keeps the
       // console's mounted state truthful so nothing repaints into a hidden
       // panel after the operator dismisses it.
-      onClose: () => { ocMounted = false; },
+      onClose: () => { ocMounted = false; ocSyncTriggerName(); },
     });
   }
   refreshOperatorReadout();
@@ -158,6 +178,7 @@ function closeOperatorConsole(restoreFocus = false) {
   const wasOpen = menuIsOpen(shell);
   if (wasOpen) menuClose(shell);
   ocMounted = false;
+  ocSyncTriggerName();
   const trigger = ocEl('btn-controls');
   if (restoreFocus && trigger) trigger.focus();
 }
@@ -739,6 +760,7 @@ function ocSyncRestartVerdict() {
 window.addEventListener('resize', () => {
   if (ocMounted) { ocSyncRailOrientation(); ocSyncRailOverflow(); }
 });
+
 
 // The strip's own scroll changes whether more sections remain.
 document.addEventListener('scroll', event => {
