@@ -992,8 +992,12 @@ async function ocHandleAction(target) {
     return;
   }
   if (target.hasAttribute('data-oc-settings')) {
+    // A warning that names one setting carries the category, so the sheet
+    // opens on the pane that holds it instead of its first pane.
+    const category = target.dataset.ocSettings || '';
     closeOperatorConsole();
-    toggleSettings();
+    if (category && typeof openSettingsAt === 'function') openSettingsAt(category);
+    else toggleSettings();
     return;
   }
   if (target.hasAttribute('data-oc-drain')) { ocDrainQueue(); return; }

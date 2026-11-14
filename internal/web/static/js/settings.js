@@ -290,6 +290,8 @@ function fillSettingsForm(doc) {
   settingsCacheSnapshots(collectSettingsValues());
   settingsKeyEls = settingsKeyElementMap(box);
   showSettingsCat();
+  // A surface that asked for a category lands on it now that the rail exists.
+  if (typeof settingsApplyCatRequest === 'function') settingsApplyCatRequest();
   updateSettingsActions();
 }
 

@@ -125,6 +125,32 @@ function cancelSettingsOpen() {
   return true;
 }
 
+// settingsCatRequest is the one-shot category the next Settings open lands
+// on. A console warning names one setting; without this the operator reaches
+// the sheet's first pane and has to find the field again.
+let settingsCatRequest = '';
+
+function settingsApplyCatRequest() {
+  const cat = settingsCatRequest;
+  if (!cat) return false;
+  const rail = $('settings-rail');
+  const btn = rail && [...rail.querySelectorAll('.st-rail-item[data-st-cat]')]
+    .find(b => b.dataset.stCat === cat);
+  if (!btn) return false;
+  settingsCatRequest = '';
+  btn.click();
+  return true;
+}
+
+// openSettingsAt is the one entry point for "open Settings showing this
+// category". It sets the request, then opens through the real owner; the
+// fill path applies the request once the rail exists.
+function openSettingsAt(category) {
+  settingsCatRequest = category || '';
+  if (settingsIsOpen()) { settingsApplyCatRequest(); return; }
+  toggleSettings();
+}
+
 // toggleSettings loads the module once, then opens the sheet through its
 // owner. A load failure leaves the sheet closed and surfaces the shared
 // status copy plus a console error.

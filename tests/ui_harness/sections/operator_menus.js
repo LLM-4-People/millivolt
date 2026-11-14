@@ -241,6 +241,41 @@ module.exports = async function operatorMenus(H) {
       // a surface left under an inert modal would be visible but unusable.
       w.toggleSettings();
       await settleUntil(() => !d.getElementById('settings-sheet').hidden, 4000);
+      // A console warning that names one setting needs a route to the pane
+      // that holds it. The fixture's config document carries one category, so
+      // this drives the contract on a two-category document: the request lands
+      // on the named pane instead of the sheet's first one.
+      {
+        const savedDoc = w.eval('JSON.stringify(settingsDoc)');
+        const savedCat = w.eval('settingsCat');
+        w.eval(`settingsDoc = {
+          revision: 'cat-jump', writable: true,
+          fields: [
+            {key: 'cat_a_one', category: 'server', label: 'A', help: '', kind: 'string'},
+            {key: 'cat_a_two', category: 'server', label: 'B', help: '', kind: 'string'},
+            {key: 'cat_b_one', category: 'storage', label: 'C', help: '', kind: 'string'},
+            {key: 'cat_b_two', category: 'storage', label: 'D', help: '', kind: 'string'}
+          ],
+          categories: [{id: 'server', label: 'Server', help: 's'},
+            {id: 'storage', label: 'Storage', help: 't'}],
+          values: {}, defaults: {}, overrides: {}, effective: {}, usage_fields: []
+        };
+        settingsCat = 'server';
+        fillSettingsForm(settingsDoc);`);
+        const storageTab = q('#settings-rail [data-st-cat="storage"]');
+        const serverTab = q('#settings-rail [data-st-cat="server"]');
+        check('a two-category sheet starts on its first category',
+          !!storageTab && !!serverTab &&
+          serverTab.classList.contains('active') && !storageTab.classList.contains('active'));
+        w.eval("openSettingsAt('storage')");
+        check('a category request lands Settings on that category',
+          storageTab.classList.contains('active') &&
+          storageTab.getAttribute('aria-current') === 'page' &&
+          w.eval('settingsCat') === 'storage' &&
+          !serverTab.classList.contains('active'));
+        w.eval('settingsDoc = ' + savedDoc + '; settingsCat = ' + JSON.stringify(savedCat)
+          + '; fillSettingsForm(settingsDoc)');
+      }
       w.openOperatorConsole('overview');
       check('opening the console closes an open settings sheet first',
         d.getElementById('settings-sheet').hidden && !shell.hidden &&
@@ -896,6 +931,13 @@ module.exports = async function operatorMenus(H) {
       check('disabled durable storage warns and blocks the start action',
         text('#oc-pane .oc-warning').startsWith('Durable storage is off') &&
         d.getElementById('oc-capture-apply').disabled);
+      // The warning names db_path, and db_path lives in one Settings pane. A
+      // sentence that names a field with no control to reach it leaves the
+      // operator to hunt the sheet for it. The link carries the category; the
+      // settings section pins that the request lands there.
+      check('the storage warning carries a control that opens the pane holding db_path',
+        q('#oc-pane .oc-warning [data-oc-settings]')?.dataset.ocSettings === 'server' &&
+        text('#oc-pane .oc-warning [data-oc-settings]') === 'open server settings');
       w.eval('storageState = {...storageState, enabled: true}');
       w.operatorConsoleSync('debug');
       check('re-enabling storage clears the warning and allows the start action',

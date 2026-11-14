@@ -293,7 +293,8 @@ function ocCaptureComposerHTML(draft) {
     ocChipRow('capture-duration', [''].concat(PAUSE_DURS.slice(1).map(([v]) => v)), draft.duration, v => v ? ocDurationText(v) : 'i stop') +
     `</div>` +
     `<p class="oc-facts">${escapeHtml(ocCaptureFacts())}</p>` +
-    (blocked ? `<p class="oc-warning" role="alert">Durable storage is off, so captures cannot start. Set db_path and restart.</p>` : '') +
+    (blocked ? `<p class="oc-warning" role="alert">Durable storage is off, so captures cannot start. Set db_path in Settings, then restart to apply it.` +
+      `<button type="button" class="oc-link" data-oc-settings="server">open server settings</button></p>` : '') +
     `<p class="oc-preview" id="oc-capture-preview" data-oc-key="capture-preview"></p>` +
     (draft.error ? `<p class="oc-error" role="alert">${escapeHtml(draft.error)}</p>` : '') +
     `<div class="oc-compose-ft"><button type="button" class="btn" data-oc-cancel>cancel</button>` +
