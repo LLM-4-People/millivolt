@@ -132,7 +132,11 @@ function ocRenderPause() {
     const html = `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}"${ocRuleEditing('pause', hold.id || '')}>` +
       `<button type="button" class="oc-rule-main" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}" data-oc-key="rule-${escapeHtml(hold.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
-      `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue', ...meta].join(' · '))}</span></button>` +
+      // A stored 0 is the server's "no cap on this hold", not "use the
+      // default": an omitted cap is written as the configured queue size at
+      // creation, so 0 only ever reaches here because the operator chose
+      // unlimited. Calling that "default queue" named the opposite bound.
+      `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'queue unlimited', ...meta].join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(ocUntilPhrase(hold.until) || 'open')}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
       `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
