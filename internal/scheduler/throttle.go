@@ -133,6 +133,9 @@ type gateLease struct {
 // window parks the policy without changing its counters: the request window
 // prunes stale admits and the token bucket refills, so the next open window
 // starts from observed traffic rather than an invented reset.
+//
+// The caller must hold the gate lock. An edit replaces throttle wholesale under
+// that lock, so an unlocked read here races every policy update.
 func (p *policyGate) active(now time.Time) bool {
 	return p.throttle.Schedule.Active(now)
 }
@@ -656,9 +659,9 @@ func (s *Scheduler) policyQueued() map[string]int {
 	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		count := func(provider, model, client, keyHash, conversation string) {
-			snap.each(provider, func(gate *policyGate) {
-				if gate.throttle.Scope.Matches(provider, model, client, keyHash, conversation) {
-					out[gate.throttle.ID]++
+			snap.each(provider, func(entry *policyEntry) {
+				if entry.matches(provider, model, client, keyHash, conversation) {
+					out[entry.id]++
 				}
 			})
 		}
@@ -668,8 +671,8 @@ func (s *Scheduler) policyQueued() map[string]int {
 		if g.provider != "" && g.sendWaiters > 0 {
 			// Send-gate waiters are not enumerated here; attribute the count to
 			// every policy that can select the group's provider.
-			snap.each(g.provider, func(gate *policyGate) {
-				out[gate.throttle.ID] += g.sendWaiters
+			snap.each(g.provider, func(entry *policyEntry) {
+				out[entry.id] += g.sendWaiters
 			})
 		}
 		g.mu.Unlock()
@@ -757,25 +760,56 @@ func (s *Scheduler) newPolicyGate(t Throttle) *policyGate {
 // policyIndex is the immutable read view of the policy map: a list for
 // provider-independent policies and one list per named provider. Matching a
 // request is a map lookup plus a short scan, never a scan of every policy.
+//
+// Each entry carries the selector and schedule it was published with. Those
+// two are immutable between publications, while the gate's throttle document
+// is replaced under its own lock on every edit, so a reader that tested
+// g.throttle.Scope here would race every policy update.
 type policyIndex struct {
-	all        []*policyGate
-	byProvider map[string][]*policyGate
+	all        []*policyEntry
+	byProvider map[string][]*policyEntry
 }
 
-// policyMatch is the allocation-free form of selector matching: it calls fn
-// for every policy that can select provider.
-func (idx *policyIndex) each(provider string, fn func(*policyGate)) {
+// policyEntry is one published policy: the gate plus the selector and
+// schedule that decide whether it applies. Published entries are never
+// mutated; an edit builds a new index.
+type policyEntry struct {
+	gate     *policyGate
+	id       string
+	scope    LimitScope
+	schedule LimitSchedule
+}
+
+// matches reports whether this published selector covers a request. It reads
+// only immutable snapshot fields.
+func (e *policyEntry) matches(provider, model, client, keyHash, conversation string) bool {
+	return e.scope.Matches(provider, model, client, keyHash, conversation)
+}
+
+// providerOnly reports whether the policy names only providers, with no other
+// constraint and no schedule. It reads only immutable snapshot fields.
+func (e *policyEntry) providerOnly() bool {
+	return e.scope.ProviderOnly() && e.schedule.Empty()
+}
+
+// activeFor reports whether the published schedule is open at now.
+func (e *policyEntry) activeFor(now time.Time) bool {
+	return e.schedule.Active(now)
+}
+
+// each calls fn for every policy that can select provider.
+func (idx *policyIndex) each(provider string, fn func(*policyEntry)) {
 	if idx == nil {
 		return
 	}
-	for _, gate := range idx.all {
-		fn(gate)
+	for _, entry := range idx.all {
+		fn(entry)
 	}
 	if provider == "" {
 		return
 	}
-	for _, gate := range idx.byProvider[provider] {
-		fn(gate)
+	for _, entry := range idx.byProvider[provider] {
+		fn(entry)
 	}
 }
 
@@ -783,7 +817,7 @@ func (idx *policyIndex) each(provider string, fn func(*policyGate)) {
 // throttleMu; readers only load the pointer, so a hot-path admission never
 // waits for a policy writer.
 func (s *Scheduler) publishPolicyLocked() {
-	idx := &policyIndex{byProvider: make(map[string][]*policyGate)}
+	idx := &policyIndex{byProvider: make(map[string][]*policyEntry)}
 	ids := make([]string, 0, len(s.gates))
 	for id := range s.gates {
 		ids = append(ids, id)
@@ -791,12 +825,16 @@ func (s *Scheduler) publishPolicyLocked() {
 	sort.Strings(ids)
 	for _, id := range ids {
 		g := s.gates[id]
-		if len(g.throttle.Scope.Providers) == 0 {
-			idx.all = append(idx.all, g)
+		entry := &policyEntry{
+			gate: g, id: g.throttle.ID,
+			scope: g.throttle.Scope, schedule: g.throttle.Schedule,
+		}
+		if len(entry.scope.Providers) == 0 {
+			idx.all = append(idx.all, entry)
 			continue
 		}
-		for _, provider := range g.throttle.Scope.Providers {
-			idx.byProvider[provider] = append(idx.byProvider[provider], g)
+		for _, provider := range entry.scope.Providers {
+			idx.byProvider[provider] = append(idx.byProvider[provider], entry)
 		}
 	}
 	s.policySnap.Store(idx)
@@ -813,17 +851,23 @@ func (s *Scheduler) tryAdmit(target policyTarget, est int64) (ok bool, lease adm
 	if idx == nil {
 		return true, admission{}, 0
 	}
-	var gates []*policyGate
-	idx.each(target.Provider, func(g *policyGate) {
-		if g.throttle.Scope.Matches(target.Provider, target.Model, target.Client, target.KeyHash, target.Conversation) {
-			gates = append(gates, g)
+	var entries []*policyEntry
+	idx.each(target.Provider, func(entry *policyEntry) {
+		if entry.matches(target.Provider, target.Model, target.Client, target.KeyHash, target.Conversation) {
+			entries = append(entries, entry)
 		}
 	})
-	if len(gates) == 0 {
+	if len(entries) == 0 {
 		return true, admission{}, 0
 	}
-	if len(gates) > 1 {
-		sort.Slice(gates, func(i, j int) bool { return gates[i].throttle.ID < gates[j].throttle.ID })
+	// Lock in published identity order. The ids come from the immutable
+	// snapshot, so the sort never reads a gate's mutable document.
+	if len(entries) > 1 {
+		sort.Slice(entries, func(i, j int) bool { return entries[i].id < entries[j].id })
+	}
+	gates := make([]*policyGate, 0, len(entries))
+	for _, entry := range entries {
+		gates = append(gates, entry.gate)
 	}
 	now := time.Now()
 	for _, g := range gates {
@@ -832,9 +876,9 @@ func (s *Scheduler) tryAdmit(target policyTarget, est int64) (ok bool, lease adm
 	// A policy outside its schedule is skipped entirely: it neither blocks nor
 	// charges, and its counters resume from real traffic when the window opens.
 	active := make([]*policyGate, 0, len(gates))
-	for _, g := range gates {
-		if g.active(now) && g.throttle.Limit.Active() {
-			active = append(active, g)
+	for _, entry := range entries {
+		if entry.activeFor(now) && entry.gate.throttle.Limit.Active() {
+			active = append(active, entry.gate)
 		}
 	}
 	if len(active) == 0 {
@@ -880,19 +924,18 @@ func (s *Scheduler) providerConcurrencyFull(provider string) bool {
 	if idx == nil {
 		return false
 	}
+	now := time.Now()
 	full := false
-	idx.each(provider, func(g *policyGate) {
-		if full || len(g.throttle.Scope.Models) > 0 || len(g.throttle.Scope.Clients) > 0 ||
-			len(g.throttle.Scope.KeyHashes) > 0 || len(g.throttle.Scope.Conversations) > 0 {
+	idx.each(provider, func(entry *policyEntry) {
+		if full || !entry.providerOnly() || !entry.activeFor(now) {
 			return
 		}
-		if !g.active(time.Now()) {
-			return
-		}
-		g.mu.Lock()
-		limit := g.throttle.Limit
-		full = limit.Concurrency > 0 && g.inFlight >= limit.Concurrency
-		g.mu.Unlock()
+		// Only occupancy and the cap belong to the gate; the selector and the
+		// schedule came from the immutable snapshot.
+		entry.gate.mu.Lock()
+		limit := entry.gate.throttle.Limit
+		full = limit.Concurrency > 0 && entry.gate.inFlight >= limit.Concurrency
+		entry.gate.mu.Unlock()
 	})
 	return full
 }
@@ -950,12 +993,12 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 		return
 	}
 	at := time.Now().Add(d)
-	idx.each(provider, func(g *policyGate) {
-		g.mu.Lock()
-		if g.throttle.Limit.Active() {
-			g.wake.arm(at, true)
+	idx.each(provider, func(entry *policyEntry) {
+		entry.gate.mu.Lock()
+		if entry.gate.throttle.Limit.Active() {
+			entry.gate.wake.arm(at, true)
 		}
-		g.mu.Unlock()
+		entry.gate.mu.Unlock()
 	})
 }
 
@@ -1122,13 +1165,13 @@ func (s *Scheduler) providerRamps(provider string) bool {
 		return false
 	}
 	ramped := false
-	idx.each(provider, func(g *policyGate) {
+	idx.each(provider, func(entry *policyEntry) {
 		if ramped {
 			return
 		}
-		g.mu.Lock()
-		ramped = g.throttle.Limit.rampActive()
-		g.mu.Unlock()
+		entry.gate.mu.Lock()
+		ramped = entry.gate.throttle.Limit.rampActive()
+		entry.gate.mu.Unlock()
 	})
 	return ramped
 }

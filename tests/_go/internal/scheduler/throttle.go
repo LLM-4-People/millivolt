@@ -1380,9 +1380,9 @@ func snapshotGate(s *Scheduler, provider string) *policyGate {
 	if idx == nil {
 		return nil
 	}
-	for _, g := range idx.byProvider[provider] {
-		if g.throttle.Scope.ProviderOnly() && g.throttle.Schedule.Empty() {
-			return g
+	for _, entry := range idx.byProvider[provider] {
+		if entry.providerOnly() {
+			return entry.gate
 		}
 	}
 	return nil

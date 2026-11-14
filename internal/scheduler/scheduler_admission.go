@@ -498,13 +498,15 @@ func (g *group) rampPolicy() (target int, duration time.Duration, enabled bool) 
 	if idx == nil {
 		return 0, 0, false
 	}
-	for _, gate := range idx.byProvider[g.provider] {
-		if !gate.throttle.Scope.ProviderOnly() || !gate.throttle.Schedule.Empty() {
+	for _, entry := range idx.byProvider[g.provider] {
+		// The selector and schedule are the published snapshot's, never the
+		// gate's mutable document.
+		if !entry.providerOnly() {
 			continue
 		}
-		gate.mu.Lock()
-		limit := gate.throttle.Limit
-		gate.mu.Unlock()
+		entry.gate.mu.Lock()
+		limit := entry.gate.throttle.Limit
+		entry.gate.mu.Unlock()
 		if !limit.rampActive() {
 			return 0, 0, false
 		}
