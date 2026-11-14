@@ -23,6 +23,7 @@ from .workflows_jobs import GATE_CHECK_NAMES
 from .workflows_support import (
     ROOT,
     WORKFLOWS,
+    load,
     missing_commands,
     named_step,
     non_comment_lines,
@@ -373,7 +374,7 @@ def escalation_proof_errors(job: dict) -> list[str]:
         'select(.name == "race")',
         "if $success != 0",
         "for attempt in 1 2 3 4",
-        "for attempt in $(seq 1 60)",
+        "for attempt in $(seq 1 200)",
         "sleep 30",
         "--argjson suite",
         'echo "::error::No escalation.yml pull_request run on testing exists for $HEAD_SHA."',
@@ -383,6 +384,23 @@ def escalation_proof_errors(job: dict) -> list[str]:
     ):
         if needle not in run:
             errors.append("check.yml: escalation proof is missing " + needle)
+    # The proof's bounded wait must cover the budget of the run it proves. A
+    # shorter bound fails a healthy run that is merely slow, which reads as a
+    # real failure and blocks a promotion for no reason.
+    escalation = load(WORKFLOWS / "escalation.yml")
+    race = ((escalation.get("jobs") or {}).get("race") or {})
+    budget = race.get("timeout-minutes")
+    attempts = re.search(r"for attempt in \$\(seq 1 (\d+)\)", run)
+    pause = re.search(r"\bsleep (\d+)\b", run)
+    if not isinstance(budget, int) or not attempts or not pause:
+        errors.append("check.yml: escalation proof wait cannot be checked against the "
+                      "escalation budget")
+    else:
+        wait_minutes = int(attempts.group(1)) * int(pause.group(1)) / 60
+        if wait_minutes < budget:
+            errors.append("check.yml: escalation proof waits "
+                          + ("%.0f" % wait_minutes) + " minutes for a run whose own budget is "
+                          + str(budget) + "; the wait must cover it")
     if "gh workflow run" in run or "actions: write" in run:
         errors.append("check.yml: escalation proof must not dispatch or write workflow runs")
     if step.get("env") != {

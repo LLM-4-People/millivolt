@@ -510,6 +510,46 @@ def spark_height_mirror_errors(pairs):
     return errors
 
 
+VENDOR_BANNER = 'internal/web/static/vendor/uplot.js'
+VENDOR_NOTICE = 'THIRD_PARTY_NOTICES.md'
+
+
+def vendor_notice_errors(pairs):
+    """The vendored library's version is one fact in three places: the banner
+    the upstream build writes, the notice's version link, and the notice's
+    license link. Only the first is generated, so a bump that replaces the file
+    silently leaves a stale version in a legally meaningful notice."""
+    errors = []
+    # The vendored bundle is outside the JS scan corpus on purpose (third-party
+    # code is never linted as ours), so its banner is read directly.
+    try:
+        banner = (ROOT / VENDOR_BANNER).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return [VENDOR_BANNER + ': unreadable']
+    try:
+        text = (ROOT / VENDOR_NOTICE).read_text(encoding='utf-8')
+    except OSError:
+        return [VENDOR_NOTICE + ': unreadable']
+    match = re.search(r'uPlot \(v(\d+\.\d+\.\d+)\)', banner)
+    if not match:
+        return [VENDOR_BANNER + ': version banner not found']
+    version = match.group(1)
+    if version not in text:
+        errors.append(VENDOR_NOTICE + ': notice does not name the vendored uPlot '
+                      + version + ' the banner declares')
+    for label, pattern in (
+        ('tree link', r'\(https://github\.com/leeoniya/uPlot/tree/(\d+\.\d+\.\d+)\)'),
+        ('license link', r'\(https://github\.com/leeoniya/uPlot/blob/(\d+\.\d+\.\d+)/LICENSE\)'),
+    ):
+        found = re.search(pattern, text)
+        if not found:
+            errors.append(VENDOR_NOTICE + ': ' + label + ' does not name a version')
+        elif found.group(1) != version:
+            errors.append(VENDOR_NOTICE + ': ' + label + ' names ' + found.group(1)
+                          + ', the vendored banner declares ' + version)
+    return errors
+
+
 # A coarse pointer cannot hover, aim finely or recover a clipped value, so every
 # control a dense layout sizes below the shared target must be raised by the
 # coarse block that owns its surface. --tap is that target.

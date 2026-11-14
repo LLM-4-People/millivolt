@@ -12,7 +12,7 @@ from .support import (ROOT,
                        git_environment, js_template_comment_errors, palette_mirror_errors,
                        removed_vocabulary_errors, site_palette_errors, source_inventory,
                        spark_height_mirror_errors, static_pairs, tap_target_errors,
-                       test_layout_errors)
+                       test_layout_errors, vendor_notice_errors)
 
 IGNORED_PATHS = (
     "AGENTS.md", "agents.md", "internal/AGENTS.md",
@@ -221,6 +221,7 @@ def check(root):
             + js_template_comment_errors(pairs)
             + spark_height_mirror_errors(pairs)
             + tap_target_errors(pairs)
+            + vendor_notice_errors(pairs)
             + palette_mirror_errors(pairs)
             + site_palette_errors(pairs)
             + artifact_gzip_choke_point_errors(gzip_pairs))
@@ -235,7 +236,7 @@ def main():
         raise SystemExit("\n".join(errors))
     print("repository checks passed: local Markdown targets, publication ignore rules, "
           "typography, dead stylesheet classes, coarse-pointer tap targets, "
-          "duplicated helpers, retired vocabulary, "
+          "duplicated helpers, retired vocabulary, vendored-notice versions, "
           "template comments, spark height mirror, static palette mirror, site palette "
           "ownership, artifact gzip choke point")
 

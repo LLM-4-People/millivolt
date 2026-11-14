@@ -389,9 +389,11 @@ jobs:
             exit 1
           fi
           # The forced full-race sweep plus the flake sweep can take tens of
-          # minutes on a four-core runner. Poll for completion, bounded at
-          # thirty minutes; a run that never completes fails closed.
-          for attempt in $(seq 1 60); do
+          # minutes on a four-core runner. The bound matches escalation.yml's
+          # own job budget (90m) plus a margin for queueing and reporting: a
+          # shorter bound here failed healthy runs that were merely slow, which
+          # is why the two numbers are now read from the same decision.
+          for attempt in $(seq 1 200); do
             run_status="$(printf '%s' "$run" | jq -r '.status')"
             run_conclusion="$(printf '%s' "$run" | jq -r '.conclusion // ""')"
             suite="$(printf '%s' "$run" | jq -r '.check_suite_id // 0')"
