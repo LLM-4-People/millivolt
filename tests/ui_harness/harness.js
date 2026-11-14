@@ -212,23 +212,10 @@ function checkEntityIdentity() {
 // loaded runner cannot turn a slow fetch or render into a false failure.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// watchdog fails a suite that never reaches its verdict. Both Node entry points
-// run the whole body inside an async function whose only exit paths are the
-// verdict or a catch; if an awaited promise never settles (a stubbed fetch that
-// is never called, a jsdom event that never fires) the loop drains, Node exits
-// 0, and `npm test` chains on as if the suite passed. That is the one failure
-// mode a green log cannot show, so it gets an explicit timer.
-//
-// The timer is refed, not unrefed: an unrefed timer let the process exit 0
-// before it could fire, which is the failure this exists to catch. The caller
-// clears it on its own exit path, so a normal run still ends immediately.
-function watchdog(ms, label) {
-  const timer = setTimeout(() => {
-    console.error('watchdog: ' + label + ' did not finish within ' + Math.round(ms / 1000) + 's');
-    process.exit(1);
-  }, ms);
-  return () => clearTimeout(timer);
-}
+// The watchdog timer has one owner, tests/watchdog.js, because half of
+// package.json's entry points never load this harness. Re-exported here so the
+// jsdom suites keep requiring one module.
+const {watchdog, WATCHDOG_MS} = require('../watchdog');
 // Poll the page's own observable state instead of sleeping a fixed time: a
 // loaded runner can stretch a fetch/render round trip past any hard-coded
 // sleep. Returning false on timeout lets the caller's own check()s fail with
@@ -264,5 +251,5 @@ module.exports = {
   installDiagnostics, checkEntityIdentity, assembleHTML, dashboardDOM, loaded,
   JSDOM, fs, path, STATIC,
   mkRec, LIST, BIG, CHART_FROM, BUCKET_MS, mkChart, modelFixture, observerFixture,
-  DEF_RULES, cfgDoc, TEST_DASHBOARD_VERSION, pageOptions, state, watchdog,
+  DEF_RULES, cfgDoc, TEST_DASHBOARD_VERSION, pageOptions, state, watchdog, WATCHDOG_MS,
 };

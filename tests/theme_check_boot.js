@@ -187,6 +187,6 @@ async function bootChecks(context) {
   return [reloaded, legacy, invalid, mixed];
 }
 
-const { watchdog } = require('./ui_harness/harness');
+const { watchdog, WATCHDOG_MS } = require('./watchdog');
 
-module.exports = { STATIC, STORAGE_KEY, boot, bootChecks, loaded, watchdog };
+module.exports = { STATIC, STORAGE_KEY, boot, bootChecks, loaded, watchdog, WATCHDOG_MS };

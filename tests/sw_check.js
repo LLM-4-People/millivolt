@@ -13,6 +13,12 @@ const CACHE_PREFIX = 'millivolt-shell-';
 const TEST_VERSION = 'test-version-0123456789abcdef';
 const CACHE_NAME = CACHE_PREFIX + TEST_VERSION;
 
+// This suite drives a real async body and reports through process.exitCode, so
+// an awaited promise that never settles would exit 0 with no verdict. The timer
+// has one owner because half of package.json's entry points never load jsdom.
+const {watchdog, WATCHDOG_MS} = require('./watchdog');
+const clearWatchdog = watchdog(WATCHDOG_MS, 'service worker check');
+
 const failures = [];
 const unhandled = [];
 process.on('unhandledRejection', reason => {
@@ -401,6 +407,7 @@ async function main() {
   await new Promise(resolve => setImmediate(resolve));
   check('the service worker leaves no unhandled cache rejection', unhandled.length === 0, unhandled.join('; '));
 
+  clearWatchdog();
   if (failures.length) {
     console.log('\nFAILURES: ' + failures.join(' | '));
     process.exitCode = 1;

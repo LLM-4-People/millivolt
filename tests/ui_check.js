@@ -12,7 +12,7 @@ const harness = require('./ui_harness/harness');
 
 // A suite that never settles exits 0 with no verdict, which reads as a pass.
 // One hour is far beyond any healthy run and still ends a wedged one.
-const clearWatchdog = harness.watchdog(60 * 60 * 1000, 'ui check');
+const clearWatchdog = harness.watchdog(harness.WATCHDOG_MS, 'ui check');
 const sections = require('./ui_harness/sections');
 const {
   dom, w, d, check, sleep, loaded, installDiagnostics, checkEntityIdentity, reportFailures,

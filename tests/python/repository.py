@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic offline regressions for the small publication checker."""
 
+import json
 import os
 from pathlib import Path
 import re
@@ -32,24 +33,31 @@ class RepositoryChecks(unittest.TestCase):
 
     def test_node_suites_fail_closed_when_they_never_settle(self):
         # A Node suite whose awaited promise never settles drains the loop and
-        # exits 0 with no verdict, which npm test reads as a pass. Both entry
-        # points arm the shared watchdog; this drives it for real: a hang must
-        # exit 1, and a clean finish must still exit promptly.
-        harness = check.ROOT / "tests" / "ui_harness" / "harness.js"
-        self.assertIn("function watchdog(", harness.read_text())
-        for entry in ("tests/ui_check.js", "tests/theme_check.js"):
+        # exits 0 with no verdict, which npm test reads as a pass. The timer has
+        # one owner; EVERY entry point npm test runs must arm it. The first
+        # version of this fix armed two of four, because it was written against
+        # "both entry points" while package.json runs four.
+        owner = check.ROOT / "tests" / "watchdog.js"
+        self.assertIn("function watchdog(", owner.read_text())
+        scripts = json.loads((check.ROOT / "package.json").read_text())["scripts"]
+        entries = [part.split()[-1] for part in scripts["test"].split("&&")
+                   if part.strip().startswith("node ")]
+        self.assertGreaterEqual(len(entries), 4, entries)
+        for entry in entries:
             text = (check.ROOT / entry).read_text()
             with self.subTest(entry=entry):
                 self.assertIn("watchdog(", text)
                 # The clear must exist, or a normal run waits out the bound.
                 self.assertIn("clearWatchdog()", text)
+                # The timer must not be re-implemented per suite.
+                self.assertNotIn("setTimeout(() => {\n    console.error('watchdog", text)
         node = shutil.which("node")
         if not node:
             self.skipTest("node is not installed")
         with tempfile.TemporaryDirectory(prefix="watchdog-") as temp:
             hang = Path(temp) / "hang.js"
             hang.write_text(
-                "const {watchdog} = require(" + repr(str(harness)) + ");\n"
+                "const {watchdog} = require(" + repr(str(owner)) + ");\n"
                 + "watchdog(300, 'pin');\n"
                 + "(async () => { await new Promise(() => {}); })();\n")
             result = subprocess.run([node, str(hang)], capture_output=True, text=True, timeout=30)
@@ -57,7 +65,7 @@ class RepositoryChecks(unittest.TestCase):
             self.assertIn("watchdog: pin did not finish", result.stderr)
             clean = Path(temp) / "clean.js"
             clean.write_text(
-                "const {watchdog} = require(" + repr(str(harness)) + ");\n"
+                "const {watchdog} = require(" + repr(str(owner)) + ");\n"
                 + "const done = watchdog(60000, 'pin');\n"
                 + "done(); process.exit(0);\n")
             self.assertEqual(

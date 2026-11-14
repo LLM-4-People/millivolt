@@ -16,7 +16,7 @@ const {
 
 // The same bound the functional suite uses: an unsettled promise would
 // otherwise drain the loop and exit 0 with no verdict at all.
-const clearWatchdog = watchdog(60 * 60 * 1000, 'theme check');
+const clearWatchdog = watchdog(WATCHDOG_MS, 'theme check');
 const { contrastChecks } = require('./theme_check_contrast');
 const { pickerChecks } = require('./theme_check_picker');
 const { surfaceChecks } = require('./theme_check_surfaces');

@@ -14,6 +14,12 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const {watchdog, WATCHDOG_MS} = require('./watchdog');
+
+// Synchronous today, so it cannot hang. Armed anyway: the first await added to
+// this file would otherwise reintroduce the exit-0-with-no-verdict failure that
+// the other suites had, and nothing here would notice.
+const clearWatchdog = watchdog(WATCHDOG_MS, 'log merge benchmark');
 
 const ROOT = path.join(__dirname, '..');
 const STATIC_JS = path.join(ROOT, 'internal/web/static/js');
@@ -199,6 +205,7 @@ const ratio = legacy.perFrame / Math.max(oneRecord.perFrame, 1e-9);
 console.log(`one-record improvement: ${(legacy.perFrame - oneRecord.perFrame).toFixed(3)} ms/frame ` +
   `(${ratio.toFixed(1)}x faster), ${((legacy.perFrame * 60) - (oneRecord.perFrame * 60)).toFixed(1)} ms/s saved at 60fps`);
 
+clearWatchdog();
 if (process.exitCode) {
   console.error('\nBENCH FAILED');
 } else {
