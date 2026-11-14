@@ -733,8 +733,7 @@ function ocRenderSystem() {
   const available = restartServerState.available !== false;
   const reason = restartServerState.reason || 'This build cannot restart in place. Update the container or service externally.';
   return `<div class="oc-sec">` +
-    `<div class="oc-sec-head"><div><h2 class="oc-h2">system</h2>` +
-    `<p class="oc-sub">Process lifecycle and the paths that live outside a policy.</p></div></div>` +
+    `<div class="oc-sec-head"><p class="oc-sub">Process lifecycle and the paths that live outside a policy.</p></div>` +
     `<div class="oc-card">` +
     `<div class="oc-label">rebuild and restart</div>` +
     `<p id="restart-description" class="oc-note">Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.</p>` +

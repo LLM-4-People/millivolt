@@ -217,14 +217,12 @@
   gap: 8px; min-width: 0; padding-bottom: 7px;
   border-bottom: 1px solid var(--border);
 }
-/* The section name is the popover's own subject line, so it stays small: the
-   panel head already carries the identity. */
-.oc-h2 {
-  margin: 0; color: var(--text); font: 650 12px/1.3 var(--mono);
-  letter-spacing: -.01em;
-}
+/* The section head is one explainer line and, when it has one, its action.
+   The pane is already labelled by its selected tab and the rail chip directly
+   above names the same section, so a second heading cost 18px of a 560px
+   panel to repeat a word the operator had just clicked. */
 .oc-sub {
-  margin: 2px 0 0; color: var(--muted); font: 10px/1.45 var(--sans);
+  margin: 0; color: var(--muted); font: 10px/1.45 var(--sans);
   max-width: 64ch;
 }
 .oc-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }

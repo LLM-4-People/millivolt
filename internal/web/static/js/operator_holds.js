@@ -131,8 +131,7 @@ function ocRenderPause() {
   const empty = holds.length ? '' :
     `<div class="oc-empty"><strong>Traffic is flowing.</strong> Nothing is held, so requests reach their provider as fast as it allows.</div>`;
   return `<div class="oc-sec">` +
-    `<div class="oc-sec-head"><div><h2 class="oc-h2">pause</h2>` +
-    `<p class="oc-sub">Park new matching requests without cancelling work that is already running.</p></div>` +
+    `<div class="oc-sec-head"><p class="oc-sub">Park new matching requests without cancelling work that is already running.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-resume-all ${holds.length ? '' : 'disabled'}>resume all</button>` +
     (composing
       ? `<button type="button" class="btn" data-oc-new="pause">start over</button>`
@@ -353,8 +352,7 @@ function ocRenderCapture() {
   const empty = sessions.length ? '' :
     `<div class="oc-empty"><strong>No capture sessions.</strong> Nothing is being recorded, so stored records hold only headers and metrics.</div>`;
   return `<div class="oc-sec">` +
-    `<div class="oc-sec-head"><div><h2 class="oc-h2">capture</h2>` +
-    `<p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p></div>` +
+    `<div class="oc-sec-head"><p class="oc-sub">Store request and response bodies for a scoped, time-bounded debug session.</p>` +
     `<div class="oc-head-actions"><button type="button" class="btn" data-oc-stop-all ${sessions.length ? '' : 'disabled'}>stop all</button>` +
     (composing
       ? `<button type="button" class="btn" data-oc-new="capture">start over</button>`

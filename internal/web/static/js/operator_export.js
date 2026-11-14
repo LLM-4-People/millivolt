@@ -157,8 +157,7 @@ function ocRenderExport() {
       `</div>`
     : '';
   return `<div class="oc-sec">` +
-    `<div class="oc-sec-head"><div><h2 class="oc-h2">export</h2>` +
-    `<p class="oc-sub">Stream matching request records as a gzip JSON artifact. The preview and the download use the same predicate.</p></div></div>` +
+    `<div class="oc-sec-head"><p class="oc-sub">Stream matching request records as a gzip JSON artifact. The preview and the download use the same predicate.</p></div>` +
     `<div class="oc-group"><div class="oc-label">what to download</div>` +
     ocChipRow('export-mode', ['all', 'filter'], draft.mode, v => v === 'all' ? 'all history' : 'matching records') +
     `</div>` + rows +

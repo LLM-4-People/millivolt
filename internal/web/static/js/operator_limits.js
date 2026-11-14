@@ -226,8 +226,7 @@ function ocRenderLimits() {
     `<div class="oc-empty"><strong>No limits in force.</strong> Every request is admitted, at whatever rate its provider accepts.</div>`;
   const composing = ocDrafts.limit && (ocDrafts.limit.id || ocView.kind === 'limit');
   return `<div class="oc-sec">` +
-    `<div class="oc-sec-head"><div><h2 class="oc-h2">limits</h2>` +
-    `<p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p></div>` +
+    `<div class="oc-sec-head"><p class="oc-sub">Cap concurrency, requests or tokens for any provider, model, client, key, conversation, or the whole proxy.</p>` +
     (composing
       ? `<button type="button" class="btn" data-oc-new="limit">start over</button>`
       : `<button type="button" class="btn btn-accent" data-oc-new="limit">new limit</button>`) + `</div>` +
