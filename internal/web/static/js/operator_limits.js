@@ -8,6 +8,18 @@
 // builds the one strict document and reads the one snapshot document.
 
 // ---------- limits ----------
+// A budget is armed when its checkbox is on. Armed but empty is a real state:
+// checking the box opens the field without writing a number the operator never
+// chose, and Apply stays disabled until they type one.
+function ocBlankBudgetArmed() {
+  return { concurrency: false, requests: false, tokens: false };
+}
+
+function ocBudgetArmed(draft, key) {
+  if (draft[key] !== '' && draft[key] != null) return true;
+  return !!(draft.armed && draft.armed[key]);
+}
+
 function ocBlankLimitDraft() {
   return {
     id: '',
@@ -21,6 +33,7 @@ function ocBlankLimitDraft() {
     antiBurst: false,
     ramp: '',
     advanced: false,
+    armed: ocBlankBudgetArmed(),
     picker: null,
     error: '',
   };
@@ -43,6 +56,7 @@ function ocLimitDraftFromPolicy(policy) {
     antiBurst: !!policy.anti_burst,
     ramp: policy.ramp_duration || '',
     advanced: !!(policy.anti_burst || policy.ramp_duration),
+    armed: ocBlankBudgetArmed(),
     picker: null,
     error: '',
   };
@@ -124,13 +138,13 @@ function ocLimitComposerHTML(draft) {
     (global ? `<p class="oc-note">No condition selected, so this limit applies to every request that crosses the proxy.</p>` : '') +
     `</div>` +
     `<div class="oc-group"><div class="oc-label">budgets</div>` +
-    `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="concurrency" ${draft.concurrency !== '' ? 'checked' : ''}><span>concurrency</span></label>` +
-    ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: draft.concurrency === '', placeholder: '4' }) + `</div>` +
-    `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="requests" ${draft.requests !== '' ? 'checked' : ''}><span>requests</span></label>` +
-    ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: draft.requests === '', placeholder: '60' }) +
+    `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="concurrency" ${ocBudgetArmed(draft, 'concurrency') ? 'checked' : ''}><span>concurrency</span></label>` +
+    ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: !ocBudgetArmed(draft, 'concurrency'), placeholder: '4' }) + `</div>` +
+    `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="requests" ${ocBudgetArmed(draft, 'requests') ? 'checked' : ''}><span>requests</span></label>` +
+    ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: !ocBudgetArmed(draft, 'requests'), placeholder: '60' }) +
     `<div class="oc-window">${ocWindowSelect('request-window', draft.requestWindow, 'request window')}</div></div>` +
-    `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="tokens" ${draft.tokens !== '' ? 'checked' : ''}><span>tokens</span></label>` +
-    ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: draft.tokens === '', placeholder: '100000' }) +
+    `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="tokens" ${ocBudgetArmed(draft, 'tokens') ? 'checked' : ''}><span>tokens</span></label>` +
+    ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: !ocBudgetArmed(draft, 'tokens'), placeholder: '100000' }) +
     `<div class="oc-window">${ocWindowSelect('token-window', draft.tokenWindow, 'token window')}</div></div>` +
     `</div>` +
     // Both optional modifiers sit on one row: they are peers, each closed by

@@ -402,6 +402,14 @@ module.exports = async function operatorMenus(H) {
         d.getElementById('oc-lim-apply').disabled &&
         text('#oc-lim-preview') === 'set at least one budget');
       click('#oc-pane [data-oc-budget="concurrency"]');
+      // Arming a budget opens its field; it must not install a number the
+      // operator never chose. One stray click on "concurrency" followed by
+      // Apply would otherwise put a 4-in-flight cap on whatever is in scope.
+      check('arming a budget opens an empty field and still refuses to apply',
+        d.querySelector('#oc-pane [data-oc-field="concurrency"]').value === '' &&
+        !d.querySelector('#oc-pane [data-oc-field="concurrency"]').disabled &&
+        d.getElementById('oc-lim-apply').disabled &&
+        text('#oc-lim-preview') === 'set at least one budget');
       input('#oc-pane [data-oc-field="concurrency"]', '-1');
       check('a negative count is refused as not a whole number',
         d.getElementById('oc-lim-apply').disabled &&

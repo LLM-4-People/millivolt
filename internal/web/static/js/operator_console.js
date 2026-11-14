@@ -1081,9 +1081,13 @@ document.addEventListener('change', event => {
     const draft = ocDrafts.limit;
     if (!draft) return;
     const key = target.dataset.ocBudget;
-    if (target.checked) {
-      draft[key] = key === 'concurrency' ? '4' : key === 'requests' ? '60' : '100000';
-    } else {
+    // Arming a budget only opens its field. Writing a plausible default here
+    // turned one discovery click into a live cap: a stray click on
+    // "concurrency" then Apply would install a 4-in-flight limit the operator
+    // never chose. The preview's "set at least one budget" gate is correct.
+    draft.armed = draft.armed || ocBlankBudgetArmed();
+    draft.armed[key] = !!target.checked;
+    if (!target.checked) {
       draft[key] = '';
       if (key === 'concurrency') { draft.antiBurst = false; draft.ramp = ''; }
     }
