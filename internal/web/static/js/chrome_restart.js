@@ -121,7 +121,9 @@ function renderRestartSteps(st) {
 function setRestartStatus(text, err) {
   const el = $('restart-count');
   if (el) {
-    el.textContent = text || '';
+    // setText: this is a status region and the poll repaints it with the same
+    // sentence on every tick until the phase changes.
+    setText(el, text || '');
     if (err) el.dataset.err = '1'; else delete el.dataset.err;
     return;
   }

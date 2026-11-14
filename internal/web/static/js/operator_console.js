@@ -752,7 +752,7 @@ function ocRenderHead() {
   // already in the segments, so a total would only say them twice.
   const segs = ocReadoutSegments();
   const text = segs.length ? segs.join(' · ') : 'steady · no rules in force';
-  if (live.textContent !== text) live.textContent = text;
+  setText(live, text);
 }
 
 // The section strip is one horizontal chip row at every width, so the tablist

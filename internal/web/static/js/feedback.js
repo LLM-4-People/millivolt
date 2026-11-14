@@ -20,6 +20,11 @@ let _toastTimer = null;
 // toast writes the one polite status line. A repeated message clears first so
 // assistive technology announces it again; the timer is shared, so a new
 // message can never be hidden by the previous one's timeout.
+//
+// That clear-then-set is the one place the guarded-setter rule does not apply,
+// and it is deliberate: a transient event (a failed action, a copy) should be
+// re-announced when it happens again, even with the same words. The clearing
+// assignment is what makes the second write a change. live-region-scan: allow
 function toast(message, tone = '') {
   const el = $('toast');
   if (!el) return;

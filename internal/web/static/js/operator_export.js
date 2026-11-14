@@ -322,7 +322,10 @@ function ocUpdateExportReceipt() {
   const el = $('oc-export-receipt');
   const btn = $('oc-export-download');
   if (!draft || !el) return;
-  el.textContent = ocExportReceiptText(draft);
+  // setText, not an assignment: this is a polite live region and the count
+  // refresh repaints it on a debounce, so an unchanged sentence would be
+  // re-announced every time the schedule fires.
+  setText(el, ocExportReceiptText(draft));
   el.dataset.tone = draft.error ? 'err' : '';
   if (btn) btn.disabled = !ocExportEnabled(draft);
 }

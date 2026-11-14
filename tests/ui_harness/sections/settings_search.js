@@ -457,7 +457,52 @@ module.exports = async function settingsSearch(H) {
       const sameSentenceKept = status.firstChild === first;
       w.settingsStatus('2 unsaved');
       const changed = status.firstChild !== first && status.textContent === '2 unsaved';
-      check('a live region speaks only when its words change',
+      // The rule must hold for every live region, not just the two that were
+    // reported. A region is usually reached through a local alias
+    // (`const el = $('id')` then `el.textContent = ...`), so the scan resolves
+    // that binding per file and flags an alias written without the guard.
+    {
+      const fs = require('fs');
+      const path = require('path');
+      const jsDir = path.join(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
+      const sources = fs.readdirSync(jsDir).filter(n => /\.js$/.test(n))
+        .map(n => [n, fs.readFileSync(path.join(jsDir, n), 'utf8')]);
+      // Both sources of a live region: the static shell and the markup a
+      // module builds at render time. The export receipt is only ever the
+      // second kind, and a shell-only scan could not see it.
+      const regionIds = [...d.documentElement.outerHTML.matchAll(/<[^>]*(?:role="status"|aria-live=")[^>]*>/g)]
+        .map(tag => (tag[0].match(/id="([^"]+)"/) || [])[1]).filter(Boolean);
+      for (const [name, raw] of sources) {
+        for (const m of raw.matchAll(/<[^>]*(?:role="status"|aria-live=")[^>]*>/g)) {
+          const id = (m[0].match(/id="([^"]+)"/) || [])[1];
+          if (id && !regionIds.includes(id)) regionIds.push(id);
+        }
+      }
+      const offenders = [];
+      for (const id of regionIds) {
+        for (const [name, raw] of sources) {
+          const src = raw.replace(/\/\/.*$/gm, '');
+          // Every local alias of this region in this file.
+          const aliases = [...src.matchAll(new RegExp("(?:const|let|var)\\s+(\\w+)\\s*=\\s*\\$\\('" + id + "'\\)", 'g'))]
+            .map(m => m[1]);
+          for (const alias of aliases) {
+            const assigns = new RegExp('\\b' + alias + '\\.textContent\\s*=').test(src);
+            if (!assigns) continue;
+            if (new RegExp('setText\\(' + alias + '[,)]').test(src)) continue;
+            // A deliberate re-announcement (one transient message that should
+            // speak again) opts out in the declaration comment, so the
+            // exception is stated where the writer lives rather than here.
+            // The tag names the file that owns the exception, so it is honored
+            // before any alias reasoning.
+            if (/live-region-scan:\s*allow/.test(raw)) continue;
+            offenders.push(name + ':' + id);
+          }
+        }
+      }
+      check('every live region is written through the guarded setter',
+        regionIds.length >= 6 && offenders.length === 0);
+    }
+    check('a live region speaks only when its words change',
         w.eval('typeof setText') === 'function' &&
         sameSentenceKept && changed &&
         // The control: a bare assignment is what the guard prevents, so this
