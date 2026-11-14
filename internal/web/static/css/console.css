@@ -583,9 +583,13 @@ button.oc-chip[aria-pressed="true"]::before {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px 14px; min-width: 0;
 }
-.oc-filter-pair .oc-filter-row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
-.oc-filter-pair .oc-filter-name { padding-top: 0; }
+/* Inside a pair each row is one line: the label sits beside its control. */
+.oc-filter-pair .oc-filter-row {
+  grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center;
+}
+.oc-filter-pair .oc-filter-name { padding-top: 0; white-space: nowrap; }
 .oc-filter-pair .oc-chip { min-height: 22px; padding: 0 7px; font-size: 9px; }
+.oc-filter-pair .oc-select { min-height: 24px; font-size: 9.5px; }
 .oc-export-more {
   justify-content: space-between; gap: 8px;
   padding: 2px 1px 0; border-top: 0;

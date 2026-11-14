@@ -135,9 +135,11 @@ function ocRenderExport() {
       `<div class="oc-filter-row"><span class="oc-filter-name">errors</span>${ocChipRow('export-errors', ['any', 'only'], draft.errors ? 'only' : 'any', v => v)}</div>` +
       `<div class="oc-filter-row"><span class="oc-filter-name">debug</span>${ocChipRow('export-debug', ['any', 'only'], draft.debug ? 'only' : 'any', v => v)}</div>` +
       `</div>` +
+      // Each age list is one of four labelled spans, so a select states the
+      // choice in one line instead of wrapping four long chips.
       `<div class="oc-filter-pair">` +
-      `<div class="oc-filter-row"><span class="oc-filter-name">newer than</span>${ocChipRow('export-after', OC_AFTER_CHOICES.map(([v]) => v), draft.after, v => OC_AFTER_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
-      `<div class="oc-filter-row"><span class="oc-filter-name">older than</span>${ocChipRow('export-age', OC_AGE_CHOICES.map(([v]) => v), draft.age, v => OC_AGE_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
+      `<div class="oc-filter-row"><span class="oc-filter-name">newer than</span>${ocChoiceSelect('export-after', OC_AFTER_CHOICES.map(([v]) => v), draft.after, v => OC_AFTER_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
+      `<div class="oc-filter-row"><span class="oc-filter-name">older than</span>${ocChoiceSelect('export-age', OC_AGE_CHOICES.map(([v]) => v), draft.age, v => OC_AGE_CHOICES.find(([x]) => x === v)?.[1] || v)}</div>` +
       `</div>` +
       `<label class="oc-field wide" data-oc-key="error-type"><span class="oc-field-name">error type</span><input type="text" data-oc-export-field="errorType" value="${escapeHtml(draft.errorType)}" placeholder="exact provider error type"></label>` +
       `</div>`
