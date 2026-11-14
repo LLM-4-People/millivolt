@@ -41,6 +41,26 @@ function ocAllRuleRows() {
   return rows;
 }
 
+// ocDrainValueHTML is the drain's value field. It is one input with the known
+// names as suggestions, not a picker plus a field: a drain may name a client
+// that has not sent traffic since the restart, so the value must stay free,
+// and retyping a name the console already knows was the same friction the
+// scope pickers were built to remove.
+const OC_DRAIN_DIMS = { provider: 'providers', model: 'models', client: 'clients' };
+
+function ocDrainValueHTML() {
+  const dim = ocDrain.scope;
+  const listId = 'oc-drain-values';
+  const known = typeof ocKnownValues === 'function'
+    ? ocKnownValues(OC_DRAIN_DIMS[dim] || dim) : [];
+  const options = known.map(value =>
+    `<option value="${escapeHtml(value)}"></option>`).join('');
+  return `<input type="text" data-oc-drain-value value="${escapeHtml(ocDrain.value)}"` +
+    ` placeholder="${escapeHtml(dim)}" aria-label="drain one ${escapeHtml(dim)}"` +
+    ` list="${listId}" autocomplete="off" data-oc-key="drain-value">` +
+    `<datalist id="${listId}">${options}</datalist>`;
+}
+
 function ocRenderOverview() {
   const rows = ocAllRuleRows();
   const queued = Number(pauseState.queued) || 0;
@@ -57,7 +77,7 @@ function ocRenderOverview() {
   const queue = queued ? `<div class="oc-group"><div class="oc-label">queue</div>` +
     `<p class="oc-note">${fmt(queued)} parked. Draining releases them with a retryable response; running streams finish.</p>` +
     `<div class="oc-inline">${ocChipRow('drain-scope', ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
-    (ocDrain.scope !== 'all' ? `<input type="text" data-oc-drain-value value="${escapeHtml(ocDrain.value)}" placeholder="${escapeHtml(ocDrain.scope)}" aria-label="drain ${ocDrain.scope}" data-oc-key="drain-value">` : '') +
+    (ocDrain.scope !== 'all' ? ocDrainValueHTML() : '') +
     `<button type="button" class="btn" data-oc-drain>drain</button></div></div>` : '';
   return `<div class="oc-sec">` +
     restart +

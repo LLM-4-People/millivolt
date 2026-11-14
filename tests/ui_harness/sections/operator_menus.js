@@ -1033,7 +1033,10 @@ module.exports = async function operatorMenus(H) {
       w.applyPauseState({ok: true, paused: true,
         holds: [{id: 'ov-hold', all: true}], queued: 3,
         known_clients: [], known_providers: [], until: null, default_max_queued: 0});
+      // The throttle document is where the server merges every seen name, so
+      // it carries the client vocabulary the drain suggestions read.
       w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
+        known_clients: ['client-a'],
         throttles: [{id: 'ov-limit', scope: {providers: ['prov-a']}, concurrency: 2,
           requests: 10, request_window: '1m', source: 'ui'}]});
       w.openOperatorConsole('overview');
@@ -1104,12 +1107,24 @@ module.exports = async function operatorMenus(H) {
         // The drain's bootstrap refresh re-reads the stubbed pause document
         // (queued 0), which disables the action. Re-seed the queue so the
         // scoped case exercises the real control rather than a stale draft.
+        // The drain's bootstrap refresh replaces both operator documents, so
+        // both vocabularies are re-seeded: the server always reports its seen
+        // names on the throttle document.
+        throttleDoc({ok: true, active: true, known_providers: ['prov-a'],
+          throttles: [{id: 'ov-limit', scope: {providers: ['prov-a']}, concurrency: 2,
+            requests: 10, request_window: '1m', source: 'ui'}]}, {clients: ['client-a']});
         w.applyPauseState({ok: true, paused: true,
           holds: [{id: 'ov-hold', all: true}], queued: 3,
           known_clients: ['client-a'], known_providers: [], until: null, default_max_queued: 0});
         w.openOperatorConsole('overview');
         await settleUntil(() => w.eval('pauseState.queued') === 3);
         choose('drain-scope', 'client');
+        // The drain value stays free text (a client may not have sent traffic
+        // since a restart) but it now offers the names the console knows, so a
+        // drain does not require retyping a value a picker would have offered.
+        check('a scoped drain offers the known names as suggestions',
+          [...(q('#oc-pane datalist#oc-drain-values')?.options || [])]
+            .some(option => option.value === 'client-a'));
         input('#oc-pane [data-oc-drain-value]', 'client-a');
         await settleUntil(() => q('#oc-pane [data-oc-drain]') && !q('#oc-pane [data-oc-drain]').disabled);
         click('#oc-pane [data-oc-drain]');
@@ -1401,6 +1416,11 @@ module.exports = async function operatorMenus(H) {
         text('#oc-pane .oc-pick-empty') === note &&
         note === 'none yet - they appear as requests arrive' &&
         qa('#oc-pane [data-oc-pick-value="providers"]').length === 0);
+      // The rule that an empty dimension matches everything was stated only
+      // in the pause composer's prose, which is invisible while the picker is
+      // open. A close-with-nothing-checked must not read as a narrowing.
+      check('an open picker says that an empty dimension narrows nothing',
+        q('#oc-pane .oc-pick-note')?.textContent.includes('does not narrow this rule'));
       throttleDoc({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
       w.operatorConsoleSync('throttle');
       if (q('#oc-pane [data-oc-pick="providers"]').getAttribute('aria-expanded') !== 'true') {

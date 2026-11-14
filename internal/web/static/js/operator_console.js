@@ -452,10 +452,11 @@ function ocScopeToggle(scope, dim, value) {
 }
 
 // ocKnownValues is the one vocabulary for a selector dimension. Provider and
-// client names come from the operator state; models are folded into canonical
-// groups and expanded to every raw spelling the server matches; keys and
-// conversations come from the live record ring, because that is where the
-// dashboard already has them without a second query.
+// client names come from the throttle document, which is the server's own
+// merge of every seen name; models are folded into canonical groups and
+// expanded to every raw spelling the server matches; keys and conversations
+// come from the live record ring, because that is where the dashboard already
+// has them without a second query.
 function ocKnownValues(dim) {
   if (dim === 'providers') {
     const state = typeof throttleState !== 'undefined' ? throttleState : {};
@@ -551,9 +552,16 @@ function ocScopePickerHTML(draft, dim) {
   const empty = known.length ? '' : `<div class="oc-pick-empty">${NONE_YET_NOTE}</div>`;
   const canAdd = dim !== 'keyHashes';
   const showFilter = all.length > 6;
+  // The rule that an empty dimension matches everything lived only in the
+  // pause composer's prose, where it was invisible at the moment of choice.
+  // Saying it inside the picker is what stops a close-with-nothing-checked
+  // from reading as a narrowing.
+  const wide = selected.size ? '' :
+    `<p class="oc-pick-note">Nothing selected, so ${ocDimLabel(dim)} does not narrow this rule.</p>`;
   return `<div class="oc-pick" data-oc-key="pick-${dim}">` +
     (showFilter ? `<input type="search" class="oc-pick-filter" data-oc-pick-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${ocDimLabel(dim)}s" aria-label="filter ${ocDimLabel(dim)}s" data-oc-key="pick-filter-${dim}">` : '') +
     `<div class="oc-pick-list" role="menu" aria-label="${ocDimLabel(dim)} values">${rows}${empty}</div>` +
+    wide +
     (canAdd ? `<div class="oc-pick-custom"><input type="text" data-oc-pick-custom="${dim}" placeholder="add a ${ocDimLabel(dim)}" aria-label="add a ${ocDimLabel(dim)}" data-oc-key="pick-custom-${dim}"><button type="button" class="btn" data-oc-pick-add="${dim}">add</button></div>` : '') +
     `</div>`;
 }

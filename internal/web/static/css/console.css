@@ -419,6 +419,11 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-pick-check { width: 12px; flex: none; color: var(--accent); font-size: 10px; }
 .oc-pick-label { min-width: 0; overflow-wrap: anywhere; }
 .oc-pick-empty { padding: 4px 6px; color: var(--muted); font: 9.5px/1.5 var(--sans); }
+/* The empty-dimension rule sits inside the picker, where the choice is made. */
+.oc-pick-note {
+  margin: 0; padding: 5px 6px 0; border-top: 1px solid var(--border);
+  color: var(--muted); font: 9.5px/1.5 var(--sans);
+}
 .oc-pick-custom { display: flex; gap: 5px; align-items: center; }
 .oc-pick-custom input { flex: 1 1 auto; border-style: dashed; }
 .oc-pick-custom .btn { flex: none; }

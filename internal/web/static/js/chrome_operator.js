@@ -259,6 +259,8 @@ async function mutateOperator(kind, body, after) {
     gate.busy = false;
     ++gate.revision;
     if (confirmed) {
+      // The gate's revision was advanced above and again before this call, so
+      // the defaulted revision is the one acceptOperator expects.
       gate.apply(confirmed);
       if (after) after();
       if (confirmed.warning) {
