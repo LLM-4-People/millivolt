@@ -502,6 +502,40 @@ module.exports = async function settingsSearch(H) {
       check('every live region is written through the guarded setter',
         regionIds.length >= 6 && offenders.length === 0);
     }
+    // A live region must also be a node whose contents only change when its
+    // words change. updateSection() replaces the whole innerHTML of its target
+    // on a poll, so every child is destroyed and rebuilt even when the visible
+    // data is identical: a screen reader then re-reads the entire strip on
+    // each tick. The totals strip was exactly that defect (polite region,
+    // repainted every chart refresh), so the rule is derived from the writers
+    // rather than restated per element.
+    {
+      const fs = require('fs');
+      const path = require('path');
+      const jsDir = path.join(__dirname, '..', '..', '..', 'internal', 'web', 'static', 'js');
+      const sources = fs.readdirSync(jsDir).filter(n => /\.js$/.test(n))
+        .map(n => [n, fs.readFileSync(path.join(jsDir, n), 'utf8')]);
+      const repainted = new Set();
+      for (const [, raw] of sources) {
+        for (const m of raw.replace(/\/\/.*$/gm, '').matchAll(/updateSection\(\s*'([^']+)'/g)) {
+          repainted.add(m[1]);
+        }
+      }
+      const shell = d.documentElement.outerHTML;
+      const markup = sources.map(([, raw]) => raw).join('\n');
+      const claimsLive = (id) => [shell, markup].some(src =>
+        [...src.matchAll(/<[^>]*>/g)].some(tag =>
+          tag[0].includes('id="' + id + '"') &&
+          /(?:role="(?:status|alert|log)"|aria-live=)/.test(tag[0])));
+      const liveTargets = [...repainted].filter(claimsLive);
+      // The control: the scan can see a repainted element that does claim a
+      // live role, so an empty result means "none are live", not "none found".
+      const probe = repainted.size >= 8 &&
+        claimsLive('settings-count') === true &&
+        claimsLive('chart-totals') === false;
+      check('a wholesale-repainted section is never a live region',
+        probe && liveTargets.length === 0);
+    }
     check('a live region speaks only when its words change',
         w.eval('typeof setText') === 'function' &&
         sameSentenceKept && changed &&
