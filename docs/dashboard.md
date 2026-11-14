@@ -329,7 +329,17 @@ its composer in edit mode. The action column offers copy, which starts a new
 rule from the same scope and schedule with no budgets, and the terminating
 action for that kind: remove, resume or stop. The edit action is not repeated
 there, because the row already performs it. On a narrow phone the row takes
-two lines so the scope can be read in full instead of being clipped.
+two lines so the scope can be read in full instead of being clipped; the
+budget wraps beneath the scope rather than being dropped, because a limit's
+scope identifies it while its budget is what it does.
+
+A rule list that outgrows the pane offers a filter once it holds enough rules
+to need one, so a console with two rules never spends a row on an empty box.
+The filter matches the text each row already renders, which gives limits,
+pause and capture one search rule and makes a new row field searchable
+without a second list of what to match. A filter that hides everything says
+how many rules are in force and offers to clear itself, so an empty result
+never reads as an empty policy.
 
 ### Composer anatomy
 
