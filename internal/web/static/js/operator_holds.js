@@ -320,7 +320,12 @@ function ocCaptureFacts() {
   const bits = [];
   if (ttl) bits.push('retained ' + ttl);
   if (max) bits.push(max + ' per capture');
-  bits.push('headers redacted, bodies retained');
+  // Redaction is by header name against the credential vocabulary, not a
+  // guarantee about every value: a secret in a header whose name does not look
+  // credential-bearing is retained. Saying "headers redacted" here contradicted
+  // the sensitivity warning one line above it, and an operator could reasonably
+  // read it as "the headers are safe".
+  bits.push('credential headers redacted');
   return bits.join(' · ');
 }
 
