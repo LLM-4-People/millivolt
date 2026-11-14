@@ -248,14 +248,14 @@ function ocRenderHead() {
   if (live.textContent !== text) live.textContent = text;
 }
 
-// ocSyncRailOrientation keeps the tablist's announced orientation matching the
-// placement menu.js chose. The rail is a vertical column on desktop and one
-// horizontal strip in sheet mode, and the viewport can cross that breakpoint
-// while the console stays open.
+// The section strip is one horizontal chip row at every width, so the tablist
+// announces a horizontal orientation everywhere and arrows move left and
+// right. menu.js owns placement only; it does not change the rail's axis.
+const OC_RAIL_ORIENTATION = 'horizontal';
+
 function ocSyncRailOrientation() {
   const rail = ocEl('oc-rail');
-  if (!rail || typeof menuPlacement !== 'function') return;
-  rail.setAttribute('aria-orientation', menuPlacement() === 'sheet' ? 'horizontal' : 'vertical');
+  if (rail) rail.setAttribute('aria-orientation', OC_RAIL_ORIENTATION);
 }
 
 function ocRenderRail() {
@@ -435,30 +435,34 @@ function ocScopeChipsHTML(scope, dim) {
   ).join('');
 }
 
-// ocScopeConditionsHTML renders the selector's active dimensions. Each row is
-// a disclosure: the chips read the current selection, and one row at a time
-// opens its picker below.
+// ocScopeConditionsHTML renders the selector as one wrapping strip: a chip per
+// dimension that opens its picker, with the chosen values sitting inside that
+// chip. The open picker is emitted after the strip so it can use the full
+// width instead of being squeezed into one chip's track.
 function ocScopeConditionsHTML(draft, dims) {
-  const rows = dims.map(dim => {
+  let picker = '';
+  const chips = dims.map(dim => {
     const values = draft.scope[dim] || [];
     const open = draft.picker && draft.picker.dim === dim;
-    return `<div class="oc-cond" data-open="${open ? '1' : '0'}">` +
+    if (open) picker = ocScopePickerHTML(draft, dim);
+    return `<div class="oc-cond" data-open="${open ? '1' : '0'}" data-set="${values.length ? '1' : '0'}">` +
       `<button type="button" class="oc-cond-btn" data-oc-pick="${dim}" data-oc-key="cond-${dim}" aria-expanded="${open ? 'true' : 'false'}">` +
       `<span class="oc-cond-name">${ocDimLabel(dim)}</span>` +
       `<span class="oc-cond-chev" aria-hidden="true">${open ? '▴' : '▾'}</span></button>` +
-      `<span class="oc-cond-values">${values.length ? ocScopeChipsHTML(draft.scope, dim) : '<span class="oc-cond-any">any</span>'}</span></div>` +
-      (open ? ocScopePickerHTML(draft, dim) : '');
+      (values.length ? `<span class="oc-cond-values">${ocScopeChipsHTML(draft.scope, dim)}</span>` : '') +
+      `</div>`;
   }).join('');
-  return `<div class="oc-conds">${rows}</div>`;
+  return `<div class="oc-conds">${chips}${picker}</div>`;
 }
 
-// ocScopePickerHTML renders one dimension's picker: a filter, the known values
-// as checkable rows, and a free-value field. The panel is deliberately inline
-// rather than a nested popover; a policy editor with four chained popovers is
-// where the old menus lost their place.
+// ocScopePickerHTML is the one dimension picker: known values as checkable
+// rows plus a free-value field, inline rather than a nested popover because a
+// policy editor with four chained popovers is where the old menus lost their
+// place. The filter only appears once the list is long enough to need it.
 function ocScopePickerHTML(draft, dim) {
   const filter = (draft.picker.filter || '').toLowerCase();
-  const known = ocKnownValues(dim).filter(value =>
+  const all = ocKnownValues(dim);
+  const known = all.filter(value =>
     !filter || ocScopeValueLabel(dim, value).toLowerCase().includes(filter));
   const selected = new Set(draft.scope[dim] || []);
   const rows = known.map(value => {
@@ -469,8 +473,9 @@ function ocScopePickerHTML(draft, dim) {
   }).join('');
   const empty = known.length ? '' : `<div class="oc-pick-empty">${NONE_YET_NOTE}</div>`;
   const canAdd = dim !== 'keyHashes';
+  const showFilter = all.length > 6;
   return `<div class="oc-pick" data-oc-key="pick-${dim}">` +
-    `<input type="search" class="oc-pick-filter" data-oc-pick-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${ocDimLabel(dim)}s" aria-label="filter ${ocDimLabel(dim)}s" data-oc-key="pick-filter-${dim}">` +
+    (showFilter ? `<input type="search" class="oc-pick-filter" data-oc-pick-filter="${dim}" value="${escapeHtml(draft.picker.filter || '')}" placeholder="filter ${ocDimLabel(dim)}s" aria-label="filter ${ocDimLabel(dim)}s" data-oc-key="pick-filter-${dim}">` : '') +
     `<div class="oc-pick-list" role="menu" aria-label="${ocDimLabel(dim)} values">${rows}${empty}</div>` +
     (canAdd ? `<div class="oc-pick-custom"><input type="text" data-oc-pick-custom="${dim}" placeholder="add a ${ocDimLabel(dim)}" aria-label="add a ${ocDimLabel(dim)}" data-oc-key="pick-custom-${dim}"><button type="button" class="btn" data-oc-pick-add="${dim}">add</button></div>` : '') +
     `</div>`;
@@ -591,12 +596,18 @@ function ocNumber(value) {
   return Number.isSafeInteger(n) && n >= 0 ? n : NaN;
 }
 
+// ocField is the one labelled input. A bare field carries its name as an
+// aria-label instead of a visible line: the surrounding row already names the
+// dimension, and a second caption above every number is pure noise.
 function ocField(key, label, value, opts = {}) {
   const type = opts.type || 'number';
   const attrs = type === 'number' ? 'min="0" step="1" inputmode="numeric"' : '';
-  return `<label class="oc-field${opts.wide ? ' wide' : ''}" data-oc-key="${escapeHtml(key)}">` +
-    `<span class="oc-field-name">${escapeHtml(label)}</span>` +
-    `<input type="${type}" ${attrs} data-oc-field="${escapeHtml(key)}" data-oc-key="field-${escapeHtml(key)}" value="${escapeHtml(String(value == null ? '' : value))}" placeholder="${escapeHtml(opts.placeholder || '')}" ${opts.disabled ? 'disabled' : ''}>` +
+  const name = opts.aria || label;
+  return `<label class="oc-field${opts.wide ? ' wide' : ''}${opts.bare ? ' bare' : ''}" data-oc-key="${escapeHtml(key)}">` +
+    (opts.bare ? '' : `<span class="oc-field-name">${escapeHtml(label)}</span>`) +
+    `<input type="${type}" ${attrs} data-oc-field="${escapeHtml(key)}" data-oc-key="field-${escapeHtml(key)}"` +
+    (name ? ` aria-label="${escapeHtml(name)}"` : '') +
+    ` value="${escapeHtml(String(value == null ? '' : value))}" placeholder="${escapeHtml(opts.placeholder || '')}" ${opts.disabled ? 'disabled' : ''}>` +
     (opts.hint ? `<span class="oc-field-hint">${escapeHtml(opts.hint)}</span>` : '') +
     `</label>`;
 }
@@ -1022,8 +1033,10 @@ document.addEventListener('keydown', event => {
     return;
   }
   // The rail is a real tablist: arrows, Home and End move selection and
-  // focus together. Tab still reaches the active tab and the pane in order.
-  const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+  // focus together. The strip is horizontal, so both axes are accepted; Tab
+  // still reaches the active tab and the pane in order.
+  const step = (event.key === 'ArrowDown' || event.key === 'ArrowRight') ? 1
+    : (event.key === 'ArrowUp' || event.key === 'ArrowLeft') ? -1 : 0;
   const jump = event.key === 'Home' || event.key === 'End';
   if (!step && !jump) return;
   const tab = document.activeElement?.closest?.('.oc-rail-item');

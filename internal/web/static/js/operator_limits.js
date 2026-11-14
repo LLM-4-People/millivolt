@@ -93,12 +93,12 @@ function ocLimitComposerHTML(draft) {
     `</div>` +
     `<div class="oc-group"><div class="oc-label">budgets</div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="concurrency" ${draft.concurrency !== '' ? 'checked' : ''}><span>concurrency</span></label>` +
-    ocField('concurrency', 'in flight', draft.concurrency, { disabled: draft.concurrency === '', placeholder: '4' }) + `</div>` +
+    ocField('concurrency', '', draft.concurrency, { bare: true, aria: 'in flight', disabled: draft.concurrency === '', placeholder: '4' }) + `</div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="requests" ${draft.requests !== '' ? 'checked' : ''}><span>requests</span></label>` +
-    ocField('requests', 'count', draft.requests, { disabled: draft.requests === '', placeholder: '60' }) +
+    ocField('requests', '', draft.requests, { bare: true, aria: 'requests per window', disabled: draft.requests === '', placeholder: '60' }) +
     `<div class="oc-window">${ocChipRow('request-window', LIMIT_WINDOWS.map(([v]) => v), draft.requestWindow, ocWindowLabel)}</div></div>` +
     `<div class="oc-budget"><label class="oc-check"><input type="checkbox" data-oc-budget="tokens" ${draft.tokens !== '' ? 'checked' : ''}><span>tokens</span></label>` +
-    ocField('tokens', 'count', draft.tokens, { disabled: draft.tokens === '', placeholder: '100000' }) +
+    ocField('tokens', '', draft.tokens, { bare: true, aria: 'tokens per window', disabled: draft.tokens === '', placeholder: '100000' }) +
     `<div class="oc-window">${ocChipRow('token-window', LIMIT_WINDOWS.map(([v]) => v), draft.tokenWindow, ocWindowLabel)}</div></div>` +
     `</div>` +
     `<div class="oc-group"><button type="button" class="oc-disclosure" data-oc-toggle="advanced" aria-expanded="${draft.advanced ? 'true' : 'false'}">` +
@@ -206,10 +206,9 @@ function ocLimitRuleHTML(policy) {
     : 'set in the console';
   const schedule = policy.schedule ? ' · ' + ocSchedulePhrase(policy.schedule) : '';
   return `<div class="oc-rule" data-kind="limit" data-oc-rule="${escapeHtml(policy.id)}">` +
-    `<button type="button" class="oc-rule-main" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" data-oc-key="rule-${escapeHtml(policy.id)}" title="${escapeHtml(scope)}">` +
+    `<button type="button" class="oc-rule-main" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" data-oc-key="rule-${escapeHtml(policy.id)}" title="${escapeHtml(scope + ' · ' + source)}">` +
     `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
-    `<span class="oc-rule-budget">${escapeHtml(ocBudgetPhrase(policy))}${escapeHtml(schedule)}</span>` +
-    `<span class="oc-rule-meta">${escapeHtml(source)}</span></button>` +
+    `<span class="oc-rule-budget">${escapeHtml(ocBudgetPhrase(policy))}${escapeHtml(schedule)}</span></button>` +
     `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(live.join(' · ') || 'idle')}</span>` +
     `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-edit="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="edit limit">edit</button>` +
     `<button type="button" class="oc-icon-btn danger" data-oc-remove="limit" data-oc-id="${escapeHtml(policy.id)}" aria-label="remove limit">remove</button></div></div>` +

@@ -850,11 +850,13 @@ module.exports = async function operatorMenus(H) {
         throttles: [{id: 'ov-limit', scope: {providers: ['prov-a']}, concurrency: 2,
           requests: 10, request_window: '1m', source: 'ui'}]});
       w.openOperatorConsole('overview');
-      const kpi = label => text(qa('.oc-kpi').find(node =>
-        node.querySelector('.oc-kpi-label').textContent === label)?.querySelector('.oc-kpi-value'));
-      check('the overview KPI tiles count rules, holds, limits and queued work',
-        kpi('rules') === '2' && kpi('holds') === '1' &&
-        kpi('limits') === '1' && kpi('queued') === '3');
+      // The counts are stated once, in the console head and on the section
+      // chips; the overview body is the rules themselves.
+      check('the overview opens on the rules with no repeated count band',
+        !q('#oc-pane .oc-kpi') &&
+        text('#oc-live').includes('paused 1') && text('#oc-live').includes('limits 1') &&
+        q('#oc-tab-pause .oc-rail-n').textContent === '1' &&
+        q('#oc-tab-limits .oc-rail-n').textContent === '1');
       const rows = qa('.oc-ov-row');
       check('the in-force list carries one row per rule',
         rows.length === 2 &&
@@ -918,13 +920,14 @@ module.exports = async function operatorMenus(H) {
         w.fetch = savedFetch;
       }
 
-      // The overview history is the same bounded ledger, newest first.
+      // The ledger has one owner: the console footer, newest first. The
+      // overview does not repeat it, so the panel keeps one scroll region.
       w.openOperatorConsole('overview');
       const phrases = evalJSON('ocChanges.map(change => change.phrase)');
-      const rendered = qa('.oc-history li .oc-ov-scope').map(node => node.textContent);
-      check('the overview lists this session\'s changes newest first',
-        rendered.length === Math.min(phrases.length, 8) &&
-        JSON.stringify(rendered) === JSON.stringify(phrases.slice(-rendered.length).reverse()));
+      check('the change ledger lives once, in the console footer',
+        !q('#oc-pane .oc-history') &&
+        text('#oc-change') === phrases[phrases.length - 1] &&
+        !!q('#oc-undo'));
       w.closeOperatorConsole();
     }
 
@@ -1077,8 +1080,12 @@ module.exports = async function operatorMenus(H) {
       }
 
       // A keyed TEXT control carries the caret contract that the rebuilt
-      // pane can preserve: the picker filter's data-oc-key is on the input
-      // itself, so ocRestoreFocus can refocus it and restore the selection.
+      // pane can preserve: the picker's data-oc-key is on the input itself, so
+      // ocRestoreFocus can refocus it and restore the selection. A long known
+      // list is what shows the filter, so seed one.
+      w.applyThrottleState({ok: true, active: true,
+        known_providers: ['prov-a', 'prov-b', 'prov-c', 'prov-d', 'prov-e', 'prov-f', 'prov-g'],
+        throttles: [policy]});
       openCond('providers');
       const filter = q('#oc-pane [data-oc-key="pick-filter-providers"]');
       filter.focus();
@@ -1087,7 +1094,9 @@ module.exports = async function operatorMenus(H) {
       const settledFilter = q('#oc-pane [data-oc-key="pick-filter-providers"]');
       settledFilter.focus();
       settledFilter.setSelectionRange(2, 2);
-      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'],
+      // The list stays long: a short known list hides the filter by design.
+      w.applyThrottleState({ok: true, active: true,
+        known_providers: ['prov-a', 'prov-b', 'prov-c', 'prov-d', 'prov-e', 'prov-f', 'prov-g'],
         throttles: [{...policy, in_flight: 9, queued: 4}]});
       await settleUntil(() => d.activeElement?.dataset?.ocKey === 'pick-filter-providers');
       const restored = q('#oc-pane [data-oc-key="pick-filter-providers"]');

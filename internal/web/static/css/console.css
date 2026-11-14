@@ -65,103 +65,97 @@
 .op-readout-btn[aria-expanded="true"] .op-readout-chev { transform: rotate(180deg); }
 
 /* ---------- console frame ----------
-   A definite desktop height lets the rail and the pane split the box instead
-   of both collapsing to content. It re-reads this max-height and clamps it
-   to the space under the trigger, so the inline value is always at most this. */
+   A compact popover, not a workspace: the panel is only as tall as its
+   content and never exceeds 560px. The pane scrolls if a section outgrows
+   that, so opening the console never resizes the page around it. */
 .mn.oc {
-  --mn-w: 940px;
-  height: min(680px, calc(100dvh - 32px));
-  max-height: min(680px, calc(100dvh - 32px));
+  --mn-w: 520px;
+  max-height: min(560px, calc(100dvh - 24px));
   overflow: hidden;
 }
 .oc-hd {
-  position: relative; display: flex; align-items: center; gap: 10px;
-  flex-shrink: 0; padding: 10px 12px 12px;
+  position: relative; display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; padding: 8px 10px 9px;
   background: var(--rail); border-bottom: 1px solid var(--border2);
 }
-/* The rail's graduated scale closes the head. */
-.oc-hd::after {
-  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 5px;
-  pointer-events: none; background: var(--tick-strip); opacity: .6;
-}
-.oc-head { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.oc-head { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .oc-mark {
-  width: 26px; height: 26px; flex: none; border-radius: 7px;
+  width: 20px; height: 20px; flex: none; border-radius: 5px;
   display: inline-flex; align-items: center; justify-content: center;
   color: var(--accent2); border: 1px solid var(--border2);
   background: color-mix(in srgb, var(--accent2) 8%, transparent);
 }
 .oc-mark svg {
-  width: 15px; height: 15px; display: block; stroke: currentColor; fill: none;
-  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+  width: 12px; height: 12px; display: block; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
 }
-.oc-head-text { flex: 1; min-width: 0; }
+/* The title and the live sentence share one line: the popover head has room
+   for exactly that much, and the state is the more useful half. */
+.oc-head-text {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 7px;
+}
 .oc-title {
-  margin: 0; color: var(--text); font: 650 15px/1.2 var(--mono);
-  letter-spacing: -.01em;
+  margin: 0; flex: none; color: var(--text); font: 650 12px/1.3 var(--mono);
+  letter-spacing: -.01em; white-space: nowrap;
 }
 .oc-live {
-  margin: 2px 0 0; color: var(--muted); font: 400 10px/1.35 var(--mono);
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin: 0; min-width: 0; color: var(--muted);
+  font: 400 10px/1.3 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.oc-close { flex: none; min-height: 30px; padding: 3px 8px; }
-.oc-close .d-key { margin-left: 4px; font-size: 9px; color: var(--muted); }
+.oc-close { flex: none; min-height: 24px; padding: 1px 6px; font-size: 10px; }
+.oc-close .d-key { margin-left: 3px; font-size: 8.5px; color: var(--muted); }
 
-/* ---------- body: readout strip beside the workspace ---------- */
-.oc-body {
-  display: grid; grid-template-columns: 152px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  flex: 1; min-height: 0; overflow: hidden;
-}
+/* ---------- body: one horizontal section strip over the pane ----------
+   The panel is a popover, so the sections read as a chip row instead of a
+   full-height rail that would cost 152px of a 520px box. */
+.oc-body { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
 .oc-rail {
-  display: flex; flex-direction: column; gap: 2px; min-height: 0;
-  padding: 8px; overflow-y: auto; overscroll-behavior: contain;
-  background: var(--rail); border-right: 1px solid var(--border);
-  scrollbar-width: thin;
+  display: flex; gap: 1px; flex: none; min-height: 0;
+  padding: 5px 6px; overflow-x: auto; overflow-y: hidden;
+  overscroll-behavior-x: contain; scrollbar-width: none;
+  background: var(--rail); border-bottom: 1px solid var(--border);
 }
+.oc-rail::-webkit-scrollbar { display: none; }
 .oc-rail-item {
-  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 30px;
-  padding: 6px 8px; text-align: left; cursor: pointer;
+  display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  min-height: 24px; padding: 3px 7px; text-align: left; cursor: pointer;
   background: none; color: var(--muted);
-  border: 1px solid transparent; border-left: 2px solid transparent;
-  border-radius: 7px; font: 10.5px var(--mono);
+  border: 1px solid transparent; border-bottom: 2px solid transparent;
+  border-radius: 5px 5px 0 0; font: 10px var(--mono);
 }
 .oc-rail-item:hover { background: var(--panel2); color: var(--text); }
 .oc-rail-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
 .oc-rail-item[aria-selected="true"] {
   background: var(--panel2); color: var(--text);
-  border-color: var(--border2); border-left-color: var(--accent);
+  border-color: var(--border); border-bottom-color: var(--accent);
 }
 .oc-rail-item[aria-selected="true"] .oc-rail-label { font-weight: 600; }
 .oc-rail-label {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .oc-rail-n {
-  margin-left: auto; min-width: 16px; padding: 0 5px;
-  border-radius: 4px; text-align: center;
+  min-width: 14px; padding: 0 4px;
+  border-radius: 3px; text-align: center;
   color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
-  font: 600 9.5px/1.6 var(--mono); font-variant-numeric: tabular-nums;
+  font: 600 9px/1.5 var(--mono); font-variant-numeric: tabular-nums;
 }
 .oc-pane {
   min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
-  padding: 14px 16px 18px; scrollbar-width: thin;
+  padding: 9px 10px 11px; scrollbar-width: thin;
 }
 .oc-pane:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
-.oc-pane::-webkit-scrollbar { width: 6px; }
-.oc-pane::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-.oc-rail::-webkit-scrollbar,
+.oc-pane::-webkit-scrollbar { width: 5px; }
 .oc-pick-list::-webkit-scrollbar { width: 5px; }
-.oc-window .oc-chips::-webkit-scrollbar { height: 4px; }
-.oc-rail::-webkit-scrollbar-thumb,
-.oc-pick-list::-webkit-scrollbar-thumb,
-.oc-window .oc-chips::-webkit-scrollbar-thumb {
+.oc-pane::-webkit-scrollbar-thumb,
+.oc-pick-list::-webkit-scrollbar-thumb {
   background: var(--border2); border-radius: 3px;
 }
 
 /* The session's change ledger, pinned below the scrolling workspace. */
 .oc-ft {
-  display: flex; align-items: center; gap: 10px; flex-shrink: 0;
-  padding: 8px 12px 9px; background: var(--rail);
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 5px 10px 6px; background: var(--rail);
   border-top: 1px solid var(--border2);
 }
 .oc-change {
@@ -176,16 +170,18 @@
 .oc-sec { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .oc-sec-head {
   display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 12px; min-width: 0; padding-bottom: 10px;
+  gap: 8px; min-width: 0; padding-bottom: 7px;
   border-bottom: 1px solid var(--border);
 }
+/* The section name is the popover's own subject line, so it stays small: the
+   panel head already carries the identity. */
 .oc-h2 {
-  margin: 0; color: var(--text); font: 650 15px/1.25 var(--mono);
+  margin: 0; color: var(--text); font: 650 12px/1.3 var(--mono);
   letter-spacing: -.01em;
 }
 .oc-sub {
-  margin: 3px 0 0; color: var(--muted); font: 10.5px/1.5 var(--sans);
-  max-width: 72ch;
+  margin: 2px 0 0; color: var(--muted); font: 10px/1.45 var(--sans);
+  max-width: 64ch;
 }
 .oc-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .oc-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
@@ -210,6 +206,8 @@
 
 /* ---------- fields ---------- */
 .oc-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.oc-field.bare { gap: 0; }
+.oc-field.bare input { padding: 3px 7px; }
 .oc-field.wide { grid-column: 1 / -1; }
 .oc-field-name {
   color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .05em;
@@ -304,35 +302,39 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-inline input { flex: 1 1 140px; width: auto; }
 .oc-inline .btn { flex: none; }
 
-/* ---------- scope conditions and pickers ---------- */
-.oc-conds { display: flex; flex-direction: column; min-width: 0; }
+/* ---------- scope conditions and pickers ----------
+   The scope is one wrapping strip of chips, not five stacked rows. An unset
+   dimension is a dim chip you click; a set one carries its values inside the
+   same chip. The open picker takes the strip's full width below it. */
+.oc-conds {
+  display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; padding: 1px 0;
+}
 .oc-cond {
-  display: grid; grid-template-columns: 104px minmax(0, 1fr);
-  gap: 4px 8px; align-items: start; min-width: 0;
-  padding: 6px 4px; border-top: 1px solid var(--border);
+  display: inline-flex; align-items: center; gap: 3px; min-width: 0;
+  max-width: 100%; padding: 1px 3px 1px 1px;
+  border: 1px solid var(--border); border-radius: 5px; background: var(--panel2);
 }
-.oc-cond:first-child { border-top: 0; }
-.oc-cond[data-open="1"] {
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
-  border-radius: 7px;
-}
+.oc-cond[data-set="1"] { border-color: color-mix(in srgb, var(--accent) 32%, var(--border2)); }
+.oc-cond[data-open="1"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--border2)); }
 .oc-cond-btn {
-  display: inline-flex; align-items: center; gap: 4px; min-height: 24px;
-  padding: 2px 0; border: 0; background: none; text-align: left;
-  color: var(--muted); font: 9px var(--mono); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 3px; min-height: 20px;
+  padding: 1px 5px; border: 0; border-radius: 4px; background: none;
+  text-align: left; color: var(--muted); font: 9px var(--mono); cursor: pointer;
 }
-.oc-cond-btn:hover { color: var(--text); }
-.oc-cond-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; border-radius: 4px; }
-.oc-cond[data-open="1"] .oc-cond-name { color: var(--text); font-weight: 600; }
-.oc-cond-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.oc-cond-chev { flex: none; color: var(--muted); font-size: 9px; }
-.oc-cond-values { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; }
+.oc-cond[data-set="1"] .oc-cond-btn,
+.oc-cond[data-open="1"] .oc-cond-btn { color: var(--text); }
+.oc-cond-btn:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.oc-cond-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+.oc-cond[data-open="1"] .oc-cond-name { font-weight: 600; }
+.oc-cond-name { min-width: 0; white-space: nowrap; }
+.oc-cond-chev { flex: none; color: var(--muted); font-size: 8px; }
+.oc-cond-values { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; min-width: 0; }
 .oc-cond-values .oc-chip {
-  max-width: 100%; color: var(--text); white-space: normal;
-  overflow-wrap: anywhere;
+  max-width: 12em; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
-.oc-cond-any { color: var(--muted); font: 9.5px var(--mono); }
-.oc-cond .oc-pick { grid-column: 1 / -1; }
+/* The picker takes the full width of the strip, below every chip. */
+.oc-conds > .oc-pick { flex: 1 0 100%; margin-top: 2px; }
 .oc-pick {
   display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding: 8px;
   border: 1px solid var(--border2); border-radius: 8px; background: var(--rail);
@@ -367,26 +369,26 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 .oc-compose-hd {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  padding: 8px 12px; background: var(--rail); border-bottom: 1px solid var(--border);
-  color: var(--text); font: 600 10.5px var(--mono);
+  padding: 5px 10px; background: var(--rail); border-bottom: 1px solid var(--border);
+  color: var(--text); font: 600 10px var(--mono);
 }
 .oc-compose .oc-group {
-  gap: 7px; padding: 10px 12px; border-top: 1px solid var(--border);
+  gap: 5px; padding: 7px 10px; border-top: 1px solid var(--border);
 }
 .oc-compose-hd + .oc-group { border-top: 0; }
 /* Facts, warnings, previews and errors are direct children of the bench, so
    they need the same inline inset the padded groups carry. */
 .oc-compose > .oc-facts,
-.oc-compose > .oc-warning { margin-left: 12px; margin-right: 12px; }
-.oc-compose > .oc-facts { margin-top: 8px; }
-.oc-compose > .oc-warning { margin-top: 8px; }
+.oc-compose > .oc-warning { margin-left: 10px; margin-right: 10px; }
+.oc-compose > .oc-facts { margin-top: 6px; }
+.oc-compose > .oc-warning { margin-top: 6px; }
 .oc-compose > .oc-preview,
-.oc-compose > .oc-error { margin: 2px 12px 10px; }
+.oc-compose > .oc-error { margin: 2px 10px 7px; }
 .oc-budget {
-  display: grid; grid-template-columns: minmax(130px, 168px) 116px minmax(0, 1fr);
-  gap: 6px 10px; align-items: center; min-width: 0;
+  display: grid; grid-template-columns: minmax(104px, 132px) 78px minmax(0, 1fr);
+  gap: 4px 8px; align-items: center; min-width: 0;
 }
-.oc-budget + .oc-budget { margin-top: 8px; }
+.oc-budget + .oc-budget { margin-top: 4px; }
 .oc-budget > .oc-check { align-self: center; }
 .oc-budget .oc-field { grid-column: 2; }
 .oc-window { min-width: 0; }
@@ -395,15 +397,16 @@ button.oc-chip[aria-pressed="true"]::before {
    ten chips into three rows. */
 .oc-window .oc-chips {
   flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden;
-  overscroll-behavior-x: contain; scrollbar-width: thin; padding-bottom: 1px;
+  overscroll-behavior-x: contain; scrollbar-width: none; padding-bottom: 0;
 }
+.oc-window .oc-chips::-webkit-scrollbar { display: none; }
 .oc-window .oc-chip { flex: 0 0 auto; }
 .oc-window .oc-chip:focus-visible { outline-offset: -1px; }
 .oc-preview {
-  margin: 0; padding: 8px 10px;
-  border: 1px solid var(--border); border-left: 2px solid var(--accent);
-  border-radius: 0 7px 7px 0;
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  margin: 0; padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
   color: var(--text); font: 10px/1.55 var(--mono); overflow-wrap: anywhere;
 }
 .oc-preview:empty { display: none; }
@@ -421,18 +424,21 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-error:empty { display: none; }
 .oc-compose-ft {
   display: flex; align-items: center; justify-content: flex-end;
-  flex-wrap: wrap; gap: 8px;
-  padding: 10px 12px; border-top: 1px solid var(--border);
+  flex-wrap: wrap; gap: 6px;
+  padding: 6px 10px; border-top: 1px solid var(--border);
   background: var(--rail);
 }
-.oc-compose-ft .btn { min-height: 30px; }
+.oc-compose-ft .btn { min-height: 26px; }
 
 /* ---------- rule rows: one calibrated line, one live column ---------- */
+/* One rule is one line: kind tag, scope, budget, then the live figure. The
+   actions appear on hover and focus so they cost no width at rest, and the
+   whole line is the edit target. */
 .oc-rule {
-  display: grid; grid-template-columns: 56px minmax(0, 1fr) 156px;
+  display: grid; grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: stretch; min-width: 0; overflow: hidden;
   background: var(--panel); border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 7px;
 }
 .oc-rule:hover { border-color: var(--border2); }
 /* The visible kind label is generated from the row's data-kind: the script
@@ -440,62 +446,55 @@ button.oc-chip[aria-pressed="true"]::before {
 .oc-rule::before {
   content: attr(data-kind);
   display: flex; align-items: center; justify-content: center;
-  padding: 6px 4px; text-align: center;
+  padding: 3px 2px; text-align: center;
   color: var(--_kind, var(--muted));
-  background: color-mix(in srgb, var(--_kind, var(--muted)) 7%, transparent);
-  border-left: 2px solid var(--_kind, var(--border2));
+  background: color-mix(in srgb, var(--_kind, var(--muted)) 9%, transparent);
   border-right: 1px solid var(--border);
-  font: 600 9px/1.3 var(--mono); letter-spacing: .04em;
+  font: 600 8.5px/1.25 var(--mono); letter-spacing: .03em;
 }
 .oc-rule[data-kind="limit"] { --_kind: var(--accent); }
 .oc-rule[data-kind="pause"] { --_kind: var(--warn); }
 .oc-rule[data-kind="capture"] { --_kind: var(--cyan); }
 .oc-rule-main {
-  display: grid;
-  /* Scope owns the first line; the budget and schedule take the second, so a
-     long selector is never the reason a schedule disappears. The source sits
-     in a right column spanning both lines. */
-  grid-template-columns: minmax(0, 1fr) auto;
-  grid-template-areas: "scope meta" "budget meta";
-  gap: 2px 12px; align-items: baseline; align-content: center; min-width: 0;
-  padding: 8px 10px; border: 0; background: none; text-align: left;
+  display: flex; align-items: baseline; gap: 7px; min-width: 0;
+  padding: 6px 8px; border: 0; background: none; text-align: left;
   color: var(--text); font: inherit; cursor: pointer;
 }
 .oc-rule-main:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
 .oc-rule-main:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
-/* The scope keeps one line so rows align; a full selector plus a schedule is
-   wider than one line, so the budget wraps instead of dropping the schedule
-   behind an ellipsis. */
+/* The scope and the budget share one line; each truncates before the other
+   collapses, so a dense row never grows taller. */
 .oc-rule-scope {
-  grid-area: scope; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; color: var(--text); font: 600 10.5px/1.4 var(--mono);
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text); font: 600 10px/1.4 var(--mono);
 }
 .oc-rule-budget {
-  grid-area: budget; min-width: 0; overflow-wrap: anywhere;
-  color: var(--text); font: 10px/1.4 var(--mono);
-}
-.oc-rule-meta {
-  grid-area: meta; align-self: center; min-width: 0; white-space: nowrap;
-  color: var(--muted); font: 9px/1.4 var(--mono);
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--muted); font: 9.5px/1.4 var(--mono);
 }
 .oc-rule-side {
-  display: flex; flex-direction: column; align-items: flex-end;
-  justify-content: center; gap: 4px; min-width: 0;
-  padding: 6px 8px; border-left: 1px solid var(--border);
-  background: color-mix(in srgb, var(--text) 2%, transparent);
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 0 8px 0 2px;
 }
 .oc-rule-live {
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  min-width: 0; max-width: 100%; max-height: 2.8em; overflow: hidden;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   color: var(--text); text-align: right;
-  font: 9px/1.35 var(--mono); font-variant-numeric: tabular-nums;
-  overflow-wrap: anywhere;
+  font: 9px/1.4 var(--mono); font-variant-numeric: tabular-nums;
 }
-.oc-rule-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; flex-wrap: wrap; }
+/* Actions stay visible: an operator should never have to hover to learn that
+   a rule can be edited or removed. They sit at muted ink so the state column
+   still reads first. */
+.oc-rule-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 1px;
+  flex: none; flex-wrap: nowrap;
+}
+.oc-rule-actions .oc-icon-btn { opacity: .72; }
+.oc-rule:hover .oc-rule-actions .oc-icon-btn,
+.oc-rule:focus-within .oc-rule-actions .oc-icon-btn { opacity: 1; }
 .oc-icon-btn {
-  min-height: 24px; padding: 2px 6px;
-  border: 1px solid transparent; border-radius: 5px; background: none;
-  color: var(--muted); font: 9px/1.3 var(--mono); cursor: pointer;
+  min-height: 20px; padding: 1px 4px;
+  border: 1px solid transparent; border-radius: 4px; background: none;
+  color: var(--muted); font: 8.5px/1.3 var(--mono); cursor: pointer;
 }
 .oc-icon-btn:hover { color: var(--text); border-color: var(--border2); }
 .oc-icon-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
@@ -504,78 +503,20 @@ button.oc-chip[aria-pressed="true"]::before {
   background: color-mix(in srgb, var(--err) 8%, transparent);
 }
 
-/* ---------- overview ---------- */
-.oc-kpis {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-  border: 1px solid var(--border); border-radius: 8px;
-  background: var(--panel2); overflow: hidden;
-}
-.oc-kpi {
-  display: flex; flex-direction: column; gap: 2px; min-width: 0;
-  padding: 8px 10px 9px 12px; border-left: 1px solid var(--border);
-}
-.oc-kpi:first-child { border-left: 0; }
-.oc-kpi-label {
-  color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .08em;
-}
-.oc-kpi-value {
-  color: var(--text); font: 650 17px/1.1 var(--mono);
-  letter-spacing: -.01em; font-variant-numeric: tabular-nums;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.oc-ov-list {
-  display: flex; flex-direction: column; min-width: 0;
-  border-bottom: 1px solid var(--border);
-}
-.oc-ov-row {
-  display: grid; grid-template-columns: 54px minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 10px; align-items: baseline; width: 100%; min-width: 0;
-  padding: 7px 6px; border: 0; border-top: 1px solid var(--border);
-  background: none; color: var(--text); text-align: left; font: inherit;
-  cursor: pointer;
-}
-.oc-ov-row:first-child { border-top: 0; }
-.oc-ov-row:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
-.oc-ov-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
-.oc-ov-kind {
-  display: inline-flex; align-items: center; gap: 5px;
-  color: var(--muted); font: 600 9px/1.4 var(--mono);
-}
-.oc-ov-kind::before {
-  content: ''; width: 5px; height: 5px; flex: none; border-radius: 1px;
-  background: currentColor;
-}
-.oc-ov-kind[data-kind="limit"] { color: var(--accent); }
-.oc-ov-kind[data-kind="pause"] { color: var(--warn); }
-.oc-ov-kind[data-kind="capture"] { color: var(--cyan); }
-.oc-ov-scope {
-  min-width: 0; color: var(--text); font: 10.5px/1.4 var(--mono);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.oc-ov-detail {
-  min-width: 0; color: var(--muted); text-align: right;
-  font: 9.5px/1.45 var(--mono); overflow-wrap: anywhere;
-}
-.oc-history {
-  list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column;
-  border-bottom: 1px solid var(--border);
-}
-.oc-history li {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-  padding: 5px 2px; border-top: 1px solid var(--border); min-width: 0;
-}
-.oc-history li:first-child { border-top: 0; }
-.oc-history .oc-ov-scope { white-space: normal; overflow: visible; font-size: 10px; }
-.oc-history .oc-ov-detail { text-align: right; white-space: nowrap; }
-.oc-empty-line { color: var(--muted); font: 9.5px/1.6 var(--sans); }
 .oc-banner {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
-  padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border));
-  border-left: 2px solid var(--warn); border-radius: 0 7px 7px 0;
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
   color: var(--warn-text); font: 10px/1.5 var(--mono);
 }
-.oc-banner .oc-link { color: var(--warn-text); }
+.mn.oc .oc-banner[data-tone="err"] {
+  border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+  color: var(--err-text);
+}
+.oc-banner .oc-link { color: inherit; }
 .oc-banner .oc-link:hover { color: var(--text); }
 .oc-empty {
   padding: 18px 12px; border: 1px dashed var(--border2); border-radius: 8px;
@@ -642,63 +583,31 @@ button.oc-chip[aria-pressed="true"]::before {
 
 /* ---------- narrow window and sheet placement ---------- */
 @media (max-width: 800px) {
+  /* The sheet is the same popover scaled to the thumb: it never fills the
+     screen, because a menu that covers the page is not a menu. */
   .mn.oc[data-placement="sheet"] {
-    height: min(86dvh, calc(100dvh - 16px));
-    max-height: min(86dvh, calc(100dvh - 16px));
+    max-height: min(70dvh, calc(100dvh - 16px));
   }
-  .mn.oc .oc-body {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-  /* One thumb-scrollable readout strip replaces the vertical rail. */
   .mn.oc .oc-rail {
-    flex-direction: row; flex-wrap: nowrap; gap: 3px;
-    padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--border);
-    overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
-    scrollbar-width: thin;
+    flex-wrap: nowrap; gap: 2px; padding: 5px 6px;
+    scrollbar-width: none;
   }
-  .mn.oc .oc-rail::-webkit-scrollbar { height: 3px; }
-  .mn.oc .oc-rail::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-  .mn.oc .oc-rail-item {
-    width: auto; flex: 0 0 auto; min-height: 38px; padding: 0 10px;
-    border-left-width: 1px; border-bottom: 2px solid transparent;
-  }
-  .mn.oc .oc-rail-item[aria-selected="true"] {
-    border-left-color: var(--border2); border-bottom-color: var(--accent);
-  }
-  .mn.oc .oc-hd { padding: 9px 12px 11px; }
-  .mn.oc .oc-pane { padding: 12px 12px 16px; }
-  .mn.oc .oc-ft { padding: 7px 10px; }
+  .mn.oc .oc-rail-item { min-height: 38px; padding: 0 9px; border-radius: 5px; }
+  .mn.oc .oc-hd { padding: 8px 10px 9px; }
+  .mn.oc .oc-pane { padding: 9px 10px 12px; }
+  .mn.oc .oc-ft { padding: 6px 10px; }
   .oc-sec-head { flex-wrap: wrap; }
-  .oc-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .oc-kpi:nth-child(odd) { border-left: 0; }
-  .oc-kpi:nth-child(n+3) { border-top: 1px solid var(--border); }
 }
 
 @media (max-width: 640px) {
   .mn.oc .oc-sec-head { flex-direction: column; align-items: stretch; gap: 8px; }
   .mn.oc .oc-head-actions { justify-content: flex-start; flex-wrap: wrap; }
-  .mn.oc .oc-rule { grid-template-columns: 52px minmax(0, 1fr); }
-  /* The kind strip runs the full height of the stacked row, so the second
-     line keeps the same left edge instead of leaving a lone accent stub. */
-  .mn.oc .oc-rule::before { grid-row: 1 / span 2; padding: 6px 2px; }
-  .mn.oc .oc-rule-main {
-    grid-template-columns: minmax(0, 1fr); grid-template-areas: "scope" "budget" "meta";
-    gap: 2px; padding: 8px 9px;
-  }
-  .mn.oc .oc-rule-meta { white-space: normal; }
-  .mn.oc .oc-rule-scope,
-  .mn.oc .oc-rule-budget,
-  .mn.oc .oc-rule-meta { white-space: normal; overflow: visible; }
-  .mn.oc .oc-rule-side {
-    grid-column: 2; flex-direction: row; align-items: center;
-    justify-content: space-between; gap: 8px;
-    padding: 6px 8px; border-left: 0; border-top: 1px solid var(--border);
-  }
-  .mn.oc .oc-rule-live {
-    display: block; flex: 1; max-height: none; overflow: hidden;
-    text-align: left; text-overflow: ellipsis; white-space: nowrap;
-  }
+  /* A phone keeps the single line and drops the budget before it drops the
+     scope. */
+  .mn.oc .oc-rule { grid-template-columns: 36px minmax(0, 1fr) auto; }
+  .mn.oc .oc-rule-main { padding: 7px 8px; }
+  .mn.oc .oc-rule-budget { display: none; }
+  .mn.oc .oc-rule-side { padding: 0 6px 0 0; }
   .mn.oc .oc-budget { grid-template-columns: minmax(0, 1fr); }
   .mn.oc .oc-budget .oc-field { grid-column: auto; }
   .mn.oc .oc-compose .oc-group { padding: 9px 10px; }
@@ -709,14 +618,10 @@ button.oc-chip[aria-pressed="true"]::before {
   .mn.oc .oc-compose-hd { padding: 8px 10px; }
   .mn.oc .oc-compose-ft { padding: 9px 10px; }
   .mn.oc .oc-compose-ft .btn { flex: 1 1 auto; }
-  .mn.oc .oc-cond { grid-template-columns: 76px minmax(0, 1fr); gap: 2px 8px; align-items: center; }
-  .mn.oc .oc-cond-values { padding-left: 0; }
   .mn.oc .oc-times .oc-field { width: calc(50% - 4px); min-width: 96px; }
   .mn.oc .oc-ov-row { grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; }
   .mn.oc .oc-ov-detail { grid-column: 1 / -1; text-align: left; }
   .mn.oc .oc-ov-scope { white-space: normal; overflow: visible; }
-  .mn.oc .oc-history li { flex-direction: column; align-items: flex-start; gap: 1px; }
-  .mn.oc .oc-history .oc-ov-detail { text-align: left; }
   .mn.oc .oc-filter-row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
   .mn.oc .oc-filter-name { padding-top: 0; }
   .mn.oc .oc-receipt .oc-compose-ft .btn { flex: 1 1 auto; }

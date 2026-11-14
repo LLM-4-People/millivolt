@@ -38,7 +38,7 @@ async function main() {
       !declarations.some(value => value === 'uppercase' || value === 'capitalize'));
     const host = d.createElement('section');
     host.innerHTML = '<div class="oc-label"></div><div class="oc-field-name"></div>' +
-      '<div class="oc-rule-meta"></div><div class="oc-pick-label"></div>' +
+      '<div class="oc-rule-budget"></div><div class="oc-pick-label"></div>' +
       '<div class="oc-live"></div><div class="oc-note"></div>' +
       '<div class="kpi"><h2></h2></div>' +
       '<span class="xp-dim-by"></span><div class="prov-lb"></div><div class="mr-what"></div>' +
@@ -47,7 +47,7 @@ async function main() {
       '<div class="detail-section"><h4></h4></div>';
     d.body.appendChild(host);
     try {
-      for (const selector of ['.oc-label', '.oc-field-name', '.oc-rule-meta', '.oc-pick-label',
+      for (const selector of ['.oc-label', '.oc-field-name', '.oc-rule-budget', '.oc-pick-label',
         '.oc-live', '.oc-note', '.kpi h2',
         '.xp-dim-by', '.prov-lb', '.mr-what', '.mr-ex-hd', '.card h2', '.ct-h', 'th',
         '.day-chip', '.detail-section h4']) {

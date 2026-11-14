@@ -43,30 +43,23 @@ function ocRenderOverview() {
   const queued = Number(pauseState.queued) || 0;
   const list = rows.length ? rows.map(row =>
     `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
-    `<span class="oc-ov-kind" data-kind="${row.kind}">${row.kind === 'capture' ? 'capture' : row.kind}</span>` +
+    `<span class="oc-ov-kind" data-kind="${row.kind}">${row.kind}</span>` +
     `<span class="oc-ov-scope">${escapeHtml(row.scope)}</span>` +
     `<span class="oc-ov-detail">${escapeHtml(row.detail)}</span></button>`).join('')
-    : `<div class="oc-empty"><strong>Nothing is in force.</strong> Requests follow provider behavior, queue settings and the absence of a cap. Add a limit, hold or capture when you need one.</div>`;
-  const recent = ocChanges.length
-    ? ocChanges.slice().reverse().map(change =>
-      `<li><span class="oc-ov-scope">${escapeHtml(change.phrase)}</span><span class="oc-ov-detail">${escapeHtml(new Date(change.at).toLocaleTimeString())}</span></li>`).join('')
-    : `<li class="oc-empty-line">changes this session appear here</li>`;
+    : `<div class="oc-empty"><strong>Nothing is in force.</strong> Add a limit, hold or capture when you need one.</div>`;
   const restart = restartInProgress() ? `<div class="oc-banner">Restart in progress. <button type="button" class="oc-link" data-oc-section="system">view steps</button></div>` : '';
+  // The counts live in the head line and on the section chips, so the body
+  // opens with the rules themselves. The queue appears only when something is
+  // actually parked: an empty queue is not a task.
+  const queue = queued ? `<div class="oc-group"><div class="oc-label">queue</div>` +
+    `<p class="oc-note">${fmt(queued)} parked. Draining releases them with a retryable response; running streams finish.</p>` +
+    `<div class="oc-inline">${ocChipRow('drain-scope', ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
+    (ocDrain.scope !== 'all' ? `<input type="text" data-oc-drain-value value="${escapeHtml(ocDrain.value)}" placeholder="${escapeHtml(ocDrain.scope)}" aria-label="drain ${ocDrain.scope}" data-oc-key="drain-value">` : '') +
+    `<button type="button" class="btn" data-oc-drain>drain</button></div></div>` : '';
   return `<div class="oc-sec">` +
     restart +
-    `<div class="oc-kpis">` +
-    `<div class="oc-kpi"><span class="oc-kpi-label">rules</span><span class="oc-kpi-value">${fmt(rows.length)}</span></div>` +
-    `<div class="oc-kpi"><span class="oc-kpi-label">holds</span><span class="oc-kpi-value">${fmt(ocRuleCounts().holds)}</span></div>` +
-    `<div class="oc-kpi"><span class="oc-kpi-label">limits</span><span class="oc-kpi-value">${fmt(ocRuleCounts().limits)}</span></div>` +
-    `<div class="oc-kpi"><span class="oc-kpi-label">queued</span><span class="oc-kpi-value">${fmt(queued)}</span></div>` +
-    `</div>` +
-    `<div class="oc-group"><div class="oc-label">in force</div><div class="oc-ov-list">${list}</div></div>` +
-    `<div class="oc-group"><div class="oc-label">queue</div>` +
-    `<p class="oc-note">${queued ? fmt(queued) + ' requests are parked. Draining releases them with a retryable response; running streams finish.' : 'The queue is empty.'}</p>` +
-    `<div class="oc-inline">${ocChipRow('drain-scope', ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
-    (ocDrain.scope !== 'all' ? `<input type="text" data-oc-drain-value value="${escapeHtml(ocDrain.value)}" placeholder="${escapeHtml(ocDrain.scope)}" aria-label="drain ${escapeHtml(ocDrain.scope)}" data-oc-key="drain-value">` : '') +
-    `<button type="button" class="btn" data-oc-drain ${queued > 0 ? '' : 'disabled'}>drain</button></div></div>` +
-    `<div class="oc-group"><div class="oc-label">this session</div><ol class="oc-history">${recent}</ol></div>` +
+    `<div class="oc-ov-list">${list}</div>` +
+    queue +
     `</div>`;
 }
 

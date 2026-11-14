@@ -17,8 +17,11 @@ module.exports = async function menusScroll(H) {
       w.menuIsOpen(shell) && d.getElementById('btn-controls').getAttribute('aria-expanded') === 'true');
     const paneStyle = w.getComputedStyle(d.getElementById('oc-pane'));
     const railStyle = w.getComputedStyle(d.getElementById('oc-rail'));
-    check('the console pane and rail own their scroll overflow',
-      paneStyle.overflowY === 'auto' && railStyle.overflowY === 'auto');
+    // The pane owns vertical scrolling; the section strip is one horizontal
+    // row that may scroll sideways, never a second vertical scroller.
+    check('the console pane owns vertical scrolling and the strip scrolls sideways',
+      paneStyle.overflowY === 'auto' && railStyle.overflowY === 'hidden' &&
+      railStyle.overflowX === 'auto');
     check('the console action rows are its own flex rows, not the retired clear-actions strip',
       w.getComputedStyle(d.getElementById('oc-change').parentElement).display === 'flex' &&
       !d.querySelector('.clear-actions'));

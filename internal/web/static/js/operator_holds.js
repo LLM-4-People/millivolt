@@ -96,8 +96,7 @@ function ocRenderPause() {
     return `<div class="oc-rule" data-kind="pause" data-oc-rule="${escapeHtml(hold.id || '')}">` +
       `<button type="button" class="oc-rule-main" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}" data-oc-key="rule-${escapeHtml(hold.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
-      `<span class="oc-rule-budget">${escapeHtml(hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue')}</span>` +
-      `<span class="oc-rule-meta">${escapeHtml(meta.join(' · '))}</span></button>` +
+      `<span class="oc-rule-budget">${escapeHtml([hold.max_queued ? 'queue cap ' + fmt(hold.max_queued) : 'default queue', ...meta].join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(ocUntilPhrase(hold.until) || 'open')}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-edit="pause" data-oc-id="${escapeHtml(hold.id || '')}">edit</button>` +
       `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button></div></div></div>`;
@@ -284,8 +283,8 @@ function ocRenderCapture() {
     return `<div class="oc-rule" data-kind="capture" data-oc-rule="${escapeHtml(session.id || '')}">` +
       `<button type="button" class="oc-rule-main" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}" data-oc-key="rule-${escapeHtml(session.id || '')}" title="${escapeHtml(scope)}">` +
       `<span class="oc-rule-scope">${escapeHtml(scope)}</span>` +
-      `<span class="oc-rule-budget">${escapeHtml(n + (n === 1 ? ' capture' : ' captures'))}${ran ? ' · ' + escapeHtml(ran) : ''}</span>` +
-      `<span class="oc-rule-meta">${escapeHtml(session.duration ? ocDurationText(session.duration) : 'manual stop')}</span></button>` +
+      `<span class="oc-rule-budget">${escapeHtml([n + (n === 1 ? ' capture' : ' captures'), ran,
+        session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '))}</span></button>` +
       `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(left)}</span>` +
       `<div class="oc-rule-actions"><button type="button" class="oc-icon-btn" data-oc-edit="capture" data-oc-id="${escapeHtml(session.id || '')}">edit</button>` +
       `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button></div></div></div>`;
