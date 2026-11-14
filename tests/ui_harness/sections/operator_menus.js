@@ -1298,6 +1298,27 @@ module.exports = async function operatorMenus(H) {
       w.closeOperatorConsole();
     }
 
+    // ---- the phone sheet keeps enough pane to work in ----
+    {
+      // jsdom does not apply media queries, so this is a source contract. At
+      // 70dvh a 320x568 phone put the pane at 253px against a 771px composer:
+      // opening one left zero rule rows visible and the list three pane
+      // heights away. The sheet may take most of a phone, but it must not
+      // lose the dismissal strip: 100dvh minus its own cap stays positive.
+      const css = fs.readFileSync(path.join(STATIC, 'css', 'console.css'), 'utf8');
+      const sheet = /@media \(max-width: 800px\)[\s\S]*?\.mn\.oc\[data-placement="sheet"\]\s*\{([^}]*)\}/.exec(css);
+      check('the phone sheet takes most of the viewport but not all of it',
+        !!sheet && /88dvh/.test(sheet[1]) &&
+        sheet[1].includes('calc(100dvh - 16px)'));
+      // The pinned commit row must park on the pane edge, and the pane must
+      // reserve room for it so a focused field cannot land underneath.
+      const block = css.slice(css.indexOf('@media (max-width: 640px)'));
+      check('the pinned commit row parks on the pane edge',
+        /\.mn\.oc \.oc-compose-ft\s*\{[^}]*position:\s*sticky;\s*bottom:\s*0/.test(block));
+      check('the pane reserves room for the pinned commit row',
+        /\.mn\.oc \.oc-pane\s*\{[^}]*scroll-padding-bottom:\s*76px/.test(block));
+    }
+
     // ---- the phone row keeps the fact the row exists to carry ----
     {
       // jsdom does not apply media queries, so this is a source contract: the
