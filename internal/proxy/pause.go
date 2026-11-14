@@ -455,9 +455,13 @@ func newPauseID() string {
 // decodePause reads the persisted hold document. The second result reports a
 // document that existed but could not be decoded: an empty store and a corrupt
 // one both yield no holds, and only the caller can tell the operator that the
-// difference means state was lost rather than never written. A corrupt
-// document is left in place so the next write does not silently destroy the
-// only evidence of it.
+// difference means state was lost rather than never written. The flag is the
+// whole contract: it stays true for the life of the process, so the served
+// snapshot keeps reporting restore_degraded until a restart reads a document
+// that decodes. The document itself is NOT preserved - the first accepted
+// operator write replaces it, because the store owns one value per key. An
+// operator who wants the unreadable bytes must read them before mutating
+// anything.
 func decodePause(raw []byte) (holds []persistedPause, degraded bool) {
 	if len(raw) == 0 {
 		return nil, false

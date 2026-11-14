@@ -1634,8 +1634,10 @@ and a degraded operator-state restore. The last one is the difference between
 "nothing is held" and "a saved hold or limit document could not be read": the
 served `pause` and `throttle` snapshots carry `restore_degraded`, so a truncated
 document does not boot as a healthy, unpaused proxy with its saved rules silently
-gone. The unreadable document stays in place rather than being overwritten by the
-next operator write, so it can be inspected or replaced deliberately. An offline
+gone. The flag stays true for the life of the process; a restart that reads a
+document which decodes is what clears it. Each key holds one value, so the next
+accepted operator write replaces the unreadable document rather than preserving
+it: capture the bytes first if they are needed as evidence. An offline
 indicator alone does not prove inference is down. None of these mechanisms makes
 initial history preload instantaneous.
 

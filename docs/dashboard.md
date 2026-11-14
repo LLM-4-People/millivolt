@@ -330,9 +330,13 @@ reopening returns where the operator left. Opening the console itself performs
 no action.
 
 The rail names six sections: overview, limits, pause, capture, export and
-system. Limits, pause and capture carry a count badge for the rules in that
-section. The overview is the in-force list: one row per hold, capture and
-enforcing limit, each jumping to the section that owns it, plus the queue drain
+system. Limits, pause and capture carry a count badge: for limits the number of
+rules enforcing right now, for pause the active holds, for capture the running
+capture sessions. A rule outside its schedule window is installed but enforcing
+nothing, so it does not raise the limits badge. The overview is the rule
+register: one row per hold, capture and every installed limit, each jumping to
+the section that owns it, with an off-schedule limit marked `off schedule`
+rather than reading as a live cap, plus the queue drain
 control when requests are actually parked. A request parked by the storm/quota
 gate is named in its own block instead: that gate runs before admission, so a
 drain cannot release it, and the block points at the controls that can. The
