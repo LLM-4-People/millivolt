@@ -1499,6 +1499,26 @@ module.exports = async function operatorMenus(H) {
         budgetRules.every(rule => !/display:\s*none/.test(rule)));
     }
 
+    // ---- the rule row keeps its scope and budget when the live figure grows ----
+    {
+      // jsdom computes no grid tracks, so this is a source contract. The live
+      // column was an `auto` track, which is sized to its max-content: measured
+      // in Chrome at 1280, a busy policy (11 in flight, 27 queued, both request
+      // and token budgets remaining) made that track 457px of a 498px row and
+      // squeezed the edit target to 16px. The scope and the budget rendered at
+      // zero width, so the row hid the cap it exists to state.
+      const css = fs.readFileSync(path.join(STATIC, 'css', 'console.css'), 'utf8');
+      const row = /^\.oc-rule\s*\{([^}]*)\}/m.exec(css);
+      check('the rule row caps its live column instead of sizing it to content',
+        !!row && /grid-template-columns:\s*40px\s+minmax\(0,\s*1fr\)\s+fit-content\(var\(--oc-rule-side-max\)\)/.test(row[1]));
+      // One owner for the cap: the token is declared on the console shell, so
+      // the row and any later rule that needs the same share read it once.
+      const shell = /^\.mn\.oc\s*\{([^}]*)\}/m.exec(css);
+      check('the live column cap is declared once on the console shell',
+        !!shell && /--oc-rule-side-max:\s*\d+%/.test(shell[1]) &&
+        (css.match(/--oc-rule-side-max:/g) || []).length === 1);
+    }
+
     // ---- 10. export builder ----
     {
       w.__ocExportRecords = [{

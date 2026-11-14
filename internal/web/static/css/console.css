@@ -117,6 +117,10 @@
    that, so opening the console never resizes the page around it. */
 .mn.oc {
   --mn-w: 520px;
+  /* The rule row's live column may claim at most this share of the row. A
+     content-sized cap keeps a short figure compact while refusing to let a
+     long one take the line away from the scope and the budget. */
+  --oc-rule-side-max: 40%;
   max-height: min(560px, calc(100dvh - 24px));
   overflow: hidden;
 }
@@ -542,9 +546,18 @@ button.oc-chip[aria-pressed="true"]::before {
 /* ---------- rule rows: one calibrated line, one live column ---------- */
 /* One rule is one line: kind tag, scope, budget, then the live figure. The
    actions appear on hover and focus so they cost no width at rest, and the
-   whole line is the edit target. */
+   whole line is the edit target.
+
+   The live track is fit-content, capped at --oc-rule-side-max. An auto track is
+   sized to its max-content, so a busy policy - measured with 11 in flight, 27
+   queued and both request and token budgets remaining - made that column 457px
+   of a 498px row and squeezed the edit target to 16px. The scope and the budget
+   rendered at zero width: the row's whole point was invisible. fit-content
+   keeps a short figure compact and caps a long one, so the scope and budget
+   keep their line; the row title carries the untruncated reading. */
 .oc-rule {
-  display: grid; grid-template-columns: 40px minmax(0, 1fr) auto;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) fit-content(var(--oc-rule-side-max));
   align-items: stretch; min-width: 0; overflow: hidden;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 7px;
