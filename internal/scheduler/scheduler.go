@@ -236,10 +236,17 @@ type Stats struct {
 	// pacing window parks both populations, so operator-facing totals add
 	// them; keeping them separate preserves the queue bound's own meaning.
 	SendWaiters int `json:"send_waiters"`
+	// StormWaiters counts requests parked in the storm/quota gate, which runs
+	// before admission. They are in neither Queued nor SendWaiters, so a
+	// fully parked proxy would otherwise read as idle. They are kept separate
+	// because operator queue draining cannot release them: only the gate
+	// opening does, so folding them into a drainable total would make the
+	// drain action promise something it cannot do.
+	StormWaiters int `json:"storm_waiters"`
 }
 
-// Stats sums in-flight slots, admission waiters and send-gate waiters across
-// every group.
+// Stats sums in-flight slots, admission waiters, send-gate waiters and
+// storm-gate waiters across every group.
 func (s *Scheduler) Stats() Stats {
 	st := Stats{Paused: s.Paused()}
 	s.mu.Lock()
@@ -251,6 +258,12 @@ func (s *Scheduler) Stats() Stats {
 		st.SendWaiters += g.sendWaiters
 		g.mu.Unlock()
 	}
+	// s.mu then the storm state's own mutex is the order UpdateOptions already
+	// takes, so this adds no new lock edge. stormState.queued is the one
+	// process-wide count: the per-scope counters are incremented once per
+	// matching scope per waiter, so summing scopes would count a model waiter
+	// parked behind its provider twice.
+	st.StormWaiters = s.storms.queuedCount()
 	return st
 }
 

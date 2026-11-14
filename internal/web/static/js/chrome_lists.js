@@ -145,13 +145,31 @@ function pauseUntilLabel(until) {
   return untilLeft(until);
 }
 
+// parkedCounts is the one reading of the two parked populations the pause
+// document publishes. They are not interchangeable: an operator drain releases
+// admission and send-gate waiters, while a request parked in the storm/quota
+// gate waits before admission, so only that gate opening or a quota resume
+// frees it. Keeping the split here is what stops a surface from offering a
+// drain for work the drain cannot touch, and from claiming nothing is waiting
+// while the gate holds every new request.
+function parkedCounts() {
+  return {
+    drainable: Math.max(0, Number(pauseState.queued) || 0),
+    gated: Math.max(0, Number(pauseState.storm_waiters) || 0),
+  };
+}
+
 // pauseStatusBits and debugStatusBits own the operator status word lists the
 // footer renders. The footer's hold variant inserts the live-hold scope bits
 // before the queued count; only that surface renders scope, so its call site
 // passes them in.
 function pauseStatusBits(scopeBits = []) {
   const bits = ['paused', ...scopeBits];
-  if (pauseState.queued > 0) bits.push('queued ' + pauseState.queued);
+  const parked = parkedCounts();
+  if (parked.drainable > 0) bits.push('queued ' + parked.drainable);
+  // A gated request is parked by a gate no hold in this list owns, so the
+  // footer names it instead of folding it into the hold's own queued count.
+  if (parked.gated > 0) bits.push('gated ' + parked.gated);
   const left = pauseUntilLabel(pauseState.until);
   if (left) bits.push(left);
   return bits;

@@ -70,7 +70,8 @@ function ocDrainValueHTML() {
 
 function ocRenderOverview() {
   const rows = ocAllRuleRows();
-  const queued = Number(pauseState.queued) || 0;
+  const parked = parkedCounts();
+  const queued = parked.drainable;
   const list = rows.length ? rows.map(row =>
     `<button type="button" class="oc-ov-row" data-oc-section="${row.section}" data-oc-target="${escapeHtml(row.id)}" data-oc-key="ov-${row.kind}-${escapeHtml(row.scope)}">` +
     `<span class="oc-ov-kind" data-kind="${row.kind}"${row.offSchedule ? ' data-oc-off-schedule="1"' : ''}>${row.kind}</span>` +
@@ -81,20 +82,31 @@ function ocRenderOverview() {
   // The counts live in the head line and on the section chips, so the body
   // opens with the rules themselves. The queue appears only when something is
   // actually parked: an empty queue is not a task.
+  //
+  // The storm/quota gate parks before admission, so its waiters are not
+  // drainable: a drain would answer "nothing released" for work it cannot
+  // reach. They are named in their own note, with the actions that do release
+  // them, so the operator is not offered a button that cannot help.
   const queue = queued ? `<div class="oc-group"><div class="oc-label">queue</div>` +
     `<p class="oc-note">${fmt(queued)} parked. Draining releases them with a retryable response; running streams finish.</p>` +
     `<div class="oc-inline">${ocChipRow('drain-scope', ['all', 'provider', 'model', 'client'], ocDrain.scope, v => v === 'all' ? 'everything' : 'one ' + v)}` +
     (ocDrain.scope !== 'all' ? ocDrainValueHTML() : '') +
     `<button type="button" class="btn" data-oc-drain>drain</button></div></div>` : '';
+  const gated = parked.gated ? `<div class="oc-group" data-oc-gate><div class="oc-label">gate</div>` +
+    `<p class="oc-note">${fmt(parked.gated)} waiting on error storm or quota protection. They are parked before admission, so a drain cannot release them: the gate opens on its own once the provider recovers, or a quota pause can be resumed from the banner. ` +
+    `<button type="button" class="oc-link" data-oc-section="limits">view limits</button></p></div>` : '';
   return `<div class="oc-sec">` +
     restart +
     `<div class="oc-ov-list">${list}</div>` +
     queue +
+    gated +
     `</div>`;
 }
 
 async function ocDrainQueue() {
-  const queued = Number(pauseState.queued) || 0;
+  // Only the drainable population is a precondition: a gate-only park has no
+  // drain to perform, and the overview does not offer one.
+  const queued = parkedCounts().drainable;
   if (!queued) return;
   let body;
   if (ocDrain.scope === 'all') body = { all: true };

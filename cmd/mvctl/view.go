@@ -64,7 +64,7 @@ func cmdOverview(ctx *Context) (Result, error) {
 	pretty += "\n\n" + kv([][2]string{
 		{"storage", storageText(snapshot)},
 		{"dropped", num(snapshot.Storage.Dropped)},
-		{"pause", boolText(snapshot.Pause.Paused) + fmt.Sprintf(" (%s queued)", num(snapshot.Pause.Queued))},
+		{"pause", boolText(snapshot.Pause.Paused) + fmt.Sprintf(" (%s queued%s)", num(snapshot.Pause.Queued), gatedSuffix(snapshot.Pause.StormWaiters))},
 		{"throttles", num(float64(len(snapshot.Throttle.Throttles)))},
 		{"debug", boolText(snapshot.Debug.Enabled)},
 		{"dashboard build", shortVersion(snapshot.DashboardVersion)},
@@ -330,6 +330,17 @@ func shortVersion(value string) string {
 		return value[:12] + "..."
 	}
 	return value
+}
+
+// gatedSuffix names requests parked by the storm/quota gate beside the
+// drainable queue. The gate runs before admission, so a drain cannot release
+// them: reporting one number for both would claim a drainable queue the
+// operator cannot drain.
+func gatedSuffix(stormWaiters float64) string {
+	if stormWaiters <= 0 {
+		return ""
+	}
+	return ", " + num(stormWaiters) + " gated"
 }
 
 func storageText(snapshot Snapshot) string {

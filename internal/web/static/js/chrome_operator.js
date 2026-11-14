@@ -341,6 +341,7 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
     until: st.until || null,
     queued: typeof st.queued === 'number' ? st.queued : 0,
+    storm_waiters: typeof st.storm_waiters === 'number' ? st.storm_waiters : 0,
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
   };
   refreshFooterState();

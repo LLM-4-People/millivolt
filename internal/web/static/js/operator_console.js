@@ -277,6 +277,14 @@ function ocRestartActive() {
   return typeof restartInProgress === 'function' && restartInProgress();
 }
 
+// ocGatedCount is the readout's reading of requests parked by the storm/quota
+// gate. It is separate from an operator drain because the gate runs before
+// admission: draining the queue cannot release these waiters, only the gate
+// opening or a quota resume can.
+function ocGatedCount() {
+  return typeof parkedCounts === 'function' ? parkedCounts().gated : 0;
+}
+
 // ocReadoutSegments returns the readout's words in priority order: a restart
 // outranks a policy because it explains why traffic is moving.
 function ocReadoutSegments() {
@@ -302,7 +310,21 @@ function ocReadoutSegments() {
   // is true only while the window is open, so this segment counts the closed
   // ones: "off schedule", not "scheduled", which read as the opposite.
   if (counts.parked > 0) segs.push(OC_OFF_SCHEDULE + ' ' + counts.parked);
+  // Requests the storm/quota gate is parking. They are in neither the
+  // admission queue nor the send gate, so without this segment a proxy
+  // refusing every new request still read `steady`.
+  const gated = ocGatedCount();
+  if (gated > 0) segs.push('gated ' + gated);
   return segs;
+}
+
+// ocParking reports whether live traffic is being held rather than merely
+// capped. A hold parks matching requests, and so does the storm/quota gate;
+// both are the warn tone in the readout because "steady" or a routine accent
+// would say traffic is moving when it is not. One predicate, so the readout's
+// words and its tone cannot disagree about whether something is parked.
+function ocParking() {
+  return ocRuleCounts().holds > 0 || ocGatedCount() > 0;
 }
 
 // refreshOperatorReadout repaints the header's always-visible state. It is the
@@ -327,7 +349,7 @@ function refreshOperatorReadout() {
   const stale = typeof operatorPollStale === 'function' && operatorPollStale();
   const state = (offline || stale) ? 'stale'
     : ocRestartActive() ? 'busy'
-      : ocRuleCounts().holds > 0 ? 'paused'
+      : ocParking() ? 'paused'
         : segs.length ? 'active' : 'steady';
   box.dataset.state = state;
   // The words stay the last known truth and say they are not current, so the

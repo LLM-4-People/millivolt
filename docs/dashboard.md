@@ -278,14 +278,16 @@ captures remain sensitive.
 The header's operator readout is the one control surface. It stays in the
 header rail at every width, including the phone header; the theme tray and
 Settings sit behind the actions flyout there. It reads `steady` when no hold or
-capture is active, no limit policy is enforcing and no restart is running, then
-one segment per active hold (`paused 1`), capture session (`captures 1`) and
-enforcing limit policy (`limits 2`). A stored policy whose schedule window is
-closed enforces nothing, so it is named separately as `off schedule N` instead
-of being counted as a cap; the server owns that verdict and reports it per
-policy, so the header cannot re-derive a different answer from the stored
-minutes. The wording names the behaviour, because `scheduled N` read as "the
-cap is on a schedule and working" when it meant the opposite.
+capture is active, no limit policy is enforcing, no request is parked by the
+storm/quota gate and no restart is running, then one segment per active hold
+(`paused 1`), capture session (`captures 1`), enforcing limit policy
+(`limits 2`) and gated request (`gated 3`). A stored policy whose schedule
+window is closed enforces nothing, so it is named separately as
+`off schedule N` instead of being counted as a cap; the server owns that
+verdict and reports it per policy, so the header cannot re-derive a different
+answer from the stored minutes. The wording names the behaviour, because
+`scheduled N` read as "the cap is on a schedule and working" when it meant the
+opposite.
 While a rebuild runs, `restarting` comes first, with ` · step N` when the server
 reports a real step. The counts are live state: a hold that expires, a stopped
 capture or a cleared limit leaves on the next state repaint. A hold takes the
@@ -315,10 +317,13 @@ The rail names six sections: overview, limits, pause, capture, export and
 system. Limits, pause and capture carry a count badge for the rules in that
 section. The overview is the in-force list: one row per hold, capture and
 enforcing limit, each jumping to the section that owns it, plus the queue drain
-control when requests are actually parked. The counts are not repeated there,
-because the head line and the section badges already state them. Limits, pause
-and capture hold rule rows and one composer; export holds the download builder,
-and system holds the restart and Settings cards.
+control when requests are actually parked. A request parked by the storm/quota
+gate is named in its own block instead: that gate runs before admission, so a
+drain cannot release it, and the block points at the controls that can. The
+counts are not repeated there, because the head line and the section badges
+already state them. Limits, pause and capture hold rule rows and one composer;
+export holds the download builder, and system holds the restart and Settings
+cards.
 
 ### Rule rows
 

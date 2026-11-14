@@ -198,6 +198,33 @@ module.exports = async function operatorMenus(H) {
       w.eval('restartServerState = {}');
       w.refreshOperatorReadout();
 
+      // The storm/quota gate parks before admission, so its waiters are in
+      // neither the admission queue nor the send gate. A proxy refusing every
+      // new request for an affected model read `steady` and offered a drain
+      // that could not release them.
+      w.applyPauseState({...EMPTY_PAUSE, queued: 2, storm_waiters: 3});
+      w.refreshOperatorReadout();
+      check('requests parked by the storm gate are named apart from the drainable queue',
+        out() === 'gated 3' &&
+        d.getElementById('op-readout').dataset.state === 'paused' &&
+        evalJSON('parkedCounts().drainable') === 2 &&
+        evalJSON('parkedCounts().gated') === 3);
+      w.openOperatorConsole('overview');
+      const gateNote = text('#oc-pane .oc-group[data-oc-gate] .oc-note');
+      check('the overview names a gate the drain cannot release',
+        gateNote.includes('3 waiting on error storm or quota protection') &&
+        gateNote.includes('a drain cannot release them') &&
+        qa('#oc-pane [data-oc-drain]').length === 1);
+      // A gate-only park offers no drain at all: the button would answer
+      // "nothing released" for work it cannot reach.
+      w.applyPauseState({...EMPTY_PAUSE, queued: 0, storm_waiters: 4});
+      w.refreshOperatorReadout();
+      check('a gate-only park offers no drain control',
+        out() === 'gated 4' && !q('#oc-pane [data-oc-drain]') &&
+        text('#oc-pane .oc-group[data-oc-gate] .oc-note').includes('4 waiting'));
+      w.applyPauseState(EMPTY_PAUSE);
+      w.refreshOperatorReadout();
+
       // A stored policy outside its schedule is installed but enforces
       // nothing. Counting it would let the readout claim a cap that is not
       // applied, so the server's own verdict decides which word is used.

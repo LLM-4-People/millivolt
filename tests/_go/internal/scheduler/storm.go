@@ -122,6 +122,46 @@ func TestStormProviderEvidenceWithoutModelGate(t *testing.T) {
 	}
 }
 
+// TestStormWaiterVisibleInStats: a request parked in the storm/quota gate runs
+// before admission, so it is in neither Stats.Queued nor Stats.SendWaiters.
+// The operator readout read that as "steady" while the proxy refused every new
+// request for the affected model.
+//
+// The count is asserted as 1, not as the sum of the per-scope counters: one
+// waiter parked behind an active model scope also increments the provider
+// scope it was evaluated against, so summing scopes would report two requests
+// where one is waiting.
+func TestStormWaiterVisibleInStats(t *testing.T) {
+	s := newStormTestScheduler(t, stormTestOptions())
+	stormFail(t, s, "provider.test", "model-a")
+	stormFail(t, s, "provider.test", "model-a")
+	if rows := s.StormSnapshot(); len(rows) != 1 || rows[0].Scope != "model" {
+		t.Fatalf("fixture did not open the model gate: %+v", rows)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.WaitStorm(ctx, "provider.test", "model-a", nil)
+		done <- err
+	}()
+	waitFor(t, func() bool { return s.Stats().StormWaiters == 1 }, "storm waiter in Stats")
+
+	// The drainable populations stay untouched: an operator drain cannot
+	// release a gate waiter, so counting it there would make the drain claim
+	// work it cannot do.
+	if st := s.Stats(); st.Queued != 0 || st.SendWaiters != 0 {
+		t.Fatalf("storm parking leaked into drainable counts: %+v", st)
+	}
+
+	cancel()
+	if !errors.Is(<-done, context.Canceled) {
+		t.Fatal("storm waiter did not cancel")
+	}
+	waitFor(t, func() bool { return s.Stats().StormWaiters == 0 }, "storm waiter cleared from Stats")
+}
+
 func TestStormSingleProbeRecoveryAndCancellation(t *testing.T) {
 	s := newStormTestScheduler(t, stormTestOptions())
 	stormFail(t, s, "provider.test", "a")

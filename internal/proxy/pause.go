@@ -1060,8 +1060,15 @@ func (s *Server) PauseSnapshot() map[string]any {
 		"until":              rfc3339OrNil(soonest),
 		"default_max_queued": s.defaultPauseCap(),
 		// Every request the scheduler is parking: admission waiters plus
-		// send-gate waiters (429/5xx retry pacing, probe serialization).
+		// send-gate waiters (429/5xx retry pacing, probe serialization). These
+		// are the populations an operator drain can release.
 		"queued": st.Queued + st.SendWaiters,
+		// Requests parked by the storm/quota gate. They wait before admission,
+		// so they are in neither admission nor send waiters above, and a proxy
+		// holding every new request would otherwise publish zero queued. They
+		// are reported apart because draining the queue cannot release them:
+		// only the gate opening or an operator resume does.
+		"storm_waiters": st.StormWaiters,
 	}
 }
 
