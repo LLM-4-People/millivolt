@@ -133,7 +133,7 @@ function ocRenderPause() {
     // The countdown is the side column's fact; the meta line carries only the
     // context around it, so one row never states the same number twice.
     const meta = [hold.queued ? hold.queued + ' queued' : '', hold.reason || ''].filter(Boolean);
-    const html = ocRuleRowHTML({
+    return ocRuleRowHTML({
       kind: 'pause', id: hold.id || '', scope, title: scope,
       // A stored 0 is the server's "no cap on this hold", not "use the
       // default": an omitted cap is written as the configured queue size at
@@ -144,7 +144,6 @@ function ocRenderPause() {
       actions: `<button type="button" class="oc-icon-btn" data-oc-copy="pause" data-oc-id="${escapeHtml(hold.id || '')}" aria-label="copy this hold's scope into a new hold" title="copy this scope into a new hold">copy</button>` +
         `<button type="button" class="oc-icon-btn" data-oc-resume="${escapeHtml(hold.id || '')}">resume</button>`,
     });
-    return { html, text: scope + ' ' + (hold.reason || '') + ' ' + (hold.max_queued || '') };
   });
   // "As fast as it allows" was only true when no limit and no queue bound
   // applied, and this section cannot see either. It states what it knows.
@@ -395,7 +394,7 @@ function ocRenderCapture() {
     const n = typeof session.captures === 'number' ? session.captures : 0;
     // Capture count and elapsed time own the budget line; the side column owns
     // the remaining window, which is the same fact the row's action changes.
-    const html = ocRuleRowHTML({
+    return ocRuleRowHTML({
       kind: 'capture', id: session.id || '', scope, title: scope,
       budget: [n + ' ' + agree(n, 'capture', 'captures'), ran,
         session.duration ? ocDurationText(session.duration) : 'manual stop'].filter(Boolean).join(' · '),
@@ -403,7 +402,6 @@ function ocRenderCapture() {
       actions: `<button type="button" class="oc-icon-btn" data-oc-copy="capture" data-oc-id="${escapeHtml(session.id || '')}" aria-label="copy this capture's scope into a new capture" title="copy this scope into a new capture">copy</button>` +
         `<button type="button" class="oc-icon-btn danger" data-oc-stop="${escapeHtml(session.id || '')}">stop</button>`,
     });
-    return { html, text: scope + ' ' + n + ' captures ' + left };
   });
   // Two ways this sentence was wrong: capture_body_preview stores a bounded
   // prompt/response preview even with no session running, and captures from

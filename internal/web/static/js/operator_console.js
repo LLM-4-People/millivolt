@@ -146,15 +146,26 @@ function ocRuleEditing(kind, id) {
 // The words are escaped here because every part is a server or operator
 // string. `actions` is trusted markup: each section builds its own verbs and
 // escapes their own values, exactly as before.
+//
+// It returns the row with the text it renders. The list filter searches that
+// text, so deriving it from the same strings the row paints is what makes
+// "anything on screen can be found" true by construction. Each section used to
+// re-assemble what it believed the row said, and the copies had already
+// drifted: a limit's schedule was on screen but unsearchable, and a hold's
+// "queue cap" wording was replaced by the bare number. `title` is included
+// because it carries the source ("set by header"), which is operator-visible
+// on hover and nowhere else.
 function ocRuleRowHTML(rule) {
   const id = escapeHtml(rule.id || '');
-  return `<div class="oc-rule" data-kind="${escapeHtml(rule.kind)}" data-oc-rule="${id}"${ocRuleEditing(rule.kind, rule.id || '')}${rule.attrs || ''}>` +
+  const html = `<div class="oc-rule" data-kind="${escapeHtml(rule.kind)}" data-oc-rule="${id}"${ocRuleEditing(rule.kind, rule.id || '')}${rule.attrs || ''}>` +
     `<button type="button" class="oc-rule-main" data-oc-edit="${escapeHtml(rule.kind)}" data-oc-id="${id}" data-oc-key="rule-${id}" title="${escapeHtml(rule.title)}">` +
     `<span class="oc-rule-scope">${escapeHtml(rule.scope)}</span>` +
     `<span class="oc-rule-budget">${escapeHtml(rule.budget)}</span></button>` +
     `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(rule.live)}</span>` +
     `<div class="oc-rule-actions">${rule.actions}</div></div>` +
     `</div>`;
+  const text = [rule.kind, rule.scope, rule.budget, rule.live, rule.title].join(' ');
+  return { html, text };
 }
 
 // OC_COMPOSERS names each composer's preview and commit control once. The

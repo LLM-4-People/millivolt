@@ -261,11 +261,10 @@ function ocRenderLimits() {
   if (!ocDrafts.limit) ocDrafts.limit = ocBlankLimitDraft();
   // Each row carries the text it renders, so the shared list filter searches
   // what the operator can actually read instead of re-deriving a predicate.
-  const entries = policies.map(policy => {
-    const html = ocLimitRuleHTML(policy);
-    const scope = ocPolicyScopePhrase(policy);
-    return { html, text: scope + ' ' + ocBudgetPhrase(policy) + ' ' + (policy.source || '') };
-  });
+  // The row builder returns the text it renders, so the filter searches the
+  // source line, the schedule and the live column without this module
+  // re-deriving any of them.
+  const entries = policies.map(ocLimitRuleHTML);
   const composing = ocComposing('limit');
   const editing = !!ocDrafts.limit?.id;
   // An empty list proves no limit rule exists. It does not prove admission:
