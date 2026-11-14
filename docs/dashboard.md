@@ -327,7 +327,8 @@ remaining time, queue cap and queued count. A capture row names its retained
 count, run time and stop time. A row is the one edit target: activating it opens
 its composer in edit mode. The action column offers copy, which starts a new
 rule from the same scope and schedule with no budgets, and the terminating
-action for that kind: remove, resume or stop. On a narrow phone the row takes
+action for that kind: remove, resume or stop. The edit action is not repeated
+there, because the row already performs it. On a narrow phone the row takes
 two lines so the scope can be read in full instead of being clipped.
 
 ### Composer anatomy
@@ -356,7 +357,10 @@ line and the rest is the platform's own picker. The ramp is offered only on a si
 rule without a schedule. Equal from and to times mean all day, and a window
 that starts after its end spans midnight. Pause adds everything, new-clients
 and named clients/providers modes, a duration or until-resumed choice, and an
-optional queue cap. Capture starts a scoped Debug session and adds client,
+optional queue cap. Its head also carries a one-click bounded hold (`hold
+15m`), which writes the same all-traffic document through the same gate,
+ledger and undo path. It is bounded by construction: an indefinite hold is
+still available, but only through the composer where the operator chooses it. Capture starts a scoped Debug session and adds client,
 provider and model scopes, a duration or until-stopped choice, and the retention
 and byte facts for the current configuration.
 
