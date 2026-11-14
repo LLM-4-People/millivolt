@@ -109,6 +109,10 @@ function chartXTick(t) {
   // a clock-time view. Multi-day sub-day buckets keep both date and time.
   if (span > CHART_DAY_MS + (chartAgg?.bucket_ms || 0)) {
     const d = new Date(t);
+    // A numeric axis label, not the log divider's prose stamp: it has to fit
+    // a tick. The calendar fields come from the date object, and the only
+    // calendar question this file asks - does the window span years - is
+    // chartSpansYears' own.
     const date = (d.getMonth() + 1) + '/' + d.getDate() + (chartSpansYears() ? '/' + d.getFullYear() : '');
     return date + (chartAgg.bucket_ms < CHART_DAY_MS ? ' ' + fmtClockMs(t) : '');
   }

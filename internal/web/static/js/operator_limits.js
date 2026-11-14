@@ -186,7 +186,7 @@ function ocLimitComposerHTML(draft) {
       (burstAllowed ? '' : `<p class="oc-note">Burst control needs a single-provider limit without a schedule.</p>`) +
       `</div>` : '') +
     (scheduleOn ? `<div class="oc-advanced">` +
-      `<div class="oc-days" role="group" aria-label="days">` + OC_DAYS.map((day, index) =>
+      `<div class="oc-days" role="group" aria-label="days">` + CAL_DAYS.map((day, index) =>
         // The painted label is one letter to fit seven chips on a row; the
         // accessible name is the day, because "S" and "T" each stand for two
         // different days and a screen reader has no width constraint to honour.

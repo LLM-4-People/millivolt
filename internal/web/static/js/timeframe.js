@@ -131,10 +131,7 @@ function tfResolve(token, nowMs) {
 // form for today, a short date otherwise.
 function tfSince(ms) {
   const d = new Date(ms);
-  const now = new Date();
-  if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) {
-    return fmtClockMs(ms);
-  }
+  if (sameLocalDay(d, new Date())) return fmtClockMs(ms);
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 

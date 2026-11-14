@@ -2444,8 +2444,13 @@ module.exports = async function operatorMenus(H) {
         // reader accepts both spellings of the same window.
         w.eval('ocSchedulePhrase({days: [1], start: 540, end: 1020})') ===
           w.eval('ocSchedulePhrase({days: [1], start_minute: 540, end_minute: 1020})') &&
-        evalJSON('OC_DAYS.map(d => d.name).join()') ===
-          'Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday');
+        // The weekday table is shared with the log dividers, so a rename
+        // reaches the schedule chips and the day stamps together.
+        evalJSON('CAL_DAYS.map(d => d.name).join()') ===
+          'Sunday,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday' &&
+        evalJSON('CAL_DAYS.map(d => d.short).join()') ===
+          'SUN,MON,TUE,WED,THU,FRI,SAT' &&
+        evalJSON('CAL_DAYS.map(d => d.letter).join()') === 'S,M,T,W,T,F,S');
       // The empty frame has one shape, whatever the surface's words are. Its
       // two parts are trusted differently: the lead is escaped here, while the
       // body is caller markup that may embed a real control (the filter's

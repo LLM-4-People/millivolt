@@ -21,22 +21,6 @@ const OC_SECTIONS = [
 const OC_STORAGE_KEY = 'millivolt.operatorSection';
 const OC_CHANGE_LIMIT = 8;
 const OC_MINUTE = 60000;
-// OC_DAYS is the one weekday table: the letter the chip paints and the name
-// it announces. Index matches the server's day numbering (0 = Sunday). The
-// letter alone is not a name - "S" is Sunday and Saturday, "T" is Tuesday and
-// Thursday - so the chip's accessible name comes from `name` while the visible
-// label stays one character wide.
-const OC_DAYS = [
-  { letter: 'S', name: 'Sunday' },
-  { letter: 'M', name: 'Monday' },
-  { letter: 'T', name: 'Tuesday' },
-  { letter: 'W', name: 'Wednesday' },
-  { letter: 'T', name: 'Thursday' },
-  { letter: 'F', name: 'Friday' },
-  { letter: 'S', name: 'Saturday' },
-];
-const OC_DAY_LABELS = OC_DAYS.map(day => day.letter);
-
 // ocNewSchedule is the one schedule a limit starts with when the operator
 // opens the schedule disclosure: no days chosen yet, 09:00 to 17:00 in the
 // server's local clock. The composer's preview fallback and the disclosure
@@ -889,7 +873,7 @@ function ocSchedulePhrase(schedule) {
   const start = schedule.start_minute != null ? schedule.start_minute : schedule.start;
   const end = schedule.end_minute != null ? schedule.end_minute : schedule.end;
   const days = Array.isArray(schedule.days) && schedule.days.length
-    ? schedule.days.map(d => OC_DAY_LABELS[d] || '?').join('') : 'every day';
+    ? schedule.days.map(d => CAL_DAYS[d]?.letter || '?').join('') : 'every day';
   if (start === end) return days + ' · all day';
   return days + ' · ' + fmtClockOfDay(start) + '-' + fmtClockOfDay(end);
 }

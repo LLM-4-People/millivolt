@@ -392,6 +392,35 @@ const fmtClockMs = ms => {
 };
 // fmtClockOfDay renders minutes since local midnight as HH:MM.
 const fmtClockOfDay = minutes => fmtClock(Math.floor(minutes / 60), minutes % 60);
+// CAL_DAYS is the one weekday table, indexed to the server's day numbering
+// (0 = Sunday). Each row carries the three spellings the dashboard actually
+// shows: the one letter a schedule chip paints, the three-letter stamp a log
+// divider prints, and the full name a screen reader hears. Two tables existed
+// before it - a letter/name table for the schedule chips and a separate short
+// table for log dividers - so a weekday rename reached one surface at a time.
+const CAL_DAYS = [
+  { letter: 'S', short: 'SUN', name: 'Sunday' },
+  { letter: 'M', short: 'MON', name: 'Monday' },
+  { letter: 'T', short: 'TUE', name: 'Tuesday' },
+  { letter: 'W', short: 'WED', name: 'Wednesday' },
+  { letter: 'T', short: 'THU', name: 'Thursday' },
+  { letter: 'F', short: 'FRI', name: 'Friday' },
+  { letter: 'S', short: 'SAT', name: 'Saturday' },
+];
+const CAL_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+// sameLocalDay answers the one calendar question the dashboard asks: do these
+// two instants fall on the same local day? It compares the fields rather than
+// a formatted string so the answer cannot depend on the format. log_rows.js
+// answered it twice - once as this comparison and once by building an
+// unpadded key - so the two could disagree about which day a row belongs to.
+const sameLocalDay = (a, b) =>
+  a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
+// fmtDateKey is the one local calendar-day key, zero-padded so a key also
+// sorts chronologically. Three surfaces built it by hand and one of them left
+// the month and day unpadded, which made "2026-11-2" sort after "2026-11-14".
+const fmtDateKey = d => d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
 // TPS_UNIT is the one compact generation-speed unit for narrow surfaces (the
 // KPI band and the summary timing tile). Chart axes, legends and tooltips keep
 // the full "tok/s" label where there is room.

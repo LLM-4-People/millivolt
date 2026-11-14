@@ -24,8 +24,7 @@ function dayKey(r) {
   if (k !== undefined) return k;
   const t = recStartMs(r);
   if (!t) { dayKeyCache.set(r, ''); return ''; }
-  const d = new Date(t);
-  k = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+  k = fmtDateKey(new Date(t));
   dayKeyCache.set(r, k);
   return k;
 }
@@ -33,19 +32,16 @@ function dayKey(r) {
 // dayDividerLabel renders the day's stamp: today / yesterday for the fresh
 // groups, else weekday · month day, with the year only when it differs from
 // the current one.
-const DAY_NAMES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
-const MONTH_NAMES = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 function dayDividerLabel(r) {
   const t = recStartMs(r);
   if (!t) return '';
   const d = new Date(t);
   const now = new Date();
-  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  if (sameDay(d, now)) return 'TODAY';
+  if (sameLocalDay(d, now)) return 'TODAY';
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (sameDay(d, yesterday)) return 'YESTERDAY';
-  let label = DAY_NAMES[d.getDay()] + ' · ' + MONTH_NAMES[d.getMonth()] + ' ' + d.getDate();
+  if (sameLocalDay(d, yesterday)) return 'YESTERDAY';
+  let label = CAL_DAYS[d.getDay()].short + ' · ' + CAL_MONTHS[d.getMonth()] + ' ' + d.getDate();
   if (d.getFullYear() !== now.getFullYear()) label += ' ' + d.getFullYear();
   return label;
 }
