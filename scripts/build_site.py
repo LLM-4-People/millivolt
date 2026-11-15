@@ -84,7 +84,7 @@ NAV_GROUPS = (
         "Start",
         (
             ("Documentation", "docs/index.html", "docs/README.md"),
-            ("Quickstart", "index.html#quickstart", None),
+            ("Install and first run", "docs/install.html", "docs/install.md"),
             ("Dashboard tour", "docs/dashboard.html", "docs/dashboard.md"),
             ("Protocol and clients", "docs/protocol.html", "docs/protocol.md"),
         ),
@@ -101,6 +101,9 @@ NAV_GROUPS = (
         "Operate",
         (
             ("Operations", "docs/operations.html", "docs/operations.md"),
+            ("Configuration", "docs/configuration.html", "docs/configuration.md"),
+            ("Containers and data", "docs/containers.html", "docs/containers.md"),
+            ("Routes and debugging", "docs/routes.html", "docs/routes.md"),
             ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
             ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Security", "security.html", "SECURITY.md"),
