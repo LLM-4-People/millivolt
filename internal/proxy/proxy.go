@@ -520,14 +520,6 @@ func policyTargetOf(rec *metrics.Record) scheduler.PolicyTarget {
 	}
 }
 
-// requestLog is the one owner of the request-scoped log prefix. The record id
-// is minted at the read boundary, so a line joins the stored row, the captured
-// body and every other line of the same request instead of being an orphan
-// message under concurrent traffic.
-func requestLog(rec *metrics.Record, format string, args ...any) {
-	logging.Printf(rec.ID, format, args...)
-}
-
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The retry directive rides the outermost writer so every error sink on
 	// the relay surface (relayed upstream statuses, the retry ladder's
@@ -741,7 +733,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case len(ensureTools) > 0:
 				feature = "ensured tools"
 			}
-			requestLog(rec, "%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
+			// The record id prefixes the line, so it joins the stored row,
+			// the captured body and every other line of the same request.
+			logging.Printf(rec.ID, "%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
 				feature, client, t.provider, recModel, why)
 		}
 	}
