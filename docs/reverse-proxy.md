@@ -93,7 +93,10 @@ client that prepends a forged entry cannot displace the real one; NGINX's
 default `$proxy_add_x_forwarded_for` then appends the resolved address on the
 way inbound. The application reads the rightmost element and never trusts the
 left side. The resolved address is a throttle key, not an identity: keep the
-location allowlists in force.
+location allowlists in force. Those lists evaluate the resolved address, so a
+caller that already reaches this host's loopback chooses what they see: they
+separate remote networks from each other and from loopback callers, not
+loopback callers from each other.
 
 NGINX's body-size gate is
 disabled in the sample: millivolt's existing `max_request_bytes` remains the

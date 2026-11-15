@@ -858,6 +858,9 @@ class PublishedContracts(unittest.TestCase):
         self.assertNotIn("$http_x_forwarded_proto", nginx.lower())
         reverse = self.read("docs/reverse-proxy.md")
         self.assertIn("X-Forwarded-Proto", reverse)
+        # The allow lists evaluate the resolved address, so the one-hop trust
+        # limit must be stated where they are described.
+        self.assertIn("chooses what", reverse)
         operations = self.read("docs/operations.md")
         self.assertIn("X-Forwarded-Proto", operations)
 

@@ -76,6 +76,14 @@ gate's brute-force limiter is the one exception: it keys on the rightmost
 back to the socket address, so it distinguishes clients behind a correct
 ingress but a directly reachable caller can still pick its own bundle.
 
+The example ingress trusts exactly one loopback hop (`set_real_ip_from
+127.0.0.1`, [deploy/nginx.conf](deploy/nginx.conf)) and its `allow` lists
+evaluate that rewritten address. A caller that can already reach the loopback
+listener therefore chooses the address the lists see: they separate remote
+networks from each other and from local callers, not local callers from each
+other. Treat a location allowlist as reachability control for a network, not as
+identity.
+
 Treat client scoping as a way to separate your own tools and traffic, not as a
 security boundary between mutually untrusted parties. A proxy reachable by
 someone who should not act as another client needs that separation enforced
