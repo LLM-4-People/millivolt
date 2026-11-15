@@ -1818,7 +1818,16 @@ and columns: `ATTACH`, `DETACH`, `PRAGMA`, `LOAD_EXTENSION`, the
 `sqlite_dbpage` and `dbstat` table-valued functions, the whole result-bearing
 `pragma_*` family and the `readfile`/`writefile` functions. Those would read
 raw pages, page statistics or the absolute database path, which is not part of
-this console's surface. Column meanings
+this console's surface.
+
+The denial is lexical over the raw query text, string literals included, so a
+keyword spelled inside a literal is refused too: `SELECT 'attach' AS x` and
+`SELECT 'pragma_table_info'` both fail. A name only has to contain the bare
+word at an ASCII boundary; `attachment` and `attach_x` pass. The driver
+executes a multi-statement string wholesale, returning the rows of the last
+statement, so both rules are load-bearing: without the `;` refusal a second
+`ATTACH` statement would run behind a `SELECT` prefix the prefix check accepts,
+and the keyword scan alone would not see it. Column meanings
 come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
 relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
 calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,
