@@ -637,3 +637,64 @@ func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte
 	out = append(out, sum[:]...)
 	return append(out, zbuf.Bytes()...)
 }
+
+// gatedReader serves data up to first, then blocks until gate closes before
+// serving the rest, so a test can hold a restore inside its upload.
+type gatedReader struct {
+	data  []byte
+	first int
+	pos   int
+	gate  chan struct{}
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	if g.pos < g.first {
+		n := copy(p, g.data[g.pos:g.first])
+		g.pos += n
+		return n, nil
+	}
+	<-g.gate
+	if g.pos == len(g.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, g.data[g.pos:])
+	g.pos += n
+	return n, nil
+}
+
+// TestRestoreHoldsReloadMuAcrossTheUpload pins H29: the restore transaction
+// starts before the upload, so two restores cannot each decode a full member
+// onto the database volume at once. While the body is still arriving the lock
+// is already held, which is what a second restore waits on.
+func TestRestoreHoldsReloadMuAcrossTheUpload(t *testing.T) {
+	liveReloadFixture(t)
+	raw, err := backup.Encode("", backup.Archive{Config: defaultConfigYAMLForRestore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &gatedReader{data: raw, first: len(raw) / 2, gate: make(chan struct{})}
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", reader)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handleRestore(rr, req)
+		close(done)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if reloadMu.TryLock() {
+			reloadMu.Unlock()
+			if time.Now().After(deadline) {
+				t.Fatal("restore never took the reload lock during the upload")
+			}
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	close(reader.gate)
+	<-done
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restore status %d body %s", rr.Code, rr.Body.String())
+	}
+}

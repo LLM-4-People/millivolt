@@ -176,6 +176,16 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
 		return
 	}
+	// One restore owns the whole transaction, including the upload staging and
+	// the decode: concurrent restores would otherwise each materialize a full
+	// member on the database volume at once and then queue for the same
+	// admission slot. A shared staging budget would bound the bytes more
+	// tightly, but it needs its own accounting and queue; widening the existing
+	// reload transaction over the decode reuses the one ownership mechanism
+	// that already serializes every apply phase. Inspect is serialized too
+	// because it stages and integrity-checks the same members.
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
 	body := http.MaxBytesReader(w, r.Body, cap)
 	defer body.Close()
 	uploadFile, err := stageRestoreUpload(uploadDir, body, cap)
@@ -262,17 +272,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	var configPlan *restoreConfigPlan
 	var dbGuard *restorePendingGuard
 	dbRestart := false
-	// Every apply phase that touches the database or config serializes under
-	// reloadMu. A database-only replace publishes the same PendingSnapshotPath
-	// admission slot a combined restore stages, so without this lock a failed
-	// combined restore could roll back (delete) a later database-only
-	// publication. Holding it for the whole phase also keeps config reads,
-	// writes, reloads and rollbacks serialized with SIGHUP, Settings saves, and
+	// reloadMu is already held from before the upload. A database-only replace
+	// publishes the same PendingSnapshotPath admission slot a combined restore
+	// stages, so without the lock a failed combined restore could roll back
+	// (delete) a later publication. The same lock keeps config reads, writes,
+	// reloads and rollbacks serialized with SIGHUP, Settings saves, and
 	// /admin/reload, and makes each guard rollback own only its own slot.
-	if wantConfig || wantDB {
-		reloadMu.Lock()
-		defer reloadMu.Unlock()
-	}
 	if wantConfig {
 		plan, err := prepareRestoreConfig(arch.Config, configMode)
 		if err != nil {

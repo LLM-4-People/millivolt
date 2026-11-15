@@ -697,7 +697,10 @@ Restore phases are ordered, not atomic. The database member runs first: a
 replace stages the decoded file and preflights it with the same schema,
 writer-INSERT and request-scan value checks boot runs before touching the live
 database, bounded by the same maintenance budget as boot maintenance, and a
-merge commits rows into the running store. Only then is the
+merge commits rows into the running store. One restore owns the whole
+transaction from the first uploaded byte, so two restores cannot stage and
+decode two full members on the database volume at once; an inspect shares that
+serialization because it stages the same members. Only then is the
 config written and hot-applied. A failed stage, preflight, or merge leaves the
 config file and live snapshot unchanged, and a failed config write or reload
 rolls the config back and restores a replace's previous pending slot. A
