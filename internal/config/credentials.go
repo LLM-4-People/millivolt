@@ -130,6 +130,13 @@ func containsAny(s string, words []string) bool {
 	return false
 }
 
+// RedactionMarker is the placeholder a model-visible config document carries in
+// place of a credential. It lives here because Config.Apply must recognize it
+// on the way back in: a redacted document posted unchanged keeps the secret the
+// loaded config already holds instead of persisting the placeholder. The MCP
+// package re-exports it as its own name, so both surfaces spell one value.
+const RedactionMarker = "[redacted]"
+
 // RedactProviderHeaders returns a shallow copy of a config values map with
 // every credential-class provider header value replaced by marker. This is the
 // one owner of where a saved config document carries a secret: provider

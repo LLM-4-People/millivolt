@@ -203,7 +203,7 @@ are development and documentation tools.
 npm ci --ignore-scripts
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements-dev.txt
 python -m playwright install chromium
 ```
 
@@ -220,7 +220,13 @@ scripts/check.sh
 
 The shared script owns the core verification commands, including offline
 documentation-link, publication-ignore and typography regressions (Git is required),
-the generated-site contract, and the workflow/automation policy. `npm test` runs
+the generated-site contract, and the workflow/automation policy. That policy
+suite runs the workflow files of the ref under test, and a `pull_request` run
+evaluates its own head revision rather than the base branch's: a workflow change
+is judged as this pull request ships it, which is what lets a workflow edit pass
+before merge. Review the workflow diff itself, since the run that validates it
+was configured by the same commit; only the post-merge `main` state proves what
+landed. `npm test` runs
 the jsdom suites and the request-log merge regression probe separately. All tests and disposable harnesses
 live in [tests/](tests/README.md), with suffix-free physical filenames. Go's
 temporary overlay adds its required virtual `_test.go` names; Python unit
@@ -240,10 +246,17 @@ and emits the search index, sitemap, and 404 page. The generated `site/`
 directory is ignored and never committed.
 
 ```sh
-python3 -m pip install -r requirements-docs.txt
+python3 -m pip install --require-hashes -r requirements-docs.txt
 python3 -B -O -m tests.python.site
 python3 scripts/build_site.py --output site
 ```
+
+Both requirements files are hash-pinned and every install command passes
+`--require-hashes`, so resolution is reproducible and a substituted file fails
+the install. After changing a pin, regenerate the hash block for that version
+from the PyPI JSON document (`https://pypi.org/pypi/<project>/<version>/json`,
+`digests.sha256` of every non-yanked file, one `--hash=sha256:` line each), keep
+the pins sorted as they are, and run the install above once to prove the file.
 
 For a local preview, serve `site/` from a separate terminal with
 `python3 -m http.server --directory site 8082`; do not point it at the proxy or
@@ -330,6 +343,11 @@ serves reads only and denies every mutation.
 
 `scripts/dev.sh status` reports the private instance. The script builds first,
 then replaces only its tracked dev process; a failed build leaves it running.
+The tracked identity is the pid file, and `status`/`stop` fall back to the
+listener on the instance's port when the file names a dead pid: a rebuild child
+rewrites the file only once it is fully booted, so a child that dies before
+readiness would otherwise strand the instance. The fallback still requires the
+process to carry this instance's exact `-pid-file` flag.
 Starting/restarting development resets its disposable database and private config,
 seeded from the public example by default. `DEV_CONFIG=proxy.yaml` explicitly
 opts into copying an operator config; it is never selected implicitly.
@@ -376,8 +394,9 @@ final 400 so both health surfaces carry data.
 
 Normal [compose.yaml](compose.yaml) only runs a published image. For a local
 source build, use [compose.dev.yaml](compose.dev.yaml) from the checkout root.
-It is a complete Compose file, not an overlay: service, container and project
-are all `millivolt-dev`.
+It is a complete Compose file, not an overlay: project and service are both
+`millivolt-dev`, and the container takes the project-scoped name Compose
+derives from them.
 
 ```sh
 docker compose -f compose.dev.yaml up -d --build
@@ -388,7 +407,8 @@ docker compose -f compose.dev.yaml down
 The development project keeps its containers and named volumes separate from a
 normal deployment, including when `COMPOSE_PROJECT_NAME` is set outside the
 checkout. Its `MILLIVOLT_DEV_PORT` and `MILLIVOLT_DEV_IMAGE` inputs are defined
-only there. Choose an unused development port if `scripts/dev.sh` is already
+only there, and it shares the deployment Compose's `MILLIVOLT_MEM_LIMIT` and
+`MILLIVOLT_PIDS_LIMIT` bounds. Choose an unused development port if `scripts/dev.sh` is already
 running.
 
 Rerun the same `up --build` command after source changes. The resulting runtime
@@ -426,6 +446,14 @@ removed, and recorded timing, token and cost values are retained. The raw online
 snapshot is temporary and never served. Treat even the derived database as
 sensitive; retained usage and timestamps can reveal activity patterns.
 
+Capture last. The gallery is a picture of the shipped dashboard, so a markup,
+CSS or layout change dates every image that shows the affected surface. Recapture
+in the same branch once the last layout edit is in, never before it, and
+recapture again if a later edit moves what an image shows. A recapture diff is
+the review set: inspect each changed file, and expect geometry changes (for
+example the request table's 8px cell padding and retry sub-rows) to come with
+them.
+
 The capture mode revalidates every row and its provenance, plus exact public
 configuration bytes, before and after browser capture. It permits only read-only
 same-origin requests: no inference, POST, purge or Settings save. Images are
@@ -433,8 +461,10 @@ staged before publication, and the exit trap stops the private process. Review
 every gallery image before committing. SSE is deliberately disabled, so the images'
 offline indicator describes a static capture session, not current service health.
 Captures keep the same category folders under `docs/images/`: `overview`,
-`charts`, `explorer`, `requests`, `menus` and `settings`. Update the existing
-capture owner and Markdown links together when adding a view.
+`charts`, `explorer`, `requests`, `console` and `settings`. Update the existing
+capture owner and Markdown links together when adding a view; the site check
+fails on any file under `docs/images/` without a Markdown consumer, so a
+recapture that drops a view cannot leave an orphan behind.
 
 The independent `--docs-images` option remains a strict synthetic regression.
 Run it only with `DEV_COPY_DB=0` and direct those two images to a scratch directory,
@@ -458,7 +488,7 @@ scripts/perf.sh stress    # private fast and streaming ramps
 scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
 scripts/perf.sh sustained # five-minute fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
-scripts/perf.sh all       # bench, stress and image, in that order
+scripts/perf.sh all       # image, bench, then stress
 ```
 
 For request, SSE-event, response-byte and output-token rates, use the
@@ -629,4 +659,6 @@ The Docker `golang` base is deliberately left manual because its tag must move
 with go.mod; distroless updates remain automated. Security updates target
 `main` as described in the branch workflow. Dependency review runs on pull
 requests, and a scheduled `govulncheck` workflow covers the Go module graph.
-These scans complement tests; a clean scan is not a security guarantee.
+The scanner is pinned as a tool dependency in `tools.go`, so it resolves from
+this module and `go.sum` covers it instead of a version being fetched fresh on
+each run. These scans complement tests; a clean scan is not a security guarantee.

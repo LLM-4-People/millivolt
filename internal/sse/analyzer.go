@@ -67,6 +67,11 @@ type Analyzer struct {
 	// id-less first fragment and its later id-bearing continuation count once.
 	// It is bounded by metrics.RetainedToolCallIDsMax like the Responses id set.
 	toolCallIndexes map[int]struct{}
+	// toolCallScratch is the reused element buffer of the tool_calls fast path.
+	// A frame is parsed whole before any fragment is applied, so the buffer
+	// stays valid across the parse and its capacity survives into the next
+	// frame instead of being reallocated per call.
+	toolCallScratch []toolCallFragment
 	finishReason    string
 	// responseID is the Responses terminal document's id, retained so a
 	// synthetic failure frame uses a resp_-shaped identity instead of the
@@ -305,7 +310,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// through to the normal JSON scan. Only the Chat-completions family (and
 	// the unknown-protocol fallback) treats the sentinel as its terminator;
 	// Responses and Anthropic Messages have their own terminal events.
-	if isDonePayload(payload) {
+	if DonePayload(payload) {
 		if a.DoneTerminates() {
 			a.terminatorSeen = true
 		}
@@ -329,7 +334,7 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 	if len(data) == 0 {
 		return
 	}
-	if isDonePayload(data) {
+	if DonePayload(data) {
 		if a.DoneTerminates() {
 			a.terminatorSeen = true
 		}

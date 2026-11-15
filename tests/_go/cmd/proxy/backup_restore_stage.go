@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -133,6 +134,53 @@ func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); !os.IsNotExist(err) {
 		t.Fatal("invalid archive staged a database snapshot")
+	}
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreRejectsAnOverCapPayload pins the endpoint ceiling: an upload well
+// under backup_max_bytes whose decoded payload is not answers 413 in the
+// upload's wording family and stages no pending snapshot.
+func TestRestoreRejectsAnOverCapPayload(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	// A 2 MiB compressible capture grows the snapshot far past the 1 MiB cap
+	// while the encoded upload stays far under it.
+	store.Record(&metrics.Record{ID: "over-cap-payload", Provider: "neutral.example", StatusCode: 200, Debug: true})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := store.SaveDebugCapture(t.Context(), "over-cap-payload", "cap-test",
+		now.UnixMilli(), now.Add(time.Hour).UnixMilli(), bytes.Repeat([]byte("x"), 2<<20)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) >= config.BackupMaxBytesMin {
+		t.Fatalf("fixture upload is %d bytes, not under the %d cap", len(raw), config.BackupMaxBytesMin)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveCfg.BackupMaxBytes = config.BackupMaxBytesMin
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d body %s, want 413", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "backup payload exceeds backup_max_bytes") {
+		t.Fatalf("body %q does not name the cap", rr.Body.String())
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); !os.IsNotExist(err) {
+		t.Fatal("an over-cap payload staged a pending snapshot")
 	}
 	assertNoRestoreStaging(t, dir)
 }
@@ -588,4 +636,65 @@ func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte
 	out = binary.BigEndian.AppendUint64(out, 0)
 	out = append(out, sum[:]...)
 	return append(out, zbuf.Bytes()...)
+}
+
+// gatedReader serves data up to first, then blocks until gate closes before
+// serving the rest, so a test can hold a restore inside its upload.
+type gatedReader struct {
+	data  []byte
+	first int
+	pos   int
+	gate  chan struct{}
+}
+
+func (g *gatedReader) Read(p []byte) (int, error) {
+	if g.pos < g.first {
+		n := copy(p, g.data[g.pos:g.first])
+		g.pos += n
+		return n, nil
+	}
+	<-g.gate
+	if g.pos == len(g.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, g.data[g.pos:])
+	g.pos += n
+	return n, nil
+}
+
+// TestRestoreHoldsReloadMuAcrossTheUpload pins H29: the restore transaction
+// starts before the upload, so two restores cannot each decode a full member
+// onto the database volume at once. While the body is still arriving the lock
+// is already held, which is what a second restore waits on.
+func TestRestoreHoldsReloadMuAcrossTheUpload(t *testing.T) {
+	liveReloadFixture(t)
+	raw, err := backup.Encode("", backup.Archive{Config: defaultConfigYAMLForRestore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &gatedReader{data: raw, first: len(raw) / 2, gate: make(chan struct{})}
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", reader)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handleRestore(rr, req)
+		close(done)
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if reloadMu.TryLock() {
+			reloadMu.Unlock()
+			if time.Now().After(deadline) {
+				t.Fatal("restore never took the reload lock during the upload")
+			}
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	close(reader.gate)
+	<-done
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restore status %d body %s", rr.Code, rr.Body.String())
+	}
 }

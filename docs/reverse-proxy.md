@@ -3,10 +3,10 @@
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
 The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
 credential; there is no tenant isolation and no per-user identity. At the
-application gate, only the unauthenticated `/healthz` probe, the `POST /session`
-login handshake, origin-root brand/PWA files and transparent inference stay
-open, so a load balancer can health-check the service without holding the
-credential and a browser can reach the login handshake. The canonical
+application gate, only the unauthenticated `/healthz` and `/readyz` probes, the
+`POST /session` login handshake, origin-root brand/PWA files and transparent
+inference stay open, so a load balancer can health-check the service without
+holding the credential and a browser can reach the login handshake. The canonical
 open-path list is in [operator access](operations.md#operator-access); this
 guide only adds the ingress boundary. Read [Security](../SECURITY.md) first.
 
@@ -27,9 +27,10 @@ The sample splits two prefix locations because they do not share an access
 model. `location /v1` is the OpenAI-compatible inference base: preserve provider
 `Authorization` and routing headers, and allowlist API clients. `location /`
 covers everything else, including the dashboard and operator plane (`/dash/`,
-`/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`
-and brand/PWA paths: allowlist operators, and keep `Host` plus the session
-cookie so Settings origin checks and the live feed work. The `/session`
+`/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`,
+`/readyz` and brand/PWA paths: allowlist operators, and keep `Host` plus the session
+cookie so Settings origin checks and the live feed work; the comparison is
+case-insensitive, so a case-preserving ingress is fine. The `/session`
 handshake is open at millivolt so login works, but this location still
 allowlists it at the edge. A URL-capable MCP client uses this location with
 `/mcp` appended and the operator Bearer header: the application's MCP endpoint
@@ -69,24 +70,59 @@ It preserves the external `Host`, including a nondefault port, so browser-origin
 checks on Settings and other mutations keep working. It also overwrites
 `X-Forwarded-Proto` with this server's `$scheme`, so a TLS presentation reaches
 millivolt as `https` and the session cookie carries `Secure`; a client-supplied
-value cannot spoof it. NGINX's body-size gate is
+value cannot spoof it. Overwriting is the recommended form. If your ingress
+appends its scheme instead (`$http_x_forwarded_proto,$scheme`), the application
+still marks the request secure when any token does, so a client-supplied `http`
+in first position cannot downgrade the cookie.
+
+The sample also resolves the client address with `real_ip`:
+
+```nginx
+set_real_ip_from 127.0.0.1;
+real_ip_header X-Forwarded-For;
+```
+
+Without it, millivolt sees this hop's address as `RemoteAddr` for every request
+and the per-source authentication throttle gets one bucket, so a single wrong
+guess locks out every operator. `set_real_ip_from` lists the addresses allowed
+to send a replacement address: this host's own loopback. If another load
+balancer, tunnel or proxy fronts NGINX, add its address range there and set
+`real_ip_recursive on` once every hop in the chain is listed. `real_ip` walks
+`X-Forwarded-For` from the right and keeps the last untrusted address, so a
+client that prepends a forged entry cannot displace the real one; NGINX's
+default `$proxy_add_x_forwarded_for` then appends the resolved address on the
+way inbound. The application reads the rightmost element and never trusts the
+left side. The resolved address is a throttle key, not an identity: keep the
+location allowlists in force. Those lists evaluate the resolved address, so a
+caller that already reaches this host's loopback chooses what they see: they
+separate remote networks from each other and from loopback callers, not
+loopback callers from each other.
+
+NGINX's body-size gate is
 disabled in the sample: millivolt's existing `max_request_bytes` remains the
 application limit, rather than an accidentally smaller duplicate at ingress.
 Choose edge idle timeouts for your deployment. `proxy_read_timeout` limits the
 gap between upstream reads, not the total lifetime of a stream.
 
 These behaviors follow the official [proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html),
-[HTTP core module](https://nginx.org/en/docs/http/ngx_http_core_module.html) and
-[HTTP/2 module](https://nginx.org/en/docs/http/ngx_http_v2_module.html).
+[HTTP core module](https://nginx.org/en/docs/http/ngx_http_core_module.html),
+[HTTP/2 module](https://nginx.org/en/docs/http/ngx_http_v2_module.html) and
+[realip module](https://nginx.org/en/docs/http/ngx_http_realip_module.html).
 
 ## Credentials and access control
 
 The sample uses a trusted IP/VPN allowlist on each location, preserving
 provider `Authorization` on `/v1` and the operator Bearer or session cookie on
 `/`. Replace each placeholder with the addresses you intend to trust for that
-plane. If another load balancer is in front of NGINX, do not trust arbitrary
-forwarded client-address headers; configure that trusted proxy boundary
-deliberately. TLS encrypts traffic but does not authorize callers.
+plane. If another load balancer is in front of NGINX, list its addresses in
+`set_real_ip_from` and switch `real_ip_recursive` on, so the trusted chain
+matches reality; a hop that appends to `X-Forwarded-For` without being listed
+is ignored on the left of the real client. TLS encrypts traffic but does not
+authorize callers. A secure presentation also makes millivolt answer
+`Strict-Transport-Security: max-age=15552000` (180 days, no
+`includeSubDomains`) so a browser pins the scheme; NGINX's own `add_header`
+is not needed for it, and adding a second HSTS header at the edge would send
+two values.
 See NGINX's [access module](https://nginx.org/en/docs/http/ngx_http_access_module.html)
 and [TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html).
 

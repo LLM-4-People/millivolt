@@ -4,14 +4,69 @@ module.exports = async function menusScroll(H) {
   const {BIG, check, d, fire, html, mkRec, rows, settleUntil, sleep, w} = H;
   const state = H.state;
 
-  // ---- test 9: menu action rows (split ends alignment + red all-actions) ----
-  w.toggleLogsMenu({ stopPropagation() {} });
-  const js = w.getComputedStyle(d.querySelector('#logs-menu .clear-actions'));
-  check('menu action row splits ends-wise', js.justifyContent === 'space-between');
-  const dlAll = [...d.querySelectorAll('#logs-menu .clear-actions button')].find(b => b.textContent.includes('Download all'));
-  check('download all is a read-only neutral action, not a danger action',
-    dlAll && !dlAll.classList.contains('btn-danger-outline') && !dlAll.classList.contains('btn-danger'));
-  w.toggleLogsMenu({ stopPropagation() {} });
+  // ---- test 9: the operator console is a shared .mn surface ----
+  // The console is the operator plane's one panel, so it inherits the shared
+  // menu lifecycle: .mn/.mn-on, anchor placement on desktop, sheet placement
+  // under the narrow breakpoint, Escape dismissal and trigger focus restore.
+  {
+    const shell = d.getElementById('operator-console');
+    w.openOperatorConsole('overview');
+    check('the operator console opens as the shared .mn surface',
+      !shell.hidden && shell.classList.contains('mn') && shell.classList.contains('mn-on') &&
+      shell.classList.contains('oc') && shell.dataset.placement === 'anchor' &&
+      w.menuIsOpen(shell) && d.getElementById('btn-controls').getAttribute('aria-expanded') === 'true');
+    const paneStyle = w.getComputedStyle(d.getElementById('oc-pane'));
+    const railStyle = w.getComputedStyle(d.getElementById('oc-rail'));
+    // The pane owns vertical scrolling; the section strip is one horizontal
+    // row that may scroll sideways, never a second vertical scroller.
+    check('the console pane owns vertical scrolling and the strip scrolls sideways',
+      paneStyle.overflowY === 'auto' && railStyle.overflowY === 'hidden' &&
+      railStyle.overflowX === 'auto');
+    // A narrow panel cannot fit six sections. The strip must say it
+    // continues, or the last ones are unreachable with no visible affordance.
+    // jsdom reports zero widths, so drive the owner's own inputs.
+    {
+      const rail = d.getElementById('oc-rail');
+      const set = (scrollWidth, clientWidth, scrollLeft) => {
+        Object.defineProperty(rail, 'scrollWidth', {configurable: true, value: scrollWidth});
+        Object.defineProperty(rail, 'clientWidth', {configurable: true, value: clientWidth});
+        rail.scrollLeft = scrollLeft;
+        rail.dispatchEvent(new w.Event('scroll', {bubbles: true}));
+      };
+      set(367, 302, 0);
+      check('an overflowing section strip marks that more sections remain',
+        rail.dataset.more === '1' &&
+        (w.getComputedStyle(rail).maskImage || w.getComputedStyle(rail).webkitMaskImage || 'none') !== 'none');
+      set(367, 302, 65);
+      check('a strip scrolled to its end drops the overflow marker',
+        rail.dataset.more === '0');
+      set(302, 302, 0);
+      check('a strip that fits marks no overflow',
+        rail.dataset.more === '0' &&
+        (w.getComputedStyle(rail).maskImage || w.getComputedStyle(rail).webkitMaskImage || 'none') === 'none');
+    }
+    check('the console action rows are its own flex rows, not the retired clear-actions strip',
+      w.getComputedStyle(d.getElementById('oc-change').parentElement).display === 'flex' &&
+      !d.querySelector('.clear-actions'));
+    // Narrow viewport: the same panel hands its geometry to CSS as a sheet and
+    // the shared scrim appears. menuPlacement reads matchMedia first.
+    const originalMatch = w.matchMedia;
+    w.matchMedia = () => ({ matches: true, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
+    try {
+      w.closeOperatorConsole();
+      w.openOperatorConsole('overview');
+      check('a narrow viewport places the console as a sheet behind the shared scrim',
+        shell.dataset.placement === 'sheet' &&
+        !d.querySelector('.mn-scrim').hidden);
+    } finally {
+      w.matchMedia = originalMatch;
+      w.closeOperatorConsole();
+    }
+    w.openOperatorConsole('overview');
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    check('Escape closes the console and restores the trigger',
+      shell.hidden && !w.menuIsOpen(shell) && d.activeElement === d.getElementById('btn-controls'));
+  }
 
   // ---- test 9b: every database deletion control lives in the settings
   // sheet's storage category (the header Clear menu is gone): the scoped
@@ -31,7 +86,9 @@ module.exports = async function menusScroll(H) {
     const row = d.querySelector('#settings-fields [data-purge="all"]');
     const purgeBtn = d.getElementById('btn-purge-all');
     const delRow = d.querySelector('#settings-fields [data-purge="matching"]');
-    const delBtn = d.getElementById('btn-del-matching');
+    // The sheet refills on every save, so the action is looked up when it is
+    // used rather than held as a node a refill can strand.
+    const delBtn = () => d.getElementById('btn-del-matching');
     check('the whole-database delete renders as a storage-category action row',
       !!row && row.dataset.cat === 'storage' && !row.hidden && row.classList.contains('st-block') &&
       !!row.querySelector('.st-backup-actions') &&
@@ -44,7 +101,7 @@ module.exports = async function menusScroll(H) {
       [...d.querySelectorAll('#settings-fields .st-row[data-cat="storage"]')].indexOf(delRow) <
         [...d.querySelectorAll('#settings-fields .st-row[data-cat="storage"]')].indexOf(row));
     check('delete matching is the light-red variant and starts disabled with an empty preview',
-      delBtn && delBtn.classList.contains('btn-danger') && delBtn.disabled &&
+      delBtn() && delBtn().classList.contains('btn-danger') && delBtn().disabled &&
       d.getElementById('del-count').textContent === '');
     check('both delete blocks join the rail badge count',
       d.querySelector('#settings-rail [data-st-cat="storage"] .rail-n').textContent === '3');
@@ -57,13 +114,13 @@ module.exports = async function menusScroll(H) {
     w.filterSettings();
     d.getElementById('del-provider').value = 'p';
     d.getElementById('del-provider').dispatchEvent(new w.Event('change', { bubbles: true }));
-    await settleUntil(() => !delBtn.disabled);
+    await settleUntil(() => !delBtn()?.disabled);
     check('a select change re-counts the live preview through the delegated listener',
-      d.getElementById('del-count').textContent === 'will delete 3 records' && !delBtn.disabled);
+      d.getElementById('del-count')?.textContent === 'will delete 3 records' && !delBtn()?.disabled);
     purgeBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
     purgeBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
-    delBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
-    delBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
+    delBtn().dispatchEvent(new w.Event('input', { bubbles: true }));
+    delBtn().dispatchEvent(new w.Event('change', { bubbles: true }));
     const collected = w.collectSettingsValues();
     check('the delete blocks never dirty the form or join value collection',
       w.settingsDirtyCount() === 0 && d.getElementById('btn-settings-revert').disabled &&
@@ -104,8 +161,15 @@ module.exports = async function menusScroll(H) {
       return originalUpdate(id, html);
     };
     w.renderAll(w.eval('lastData'));
-    check('full render resets scroll before inserting the table, never after it',
+    check('a same-scope full render keeps the operator place', inserted && top === 200);
+    // A scope change is a different list: it returns to the newest row, and
+    // does so before the table is inserted.
+    top = 200; inserted = false; lateScrollReset = false;
+    w.eval("filters.status = '200'");
+    w.renderAll(w.eval('lastData'));
+    check('a scope change resets the log to the newest row before inserting the table',
       inserted && top === 0 && !lateScrollReset);
+    w.eval("filters.status = ''");
     w.updateSection = originalUpdate;
     delete logBox.scrollTop;
     // Drain the real queued fill before checking the shared coalescing gate.
@@ -165,14 +229,18 @@ module.exports = async function menusScroll(H) {
   state.box.scrollTop = 0; // full rebuild resets scroll (jsdom keeps the stubbed top)
   fire('snapshot', { feed_id: 'feedB', seq: 81, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
-  check('full resync after paging resets to page size', await settleUntil(() => rows().length === 60));
+  // A resync keeps the loaded breadth (the operator's place needs rows to sit
+  // in) but the store pages it held are gone: the ring refills the window.
+  check('full resync after paging keeps the loaded breadth', await settleUntil(() => rows().length === 80 || rows().length === 60));
   check('resync drops store-paged rows', !rows().some(tr => tr.dataset.id === 'old000'));
 
-  // Delete/Logs preview ownership and failed mutations: exercise each actual
-  // handler, with controlled out-of-order requests and a fixed preview cutoff.
+  // Delete preview ownership and failed mutations: exercise the actual
+  // settings handlers, with controlled out-of-order requests and a fixed
+  // preview cutoff. The console export section owns its own count preview;
+  // both surfaces share purgeCount and the server predicate, pinned in the
+  // export section.
   {
     const savedFetch = w.fetch;
-    w.populateFilterMenu('lf');
     d.getElementById('del-provider').value = 'p';
     let replyCount;
     w.fetch = () => new Promise(resolve => { replyCount = resolve; });
@@ -185,8 +253,8 @@ module.exports = async function menusScroll(H) {
     check('an old count cannot overwrite an empty selection or re-enable delete',
       d.getElementById('btn-del-matching').disabled && d.getElementById('del-count').textContent === '');
 
-    check('Delete/Logs age options use duration tokens',
-      ['del', 'lf'].every(prefix => {
+    check('the delete age options use canonical duration tokens',
+      ['del'].every(prefix => {
         const el = d.getElementById(prefix + '-age');
         return !!el.querySelector('option[value="1h"]') &&
           !!el.querySelector('option[value="24h"]') &&
@@ -196,16 +264,23 @@ module.exports = async function menusScroll(H) {
           !el.querySelector('option[value="604800000"]') &&
           !el.querySelector('option[value="7d"]');
       }));
+    // FILTER_AGES remains the age vocabulary and ocExportFilter reads the same
+    // tokens into the server's before_ms predicate.
+    const ages = w.eval('FILTER_AGES');
+    check('ocExportFilter maps every FILTER_AGES token to the server cutoff',
+      ages.every(([token]) => {
+        const before = w.ocExportFilter({ age: token }).before_ms;
+        return token === '' ? before === 0 : before > 0 && before < Date.now();
+      }) &&
+      ages.map(([token]) => token).join(',') === ',1h,24h,168h');
     d.getElementById('del-age').value = '1h';
-    d.getElementById('lf-age').value = '1h';
-    const pendingCounts = [];
-    w.fetch = () => new Promise(resolve => pendingCounts.push(resolve));
-    const delCount = w.updateDelCount(), logsCount = w.updateLogsCount();
-    pendingCounts[1]({ok: true, json: async () => ({count: 4})});
-    pendingCounts[0]({ok: true, json: async () => ({count: 3})});
-    await Promise.all([delCount, logsCount]);
-    check('Logs and Delete counts do not supersede each other',
-      d.getElementById('del-count').textContent.includes('3 records') && d.getElementById('logs-count').textContent.includes('4 records'));
+    let replyScoped;
+    w.fetch = () => new Promise(resolve => { replyScoped = resolve; });
+    const delCount = w.updateDelCount();
+    replyScoped({ok: true, json: async () => ({count: 3})});
+    await delCount;
+    check('the delete count paints its own preview',
+      d.getElementById('del-count').textContent.includes('3 records'));
     const preview = w.previewedFilter('del');
     const selectedRows = rows().slice();
     let submitted, resyncs = 0;
@@ -219,12 +294,35 @@ module.exports = async function menusScroll(H) {
     };
     await sleep(5); // drain the previous case's queued count render before the fetch swap
     await w.deleteMatching();
-    check('filtered deletion uses the previewed cutoff, not a later time', submitted.before_ms === preview.filter.before_ms);
+    check('filtered deletion uses the previewed cutoff, not a later time', submitted.filter.before_ms === preview.filter.before_ms);
     check('failed deletion reports through the sheet status without wiping or resyncing the log', resyncs === 0 &&
       d.getElementById('settings-count').textContent === 'delete rejected' &&
       d.getElementById('del-count').textContent === 'will delete 3 records' &&
       !d.getElementById('btn-del-matching').disabled &&
       rows().every((row, i) => row === selectedRows[i]));
+    // A refused count (409) is not a generic failure: the previewed set moved.
+    // The sheet drops the stale preview, disables the button and counts again,
+    // so the next click confirms the new set instead of repeating the 409.
+    let replyRefusedCount, checks = 0;
+    w.fetch = (url, options) => {
+      if (String(url).includes('/admin/purge/count')) {
+        return new Promise(resolve => { replyRefusedCount = resolve; });
+      }
+      if (String(url).includes('/admin/purge')) {
+        return Promise.resolve({ok: false, status: 409, json: async () => ({error: 'the row set changed since the preview; preview again and confirm the new count'})});
+      }
+      checks++;
+      return savedFetch(url, options);
+    };
+    await sleep(5); // drain the previous case's queued count render before the fetch swap
+    await w.deleteMatching();
+    check('a refused count drops the stale preview and recounts instead of re-arming it', replyRefusedCount !== undefined &&
+      d.getElementById('del-count').textContent === 'counting…' &&
+      d.getElementById('btn-del-matching').disabled && w.previewedFilter('del') === null);
+    replyRefusedCount({ok: true, json: async () => ({count: 5})});
+    await settleUntil(() => d.getElementById('btn-del-matching').disabled === false);
+    check('the recount confirms the new set and re-arms the button', checks === 0 &&
+      d.getElementById('del-count').textContent === 'will delete 5 records' && w.previewedFilter('del').count === 5);
     let replyPurge, posts = 0;
     w.fetch = () => { posts++; return new Promise(resolve => { replyPurge = resolve; }); };
     const first = w.deleteMatching();
@@ -248,11 +346,8 @@ module.exports = async function menusScroll(H) {
       ![...d.querySelectorAll('#settings-fields [data-purge="matching"] select')].some(s => s.disabled) &&
       d.getElementById('btn-del-matching').disabled);
     d.getElementById('del-age').value = '';
-    d.getElementById('lf-age').value = '';
-    d.getElementById('lf-provider').value = '';
     w.fetch = savedFetch;
     await w.updateDelCount();
-    await w.updateLogsCount();
     // Arm a fresh scoped preview, then prove a settings-origin failure
     // reports through the sheet status and never writes the delete
     // block's count preview.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -130,6 +131,43 @@ func (f PurgeFilter) IsEmpty() bool {
 		!f.HasError && !f.HasDebug && f.BeforeMs == 0 && f.AfterMs == 0
 }
 
+// Describe renders the filter as one stable comma-separated token list for
+// audit lines: zero values are omitted, so what an operator selected is
+// reconstructable without decoding a JSON body that no longer exists. An empty
+// filter is the full deletion and reads "all".
+func (f PurgeFilter) Describe() string {
+	parts := make([]string, 0, 10)
+	add := func(key, value string) {
+		if value != "" {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	add("provider", f.Provider)
+	add("model", f.Model)
+	add("client", f.Client)
+	add("conversation_id", f.ConversationID)
+	add("error_type", f.ErrorType)
+	if f.StatusCode != 0 {
+		add("status_code", strconv.Itoa(f.StatusCode))
+	}
+	if f.HasError {
+		add("has_error", "1")
+	}
+	if f.HasDebug {
+		add("debug", "1")
+	}
+	if f.BeforeMs != 0 {
+		add("before_ms", strconv.FormatInt(f.BeforeMs, 10))
+	}
+	if f.AfterMs != 0 {
+		add("after_ms", strconv.FormatInt(f.AfterMs, 10))
+	}
+	if len(parts) == 0 {
+		return "all"
+	}
+	return strings.Join(parts, ",")
+}
+
 // build assembles the parameterized WHERE clause + args for the filter. Only
 // allowlisted columns are used; every value is a bound parameter.
 func (f PurgeFilter) build() (string, []any) {
@@ -171,11 +209,16 @@ func (f PurgeFilter) build() (string, []any) {
 	return strings.Join(where, " AND "), args
 }
 
+// ErrPurgeCountChanged refuses a deletion whose row set no longer matches the
+// count an operator previewed. It is a distinct class so a caller can answer
+// "preview again" instead of a generic failure, and it is raised from inside
+// the delete transaction, before any row is removed.
+var ErrPurgeCountChanged = errors.New("purge row count changed since the preview")
+
 // PurgeResult carries the store-level deletion counts Clear returns: durable
-// rows deleted and live-ring records removed. Purely internal - the purge
-// response dropped its wire keys ({"ok": true} only, pinned by the strict
-// response decoder), and the fields are the store-level contract the storage
-// tests assert against.
+// rows deleted and live-ring records removed. The purge response publishes
+// both, and the fields are the store-level contract the storage tests assert
+// against.
 type PurgeResult struct {
 	Deleted       int64
 	BufferRemoved int
@@ -189,6 +232,7 @@ type purgeOutcome struct {
 type purgeCommand struct {
 	ctx      context.Context
 	filter   *PurgeFilter
+	reviewed *int64
 	accepted uint64
 	buffer   *metrics.Buffer
 	boundary metrics.RemovalBoundary
@@ -197,10 +241,13 @@ type purgeCommand struct {
 
 // Clear deletes finalized history through a single ring/enqueue fence. A nil
 // filter explicitly selects all history; a supplied empty filter is rejected.
-// Admin callers serialize outside sendMu. The only work under the producer lock
-// is capturing the in-memory boundary and publishing one command; SQL and waits
-// are exclusively on the writer/admin goroutines.
-func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.Buffer) (PurgeResult, error) {
+// A non-nil reviewed count is the row count an operator previewed: it is
+// counted again inside the delete transaction and a mismatch aborts with
+// ErrPurgeCountChanged before anything is removed. Admin callers serialize
+// outside sendMu. The only work under the producer lock is capturing the
+// in-memory boundary and publishing one command; SQL and waits are exclusively
+// on the writer/admin goroutines.
+func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, reviewed *int64, buffer *metrics.Buffer) (PurgeResult, error) {
 	if filter != nil {
 		copy := *filter
 		filter = &copy
@@ -210,6 +257,9 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 		if filter.IsEmpty() {
 			return PurgeResult{}, errors.New("empty purge filter (send no body to delete everything)")
 		}
+	}
+	if reviewed != nil && *reviewed < 0 {
+		return PurgeResult{}, errors.New("invalid reviewed_count")
 	}
 	s.purgeMu.Lock()
 	defer s.purgeMu.Unlock()
@@ -221,7 +271,7 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 	if err := ctx.Err(); err != nil {
 		return PurgeResult{}, err
 	}
-	cmd := &purgeCommand{ctx: ctx, filter: filter, buffer: buffer, result: make(chan purgeOutcome, 1)}
+	cmd := &purgeCommand{ctx: ctx, filter: filter, reviewed: reviewed, buffer: buffer, result: make(chan purgeOutcome, 1)}
 	s.sendMu.Lock()
 	if s.shut {
 		s.sendMu.Unlock()
@@ -252,18 +302,39 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 // preview). It runs on the read pool like the other filter read paths
 // (ExportWhere/QueryBefore): the HasError predicate's full-table json_each
 // scan must never pin the sole writer connection up to QueryTimeout and
-// stall insertBatch. With WAL the preview reads the committed snapshot, so
-// it may miss the last un-flushed batch - exactly like the ExportWhere it
-// previews, keeping the count==download contract.
+// stall insertBatch. Before counting it barriers the writer's still-queued
+// batch into the committed snapshot: the confirmation the operator sends back
+// travels with this count, so a batch the writer accepted but has not flushed
+// yet would otherwise make the delete transaction refuse exactly the
+// population the preview showed. Both preview steps run detached from the
+// caller's deadline and cancellation, each bounded by one query budget, and an
+// expired barrier falls through to the count: a wedged writer (holding the sole
+// connection) never resolves it, a short caller deadline never fails the
+// preview, and the delete's own transactional re-check covers the stale preview.
 func (s *Store) CountWhere(ctx context.Context, f PurgeFilter) (int64, error) {
 	if err := f.Validate(); err != nil {
 		return 0, err
 	}
-	q, args := buildCountQuery(f)
-	ctx, cancel := s.withQueryTimeout(ctx)
+	// One detached base for the whole preview: neither step may inherit the
+	// caller's deadline or cancellation, because the answer is still available
+	// from the committed snapshot and the delete re-checks the population. A
+	// client cancel therefore behaves like a very short caller deadline.
+	base := context.WithoutCancel(ctx)
+	barrierCtx, barrierCancel := s.withQueryTimeout(base)
+	err := s.flushWithin(barrierCtx)
+	expired := barrierCtx.Err() != nil
+	barrierCancel()
+	if err != nil && !expired {
+		return 0, err
+	}
+	// A wedged writer spends the barrier's whole budget, so the count cannot
+	// reuse that deadline: it keeps a bounded step of its own on the same
+	// detached base, and the caller deadline never cuts either step.
+	countCtx, cancel := s.withQueryTimeout(base)
 	defer cancel()
+	q, args := buildCountQuery(f)
 	var n int64
-	err := s.rdb.QueryRowContext(ctx, q, args...).Scan(&n)
+	err = s.rdb.QueryRowContext(countCtx, q, args...).Scan(&n)
 	return n, err
 }
 
@@ -329,6 +400,24 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 		return PurgeResult{}, err
 	}
 	defer tx.Rollback()
+	// The reviewed count is verified in this same transaction, so the row set
+	// the operator previewed is the row set the deletes below remove. A
+	// count outside the transaction could not close that gap. Nothing has
+	// been written yet, so a mismatch rolls back to an untouched store.
+	if cmd.reviewed != nil {
+		countFilter := PurgeFilter{}
+		if cmd.filter != nil {
+			countFilter = *cmd.filter
+		}
+		countQuery, countArgs := buildCountQuery(countFilter)
+		var live int64
+		if err := tx.QueryRowContext(cmd.ctx, countQuery, countArgs...).Scan(&live); err != nil {
+			return PurgeResult{}, err
+		}
+		if live != *cmd.reviewed {
+			return PurgeResult{}, ErrPurgeCountChanged
+		}
+	}
 	// Captures for requests still finalizing have no durable row yet and must
 	// survive. Orphan/expired capture cleanup remains owned by the TTL path.
 	// buildPurgeDebugDelete issues the one sidecar DELETE: a full purge keeps

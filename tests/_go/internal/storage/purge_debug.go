@@ -63,7 +63,7 @@ func TestPurgePreservesConcurrentDebugSaveAtCap(t *testing.T) {
 	entered, release := blockDebugAfterCommit(t)
 	purged := make(chan error, 1)
 	go func() {
-		_, err := s.Clear(context.Background(), nil, nil)
+		_, err := s.Clear(context.Background(), nil, nil, nil)
 		purged <- err
 	}()
 	<-entered
@@ -186,7 +186,7 @@ func TestClearCancellationRetiresBeforeSecondCommand(t *testing.T) {
 	defer cancel()
 	first := make(chan error, 1)
 	go func() {
-		_, err := s.Clear(ctx, nil, b)
+		_, err := s.Clear(ctx, nil, nil, b)
 		first <- err
 	}()
 	waitPurgeCondition(t, func() bool { return s.pendingPurge.Load() != nil })
@@ -196,7 +196,7 @@ func TestClearCancellationRetiresBeforeSecondCommand(t *testing.T) {
 	go func() {
 		secondCtx, secondCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer secondCancel()
-		got, err := s.Clear(secondCtx, nil, b)
+		got, err := s.Clear(secondCtx, nil, nil, b)
 		second <- purgeOutcome{result: got, err: err}
 	}()
 	time.Sleep(200 * time.Millisecond) // first deadline passes while the lock is held
@@ -237,7 +237,7 @@ func TestClearCommittedBeforeLateCancellationReportsSuccess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan purgeOutcome, 1)
 	go func() {
-		got, err := s.Clear(ctx, nil, nil)
+		got, err := s.Clear(ctx, nil, nil, nil)
 		result <- purgeOutcome{result: got, err: err}
 	}()
 	<-entered

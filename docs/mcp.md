@@ -148,15 +148,22 @@ they never leave the process and the gate re-validates the forwarded Bearer.
 
 `set_throttle` takes `provider` and any of `concurrency`,
 `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and
-`ramp_duration`; omitted dimensions keep their value, and `clear: true` drops
-the whole policy. `clear` cannot be combined with a dimension. The proxy owns
+`ramp_duration`; omitted dimensions keep their value. A count needs its own
+window only when the policy stores none for that dimension, a count of `0`
+clears the dimension with its window, and a window without a count is refused
+unless a count is already stored. `clear: true` drops the whole policy and
+cannot be combined with a dimension. The proxy owns
 the duration grammar and band and refuses an explicit on-ramp without an
-active limit.
+active limit. This tool addresses one provider and has no selector or schedule
+fields. Scoped selectors and recurring schedules are available through the HTTP
+API (`/admin/throttle`) and the dashboard console, not through MCP.
 
 `set_pause` refuses a resume that carries a scope, and refuses `all` combined
 with `new`, `clients` or `providers`. `config_get` and the `set_config` echo
 redact credential-class provider headers and last-reload error text; the CLI's
-`--reveal` flag is the explicit operator opt-in.
+`--reveal` flag is the explicit operator opt-in. A redacted document posted
+back through `set_config` keeps the loaded secret: the marker is restored at the
+write owner, so a read-then-repost round trip cannot erase a credential.
 
 ### Filters
 
@@ -168,6 +175,10 @@ across dimensions and OR-ed within one dimension. `dim` is one of `client`,
 `status` is a single selector: an exact HTTP status code (`0` to `9999`) or a
 live in-flight class (`streaming`, `paused`, `throttled`, `pending`). It is not
 the explorer's status-class vocabulary, which travels as `status:2xx`.
+
+Two bounds apply to `f=` itself: at most 64 filters, and each `dim:id` value at
+most 2048 bytes. The list is refused whole when either is exceeded; no filter
+is silently dropped.
 
 An unknown dimension, malformed filter or unknown status is refused before the
 request is sent.
@@ -323,7 +334,7 @@ Three guards apply together, and each alone would be insufficient:
 3. **`preview_token` must be the token `purge_preview` issued for THIS filter.**
    It is an opaque HMAC-bound token over the canonicalized filter, the count it
    authorized and an expiry, so it cannot be forged, cannot be reused for another
-   filter, and expires. A bare count could not do this: it is only a number, so
+   filter, and expires **15 minutes after issue**. A bare count could not do this: it is only a number, so
    two different filters matching the same number of rows authorized each other,
    and a count obtained from anywhere - a `query`, a guess, a preview of a
    different filter - satisfied the comparison. That was a live bypass, not a
@@ -336,11 +347,12 @@ Always run `purge_preview` first and pass its `preview_token` back verbatim.
 Stated plainly, because an operator needs to know the size of the remaining
 window:
 
-- **The re-check and the delete are two HTTP requests with no shared
-  transaction.** The count is re-checked immediately before deleting, and a
-  deletion is refused when it no longer matches. But rows committed between that
-  re-check and the delete are still removed without having been previewed. The
-  preview authorizes a *filter* and a *count*; it is not a lock on the row set.
+- **The count compares a population, not row identities.** The count is
+  re-checked immediately before deleting, and the reviewed count travels with
+  the delete, where the proxy counts it again inside the delete transaction and
+  refuses with 409 when it moved. Nothing un-previewed is deleted by a refused
+  call, but two different populations with the same row count are
+  indistinguishable, and a refusal means previewing again.
 - **A filter that reaches a captured request deletes its capture document too.**
   The preview and the deletion both say so in their output.
 
@@ -368,7 +380,8 @@ is not re-read.
 
 Every failure is a tool result the model can read and correct, carrying the
 proxy's own `.error` text and the status: `401` (credential wrong or missing),
-`403` (the proxy's operator plane is unarmed), `404`, `409` (overlap or stale
+`403` (the proxy's operator plane is unarmed, or the request carried only the
+dashboard session cookie), `404`, `409` (overlap or stale
 revision), `413` (a result limit), and `429` with its `Retry-After`. An
 unreachable proxy, a timeout, and a body that is not the expected document are
 reported the same way. The `.error` field is read regardless of `Content-Type`,
@@ -443,6 +456,12 @@ runs outside that harness on purpose:
   SQLite schema with empty, space-padded, tab-padded and NBSP-padded sidecars,
   and asserts they are excluded while every returned id has an unexpired
   sidecar and is the exact spelling `audit_capture_get` can fetch.
+
+This page is mechanically pinned by `tests/python/mcp_docs.py`: the tool table
+must match the `addTool` registrations, every "<n> tools" mention must match
+that count, every route the client owns must appear in the
+[operations route table](operations.md#operator-and-data-routes), and this page
+may name no operator path the client does not own.
 
 The live integration test starts a private instance through
 [scripts/dev.sh](../scripts/dev.sh) on a port and scratch database of its own, so

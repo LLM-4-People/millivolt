@@ -213,6 +213,20 @@ func FuzzRequestFastPathEquivalence(f *testing.F) {
 	for _, tc := range requestFastPathCorpus() {
 		f.Add([]byte(tc.body))
 	}
+	// Escape-parity seeds: the string terminator scan must keep an escaped
+	// quote inside the string and end at an even backslash run.
+	for _, seed := range []string{
+		`{"messages":[{"role":"user","content":"a\"b"}]}`,
+		`{"messages":[{"role":"user","content":"a\\"}]}`,
+		`{"messages":[{"role":"user","content":"\\\"\\\"\\\""}]}`,
+		`{"messages":[{"role":"user","content":"\\\\\\\\"}]}`,
+		`{"mess\u0061ges":[{"role":"user","content":"a\"b"}],"max_tokens":8}`,
+		"{\"messages\":[{\"role\":\"user\",\"content\":\"a\\\"}]}",
+		`{"max_tokens":1,"max_tokens":2,"messages":[]}`,
+		`{"max_tokens":1,"max_output_tokens":2}`,
+	} {
+		f.Add([]byte(seed))
+	}
 	f.Fuzz(func(t *testing.T, body []byte) {
 		if len(body) > 1<<20 {
 			t.Skip()

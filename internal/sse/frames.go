@@ -94,12 +94,13 @@ func ErrorEnvelope(id, typ string, code any, msg string) (json.RawMessage, error
 // event may still name itself on a later line - and is never a DoneLine.
 func DoneLine(line []byte) bool {
 	payload, ok := DataPayload(line)
-	return ok && isDonePayload(payload)
+	return ok && DonePayload(payload)
 }
 
-// isDonePayload reports whether one data payload is the [DONE] sentinel,
-// tolerating a trailing CR.
-func isDonePayload(payload []byte) bool {
+// DonePayload reports whether one data payload is the [DONE] sentinel,
+// tolerating a trailing CR. It is the one owner of the sentinel spelling, for
+// callers that hold a payload without its SSE framing.
+func DonePayload(payload []byte) bool {
 	return string(bytes.TrimRight(payload, "\r")) == "[DONE]"
 }
 
@@ -170,16 +171,25 @@ func EventData(raw []byte) []byte {
 }
 
 // DataPayload extracts the payload of one raw SSE line: ok is false when the
-// line is not a data line - the full "data:" prefix is required (never just a
-// leading 'd') so a short or garbled upstream line can never slice out of
-// range - otherwise payload is the bytes after the prefix with one optional
-// leading space consumed. Trailing \r tolerance stays with the terminal
-// marker comparisons; ordinary payloads keep their bytes verbatim.
+// line is not a data field, otherwise payload is the bytes after the full
+// "data" field name (never just a leading 'd') with the separator colon and
+// one optional leading space consumed. The bare "data" spelling is a valid
+// field with no payload; a line-ending \r stays in the payload exactly as it
+// does for the prefixed spelling, so a CRLF stream reads both alike. Trailing
+// \r tolerance otherwise stays with the terminal marker comparisons; ordinary
+// payloads keep their bytes verbatim.
 func DataPayload(line []byte) (payload []byte, ok bool) {
-	if !bytes.HasPrefix(line, []byte("data:")) {
+	if !bytes.HasPrefix(line, []byte("data")) {
 		return nil, false
 	}
-	payload = line[len("data:"):]
+	rest := line[len("data"):]
+	if len(rest) == 0 || bytes.Equal(rest, []byte("\r")) {
+		return rest, true
+	}
+	if rest[0] != ':' {
+		return nil, false
+	}
+	payload = rest[1:]
 	if len(payload) > 0 && payload[0] == ' ' {
 		payload = payload[1:]
 	}

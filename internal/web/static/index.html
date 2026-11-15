@@ -22,36 +22,10 @@
 <link rel="stylesheet" href="/dash/css/requests.css?v=__DASHBOARD_VERSION__">
 <link rel="stylesheet" href="/dash/css/inspector.css?v=__DASHBOARD_VERSION__">
 <link rel="stylesheet" href="/dash/css/themes.css?v=__DASHBOARD_VERSION__">
+<link rel="stylesheet" href="/dash/css/console.css?v=__DASHBOARD_VERSION__">
 <!-- BEGIN vendored uPlot v1.6.32 CSS (MIT - https://github.com/leeoniya/uPlot) -->
 <link rel="stylesheet" href="/dash/vendor/uplot.css?v=__DASHBOARD_VERSION__">
-<script>
-// Apply the stored theme and surface before the first paint, after the
-// stylesheets so computed palette tokens are available. The meta tag above
-// owns the key; js/theme.js owns the registry, writes and validation. This
-// guard only removes the flash of the default pair and publishes the resolved
-// rail to the browser chrome. The eight ids mirror THEMES in js/theme.js and
-// theme_check pins both sets.
-try {
-  var key = document.querySelector('meta[name="theme-storage-key"]');
-  var raw = key ? localStorage.getItem(key.content) : '';
-  if (raw) {
-    var saved = raw;
-    try { saved = JSON.parse(raw); } catch (e) {}
-    if (typeof saved === 'string') saved = { theme: saved };
-    if (saved && typeof saved === 'object') {
-      if (typeof saved.theme === 'string' && /^(instrument|slate|midnight|nord|forest|rose|ember|contrast)$/.test(saved.theme)) {
-        document.documentElement.dataset.theme = saved.theme;
-      }
-      if (saved.mode === 'clear' || saved.mode === 'black') {
-        document.documentElement.dataset.mode = saved.mode;
-      }
-    }
-  }
-  var themeMeta = document.querySelector('meta[name="theme-color"]');
-  var rail = getComputedStyle(document.documentElement).getPropertyValue('--rail').trim();
-  if (themeMeta && rail) themeMeta.setAttribute('content', rail);
-} catch (e) {}
-</script>
+<script src="/dash/js/theme_boot.js?v=__DASHBOARD_VERSION__"></script>
 <!-- BEGIN vendored uPlot v1.6.32 (MIT - https://github.com/leeoniya/uPlot).
      Vendored IIFE build (25k gz): exposes window.uPlot; canvas 2D, zero deps.
      jsdom safety: the IIFE itself runs under jsdom (so a bare typeof guard is
@@ -63,9 +37,12 @@ try {
 <script defer src="/dash/js/core.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/feedback.js?v=__DASHBOARD_VERSION__"></script>
 <!-- The chrome modules initialize in this order: chrome_lists.js owns the
-     duration vocabulary chrome_menus.js FILTER_AGES reads, and the pause
-     menu sync owners chrome_operator.js operatorState captures; the
-     settings shell owns the rest of those sync owners. -->
+     duration vocabulary chrome_menus.js FILTER_AGES reads; chrome_operator.js
+     applies snapshots through the state owners in chrome_settings.js and
+     chrome_lists.js; the operator console shell loads after them because it
+     borrows menu.js, chrome_storm's modal frame and chrome_restart's status
+     surface, and its four policy modules load after the shell because they
+     read its drafts and renderers. -->
 <script defer src="/dash/js/chrome_storm.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_lists.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_settings.js?v=__DASHBOARD_VERSION__"></script>
@@ -73,6 +50,11 @@ try {
 <script defer src="/dash/js/menu.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_menus.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chrome_restart.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/operator_console.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/operator_limits.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/operator_holds.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/operator_export.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/operator_overview.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/timeframe.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/chart.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/entities.js?v=__DASHBOARD_VERSION__"></script>
@@ -89,8 +71,13 @@ try {
 <script defer src="/dash/js/explorer.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/live.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/theme.js?v=__DASHBOARD_VERSION__"></script>
+<!-- The one id -> handler table for the shell's authored controls; loaded last
+     so every eager handler exists and so the document carries no inline
+     script (the policy can then claim script-src 'self'). -->
+<script defer src="/dash/js/bind_static.js?v=__DASHBOARD_VERSION__"></script>
 </head>
 <body>
+<a class="skip-link" id="skip-link" href="#main">skip to content</a>
 <header>
   <a class="brand" href="https://github.com/LLM-4-People/millivolt" target="_blank" rel="noopener noreferrer" title="source on GitHub">
     <div class="brand-logo" aria-hidden="true">
@@ -113,221 +100,19 @@ try {
     <h1>millivolt</h1>
   </a>
   <span class="sub">· precision instrument on the wire</span>
-  <button class="btn" id="btn-nav" type="button" onclick="toggleNavMenu(event)" aria-haspopup="true" aria-controls="hdr-actions" aria-expanded="false" aria-label="Actions" title="Actions">
+  <button class="btn op-readout-btn" id="btn-controls" type="button" aria-haspopup="dialog" aria-controls="operator-console" aria-expanded="false" aria-label="operator console" title="Operator console" data-state="steady">
+    <span class="op-readout" id="op-readout" data-state="steady">
+      <span class="op-readout-dot" id="op-readout-dot" aria-hidden="true"></span>
+      <span class="op-readout-state" id="op-readout-state">steady</span>
+    </span>
+    <svg class="hdr-ico op-readout-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.6 6.3 8 9.7l3.4-3.4"/></svg>
+  </button>
+  <button class="btn" id="btn-nav" type="button" aria-controls="hdr-actions" aria-expanded="false" aria-label="Actions" title="Actions">
     <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>
   </button>
-  <div class="refresh-controls" id="hdr-actions">
+  <div class="refresh-controls" id="hdr-actions" role="group" aria-label="Header actions">
     <div class="menu-wrap">
-      <button class="btn" id="btn-pause" onclick="togglePauseMenu(event)" aria-haspopup="dialog" aria-controls="pause-menu" aria-expanded="false" aria-pressed="false" aria-label="Pause" title="Pause">
-        <svg class="hdr-ico solid" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="3" width="2.6" height="10" rx="0.8"/><rect x="9.4" y="3" width="2.6" height="10" rx="0.8"/></svg>
-        <span class="hdr-btn-label">Pause</span>
-      </button>
-      <div class="hdr-menu op-menu" id="pause-menu" hidden role="dialog" aria-label="Pause traffic">
-        <div class="op-head">
-          <div class="clear-menu-hd">Pause traffic</div>
-          <p class="op-sub">Parks new matching requests. In-flight work always finishes.</p>
-        </div>
-        <div id="pf-holds" class="pause-holds"></div>
-        <div class="op-fields">
-          <label class="op-field" for="pf-scope">Scope
-            <select id="pf-scope" onchange="onPauseScopeChange()"></select>
-          </label>
-          <label class="op-field" for="pf-dur">Until
-            <select id="pf-dur" onchange="updatePauseSummary()"></select>
-          </label>
-        </div>
-        <p class="op-hint" id="pf-hint">Pick named clients or providers, or hold everything.</p>
-        <div class="pause-known" id="pf-lists">
-          <div>
-            <div class="pause-known-hd">Clients <span class="op-pick" id="pf-clients-n"></span></div>
-            <div id="pf-clients" class="pause-clients"></div>
-          </div>
-          <div>
-            <div class="pause-known-hd">Providers <span class="op-pick" id="pf-providers-n"></span></div>
-            <div id="pf-providers" class="pause-clients"></div>
-          </div>
-        </div>
-        <p class="op-note" id="pf-any">A list left empty matches any value in that dimension.</p>
-        <details class="op-advanced">
-          <summary>Queue options</summary>
-          <label class="op-field" for="pf-cap">Queue cap
-            <input type="number" id="pf-cap" min="0" step="1" placeholder="default">
-          </label>
-          <p class="op-hint">Blank keeps the current cap. 0 means unlimited.</p>
-        </details>
-        <div class="clear-menu-ft">
-          <div class="op-summary" id="pause-summary"></div>
-          <span class="clear-count" id="pause-count" role="status" aria-live="polite"></span>
-          <div class="clear-actions">
-            <button class="btn btn-accent" id="btn-pause-apply" onclick="applyPauseMenu()" disabled>Pause</button>
-            <button class="btn btn-danger-outline" id="btn-pause-resume" onclick="resumePauseMenu()" data-confirm="Resume every hold" disabled>Resume all</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="menu-wrap">
-      <button class="btn" id="btn-debug" onclick="toggleDebugMenu(event)" aria-haspopup="dialog" aria-controls="debug-menu" aria-expanded="false" aria-pressed="false" aria-label="Debug" title="Debug">
-        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.6v2.2"/><path d="M8 11.2v2.2"/><circle cx="8" cy="8" r="2.4"/><path d="M3.4 4.2 4.9 5.7M11.1 10.3l1.5 1.5M3.4 11.8 4.9 10.3M11.1 5.7l1.5-1.5"/></svg>
-        <span class="hdr-btn-label">Debug</span>
-      </button>
-      <div class="hdr-menu op-menu" id="debug-menu" hidden role="dialog" aria-label="Capture debug">
-        <div class="op-head">
-          <div class="clear-menu-hd">Capture debug</div>
-          <p class="op-sub">Stores matching request and response bodies for later inspection.</p>
-        </div>
-        <div id="df-holds" class="pause-holds"></div>
-        <div class="op-fields">
-          <label class="op-field" for="df-dur">Until
-            <select id="df-dur"></select>
-          </label>
-        </div>
-        <div class="pause-known">
-          <div>
-            <div class="pause-known-hd">Clients <span class="op-pick" id="df-clients-n"></span></div>
-            <div id="df-clients" class="pause-clients"></div>
-          </div>
-          <div>
-            <div class="pause-known-hd">Providers <span class="op-pick" id="df-providers-n"></span></div>
-            <div id="df-providers" class="pause-clients"></div>
-          </div>
-        </div>
-        <div class="pause-known pause-known-one">
-          <div>
-            <div class="pause-known-hd">Models <span class="op-pick" id="df-models-n"></span></div>
-            <div id="df-models" class="pause-clients"></div>
-          </div>
-        </div>
-        <p class="op-note" id="df-any">A list left empty matches any value in that dimension.</p>
-        <div class="op-facts" id="debug-facts"></div>
-        <p class="op-warning">Captures can contain credentials and private content. Keep the retention window short and download only what you need.</p>
-        <div class="clear-menu-ft">
-          <div class="op-summary" id="debug-summary"></div>
-          <span class="clear-count" id="debug-count" role="status" aria-live="polite"></span>
-          <div class="clear-actions">
-            <button class="btn btn-accent" id="btn-debug-apply" onclick="applyDebugMenu()" disabled>Start capture</button>
-            <button class="btn btn-danger-outline" id="btn-debug-stop" onclick="stopDebugMenu()" data-confirm="Stop every capture session" disabled>Stop all</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="menu-wrap">
-      <button class="btn" id="btn-limits" onclick="toggleLimitsMenu(event)" aria-haspopup="dialog" aria-controls="limits-menu" aria-expanded="false" aria-pressed="false" aria-label="Limits" title="Limits">
-        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 12.3a5.6 5.6 0 1 1 9.6 0"/><path d="M8 12.3 11.1 7.5"/><circle cx="8" cy="12.3" r="1.05" fill="currentColor" stroke="none"/></svg>
-        <span class="hdr-btn-label">Limits</span>
-      </button>
-      <div class="hdr-menu op-menu" id="limits-menu" hidden role="dialog" aria-label="Provider limits">
-        <div class="op-head">
-          <div class="clear-menu-hd">Provider limits</div>
-          <p class="op-sub">One policy per provider, across every client and key.</p>
-        </div>
-        <div id="lim-holds" class="pause-holds"></div>
-        <label class="op-field" for="lim-provider">Provider
-          <select id="lim-provider" onchange="onLimitProviderChange()"></select>
-        </label>
-        <div class="lim-grid">
-          <label class="op-field" for="lim-conc">Concurrency
-            <input type="number" id="lim-conc" min="0" step="1" placeholder="off" oninput="updateLimitSummary()">
-          </label>
-          <label class="op-field" for="lim-req">Requests
-            <input type="number" id="lim-req" min="0" step="1" placeholder="off" oninput="updateLimitSummary()">
-          </label>
-          <label class="op-field" for="lim-reqw">Request window
-            <select id="lim-reqw" onchange="updateLimitSummary()"></select>
-          </label>
-          <label class="op-field" for="lim-tok">Tokens
-            <input type="number" id="lim-tok" min="0" step="1" placeholder="off" oninput="updateLimitSummary()">
-          </label>
-          <label class="op-field" for="lim-tokw">Token window
-            <select id="lim-tokw" onchange="updateLimitSummary()"></select>
-          </label>
-          <label class="op-check" for="lim-antiburst">Anti-burst
-            <input type="checkbox" id="lim-antiburst" onchange="updateLimitSummary()">
-          </label>
-          <label class="op-field" for="lim-ramp">Ramp in
-            <select id="lim-ramp" onchange="updateLimitSummary()"></select>
-          </label>
-        </div>
-        <p class="op-hint">0 turns a dimension off. A window alone does nothing until its count is set.</p>
-        <div class="op-section">
-          <div class="op-section-hd">Queue</div>
-          <div class="lim-queue" id="lim-drain-count"></div>
-          <div class="op-fields">
-            <label class="op-field" for="lim-drain-scope">Drain
-              <select id="lim-drain-scope" onchange="updateDrainScope()">
-                <option value="all">everything queued</option>
-                <option value="provider">this provider</option>
-                <option value="model">one model</option>
-                <option value="client">one client</option>
-              </select>
-            </label>
-            <label class="op-field" for="lim-drain-value" id="lim-drain-value-wrap" hidden>Value
-              <input type="text" id="lim-drain-value" placeholder="name">
-            </label>
-          </div>
-          <button class="btn" id="btn-limits-drain" onclick="drainLimitsQueue()">Drain queued</button>
-        </div>
-        <div class="clear-menu-ft">
-          <div class="op-summary" id="lim-summary"></div>
-          <span class="clear-count" id="lim-count" role="status" aria-live="polite"></span>
-          <div class="clear-actions">
-            <button class="btn btn-accent" id="btn-limits-apply" onclick="applyLimitsMenu()" disabled>Apply limit</button>
-            <button class="btn btn-danger-outline" id="btn-limits-clear" onclick="clearLimitsMenu()" data-confirm="Remove this provider limit" disabled>Clear</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="menu-wrap">
-      <button class="btn" id="btn-logs" onclick="toggleLogsMenu(event)" aria-haspopup="dialog" aria-controls="logs-menu" aria-expanded="false" aria-label="Logs" title="Logs">
-        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.8v7.4"/><path d="M5.1 7.6 8 10.6l2.9-3"/><path d="M3.2 13.2h9.6"/></svg>
-        <span class="hdr-btn-label">Logs</span>
-      </button>
-      <div class="hdr-menu op-menu" id="logs-menu" hidden role="dialog" aria-label="Export logs">
-        <div class="op-head">
-          <div class="clear-menu-hd">Export logs (JSON, gzip)</div>
-          <p class="op-sub">Streams every matching record. The preview and the download use the same filter.</p>
-        </div>
-        <div class="clear-opts">
-          <label>provider <select id="lf-provider"></select></label>
-          <label>model <select id="lf-model"></select></label>
-          <label>client <select id="lf-client"></select></label>
-          <label>status <select id="lf-status"></select></label>
-          <label>errors <select id="lf-errors"></select></label>
-          <label>debug <select id="lf-debug"></select></label>
-          <label>older than <select id="lf-age"></select></label>
-        </div>
-        <div class="op-hintrow">
-          <p class="op-hint">Filters read durable history when storage is enabled. Status 0 is an in-flight row and is never offered.</p>
-          <button class="op-link" id="btn-logs-reset" onclick="resetLogsFilters()">Reset filters</button>
-        </div>
-        <div class="clear-menu-ft">
-          <div class="op-summary" id="logs-summary"></div>
-          <span class="clear-count" id="logs-count" role="status" aria-live="polite"></span>
-          <div class="clear-actions">
-            <button class="btn btn-accent" id="btn-logs-filtered" onclick="downloadLogsFiltered()" disabled>Download matching</button>
-            <button class="btn" onclick="downloadLogsAll()">Download all</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="menu-wrap" id="restart-wrap">
-      <button class="btn" id="btn-restart" onclick="toggleRestartMenu(event)" aria-haspopup="menu" aria-controls="restart-menu" aria-expanded="false" aria-label="Restart" title="Restart">
-        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.97-4.23"/><path d="M13.6 2.4v2.9h-2.9"/></svg>
-        <span class="hdr-btn-label">Restart</span>
-      </button>
-      <div class="hdr-menu" id="restart-menu" hidden>
-        <div class="clear-menu-hd">Rebuild &amp; restart…</div>
-        <p class="restart-description" id="restart-description">Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.</p>
-        <ol class="restart-steps" id="restart-steps" hidden aria-live="polite"></ol>
-        <div class="clear-menu-ft">
-          <span class="clear-count" id="restart-count" role="status"></span>
-          <div class="clear-actions restart-actions">
-            <button class="btn btn-accent" id="btn-restart-now" onclick="restartProxy()" aria-describedby="restart-description">Restart now</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="menu-wrap">
-      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" onkeydown="themeTriggerKey(event)" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+      <button class="btn" id="btn-theme" type="button" aria-haspopup="dialog" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path class="theme-ico-fill" d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
         <span class="hdr-btn-label">Theme</span>
       </button>
@@ -366,31 +151,35 @@ try {
             <div class="theme-mode" id="theme-mode" role="radiogroup" aria-labelledby="theme-mode-label"></div>
           </div>
         </div>
-        <p class="theme-status" id="theme-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <p class="theme-status visually-hidden" id="theme-status" role="status" aria-live="polite" aria-atomic="true"></p>
         <div class="clear-menu-hd theme-palette-hd" id="theme-palette-hd">Palette</div>
         <div class="theme-list" id="theme-list" role="radiogroup" aria-orientation="vertical" aria-labelledby="theme-palette-hd"></div>
         <p class="theme-hintbar">Arrows preview. Click or press Enter to apply. Esc closes.</p>
         <div class="theme-ft">
-          <button class="btn" type="button" id="theme-reset" onclick="resetTheme()" title="Restore Instrument Black">Reset</button>
-          <button class="btn" type="button" id="theme-close" onclick="closeThemeMenu()">Close</button>
+          <button class="btn" type="button" id="theme-reset" title="Restore Instrument Black">Reset</button>
+          <button class="btn" type="button" id="theme-close">Close</button>
         </div>
       </div>
     </div>
-    <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">
+    <button class="btn" id="btn-settings" type="button" aria-haspopup="dialog" aria-controls="settings-sheet" aria-expanded="false" aria-label="Settings" title="Settings">
       <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4"/><circle cx="8" cy="8" r="1.5"/><path d="M8 2.6v1.5M8 11.9v1.5M2.6 8h1.5M11.9 8h1.5M4.05 4.05l1.05 1.05M10.9 10.9l1.05 1.05M11.95 4.05l-1.05 1.05M5.1 10.9l-1.05 1.05"/></svg>
       <span class="hdr-btn-label">Settings</span>
+    </button>
+    <button class="btn" id="btn-signout" type="button" aria-label="Sign out" title="Sign out">
+      <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.6 2.6H3.4v10.8h3.2M10.1 5.3 12.8 8l-2.7 2.7M12.8 8H6.4"/></svg>
+      <span class="hdr-btn-label">Sign out</span>
     </button>
   </div>
 </header>
 
 <section id="storm-banner" class="storm-banner" hidden role="status" aria-live="polite" aria-label="Error storm protection" tabindex="0"></section>
 
-<main>
+<main id="main" tabindex="-1">
   <!-- Static KPI skeleton: full-height placeholders from the first paint,
        so the first payload only swaps text and nothing below the band
        moves. The live renderer replaces this innerHTML wholesale. -->
   <div class="kpis" id="kpis">
-    <div class="kpi"><h2>Requests</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>Request count</h2><div class="val">-</div><div class="sub2">-</div></div>
     <div class="kpi k-flight"><h2>In-flight</h2><div class="val">-</div><div class="sub2 flight-sub"><span>-</span></div><div class="flight-mix"></div></div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">-</div><div class="sub2">-</div></div>
     <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">-</div><div class="sub2">-</div></div>
@@ -423,24 +212,24 @@ try {
     <div class="card traffic-card">
       <div class="card-hd"><h2>Timeline</h2>
         <div class="chart-controls">
-          <button type="button" id="chart-preset" class="chart-trigger" aria-haspopup="true" aria-expanded="false" aria-label="Chart metric" title="Chart metric"><span id="chart-preset-label"></span></button>
-          <button type="button" id="chart-window" class="chart-trigger" aria-expanded="false" aria-controls="chart-window-panel" aria-label="Chart time window" title="Chart time window"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 5.1V8l2.1 1.5"/></svg><span id="chart-window-label"></span></button>
-          <button type="button" id="chart-pct" class="chart-trigger" aria-haspopup="true" aria-expanded="false" aria-label="Percentile" title="Percentile applied to speed, latency and decode" hidden><span id="chart-pct-label"></span></button>
+          <button type="button" id="chart-preset" class="chart-trigger" aria-haspopup="true" aria-expanded="false" aria-labelledby="chart-preset-name chart-preset-label" title="Chart metric"><span class="visually-hidden" id="chart-preset-name">Chart metric</span><span id="chart-preset-label"></span></button>
+          <button type="button" id="chart-window" class="chart-trigger" aria-expanded="false" aria-controls="chart-window-panel" aria-labelledby="chart-window-name chart-window-label" title="Chart time window"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 5.1V8l2.1 1.5"/></svg><span class="visually-hidden" id="chart-window-name">Chart time window</span><span id="chart-window-label"></span></button>
+          <button type="button" id="chart-pct" class="chart-trigger" aria-haspopup="true" aria-expanded="false" aria-labelledby="chart-pct-name chart-pct-label" title="Percentile applied to speed, latency and decode" hidden><span class="visually-hidden" id="chart-pct-name">Percentile</span><span id="chart-pct-label"></span></button>
           <div class="metrics-pick" id="chart-metrics" hidden>
             <button type="button" id="chart-metrics-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="chart-metrics-menu" aria-label="Summary metrics"></button>
             <div class="mn metrics-menu" id="chart-metrics-menu" role="menu" aria-label="Summary metrics" hidden></div>
           </div>
         </div>
       </div>
-      <div class="chart-totals" id="chart-totals" aria-live="polite"></div>
+      <div class="chart-totals" id="chart-totals" role="group" aria-label="Chart totals"></div>
       <div class="chart-axes" id="chart-axes"></div>
-      <div class="chart-wrap" id="chart-traffic"><div id="chart-hover" hidden aria-hidden="true"></div></div>
+      <div class="chart-wrap" id="chart-traffic"><div id="chart-hover" hidden role="status"></div></div>
       <div class="legend" id="traffic-legend"></div>
       <div class="chart-context" id="chart-context"></div>
     </div>
 
     <div class="card">
-      <div class="card-hd"><h2>Requests</h2>
+      <div class="card-hd"><h2>Request log</h2>
         <span class="htext" id="f-stats">0 records</span>
         <select id="f-status" class="req-status" aria-label="Request status" title="Request status"></select>
       </div>
@@ -449,12 +238,38 @@ try {
   </div>
 </main>
 
-<div class="st-veil" id="settings-veil" onclick="closeSettings()"></div>
+<div class="mn oc" id="operator-console" hidden role="dialog" aria-modal="false" aria-labelledby="oc-title">
+  <div class="oc-hd">
+    <div class="oc-head">
+      <span class="oc-mark" aria-hidden="true">
+        <svg viewBox="0 0 16 16"><path d="M2 8h3l1.4-3.6L9 11.6 10.6 8H14"/></svg>
+      </span>
+      <div class="oc-head-text">
+        <h2 class="oc-title" id="oc-title">operator console</h2>
+        <p class="oc-live" id="oc-live" role="status" aria-live="polite">steady · no rules in force</p>
+      </div>
+    </div>
+    <button class="btn oc-close" type="button" data-oc-close aria-label="close operator console">✕<span class="d-key" aria-hidden="true">esc</span></button>
+  </div>
+  <div class="oc-body">
+    <!-- aria-orientation is owned by operator_console.js: it derives the
+         painted axis (horizontal strip, vertical grid), and a hardcoded
+         attribute here announced the wrong axis until the first render. -->
+    <nav class="oc-rail" id="oc-rail" role="tablist" aria-label="operator sections"></nav>
+    <div class="oc-pane" id="oc-pane" role="tabpanel" tabindex="-1"></div>
+  </div>
+  <div class="oc-ft">
+    <span class="oc-change" id="oc-change" role="status" aria-live="polite">no changes yet this session</span>
+    <button class="btn oc-undo" id="oc-undo" type="button" data-oc-undo hidden>undo</button>
+  </div>
+</div>
+
+<div class="st-veil" id="settings-veil"></div>
 <section class="st-sheet" id="settings-sheet" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="settings-title">
   <div class="st-hd">
     <h3 id="settings-title">Settings</h3>
-    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" oninput="filterSettings()" aria-label="find a setting">
-    <button class="btn" type="button" id="btn-settings-close" onclick="closeSettings()" aria-label="close settings">✕<span class="d-key">esc</span></button>
+    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" aria-label="find a setting" aria-controls="settings-fields" aria-describedby="settings-pane-hd">
+    <button class="btn" type="button" id="btn-settings-close" aria-label="close settings">✕<span class="d-key" aria-hidden="true">esc</span></button>
   </div>
   <div class="st-body">
     <div class="st-side">
@@ -462,29 +277,29 @@ try {
       <div class="st-live" id="settings-live"></div>
     </div>
     <div class="st-main">
-      <div class="st-pane-hd" id="settings-pane-hd"></div>
+      <div class="st-pane-hd" id="settings-pane-hd" aria-live="polite"></div>
       <div class="st-fields" id="settings-fields"></div>
     </div>
   </div>
   <div class="st-ft">
     <span class="st-status" id="settings-count" role="status" aria-live="polite" aria-atomic="true"></span>
     <div class="st-actions">
-      <button class="btn" type="button" id="btn-settings-revert" onclick="revertSettings()" disabled>Revert</button>
-      <button class="btn btn-accent" type="button" id="btn-settings-apply" onclick="applySettings()" disabled>Apply</button>
+      <button class="btn" type="button" id="btn-settings-revert" disabled>Revert</button>
+      <button class="btn btn-accent" type="button" id="btn-settings-apply" disabled>Apply</button>
     </div>
   </div>
 </section>
 
-<div class="drawer-veil" id="drawer-veil" onclick="closeDrawer()"></div>
-<aside class="drawer" id="drawer" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-label="Request detail">
+<div class="drawer-veil" id="drawer-veil"></div>
+<aside class="drawer" id="drawer" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
   <div class="drawer-hd">
     <h3 id="drawer-title">request</h3>
     <div class="nav-btns">
-      <button class="btn" type="button" onclick="drawerNav(-1)" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
-      <button class="btn" type="button" onclick="drawerNav(1)" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
+      <button class="btn" type="button" id="drawer-prev" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
+      <button class="btn" type="button" id="drawer-next" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
     </div>
-    <button class="btn drawer-tool" type="button" onclick="drawerCopyRecord()" aria-label="copy request JSON" title="copy request JSON" data-focus-key="copy-record">JSON</button>
-    <button class="btn" type="button" onclick="closeDrawer()" aria-label="close request detail (escape)" title="close (escape)" data-focus-key="close">✕<span class="d-key">esc</span></button>
+    <button class="btn drawer-tool" type="button" id="drawer-copy" aria-label="copy request JSON" title="copy request JSON" data-focus-key="copy-record">JSON</button>
+    <button class="btn" type="button" id="drawer-close" aria-label="close request detail (escape)" title="close (escape)" data-focus-key="close">✕<span class="d-key" aria-hidden="true">esc</span></button>
   </div>
   <div class="drawer-body" id="drawer-body"></div>
 </aside>
@@ -497,7 +312,7 @@ try {
     <span class="f-cell" id="f-clock">-</span>
   </span>
 </footer>
-<div id="client-tip" hidden aria-hidden="true"></div>
+<div id="client-tip" hidden role="tooltip"></div>
 <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script id="dashboard-bootstrap" type="application/json">__DASHBOARD_BOOTSTRAP__</script>

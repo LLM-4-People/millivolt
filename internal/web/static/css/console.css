@@ -1,0 +1,1034 @@
+/* Operator console: the header readout and the one operator plane.
+   The panel itself is a .mn surface, so menu.js owns placement, the sheet
+   scrim, the open transition and the inline max-height clamp. This module
+   styles only what .oc adds: a readout strip, a workspace pane and a change
+   ledger. Everything resolves the shared surface, accent and status tokens. */
+
+/* ---------- header readout ----------
+   The trigger is a direct child of the header, so it needs the flex row the
+   .btn base assumes. Without it the box is block-level: the words and the
+   chevron stack into two rows, and a long state overruns the button and
+   paints over the controls to its right. Its data-state mirrors #op-readout;
+   operator_console.js writes both in the same repaint. */
+.op-readout-btn {
+  display: inline-flex; align-items: center;
+  /* The right edge is pinned by the header's margin-auto, so a growing label
+     pushed the left edge - the hit target - leftward under a stationary
+     pointer every poll. A stable floor covers the common single-segment
+     state; the box then takes whatever the header has left rather than a
+     viewport share, so a three-segment state fits instead of ellipsizing. */
+  width: auto; min-width: 96px; max-width: 100%; height: auto; min-height: 30px;
+  padding: 3px 8px; gap: 6px; justify-content: flex-start;
+  overflow: hidden;
+}
+.op-readout {
+  display: inline-flex; align-items: center; gap: 6px;
+  flex: 1 1 auto; min-width: 0; overflow: hidden;
+}
+.op-readout-dot {
+  width: 7px; height: 7px; flex: none; border-radius: 50%;
+  border: 1px solid var(--border2);
+  background: color-mix(in srgb, var(--muted) 40%, transparent);
+}
+.op-readout-state {
+  /* The button owns the available header width; the words use all of it. A
+     phone keeps the ellipsis as the visible hint that more state exists, and
+     the trigger's accessible label always carries the complete sentence. */
+  min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font: 400 10px/1.3 var(--mono); letter-spacing: 0;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.op-readout-chev {
+  width: 12px; height: 12px; flex: none; color: var(--muted);
+  transition: transform .16s ease, color .16s ease;
+}
+.op-readout-btn:hover .op-readout-state { color: var(--text); }
+#op-readout[data-state="active"] .op-readout-state { color: var(--text); }
+#op-readout[data-state="active"] .op-readout-dot {
+  border-color: var(--accent); background: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.op-readout-btn[data-state="active"] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border2));
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel2));
+}
+.op-readout-btn[data-state="active"]:hover {
+  color: var(--text); border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.op-readout-btn[data-state="active"] .op-readout-chev { color: var(--text); }
+/* Paused stops or parks live traffic, so it takes the warn tone instead of
+   the calm accent a routine cap gets. The dot still reads as a state, not an
+   alarm: no pulse, which stays reserved for a restart. */
+#op-readout[data-state="paused"] .op-readout-state { color: var(--warn); }
+#op-readout[data-state="paused"] .op-readout-dot {
+  border-color: var(--warn); background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 18%, transparent);
+}
+.op-readout-btn[data-state="paused"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border2));
+  background: color-mix(in srgb, var(--warn) 7%, var(--panel2));
+}
+.op-readout-btn[data-state="paused"]:hover { border-color: var(--warn); }
+.op-readout-btn[data-state="paused"]:hover .op-readout-state { color: var(--warn); }
+.op-readout-btn[data-state="paused"] .op-readout-chev { color: var(--warn); }
+#op-readout[data-state="busy"] .op-readout-state { color: var(--warn); }
+#op-readout[data-state="busy"] .op-readout-dot {
+  border-color: var(--warn); background: var(--warn);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 18%, transparent);
+  animation: livepulse 1.6s ease-in-out infinite;
+}
+.op-readout-btn[data-state="busy"] {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 50%, var(--border2));
+  background: color-mix(in srgb, var(--warn) 7%, var(--panel2));
+}
+.op-readout-btn[data-state="busy"]:hover {
+  color: var(--warn); border-color: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent);
+}
+.op-readout-btn[data-state="busy"]:hover .op-readout-state { color: var(--warn); }
+.op-readout-btn[data-state="busy"] .op-readout-chev { color: var(--warn); }
+/* An offline stream is not a quiet state: the words are the last known truth,
+   so the line says so and the dot hollows out instead of glowing. */
+#op-readout[data-state="stale"] .op-readout-state { color: var(--muted); }
+#op-readout[data-state="stale"] .op-readout-dot {
+  border-color: var(--muted); background: transparent;
+  box-shadow: none; animation: none;
+}
+.op-readout-btn[data-state="stale"] {
+  border-color: var(--border2);
+  background: var(--panel2);
+}
+.op-readout-btn[data-state="stale"] .op-readout-chev { color: var(--muted); }
+.op-readout-btn[aria-expanded="true"] .op-readout-chev { transform: rotate(180deg); }
+/* The trigger is the one control an operator reaches for under pressure, and
+   it had no pressed feedback at all: mousedown gave nothing between hover and
+   the panel appearing. The offset is the whole signal, so it stays subtle. */
+.op-readout-btn:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+.op-readout-btn:active .op-readout-state { color: var(--text); }
+
+/* ---------- console frame ----------
+   A compact popover, not a workspace: the panel is only as tall as its
+   content and never exceeds 560px. The pane scrolls if a section outgrows
+   that, so opening the console never resizes the page around it. */
+.mn.oc {
+  --mn-w: 520px;
+  /* The rule row's live column may claim at most this share of the row. A
+     content-sized cap keeps a short figure compact while refusing to let a
+     long one take the line away from the scope and the budget. */
+  --oc-rule-side-max: 40%;
+  max-height: min(560px, calc(100dvh - 24px));
+  overflow: hidden;
+}
+.oc-hd {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  flex-shrink: 0; padding: 8px 10px 9px;
+  background: var(--rail); border-bottom: 1px solid var(--border2);
+}
+.oc-head { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+.oc-mark {
+  width: 20px; height: 20px; flex: none; border-radius: 5px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--accent2); border: 1px solid var(--border2);
+  background: color-mix(in srgb, var(--accent2) 8%, transparent);
+}
+.oc-mark svg {
+  width: 12px; height: 12px; display: block; stroke: currentColor; fill: none;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+/* The title and the live sentence share one line: the popover head has room
+   for exactly that much, and the state is the more useful half. */
+.oc-head-text {
+  flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 7px;
+}
+.oc-title {
+  margin: 0; flex: none; color: var(--text); font: 650 12px/1.3 var(--mono);
+  letter-spacing: -.01em; white-space: nowrap;
+}
+.oc-live {
+  margin: 0; min-width: 0; color: var(--muted);
+  font: 400 10px/1.3 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-close { flex: none; min-height: 24px; padding: 1px 6px; font-size: 10px; }
+.oc-close .d-key { margin-left: 3px; font-size: 9px; color: var(--muted); }
+
+/* ---------- body: one horizontal section strip over the pane ----------
+   The panel is a popover, so the sections read as a chip row instead of a
+   full-height rail that would cost 152px of a 520px box. */
+/* The console is a three-part flex column: header, body, ledger. The body is
+   the part that must absorb the sheet's height. It had no flex grow, so it was
+   content-sized inside the definite sheet: on a phone the rail ate the height
+   and the pane was left with a 99px strip, while the form's tail was clipped
+   by the shell's overflow. Growing here is what makes the pane the exact
+   remainder instead of whatever the content happened to measure. */
+.oc-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.oc-rail {
+  display: flex; gap: 1px; flex: none; min-height: 0;
+  padding: 5px 6px; overflow-x: auto; overflow-y: hidden;
+  overscroll-behavior-x: contain; scrollbar-width: none;
+  background: var(--rail); border-bottom: 1px solid var(--border);
+}
+.oc-rail::-webkit-scrollbar { display: none; }
+/* A narrow panel cannot fit six sections, and a hidden scrollbar with no
+   affordance hides the last ones entirely: system sat fully outside a 320px
+   panel. Fade the trailing edge while more sections remain, and drop the fade
+   once the strip is scrolled to its end. */
+.oc-rail { position: relative; }
+.oc-rail[data-more="1"] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+}
+.oc-rail-item {
+  display: flex; align-items: center; gap: 4px; flex: 0 0 auto;
+  min-height: 24px; padding: 3px 7px; text-align: left; cursor: pointer;
+  background: none; color: var(--muted);
+  border: 1px solid transparent; border-bottom: 2px solid transparent;
+  border-radius: 5px 5px 0 0; font: 10px var(--mono);
+}
+.oc-rail-item:hover { background: var(--panel2); color: var(--text); }
+.oc-rail-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-rail-item[aria-selected="true"] {
+  background: var(--panel2); color: var(--text);
+  border-color: var(--border); border-bottom-color: var(--accent);
+}
+.oc-rail-item[aria-selected="true"] .oc-rail-label { font-weight: 600; }
+.oc-rail-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-rail-n {
+  min-width: 14px; padding: 0 4px;
+  border-radius: 3px; text-align: center;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent);
+  font: 600 9px/1.5 var(--mono); font-variant-numeric: tabular-nums;
+}
+.oc-pane {
+  min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  /* Grow into whatever the head, rail and ledger leave. Without this the pane
+     is content-sized inside a definite-height sheet, leaving dead space on a
+     short section and an unreachable tail on a tall one. */
+  flex: 1 1 auto;
+  padding: 9px 10px 11px; scrollbar-width: thin;
+}
+.oc-pane:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
+.oc-pane::-webkit-scrollbar { width: 5px; }
+.oc-pick-list::-webkit-scrollbar { width: 5px; }
+.oc-pane::-webkit-scrollbar-thumb,
+.oc-pick-list::-webkit-scrollbar-thumb {
+  background: var(--border2); border-radius: 3px;
+}
+
+/* The session's change ledger, pinned below the scrolling workspace. */
+.oc-ft {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  padding: 5px 10px 6px; background: var(--rail);
+  border-top: 1px solid var(--border2);
+}
+.oc-change {
+  flex: 1; min-width: 0; color: var(--muted); font: 10px/1.4 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-change[data-tone="ok"] { color: var(--ok); }
+.oc-change[data-tone="err"] { color: var(--err); }
+.oc-undo { flex: none; min-height: 26px; padding: 3px 10px; }
+
+/* ---------- section chrome ---------- */
+.oc-sec { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.oc-sec-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 8px; min-width: 0; padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+/* The section head is one explainer line and, when it has one, its action.
+   The pane is already labelled by its selected tab and the rail chip directly
+   above names the same section, so a second heading cost 18px of a 560px
+   panel to repeat a word the operator had just clicked. */
+.oc-sub {
+  margin: 0; color: var(--muted); font: 10px/1.45 var(--sans);
+  max-width: 64ch;
+}
+.oc-head-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.oc-group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.oc-label {
+  color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .05em;
+  text-transform: none;
+}
+.oc-note { margin: 4px 0 0; color: var(--muted); font: 10px/1.55 var(--sans); }
+.oc-facts { margin: 0; color: var(--muted); font: 10px/1.55 var(--mono); overflow-wrap: anywhere; }
+.oc-warning {
+  margin: 6px 0 0; padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, var(--border));
+  border-radius: 7px; background: color-mix(in srgb, var(--warn) 8%, transparent);
+  color: var(--warn-text); font: 10px/1.5 var(--sans);
+}
+.oc-link {
+  flex: none; border: 0; background: none; color: var(--accent);
+  font: 10px var(--mono); padding: 2px 0; cursor: pointer; border-radius: 4px;
+}
+.oc-link:hover { color: var(--accent-hover); text-decoration: underline; text-underline-offset: 2px; }
+.oc-link:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+
+/* ---------- fields ---------- */
+.oc-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.oc-field.bare { gap: 0; }
+.oc-field.bare input { padding: 3px 7px; }
+.oc-field.wide { grid-column: 1 / -1; }
+.oc-field-name {
+  color: var(--muted); font: 600 9px/1.4 var(--mono); letter-spacing: .05em;
+  text-transform: none;
+}
+.oc-field-hint { color: var(--muted); font: 9px/1.4 var(--mono); }
+.oc-field input,
+.oc-pick input,
+.oc-inline input,
+.oc-select {
+  width: 100%; min-width: 0; min-height: 28px; padding: 5px 9px;
+  color: var(--text); background: var(--rail);
+  border: 1px solid var(--border); border-radius: 7px;
+  font: 11px/1.4 var(--mono); font-variant-numeric: tabular-nums;
+}
+.oc-select {
+  padding: 3px 6px; cursor: pointer; appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 12px) 50%, calc(100% - 8px) 50%;
+  background-size: 4px 4px, 4px 4px; background-repeat: no-repeat;
+  padding-right: 20px; text-overflow: ellipsis;
+}
+.oc-field input::placeholder,
+.oc-pick input::placeholder,
+.oc-inline input::placeholder { color: var(--muted); opacity: 1; }
+.oc-field input:hover,
+.oc-pick input:hover,
+.oc-inline input:hover,
+.oc-select:hover { border-color: var(--border2); }
+.oc-field input:focus,
+.oc-pick input:focus,
+.oc-inline input:focus,
+.oc-select:focus {
+  border-color: var(--accent); outline: var(--focus-outline); outline-offset: 1px;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+.oc-field input:disabled,
+.oc-pick input:disabled,
+.oc-inline input:disabled,
+.oc-select:disabled { opacity: .6; cursor: not-allowed; color: var(--muted-off); }
+.oc-check {
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+  color: var(--text); font: 10px/1.4 var(--mono); cursor: pointer;
+}
+.oc-check span { min-width: 0; }
+.oc-check input[type="checkbox"] { width: 15px; height: 15px; flex: none; margin: 0; }
+.oc-check input[type="checkbox"]:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+.oc-check:has(input:disabled) { opacity: .6; cursor: default; color: var(--muted-off); }
+.oc-check:has(input:disabled) span { cursor: default; }
+
+/* ---------- chips ---------- */
+.oc-chips { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; }
+.oc-chip {
+  display: inline-flex; align-items: center; gap: 3px; min-height: 24px;
+  min-width: 0; padding: 0 8px; white-space: nowrap;
+  color: var(--muted); background: var(--panel2);
+  border: 1px solid var(--border2); border-radius: 6px;
+  font: 10px/1 var(--mono);
+}
+button.oc-chip { cursor: pointer; transition: color .15s ease, border-color .15s ease, background .15s ease; }
+button.oc-chip:hover { color: var(--text); border-color: var(--accent); }
+.oc-chip:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+button.oc-chip[aria-pressed="true"] {
+  color: var(--text); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+button.oc-chip[aria-pressed="true"]::before {
+  content: '✓'; margin-right: 1px; color: var(--accent); font-size: 9px; line-height: 1;
+}
+.oc-chip-day { min-width: 28px; justify-content: center; padding: 0 4px; }
+.oc-chip-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; min-height: 20px; padding: 2px 5px;
+  border: 0; border-radius: 4px; background: none; color: var(--muted);
+  font: 11px/1 var(--mono); cursor: pointer;
+}
+.oc-chip-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+.oc-chip-x:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+.oc-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; max-width: 296px; }
+.oc-times { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.oc-times .oc-field { width: 108px; }
+.oc-times .oc-field-hint { align-self: center; padding-bottom: 6px; }
+/* The composer's optional modifiers share one row as peers. */
+.oc-disclosures {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 16px; min-width: 0;
+}
+.oc-disclosure {
+  display: flex; align-items: center; gap: 8px; width: auto; min-height: 24px;
+  padding: 2px 0; border: 0; background: none; text-align: left;
+  color: var(--muted); font: 10px var(--mono); cursor: pointer;
+}
+.oc-disclosure[aria-expanded="true"] { color: var(--text); }
+.oc-disclosure > span:first-child { flex: 0 1 auto; min-width: 0; }
+.oc-disclosure > span:last-child { flex: none; color: var(--muted); }
+.oc-disclosure-state {
+  max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 10px;
+}
+.oc-disclosure:hover .oc-disclosure-state,
+.oc-disclosure[aria-expanded="true"] .oc-disclosure-state { color: var(--text); }
+.oc-disclosure:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+.oc-advanced {
+  display: flex; flex-direction: column; gap: 8px; margin-top: 4px;
+  padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--rail);
+}
+.oc-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.oc-inline input { flex: 1 1 140px; width: auto; }
+.oc-inline .btn { flex: none; }
+
+/* ---------- scope conditions and pickers ----------
+   The scope is one wrapping strip of chips, not five stacked rows. An unset
+   dimension is a dim chip you click; a set one carries its values inside the
+   same chip. The open picker takes the strip's full width below it. */
+.oc-conds {
+  display: flex; flex-wrap: wrap; gap: 3px; min-width: 0; padding: 1px 0;
+}
+.oc-cond {
+  display: inline-flex; align-items: center; gap: 3px; min-width: 0;
+  max-width: 100%; padding: 1px 3px 1px 1px;
+  border: 1px solid var(--border); border-radius: 5px; background: var(--panel2);
+}
+.oc-cond[data-set="1"] { border-color: color-mix(in srgb, var(--accent) 32%, var(--border2)); }
+.oc-cond[data-open="1"] { border-color: color-mix(in srgb, var(--accent) 55%, var(--border2)); }
+.oc-cond-btn {
+  display: inline-flex; align-items: center; gap: 3px; min-height: 20px;
+  padding: 1px 5px; border: 0; border-radius: 4px; background: none;
+  text-align: left; color: var(--muted); font: 9px var(--mono); cursor: pointer;
+}
+.oc-cond[data-set="1"] .oc-cond-btn,
+.oc-cond[data-open="1"] .oc-cond-btn { color: var(--text); }
+.oc-cond-btn:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
+.oc-cond-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+.oc-cond[data-open="1"] .oc-cond-name { font-weight: 600; }
+.oc-cond-name { min-width: 0; white-space: nowrap; }
+.oc-cond-chev { flex: none; color: var(--muted); font-size: 9px; }
+.oc-cond-values { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; min-width: 0; }
+/* A value chip holds a label and a remove button. Only the label may give
+   way: with the text as a bare flex item it could not shrink, so a value of
+   nineteen characters or more pushed the button past the max-width, where it
+   had no clickable area and floated over the next dimension chip. */
+.oc-cond-values .oc-chip { max-width: 12em; color: var(--text); }
+.oc-chip-text {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.oc-cond-values .oc-chip-x { flex: none; }
+/* The picker takes the full width of the strip, below every chip. */
+.oc-conds > .oc-pick { flex: 1 0 100%; margin-top: 2px; }
+.oc-pick {
+  display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding: 8px;
+  border: 1px solid var(--border2); border-radius: 8px; background: var(--rail);
+}
+.oc-pick-list {
+  display: flex; flex-direction: column; gap: 1px; min-height: 0;
+  max-height: 190px; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.oc-pick-row {
+  display: flex; align-items: center; gap: 7px; width: 100%; min-height: 26px;
+  padding: 4px 6px; border: 0; border-radius: 6px; background: none;
+  color: var(--text); text-align: left; font: 10px var(--mono); cursor: pointer;
+}
+.oc-pick-row:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+.oc-pick-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-pick-row[aria-checked="true"] {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.oc-pick-row[aria-checked="true"] .oc-pick-label { font-weight: 600; }
+.oc-pick-check { width: 12px; flex: none; color: var(--accent); font-size: 10px; }
+.oc-pick-label { min-width: 0; overflow-wrap: anywhere; }
+.oc-pick-empty { padding: 4px 6px; color: var(--muted); font: 10px/1.5 var(--sans); }
+/* The empty-dimension rule sits inside the picker, where the choice is made. */
+.oc-pick-note {
+  margin: 0; padding: 5px 6px 0; border-top: 1px solid var(--border);
+  color: var(--muted); font: 10px/1.5 var(--sans);
+}
+.oc-pick-custom { display: flex; gap: 5px; align-items: center; }
+.oc-pick-custom input { flex: 1 1 auto; border-style: dashed; }
+.oc-pick-custom .btn { flex: none; }
+
+/* ---------- composer bench ---------- */
+.oc-compose {
+  margin-top: 6px; border: 1px solid var(--border2); border-radius: 9px;
+  background: var(--panel2);
+  /* Not overflow: hidden. That would make the composer its own scroll
+     container, which never scrolls, so a sticky action row could never reach
+     the pane's bottom edge on a phone. */
+  overflow: clip;
+}
+/* The composer's title stays with the form while the pane scrolls. A scope
+   strip and three budget rows are taller than a phone pane, and the title
+   scrolling away left a screen of bare inputs with nothing saying what they
+   belong to. Sticky rather than fixed: it is inside the one scroll region,
+   so it leaves with the form and needs no second stacking context. */
+.oc-compose-hd {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 5px 10px; background: var(--rail); border-bottom: 1px solid var(--border);
+  color: var(--text); font: 600 10px var(--mono);
+}
+.oc-compose .oc-group {
+  gap: 5px; padding: 7px 10px; border-top: 1px solid var(--border);
+}
+.oc-compose-hd + .oc-group { border-top: 0; }
+/* Facts, warnings, previews and errors are direct children of the bench, so
+   they need the same inline inset the padded groups carry. */
+.oc-compose > .oc-facts,
+.oc-compose > .oc-warning { margin-left: 10px; margin-right: 10px; }
+.oc-compose > .oc-facts { margin-top: 6px; }
+.oc-compose > .oc-warning { margin-top: 6px; }
+.oc-compose > .oc-preview,
+.oc-compose > .oc-error { margin: 2px 10px 7px; }
+.oc-budget {
+  display: grid; grid-template-columns: minmax(104px, 132px) 78px minmax(0, 1fr);
+  gap: 4px 8px; align-items: center; min-width: 0;
+}
+.oc-budget + .oc-budget { margin-top: 4px; }
+.oc-budget > .oc-check { align-self: center; }
+.oc-budget .oc-field { grid-column: 2; }
+.oc-window { min-width: 0; }
+/* A window is one label wide, so it is a native select: the platform states
+   the current choice in 24px and opens its own list for the rest. */
+.oc-window .oc-select { width: 100%; min-height: 24px; }
+.oc-preview {
+  margin: 0; padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text); font: 10px/1.55 var(--mono); overflow-wrap: anywhere;
+}
+.oc-preview:empty { display: none; }
+.oc-preview[data-tone="err"] {
+  border-color: var(--err);
+  background: color-mix(in srgb, var(--err) 7%, transparent);
+  color: var(--err);
+}
+.oc-error {
+  margin: 0; padding: 7px 9px;
+  border: 1px solid var(--err); border-radius: 7px;
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+  color: var(--err); font: 10px/1.5 var(--sans); overflow-wrap: anywhere;
+}
+.oc-error:empty { display: none; }
+.oc-compose-ft {
+  display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 6px;
+  padding: 6px 10px; border-top: 1px solid var(--border);
+  background: var(--rail);
+}
+.oc-compose-ft .btn { min-height: 26px; }
+
+/* A rule list that outgrows the panel is only usable if it can be narrowed.
+   The row appears only once a section holds enough rules to need it. */
+.oc-list-filter { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.oc-list-filter input {
+  flex: 1 1 auto; min-width: 0; min-height: 26px; padding: 3px 8px;
+  color: var(--text); background: var(--rail);
+  border: 1px solid var(--border); border-radius: 6px;
+  font: 10px/1.4 var(--mono);
+}
+.oc-list-filter input::placeholder { color: var(--muted); opacity: 1; }
+.oc-list-filter input:hover { border-color: var(--border2); }
+.oc-list-filter input:focus {
+  border-color: var(--accent); outline: var(--focus-outline); outline-offset: 1px;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* ---------- rule rows: one calibrated line, one live column ---------- */
+/* One rule is one line: kind tag, scope, budget, then the live figure. The
+   actions appear on hover and focus so they cost no width at rest, and the
+   whole line is the edit target.
+
+   The live track is fit-content, capped at --oc-rule-side-max. An auto track is
+   sized to its max-content, so a busy policy - measured with 11 in flight, 27
+   queued and both request and token budgets remaining - made that column 457px
+   of a 498px row and squeezed the edit target to 16px. The scope and the budget
+   rendered at zero width: the row's whole point was invisible. fit-content
+   keeps a short figure compact and caps a long one, so the scope and budget
+   keep their line; the row title carries the untruncated reading. */
+.oc-rule {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) fit-content(var(--oc-rule-side-max));
+  align-items: stretch; min-width: 0; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.oc-rule:hover { border-color: var(--border2); }
+/* The rule that is open in its composer is marked in the list, so the form
+   and the row it belongs to read as one thing instead of two rules. The left
+   rule is the same accent the selected rail tab uses; the list already relies
+   on that to mean "you are here". */
+.oc-rule[data-oc-editing="1"] {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border2));
+  background: color-mix(in srgb, var(--accent) 4%, var(--panel));
+}
+.oc-rule[data-oc-editing="1"]::before { color: var(--text); }
+/* The visible kind label is generated from the row's data-kind, and color
+   alone must never carry the distinction: the row button carries the same
+   word, visually hidden, for its accessible name. */
+.oc-rule::before {
+  content: attr(data-kind);
+  display: flex; align-items: center; justify-content: center;
+  padding: 3px 2px; text-align: center;
+  color: var(--_kind, var(--muted));
+  font: 600 9px/1.25 var(--mono); letter-spacing: .03em;
+}
+.oc-rule[data-kind="limit"] { --_kind: var(--accent); }
+.oc-rule[data-kind="pause"] { --_kind: var(--warn); }
+.oc-rule[data-kind="capture"] { --_kind: var(--cyan); }
+.oc-rule-main {
+  display: flex; align-items: baseline; gap: 7px; min-width: 0;
+  padding: 6px 8px; border: 0; background: none; text-align: left;
+  color: var(--text); font: inherit; cursor: pointer;
+}
+.oc-rule-main:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.oc-rule-main:focus-visible { outline: var(--focus-outline); outline-offset: -2px; }
+/* The scope and the budget share one line; each truncates before the other
+   collapses, so a dense row never grows taller. */
+.oc-rule-scope {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text); font: 600 10px/1.4 var(--mono);
+}
+.oc-rule-budget {
+  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--muted); font: 10px/1.4 var(--mono);
+}
+.oc-rule-side {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  padding: 0 8px 0 2px;
+}
+.oc-rule-live {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text); text-align: right;
+  font: 10px/1.4 var(--mono); font-variant-numeric: tabular-nums;
+}
+/* A rule outside its schedule is installed but enforcing nothing. The state
+   column says so in the same word the readout uses, at the same warn tone
+   the readout takes for a hold, because both mean "this is not capping". */
+.oc-rule[data-oc-off-schedule="1"] .oc-rule-live { color: var(--warn); }
+/* Actions stay visible: an operator should never have to hover to learn that
+   a rule can be edited or removed. They sit at muted ink so the state column
+   still reads first. */
+.oc-rule-actions {
+  display: flex; align-items: center; justify-content: flex-end; gap: 2px;
+  flex: none; flex-wrap: nowrap;
+}
+.oc-icon-btn {
+  min-height: 24px; padding: 1px 6px;
+  border: 1px solid transparent; border-radius: 4px; background: none;
+  color: var(--muted); font: 9px/1.3 var(--mono); cursor: pointer;
+}
+.oc-icon-btn:hover { color: var(--text); border-color: var(--border2); }
+.oc-icon-btn:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+.oc-icon-btn.danger:hover {
+  color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border2));
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+
+.oc-banner {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px;
+  /* A direct child of a pane that is not a flex container: this banner is the
+     one element that needs its own separation from the section head. */
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  color: var(--warn-text); font: 10px/1.5 var(--mono);
+}
+.mn.oc .oc-banner[data-tone="err"] {
+  border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+  color: var(--err-text);
+}
+.oc-banner .oc-link { color: inherit; }
+.oc-banner .oc-link:hover { color: var(--text); }
+/* ---------- overview readout ----------
+   The page band's recipe at the console's narrow track: four cells, the same
+   leading tick and tick baseline, the value one display step down so a real
+   figure fits 470px. */
+.oc-sec .oc-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 10px; }
+.oc-sec .oc-kpis .kpi { padding: 7px 9px 11px 11px; }
+.oc-sec .oc-kpis .kpi h2 { margin-bottom: 4px; font-size: 8.5px; letter-spacing: .08em; }
+.oc-sec .oc-kpis .kpi .val { font-size: 17px; }
+.oc-sec .oc-kpis .kpi .sub2 { margin-top: 3px; font-size: 9.5px; }
+.oc-sec .oc-kpis + .oc-label { margin-top: 12px; }
+
+/* ---------- overview: one row per rule in force ---------- */
+/* The overview is the same reading as a rule row: kind, scope, then the
+   budget. Clicking a row opens the section that owns the rule. The inset and
+   gap match .oc-rule-main so switching sections does not change the rhythm.
+   The row wraps rather than clipping. A three-dimension scope and a budget
+   with a schedule cannot both fit a 520px line, and truncating both left the
+   operator unable to read the scope or the budget - the two facts the row
+   exists to carry. When they do not fit together the budget drops to its own
+   right-aligned line, so the row is taller only for the rules that need it. */
+.oc-ov-list { display: flex; flex-direction: column; min-width: 0; }
+.oc-ov-row {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 7px;
+  width: 100%; min-width: 0;
+  padding: 6px 8px; border: 0; border-top: 1px solid var(--border);
+  background: none; color: var(--text); text-align: left; font: inherit;
+  cursor: pointer;
+}
+.oc-ov-row:first-child { border-top: 0; }
+.oc-ov-row:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.oc-ov-row:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+.oc-ov-kind {
+  display: inline-flex; align-items: center; gap: 5px;
+  flex: none; min-width: 40px;
+  color: var(--muted); font: 600 9px/1.4 var(--mono);
+}
+.oc-ov-kind::before {
+  content: ''; width: 5px; height: 5px; flex: none; border-radius: 1px;
+  background: currentColor;
+}
+.oc-ov-kind[data-kind="limit"] { color: var(--accent); }
+.oc-ov-kind[data-kind="pause"] { color: var(--warn); }
+.oc-ov-kind[data-kind="capture"] { color: var(--cyan); }
+/* An off-schedule limit is installed but enforcing nothing, so its kind takes
+   the same warn tone the rule row's state column takes. The marker existed on
+   this row before the rule did, which made it markup only a test could see. */
+.oc-ov-kind[data-oc-off-schedule="1"] { color: var(--warn); }
+.oc-ov-scope {
+  flex: 0 1 auto; min-width: 0;
+  color: var(--text); font: 600 10px/1.4 var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The budget gives way first: when it cannot share the line it moves to its
+   own line whole, instead of being cut mid-word. */
+.oc-ov-detail {
+  flex: 0 1 auto; min-width: 0; margin-left: auto;
+}
+.oc-ov-detail {
+  color: var(--muted); text-align: right;
+  font: 10px/1.45 var(--mono);
+}
+
+.oc-empty {
+  padding: 14px 12px; border: 1px dashed var(--border2); border-radius: 8px;
+  color: var(--muted); font: 10px/1.6 var(--sans);
+}
+.oc-empty strong { color: var(--text); font-weight: 600; }
+/* A partial result is a note, not a hole: it names the fraction the filter
+   hid and carries the same clear action as the empty state. */
+.oc-list-note { color: var(--muted); font: 10px/1.5 var(--sans); }
+
+/* ---------- capture and system cards ---------- */
+.oc-card {
+  padding: 12px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel2); min-width: 0; overflow: hidden;
+}
+.oc-card + .oc-card { margin-top: 6px; }
+.oc-card > .oc-label { margin-bottom: 6px; }
+.oc-card > .oc-note { margin-top: 0; }
+.oc-card > .btn { margin-top: 9px; }
+/* Inside a card the action row is part of the card, not a second surface:
+   no rail fill, no separator and no negative margins, so a lone action sits
+   under the copy instead of floating in a band of its own. */
+.oc-card .oc-compose-ft {
+  margin: 8px 0 0; padding: 0; background: transparent; border-top: 0;
+}
+.oc-card .oc-compose-ft .clear-count {
+  flex: 1; min-width: 0; margin-bottom: 0; font-size: 10px;
+}
+/* An idle restart has no status text. An empty status span still claimed a
+   full row, so the action sat under an invisible bar; hiding only the empty
+   case keeps a real status line on its own row when it appears. */
+.oc-card .oc-compose-ft .clear-count:empty { display: none; }
+.oc-card .restart-steps { margin-top: 8px; }
+
+/* ---------- export receipt and filter rows ---------- */
+.oc-receipt {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 10px 12px; border: 1px solid var(--border2); border-radius: 8px;
+  background: var(--rail); min-width: 0;
+}
+.oc-receipt-main {
+  min-height: 16px; color: var(--text); font: 600 12px/1.45 var(--mono);
+  overflow-wrap: anywhere;
+}
+.oc-receipt-main[data-tone="err"] { color: var(--err); }
+.oc-receipt-sub { color: var(--muted); font: 9px/1.5 var(--sans); }
+.oc-receipt .oc-compose-ft {
+  margin-top: 2px; padding: 9px 0 0; border-top: 1px solid var(--border);
+}
+.oc-filter-row {
+  display: grid; grid-template-columns: 88px minmax(0, 1fr);
+  gap: 4px 8px; align-items: start; min-width: 0;
+}
+/* The two boolean and the two age pairs sit side by side: each is a short
+   label and two or four chips, so one per column halves the section height. */
+.oc-filter-pair {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 14px; min-width: 0;
+}
+/* Inside a pair each row is one line: the label sits beside its control. */
+.oc-filter-pair .oc-filter-row {
+  grid-template-columns: auto minmax(0, 1fr); gap: 6px; align-items: center;
+}
+.oc-filter-pair .oc-filter-name { padding-top: 0; white-space: nowrap; }
+.oc-filter-pair .oc-chip { min-height: 22px; padding: 0 7px; font-size: 9px; }
+.oc-filter-pair .oc-select { min-height: 24px; font-size: 10px; }
+.oc-export-more {
+  justify-content: space-between; gap: 8px;
+  padding: 2px 1px 0; border-top: 0;
+}
+.oc-export-more .oc-note { margin: 0; flex: 1 1 auto; }
+.oc-filter-name {
+  padding-top: 6px; color: var(--muted); font: 600 9px/1.4 var(--mono);
+  letter-spacing: .05em;
+}
+
+/* ---------- confirmation dialog ---------- */
+/* The shared operator dialog owns the frame; the console only widens it for
+   a scope sentence that must stay readable. */
+.oc-confirm-panel { width: min(26rem, 100%); }
+.oc-confirm-body {
+  margin: 0 0 18px; color: var(--muted); font: 13px/1.55 var(--sans);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- narrow window and sheet placement ---------- */
+@media (max-width: 800px) {
+  /* The sheet is the same popover scaled to the thumb: it never fills the
+     screen, because a menu that covers the page is not a menu. It does need
+     most of it though. At 70dvh a 320x568 phone gave the pane 253px, and a
+     composer is 771px tall, so opening one left zero rule rows visible and the
+     list three pane-heights away. At 88dvh the pane is 402px - two more rows
+     above the pinned commit, and the list is reachable. The remaining 12% plus
+     the bottom inset still leaves an outside-press strip for dismissal. */
+  /* A definite height, not just a cap. With max-height alone the flex column
+     was content-sized, so the pane never received the remaining space and
+     .mn.oc's overflow:hidden clipped the bottom of a tall composer: the form
+     ran past the visible panel with no way to reach it. Height makes the pane
+     the exact remainder below the rail and above the ledger. */
+  .mn.oc[data-placement="sheet"] {
+    height: min(88dvh, calc(100dvh - 16px));
+    max-height: min(88dvh, calc(100dvh - 16px));
+  }
+  .mn.oc .oc-hd { padding: 8px 10px 9px; }
+  /* A pinned commit row can only reach the pane's true bottom edge when no
+     padding sits below the composer. With the usual bottom padding the sticky
+     row stopped exactly that many pixels short and content scrolled through
+     the gap beneath it - most visible on a landscape phone. The trailing
+     inset moves to the sections that have no pinned row. */
+  .mn.oc .oc-pane { padding: 9px 10px 0; }
+  .mn.oc .oc-pane:not(:has(.oc-compose)) { padding-bottom: 12px; }
+  .mn.oc .oc-ft { padding: 6px 10px; }
+  .oc-sec-head { flex-wrap: wrap; }
+}
+
+/* The rail becomes a grid only when one row genuinely cannot hold six
+   destinations - not merely because the viewport is narrow. Six chips plus
+   their badges measure about 320px, so at 320 and 390 the strip clipped
+   "system" to nothing and the grid is right. A landscape phone is 640-844
+   wide: the strip fits there with room to spare, and taking a second 38px row
+   out of a 317px sheet left the pane 125px. The threshold is the content, not
+   the device class. */
+@media (max-width: 560px) {
+  .mn.oc .oc-rail {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 3px; padding: 5px 6px;
+    overflow: visible; scrollbar-width: none;
+  }
+  .mn.oc .oc-rail[data-more="1"] {
+    -webkit-mask-image: none; mask-image: none;
+  }
+  .mn.oc .oc-rail-item {
+    /* Height comes from the shared touch rung (--oc-ctl) declared below, so
+       this block styles the grid cell without also pinning a target size. */
+    padding: 0 9px; border-radius: 5px;
+    justify-content: center; min-width: 0;
+  }
+  .mn.oc .oc-rail-label { overflow: visible; }
+}
+
+/* A landscape phone is wide but very short. Every pixel the fixed chrome takes
+   is a pixel the form and the rule list lose, so the header and the ledger
+   tighten and the sheet trades its top gap for working height: at this size it
+   sits flush with the top edge and keeps only the 8px bottom gap that leaves a
+   dismissal strip (the sheet's own bottom offset). */
+@media (max-width: 800px) and (max-height: 500px) {
+  .mn.oc[data-placement="sheet"] {
+    height: calc(100dvh - 8px);
+    max-height: calc(100dvh - 8px);
+  }
+  .mn.oc .oc-hd { padding: 5px 8px; }
+  .mn.oc .oc-ft { padding: 4px 8px; }
+  .mn.oc .oc-rail { padding: 4px 6px; }
+  .mn.oc .oc-pane { padding: 7px 8px 0; }
+  .mn.oc .oc-pane:not(:has(.oc-compose)) { padding-bottom: 10px; }
+  /* Two pinned bands in a pane this short leave almost no form between them:
+     at 568x320 the pane is 180px, the composer title took 28 and the action
+     row 63, so barely 90px of fields showed at once. The action row must stay
+     (committing is the whole task); the title does not, because the rail names
+     the section and the commit button names the action. It scrolls away like
+     the rest of the form. */
+  .mn.oc .oc-compose-hd { position: static; }
+  .mn.oc .oc-compose-ft { padding: 6px 8px; }
+}
+
+@media (max-width: 640px) {
+  .mn.oc .oc-sec-head { flex-direction: column; align-items: stretch; gap: 8px; }
+  .mn.oc .oc-head-actions { justify-content: flex-start; flex-wrap: wrap; }
+  /* A phone has no room for a four-part instrument line: the kind names the
+     first line, the scope and budget share it, and the live figure and actions
+     take the second. Squeezing all four onto one line clipped the scope to
+     "model glm…", which is the one field the operator must read.
+     The budget used to be display:none here, so a phone showed
+     "model glm-5.3 · idle" and never said what the limit caps - the row's whole
+     point. It wraps beside the scope instead, with the side row below. */
+  .mn.oc .oc-rule {
+    grid-template-columns: 36px minmax(0, 1fr);
+    grid-template-areas: "kind main" "side side";
+  }
+  /* The kind tag names the rule's first line, so it stays in that line's
+     height instead of stretching a block beside every line. */
+  .mn.oc .oc-rule::before { grid-area: kind; align-self: start; }
+  .mn.oc .oc-rule-main {
+    grid-area: main; padding: 7px 8px; flex-wrap: wrap; row-gap: 1px;
+  }
+  .mn.oc .oc-rule-budget { display: block; white-space: normal; }
+  .mn.oc .oc-rule-side {
+    grid-area: side; justify-content: space-between;
+    padding: 0 6px 4px 44px;
+  }
+  .mn.oc .oc-rule-scope { white-space: normal; overflow: visible; }
+  /* Label, value and window stay on one line. Stacking them tripled every
+     budget row (92-120px each, 332px for three), which is what pushed the
+     composer to 2-3 pane-heights on a phone and hid the commit action below
+     the fold. The tracks shrink instead of the layout changing shape. */
+  .mn.oc .oc-budget {
+    grid-template-columns: minmax(0, max-content) 58px minmax(0, 1fr);
+  }
+  .mn.oc .oc-compose .oc-group { padding: 9px 10px; }
+  .mn.oc .oc-compose > .oc-facts,
+  .mn.oc .oc-compose > .oc-warning { margin-left: 10px; margin-right: 10px; }
+  .mn.oc .oc-compose > .oc-preview,
+  .mn.oc .oc-compose > .oc-error { margin-left: 10px; margin-right: 10px; }
+  .mn.oc .oc-compose-hd { padding: 8px 10px; }
+  /* A phone pane scrolls, so the commit sits on its bottom edge: the action
+     the operator came for was 600px below the fold when a composer opened.
+     bottom:0 rather than a negative offset, so the row parks on the pane's
+     edge instead of hanging past it: at a 340px viewport height a negative
+     offset pushed the commit button outside the panel's clip. */
+  .mn.oc .oc-compose-ft {
+    position: sticky; bottom: 0; z-index: 2;
+    padding: 9px 10px; background: var(--rail);
+    border-top: 1px solid var(--border2);
+    border-radius: 0 0 8px 8px;
+  }
+  /* A focused field must not scroll in under that pinned row: without this a
+     keyboard-height phone put the field the operator was typing into directly
+     beneath the commit button. */
+  .mn.oc .oc-pane { scroll-padding-bottom: 76px; }
+  .mn.oc .oc-compose-ft .btn { flex: 1 1 auto; }
+  .mn.oc .oc-times .oc-field { width: calc(50% - 4px); min-width: 96px; }
+  .mn.oc .oc-ov-row { grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; }
+  .mn.oc .oc-ov-detail { grid-column: 1 / -1; text-align: left; }
+  .mn.oc .oc-ov-scope { white-space: normal; overflow: visible; }
+  .mn.oc .oc-filter-row { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .mn.oc .oc-filter-name { padding-top: 0; }
+  .mn.oc .oc-receipt .oc-compose-ft .btn { flex: 1 1 auto; }
+  .mn.oc .oc-card .oc-compose-ft { margin: 10px -12px -12px; }
+}
+
+/* ---------- touch sizing ----------
+   Two rungs, one inventory. A narrow fine pointer keeps the dense 38px rung;
+   any coarse pointer takes the shared 44px target; desktop keeps the
+   instrument's 20px to 30px controls.
+
+   The rung's numbers are configuration, not declarations: --oc-ctl,
+   --oc-chip-pad and --oc-check-box are set once per input condition, and every
+   touchable control reads them. Before this, the same selector inventory was
+   written twice - once per media condition - and the rung itself appeared nine
+   times in one block, so a control added to one list silently missed the other
+   and the two could disagree about a single target size.
+
+   The broad query is a media list, not a single condition: a wide coarse
+   pointer (a tablet) matches only the second entry, and a narrow fine pointer
+   only the first. The coarse block then overrides the three tokens, so one
+   selector inventory serves both and the later rung wins wherever both match. */
+@media (max-width: 800px), (hover: none), (pointer: coarse) {
+  .mn.oc {
+    --oc-ctl: 38px;
+    --oc-chip-pad: 0 11px;
+    --oc-check-box: 18px;
+  }
+  .mn.oc .btn,
+  .mn.oc .oc-rail-item,
+  .mn.oc .oc-rule-main,
+  .mn.oc .oc-ov-row,
+  .mn.oc .oc-check,
+  .mn.oc .oc-disclosure,
+  .mn.oc .oc-cond-btn,
+  .mn.oc .oc-pick-row,
+  .mn.oc .oc-icon-btn,
+  .mn.oc .oc-close,
+  .mn.oc .oc-undo,
+  .mn.oc .oc-link,
+  .mn.oc .oc-field input,
+  .mn.oc .oc-pick input,
+  .mn.oc .oc-inline input,
+  /* The window selects are the most-tapped controls in the policy form: a
+     limit states its budget and then its window, and on a phone they rendered
+     24px because the base rules cap them and this inventory never named them. */
+  .mn.oc .oc-select,
+  .mn.oc .oc-list-filter input { min-height: var(--oc-ctl); }
+  .mn.oc .oc-chip { min-height: var(--oc-ctl); padding: var(--oc-chip-pad); }
+  .mn.oc .oc-chip-x {
+    min-width: var(--oc-ctl); min-height: var(--oc-ctl);
+  }
+  .mn.oc .oc-check input[type="checkbox"] {
+    width: var(--oc-check-box); height: var(--oc-check-box);
+  }
+  .mn.oc .oc-link { display: inline-flex; align-items: center; padding: 0 4px; }
+  .mn.oc .oc-icon-btn { padding: 0 9px; }
+  /* Two adjacent 20px actions one pixel apart are one blur at a thumb: the
+     rung's targets get room between them. */
+  .mn.oc .oc-rule-actions { gap: 4px; }
+  /* The readout is a header control outside .mn.oc and takes the full target
+     at any narrow or coarse size, not the dense rung. */
+  .op-readout-btn { min-height: var(--tap); }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .mn.oc {
+    --oc-ctl: var(--tap);
+    --oc-chip-pad: 0 14px;
+    --oc-check-box: 20px;
+  }
+  /* A 12em cap leaves almost nothing for the value once the remove button
+     takes a 44px tap target beside 28px of padding. A phone has no hover to
+     recover a clipped value, so the chip may use the strip's full width. */
+  .mn.oc .oc-cond-values .oc-chip { max-width: 100%; }
+  /* Seven day chips cannot fit a 44px target on one phone row: use four
+     columns and let the week wrap onto a second row. */
+  .mn.oc .oc-days { grid-template-columns: repeat(4, minmax(var(--tap), 1fr)); max-width: none; }
+  .mn.oc .oc-chip-day { min-width: var(--tap); }
+  .mn.oc .oc-pick-list { max-height: 40dvh; }
+  /* A free-value row and its add button each take the full tap target; giving
+     the button the same width as the field keeps the pair readable instead of
+     leaving a 44px square beside a long input. */
+  .mn.oc .oc-pick-custom .btn { min-width: var(--tap); }
+  /* The confirmation panel sits outside .mn.oc, so it takes the same coarse
+     target explicitly. Its base 42px already clears the narrow rung. */
+  .oc-confirm-panel .btn { min-height: var(--tap); }
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .op-readout-dot { animation: none !important; }
+  .op-readout-chev { transition: none; }
+}

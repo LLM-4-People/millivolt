@@ -14,7 +14,8 @@
 #   scripts/dev-traffic.sh status   print whether it runs and its log
 #
 # Env overrides:
-#   DEV_PORT           dev instance port    (default 8081)
+#   DEV_PORT           dev instance port    (default 8081); also keys the PID
+#                      file and log, so instances are independent
 #   DEV_TRAFFIC_BURSTS burst count          (default 5)
 #   DEV_TRAFFIC_GAP    seconds between bursts (default 62, just over one
 #                      chart bucket so the timeline gains a bucket per burst)
@@ -23,9 +24,6 @@ cd "$(dirname "$0")/.."   # repo root
 
 DEV_PORT="${DEV_PORT:-8081}"
 DEV_DIR=/tmp/millivolt   # the reserved disposable namespace dev.sh owns
-STATE="$DEV_DIR/dev-traffic"
-PID_FILE="$STATE.pid"
-LOG_FILE="$DEV_DIR/dev-traffic.log"
 DRIVER="scripts/dev-traffic.py"
 mkdir -p "$DEV_DIR"
 
@@ -34,13 +32,33 @@ case "$DEV_PORT" in ''|*[!0-9]*) die "DEV_PORT must be numeric" ;; esac
 (( DEV_PORT >= 1024 && DEV_PORT <= 65535 && DEV_PORT != 8080 )) \
   || die "DEV_PORT must be 1024..65535 and not production port 8080"
 
+# One state triple per instance, keyed like every other dev.sh artefact. A
+# single shared PID file made `status` and `stop` on one port report and
+# terminate the driver belonging to another, and `start` on the second port
+# refuse because the first port's driver looked like its own.
+STATE="$DEV_DIR/dev-traffic-$DEV_PORT"
+PID_FILE="$STATE.pid"
+LOG_FILE="$DEV_DIR/dev-traffic-$DEV_PORT.log"
+
 is_running() {
   [ -f "$PID_FILE" ] || return 1
   local pid
   pid="$(cat "$PID_FILE")"
   [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )) || return 1
-  # PID-file identity: the driver must still be the process behind the pid.
-  grep -q "dev-traffic.py" "/proc/$pid/cmdline" 2>/dev/null || return 1
+  # PID-file identity: the process behind the pid must be this port's driver.
+  # A substring grep on the command line would accept any process that merely
+  # mentions the script; the driver takes its port from DEV_PORT in its
+  # environment, so that is what distinguishes two drivers of the same script.
+  local cmdline envline
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || return 1
+  case "$cmdline" in
+    *"dev-traffic.py"*) ;;
+    *) return 1 ;;
+  esac
+  [ -r "/proc/$pid/environ" ] || return 1
+  envline="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null)" || return 1
+  grep -qx "DEV_PORT=$DEV_PORT" <<<"$envline" || return 1
   kill -0 "$pid" 2>/dev/null
 }
 

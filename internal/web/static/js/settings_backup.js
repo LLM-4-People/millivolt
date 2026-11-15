@@ -152,8 +152,7 @@ function backupWhen(v) {
   if (v == null || v === '' || v === 0) return '';
   const d = new Date(typeof v === 'number' ? v : String(v));
   if (Number.isNaN(d.getTime())) return '';
-  const p = n => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  return fmtDateKey(d) + ' ' + fmtClock(d.getHours(), d.getMinutes());
 }
 
 function backupSpan(lo, hi) {
@@ -371,7 +370,7 @@ function runBackupDownload() {
       const n = backupBytes(blob.size);
       settingsStatus(n ? 'downloaded ' + n : 'backup downloaded', 'ok');
     })
-    .catch(err => settingsStatus(String(err.message || err)))
+    .catch(err => settingsStatus(String(err.message || err), 'error'))
     .finally(() => backupSetBusy(false));
 }
 
@@ -394,7 +393,7 @@ function runBackupRestore(ev) {
     settingsStatus('review then apply', 'ok');
   }).catch(err => {
     if (req !== backupReq) return;
-    settingsStatus(String(err.message || err));
+    settingsStatus(String(err.message || err), 'error');
   }).finally(() => {
     if (input) input.value = '';
     if (req === backupReq && !backupInspect) backupSetBusy(false);
@@ -402,7 +401,7 @@ function runBackupRestore(ev) {
 }
 
 function paintBackupPane() {
-  const box = $('settings-fields');
+  const box = settingsFields();
   if (!box || !settingsDoc) return;
   box.querySelectorAll('[data-backup]').forEach(el => el.remove());
   box.insertAdjacentHTML('beforeend', settingsBackupHTML(settingsDoc));
@@ -413,14 +412,34 @@ function paintBackupPane() {
   showSettingsCat();
 }
 
-function runBackupApply() {
+async function runBackupApply() {
   if (!backupInspect || !backupInspect.file) return;
   const q = backupQuery(true);
   if (!q.get('config') && !q.get('database')) { settingsStatus('select config, database, or both'); return; }
   if (backupBusy) return;
+  // One confirmation naming what is written, how, and whether it can be taken
+  // back: a restore used to start on the single click that also picked the
+  // file, and merge has no rollback at all.
+  const members = [q.get('config') ? 'config' : '', q.get('database') ? 'database' : ''].filter(Boolean).join(' and ');
+  const merge = backupMode === 'merge';
+  const body = merge
+    ? `Adds the archive's ${members} to this instance and leaves everything else. Merge never rolls back: config keys are overlaid and request ids already stored are kept.`
+    : `Overwrites the live ${members} with the archive's copy. A replace cannot be undone from here, and a replaced database is applied on the next restart.`;
+  // ocConfirm is a modal, and the modal layer preempts the open sheet; the
+  // sheet is put back with the same restore pane after the answer, whichever
+  // way it went.
+  const reopen = settingsIsOpen();
+  const restoreSheet = async () => { if (reopen && !settingsIsOpen()) await openSettings(); };
+  if (reopen && !(await ocConfirm({ title: 'Restore this backup?', body, confirm: 'restore', danger: !merge }))) {
+    await restoreSheet();
+    return;
+  }
+  await restoreSheet();
+  if (backupBusy) return;
   const req = ++backupReq;
   backupSetBusy(true);
   settingsStatus('restoring');
+  const dbOnly = !!q.get('database') && !q.get('config');
   operatorJsonBody('/admin/restore?' + q, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
@@ -431,12 +450,16 @@ function runBackupApply() {
     backupSetBusy(false);
     const restart = settingsRestartNotice(j);
     settingsStatus(restart ? 'restored · ' + restart : 'restored', restart ? '' : 'ok');
-    return fetchSettings(true);
+    // A database-only restore leaves the config snapshot alone, so an open,
+    // dirty config draft is still valid and must survive the refill.
+    return fetchSettings(!dbOnly);
   }).catch(err => {
     if (req !== backupReq) return;
     backupSetBusy(false);
     paintBackupPane();
-    settingsStatus(String(err.message || err));
+    // A failed restore is an error, not an informational line: the status
+    // line's tone is the only thing that tells the two apart.
+    settingsStatus(String(err.message || err), 'error');
   });
 }
 
@@ -482,6 +505,11 @@ function fillSettingsLive(doc) {
     `<div class="st-live-row"><span class="k">listen</span><span class="v" title="${escapeHtml(String(listen))}">${escapeHtml(String(listen))}</span></div>` +
     `<div class="st-live-row"><span class="k">store</span><span class="v" title="${escapeHtml(String(db))}">${escapeHtml(String(db || 'ring'))}</span></div>` +
     `<div class="st-live-row"><span class="k">write</span><span class="v">${escapeHtml(persist)}</span></div>` +
+    (doc.backup && doc.backup.pending_database
+      // A staged database lands on restart, and nothing else on this sheet
+      // carries the fact at the level the operator reads system state from.
+      ? `<div class="st-live-row"><span class="k">staged</span><span class="v" title="a restored database is waiting for the next restart">database restore</span></div>`
+      : '') +
     lastApply;
 }
 
@@ -574,6 +602,13 @@ function settingsScalarRangeError(input) {
     value = parseGoByteSize(raw);
     if (value == null) return 'use a byte size such as 32MiB';
   }
+  // Zero is a distinct setting, not a lapsed range: the schema publishes what it
+  // means through `zero_means`, and the server's own validator skips the range
+  // entirely for it. Four fields declare a positive minimum that way - the Go
+  // memory limit, the debug store, and both in-flight body budgets - so the
+  // client must accept the same zero the server accepts. Rejecting it here
+  // blocked Apply on a value the server had itself written.
+  if (value === 0 && input.dataset.stZeroMeans) return '';
   const min = input.dataset.stMin === '' ? null : Number(input.dataset.stMin);
   const max = input.dataset.stMax === '' ? null : Number(input.dataset.stMax);
   if (min != null && value < min) {
@@ -611,7 +646,9 @@ function settingsFieldHTML(f, val, def, override) {
   const helpId = settingsFieldID(f.key, 'help');
   const errorId = settingsFieldID(f.key, 'error');
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
-  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-min-label="${escapeHtml(f.min_label || '')}" data-st-max-label="${escapeHtml(f.max_label || '')}" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
+  // data-st-zero-means carries the schema's own sentence for zero, which is
+  // what tells the range check that zero is a setting rather than a lapse.
+  const scalarAttrs = ` data-st-scalar="1" data-st-kind="${escapeHtml(f.kind || '')}" data-st-min="${f.min == null ? '' : escapeHtml(String(f.min))}" data-st-max="${f.max == null ? '' : escapeHtml(String(f.max))}" data-st-min-label="${escapeHtml(f.min_label || '')}" data-st-max-label="${escapeHtml(f.max_label || '')}"${f.zero_means ? ` data-st-zero-means="${escapeHtml(f.zero_means)}"` : ''} data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
   const pills = (locked ? '<span class="st-pill lock">flag</span>' : '') +
     (f.hot_reload ? '' : '<span class="st-pill restart" title="takes a process restart">restart</span>');
   let hint = '';

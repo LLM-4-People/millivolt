@@ -370,8 +370,29 @@ def toc_escape_errors() -> list[str]:
     return errors
 
 
+def docs_image_errors() -> list[str]:
+    """Every published docs image needs a Markdown consumer.
+
+    The built-site pass only sees images its pages already reference, so an
+    orphan under docs/images survives it forever. The gallery is published from
+    a capture run, and a recaptured folder that loses its last reference is
+    exactly the drift this catches.
+    """
+    referenced: set[str] = set()
+    for path in ROOT.rglob("*.md"):
+        if not {"node_modules", ".venv", ".git", "agents"}.isdisjoint(
+                path.relative_to(ROOT).parts):
+            continue
+        for match in re.finditer(r"images/[A-Za-z0-9_./-]+", path.read_text(encoding="utf-8")):
+            referenced.add(match.group(0))
+    return [f"docs/{rel.relative_to(ROOT / 'docs').as_posix()}: no Markdown consumer"
+            for rel in ROOT.joinpath("docs/images").rglob("*")
+            if rel.is_file()
+            and rel.relative_to(ROOT / 'docs').as_posix() not in referenced]
+
+
 def check_site(site: Path) -> list[str]:
-    errors: list[str] = []
+    errors: list[str] = docs_image_errors()
     pages = sorted(site.rglob("*.html"))
     page_texts = {page: page.read_text(encoding="utf-8") for page in pages}
     parsed: dict[Path, PageParser] = {}

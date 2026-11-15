@@ -27,11 +27,19 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 from . import race_scope
 from .go import PARITY_HANDSHAKE, parity_digest
+
+# A compiled test binary runs with -test.timeout 0 unless told otherwise: the
+# 10-minute default belongs to `go test`, which this module bypasses because it
+# invokes the binaries directly. A wedged test therefore had no local bound at
+# all and only CI's job budget ended it. This matches the unit job's 30-minute
+# allowance so a healthy slow package is never cut off, while a hang still ends.
+TEST_TIMEOUT = "30m"
 
 ROOT = Path(__file__).resolve().parent.parent
 TEST_LIST = re.compile(r"^(?:Test|Fuzz|Example)\w*$")
@@ -137,7 +145,8 @@ class Task:
         # serial package: without the filter both passes would run the whole
         # package, duplicating the plain tests under -race.
         pattern = "^(?:" + "|".join(re.escape(name) for name in self.names) + ")$"
-        return [binary, "-test.count=1", "-test.benchtime=200ms", "-test.run", pattern]
+        return [binary, "-test.count=1", "-test.timeout", TEST_TIMEOUT,
+                "-test.benchtime=200ms", "-test.run", pattern]
 
 
 def packages() -> dict[str, str]:

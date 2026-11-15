@@ -3,16 +3,21 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 )
@@ -33,6 +38,10 @@ type deadlineWriter struct {
 	body          []byte
 	readDeadline  time.Time
 	writeDeadline time.Time
+	// firstRead is the very first read deadline armed, i.e. the layer's own
+	// absolute arm before any handler runs, and arming counts it.
+	firstRead time.Time
+	armCount  int
 }
 
 func (w *deadlineWriter) Header() http.Header {
@@ -46,7 +55,14 @@ func (w *deadlineWriter) Write(p []byte) (int, error) {
 	w.body = append(w.body, p...)
 	return len(p), nil
 }
-func (w *deadlineWriter) SetReadDeadline(t time.Time) error  { w.readDeadline = t; return nil }
+func (w *deadlineWriter) SetReadDeadline(t time.Time) error {
+	if w.armCount == 0 {
+		w.firstRead = t
+	}
+	w.armCount++
+	w.readDeadline = t
+	return nil
+}
 func (w *deadlineWriter) SetWriteDeadline(t time.Time) error { w.writeDeadline = t; return nil }
 func (w *deadlineWriter) Flush()                             {}
 
@@ -440,3 +456,77 @@ func TestDeadlineHandlerStreamAfterBodySurvivesIdleBound(t *testing.T) {
 		t.Fatalf("stream ended without [DONE]: %q", string(body))
 	}
 }
+
+// TestRestoreIsExemptFromTheAbsoluteBodyBound pins the restore exemption: a
+// full database upload can legitimately outlast request_body_read_timeout, and
+// the absolute bound turned that into an over-cap 413. The idle bound still
+// applies on the exempt route, so a silent client is still cut.
+func TestRestoreIsExemptFromTheAbsoluteBodyBound(t *testing.T) {
+	h := deadlineHandler{next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+	}), policy: deliveryPolicyFor(config.Default())}
+
+	for _, tc := range []struct {
+		path     string
+		exempt   bool
+		bodyText string
+	}{
+		{string(mcp.RouteRestore), true, "archive"},
+		{"/v1/chat/completions", false, "chat"},
+	} {
+		w := &deadlineWriter{}
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.bodyText)))
+		if tc.exempt {
+			if !w.firstRead.IsZero() {
+				t.Fatalf("%s: absolute read deadline armed (%v), want the route exempt", tc.path, w.firstRead)
+			}
+		} else if w.firstRead.IsZero() {
+			t.Fatalf("%s: absolute read deadline not armed", tc.path)
+		}
+	}
+
+	// The wrapper itself still arms the shorter idle bound per read when the
+	// route is exempt, so the exemption is not "no bound at all".
+	var armed []time.Time
+	body := &progressReadCloser{
+		body:            io.NopCloser(strings.NewReader("abc")),
+		setReadDeadline: func(t time.Time) error { armed = append(armed, t); return nil },
+		idle:            time.Minute,
+	}
+	if _, err := io.ReadAll(body); err != nil {
+		t.Fatal(err)
+	}
+	if len(armed) == 0 {
+		t.Fatal("no read deadline armed for the exempt route")
+	}
+	if wait := time.Until(armed[0]); wait <= 0 || wait > time.Minute+time.Second {
+		t.Fatalf("armed deadline %v is not the idle bound", wait)
+	}
+}
+
+// TestUploadTimeoutClassification pins the second half of O3: a delivery
+// deadline must answer its own status instead of the archive-cap 413.
+func TestUploadTimeoutClassification(t *testing.T) {
+	if !isUploadTimeout(&restoreUploadReadError{err: os.ErrDeadlineExceeded}) {
+		t.Error("a wrapped deadline error was not classified as a timeout")
+	}
+	if !isUploadTimeout(context.DeadlineExceeded) {
+		t.Error("a context deadline error was not classified as a timeout")
+	}
+	if !isUploadTimeout(&net.OpError{Op: "read", Err: timeoutOnly{}}) {
+		t.Error("a net timeout was not classified as a timeout")
+	}
+	if isUploadTimeout(&restoreUploadReadError{err: errors.New("connection reset")}) {
+		t.Error("a plain read error was classified as a timeout")
+	}
+	if isUploadTimeout(backup.ErrTooLarge) {
+		t.Error("the size refusal was classified as a timeout")
+	}
+}
+
+// timeoutOnly is a minimal net.Error that only reports Timeout.
+type timeoutOnly struct{}
+
+func (timeoutOnly) Error() string   { return "i/o timeout" }
+func (timeoutOnly) Timeout() bool   { return true }
+func (timeoutOnly) Temporary() bool { return true }

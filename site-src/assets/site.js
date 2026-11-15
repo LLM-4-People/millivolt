@@ -41,6 +41,38 @@
     mobile.addEventListener("change", syncDocsNav);
   }
 
+  // The landing page's console miniature is a real tablist, so a visitor can
+  // read every section without a screenshot. The real dashboard owns the same
+  // keys: arrows move selection and focus, Home and End jump.
+  const consolePlate = document.querySelector(".console-plate");
+  const plateTabs = consolePlate ? Array.from(consolePlate.querySelectorAll(".cp-rail [role=tab]")) : [];
+  if (plateTabs.length) {
+    const selectPlate = (tab, focus) => {
+      for (const other of plateTabs) {
+        const on = other === tab;
+        other.setAttribute("aria-selected", String(on));
+        other.tabIndex = on ? 0 : -1;
+        const panel = document.getElementById(other.getAttribute("aria-controls"));
+        if (panel) panel.hidden = !on;
+      }
+      if (focus) tab.focus();
+    };
+    plateTabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => selectPlate(tab, false));
+      tab.addEventListener("keydown", (event) => {
+        const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
+          : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 0;
+        const jump = event.key === "Home" || event.key === "End";
+        if (!step && !jump) return;
+        event.preventDefault();
+        const next = jump
+          ? plateTabs[event.key === "Home" ? 0 : plateTabs.length - 1]
+          : plateTabs[(index + step + plateTabs.length) % plateTabs.length];
+        selectPlate(next, true);
+      });
+    });
+  }
+
   const live = document.createElement("span");
   live.className = "sr-only";
   live.setAttribute("aria-live", "polite");

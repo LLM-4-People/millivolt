@@ -155,6 +155,12 @@ def main() -> int:
     print('dev traffic: %d bursts %gs apart against %s (upstream 127.0.0.1:%d)'
           % (count, gap, BASE, UPSTREAM_PORT), flush=True)
     plan = bursts(count, gap)
+    # The designed final 400 is a success case; anything else that fails means
+    # the driver did not deliver the traffic it claimed, and a zero exit would
+    # report that as a clean run. dev-traffic.sh only checks liveness right
+    # after start, so this status is the one signal a caller can act on.
+    failed = 0
+    delivered = 0
     for n, burst in enumerate(plan):
         for content in burst:
             if STOP.is_set():
@@ -163,13 +169,19 @@ def main() -> int:
             try:
                 post(content)
                 print('ok   ' + content, flush=True)
+                delivered += 1
             except Exception as exc:  # a 400 fixture raises on the client side
                 if 'bad' in content:
                     print('ok   %s (final 400 as designed)' % content, flush=True)
+                    delivered += 1
                 else:
                     print('FAIL %s %r' % (content, exc), flush=True)
+                    failed += 1
         if n < len(plan) - 1:
             STOP.wait(gap)
+    if failed:
+        print('dev traffic: %d of %d requests failed' % (failed, delivered + failed), flush=True)
+        return 1
     print('dev traffic: done', flush=True)
     return 0
 

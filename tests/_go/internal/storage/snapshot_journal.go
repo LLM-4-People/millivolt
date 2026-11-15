@@ -90,7 +90,7 @@ func TestPendingSnapshotRejectsStaleHotJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ValidatePendingSnapshot(dstPath); err != nil {
+	if err := ValidatePendingSnapshot(t.Context(), dstPath); err != nil {
 		t.Fatalf("later snapshot rejected because of stale hot journal: %v", err)
 	}
 	if _, err := os.Stat(PendingSnapshotPath(dstPath) + "-journal"); !os.IsNotExist(err) {

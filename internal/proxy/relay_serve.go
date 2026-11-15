@@ -127,10 +127,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					})
 				} else if rerr != nil {
 					// The provider's error document could not be read within
-					// the whole-document bound. Fail closed with a real
-					// gateway status instead of asserting the upstream status
-					// over a partial or missing envelope.
-					status = http.StatusBadGateway
+					// the whole-document bound. A 429 is flow control decided
+					// by the status alone, so it keeps the status and the
+					// rate-limit series even without an envelope; every other
+					// status fails closed with a real gateway status instead
+					// of asserting the upstream status over a partial or
+					// missing envelope.
+					status = resp.StatusCode
+					if status != http.StatusTooManyRequests {
+						status = http.StatusBadGateway
+					}
 					rec.StatusCode = status
 					if rec.ErrorType == "" {
 						rec.ErrorType = metrics.TypeUpstreamError
@@ -255,7 +261,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			if usageErr == nil && sourceHasUsage {
 				usageOverride = &sourceUsage
 			}
-			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full, usageOverride)
+			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full, usageOverride, providerformat.ResponseOptions{ToolNames: t.toolNames})
 			if terr != nil {
 				rec.StatusCode = http.StatusBadGateway
 				// Keep a provider error already parsed from the upstream document;
@@ -634,6 +640,12 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				}
 				return
 			}
+			// The status line is committed and the re-send never produced a
+			// response, so the client still holds the absorbed attempt's
+			// status: the transport default's 502 stamps describe the wire
+			// attempt, and the committed-status owner restores what the client
+			// actually sees.
+			stampCommittedErrorStatus(rec, resp.StatusCode)
 			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typeUpstreamUnreachable, "", rec.ErrorMsg); werr != nil {
 				markClientGone(rec)
 			}
@@ -651,8 +663,12 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		resp = next
 		defer nextCancel()
 		defer next.Body.Close()
-		rec.StatusCode = resp.StatusCode
+		// The re-send cannot change the status line the first attempt already
+		// committed: the client holds 200, so every arm below describes 200 on
+		// the record. The committed-status owner also keeps an upstream 429 as
+		// the distinct in-band rate-limit attempt.
 		captureUpstreamHeaders(resp, rec, t.authHeader)
+		stampCommittedErrorStatus(rec, resp.StatusCode)
 		if isNonCompletionStatus(resp.StatusCode) {
 			// The retry answered with an asynchronous acceptance or a
 			// status-only response, not a completion stream. The first
@@ -672,9 +688,16 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		if resp.StatusCode >= 400 {
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
-			// committed-SSE contract), never as raw JSON on the stream.
+			// committed-SSE contract), never as raw JSON on the stream. The
+			// committed-status stamp above already recorded the 200 the client
+			// holds (and the 429 rate-limit attempt).
 			s.captureErrorFromResponse(ctx, resp, rec)
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+			// The envelope's type and message are the record's failure class
+			// too (the non-streaming twin stamps the same owners): the client
+			// holds the 200, so without them the failed turn would read as
+			// healthy.
+			rec.ErrorType, rec.ErrorMsg = typ, msg
 			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 				markClientGone(rec)
 			}

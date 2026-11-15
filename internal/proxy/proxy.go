@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -124,10 +124,14 @@ type target struct {
 	authHeader string
 	authPrefix string
 	path       string
-	query      string
-	provider   string
-	timeout    time.Duration
-	format     string
+	// pathSet records that the client supplied X-Proxy-Path. The translator
+	// also fills path with the outbound inference endpoint, which is not a
+	// discovery endpoint, so discovery must honor path only when it is set.
+	pathSet  bool
+	query    string
+	provider string
+	timeout  time.Duration
+	format   string
 	// inbound is the client's wire protocol (path-derived or overridden);
 	// outbound is the protocol selected by X-Proxy-Format. translate is true
 	// only when both are known and differ.
@@ -146,6 +150,10 @@ type target struct {
 	// stream_options.include_usage. The Chat encoder emits its extra usage
 	// chunk only when requested and the source reported usage.
 	streamIncludeUsage bool
+	// toolNames maps a flat wire tool name back to the tool the translated
+	// request declared, so a Responses client sees its namespace groups again
+	// on the response. Nil when no translated request declared a namespace.
+	toolNames map[string]ir.Tool
 }
 
 // tlsPossible reports whether an upstream send to this target can ever run a
@@ -246,6 +254,10 @@ type Server struct {
 	// tokenRefresh coalesces concurrent expired-token exchanges for the same
 	// provider + refresh token, holding no credentials after completion.
 	tokenRefresh tokenRefreshCoalescer
+	// namePinHook is nil in production. It runs inside syncNamePins after the
+	// roster is derived and before the pins are applied, so a test can hold one
+	// derivation open while a newer roster is committed.
+	namePinHook func()
 }
 
 // cfg returns the current config snapshot. Cheap (atomic load); safe to call
@@ -460,17 +472,36 @@ func (c *clientRetryDirective) WriteHeader(status int) {
 // recorded one when a body-forbidden upstream status fails closed to 502) plus
 // the record's structured error members when the relay has them. A proxy-minted
 // type is marked Local so a provider spelling can never be attributed to the
-// provider; an empty type is "no provider claim", not a local failure.
+// provider; an empty type is "no provider claim", not a local failure. A
+// transport failure is the record's own unreachable/transport type, marked
+// Transport as well: its type is proxy-minted but the evidence is stronger
+// than "the proxy minted it", and the classifier lets Transport outrank Local.
+// The timeout text stays the narrower class a client can tell apart.
 func clientErrorFacts(rec *metrics.Record, status int) metrics.ErrorFacts {
 	if rec == nil {
 		return metrics.ErrorFacts{Status: status}
 	}
-	return metrics.ErrorFacts{
-		Status: status,
-		Type:   rec.ErrorType,
-		Code:   rec.ErrorCode,
-		Local:  rec.ErrorType != "" && metrics.IsLocalErrorType(rec.ErrorType),
+	transport := rec.ErrorType == metrics.TypeUpstreamUnreachable || rec.ErrorType == metrics.TypeTransport
+	code := rec.ErrorCode
+	if transport && code == "" && isTransportTimeout(rec.ErrorMsg) {
+		code = "timeout"
 	}
+	return metrics.ErrorFacts{
+		Status:    status,
+		Type:      rec.ErrorType,
+		Code:      code,
+		Transport: transport,
+		Local:     rec.ErrorType != "" && metrics.IsLocalErrorType(rec.ErrorType),
+	}
+}
+
+// isTransportTimeout recognizes the bounded transport texts the proxy stores
+// for a timeout-class failure (net/http's header/dial "timeout" and a fired
+// deadline). The message is the only carrier: every transport failure keeps the
+// one upstream_unreachable type, so this narrows the client class without
+// minting a second type or changing what is recorded.
+func isTransportTimeout(msg string) bool {
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }
 
 func (c *clientRetryDirective) Flush() {
@@ -483,6 +514,20 @@ func (c *clientRetryDirective) Flush() {
 func (c *clientRetryDirective) Unwrap() http.ResponseWriter { return c.ResponseWriter }
 
 // ServeHTTP implements http.Handler.
+// policyTargetOf is the one projection from a request record to the identity
+// the scheduler matches policies and holds against. Two surfaces ask whether a
+// request is parked (the record's Paused flag and the admission gate); building
+// the identity at each call site let them disagree about which fields count.
+func policyTargetOf(rec *metrics.Record) scheduler.PolicyTarget {
+	return scheduler.PolicyTarget{
+		Provider:     rec.Provider,
+		Model:        rec.Model,
+		Client:       rec.Client,
+		KeyHash:      rec.KeyHash,
+		Conversation: rec.ConversationID,
+	}
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The retry directive rides the outermost writer so every error sink on
 	// the relay surface (relayed upstream statuses, the retry ladder's
@@ -497,22 +542,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// inference client-wire override is present; every other early sink
 	// follows the client protocol.
 	envelope := envelopeProtocol(r)
-	// Reserve one request slot and charge the body budget as bytes actually
-	// arrive. Reserving the declared Content-Length up front let an idle
-	// connection hold budget it never used: eight clients declaring 32 MiB each
-	// exhausted the default 256 MiB budget and denied inference to every other
-	// client. Reserving even one read hint per socket kept a smaller version of
-	// the same lever, so the reservation starts at zero and only real bytes
-	// count.
-	reservation, ok := s.inflight.acquireBody()
+	// Reserve one request slot and charge the body hint the body owner is
+	// about to allocate. The declared Content-Length alone is not the charge:
+	// the allocation is bounded by the request cap and the read hint, and
+	// chargeRead refunds whatever the body does not need. Charging nothing let
+	// idle declarations hold uncharged heap; charging the full declaration let
+	// eight idle 32 MiB bodies exhaust the budget.
+	hint := requestBodyHint(r.ContentLength, int64(s.cfg().MaxRequestBytes))
+	reservation, ok := s.inflight.acquireBody(hint)
 	if !ok {
-		// Refuse before buffering a body: over the process-wide bound, heap is
-		// what a client would otherwise control. The directive writer above
-		// carries the no-retry header like every other error sink.
-		w.Header().Set("Retry-After", "1")
-		writeProtocolHTTPError(w, envelope, http.StatusServiceUnavailable, typeAPIError,
-			"proxy is at its in-flight request limit")
-		return
+		// The budget cannot cover the allocation. Hold the slot alone and let
+		// the body owner charge-and-refuse: it retains nothing and still
+		// settles the status by the cap/budget precedence, so a body past
+		// max_request_bytes keeps its permanent 413 instead of a 503 that
+		// invites a retry which can never fit.
+		reservation, ok = s.inflight.acquireBody(0)
+		if !ok {
+			// Refuse before buffering a body: over the process-wide bound,
+			// heap is what a client would otherwise control. The directive
+			// writer above carries the no-retry header like every other error
+			// sink.
+			w.Header().Set("Retry-After", "1")
+			writeProtocolHTTPError(w, envelope, http.StatusServiceUnavailable, typeAPIError,
+				"proxy is at its in-flight request limit")
+			return
+		}
 	}
 	defer reservation.release()
 	t, err := resolveTarget(r, s.cfg())
@@ -572,12 +626,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeProtocolHTTPError(w, t.inbound, status, errorType, err.Error())
 		return
 	}
+	// Mint the correlation id here, before the first request-scoped log line
+	// and before anything else can stamp the record: every later line carries
+	// it, so a log entry, a captured body and the stored row can be joined.
+	// The translate branch below replaces rec wholesale and restamps it.
+	rec.ID = requestID()
 	// Hold the inbound body size readRequest captured: the rewrite engine
 	// below can replace the body bytes and the translate branch replaces the
 	// whole record, but request_bytes must keep describing the client's
 	// upload (the stream/model pattern - re-stamped on the final record at
 	// the metadata wiring).
 	reqBytes := rec.RequestBytes
+	// The correlation id minted above is the one request-scoped identity; the
+	// translate branch below builds a fresh record, so carry it across.
+	reqID := rec.ID
 
 	// Cursor clients send FUSED display model ids (thinking level + tier
 	// baked into the name). Record the canonical base id instead so the
@@ -642,19 +704,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		overrideBody = nil
 	}
 	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
+	// One occurrence scan of the client body owns the token-ceiling trust
+	// boundary for both checks below. The rewrite path re-scans the bytes it
+	// produced, so the record restamp and both checks describe what is sent.
+	caps := scanTokenCaps(body)
 	if rewriteBody {
 		// The rewrite decodes into a map and re-marshals, which collapses
 		// duplicate cap members to one. Run the occurrence scan on the
 		// pre-rewrite bytes so the documented duplicate rejection cannot be
 		// lost before the cap check below sees the rewritten body.
-		if reason := tokenCapViolation(body, nil); reason != "" {
+		if reason := caps.violation(nil); reason != "" {
 			writeHostileTokenCap(w, t.inbound, reason)
 			return
 		}
 		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes), t.inbound); why == "" {
 			body = rewritten
 			if changed {
-				restampReqMaxTokens(body, rec)
+				caps = scanTokenCaps(body)
+				caps.apply(rec)
 			}
 		} else {
 			// Name the requesting feature(s) by what fired, so a
@@ -674,7 +741,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case len(ensureTools) > 0:
 				feature = "ensured tools"
 			}
-			log.Printf("%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
+			// The record id prefixes the line, so it joins the stored row,
+			// the captured body and every other line of the same request.
+			logging.Printf(rec.ID, "%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
 				feature, client, t.provider, recModel, why)
 		}
 	}
@@ -682,7 +751,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The Chat and Responses cap spellings are different wire families; a
 	// body carrying both is ambiguous and must not let decode precedence pick
 	// the recorded ceiling.
-	if conflictingTokenCapSpellings(body) {
+	if caps.mixesSpellings() {
 		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
 			"max_output_tokens cannot be combined with max_tokens or max_completion_tokens")
 		return
@@ -696,7 +765,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if reason := tokenCapViolation(body, rec); reason != "" {
+	if reason := caps.violation(rec); reason != "" {
 		writeHostileTokenCap(w, t.inbound, reason)
 		return
 	}
@@ -739,6 +808,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		body = translated
 		t.streamIncludeUsage = req.StreamIncludeUsage
+		t.toolNames = ir.ToolNamesByWireName(req.Tools)
 		setWarningsHeader(w.Header(), warnings)
 		// Parameter/composition metrics describe the translated upstream body
 		// for the two wire shapes the metadata decoder understands. A
@@ -746,7 +816,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// not model yet; keep the inbound record there and stamp only the
 		// fields the IR owns.
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
-			rec = &metrics.Record{Start: rec.Start}
+			rec = &metrics.Record{Start: rec.Start, ID: reqID}
 			// The retry/class directive writer was attached to the ORIGINAL
 			// record; re-point it at the translated one, or an error response on
 			// this path would carry the class of an abandoned record.
@@ -774,7 +844,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rec.ID = requestID()
+	// The id was minted at the read boundary; re-stamp the invariant so a
+	// branch that replaced the record without carrying it cannot ship an empty
+	// primary key.
+	if rec.ID == "" {
+		rec.ID = reqID
+	}
 	rec.Provider = t.provider
 	rec.Model = recModel
 	rec.KeyHash = hashKey(key)
@@ -802,7 +877,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// live "streaming" row immediately (not only after it completes). This goes
 	// ONLY to live SSE subscribers - the durable store sees just the finalized
 	// record below, so it still persists exactly one row per request.
-	if s.scheduler.HoldsTarget(rec.Client, rec.Provider) {
+	if s.scheduler.HoldsTarget(policyTargetOf(rec)) {
 		rec.Paused = true
 	}
 	debugTap := s.beginDebugTap(r, t, rec, body)
@@ -892,11 +967,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the scheduler, so the lock order holdCountMu -> hookMu -> buffer stays
 	// cycle-free.
 	var hookMu sync.Mutex
+	target := policyTargetOf(rec)
 	hooks := scheduler.WaiterHooks{
-		Client:    rec.Client,
-		Provider:  rec.Provider,
-		Model:     rec.Model,
-		EstTokens: estimateTokens(rec),
+		Client:       target.Client,
+		Provider:     target.Provider,
+		Model:        target.Model,
+		KeyHash:      target.KeyHash,
+		Conversation: target.Conversation,
+		EstTokens:    estimateTokens(rec),
 		OnWait: func() {
 			if stream {
 				pacer.Start()

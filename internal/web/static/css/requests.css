@@ -9,6 +9,10 @@
      below a 14px image (`|-` not `| /name`). */
   .ent { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 11px; line-height: 1; min-width: 0; vertical-align: middle; }
   .ent-ic { color: var(--ent); font-size: 11px; line-height: 1; flex-shrink: 0; width: 14px; height: 14px; display: inline-flex; align-items: center; justify-content: center; text-align: center; }
+  /* The type glyphs are authored 14px paths (entities.js), drawn in one stroke
+     language so a type is recognizable at a glance instead of whatever the
+     OS font substitutes for a symbol. */
+  .ent-ic svg { width: 12px; height: 12px; display: block; stroke: currentColor; fill: none; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
   /* A provider favicon can be a dark plate (OpenDesign's is near-black), which
      all but disappears against a dark surface on its own. The 1px padding and
      its text-derived hairline ring give every icon a visible tile edge without
@@ -19,6 +23,16 @@
   .ent-fav { width: 14px; height: 14px; padding: 1px; border-radius: 3px; flex-shrink: 0; object-fit: contain; display: block; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 30%, transparent); }
   .ent-lb { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 14px; height: 14px; display: inline-flex; align-items: center; }
   a.ent:hover .ent-lb { color: var(--ent); }
+  /* Clear mode: these hues are picked against a dark ground and fall to
+     1.3-2.4:1 on the light panels. The hue stays the identity as a hairline
+     ring around the glyph, while the glyph and the hovered label take the
+     type's own light-mode ink (5:1 or better). */
+  [data-mode="clear"] .ent-ic {
+    color: var(--ent-ink, var(--ent));
+    border-radius: 3px;
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ent) 65%, transparent);
+  }
+  [data-mode="clear"] a.ent:hover .ent-lb { color: var(--ent-ink, var(--ent)); }
   /* entityPivot: an entityBadge wrapped in a navigable link. */
   a.ent-link { text-decoration: none; border-radius: 5px; padding: 1px 2px; }
   a.ent-link:hover { background: var(--panel2); }
@@ -50,13 +64,15 @@
   .legend .leg-item {
     display: flex; align-items: center; gap: 5px; background: none; border: none;
     color: var(--muted); font-size: 10px; font-family: var(--mono); cursor: pointer;
-    padding: 2px 4px; border-radius: 4px; transition: all .15s;
+    /* The row height lives here, not on #traffic-legend, so the coarse
+       raiser below wins on equal specificity instead of losing to an id. */
+    min-height: 26px; padding: 2px 4px; border-radius: 4px; transition: all .15s;
   }
   .legend .leg-item:hover { color: var(--text); }
   .legend .leg-item .swatch { width: 10px; height: 3px; border-radius: 2px; background: var(--sw, var(--muted)); display: inline-block; }
   .legend .leg-item.off { color: var(--border2); text-decoration: line-through; }
   #traffic-legend { column-gap: 12px; row-gap: 5px; flex-shrink: 0; margin-top: 2px; }
-  #traffic-legend .leg-item { min-height: 26px; color: var(--text); }
+  #traffic-legend .leg-item { color: var(--text); }
   #traffic-legend .leg-item:hover { background: var(--panel2); }
   #traffic-legend .leg-item.off { color: var(--muted); text-decoration: none; }
   #traffic-legend .leg-item.off .swatch { opacity: .25; }
@@ -72,13 +88,22 @@
   }
   .req-status { margin-left: 8px; padding: 3px 8px; font-size: 10px; }
   select:hover, select:focus { border-color: var(--accent); outline: none; }
+  /* The border move alone is a color cue; a keyboard focus also gets the
+     shared edge so the control is locatable without reading its hue. */
+  select:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   /* The status filter is a primary request-log control; on touch it takes the
      full target instead of the dense desktop box. */
   @media (max-width: 800px), (hover: none), (pointer: coarse) {
     .req-status { min-height: var(--tap); padding: 0 10px; }
+    /* Each legend row toggles one series on or off. It is a button, not a
+       label, and a mis-tap on a phone hides the line the operator is reading. */
+    .legend .leg-item { min-height: var(--tap); }
   }
 
-  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
+  /* Every cell is a number, a stamp or a status word in the mono voice; the
+     tabular figures keep a live value from shifting its neighbours as digits
+     land (the Readout Is Mono rule). */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   /* Request log: content-sized columns. Automatic layout fits each column to
      its widest cell; log.js ratchets the natural width into a min-width on the
@@ -87,6 +112,43 @@
      live row finalizes or a shorter value replaces the widest one. */
   #tbl-requests table { table-layout: auto; }
   #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
+  /* The log is the densest table in the app: 14 columns at 10px inline padding
+     spend 280px on air alone. 8px keeps the columns legible and returns enough
+     for the widest fixture identity to fit a desktop card without a sideways
+     scroll. #req-measure is the natural-width probe outside the card, so it
+     must carry the same padding or every floor is measured 4px too wide. */
+  #tbl-requests th, #tbl-requests td,
+  #req-measure th, #req-measure td { padding-inline: 8px; }
+  /* The row opener is the one control in the log and the table is wider than a
+     phone: the actions column pins to the right edge, over the scrolled cells,
+     so the way into a request survives every horizontal scroll. */
+  #tbl-requests th:last-child,
+  #tbl-requests tr.exp-row:not(.retry-sub) td:last-child {
+    position: sticky; right: 0; z-index: 1;
+    background: var(--panel);
+    box-shadow: inset 1px 0 0 var(--border);
+  }
+  /* The pinned cell must repaint with its row in every state it can be in -
+     hover, keyboard focus on the opener, and the row whose drawer is open -
+     or the column reads as a strip cut out of the row. The tokens follow the
+     palette in both modes. */
+  #tbl-requests tr:hover td:last-child,
+  #tbl-requests tr:focus-within td:last-child,
+  #tbl-requests tr.exp-row.expanding td:last-child { background: var(--panel2); }
+  /* A 26px square holds the chevron: the opener was a 6x17 glyph and a phone
+     could not hit it. The whole row stays clickable behind it. */
+  .log-open {
+    width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid transparent; border-radius: 5px; color: var(--muted);
+    font-size: 15px; line-height: 1;
+  }
+  .log-open:hover { color: var(--text); border-color: var(--border2); background: var(--panel2); }
+  .log-open:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
+  /* The row opener is the log's primary control: a phone gets the full target,
+     not the 26px dense box (declared after the base rule so it wins). */
+  @media (max-width: 800px), (hover: none), (pointer: coarse) {
+    .log-open { width: var(--tap); height: var(--tap); font-size: 17px; }
+  }
   /* The identity cell keeps every badge at its natural width: the column floor
      was measured from the full one-line client · provider · model, so no badge
      is capped or wrapped. A card narrower than the learned columns scrolls
@@ -111,6 +173,14 @@
   tr:hover td { background: var(--panel2); }
   td { color: var(--text); }
   .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; font-family: var(--mono); font-weight: 600; }
+  /* A pill that acts is a button, so it can be reached and pressed from the
+     keyboard: the UA button skin (border, fill, type ramp) is reset so the
+     token paints the same as a painted pill. */
+  button.pill {
+    border: 0; font-family: var(--mono); font-size: 10px; font-weight: 600;
+    line-height: normal; color: inherit;
+  }
+  .pill:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .pill.ok { background: color-mix(in srgb, var(--ok) var(--pill-tint), transparent); color: var(--ok); }
   .pill.err { background: color-mix(in srgb, var(--err) var(--pill-tint), transparent); color: var(--err); }
   .pill.warn { background: color-mix(in srgb, var(--warn) var(--pill-tint), transparent); color: var(--warn); }
@@ -132,6 +202,11 @@
   tr.retry-sub td { background: color-mix(in srgb, var(--warn) 4%, transparent); color: var(--muted); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
   tr.retry-sub { cursor: pointer; }
   tr.retry-sub:hover td { background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--text); }
+  /* The sub-row is a tab stop: it shows the same repaint and the shared edge
+     while it holds the keyboard, because the row is not a control that would
+     paint its own. */
+  tr.retry-sub:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+  tr.retry-sub:focus-visible td { background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--text); }
   /* The nested err pill keeps its 13% err tint over the hovered warn row;
      --err is too dim there, so the proven error-text ink carries the label. */
   tr.retry-sub:hover td .pill.err { color: var(--err-text); }
@@ -145,6 +220,12 @@
      the sub-row ellipsizes inside the current width; the full message stays
      in the cell title and the request drawer. */
   .retry-sub-text { display: inline-block; max-width: 72ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+
+  /* The terminal row closes the list: the log states its own end, or that the
+     older page failed, instead of simply stopping. */
+  tr.log-end td { border-bottom: 0; padding: 10px 10px 12px; text-align: center; white-space: normal; }
+  .log-end-note .oc-empty { padding: 0; text-align: center; font-size: 10.5px; }
+  .log-end-note .oc-empty strong { color: var(--text); }
 
   /* Day dividers - the request log nests by local calendar day. Each divider
      is a major graduation on the instrument scale: a dated chip riding the

@@ -4,6 +4,13 @@ module.exports = async function selectionDrawer(H) {
   const {check, d, fire, mkRec, rows, settleUntil, w} = H;
   const state = H.state;
 
+  // A repaint can replace a control between the query and the press, so a press
+  // waits for its node first.
+  const clickWait = async sel => {
+    await settleUntil(() => !!d.querySelector(sel));
+    d.querySelector(sel).click();
+  };
+
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
   // folds missed records exactly like the stream does, and replay-tolerant
   // delivery (the same record twice) must not duplicate the row.
@@ -204,13 +211,45 @@ module.exports = async function selectionDrawer(H) {
     if (backBtn) backBtn.click();
     check('the back affordance returns to the request view with focus on the drawer\'s first control',
       !!backBtn && !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F') &&
-        d.activeElement === d.querySelector('#drawer .nav-btns button'));
+        // Focus lands on the first ENABLED control: the newer arrow disables on
+        // the newest row, so the older one is the first stop there.
+        d.activeElement === d.querySelector('#drawer .nav-btns button:not(:disabled)') &&
+        d.activeElement === d.getElementById('drawer-next'));
+    // The arrows disable at the ends of the visible window instead of dying
+    // silently, and a scope change that hides the open record says so and
+    // offers the way back.
+    {
+      const firstId = rows()[0].dataset.id;
+      const lastId = rows()[rows().length - 1].dataset.id;
+      w.openDrawer(firstId);
+      check('the newer arrow disables on the newest record',
+        d.getElementById('drawer-prev').disabled && !d.getElementById('drawer-next').disabled);
+      w.openDrawer(lastId);
+      check('the older arrow disables on the oldest record',
+        d.getElementById('drawer-next').disabled && !d.getElementById('drawer-prev').disabled);
+      w.openDrawer(firstId);
+      w.navigateTo([{ dim: 'provider', id: 'no-such-provider.example' }]);
+      await settleUntil(() => /Not in the current scope/.test(d.getElementById('drawer-body').textContent));
+      check('an out-of-scope record says so and disables both arrows',
+        !!d.querySelector('#drawer-body [data-drawer-scope]') &&
+        d.getElementById('drawer-prev').disabled && d.getElementById('drawer-next').disabled);
+      await clickWait('#drawer-body [data-drawer-scope]');
+      await settleUntil(() => !!d.querySelector(`#tbl-requests tr.exp-row[data-id="${firstId}"]`));
+      check('the way back restores the record to the window and the arrows with it',
+        !/Not in the current scope/.test(d.getElementById('drawer-body').textContent) &&
+        !w.eval('explorerState().filters.length'));
+      w.closeDrawer();
+    }
+
     // The log retry-sub rows open the same attempt mode (their index rides
     // data-attempt).
-    d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();
+    await clickWait('.retry-toggle[data-retry-for="att-open"]');
     const sub = () => d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="1"]');
     check('the retry-sub rows carry their attempt index', !!sub() && !sub().hidden);
     const subRow = sub();
+    check('a retry-sub row is announced as a pressable control naming its attempt, time, status and message',
+      !!subRow && subRow.getAttribute('role') === 'button' && subRow.tabIndex === 0 &&
+      /^open attempt 2 of rate_limit at \d[^ ]* [AP]M - /.test(subRow.getAttribute('aria-label') || ''));
     check('a retry sub-row spans the full request column count',
       !!subRow && [...subRow.cells].reduce((sum, cell) => sum + cell.colSpan, 0) === w.eval('REQ_COLS'));
     if (subRow) subRow.click();
@@ -268,12 +307,12 @@ module.exports = async function selectionDrawer(H) {
     d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
     check('Escape closes the drawer and clears the attempt mode',
       d.getElementById('drawer').hidden && w.eval('drawerId') === null && attemptSel() === null);
-    d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();
+    await clickWait('.retry-toggle[data-retry-for="att-open"]');
     const sub0 = d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="0"]');
     if (sub0) sub0.click();
     check('a fresh open from a sub-row click lands in attempt mode',
       d.getElementById('drawer').classList.contains('open') && title().includes('attempt 1 of 3'));
-    d.querySelector('#drawer .nav-btns button[onclick="drawerNav(1)"]').click();
+    d.getElementById('drawer-next').click();
     check('drawerNav clears the attempt mode',
       !title().includes('attempt') && attemptSel() === null &&
         bodyText().includes('sel-live') && bodyText().includes('999ms'));
@@ -299,13 +338,13 @@ module.exports = async function selectionDrawer(H) {
     const listPill = d.querySelector('.attempt-link .pill');
     check('the drawer retry list classes the degenerate 200 attempt warn',
       listPill.classList.contains('warn') && !listPill.classList.contains('err'));
-    d.querySelector('.attempt-link').click();
+    await clickWait('.attempt-link');
     const viewPill = [...d.querySelectorAll('#drawer-body .detail-kv')]
       .find(el => el.querySelector('.k')?.textContent === 'status')?.querySelector('.v .pill');
     check('the attempt view status pill wears the same class',
       viewPill && viewPill.classList.contains('warn') && !viewPill.classList.contains('err'));
     w.closeDrawer();
-    d.querySelector('.retry-toggle[data-retry-for="att-200"]').click();
+    await clickWait('.retry-toggle[data-retry-for="att-200"]');
     const subPill = d.querySelector('tr.retry-sub[data-retry-of="att-200"] .pill');
     check('the log sub-row pill wears the same shared class',
       subPill && subPill.classList.contains('warn') && !subPill.classList.contains('err'));

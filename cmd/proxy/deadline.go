@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // Delivery deadlines are operator settings owned by config. The server
@@ -32,6 +34,16 @@ type deadlineHandler struct {
 	policy func() deadlinePolicy
 }
 
+// bodyAbsoluteExemptPath reports the routes whose upload may legitimately
+// outlast the absolute body bound. A full database restore streams a
+// backup_max_bytes archive, and ten minutes is easily consumed by an upload on
+// a slow link; cutting it there reported a perfectly good restore as over-cap
+// (both arrive at the handler as a read error). The idle bound still applies on
+// these routes, so a client that stops sending is still cut promptly.
+func bodyAbsoluteExemptPath(path string) bool {
+	return path == string(mcp.RouteRestore)
+}
+
 func (h deadlineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.policy == nil {
 		http.Error(w, "delivery policy unavailable", http.StatusInternalServerError)
@@ -41,6 +53,9 @@ func (h deadlineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil && r.Body != http.NoBody {
 		rc := http.NewResponseController(w)
 		absolute := time.Now().Add(policy.bodyRead)
+		if bodyAbsoluteExemptPath(r.URL.Path) {
+			absolute = time.Time{}
+		}
 		// Arm the absolute bound before the handler runs (the pre-progress
 		// contract), then let the wrapper replace it with the shorter idle
 		// bound before every read.
@@ -73,7 +88,8 @@ type progressReadCloser struct {
 
 func (b *progressReadCloser) Read(p []byte) (int, error) {
 	deadline := time.Now().Add(b.idle)
-	if b.absolute.Before(deadline) {
+	// A zero absolute means the route is exempt from the absolute bound.
+	if !b.absolute.IsZero() && b.absolute.Before(deadline) {
 		deadline = b.absolute
 	}
 	// A writer without deadline support (httptest.ResponseRecorder) leaves the

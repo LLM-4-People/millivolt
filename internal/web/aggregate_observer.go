@@ -17,6 +17,12 @@ import (
 type modelRuleCache struct {
 	mu      sync.Mutex
 	current *compiledModelRules
+	// lastRules and lastCompiled are the slice and result of the last get. A
+	// caller that hands back the same backing array (a cached snapshot, which
+	// every observer path does within one config) skips the element compare the
+	// 64-rule maximum would otherwise pay per event.
+	lastRules    []config.ModelRule
+	lastCompiled *compiledModelRules
 }
 
 type compiledModelRules struct {
@@ -25,13 +31,18 @@ type compiledModelRules struct {
 	exec               []config.ModelRuleExec
 }
 
-// get returns the compiled rules for the current snapshot. The rules content
-// is compared directly, so the identity marshal and hash run only when the
-// operator actually changes them; the former per-event path serialized the
-// whole rule set and hashed it again for every SSE event.
+// get returns the compiled rules for the current snapshot. The rules content is
+// compared directly only when the caller's slice is not the one the last get
+// saw, so the identity marshal and hash run only when the operator actually
+// changes them; the former per-event path serialized the whole rule set and
+// hashed it again for every SSE event.
 func (c *modelRuleCache) get(rules config.ModelCanon) *compiledModelRules {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.lastCompiled != nil && len(c.lastRules) == len(rules.Rules) &&
+		(len(rules.Rules) == 0 || &rules.Rules[0] == &c.lastRules[0]) {
+		return c.lastCompiled
+	}
 	if c.current == nil || !slices.Equal(c.current.rules, rules.Rules) {
 		identity := modelCanonIdentity(rules)
 		hash := sha256.Sum256([]byte(identity))
@@ -42,6 +53,7 @@ func (c *modelRuleCache) get(rules config.ModelCanon) *compiledModelRules {
 			exec:     config.CompileModelRules(rules.Rules),
 		}
 	}
+	c.lastRules, c.lastCompiled = rules.Rules, c.current
 	return c.current
 }
 
@@ -50,57 +62,61 @@ func (c *modelRuleCache) get(rules config.ModelCanon) *compiledModelRules {
 // Overflow names are still canonicalized per call; only retention stops.
 const modelNameMemoMax = 8192
 
-// modelNameMemo memoizes canonical spellings across observer calls. Entries
-// are keyed by the compiled rule revision: a revision change discards the old
-// map, so values produced by superseded rules are unreachable. The map is
-// bounded by modelNameMemoMax.
+// modelNameMemo memoizes the whole single-name observer payload, not only the
+// canonical spelling, so an SSE event that repeats a model name answers with one
+// mutex and one map lookup: no rule application, no payload map and no boxing
+// allocation. Entries are keyed by the compiled rule revision (a revision change
+// discards the old map, so values produced by superseded rules are unreachable)
+// and bounded by modelNameMemoMax. The cached payload's map is read-only, so the
+// same pointer may be marshaled by concurrent observers.
 type modelNameMemo struct {
 	mu       sync.Mutex
 	revision string
-	names    map[string]string
+	entries  map[string]*modelObserverState
 }
 
-// begin selects revision for one observation, discarding every entry from a
-// superseded rule revision. The per-entry get/put revision checks keep
-// interleaved observations correct if another goroutine switches revision
-// concurrently.
+// state returns the cached single-name payload under revision, computing and
+// recording it on a miss. A different current revision discards every entry
+// first, so a stale payload is never returned.
+func (m *modelNameMemo) state(compiled *compiledModelRules, name string) *modelObserverState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reset(compiled.revision)
+	if state, ok := m.entries[name]; ok {
+		return state
+	}
+	state := &modelObserverState{
+		Revision: compiled.revision,
+		Names:    map[string]string{name: config.ApplyModelRules(compiled.exec, name)},
+	}
+	// Once the map is full, a new name is returned but not retained; the caller
+	// still gets the computed payload.
+	if len(m.entries) < modelNameMemoMax {
+		m.entries[name] = state
+	}
+	return state
+}
+
+// begin selects revision for one bulk observation, discarding every entry from a
+// superseded rule revision so a name list that later turns out empty still
+// retires the old payloads. The per-entry revision check in state keeps
+// interleaved observations correct if another goroutine switches revision.
 func (m *modelNameMemo) begin(revision string) {
 	m.mu.Lock()
-	if m.revision != revision || m.names == nil {
-		m.revision = revision
-		m.names = make(map[string]string)
-	}
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	m.reset(revision)
 }
 
-// get returns the memoized canonical spelling for name under revision. A
-// different current revision is a miss, never a stale hit.
-func (m *modelNameMemo) get(revision, name string) (string, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.revision != revision {
-		return "", false
+func (m *modelNameMemo) reset(revision string) {
+	if m.revision != revision || m.entries == nil {
+		m.revision = revision
+		m.entries = make(map[string]*modelObserverState)
 	}
-	canon, ok := m.names[name]
-	return canon, ok
 }
 
-// put records one canonical spelling under revision. A changed revision
-// replaces the whole map first; once the map is full, a new name is not
-// retained (the caller still returns the computed value).
-func (m *modelNameMemo) put(revision, name, canon string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.revision != revision || m.names == nil {
-		m.revision = revision
-		m.names = make(map[string]string)
-	}
-	if len(m.names) >= modelNameMemoMax {
-		if _, exists := m.names[name]; !exists {
-			return
-		}
-	}
-	m.names[name] = canon
+// canonical returns one cached canonical spelling for the bulk observer paths.
+func (m *modelNameMemo) canonical(compiled *compiledModelRules, name string) string {
+	return m.state(compiled, name).Names[name]
 }
 
 type modelObserverState struct {
@@ -119,8 +135,13 @@ func (a *AggAPI) ObserveModelNames(names []string) any {
 func (a *AggAPI) observeModelNames(full bool, names []string) any {
 	rules := a.modelCanon()
 	compiled := a.modelRules.get(rules)
+	// The SSE event path carries one name and no static rules: answer it from
+	// the payload memo so the common event costs one lock and one lookup.
+	if !full && len(names) == 1 {
+		return a.modelNames.state(compiled, names[0])
+	}
 	a.modelNames.begin(compiled.revision)
-	out := modelObserverState{Revision: compiled.revision, Names: make(map[string]string)}
+	out := modelObserverState{Revision: compiled.revision, Names: make(map[string]string, len(names))}
 	if full {
 		if rules.Rules == nil {
 			rules.Rules = []config.ModelRule{}
@@ -129,12 +150,7 @@ func (a *AggAPI) observeModelNames(full bool, names []string) any {
 	}
 	for _, name := range names {
 		if _, exists := out.Names[name]; !exists {
-			canon, ok := a.modelNames.get(compiled.revision, name)
-			if !ok {
-				canon = config.ApplyModelRules(compiled.exec, name)
-				a.modelNames.put(compiled.revision, name, canon)
-			}
-			out.Names[name] = canon
+			out.Names[name] = a.modelNames.canonical(compiled, name)
 		}
 	}
 	return out

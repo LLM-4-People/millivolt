@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -29,4 +30,25 @@ func waitFor(t *testing.T, cond func() bool) bool {
 		time.Sleep(time.Millisecond)
 	}
 	return cond()
+}
+
+// snapshotWithoutClock decodes one operator-document body and removes the
+// server clock field, so two independently-taken snapshots can be compared for
+// everything the document means. `server_ms` is a wall-clock read at render
+// time (operator_state.go serverClockMs), so comparing it byte-for-byte makes
+// the equality of two calls a race: measured at 42 failures in 400 runs, which
+// reddened the default gate whenever the two reads straddled a millisecond.
+// The clock is not part of the contract under test; every other field is.
+func snapshotWithoutClock(t *testing.T, body []byte) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("decode operator document: %v (%q)", err, body)
+	}
+	delete(doc, "server_ms")
+	canonical, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("re-encode operator document: %v", err)
+	}
+	return string(canonical)
 }

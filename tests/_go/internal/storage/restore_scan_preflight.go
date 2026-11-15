@@ -219,7 +219,7 @@ func TestOpenQuarantinesNullScanRequiredColumnSnapshot(t *testing.T) {
 			if err := StageSnapshot(dstPath, data); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), "NULL "+tc.column) {
+			if err := ValidatePendingSnapshot(t.Context(), dstPath); err == nil || !strings.Contains(err.Error(), "NULL "+tc.column) {
 				t.Fatalf("ValidatePendingSnapshot = %v, want a NULL %s rejection", err, tc.column)
 			}
 			if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -238,9 +238,7 @@ func TestOpenQuarantinesNullScanRequiredColumnSnapshot(t *testing.T) {
 			if len(rows) != 1 || rows[0].ID != "keep-old" {
 				t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 			}
-			if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-				t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-			}
+			requireQuarantined(t, PendingSnapshotPath(dstPath))
 		})
 	}
 }
@@ -493,7 +491,7 @@ func TestOpenQuarantinesNullRequestIDSnapshot(t *testing.T) {
 	if err := StageSnapshot(dstPath, data); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), "NULL id") {
+	if err := ValidatePendingSnapshot(t.Context(), dstPath); err == nil || !strings.Contains(err.Error(), "NULL id") {
 		t.Fatalf("ValidatePendingSnapshot = %v, want a NULL id rejection", err)
 	}
 	if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -512,9 +510,7 @@ func TestOpenQuarantinesNullRequestIDSnapshot(t *testing.T) {
 	if len(rows) != 1 || rows[0].ID != "keep-old" {
 		t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 	}
-	if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-		t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
-	}
+	requireQuarantined(t, PendingSnapshotPath(dstPath))
 }
 
 // TestFreshRequestSchemaRequiresID pins the fresh DDL. Existing tables keep
@@ -630,7 +626,7 @@ func TestOpenQuarantinesUnscannableScanColumnSnapshot(t *testing.T) {
 			if err := StageSnapshot(dstPath, scanColumnValueSnapshot(t, tc.column, tc.value)); err != nil {
 				t.Fatal(err)
 			}
-			if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), tc.column) {
+			if err := ValidatePendingSnapshot(t.Context(), dstPath); err == nil || !strings.Contains(err.Error(), tc.column) {
 				t.Fatalf("ValidatePendingSnapshot = %v, want a %s rejection", err, tc.column)
 			}
 			if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
@@ -649,8 +645,54 @@ func TestOpenQuarantinesUnscannableScanColumnSnapshot(t *testing.T) {
 			if len(rows) != 1 || rows[0].ID != "keep-old" {
 				t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
 			}
-			if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
-				t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
+			requireQuarantined(t, PendingSnapshotPath(dstPath))
+		})
+	}
+}
+
+// TestOpenCanonicalizesEmptyJSONNoValueColumns pins the replace-side half of
+// the shared JSON column list: admission rewrites the legacy empty spelling in
+// the staged file before it becomes live, so a raw json_each/json_extract
+// consumer works after the restart.
+func TestOpenCanonicalizesEmptyJSONNoValueColumns(t *testing.T) {
+	for _, column := range jsonNoValueColumns {
+		t.Run(column, func(t *testing.T) {
+			dstPath := filepath.Join(t.TempDir(), "dst.db")
+			live, err := Open(dstPath, testOpts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+			if err := live.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if err := live.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot := legacySnapshot(t, schema, func(db *sql.DB) error {
+				_, err := db.Exec(`UPDATE requests SET "` + column + `" = ''`)
+				return err
+			})
+			if err := StageSnapshot(dstPath, snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidatePendingSnapshot(t.Context(), dstPath); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dstPath, testOpts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+
+			var stored string
+			var valid int
+			if err := reopened.rdb.QueryRow(`SELECT "`+column+`", json_valid("`+column+`") FROM requests WHERE id = 'legacy-row'`).Scan(&stored, &valid); err != nil {
+				t.Fatal(err)
+			}
+			if stored != "null" || valid != 1 {
+				t.Fatalf("admitted %s = %q (valid=%d), want canonical null", column, stored, valid)
 			}
 		})
 	}

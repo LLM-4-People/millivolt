@@ -30,7 +30,25 @@ func observerMemoSnapshot(t *testing.T, a *AggAPI) (string, map[string]string) {
 	t.Helper()
 	a.modelNames.mu.Lock()
 	defer a.modelNames.mu.Unlock()
-	return a.modelNames.revision, maps.Clone(a.modelNames.names)
+	stored := make(map[string]string, len(a.modelNames.entries))
+	for name, state := range a.modelNames.entries {
+		stored[name] = state.Names[name]
+	}
+	return a.modelNames.revision, stored
+}
+
+// observerStateOf accepts either returned payload shape: the bulk paths carry a
+// value and the cached single-name event path a pointer to its entry.
+func observerStateOf(t *testing.T, value any) modelObserverState {
+	t.Helper()
+	switch state := value.(type) {
+	case modelObserverState:
+		return state
+	case *modelObserverState:
+		return *state
+	}
+	t.Fatalf("unexpected observer payload %T", value)
+	return modelObserverState{}
 }
 
 func TestObserveModelNamesMemoMatchesApplyModelRules(t *testing.T) {
@@ -63,7 +81,7 @@ func TestObserveModelNamesMemoMatchesApplyModelRules(t *testing.T) {
 			a := NewAggAPI(metrics.NewBuffer(1), nil, time.Second)
 			a.ModelCanon = func() config.ModelCanon { return rules }
 			revision, want := observerExpected(t, rules, names)
-			got := a.ObserveModelNames(names).(modelObserverState)
+			got := observerStateOf(t, a.ObserveModelNames(names))
 			if got.Revision != revision {
 				t.Fatalf("revision = %q, want %q", got.Revision, revision)
 			}
@@ -75,7 +93,7 @@ func TestObserveModelNamesMemoMatchesApplyModelRules(t *testing.T) {
 				records = append(records, &metrics.Record{Model: name})
 			}
 			records = append(records, nil)
-			viaModels := a.ObserveModels(false, records).(modelObserverState)
+			viaModels := observerStateOf(t, a.ObserveModels(false, records))
 			if !maps.Equal(viaModels.Names, want) {
 				t.Fatalf("ObserveModels names = %v, want %v", viaModels.Names, want)
 			}
@@ -89,7 +107,7 @@ func TestObserveModelNamesMemoReusesAndStaysBounded(t *testing.T) {
 	a.ModelCanon = func() config.ModelCanon { return rules }
 	_, want := observerExpected(t, rules, []string{"A", "B", "C"})
 
-	first := a.ObserveModelNames([]string{"A", "B", "C"}).(modelObserverState)
+	first := observerStateOf(t, a.ObserveModelNames([]string{"A", "B", "C"}))
 	if !maps.Equal(first.Names, want) {
 		t.Fatalf("first names = %v, want %v", first.Names, want)
 	}
@@ -101,7 +119,7 @@ func TestObserveModelNamesMemoReusesAndStaysBounded(t *testing.T) {
 		t.Fatalf("memo = %v, want %v", stored, want)
 	}
 
-	second := a.ObserveModelNames([]string{"A", "B", "C"}).(modelObserverState)
+	second := observerStateOf(t, a.ObserveModelNames([]string{"A", "B", "C"}))
 	revisionAfter, storedAfter := observerMemoSnapshot(t, a)
 	if revisionAfter != revision || !maps.Equal(storedAfter, stored) {
 		t.Fatalf("repeated call rebuilt memo: revision %q -> %q, names %v -> %v",
@@ -115,7 +133,7 @@ func TestObserveModelNamesMemoReusesAndStaysBounded(t *testing.T) {
 	for i := range flood {
 		flood[i] = fmt.Sprintf("flood.example/Model-%d.5:tag", i)
 	}
-	flooded := a.ObserveModelNames(flood).(modelObserverState)
+	flooded := observerStateOf(t, a.ObserveModelNames(flood))
 	_, stored = observerMemoSnapshot(t, a)
 	if len(stored) != modelNameMemoMax {
 		t.Fatalf("flooded memo size = %d, want bound %d", len(stored), modelNameMemoMax)
@@ -134,7 +152,7 @@ func TestObserveModelNamesMemoReusesAndStaysBounded(t *testing.T) {
 			t.Fatalf("overflow name %q retained past bound", name)
 		}
 	}
-	replayed := a.ObserveModelNames(flood[modelNameMemoMax-len(first.Names):]).(modelObserverState)
+	replayed := observerStateOf(t, a.ObserveModelNames(flood[modelNameMemoMax-len(first.Names):]))
 	if _, stored = observerMemoSnapshot(t, a); len(stored) != modelNameMemoMax {
 		t.Fatalf("replayed memo size = %d, want bound %d", len(stored), modelNameMemoMax)
 	}
@@ -150,7 +168,7 @@ func TestObserveModelNamesMemoResetsOnRevisionChange(t *testing.T) {
 	lower := config.ModelCanon{Rules: []config.ModelRule{{Mode: config.ModelRuleLower}}}
 	a.ModelCanon = func() config.ModelCanon { return lower }
 	oldRevision, oldWant := observerExpected(t, lower, []string{"MiXeD", "only-old"})
-	first := a.ObserveModelNames([]string{"MiXeD", "only-old"}).(modelObserverState)
+	first := observerStateOf(t, a.ObserveModelNames([]string{"MiXeD", "only-old"}))
 	if first.Revision != oldRevision || !maps.Equal(first.Names, oldWant) {
 		t.Fatalf("lower observer = %+v, want %v", first, oldWant)
 	}
@@ -158,14 +176,14 @@ func TestObserveModelNamesMemoResetsOnRevisionChange(t *testing.T) {
 	exact := config.ModelCanon{Rules: []config.ModelRule{{Mode: config.ModelRuleExact, From: "MiXeD", To: "replacement"}}}
 	newRevision, newWant := observerExpected(t, exact, []string{"MiXeD"})
 	a.ModelCanon = func() config.ModelCanon { return exact }
-	empty := a.ObserveModelNames(nil).(modelObserverState)
+	empty := observerStateOf(t, a.ObserveModelNames(nil))
 	if empty.Revision != newRevision {
 		t.Fatalf("empty observer revision = %q, want %q", empty.Revision, newRevision)
 	}
 	if revision, stored := observerMemoSnapshot(t, a); revision != newRevision || len(stored) != 0 {
 		t.Fatalf("revision change retained old memo: revision=%q names=%v", revision, stored)
 	}
-	second := a.ObserveModelNames([]string{"MiXeD"}).(modelObserverState)
+	second := observerStateOf(t, a.ObserveModelNames([]string{"MiXeD"}))
 	if second.Revision != newRevision || second.Revision == oldRevision {
 		t.Fatalf("new revision = %q, want %q distinct from %q", second.Revision, newRevision, oldRevision)
 	}
@@ -181,7 +199,7 @@ func TestObserveModelNamesMemoResetsOnRevisionChange(t *testing.T) {
 	}
 
 	a.ModelCanon = func() config.ModelCanon { return lower }
-	third := a.ObserveModelNames([]string{"MiXeD"}).(modelObserverState)
+	third := observerStateOf(t, a.ObserveModelNames([]string{"MiXeD"}))
 	if third.Revision != oldRevision || third.Names["MiXeD"] != oldWant["MiXeD"] {
 		t.Fatalf("restored lower observer = %+v, want %v", third, oldWant)
 	}
@@ -192,7 +210,7 @@ func TestObserveModelNamesMemoPreservesDuplicateAndEmptyOutput(t *testing.T) {
 	a := NewAggAPI(metrics.NewBuffer(1), nil, time.Second)
 	a.ModelCanon = func() config.ModelCanon { return rules }
 	names := []string{"", "", " ", "  ", "DUP", "DUP", "dup"}
-	got := a.ObserveModelNames(names).(modelObserverState)
+	got := observerStateOf(t, a.ObserveModelNames(names))
 	wantExec := config.CompileModelRules(rules.Rules)
 	unique := make(map[string]string)
 	for _, name := range names {
@@ -240,13 +258,13 @@ func TestObserveModelNamesMemoConcurrentRuleChanges(t *testing.T) {
 				current.Store(&variants[(worker+i)%len(variants)])
 				var observed modelObserverState
 				if i%2 == 0 {
-					observed = a.ObserveModelNames(names).(modelObserverState)
+					observed = observerStateOf(t, a.ObserveModelNames(names))
 				} else {
 					records := make([]*metrics.Record, len(names))
 					for j, name := range names {
 						records[j] = &metrics.Record{Model: name}
 					}
-					observed = a.ObserveModels(false, records).(modelObserverState)
+					observed = observerStateOf(t, a.ObserveModels(false, records))
 				}
 				want, ok := expected[observed.Revision]
 				if !ok {

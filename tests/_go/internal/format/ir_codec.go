@@ -1066,9 +1066,23 @@ func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	if _, err := DecodeAnthropicRequest([]byte(anthropic)); err == nil {
 		t.Fatal("anthropic provider tool was accepted")
 	}
+	// A Responses client declares provider-executed tools it may never call
+	// through this proxy (Codex always sends web_search). The known types are
+	// dropped with a warning so the remaining function tools still translate.
 	responses := `{"model":"m","input":"hi","tools":[{"type":"web_search"}]}`
-	if _, err := DecodeResponsesRequest([]byte(responses)); err == nil {
-		t.Fatal("responses provider tool was accepted")
+	req, err := DecodeResponsesRequest([]byte(responses))
+	if err != nil {
+		t.Fatalf("known provider tool failed the request: %v", err)
+	}
+	if len(req.Tools) != 0 {
+		t.Fatalf("provider tool was not dropped: %+v", req.Tools)
+	}
+	if !warningField(req.Warnings, "tool.web_search") {
+		t.Fatalf("dropped provider tool was not reported: %+v", req.Warnings)
+	}
+	unknown := `{"model":"m","input":"hi","tools":[{"type":"mystery_tool"}]}`
+	if _, err := DecodeResponsesRequest([]byte(unknown)); err == nil {
+		t.Fatal("unclassified provider tool was accepted")
 	}
 }
 

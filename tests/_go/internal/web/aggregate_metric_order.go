@@ -557,12 +557,14 @@ func TestProjectionMetricOrderMatchesFullRebuild(t *testing.T) {
 	compactions := 0
 	for from := 0; from < n; {
 		to := min(from+1+rng.IntN(2500), n)
-		pendingBefore := m.pending.sampleCount()
 		m.append(rows[:to], from)
-		if m.pending.sampleCount() < pendingBefore {
+		if m.pending.sampleCount() >= metricOrderPendingSamples {
 			compactions++
-		}
-		if got := m.pending.sampleCount(); got >= metricOrderPendingSamples {
+			m = compactedMetrics(m)
+			if got := m.pending.sampleCount(); got != 0 {
+				t.Fatalf("pending samples = %d at row %d, want 0 after the fold", got, to)
+			}
+		} else if got := m.pending.sampleCount(); got >= metricOrderPendingSamples {
 			t.Fatalf("pending samples = %d at row %d, want below %d", got, to, metricOrderPendingSamples)
 		}
 		var rebuild projectionMetrics
@@ -578,6 +580,15 @@ func TestProjectionMetricOrderMatchesFullRebuild(t *testing.T) {
 	if compactions < 2 {
 		t.Fatalf("test crossed only %d compaction boundaries", compactions)
 	}
+}
+
+// compactedMetrics runs the background fold synchronously, standing in for the
+// goroutine the projection append path arms.
+func compactedMetrics(m projectionMetrics) projectionMetrics {
+	p := &historyProjection{}
+	p.data.metrics = m
+	p.compactMetrics(nil)
+	return p.data.metrics
 }
 
 func TestProjectionMetricOrderPendingBoundary(t *testing.T) {
@@ -617,6 +628,13 @@ func TestProjectionMetricOrderPendingBoundary(t *testing.T) {
 
 	at := below
 	at.append(rows[:baseRows+threshold], baseRows+threshold-1)
+	if got := at.pending.sampleCount(); got != threshold {
+		t.Fatalf("at threshold: append folded inline, pending = %d", got)
+	}
+	if !at.needsCompaction() {
+		t.Fatal("crossing the bound did not arm the fold")
+	}
+	at = compactedMetrics(at)
 	if got := at.pending.sampleCount(); got != 0 {
 		t.Fatalf("at threshold: pending = %d, want 0 after compaction", got)
 	}
@@ -632,6 +650,7 @@ func TestProjectionMetricOrderPendingBoundary(t *testing.T) {
 
 	above := newBase()
 	above.append(rows[:baseRows+threshold+1], baseRows)
+	above = compactedMetrics(above)
 	if got := above.pending.sampleCount(); got != 0 {
 		t.Fatalf("above threshold: pending = %d, want 0 after compaction", got)
 	}
@@ -643,6 +662,9 @@ func TestProjectionMetricOrderPendingBoundary(t *testing.T) {
 	at.append(rows[:baseRows+threshold+1], baseRows+threshold)
 	if got := at.pending.sampleCount(); got != 1 {
 		t.Fatalf("post-compaction delta: pending = %d, want 1", got)
+	}
+	if at.needsCompaction() {
+		t.Fatal("a one-sample delta armed the fold")
 	}
 	if got := len(at.base.ttft); got != baseRows+threshold {
 		t.Fatalf("post-compaction base = %d, want %d", got, baseRows+threshold)
@@ -729,7 +751,11 @@ func TestProjectionMetricOrderConcurrentLease(t *testing.T) {
 		p.mu.Lock()
 		data := p.data
 		data.metrics.append(rows[:to], from)
+		compacting := data.metrics.needsCompaction()
 		p.data = data
+		if compacting {
+			go p.compactMetrics(nil)
+		}
 		p.mu.Unlock()
 	}
 	close(done)
@@ -737,6 +763,29 @@ func TestProjectionMetricOrderConcurrentLease(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Fatal(err)
+	}
+	// The background folds finish, publish, and leave the delta empty.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p.mu.RLock()
+		active := p.data.metrics.compacting
+		pending := p.data.metrics.pending.sampleCount()
+		order := p.data.metrics.allOrder()
+		sorted := slices.IsSortedFunc(order.ttft, func(a, b metricSample[int64]) int { return cmp.Compare(a.value, b.value) })
+		p.mu.RUnlock()
+		if len(order.ttft) != initial+batch*batches || !sorted {
+			t.Fatalf("published order = %d samples, sorted=%v", len(order.ttft), sorted)
+		}
+		if !active {
+			if pending >= metricOrderPendingSamples {
+				t.Fatalf("idle compaction left %d pending samples", pending)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("compaction unfinished: active=%v pending=%d", active, pending)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -908,5 +957,158 @@ func TestChartRecentTailMatchesAllHistory(t *testing.T) {
 	fast, slow := fold(false), fold(true)
 	if !reflect.DeepEqual(fast, slow) {
 		t.Fatal("tail-selected chart payload differs from all-history payload")
+	}
+}
+
+// TestProjectionMetricCompactPublishesOntoTheLiveBase pins that a base replaced
+// while a fold runs is not overwritten by the stale merge: the fold discards it,
+// retries against the live snapshot, and no reader ever sees a partial or stale
+// order. The same property bounds a shutdown, which can only drop an in-flight
+// fold and keep the published order.
+func TestProjectionMetricCompactPublishesOntoTheLiveBase(t *testing.T) {
+	const history = 60000
+	rows := benchmarkMetricRows(history + metricOrderPendingSamples + 8)
+	var p historyProjection
+	p.mu.Lock()
+	p.data.metrics.append(rows[:history], 0)
+	p.data.metrics.append(rows, history)
+	armed := p.data.metrics.needsCompaction()
+	p.mu.Unlock()
+	if !armed {
+		t.Fatal("crossing the bound did not arm the fold")
+	}
+	go p.compactMetrics(nil)
+
+	// Replace the base while the fold has the merge in hand.
+	var fresh projectionMetrics
+	fresh.append(rows[:1000], 0)
+	p.mu.Lock()
+	p.data.metrics = fresh
+	p.mu.Unlock()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p.mu.RLock()
+		active := p.data.metrics.compacting
+		order := p.data.metrics.allOrder()
+		p.mu.RUnlock()
+		if got := len(order.ttft); got != 1000 {
+			t.Fatalf("published order = %d samples, want the replacement's 1000", got)
+		}
+		if !active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("compaction did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	var want projectionMetrics
+	want.append(rows[:1000], 0)
+	checkMetricOrdersEquivalent(t, "replaced base", p.data.metrics.allOrder(), want.allOrder())
+}
+
+// TestProjectionMetricCompactArmsThePublishedSnapshot pins the production
+// sequence: the arm flag must ride the published copy, or every refresh would
+// start its own fold and none would coalesce.
+func TestProjectionMetricCompactArmsThePublishedSnapshot(t *testing.T) {
+	const history = 60000
+	rows := benchmarkMetricRows(history + metricOrderPendingSamples + 8)
+	var p historyProjection
+	p.mu.Lock()
+	p.data.metrics.append(rows[:history], 0)
+	p.mu.Unlock()
+
+	p.mu.Lock()
+	data := p.data
+	data.metrics.append(rows, history)
+	compacting := data.metrics.needsCompaction()
+	p.data = data
+	p.mu.Unlock()
+	if !compacting || !p.data.metrics.compacting {
+		t.Fatal("the published snapshot does not carry the armed fold")
+	}
+	// A second refresh while the flag is set must not arm a second fold.
+	p.mu.Lock()
+	data = p.data
+	data.metrics.append(rows, history)
+	second := data.metrics.needsCompaction()
+	p.data = data
+	p.mu.Unlock()
+	if second {
+		t.Fatal("a second fold was armed while one is in flight")
+	}
+
+	p.compactMetrics(nil)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.data.metrics.compacting || p.data.metrics.pending.sampleCount() != 0 {
+		t.Fatalf("fold did not finish: compacting=%v pending=%d", p.data.metrics.compacting, p.data.metrics.pending.sampleCount())
+	}
+}
+
+// TestProjectionMetricCompactReleasesTheArmOnPanic: needsCompaction arms the
+// fold once and refuses to arm again while compacting is set, so an unwind that
+// skips the release would disable compaction for the process lifetime and let
+// pending keep the whole delta. The merge mutates nothing published, so the fold
+// must recover, clear the arm and leave the data intact for the next append to
+// re-arm.
+func TestProjectionMetricCompactReleasesTheArmOnPanic(t *testing.T) {
+	const history = 1000
+	rows := benchmarkMetricRows(history + metricOrderPendingSamples + 8)
+	var p historyProjection
+	p.mu.Lock()
+	p.data.metrics.append(rows[:history], 0)
+	p.mu.Unlock()
+	p.mu.Lock()
+	data := p.data
+	data.metrics.append(rows, history)
+	armed := data.metrics.needsCompaction()
+	p.data = data
+	pendingBefore := data.metrics.pending.sampleCount()
+	p.mu.Unlock()
+	if !armed {
+		t.Fatal("crossing the bound did not arm the fold")
+	}
+
+	panics := 0
+	hooks := &aggregateTestHooks{fold: func() { panics++; panic("merge exploded") }}
+	p.compactMetrics(hooks)
+	if panics != 1 {
+		t.Fatalf("fold ran %d times, want 1", panics)
+	}
+
+	p.mu.RLock()
+	active := p.data.metrics.compacting
+	pendingAfter := p.data.metrics.pending.sampleCount()
+	order := p.data.metrics.allOrder()
+	p.mu.RUnlock()
+	if active {
+		t.Fatal("the panicked fold left compacting armed; needsCompaction can never arm again")
+	}
+	if pendingAfter != pendingBefore {
+		t.Fatalf("pending = %d after the panic, want the untouched %d", pendingAfter, pendingBefore)
+	}
+	if got := len(order.ttft); got != len(rows) {
+		t.Fatalf("published order = %d samples, want the %d published rows", got, len(rows))
+	}
+
+	// The armed flag is live again: the next cross of the threshold folds and
+	// the fault-free run drains the preserved delta.
+	p.mu.Lock()
+	data = p.data
+	data.metrics.append(rows[:1], len(rows))
+	rearmed := data.metrics.needsCompaction()
+	p.data = data
+	p.mu.Unlock()
+	if !rearmed {
+		t.Fatal("the next append did not re-arm the fold")
+	}
+	p.compactMetrics(nil)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.data.metrics.compacting || p.data.metrics.pending.sampleCount() != 0 {
+		t.Fatalf("recovered fold did not finish: compacting=%v pending=%d",
+			p.data.metrics.compacting, p.data.metrics.pending.sampleCount())
 	}
 }

@@ -35,6 +35,13 @@ module.exports = async function chartE2e(H) {
     check("the blank is painted: 'no requests in this window' (canvas drawBlank, not DOM text)",
       Array.isArray(blankMsgs) && blankMsgs.length >= 1 && blankMsgs.every(m => m === 'no requests in this window') &&
       !box.textContent.includes('no requests in this window'));
+    check('the painted blank is a named image and the readout is a status region', (() => {
+      const canvas = box.querySelector('canvas.chart-blank');
+      const hover = d.getElementById('chart-hover');
+      return canvas?.getAttribute('role') === 'img' &&
+        (canvas.getAttribute('aria-label') || '').includes('no requests in this window') &&
+        hover.getAttribute('role') === 'status' && !hover.hasAttribute('aria-hidden');
+    })());
     // The no-stored-history variant keeps its own message: data_from_ms 0
     // means nothing was ever stored, so the window cannot be blamed.
     w.eval('window.__blankMsgs.length = 0; chartAgg.data_from_ms = 0;');
@@ -71,6 +78,12 @@ module.exports = async function chartE2e(H) {
     check('the fourth populated bucket un-blanks and mounts the plot',
       w.eval('chartData()[0].length === 4') &&
       !!box.querySelector('div.uplot') && w.eval('_up') !== null);
+    check('a mounted plot root is one named image', (() => {
+      const plot = box.querySelector('div.uplot');
+      const label = plot?.getAttribute('aria-label') || '';
+      return plot?.getAttribute('role') === 'img' && /\bover\b/.test(label) &&
+        !plot.contains(d.getElementById('chart-hover'));
+    })());
     // traffic without timing samples: compaction empties the latency window
     // while traffic exists, so the blank names the preset, not the traffic
     w.eval("chartView.preset = 'latency'");

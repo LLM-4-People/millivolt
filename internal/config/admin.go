@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -46,11 +46,13 @@ type Handler struct {
 	// with the process-wide config-application serializer. Production wires it
 	// to reloadMu, the same lock SIGHUP, /admin/reload and backup restore hold,
 	// so a Settings save cannot interleave with a restore's read/write/reload.
-	// It returns the release function; nil is a no-op (tests). It runs after
-	// Handler.mu is acquired, so the lock order is Handler.mu -> serializer.
+	// It returns the release function and whether the transaction is refused:
+	// a restore holds the serializer across a whole streaming upload, so busy
+	// answers 409 instead of blocking for the upload. It runs after Handler.mu
+	// is acquired, so the lock order is Handler.mu -> serializer.
 	// Persist must then be the locked variant and must not acquire the
 	// serializer again.
-	Serialize func() (release func())
+	Serialize func() (release func(), busy bool)
 	// Backup reports whether Settings can download/restore config and
 	// database. Nil omits the object (tests).
 	Backup func() map[string]any
@@ -112,7 +114,7 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 	// writer.
 	b, err := json.Marshal(body)
 	if err != nil {
-		log.Printf("admin config: encode failed: %v", err)
+		logging.Printf("", "admin config: encode failed: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -139,7 +141,11 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.Serialize != nil {
-		release := h.Serialize()
+		release, busy := h.Serialize()
+		if busy {
+			adminjson.WriteError(w, http.StatusConflict, "a restore is running; retry the save when it finishes")
+			return
+		}
 		defer release()
 	}
 	cur, err := h.fileConfig()

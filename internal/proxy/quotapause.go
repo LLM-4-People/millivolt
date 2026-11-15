@@ -3,13 +3,13 @@ package proxy
 import (
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -59,7 +59,8 @@ func (s *Server) quotaPauseArmed() bool {
 // whose response already reached the client (the in-band path) only arms
 // the pause. When false is returned the permit is released and the caller
 // keeps its existing surface-immediately behavior.
-func (s *Server) settleQuotaFailure(permit *scheduler.StormPermit, format, client, provider, reason string, retryAfter time.Duration) bool {
+func (s *Server) settleQuotaFailure(permit *scheduler.StormPermit, format string, target scheduler.PolicyTarget, reason string, retryAfter time.Duration) bool {
+	provider := target.Provider
 	if !s.quotaPauseArmed() || !isOpenAICompatibleWire(format) || provider == "" {
 		permit.Cancel()
 		return false
@@ -70,7 +71,7 @@ func (s *Server) settleQuotaFailure(permit *scheduler.StormPermit, format, clien
 		return true
 	case config.QuotaPauseManual:
 		permit.Cancel()
-		return s.addQuotaHold(client, provider, reason)
+		return s.addQuotaHold(target, reason)
 	default:
 		permit.Cancel()
 		return false
@@ -88,7 +89,8 @@ func (s *Server) settleQuotaFailure(permit *scheduler.StormPermit, format, clien
 // is per-request, so the outcome is decided by whether the triggering
 // client is actually held. A crash before the write lands simply re-arms on
 // the provider's next durable quota 429.
-func (s *Server) addQuotaHold(client, provider, reason string) bool {
+func (s *Server) addQuotaHold(target scheduler.PolicyTarget, reason string) bool {
+	provider := target.Provider
 	h := persistedPause{
 		ID:        newPauseID(),
 		Providers: []string{provider},
@@ -101,19 +103,24 @@ func (s *Server) addQuotaHold(client, provider, reason string) bool {
 		s.pause.mu.Unlock()
 		if errors.Is(err, scheduler.ErrOverlap) {
 			// An existing hold already parks this request on the provider:
-			// the manual pause holds it without creating a duplicate.
-			return s.scheduler.HoldsTarget(client, provider)
+			// the manual pause holds it without creating a duplicate. The
+			// check uses the same identity the scheduler matches, so a hold
+			// that narrows by model, key or conversation is honoured rather
+			// than assumed to be provider-wide.
+			return s.scheduler.HoldsTarget(target)
 		}
-		log.Printf("quota pause: hold %s: %v", provider, err)
+		logging.Printf("", "quota pause: hold %s: %v", provider, err)
 		return false
 	}
 	s.pause.holds = append(s.pause.holds, h)
-	snap, gen := s.finishPauseLocked()
-	s.pause.mu.Unlock()
-	log.Printf("quota pause: provider %s paused (%s)", provider, reason)
+	// The shared commit tail derives the pins (a quota hold is an operator hold
+	// and must keep its provider offered) and releases pause.mu; only the write
+	// moves to the helper goroutine.
+	snap, gen := s.finalizePause()
+	logging.Printf("", "quota pause: provider %s paused (%s)", provider, reason)
 	go func() {
 		if err := s.persistLatest(snap, gen); err != nil {
-			log.Printf("quota pause: hold %s: %v", provider, err)
+			logging.Printf("", "quota pause: hold %s: %v", provider, err)
 		}
 	}()
 	return true
@@ -158,7 +165,7 @@ func (s *Server) HandleQuotaPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.scheduler.ReleaseQuota(provider) {
-		log.Printf("quota pause: provider %s resumed by operator", provider)
+		logging.Printf("", "quota pause: provider %s resumed by operator", provider)
 	}
 	writeOperatorState(w, s.StormSnapshot(), nil)
 }

@@ -4,9 +4,10 @@ Read the [security boundary](../SECURITY.md) before exposing the listener.
 The whole embedded dashboard is protected: every dashboard, `/metrics/*`,
 `/admin/*` and `/mcp` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential
 and is denied while it is not configured. At the application gate, only the
-unauthenticated `/healthz` liveness probe, the `POST /session` login handshake,
-origin-root brand/PWA files and transparent inference stay open; see the
-canonical [operator access](#operator-access) list.
+unauthenticated `/healthz` liveness and `/readyz` readiness probes, the
+`POST /session` login handshake, origin-root brand/PWA files and transparent
+inference stay open; see the canonical [operator access](#operator-access)
+list.
 
 ## Configuration and CLI
 
@@ -22,10 +23,11 @@ for fresh config volumes. Do not start Settings against the committed example.
 | Flag | Behavior |
 | --- | --- |
 | `-config PATH` | Config path; defaults to local `proxy.yaml`. Empty selects built-in defaults and disables Settings persistence. |
-| `-listen ADDRESS` | Override the configured listen address. |
+| `-listen ADDRESS` | Override the configured listen address; the effective value is validated after every override. |
 | `-db-path PATH` | Override durable storage; `none` disables it. |
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
-| `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. |
+| `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. A named config that cannot be read fails the probe instead of falling back to defaults; only an empty `-config` probes the built-in defaults. |
+| `-readycheck` | Probe `GET /readyz` the same way and exit nonzero when the durable pipeline is not ready. Used by the Compose readiness probe; mutually exclusive with `-healthcheck`. |
 | `-print-config` | Print neutral built-in default YAML. |
 | `-print-example-config` | Print the deployment example, including its enabled compatibility profiles and the opencode sub-conversation tracking exemplar. |
 | `-version` | Print JSON build identity. |
@@ -40,13 +42,21 @@ extra YAML documents are dropped and the file is rewritten without them. An
 invalid recognized value fails startup without rewriting the file, and an
 unparseable file is moved to `PATH.invalid` and replaced with the documented
 defaults, except an ambiguous duplicate top-level key, which fails closed and
-stays in place. Reload rejects an invalid document without rewriting it.
-Settings, healthcheck and restore merge treat a missing file as defaults, while
+stays in place. Because replacing it with defaults would silently widen the
+bind and drop the origin allowlist, an unparseable file first has `listen` and
+`allowed_base_urls` salvaged from it block by block and applied over the
+defaults; both `(unparseable yaml)` and `<key> (salvaged)` are reported in the
+boot log and `last_reload`. A named key with no usable value, or a salvaged
+value the config rejects, fails startup with the original file still in place.
+Reload rejects an invalid document without rewriting it.
+Settings and restore merge treat a missing file as defaults, while
 an invalid or unreadable document fails closed and is reported instead of
-substituting a default. Backup capture is stricter: a missing config file is an
+substituting a default. Healthcheck is stricter: a named file that cannot be
+read fails the probe, and only an empty `-config` reaches the built-in
+defaults. Backup capture is stricter: a missing config file is an
 error because there is nothing to archive. Settings POST still rejects invalid
 inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck loads
-the file read-only and never rewrites it.
+whatever file it is given read-only and never rewrites it.
 
 To regenerate the public example after changing its canonical owners:
 
@@ -86,27 +96,24 @@ Settings; do not write a bare number and assume seconds. A bare integer is still
 accepted as a count of bytes. Integer counts (retries, percents, tokens) stay
 unitless numbers with the unit in the schema label when it is not obvious.
 
-| Settings category | Configuration area |
+| Settings categories | Surface |
 | --- | --- |
-| Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
-| Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
-| Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap, upstream response-header cap and SSE event/hold bounds. |
-| Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
-| Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
-| Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
-| Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
-| Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call bounds, and Cursor parked-run lifetime and heartbeat. |
-| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
-| Backup | Size cap for one Settings backup download or restore upload. |
-| MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
-| Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
-| Models | Ordered model-name grouping rules and their preview. |
-| Providers | Usage/cost field paths, discovery enrichment, upstream headers and provider aliases. |
-| Request overrides | Scoped upstream rewrites: set, replace or remove headers and set output-token ceilings per client, provider and/or model. |
+| Server, Request, Upstream, Queue & retry, Error storm protection | The proxy's traffic surfaces, in that order. |
+| Quota pause, Conversations, Format translation | Provider reaction, grouping, and cross-protocol translation. |
+| Storage, Backup, MCP, Dashboard | Durable state, its archives, the LLM tool endpoint and the live view. |
+| Models, Providers, Request overrides | Grouping rules, upstream mappings and scoped rewrites. |
 
-The table is a navigation aid, not another source of default values.
-[Schema](../internal/config/schema.go), configuration validation and generated
-YAML remain authoritative when a setting is added or changed.
+The category labels, their help and their membership are owned by
+`schema.Categories()` and `Schema()` over `GET /admin/config`; the generated
+example carries the same sections with each field's type, range and default.
+The rows above are names only, not a second copy of either.
+
+The destructive controls sit in their category and each confirms first: a
+rebuild and restart is confirmed and single-flight, starting a capture through
+MCP needs its `confirm` phrase and stopping every session confirms separately,
+a database delete confirms in the console (and over MCP needs the exact phrase
+plus the preview token for that filter), and a restore inspects before its
+confirmed apply.
 
 ### Guardrails that are not settings
 
@@ -224,13 +231,14 @@ not the secret behind it.
 Header rules are the operator's last word on the upstream wire: the resolved
 merge applies after client-forwarded values, configured provider headers and
 the client's `X-Proxy-Headers` map, so a matching override wins over all of
-them. The proxy-owned transport-mode names `accept-encoding` and `range` are
-the exception: the client header maps (`X-Proxy-Headers` and an
-`X-Proxy-Auth-Header` naming one) reject them with a 400 before any send, and
-configured provider headers or request-override values are stripped from the
-final upstream request, so the transport keeps its own gzip negotiation and
-never sends a partial range. Two header classes are rejected at load in both
-header lists. Protocol and framing names (`host`, `content-type`,
+them. Only the proxy-owned transport-mode names `accept-encoding` and `range`
+are stripped from the final upstream request before send, whichever source set
+them, so the transport keeps its own gzip negotiation and never sends a partial
+range; the client header maps (`X-Proxy-Headers` and an
+`X-Proxy-Auth-Header` naming one) also reject them with a 400 before any send.
+
+The request-override list refuses two further header classes at load. Protocol
+and framing names (`host`, `content-type`,
 `content-length`, `transfer-encoding`, `te`, `connection`, `keep-alive`,
 `proxy-authenticate`, `proxy-connection`, `trailer`, `upgrade`) and the whole
 `x-proxy-` control prefix belong to the proxy and the transport. Credential
@@ -256,6 +264,13 @@ The client header maps reject `content-length` before any send so the transport
 keeps ownership of message framing. Header
 names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
+
+Provider `headers` refuse neither class above. They are applied after the
+extracted credential is placed, so a credential name (including the target's
+own auth header) or an `x-proxy-` name is legal there and takes effect over the
+forwarded and extracted value. Configured provider values are still stripped
+for `accept-encoding` and `range` at the final request, exactly like override
+values.
 
 The body rewrite is fail closed. It applies to Chat Completions or Anthropic
 client bodies before translation, whatever the target (a Responses client body
@@ -398,14 +413,60 @@ Keep the same Compose project name to reuse its named volumes. The normal file
 names the project `millivolt`; an explicit `-p` overrides it. The deployment
 inputs are `MILLIVOLT_IMAGE` (image reference),
 `MILLIVOLT_PORT` (loopback host port), `MILLIVOLT_OPERATOR_TOKEN` (the
-operator credential, forwarded into the container environment only), and
+operator credential, forwarded into the container environment only),
 `MILLIVOLT_STOP_GRACE_PERIOD` (container
-stop grace). Their defaults live in [compose.yaml](../compose.yaml), not server
+stop grace), `MILLIVOLT_MEM_LIMIT` (container memory ceiling, default `1g`) and
+`MILLIVOLT_PIDS_LIMIT` (process/thread ceiling, default `512`). Their defaults
+live in [compose.yaml](../compose.yaml), not server
 configuration. Supply them consistently through the environment or an ignored
 local `.env` file. `docker compose config` shows the resolved deployment.
+
+The memory ceiling is also the source of the runtime's own soft limit: with
+`go_memory_limit` at its `0B` default, a detected finite cgroup ceiling at or
+above 80 MiB becomes a soft limit at 80% of itself, so the container bound
+reaches the Go runtime instead of leaving it unbounded. Raise the ceiling with
+`history_size`, request buffers, concurrency or observed identity cardinality;
+a ceiling under 80 MiB is ignored by the runtime and leaves only the hard OOM
+kill. `pids_limit` bounds process and thread amplification, not goroutines.
 The image carries a Dockerfile `HEALTHCHECK` that probes the unauthenticated
 `/healthz` through the binary's `-healthcheck` mode, so `docker compose ps`
-reports health without any operator credential.
+reports health without any operator credential. Both Compose files replace that
+probe with the readiness check below, which is strictly stronger.
+
+Liveness (`/healthz`) answers "the process is up and serving HTTP". Readiness
+(`/readyz`) additionally answers "this instance can persist": it fails with
+`503` and a reason when the durable writer is wedged. Two arms answer that: the
+oldest record on the queue has waited, or no flush has succeeded, for longer
+than one flush interval plus a progress window. The window is four flush
+intervals clamped to at least 30 seconds and at most two minutes; the record's
+own interval is allowed on top, so a record inside its own cadence never
+convicts and a long configured interval cannot postpone the verdict by more
+than that one cadence. Every clock starts on arrival: the oldest record on the
+queue ages the first arm, and while no flush has succeeded since boot the first
+accepted record ages the second one, so a writer that never picks records up is
+convicted all the same. Readiness also fails when
+any durable flush has failed since boot.
+Readiness stays red after the first failed flush even once writes recover,
+because a lost batch is worth an operator's attention; restart or investigate.
+With durable storage disabled both routes answer `200`, since there is no
+pipeline to wedge.
+
+The Compose files use `-readycheck` as the service healthcheck, so
+`docker compose ps` reports `healthy` only for an instance that can persist.
+Point an external load balancer or orchestrator at `/readyz` for the same
+signal; both probe routes are unauthenticated and answer the exact body
+`{"ok":true}` on success.
+
+Storage state is also scrapeable at `/metrics/prometheus` (behind the operator
+credential) as `llm_proxy_storage_enabled`,
+`llm_proxy_storage_queue_depth`, `llm_proxy_storage_queue_capacity`,
+`llm_proxy_storage_dropped_total{cause}` (`overflow`, `after_close`, `panic`,
+`flush_failed`), `llm_proxy_storage_flush_failed_total`,
+`llm_proxy_storage_last_flush_timestamp_seconds` and
+`llm_proxy_storage_wedged`. The block is rendered on every scrape, outside the
+memoized request aggregate, so queue and drop movement shows up immediately.
+Alert on `llm_proxy_storage_wedged`, on a rising `flush_failed` counter, and on
+`overflow` drops that are not explained by a burst.
 
 ```sh
 # Start or adopt a newly pulled image while preserving volumes.
@@ -477,8 +538,12 @@ directories owned by `65532:65532` before the first start, or
 again. Named volumes avoid this entirely: Docker seeds them from the image
 with correct ownership.
 
-Settings saves by creating a temporary file beside the config and atomically
-renaming it. A read-only mount, or a bind mount of only the config file, cannot
+Settings saves by creating a temporary file beside the resolved config and
+atomically renaming it; a symlinked config path is followed to its final
+target, so the link stays in place and the target receives the document. The
+restore rollback publishes through the same writer, so a failed restore of a
+symlinked config keeps the link too. A
+read-only mount, or a bind mount of only the config file, cannot
 support that save contract. Mount the whole writable directory, or deliberately
 use read-only configuration and update it outside the dashboard. Do not mount
 the committed example as a mutable runtime config.
@@ -642,9 +707,10 @@ zstd frame, member framing and config `Validate()` before applying anything.
 A selected database member is decoded into its private staging file first,
 then must pass `PRAGMA integrity_check`; only that checked file is published
 as the pending snapshot, which restore then preflights for admission before
-the config member is written. Decode refuses an uncompressed payload larger than the
-Schema maximum for `backup_max_bytes`, so a small compressed file cannot expand
-without bound. Download lists how many live settings differ from default and how
+the config member is written. Decode holds the uncompressed payload to the same `backup_max_bytes` ceiling as
+the upload (and to the Schema maximum, whichever is lower), so a small
+compressed file cannot expand past what the operator configured; an over-cap
+payload answers 413 with the upload's wording and stages no pending snapshot. Download lists how many live settings differ from default and how
 many stored requests would be packed. Picking a file first inspects the
 archive: created time, size, member sizes, each config key as default vs
 modified vs the live file, and the database request span when a live store can
@@ -678,14 +744,20 @@ the attached snapshot rejects writes, while the live database stays writable
 for the merge, and no restart is required. Its request rows, debug sidecars and
 since-inception totals commit as one transaction, so a failed totals write
 leaves no partial merge behind. Truncated or bit-flipped files are rejected.
-The `backup_max_bytes` setting is the archive ceiling; encoding enforces it
-while the stream is written, so an over-cap archive is removed instead of
-partially served, and an over-cap upload answers 413 before decoding.
+The `backup_max_bytes` setting is the encoded-archive and the decoded-payload
+ceiling alike; encoding enforces it while the stream is written, so an over-cap
+archive is removed instead of partially served, an over-cap upload answers 413
+before decoding, and a decoded payload over it answers 413 before staging a
+snapshot.
 
 Restore phases are ordered, not atomic. The database member runs first: a
 replace stages the decoded file and preflights it with the same schema,
 writer-INSERT and request-scan value checks boot runs before touching the live
-database, and a merge commits rows into the running store. Only then is the
+database, bounded by the same maintenance budget as boot maintenance, and a
+merge commits rows into the running store. One restore owns the whole
+transaction from the first uploaded byte, so two restores cannot stage and
+decode two full members on the database volume at once; an inspect shares that
+serialization because it stages the same members. Only then is the
 config written and hot-applied. A failed stage, preflight, or merge leaves the
 config file and live snapshot unchanged, and a failed config write or reload
 rolls the config back and restores a replace's previous pending slot. A
@@ -693,9 +765,23 @@ successful live merge has no rollback: if the later config phase fails, the
 merged rows stay applied. A crash between the database and config phases is
 likewise not atomic; the pending snapshot or completed merge can be durable
 while the config file still has its previous bytes. Preserved `.incoming`,
-`.previous`, and `.snapshot-state` files next to `db_path` are boot-recovery
-evidence and may need operator inspection after such a crash; do not remove them
-while a restore may have been in flight. A combined config and database merge
+`.incoming.invalid-<token>`, `.incoming.invalid-interrupted-<token>`,
+`.previous`, `.snapshot-state`, and `.millivolt-restore-pending-*` files next to
+`db_path` are boot-recovery evidence and may need operator inspection after such
+a crash; do not remove them while a restore may have been in flight. Quarantine
+names carry a unique token and keep their sidecars beside them, so repeated
+rejections accumulate instead of overwriting the previous one. The
+`.millivolt-restore-pending-*` copy is a hard link to the snapshot that was
+queued before the restore; it is created before the successor replaces the slot,
+so the pending queue is never empty, and a crash on either side leaves a
+recoverable snapshot instead of an orphan that the 24 hour staging sweep
+eventually deletes. A volume without hard links (exFAT, vfat, and several FUSE
+or SMB mounts) rejects `link(2)`; there the slot is moved aside instead, still
+without copying the snapshot bytes, and a crash leaves only the preserved
+sibling, which boot re-admits. When the stage fails before the successor
+replaces the slot the restore drops the copy again, and when a boot finds a
+rejected successor or an empty slot it renames the preserved copy back onto the
+slot and admits once, so the queued snapshot is neither hidden nor swept. A combined config and database merge
 answers 400 when the restored config's effective `db_path` differs from the
 running store's file, because the rows would be written to a database the next
 boot does not open; merge the database separately or use database replace.
@@ -809,11 +895,11 @@ merged promotion PR does.
 
 | Image tag | Meaning |
 | --- | --- |
-| `main` | Moving production image for the released current `main` revision; updated by non-prerelease versioned releases from a merged promotion PR, a delivered main push or a release tag. A prerelease does not move it. |
+| `main` | Moving production image for the released current `main` revision; updated by a non-prerelease versioned release cut from a merged promotion PR or a delivered main push. A prerelease does not move it, and a manually pushed release tag does not either. |
 | `testing` | Moving development image after a successful testing-branch push; never a release. Its OCI version label reports the embedded `VERSION`, which can lag the latest release. |
-| `sha-<full commit>` | Release tag for the exact cut revision built and published; the version bump is part of the reviewed promotion merge, so this is a main commit. Testing pushes do not publish it. |
+| `sha-<full commit>` | Release tag for the exact cut revision built and published; the version bump is part of the reviewed promotion merge, so this is a main commit. Testing pushes do not publish it, while a manually pushed tag publishes it for the tagged revision. |
 | Version from `VERSION` | Created by the matching `v`-prefixed release tag on the promotion merge commit, or by a manually pushed tag. |
-| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a merged promotion PR, a main push or a tag. Prereleases and testing pushes do not update it. |
+| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a merged promotion PR, a main push or a manually pushed tag. Prereleases and testing pushes do not update it. A tag push moves the version, `sha-` and `latest` tags only; `main` stays where the last main-branch release put it. |
 
 Release builds request an SBOM and max-mode provenance. The image and its
 attestations are published before the tag and release are updated; the workflow
@@ -848,9 +934,24 @@ fields require restart.
 
 Rebuild & restart requires Go on PATH and the original source tree available at
 its compiled-in path. Moved/trimpath builds may report it unavailable. It builds
+the working tree exactly as it is: uncommitted, unstaged and untracked files are
+compiled, so a restart is not a review gate and a dirty tree ships as-is. The
+rebuilt binary is written into the process temp directory, which must be
+writable (`TMPDIR`, or `/tmp` when unset); an unusable directory is refused with
+that directory named rather than as a build fault. The choreography builds
 first, stops acceptance while retaining the listening socket, drains active
-handlers, flushes storage, then hands the socket to a ready child. Drain timeout
-or flush failure aborts and resumes the old process. Parked native-adapter runs
+handlers, flushes storage, then hands the socket to a ready child. A flush
+failure aborts and resumes the old process. A drain timeout still flushes and
+hands off: the in-flight requests are cut, but everything finalized before them
+is durable before the child opens the database. The flush has its own bound
+rather than sharing the drain window. The handoff also takes the config
+transaction lock for its whole flush fence, so a start while a reload, Settings
+save or backup restore is running is refused with `409` naming the operation
+instead of queueing behind it; the fence itself is bounded by
+`restart_drain_timeout` plus the flush bound. A restore holds that lock across
+its streaming upload, so `POST /admin/reload` and a Settings save answer `409`
+while one is in flight rather than waiting for a client-paced upload to finish.
+Parked native-adapter runs
 are process-local and do not survive a successful restart.
 
 Ordinary SIGINT/SIGTERM shutdown is different: it cancels active stream contexts,
@@ -873,30 +974,31 @@ both.
 
 | Route | Action / important contract |
 | --- | --- |
-| `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. |
+| `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. Trailing-slash look-alikes (`/healthz/...`) are reserved and answer 404, never inference. |
+| `GET /readyz` | Unauthenticated readiness probe. `200` when the durable pipeline can persist; `503` with a reason when the writer is wedged or a flush failed since boot. Compose uses it through `-readycheck`. Trailing-slash look-alikes are reserved and answer 404, never inference. |
 | `GET /favicon.ico` | Unauthenticated ICO brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
 | `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-*.png` | Ungated SVG/PNG icons for tabs, home screens and the web app manifest. |
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
-| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; cache-first only for a `/dash/` URL carrying exactly the stamped version, network-first with cache fallback for unversioned or stale `/dash/` URLs and brand paths. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*`, `/session/*` or `/v1`. |
+| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; cache-first only for a `/dash/` URL carrying exactly the stamped version, network-first with cache fallback for unversioned or stale `/dash/` URLs and brand paths. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Its never-cache list is generated at load from the same canonical namespace table that drives the gate and the reserved routes, so the three cannot drift; it never intercepts `/`, `/index.html`, `/healthz`, `/readyz`, `/models`, `/sw.js`, `/admin/*`, `/session/*`, `/metrics/*`, `/mcp/*` or `/v1`. |
 | `POST /session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. Lives outside `/admin` so an external authentication layer can front the admin plane without gating millivolt's own login. |
-| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
-| `POST /admin/reload` | Re-read config and report restart-required keys. |
-| `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
-| `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
+| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409, and so does a save while a restore holds the config transaction (its upload is client-paced). Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. GET returns provider header values verbatim, because the settings sheet must round-trip them on save; redaction applies to the model-visible `config_get` tool and the operator CLI instead (see [cli](cli.md) and [mcp](mcp.md)), where `--reveal` is the opt-in. Posting a redacted document back is safe: a credential header whose value is the marker keeps the loaded secret, while a posted real value replaces it. The same applies to `set_config`, so a model can read and re-post without erasing credentials. |
+| `POST /admin/reload` | Re-read config and report restart-required keys. Answers 409 while a restore holds the config transaction. |
+| `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected, and so is a start while a config transaction (reload, Settings save, backup restore) holds the reload lock: `409` names the operation. |
+| `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. GET reports `queued` (admission and send-gate waiters, the populations an operator drain can release) and `storm_waiters` (requests parked by the storm/quota gate before admission, which only the gate opening or a quota resume frees). |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
-| `GET/POST /admin/throttle` | Inspect/provider-limit updates. POST requires provider and accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge; `clear:true` removes policy. |
+| `GET/POST /admin/throttle` | Inspect and edit limits. A policy is named by its opaque `id` or by its selector. Scope dimensions `providers` (the singular `provider` field is still accepted), `models`, `clients`, `key_hashes` and `conversations` intersect; an empty dimension matches any value. An optional schedule uses `days` (0 = Sunday), `start_minute` and `end_minute` in server-local time; equal minutes mean all day and a start after the end spans midnight. POST accepts `concurrency`, `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and `ramp_duration`; supplied limits merge. A count requires its own window only when the policy has no stored window for that dimension: a fresh count without one is refused, while a count may raise an already windowed dimension alone. A count of `0` clears that dimension and its window. A window without a count is a refused no-op unless a count is already stored. `clear:true` drops the whole policy. Anti-burst and its ramp require a single-provider policy without a schedule. GET also returns `known_providers`, `known_clients` and `known_models` for selector pickers. |
 | `POST /admin/queue/drain` | Release parked requests without waiting for their limit, pause hold or retry window, covering both the admission queue and the send gate. Requires exactly one scope: `all:true`, `provider`, `model` or `client`. Released requests answer with a retryable 503, never a provider error; a request already exchanging bytes with the provider finishes normally. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
-| `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. Filters are body-only: any query key is rejected with 400 before the body is read. |
-| `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
+| `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. A genuinely bodyless POST counts the whole set, mirroring the bodyless delete; otherwise the body is `{"filter":{...}}`. Filters are body-only, so any query key is rejected with 400 before the body is read. |
+| `POST /admin/purge` | Delete matching finalized records. A genuinely bodyless POST deletes everything: that is the deliberate full-history command, it answers `200` rather than `404`, and any query key must be moved into a body instead. Otherwise the body is `{"filter":{...},"reviewed_count":N}`: an empty/invalid filter is rejected, and a supplied reviewed count is counted again inside the delete transaction, refusing with 409 when the row set moved. `status_code=0`, `debug=0` and `has_error=0` mean "no constraint" on that dimension, not a match for zero or false. The response is `{"deleted":N,"buffer_removed":N}`. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
 | `GET /admin/backup` | Download the self-checked `.mvb` Settings backup archive of config and/or database members. `?config=1` and `?database=1` select members, defaulting to both when no key is given; an explicit empty selection is an error. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
-| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, the config values plus their changed-key lists against defaults and the live config, and the database request span when a live store stages the member) without applying anything. A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
-| `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
+| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, the config values plus their changed-key lists against defaults and the live config, and the database request span when a live store stages the member) without applying anything. A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The upload is exempt from `request_body_read_timeout` (the idle bound still applies) and an expired read deadline answers 408. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
+| `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. `status_code=0` and `debug=0` mean "no constraint" on that dimension. A debug capture rides as a sibling `debug_capture` member only for a row that has a stored sidecar, so debug bodies appear only while durable storage is live; a ring-only export never carries them, and debug bodies stay sensitive either way. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
-| `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. |
+| `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. The Requests-card `s=` selector accepts an exact code or a live in-flight class on all three, but only the explorer folds pending rows: the chart answers a live class with `400 invalid scope` (its buckets are finalized-only, so an accepted class could only read as "no traffic"), and the log keeps its standing empty page so the archive pager does not stop. |
 | `GET /metrics/prometheus` | Prometheus exposition over the in-memory ring, not durable since-inception dashboard totals. |
 | `GET /metrics/pprof/` | Standard Go profiling handlers behind the same credential as every `/metrics` route: the index listing plus the `profile` (CPU), `heap`, `allocs`, `goroutine`, `block`, `mutex` and `threadcreate` profiles at `/metrics/pprof/<name>`. Unregistered subpaths answer the reserved namespace 404, never inference. See the capture workflow below the route table. |
 | `POST /mcp` | Streamable HTTP MCP endpoint, operator-gated like `/metrics` and enabled by default: `mcp_enabled: false` removes it from the process (the route stays reserved, answering 404 and never inference; restart to apply). Serves the 22 MCP tools. Bearer-only: the gate admits the session cookie on gated paths, but this endpoint refuses a cookie-only request (`403`) and forwards the caller's own Bearer on its in-process calls to the routes above, so no session cookie or per-request state is retained between requests; the admitted credential keys an in-memory cache of its SDK server object (never logged or persisted) so repeated calls do not rebuild it. Stateless: `GET`/`DELETE` answer `405`. `/mcp/...` look-alikes are reserved and answer `404`, never inference, and a reserved-namespace spelling whose separator is written single-encoded (`%2f` or `%5c`, any hex case) is refused the same way. A double-encoded separator (`%252f`) is not a reserved-namespace spelling: it decodes to a literal `%2f` inside one segment, so it can reach neither the MCP handler nor a reserved namespace and is ordinary inference traffic. |
@@ -923,7 +1025,10 @@ go tool pprof /tmp/millivolt-profiling /tmp/cpu.pprof
 ```
 
 The `seconds=N` parameter on `/metrics/pprof/profile` is the capture window:
-that one request stays open for the whole window while samples accumulate. A
+that one request stays open for the whole window while samples accumulate. The
+valid range is 1 to `response_write_timeout` (600 by default); an absent or
+unparseable value uses 30 and a larger one is lowered to the bound, so a
+capture never outlives the delivery contract unnoticed. A
 process runs one CPU profile at a time, so a second concurrent `profile`
 request fails with 500 until the first finishes. On `/metrics/pprof/heap`,
 `gc=1` forces a garbage collection cycle before the sample.
@@ -935,6 +1040,8 @@ re-validated exactly like an external request. For its irreversible call, the
 operator credential and the tool's own guards are the entire gate: an empty
 purge filter, a purge without the exact confirmation phrase, and a purge
 without the `purge_preview` token issued for that same filter are each refused.
+The preview token expires 15 minutes after it is issued, so a purge more than
+15 minutes after its preview needs a fresh one.
 It also refuses a capture session on a proxy without durable storage, and an
 unknown name in a capture scope or a throttle provider is offered the known
 values instead. The throttle provider check fails open when the proxy's
@@ -955,8 +1062,8 @@ route. This is the canonical open-path list; [Security](../SECURITY.md) and the
 [reverse-proxy guide](reverse-proxy.md) summarize it instead of maintaining a
 second list.
 
-- Open: `GET /healthz`, the `POST /session` login handshake (the one open
-  operator route), origin-root brand/PWA files (`/favicon.ico`, icons,
+- Open: `GET /healthz`, `GET /readyz`, the `POST /session` login handshake (the
+  one open operator route), origin-root brand/PWA files (`/favicon.ico`, icons,
   `/manifest.webmanifest`, `/sw.js`) and transparent inference. Provider
   credentials ride the same header name and are never inspected by the gate.
 - Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
@@ -975,10 +1082,21 @@ HttpOnly (script never reads it), SameSite Strict, scoped to 12 hours, and
 signed with a key derived from the operator token, so a container restart with
 the same credential keeps the session. Rotating the token invalidates outstanding
 cookies. The cookie carries `Secure` only when the request arrived over TLS or
-the first `X-Forwarded-Proto` token is `https` (the documented TLS deployments
-terminate at the ingress, and the canonical NGINX sample overwrites that header
-with `$scheme`), so a loopback plain-HTTP dashboard keeps working
+any `X-Forwarded-Proto` token names a secure scheme (`https` or `wss`). The
+header is a list: the canonical NGINX sample overwrites it with this server's
+`$scheme`, and an ingress that appends its own scheme after the client's
+`http` must not downgrade the cookie - hence any token, not the first. A
+loopback plain-HTTP dashboard keeps working
 while a TLS presentation gets the flag.
+
+Every response to a secure presentation also carries
+`Strict-Transport-Security: max-age=15552000` (180 days), set once at the
+outermost server wrapper from the same secure-presentation test. There is no
+`includeSubDomains`, because millivolt cannot know whether sibling or parent
+hostnames are TLS-capable. A plain-HTTP response carries no header at all
+(browsers ignore it there), so the dev instance is unaffected. The lifespan is
+deliberately under a quarter: moving the dashboard off TLS becomes reachable
+again within that window instead of pinning a browser for a year.
 Do not expose the listener over plaintext networks anyway. The login page
 served for unauthenticated dashboard visits exchanges the entered value for
 that cookie through `POST /session` and works without JavaScript; API
@@ -988,27 +1106,41 @@ login page on navigation.
 Unregistered `/admin/*`, `/session/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
 answer 404 and are never forwarded upstream. The gate also refuses 404 when an
 owned-namespace path is written with a percent-encoded separator (`%2f` or
-`%5c`, any hex case): the mux cannot route it to the reserved subtree, so it
+`%5c`, any hex case), a duplicated separator (leading or interior) or a dot
+segment: the mux cannot route it to the reserved subtree unchanged, so it
 would otherwise fall through to inference. A double-encoded separator
 (`%252f`) is not a reserved-namespace spelling: it decodes to a literal `%2f`
 inside one segment, matches no reserved route, and is ordinary inference
 traffic.
 
-Failed authentications are throttled per source IP (RemoteAddr only;
-forwarded-header chains are never trusted, since no trusted-proxy model
-exists): after five rejected credentials the IP is locked out with a window
-that doubles from 10 seconds to a 15 minute ceiling. The throttle counts only
+Failed authentications are throttled per source IP. The immediate hop is the
+only trusted one, so the throttle key is the rightmost `X-Forwarded-For`
+element (the address that hop appended) and `RemoteAddr` when the header is
+absent; a client can prepend anything, and an unparseable element is skipped.
+The shipped [NGINX example](../deploy/nginx.conf) resolves its own peer with
+`real_ip` first, so the rightmost element is the real client. A directly
+exposed instance lets a client choose its own key, which only ever relaxes the
+throttle, never the credential decision: after five rejected credentials the IP
+is locked out with a window that doubles from 10 seconds to a 15 minute
+ceiling. The throttle counts only
 presented-but-wrong credentials, so an expired-cookie dashboard polling in a
 background tab cannot lock its own operator out, and a verified credential is
 always admission: presenting the correct Bearer during a lockout clears the
 budget, because the lockout exists to rate-limit guessing, not to lock the
 operator out of their own dashboard. The map is hard-capped at 4096 source
-IPs with idle expiry, so spoofed-address floods cannot grow it. A lockout
-response is `429` with a coarse rounded `Retry-After` and a generic body.
+IPs with idle expiry, so spoofed-address floods cannot grow it; reaching the
+cap is logged once per episode, because from then on a new source evicts a
+tracked one. Crossing the five-failure threshold is logged once per source. A lockout
+response is `429` with a coarse rounded `Retry-After` and a generic JSON body,
+except `GET /` (and `/index.html`): the sign-in page is still served, read-only,
+with the same `Retry-After`, the form intact and the lockout named in its
+notice slot, because the form is the only route back to a credential and `POST
+/session` keeps working through the lockout.
 
 With the variable unset or empty the deny-all state holds: the whole dashboard
 returns 403, the open `POST /session` handshake cannot mint a cookie, and only
-`/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
+`/healthz` and `/readyz`, brand/PWA files and inference respond. A nonempty
+value shorter than 16
 or longer than 512 bytes fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart
@@ -1025,10 +1157,16 @@ so run the proxy under a dedicated account.
 
 Pause creates holds; it does not disconnect already-running sends. Matching new
 sends and retries wait until the hold expires or is resumed. Choose all traffic,
-named clients/providers, or clients that were unseen when a New-clients hold was
-created. "New" does not mean new requests or new conversations. Multiple names
-within a dimension are alternatives; provider and client constraints intersect.
-When named clients and New are combined, either client condition may match.
+any combination of the five scope dimensions, or clients that were unseen when a
+new-clients hold was created. "New" does not mean new requests or new
+conversations.
+
+A hold scopes on the same five dimensions a limit does: providers, models,
+clients, upstream key hashes and conversations. Values inside one dimension are
+alternatives, an unset dimension matches any value, and set dimensions
+intersect - the same rule limits use, because the scheduler matches both against
+one request identity. When named clients and new are combined, either client
+condition may match.
 
 A hold has its own duration and queue cap; the cap defaults to `max_queue_size`
 when the hold does not set one. Excess waiting work can be refused;
@@ -1039,18 +1177,21 @@ scopes are rejected instead of silently replacing a different hold.
 The HTTP shape is closed. A resume carries only `paused:false` and an optional
 `id`; supplying a scope, duration or queue cap beside it is a 400, because the
 proxy has no scope-selective resume and accepting one would clear more holds
-than the caller named. `all:true` cannot be combined with `new`, `clients` or
-`providers`; the global hold already covers them. Named clients plus `new`
-remains a valid union. These are enforced by the handler, not only by the MCP
-and CLI wrappers.
+than the caller named. `all:true` cannot be combined with `new` or any scope
+dimension; the global hold already covers them. Named clients plus `new`
+remains a valid union. An edit restates the dimensions it supplies and preserves
+the ones it omits, so supplying an explicit empty array is how a dimension is
+cleared. These are enforced by the handler, not only by the MCP and CLI
+wrappers.
 
-The known client/provider/model vocabularies (the pause and debug pickers, and
-the snapshot a New-clients hold compares against) are bounded at 4096 names per
-dimension. Client labels and model ids come from the request, so they are
+The known client/provider/model vocabularies (the pause and capture pickers,
+and the snapshot a new-clients hold compares against) are bounded at 4096 names
+per dimension. Client labels and model ids come from the request, so they are
 evictable: past the cap the least recently observed name makes room for the
 newest, so a client that keeps sending requests outlives a burst of one-shot
-labels that arrived after it. Names an operator documents - a hold scope or a
-debug session - are pinned and are never evicted by later traffic, so a flood
+labels that arrived after it. Names an operator documents - a hold scope, a debug session, a limit policy
+(including one installed from a request's `X-Limit-*` headers or restored at
+boot) - are pinned and are never evicted by later traffic, so a flood
 of distinct labels cannot hide the client you scoped a hold to. Pins are
 derived from the documents that exist, not accumulated: resuming a hold or
 ending a debug session releases its names back to ordinary eviction. When a
@@ -1063,14 +1204,35 @@ tools from each other, not trusted callers from untrusted ones; a caller that
 sends another client's label is parked, or not parked, as that client. See
 [client identity](../SECURITY.md#client-identity-is-a-claim-not-an-authentication).
 
-Limits applies to a provider across all clients and keys, independently of the
-per-key concurrency/queue settings. Choose concurrency, requests per window,
-tokens per window and the optional anti-burst ramp, then Apply; Clear removes
-that provider policy. `clear:true` cannot be combined with a limit dimension:
-the handler refuses the ambiguity instead of dropping the supplied value and
-reporting success. The menu shows whether a policy came from the UI or a
-request header, together with available budget and in-flight/queued state.
-Queued counts every request the scheduler parks for that provider - admission
+Limits applies to an intersection of conditions: providers, models, clients,
+key hashes and conversations. Values inside one condition are alternatives; an
+empty condition matches any value, so a rule with no condition covers every
+request. A request must satisfy every non-empty condition, and every matching
+policy charges its own lease, so the tightest cap wins. A provider-only rule
+keeps the per-key concurrency and fairness behavior below; adding any other
+condition narrows the same machinery without changing it. Conditions select the
+request's recorded identity, so models match the request spelling, keys match
+the SHA-256 digest, and conversations match the selected leaf.
+
+A rule may also carry a recurring schedule: `days` (0 = Sunday), `start_minute`
+and `end_minute` in the server's local timezone. Equal minutes mean all day, and
+a start after the end spans midnight, with the after-midnight portion belonging
+to the previous day. An empty schedule is always active. Outside a rule's window
+it does not charge, settle or queue, and a request that matches no other rule
+proceeds normally.
+
+A policy's identity is the digest of its normalized conditions and schedule.
+Editing either one therefore creates a new identity, and two rules cannot
+silently share counters. Provider-only policies keep the version 1 persisted
+shape and still accept the singular `provider` field; a rule with any other
+condition persists its selector arrays. `clear:true` removes the whole policy
+and cannot be combined with a limit dimension: the handler refuses the
+ambiguity instead of dropping the supplied value and reporting success.
+
+Choose concurrency, requests per window, tokens per window and the optional
+anti-burst ramp. The console shows whether a policy came from the console or a
+request header, its schedule, and available budget and in-flight/queued state.
+Queued counts every request the scheduler parks for that policy - admission
 waits and send-gate waits behind a 429/5xx pacing window alike - not only work
 blocked by the configured cap. Send-gate waits are paced by the provider's retry
 hint and the retry budget; `max_queue_size` and `max_queue_wait` bound only the
@@ -1084,21 +1246,24 @@ a grant refills a saturated provider concurrency cap. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
-**Drain queued** releases every request the scheduler has parked, or only the
-model/client named in the menu fields, without waiting for a limit window, pause
-hold or retry pacing to open. The provider selector scopes limits only: a
-provider can hold queued work without a limit row (for example, send-gate waits
-behind an upstream 429), so it never narrows the drain. The line above the
-buttons shows the total parked count. Each released request answers with a
-retryable 503 and is recorded as `queue_drained`, never as a provider error; a
-request already exchanging bytes with the provider finishes normally. The API
-also accepts a `provider` scope for scripted drains.
+**Drain queue** releases every request the scheduler has parked, or only those
+whose recorded provider, model or client matches the one named in the console,
+without waiting for a limit window, pause hold or retry pacing to open. The
+selector reads each parked request's own identity, so it also releases work
+parked by a hold, by pacing, or by a provider without a limit row. The overview
+shows the total parked count. Each released request answers with a retryable 503
+and is recorded as `queue_drained`, never as a provider error; a request already
+exchanging bytes with the provider finishes normally. The API also accepts the
+same three scopes for scripted drains.
 
-Anti-burst is opt-in and scoped to each provider+key group. With `anti_burst`
-enabled and a concurrency target of at least 2, a group starts at one
-concurrent request and gains allowance linearly until it reaches the provider's
-`concurrency` target after `ramp_duration`. It is inert unless all three are
-set: the flag, a target of at least 2, and a duration above zero.
+Anti-burst is opt-in and scoped to each provider+key group. It is available
+only on a single-provider rule without a schedule, because a ramp is defined
+over the provider-plus-key groups the scheduler owns; the server rejects the
+pair on any other rule. With `anti_burst` enabled and a concurrency target of at
+least 2, a group starts at one concurrent request and gains allowance linearly
+until it reaches the rule's `concurrency` target after `ramp_duration`. It is
+inert unless all three are set: the flag, a target of at least 2, and a duration
+above zero.
 `ramp_duration` accepts the same 1s..24h window grammar as request and token
 windows, including `1d`; empty, `0` or `0s` turns it off. Requests beyond the
 current allowance stay in the existing per-key FIFO. A fully idle group whose
@@ -1108,15 +1273,17 @@ already has in-flight work anchors its epoch at the current occupancy, so
 running streams are not stalled. Changing the flag, duration or concurrency
 target resets every group's epoch. Header updates change only the three cap
 dimensions and preserve the stored anti-burst pair. Clearing the last active cap
-drops the whole provider policy, ramp included. The Limits menu carries the
-checkbox and ramp select; Apply sends both, and a form whose caps are all zero
+drops the whole policy, ramp included. The limit composer carries the checkbox
+and the ramp chips; applying sends both, and a form whose caps are all zero
 sends the pair off rather than an invalid on-ramp.
 
 Operator limit edits persist synchronously and report a warning when the store
 rejects the write. Header-driven limit changes apply in memory immediately and
 are persisted by one coalescing background writer: a burst of changes becomes
 the latest whole-policy document, with bounded retry and backoff after a store
-failure. That document also carries the anti-burst pair, and one written before
+failure. A closed store is not retried - the generation stays dirty and the
+writer stops - while a busy one keeps the ladder. That document also carries
+the anti-burst pair, and one written before
 those fields restores them off. A crash can therefore lose the most recent
 header-driven changes, and a failed save never rejects inference. Graceful
 shutdown and restart flush the latest policy before storage closes or the
@@ -1126,21 +1293,29 @@ from base URLs remain below both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB; admission charges the bytes actually read, so a
-declared length alone holds no budget), and `max_inflight_response_bytes` its
+body budget (default 256 MiB; admission charges the allocation hint, the
+declared length bounded by `max_request_bytes` and the read hint, and reconciles
+it against the bytes actually read, so a short body refunds the difference and a
+chunked one is charged as it arrives), and `max_inflight_response_bytes` its
 budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
 (at most 1 MiB plus one 32 KiB chunk), and model discovery. A request-slot
 refusal is answered with `503` and `Retry-After` before the body is read. The
-body budget refuses on the read that would cross it; that chunk and the rest
-of the upload are not retained. The per-request cap still owns the status: a
+body budget charges the allocation hint at admission and reconciles it against
+the bytes actually read; when the hint cannot be covered the slot is still
+taken, and the first read decides without retaining the upload. The
+per-request cap still owns the status: a
 refused request drains at most the remaining `max_request_bytes` window so an
 over-cap body answers the definitive `413` instead of a retryable `503`, while
 a body that fits the cap answers `503`. Request-body reads must make progress within
 `request_body_idle_timeout` and finish within the absolute
 `request_body_read_timeout`, so a stalled peer releases its reservation
-without cutting off a slow but progressing upload. Buffered whole-document
+without cutting off a slow but progressing upload. The `POST /admin/restore`
+upload is exempt from the absolute bound only: a full database archive can
+legitimately outlast it on a slow link, while the idle bound still cuts a
+client that stops sending, and an expired deadline answers `408` with its own
+message instead of the archive-cap `413`. Buffered whole-document
 response reads use `whole_document_read_timeout` when the send has no deadline
 and `whole_document_read_max` as the ceiling even when `X-Proxy-Timeout-Ms` is
 longer, so a slow or stalled body releases its response-buffer reservation; a
@@ -1262,10 +1437,16 @@ The retry-mode gate shares the storm scheduler's parking, probes and pacing,
 so storm recovery settings configure it without storm protection being
 enabled. It surfaces in the storm banner as a quota incident with a
 **Resume now** action (`POST /admin/quota`); manual-mode holds appear on the
-pause surface with their reason and resume like any hold. A quota 429 never
+pause surface with their reason and resume like any hold, and they derive their
+provider pin through the same commit owner as a manual pause so the provider
+stays offered in the scope pickers. A quota 429 never
 arms the rate-limit pacing trip (the rate-limit health series still counts the
 429 itself), and quota re-sends never burn the transient
-`max_retries` budget. The retry gate is in-memory - a restart drops it and
+`max_retries` budget. They are bounded by `storm_max_wait` instead, measured
+from the request's first park: when it expires the client receives the
+canonical retryable `error storm protection: ...` 429 rather than waiting on a
+gate that never opens, and the provider stays parked for the next request.
+The retry gate is in-memory - a restart drops it and
 the provider's next durable quota 429 re-arms it - while manual-mode holds
 persist like every operator pause. In-band occurrences (the same envelope
 inside a 200 stream) arm the pause the same way; that request already
@@ -1291,8 +1472,9 @@ Do not assume that every model spelling is an independent exact scope.
 
 The session timer selects future captures. `debug_capture_ttl` separately
 controls retained capture lifetime after completion, and
-`debug_capture_max_bytes` bounds captured request plus client-facing response
-bytes. Oversized captures are marked truncated. `debug_store_max_bytes`
+`debug_capture_max_bytes` bounds one capture document: retained headers are
+charged first and the remainder is split between the request and the
+client-facing response body. Oversized captures are marked truncated. `debug_store_max_bytes`
 (default 512 MiB) caps the whole capture sidecar; once the next write would
 exceed it, new captures are skipped and TTL expiry frees capacity again.
 Capture writes are counted in bytes, not characters. The request drawer loads an
@@ -1350,13 +1532,29 @@ even when credential headers are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
 
-### Logs and deletion
+### Export and deletion
 
-Logs downloads finalized request records as JSON, not the process's stderr log
-and not a complete administrative audit trail. With durable storage it reads the
-database; otherwise it uses available ring records. Open the menu, choose a
-filter and review its matching count before Download matching, or deliberately
-choose Download all. A debug-only export can include retained capture sidecars.
+The operator console's export section downloads finalized request records as
+JSON, not the process's stderr log and not a complete administrative audit
+trail. With durable storage it reads the database; otherwise it uses available
+ring records. Open export, choose either all history or matching records, and
+review the previewed count before downloading. Provider, model, client and
+conversation merge the server's known vocabularies with whatever the live record
+ring holds, so a quiet proxy can still filter by what has run since it started,
+and each of them also accepts a typed value. Status is the one list-only
+dimension, because a status code is not a name anyone can type reliably. A
+debug-only export can include retained capture sidecars.
+
+A debug capture is written beside its record as a `debug_capture` member, and
+only when the row still has a stored sidecar. The artifact therefore carries
+debug bodies only while durable storage is live: a ring-record export, or a
+sidecar already reclaimed by the capture retention sweep, has the record alone.
+The bodies remain sensitive either way.
+
+The export predicate has no constraint for `status_code=0` and `debug=0`; both
+are off rather than a match for the zero status or the false flag. A
+genuinely bodyless `POST /admin/purge` deletes everything in one call, which is
+why a mistyped query key is refused instead of silently ignored.
 
 The download is always a gzip artifact named `millivolt-logs-<timestamp>.json.gz`;
 gunzip it to read the JSON array of records. Compression is applied at the
@@ -1378,25 +1576,57 @@ category, and nowhere else. Delete matching uses the same filter/count owner
 as the export, and its scope is the chosen filter; Delete everything wipes
 the whole database. Deletion requires confirmation in the dashboard; it does
 not happen when the sheet opens. A selected filter makes a read-only
-`POST /admin/purge/count` preview. Current traffic can change the count
+`POST /admin/purge/count` preview; the count first commits the writer's queued
+batch into the read view, so a just-finalized request cannot read as empty.
+That barrier is bounded by the query timeout: a wedged writer lets the preview
+answer from the committed snapshot instead of spinning the sheet forever, and
+the delete's transactional re-check stays the guard. Neither the caller's
+deadline nor a client cancel fails the preview, even when it expires before the
+barrier does: each step runs detached on its own query budget, so a short
+dashboard deadline answers the same as an unbounded one. A
+ring-only deployment removes through the boundary the count saw, so a record
+that finalizes during the delete stays behind instead of disappearing
+uncounted. Current traffic can still change the count
 before the action, but the UI retains the previewed age cutoff rather than
-silently moving it. The filter selections reset every time the sheet
+silently moving it, and sends the rendered count with the delete so the
+proxy re-checks it inside the delete transaction and refuses a moved row
+set with 409 instead of deleting unpredicted rows. A 409 drops the sheet's
+preview and re-counts, so the operator confirms the new set instead of
+repeating the refusal. The filter selections reset every time the sheet
 refills, so a stale invisible filter never arms a destructive default.
 Both actions are irreversible without a backup.
 
+Every purge, backup and restore writes one audit line to the process log with
+its terminal outcome, before the response is written: the action, the rendered
+selection (`filter="all"` for a bodyless full delete, `filter="unparsed"` while
+the body or query has not been accepted, and `members="unparsed"` likewise for
+a backup/restore), the previewed count when
+one was supplied, and the committed `deleted` / `buffer_removed` counts, or the
+error. Even a rejection at the method gate or the query grammar, before the
+selection exists, leaves a line. Each value is quoted with Go string escaping,
+so a label carrying a newline or a quote stays one token on one physical line. A
+lost or truncated response therefore stays diagnosable, and a
+retry can be compared against what was actually attempted. These lines are the
+destructive-action trail; they are not a general request log.
+
 Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
-beyond the menu's common choices. See the shared
+beyond the console's common choices. See the shared
 [filter decoder](../cmd/proxy/log.go) and
 [PurgeFilter](../internal/storage/purge.go). Empty-body full deletion is
-deliberate and destructive; never use malformed JSON as an all-records command.
+deliberate and destructive; never use malformed or empty JSON as an all-records
+command. The count preview applies the same empty-filter rule, so `{}` answers
+400 on both routes rather than counting the full set for an ambiguous body; a
+genuinely bodyless count previews the whole set, exactly like the bodyless
+delete.
 The delete fence preserves newer completions and in-flight work. A completed
 purge, and an expired debug-capture sweep, checkpoint-truncates the WAL after
 the committed delete: `secure_delete` zeroes freed cells in the pages SQLite
 writes, and the checkpoint removes the pre-delete frames that would otherwise
 keep the old page images readable in the `-wal` sidecar. A reader holding an
-older snapshot can defer the checkpoint; the next destructive maintenance pass
-retries it.
+older snapshot can defer the checkpoint; the writer's near-term tick retries it
+while the reader is gone, and a clean shutdown makes the final attempt after the
+read pool is closed.
 
 ### Settings and Restart
 
@@ -1404,13 +1634,14 @@ Settings only reads configuration when opened. Its search, category rail and
 structured editors work on a local draft; Apply uses the
 [revision-checked save contract](#saving-settings-safely).
 
-Opening Restart reads availability and status. Restart now is disabled while a
-restart is in progress or rebuilding is unavailable. Progress reports actual
-build/drain/flush/handoff phases; it is not a simulated timer. After a successful
-handoff, reconnect/bootstrap refreshes history, aggregates, operator state and
-config. Changed embedded frontend assets trigger a page reload through that same
-refresh owner. The [lifecycle section](#reload-restart-and-shutdown) distinguishes
-source rebuilds from container replacement and ordinary shutdown.
+The console's system section reads restart availability and status when opened.
+The restart action is disabled while a restart is in progress or rebuilding is
+unavailable. Progress reports actual build/drain/flush/handoff phases; it is not
+a simulated timer. After a successful handoff, reconnect/bootstrap refreshes
+history, aggregates, operator state and config. Changed embedded frontend assets
+trigger a page reload through that same refresh owner. The
+[lifecycle section](#reload-restart-and-shutdown) distinguishes source rebuilds
+from container replacement and ordinary shutdown.
 
 ## Dashboard data and request inspection
 
@@ -1468,7 +1699,11 @@ the control gates on.
 The log starts with recent rows and pages older durable records as you scroll.
 Live rows show in-flight/queue/retry progress; final rows retain their outcomes.
 Retry disclosure opens absorbed attempts under the original request, not another
-inference record. Click the detail arrow or a non-link row cell to open its
+inference record. The attempts log keeps the newest `max_retries` plus
+`storm_max_retries` entries (at least one): a durable quota wait re-sends
+without spending either budget, so the tail is what explains a long parked
+request.
+Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
 The inspector presents available facts in four classified groups. Request covers
@@ -1559,9 +1794,11 @@ The two signals can overlap: a bare 429 is not an error, but a non-429 status
 that carries a rate-limit class failed the request and counts in both.
 Client-local
 cancellation is likewise distinct from an upstream failure - except a 499 whose
-record carries a structured error type: that observed the provider's in-band
-stream failure before the client left (typically an error event the client
-received and aborted around), and counts as the provider error it is. Zero
+record carries a structured error type: that observed a failure before the
+client left, either the provider's in-band stream failure (typically an error
+event the client received and aborted around) or a truncated stream whose
+completion marker never arrived, independent of which relay write failed. It
+counts as the upstream error it is. Zero
 explorer health badges are hidden independently. Error-dimension card
 headlines count failure events (final plus absorbed), while card N counts
 distinct affected requests. The gallery share denominator `error_total` is the
@@ -1591,9 +1828,17 @@ for a second state request. Live SSE carries pending progress and finalization;
 KPI/operator polling and configured aggregate refresh keep derived surfaces current.
 Reconnects use sequence/feed identity and fall back to full snapshots when replay
 cannot be trusted. The footer distinguishes live/offline, active holds/Debug,
-process-local storage drops and totals degraded by a failed startup history
-scan. An offline indicator alone does not prove inference
-is down. None of these mechanisms makes initial history preload instantaneous.
+process-local storage drops, totals degraded by a failed startup history scan,
+and a degraded operator-state restore. The last one is the difference between
+"nothing is held" and "a saved hold or limit document could not be read": the
+served `pause` and `throttle` snapshots carry `restore_degraded`, so a truncated
+document does not boot as a healthy, unpaused proxy with its saved rules silently
+gone. The flag stays true for the life of the process; a restart that reads a
+document which decodes is what clears it. Each key holds one value, so the next
+accepted operator write replaces the unreadable document rather than preserving
+it: capture the bytes first if they are needed as evidence. An offline
+indicator alone does not prove inference is down. None of these mechanisms makes
+initial history preload instantaneous.
 
 For integrations, use the documented read routes rather than scraping the DOM.
 Bootstrap/live data is a recent observation window; scoped aggregate routes query
@@ -1622,7 +1867,16 @@ and columns: `ATTACH`, `DETACH`, `PRAGMA`, `LOAD_EXTENSION`, the
 `sqlite_dbpage` and `dbstat` table-valued functions, the whole result-bearing
 `pragma_*` family and the `readfile`/`writefile` functions. Those would read
 raw pages, page statistics or the absolute database path, which is not part of
-this console's surface. Column meanings
+this console's surface.
+
+The denial is lexical over the raw query text, string literals included, so a
+keyword spelled inside a literal is refused too: `SELECT 'attach' AS x` and
+`SELECT 'pragma_table_info'` both fail. A name only has to contain the bare
+word at an ASCII boundary; `attachment` and `attach_x` pass. The driver
+executes a multi-statement string wholesale, returning the rows of the last
+statement, so both rules are load-bearing: without the `;` refusal a second
+`ATTACH` statement would run behind a `SELECT` prefix the prefix check accepts,
+and the keyword scan alone would not see it. Column meanings
 come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
 relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
 calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,
@@ -1871,7 +2125,10 @@ separate acceptance criteria. A short successful burst does not establish
 sustainable writer throughput or an absolute request-capacity ceiling.
 
 `storage_query_timeout` bounds interactive dashboard reads (chart, explorer,
-log/bootstrap, capture reads) and the ad-hoc query route. Startup projection
+log/bootstrap, capture reads) and the ad-hoc query route. A capture read waits
+first for the in-flight sidecar save of the same request, bounded by the
+drawer client's own request context, and only then starts the read budget, so a
+slow save cannot spend the budget the read needs. Startup projection
 preload, the boot totals rebuild, an administrative purge, and a backup merge's
 totals scan run under a separate internal ten-minute maintenance budget: they
 legitimately read or rewrite full history and must not inherit the interactive

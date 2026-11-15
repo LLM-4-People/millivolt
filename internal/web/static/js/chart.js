@@ -78,7 +78,6 @@ const CHART_MIN_H = 40;
 // Reuse locale formatters; cursor movement must not create one per readout.
 const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-const CHART_DAY_MS = 86400000;
 
 // fmtPct keeps % axis ticks/legend values human (up to 1 decimal, no float
 // spew) through the shared percentage-value owner: a strictly-sub-100 value
@@ -89,11 +88,6 @@ const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
 // range; the shared trailing unit is stated once so the pair fits one tile.
 // fmtTPSCompact and tpsUnitAfter are the shared owners in core.js.
 
-// hm is the single HH:MM local-time label (x ticks + hover chip).
-const hm = t => {
-  const d = new Date(t);
-  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
-};
 // chartWindowEnd is the payload's resolved window end: to_ms is the
 // exclusive right edge (the clock-clamped requested end for calendar views),
 // with now_ms as the fallback for a payload that predates the field. Span
@@ -112,12 +106,16 @@ function chartXTick(t) {
   const span = chartAgg ? (chartWindowEnd() - chartAgg.from_ms) : 0;
   // Alignment can extend a 24h range by one partial bucket; that is still
   // a clock-time view. Multi-day sub-day buckets keep both date and time.
-  if (span > CHART_DAY_MS + (chartAgg?.bucket_ms || 0)) {
+  if (span > TIME_MS.day + (chartAgg?.bucket_ms || 0)) {
     const d = new Date(t);
+    // A numeric axis label, not the log divider's prose stamp: it has to fit
+    // a tick. The calendar fields come from the date object, and the only
+    // calendar question this file asks - does the window span years - is
+    // chartSpansYears' own.
     const date = (d.getMonth() + 1) + '/' + d.getDate() + (chartSpansYears() ? '/' + d.getFullYear() : '');
-    return date + (chartAgg.bucket_ms < CHART_DAY_MS ? ' ' + hm(t) : '');
+    return date + (chartAgg.bucket_ms < TIME_MS.day ? ' ' + fmtClockMs(t) : '');
   }
-  return hm(t);
+  return fmtClockMs(t);
 }
 
 // A multi-day bucket must name both dates; clock-only end labels would make
@@ -128,7 +126,7 @@ function chartBucketRange(t0, t1) {
   const formatter = chartSpansYears() || start.getFullYear() !== end.getFullYear()
     ? CHART_FULL_DATE_FORMAT : CHART_DATE_FORMAT;
   const endDate = start.toDateString() !== end.toDateString() ? formatter.format(end) + ' · ' : '';
-  return formatter.format(start) + ' · ' + hm(t0) + '–' + endDate + hm(t1);
+  return formatter.format(start) + ' · ' + fmtClockRange(fmtClockMs(t0), endDate + fmtClockMs(t1));
 }
 
 // asinhTickLadder returns round decade values (1…1e15) for the arcsinh bars
@@ -224,6 +222,12 @@ const CHART_PRESETS = [
   },
 ];
 const activePreset = () => CHART_PRESETS.find(pr => pr.id === chartView.preset) || CHART_PRESETS[0];
+// chartImageLabel names the plot for assistive technology: a canvas has no
+// text, so the plot root carries an image role with what it currently shows.
+function chartImageLabel(preset) {
+  const win = ($('chart-window-label')?.textContent || '').trim();
+  return win ? `${preset.label} over ${win}` : preset.label;
+}
 function chartSpec(id) {
   return CHART_SERIES.find(s => s.id === id);
 }
@@ -947,15 +951,26 @@ function chartChromeSync() {
   const omitted = _compacted
     ? (_plan?.preset.requireAll ? ' · unmeasured intervals omitted' : ' · empty intervals omitted')
     : '';
-  const failed = !chartAgg && chartFailure === chartReqKey();
+  // A failed request is two different facts. With no payload there is nothing
+  // to show, so the row says so. With a last-good payload for the same
+  // identity the plot keeps drawing it - that is deliberate, a transient 500
+  // should not blank the chart - but the numbers on screen are no longer
+  // current, so the row has to say that too. It used to require !chartAgg,
+  // which meant a failing refresh kept presenting old buckets as a live
+  // reading.
+  const failed = chartFailure === chartReqKey();
   // The context row names the resolved selection, its bucket cadence, and -
-  // for all time - the stored coverage the payload reported.
+  // for all time - the stored coverage the payload reported. A live status
+  // filter is not charted at all (finalized buckets only), so the row says so
+  // instead of leaving the operator to wonder why the timeline looks unfiltered.
   const token = chartWindowToken();
   const resolved = tfResolve(token, Date.now());
   const history = token === 'all' && tfExtentFrom() > 0
     ? ' · ' + fmtDur(Date.now() - tfExtentFrom()) + ' of history' : '';
-  const context = failed ? 'chart unavailable - retrying'
-    : chartAgg ? resolved.long + ' · ' + fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted + history : 'Waiting for traffic';
+  const inFlight = chartStatusCharted() ? '' : ' · in-flight status is not charted';
+  const context = failed
+    ? (chartAgg ? resolved.long + ' · stale, retrying' : 'chart unavailable - retrying')
+    : chartAgg ? resolved.long + ' · ' + fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted + history + inFlight : 'Waiting for traffic';
   updateSection('chart-context', context);
 }
 
@@ -1009,7 +1024,7 @@ function renderChart() {
   if (!canRender) {
     if (_up) { _up.destroy(); _up = null; _upKey = ''; }
     if (canMeasure && w >= CHART_MIN_W && h >= CHART_MIN_H) {
-      const { ctx } = setupCanvas(box);
+      const { ctx, cv } = setupCanvas(box);
       ctx.clearRect(0, 0, w, h);
       // Three honest blanks, in priority order: nothing stored at all,
       // a window inside history with zero requests, traffic the preset
@@ -1018,6 +1033,9 @@ function renderChart() {
       if (chartIsEmpty()) msg = !chartAgg.data_from_ms ? 'no traffic yet' : 'no requests in this window';
       else if (!data) msg = `no ${activePreset().label.toLowerCase()} samples yet`;
       else msg = 'not enough data points yet';
+      // The blank is drawn text, not content: name it like a plot.
+      cv.setAttribute('role', 'img');
+      cv.setAttribute('aria-label', chartImageLabel(preset) + ' - ' + msg);
       drawBlank(ctx, msg);
     }
     return;
@@ -1033,6 +1051,14 @@ function renderChart() {
   } else {
     if (_up.width !== w || _up.height !== h) _up.setSize({ width: w, height: h });
     _up.setData(data);
+  }
+  // A canvas has no text, so the plot root is one named image for assistive
+  // technology, named by what it currently shows. The hover readout stays
+  // outside that root: an image role makes its own descendants presentational,
+  // and the readout is a live status region.
+  if (_up.root) {
+    _up.root.setAttribute('role', 'img');
+    _up.root.setAttribute('aria-label', chartImageLabel(preset));
   }
 }
 

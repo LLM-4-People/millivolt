@@ -150,7 +150,7 @@ func (s *Server) finishStormResponse(ctx context.Context, qualityFailure bool) {
 		// request: its response already reached the client verbatim. The
 		// settling permit may be this gate's probe; on unarmed targets the
 		// release is the historical Cancel.
-		s.settleQuotaFailure(p, state.format, state.rec.Client, state.rec.Provider,
+		s.settleQuotaFailure(p, state.format, policyTargetOf(state.rec),
 			metrics.NonRetryableQuotaClass(state.rec.ErrorType, state.rec.ErrorCode), 0)
 		return
 	}

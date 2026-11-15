@@ -414,8 +414,8 @@ func TestTranslationRejectionEchoBounded(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
 	}
-	if rec.Body.Len() > 2*protocolErrorEchoMax {
-		t.Fatalf("rejection body = %d bytes, want <= %d", rec.Body.Len(), 2*protocolErrorEchoMax)
+	if rec.Body.Len() > 2*metrics.ErrorMessageMaxBytes {
+		t.Fatalf("rejection body = %d bytes, want <= %d", rec.Body.Len(), 2*metrics.ErrorMessageMaxBytes)
 	}
 }
 

@@ -53,28 +53,52 @@ func newPrecomputedGzipWriter(w io.Writer) *gzip.Writer {
 }
 
 // acceptsGzip reports whether the client explicitly accepts gzip (denied by
-// default: a missing header or an explicit q=0 means no; any non-zero
-// qvalue - RFC 9110 §12.5.3 - is acceptance). An UNPARSEABLE qvalue is also
-// a refusal, as is a non-finite/out-of-range value - deny by default.
+// default: a missing header or an explicit q=0 means no; any non-zero qvalue -
+// RFC 9110 §12.5.3 - is acceptance). Only the q parameter is read, so unknown
+// parameters such as a level hint are ignored. A bare "*" also accepts gzip;
+// an explicit gzip entry outranks the wildcard and the first explicit entry
+// wins. An UNPARSEABLE qvalue is a refusal, as is a non-finite/out-of-range
+// value - deny by default.
 func acceptsGzip(r *http.Request) bool {
+	explicitSeen, explicitOK := false, false
+	wildcardSeen, wildcardOK := false, false
 	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
 		part = strings.TrimSpace(strings.ToLower(part))
 		if part == "" {
 			continue
 		}
 		token, params, _ := strings.Cut(part, ";")
-		if strings.TrimSpace(token) != "gzip" {
-			continue
-		}
-		if _, q, ok := strings.Cut(params, "q="); ok {
-			v, err := strconv.ParseFloat(strings.TrimSpace(q), 64)
-			if err != nil || !(v > 0 && v <= 1) {
-				return false // explicit refusal or garbage - both refuse
+		accepted := acceptsQValue(params)
+		switch strings.TrimSpace(token) {
+		case "gzip":
+			if !explicitSeen {
+				explicitSeen, explicitOK = true, accepted
+			}
+		case "*":
+			if !wildcardSeen {
+				wildcardSeen, wildcardOK = true, accepted
 			}
 		}
-		return true
 	}
-	return false
+	if explicitSeen {
+		return explicitOK
+	}
+	return wildcardSeen && wildcardOK
+}
+
+// acceptsQValue reports whether one Accept-Encoding entry's parameter list
+// carries an acceptable qvalue. A missing q parameter weighs 1; unsupported
+// parameters are ignored; a q parameter outside (0, 1] or unparseable refuses.
+func acceptsQValue(params string) bool {
+	for _, param := range strings.Split(params, ";") {
+		name, raw, ok := strings.Cut(param, "=")
+		if !ok || strings.TrimSpace(name) != "q" {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		return err == nil && value > 0 && value <= 1
+	}
+	return true
 }
 
 // gzipResponseWriter defers the Content-Encoding decision to the first

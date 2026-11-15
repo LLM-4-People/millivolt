@@ -41,6 +41,83 @@ module.exports = async function chartRender(H) {
   w.eval("chartView.preset = 'traffic'; chartView.hidden = {}");
   check('traffic plan keeps requests + errors as bars',
     w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.bar ? "bar" : "line") + "@" + m.scale).join("|")') === 'req=bar@y|err=bar@y');
+  // ---- the context row distinguishes "no data" from "not current" ----
+  // A failed same-identity refresh keeps the last good payload on purpose, so
+  // the plot does not blank on one transient error. The numbers on screen are
+  // then old, and the row has to say so: the guard used to require an absent
+  // payload, so a failing refresh presented old buckets as a live reading.
+  {
+    w.eval(`
+      chartAgg = window.__cp = ${JSON.stringify(mkChart())};
+      chartView.preset = 'traffic'; chartView.hidden = {};
+      chartFailure = null;
+      chartChromeSync();
+    `);
+    const healthy = d.getElementById('chart-context').textContent;
+    w.eval('chartFailure = chartReqKey(); chartChromeSync()');
+    const stale = d.getElementById('chart-context').textContent;
+    check('a failed refresh over a last-good payload is marked stale, not shown as current',
+      w.eval('!!chartAgg') && stale !== healthy && /stale/.test(stale) && /retrying/.test(stale) &&
+      !/unavailable/.test(stale));
+    w.eval('chartAgg = null; chartFailure = chartReqKey(); chartChromeSync()');
+    const gone = d.getElementById('chart-context').textContent;
+    check('a failed refresh with no payload names the chart unavailable',
+      /unavailable/.test(gone) && !/stale/.test(gone));
+    w.eval('chartFailure = null; chartAgg = null; chartChromeSync()');
+    check('a cleared failure returns the row to its ordinary reading',
+      !/stale|unavailable/.test(d.getElementById('chart-context').textContent));
+  }
+  // ---- a live status filter is never sent to the chart ----
+  // The chart folds finalized contributions only, so the server refuses an
+  // in-flight class with 400 invalid scope. The picker offers those classes
+  // unconditionally, and the 15s refresh re-sent the same impossible scope
+  // forever: a permanent condition painted as "chart unavailable - retrying".
+  // The chart's own scope now omits the class it cannot answer, and the context
+  // row says why instead of leaving the timeline looking unfiltered.
+  {
+    const savedStatus = w.eval('filters.status');
+    try {
+      for (const live of ['streaming', 'paused', 'throttled', 'pending']) {
+        w.eval('filters.status = ' + JSON.stringify(live));
+        check('an in-flight status class is not charted: ' + live,
+          w.eval('chartStatusCharted()') === false &&
+          !/[?&]s=/.test(w.eval('chartQuery()')) &&
+          !/[?&]s=/.test(w.eval('chartReqKey()')));
+      }
+      // A durable selector still rides the chart scope unchanged.
+      w.eval("filters.status = '200'");
+      check('a durable status code still scopes the chart',
+        w.eval('chartStatusCharted()') === true &&
+        /[?&]s=200/.test(w.eval('chartQuery()')));
+      // The explorer filter set is independent of the status selector and must
+      // keep applying even while the status is uncharted.
+      // Swap the filter source only for the duration of this assertion, and
+      // restore it in the same block: a leaked override breaks every later
+      // section that derives scope from the real function.
+      {
+        const savedSrc = w.eval('explorerFilters');
+        w.eval("filters.status = 'paused'; explorerFilters = () => [{dim: 'provider', id: 'prov-a'}]");
+        try {
+          check('the explorer filter set still scopes the chart under an in-flight status',
+            /f=provider%3Aprov-a/.test(w.eval('chartQuery()')) &&
+            !/[?&]s=/.test(w.eval('chartQuery()')));
+        } finally {
+          w.explorerFilters = savedSrc;
+        }
+      }
+      w.eval("filters.status = 'paused'; chartAgg = null; chartFailure = null; chartChromeSync()");
+      try {
+        w.eval('chartAgg = ' + JSON.stringify(mkChart()) + '; chartChromeSync()');
+        check('the context row states that an in-flight status is not charted',
+          /in-flight status is not charted/.test(d.getElementById('chart-context').textContent));
+      } finally {
+        w.eval('chartAgg = null; chartFailure = null');
+      }
+    } finally {
+      w.eval('filters.status = ' + JSON.stringify(savedStatus));
+      w.eval('chartAgg = null; chartFailure = null; chartChromeSync()');
+    }
+  }
   w.eval('chartAgg = null; chartView.preset = "traffic"; chartView.hidden = {}');
 
   // ---- test 11c: percentile selection never changes series structure ----
@@ -144,7 +221,23 @@ module.exports = async function chartRender(H) {
     dataLegDecHidden[1][0] === 200 && dataLegDecHidden[2][0] === 20);
   legDec().click();
   const pctControl = d.getElementById('chart-pct');
-  check('the percentile control names the plotted metrics without a second owner', pctControl.getAttribute('aria-label') === 'Percentile' && pctControl.title.includes('speed, latency and decode'));
+  // WCAG 2.5.3 (label in name): the accessible name must contain the visible
+  // text, because a voice-control user speaks what they see. The trigger paints
+  // "p95" and used to carry a static aria-label that omitted it, so saying
+  // "click p95" matched nothing. aria-labelledby joins a hidden prefix to the
+  // very span the writer already owns, so the name carries both and there is
+  // still one writer of the visible label.
+  const accName = el => {
+    const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    if (ids.length) return ids.map(i => (d.getElementById(i) || {}).textContent || '').join(' ').trim();
+    return (el.getAttribute('aria-label') || el.textContent || '').trim();
+  };
+  const pctVisible = d.getElementById('chart-pct-label').textContent;
+  check('the percentile control puts its visible label in its accessible name',
+    pctVisible === 'p' + w.eval('chartView.pct') &&
+    accName(pctControl).includes(pctVisible) &&
+    accName(pctControl).includes('Percentile') &&
+    pctControl.title.includes('speed, latency and decode'));
   // The control is a choiceMenu on the shared foundation: its trigger opens
   // the Percentile panel and the p99 row picks the value for every plotted
   // line. Drive the real control, not the setter.

@@ -191,6 +191,13 @@ function validateModelRulesDraft(wrap) {
 
 // The park/visibility button's title pair, shared by the row template and
 // the toggle handler so the two spellings of the same states cannot drift.
+// The park control's accessible name. It is deliberately state-independent: a
+// toggle's name must say what the control is, not what pressing it would do, so
+// aria-pressed carries the state while the name stays "park this rule". Before
+// this the button's only text was the glyph, and a glyph in the subtree wins
+// the accessible-name computation over title, so a screen reader announced
+// "◉, toggle button, pressed" and never the purpose.
+const MR_VIS_NAME = 'park this rule';
 const MR_VIS_TITLE_PARKED = 'un-park this rule';
 const MR_VIS_TITLE_ACTIVE = 'park this rule - keep it without applying it';
 
@@ -205,7 +212,7 @@ function modelRuleRowHTML(r) {
     `<input class="mr-from" value="${escapeHtml(r.from || '')}" placeholder="from - spelling (exact) or regex (pattern)"${dead} aria-label="from">` +
     `<span class="prov-arrow" aria-hidden="true">→</span>` +
     `<input class="mr-to" value="${escapeHtml(r.to || '')}" placeholder="to - empty removes the match"${dead} aria-label="to">` +
-    `<span class="mr-move"><button type="button" class="mr-vis" data-mr-vis aria-pressed="${off}" title="${off ? MR_VIS_TITLE_PARKED : MR_VIS_TITLE_ACTIVE}">${off ? '◌' : '◉'}</button><button type="button" data-mr-up aria-label="move rule up" title="move up">▲</button><button type="button" data-mr-dn aria-label="move rule down" title="move down">▼</button></span>` +
+    `<span class="mr-move"><button type="button" class="mr-vis" data-mr-vis aria-pressed="${off}" aria-label="${MR_VIS_NAME}" title="${off ? MR_VIS_TITLE_PARKED : MR_VIS_TITLE_ACTIVE}">${off ? '◌' : '◉'}</button><button type="button" data-mr-up aria-label="move rule up" title="move up">▲</button><button type="button" data-mr-dn aria-label="move rule down" title="move down">▼</button></span>` +
     `<button type="button" class="prov-x" data-mr-rm aria-label="remove rule" title="remove">✕</button>` +
     `<div class="mr-err" aria-live="polite"></div>` +
     `</div>`;

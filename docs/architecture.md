@@ -15,7 +15,7 @@ defines their supported combinations.
 | [internal/config](../internal/config/config.go) | Config/defaults/validation, split by subject into `config_types.go`, `config_defaults.go`, `config_clone.go`, `config_load.go`, `config_validate.go` and `config_validate_overrides.go`; schema, YAML generation, revision-checked Settings, model-rule execution, and the credential-class header vocabulary and redactor in `credentials.go`. |
 | [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. `params/params.go` owns the backup/restore query keys, boolean spelling, restore modes and archive magic shared by the HTTP handlers and `mvctl`; the leaf imports no encoder, SQLite or zstd. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; inbound/outbound protocol selection and canonical paths in [protocol.go](../internal/proxy/protocol.go); the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
-| [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
+| [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds, and limit policies selected by provider, model, client, key hash and conversation with optional recurring schedules; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection for Chat, Responses and Anthropic SSE ([analyzer_anthropic.go](../internal/sse/analyzer_anthropic.go)), split into decode, feed, usage, terminal, error, fill and report modules; client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit wire codecs (Chat, Responses, Anthropic) over the canonical [IR](../internal/format/ir/ir.go), Connect/protobuf framing, and the same-protocol translation facade. |
@@ -23,6 +23,15 @@ defines their supported combinations.
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates; `aggregate.go` owns the core row model and each surface has its own `aggregate_*.go` module. |
 | [cmd/mvctl](../cmd/mvctl/main.go) | the human operator client: command dispatch, per-command flags, human and JSON rendering, and destructive-action guards. It reuses `internal/mcp` for the operator HTTP client, `internal/config` for setting kinds and bands, and `internal/backup` for archive and query grammar. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
+
+## Logging
+
+[internal/logging](../internal/logging/logging.go) is the one owner of process
+log lines. It wraps the standard logger's sink and gives a request-scoped line
+the record id minted at the read boundary, so the line joins its stored row,
+capture and neighbouring lines. Process and operator-state lines pass no id.
+`log.Fatal` exits and the earliest flag errors that precede the process logger
+stay direct.
 
 ## Release identity and promotion
 
@@ -72,7 +81,25 @@ content strings, and `system`. It extracts the same routing and composition
 fields without the typed decode and delegates every other shape, including all
 parameter collections, escapes, duplicates, content part arrays, and preview
 capture, to the existing decoder and its bounds. Differential tests pin
-byte-for-byte record and rejection equivalence. The Anthropic translator
+byte-for-byte record and rejection equivalence. `SkipJSONString` finds each
+candidate quote with one `IndexByte` and reads its escape parity from the
+backslash run before it, so escaped content is one forward pass instead of a
+restart per escape: an escaped 1 MiB string went from 293-333 us to 12-13 us, a
+single escape before a 1 MiB run from 420-462 us to 12-14 us, and a 100 KiB
+escaped request body from 322-331 us to 219-235 us. The metadata preflight
+counts message elements, content parts and tool calls in one walk instead of
+three, and a 100 KiB body of 200 messages with tool calls went from 266-273 us
+to 187-205 us (`BenchmarkSkipJSONString`, `BenchmarkRequestMetadataShapes`).
+The streaming analyzer scans each frame once for its classifier keys and
+classifies lexically wherever it can. Chat tool-call frames are scanned once
+for the element index, id and `function.name`, with the typed decode kept only
+as the fallback for a shape the lexical grammar rejects: 1,728-1,850 ns and 6
+allocs per frame became 945-991 ns and 1 alloc, and the 1,000-frame dedupe
+benchmark at 10,000 retained names went from 11.05-11.40 ms, 2.89 MB and 60,158
+allocs to 6.2-6.7 ms, 190 KB and 10,112 allocs
+(`BenchmarkAnalyzerFeed/tool_call`, `BenchmarkAnalyzerToolNameDedupe`). A
+differential corpus and a fuzz target compare both paths over every analyzer
+field they touch. The Anthropic translator
 independently requires valid UTF-8 input,
 so it cannot materialize the replacement expansion either. The Start stamp
 follows body upload and precedes metadata/translation CPU. Upstream
@@ -89,8 +116,9 @@ fits the bounded read cap, otherwise that cap, and refuses with a retryable
 and its merge has exactly two application stages: the final header stage of
 `buildUpstreamRequest`, and the cursor identity headers at the native send. Its
 body stamp is fail closed (an undecodable or oversize result relays the
-original bytes with one log line), and a nil resolution - the feature off or
-nothing matched - leaves the request path byte-identical. The sub-conversation
+original bytes with one log line, prefixed by the request id minted at the read
+boundary so the line joins the stored row), and a nil resolution - the feature
+off or nothing matched - leaves the request path byte-identical. The sub-conversation
 strip is the single body-rewrite engine's second consumer: it fires
 independently of override resolution, after the tracked value is extracted
 from the buffered body and before translation, with
@@ -102,8 +130,12 @@ translated-anthropic or cursor body, and they fire with any override and
 strip actions through one document decode.
 
 Immutable config/client snapshots hot-swap for new work; old transports finish
-active requests. Admission is provider+key scoped, with provider-wide token,
-request and concurrency limits layered at the same grant owner. Acquisition
+active requests. Admission is provider+key scoped, with persistent limit
+policies layered at the same grant owner. A policy intersects its non-empty
+selector dimensions and an empty dimension matches any value, so a provider-only
+rule is the provider-wide cap while a narrower rule reuses the same machinery.
+Every matching policy charges its own lease, and a scheduled policy outside its
+window neither charges nor queues. Acquisition
 release settles exactly once. The provider gate and token-bucket epoch captured
 at admission keep clearing/replacing a cap from charging another generation's
 reservation. A provider-to-groups index in `Scheduler` keeps each group's slot
@@ -230,6 +262,28 @@ whole-event drop rule.
 under one short producer fence. SQLite is the durable authority; enqueue overflow
 and failed batches remain visible best-effort losses.
 
+`internal/storage/health.go` is the one owner of that loss accounting and of the
+pipeline's liveness. Every discard is counted under exactly one cause
+(`overflow`, `after_close`, `panic`, `flush_failed`); `Dropped()` sums them for
+the dashboard counter, and the exposition renders each cause so alerting can
+separate overload from shutdown, a panic and a failing database. The same owner
+publishes the oldest queued record's arrival and stamps every flush attempt, so
+`/readyz` can tell a stalled writer from a merely idle one: a non-empty queue
+whose oldest record, or last successful flush, has passed one flush interval
+plus the wedge window (four intervals clamped to 30 seconds and 2 minutes)
+reads wedged. The interval on top is the record's own cadence, so a record
+inside it never convicts and a long cadence cannot hide a stuck writer for
+longer than that. The arrival stamp comes from the producer when the queue was
+empty as well as from the writer, so a writer that dies before its first pickup
+still ages the record, and with no flush since boot the first accepted record
+ages the last-success arm too, so a zero flush stamp is not a blind spot. A
+failed flush stays sticky. `/healthz` stays the
+liveness contract; readiness is the stronger answer a scheduler needs.
+`tests/_go/internal/storage/health.go` pins the cause split, the wedge/ready
+transition and the disabled-store answer, and
+`tests/_go/internal/metrics/prometheus_extra.go` pins that the storage block is
+rendered per scrape rather than from the ring-revision memo.
+
 The one writer owns transactions and incremental totals. Its insertion plan
 binds arbitrary values, using exact zero/empty literals only for absent scalar
 work, and preserves existing conflict/rollback semantics. Record columns,
@@ -273,7 +327,12 @@ may renumber implicit rowids. The page handler classifies active filters:
 when every predicate is SQL-exact it requests exactly the remaining rows, and
 Go-only predicates grow geometrically from the page size to the 512-row batch
 cap within the 4,096-row scan budget. Both preserve the exclusive
-`(started_at, id)` cursor and `more`.
+`(started_at, id)` cursor and `more`. The candidate statement selects only the
+columns the residual groups read, and the derived error signature and tool
+labels are filled only when the plan declares them; a limit-60 5xx miss over
+200,000 rows costs 21,106 allocs and 3.4-4.2 ms instead of 66,278 allocs and
+8.5-10 ms, and the unfiltered page 2,642 allocs instead of 3,432
+(`BenchmarkHandleLogPage`).
 
 `Store.Clear` serializes administrative purges, captures an accepted-record
 boundary and publishes one command. The writer flushes earlier records, deletes
@@ -285,8 +344,21 @@ every ordinary consumed record. A non-empty purge, and a drained expired-capture
 sweep, checkpoint-truncates the WAL after the commit: `secure_delete` cleans the
 pages SQLite writes, and truncation removes the pre-delete frames that would
 otherwise keep the old page images in the `-wal` sidecar. The checkpoint is
-bounded and best effort; a busy reader defers it to the next destructive pass
-without failing the committed deletion.
+bounded and best effort; a busy reader raises a pending flag that the writer's
+near-term tick retries, and `Store.Close` makes the final attempt after the read
+pool is closed, without failing the committed deletion.
+
+The restricted SQL console (`GET /metrics/query` and the MCP `query` tool) is
+gated in `validateQuery`: one `SELECT`, no `;`, no
+`ATTACH`/`DETACH`/`PRAGMA`/`LOAD_EXTENSION` word, and no
+`sqlite_dbpage`/`dbstat`/`pragma_*`/`readfile`/`writefile`. The scan is lexical
+over the raw text, string literals included, and the read pool's `mode=ro` pins
+only the main database; SQLite still opens an `ATTACH`ed file writable.
+Follow-up gap: the pinned modernc.org/sqlite v1.61.0 exposes an authorizer per
+physical connection (`AuthorizerRegisterer`, installed through
+`RegisterConnectionHook`) and a `_defensive=1` DSN mode, and this build wires
+in neither. An authorizer policy at read-pool open plus defensive mode would
+turn the keyword list into defense in depth instead of the only owner.
 
 Operator backup and restore stage database-sized work as private files.
 `backup.EncodeFile` streams the packed snapshot, encoded archive and self-check
@@ -303,7 +375,14 @@ including over-cap, invalid archive, apply failure and client disconnect. A
 boot-time sweep reclaims only known staging names older than a safety age,
 examining the directory in bounded batches up to a per-boot entry budget; the
 live database, pending snapshot, rollback set, state marker and quarantined
-admission evidence are outside that registry. The attached inspect/merge and
+admission evidence are outside that registry. A rejected or interrupted pending
+file is preserved under a unique `.incoming.invalid-<token>` or
+`.incoming.invalid-interrupted-<token>` name with its sidecars, so a later
+rejection cannot overwrite earlier evidence. A pre-existing pending snapshot is
+hard-linked aside before the successor replaces the slot: the restore drops that
+link again on its own rollback, and a boot that rejects the successor renames
+the link back onto the slot and admits it once, so the queue entry is never
+orphaned into the sweep. The attached inspect/merge and
 decoded source use the shared `SQLiteURI` with `mode=ro`, so a snapshot path
 with URI metacharacters stays literal and writes through the attached schema
 fail.
@@ -337,7 +416,9 @@ post-reload request.
 
 Materialization runs off the projection lock with one single-flight builder;
 concurrent readers keep serving the previous complete snapshot and wait for
-that builder instead of repeating its scan. A destructive change builds a
+that builder instead of repeating its scan. The builder's token is released by
+a defer, so a panic in the scan, decode or interning step frees the waiters
+instead of wedging them until restart. A destructive change builds a
 complete replacement off-lock and swaps it under a short write lock. The
 durable since-inception totals are one meta row written in the same
 transaction as every insert, purge and merge on the held writer connection;
@@ -356,14 +437,19 @@ validated view/scope, canonical model rules, finalized/database revisions and,
 for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
 One in-flight fold per memo is shared by concurrent same-key callers: a
 different key never waits, and a waiter that finds no published entry after the
-leader ends recomputes as the next leader instead of inheriting its error.
+leader ends recomputes as the next leader instead of inheriting its error. The
+stability recheck hands over the fold's compiled rules identity instead of
+re-reading the config and re-marshalling up to 64 rules, so at the 64-rule
+maximum it costs 34-48 ns and 0 B/op instead of 7.7-8.0 us and 4,660 B/op
+(`BenchmarkAggregateUnchanged`).
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
 are filled at serve time and the ring snapshot itself is never retained.
 The unwritten set stays ring-derived. A record can be missing from the durable
 store while never having been queued: an enqueue that overflowed the writer
 channel and a batch whose insert failed are both dropped by design and counted
-only in `Dropped()`. The writer queue is therefore not a superset of "possibly
+by cause in the storage health owner; `Dropped()` sums the causes for the
+dashboard counter. The writer queue is therefore not a superset of "possibly
 not yet durable", and only the written-id set can say which ring rows are
 already durable, so the O(ring) probe under `aggMu` is the exact dedupe
 boundary. One cold fold measures 0.23-0.37 ms at the default 10,000-record ring
@@ -397,12 +483,19 @@ distinct errors into one dictionary id. Ordinary text keeps the historic
 spelling, which preserves saved error-filter ids. Exact group accumulators are capped at
 `explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
 fold into one synthetic `other` card carrying aggregate count, cost, token,
-tool and health fields; no per-value accumulator or error affected-ID map is
-allocated for them. The card carries an explicit `synthetic` wire marker and
+tool and health fields; no per-value accumulator and no per-card request-ID
+set is allocated for either an exact card or them. An error card's affected
+count is a counter plus the previous request id: one row's visits are
+contiguous, so that guard dedupes exactly what the old ID set did while staying
+bounded regardless of history. The card carries an explicit `synthetic` wire marker and
 no filter key, so a real value sharing its display label keeps its own exact,
 selectable card. The card ranking remains exact among tracked values, with
 `other` competing by its aggregate count, and overflow memberships map to the
-reserved other id so their percentile samples still select correctly. Rail
+reserved other slot so their percentile samples still select correctly. Rows
+store the group's 16-bit membership slot, not its dimension-wide dictionary id,
+so the per-row table is two bytes and the selected-card lookup is a bounded
+probe instead of a max-id-sized array; a 100,000-row provider fold drops from
+406,296 B/op to 209,688 B/op (`BenchmarkAggregateFold/explorer`). Rail
 distinct-value counts, scope totals and conversation summaries remain
 whole-history values and are not derived from the truncated group set.
 Selected groups use the same exact rank reader as chart buckets,
@@ -412,18 +505,32 @@ also produces the occurrence-weighted avg/min/max in the same traversal, so a
 metric order is no longer walked separately for stats. The all-history order is
 a compacted immutable base plus a bounded value-sorted pending delta (16,384
 samples): a catch-up append folds only its new samples, so it stays
-O(delta log delta) regardless of history, and reaching the bound folds
-base+pending once. Chart and explorer walk the two runs through one merge
-iterator, so a fresh view allocates no history-sized copy; a materialized merge
-stays cached per published snapshot only for consumers that need a slice. A
-full rebuild replaces the base and clears pending. A retained
+O(delta log delta) regardless of history, and reaching the bound arms one
+background fold that runs off the request and publishes the merged base under a
+one-assignment write. Readers keep the current base and pending until then, so
+an interrupted fold only leaves the published order in place. The fold owns its
+armed flag behind a deferred release: an unwind there (recovered and logged)
+clears the arm with the pending delta intact, so the next append folds again
+instead of the flag staying set and pending keeping the whole delta for the
+process lifetime. An append that
+crosses the bound at one million rows costs 0.47-1.54 ms and 3.96 MB instead of
+12.0-15.7 ms and 52.2 MB; the fold itself still costs 12.9 ms and 48 MB, now off
+the request (`BenchmarkProjectionMetricAppend`). Chart and explorer
+walk the two runs through one merge iterator, so a fresh view allocates no
+history-sized copy; a materialized merge stays cached per published snapshot
+only for consumers that need a slice. A full rebuild replaces the base, clears
+pending and discards a fold that has not published yet. A retained
 last-65,536-row order serves bounded chart windows whose earliest in-window
 durable row is inside that tail. It uses the same compacted base plus bounded
 pending delta design and its own per-snapshot view holder, so a sub-threshold
 catch-up merges only its new batch instead of copying the tail; a rebuild of
 the newest 65,536 rows replaces its base, clears the pending delta and releases
 samples that fell out of the tail. Older or unscoped windows fall back to the
-all-history order, so the fast path never changes rank or stat results.
+all-history order, so the fast path never changes rank or stat results. Chart
+membership is indexed from the first row a bounded window accepts and sized
+only to that window's remaining span, so a 15-minute view over 100,000 rows
+costs 335-347 us and 17,616 B/op instead of 560-588 us and 123,088 B/op; the
+All path keeps its historical allocation (`BenchmarkAggregateFold/chart_window`).
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
 speed/TTFT percentiles use period samples, never means of bucket percentiles.
@@ -495,7 +602,22 @@ record/end serialization never takes the ring lock. Canonical names are
 memoized across observer calls under the compiled rules revision, and each
 known-name vocabulary caches its sorted view under a set revision. Both caches
 are bounded and invalidate on content change, so bootstrap polls do not re-run
-the rules or re-sort thousands of names.
+the rules or re-sort thousands of names. The single-name memo owns the whole
+payload under one mutex keyed by the rules revision, so a repeat at event rate
+costs one lock and one lookup: 121-264 ns, 392 B/op and 4 allocs became 44-88
+ns, 24 B/op and 1 alloc, and 323-366 ns became 54-86 ns at the 64-rule maximum
+(`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`). The canon
+the observer reads is memoized per live config pointer, so consecutive events
+hand the compiled-rule cache the same backing array and it skips the whole-set
+compare; the wired shape holds 53 ns, 24 B/op and 1 alloc at the 64-rule maximum
+against 1062 ns, 4120 B/op and 2 allocs when the provider copied the rules per
+event (`BenchmarkObserveModelNameEventWired`).
+
+Pinned names are derived from the live holds, debug sessions and limit policies,
+never accumulated, so a removed document releases its scope. The derivation
+reads and applies the whole roster under the owning document locks: every
+document commit happens under the same lock and re-derives right after, so a
+stale derivation can never overwrite a newer roster and unpin a live scope.
 
 Observer records carry server-local `time_bucket`; browser-local dates are
 presentation only. Raw names remain raw for exact export/delete semantics.
@@ -539,6 +661,15 @@ Bearer-only: every POST gets a temporary server session bound to that request's
 credential, nothing survives it, and the dashboard session cookie is refused
 there because a cookie must not create an internal call.
 
+The SDK's own localhost DNS-rebinding `Host` check is deliberately off: the
+documented reverse-proxied placement preserves an external `Host` while dialing
+the proxy over loopback, so the check would reject that placement. Protection
+therefore rests entirely on the Bearer, which the same gate re-validates on
+every request; a missing or wrong credential is denied before any tool runs.
+The consequence is explicit: the endpoint admits any `Host` on the listener it
+is reachable from, with a valid credential, and any `Host`-based allow rule has
+to sit at the ingress rather than here.
+
 The destructive surface is guarded where the risk lives. A purge needs a filter
 that constrains something (the bodyless delete-everything command is never sent),
 an exact confirmation phrase, and the opaque `preview_token` that
@@ -550,9 +681,11 @@ and a rotated credential invalidates every outstanding preview. It carries its
 own expiry, enforced when the token is verified, so a preview authorizes a
 deletion only shortly after it was taken. A refusal discloses no count, because
 a refusal that reports the live count is a count oracle a model can retry its
-way through. The residual gap is stated rather than claimed away:
-the re-check and the delete are two requests with no shared transaction, so rows
-committed between them are removed un-previewed. Capture refuses to start without
+way through. The count is compared a second time inside the delete transaction
+in `Store.purgeTransaction`, so a population that moved refuses with 409 before
+any row is removed; the remaining limit is stated rather than claimed away: a
+count compares a population, not row identities, so a same-size different row
+set passes and a refusal needs a fresh preview. Capture refuses to start without
 durable storage, and checks a scope name against the vocabulary the proxy
 reports, because either way the session would report success and store nothing.
 Stopping a capture session deletes nothing, and a purge deletes the stored
@@ -566,7 +699,10 @@ when the same read fails. See the [MCP server guide](mcp.md).
 ## Dashboard render owners
 
 HTML embeds the canonical bootstrap builder's JSON, safely escaped in an inert
-data block. Deferred external assets download alongside HTML; the Settings
+data block. Transit gzip is negotiated from `Accept-Encoding` with only the `q`
+parameter read: unknown parameters are ignored, a bare `*` accepts gzip, and an
+explicit gzip entry outranks the wildcard; an unparseable or out-of-range
+qvalue refuses. Deferred external assets download alongside HTML; the Settings
 sheet is the one exception: its ordered `settings*.js` set is injected by the
 Settings trigger on first open, one module at a time under the same versioned
 URL, and single-flighted across concurrent opens. Saved hash/chart choices
@@ -592,11 +728,23 @@ Vanilla modules under [static/js](../internal/web/static/js) have distinct owner
 `core` formatters/shared state, `feedback` the one clipboard and toast path,
 `entities` identities/record labels, `explorer` routing/cards, `chart` uPlot
 plans, `menu` the one open/close, placement, dismissal and focus contract for
-menu panels, `timeframe` the chart time vocabulary, stored-extent availability
-and the timeframe control, `log` window/drawer, `log_detail` detail rows,
-classified group tabs,
-cards and long-text surfaces,
-`chrome` operator shell, `theme` the surface/palette registry and preview tray,
+menu panels, `chrome_menus` the header menu registry and the remaining theme
+tray, nav and dimension class menus, `operator_console` the header readout,
+console shell, section rail, shared wording and bounded session change ledger,
+its four policy modules `operator_limits`, `operator_holds`, `operator_export`
+and `operator_overview` owning their own sections, with `chrome_operator`
+owning the mutation gate and request shape, `chrome_lists`
+the operator vocabularies, model grouping, capture storage gate and footer
+words, `chrome_restart` the restart choreography, and `chrome_settings` the
+Settings shell and trigger, the accepted debug snapshot, hold liveness and the
+download paths, `timeframe` the chart time vocabulary, stored-extent
+availability and the timeframe control, `log` the live log frame,
+`log_rows` the rows, day dividers and column registry, `log_archive` the durable
+archive window, `log_drawer` the detail drawer lifecycle and retry-attempt
+navigation, `log_detail` the detail primitives, `log_debug` the drawer's Debug
+capture section, `chrome_storm` the storm banner, incident identity and details
+dialog,
+`theme` the surface/palette registry and preview tray,
 `settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
 state. `theme.js` owns
 the mode/palette registry, normalization, the single persistence shape, the
@@ -615,8 +763,9 @@ chrome and the theme tray, including the comparator/caption-bar layout. The
 dashboard sheet is split by surface, linked in this order: `dashboard.css`
 (palette, base, chrome and KPI band), `explorer.css`, `overlays.css` (drawer
 and settings sheet), `charts.css`, `requests.css` (including the shared
-semantic status fills) and `inspector.css`, with `themes.css` last among the
-dashboard modules and the vendored uPlot sheet after it. The link order is the
+semantic status fills) and `inspector.css`, with `themes.css` next, then
+`console.css` for the readout and operator console only, and the vendored uPlot
+sheet last. The link order is the
 cascade; `dashboard.css` remains the `:root` palette owner. Each palette owns
 `--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
 cool Clear palettes get cool elevation and scrims. `chrome_settings.js` owns

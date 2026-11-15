@@ -161,7 +161,7 @@ jobs:
         # so the Chromium download stays out of this job.
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install --require-hashes -r requirements-dev.txt
       - name: Check source and unit tests
         run: bash scripts/check.sh
 
@@ -212,7 +212,7 @@ jobs:
         # harnesses, and `scripts/dev.sh up` (a Go build) never invoke Node or
         # npm, so there is no `npm ci` and no setup-node in this job.
         run: |
-          python3 -m pip install -r requirements-dev.txt
+          python3 -m pip install --require-hashes -r requirements-dev.txt
           python3 -m playwright install --with-deps chromium
       - name: Check isolated browser fixtures
         env:
@@ -225,6 +225,8 @@ jobs:
           # credential: the dashboard gate is fail closed, and the harnesses
           # sign in through it for gated fixture cleanup.
           MILLIVOLT_OPERATOR_TOKEN: "ci-browser-fixture-credential"
+          # Opt-in for the integration test below; a plain local run stays fast.
+          MILLIVOLT_MCP_INTEGRATION: "1"
         run: |
           trap 'scripts/dev.sh stop' EXIT
           scripts/dev.sh up
@@ -235,8 +237,10 @@ jobs:
           # the browser fixture. In the unit job it would mean a second proxy in
           # a source-and-unit suite, which is the wrong place for it. It used to
           # be manual, and a regression in the audit lifecycle or the purge
-          # guards would merge green; it is opt-in only for local runs.
-          MILLIVOLT_MCP_INTEGRATION=1 bash scripts/check.sh go test -count=1 ./internal/mcp/...
+          # guards would merge green; MILLIVOLT_MCP_INTEGRATION above is its
+          # opt-in, and tests/python/workflows_jobs.py pins both the variable
+          # and this command so dropping either fails the contract.
+          bash scripts/check.sh go test -count=1 ./internal/mcp/...
 
   container:
     name: container (${{ matrix.platform }})
@@ -309,7 +313,13 @@ jobs:
       github.event.action != 'closed' && github.base_ref == 'main' &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # This job polls for escalation.yml's run, whose own race job is allowed
+    # 90 minutes. The wait below is 100 minutes, so this budget must exceed it:
+    # a shorter job timeout kills the loop before it can report its designed
+    # failure, and the operator sees a generic cancellation instead of
+    # "still pending". tests/python/workflows_gates.py asserts both
+    # relationships (wait >= the proved run's budget, job > wait).
+    timeout-minutes: 120
     permissions:
       actions: read
       checks: read
@@ -389,16 +399,20 @@ jobs:
             exit 1
           fi
           # The forced full-race sweep plus the flake sweep can take tens of
-          # minutes on a four-core runner. Poll for completion, bounded at
-          # thirty minutes; a run that never completes fails closed.
-          for attempt in $(seq 1 60); do
+          # minutes on a four-core runner. This wait must cover escalation.yml's
+          # own race budget (90m) and still fit inside this job's budget: a
+          # shorter wait failed healthy runs that were merely slow, and a wait
+          # longer than the job could never report its own failure. Declared
+          # once so the loop bound and the progress line cannot disagree.
+          wait_attempts=200
+          for attempt in $(seq 1 "$wait_attempts"); do
             run_status="$(printf '%s' "$run" | jq -r '.status')"
             run_conclusion="$(printf '%s' "$run" | jq -r '.conclusion // ""')"
             suite="$(printf '%s' "$run" | jq -r '.check_suite_id // 0')"
             payload="$(fetch_check_runs "$HEAD_SHA")"
             outcome="$(race_outcome "$payload" "$suite")"
             if [ "$run_status" = "completed" ] && [ "$outcome" != "pending" ]; then break; fi
-            echo "The escalation run for $HEAD_SHA is $run_status with race $outcome; waiting 30 seconds ($attempt/60)."
+            echo "The escalation run for $HEAD_SHA is $run_status with race $outcome; waiting 30 seconds ($attempt/$wait_attempts)."
             sleep 30
             runs="$(fetch_workflow_runs "head_sha=$HEAD_SHA")"
             run="$(escalation_run "$runs" "$HEAD_SHA")"
@@ -1013,7 +1027,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
-          python3 -m pip install -r requirements-docs.txt
+          python3 -m pip install --require-hashes -r requirements-docs.txt
           python3 -B -O -m tests.python.site
           python3 -B -O -m tests.python.repository
           python3 -B -O -m tests.python.workflows

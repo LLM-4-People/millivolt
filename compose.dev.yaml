@@ -5,7 +5,8 @@ name: millivolt-dev
 services:
   millivolt-dev:
     image: ${MILLIVOLT_DEV_IMAGE:-millivolt:dev}
-    container_name: millivolt-dev
+    # No container_name: the project-scoped name keeps a second development
+    # project from colliding with this one.
     build:
       context: .
     pull_policy: build
@@ -17,6 +18,10 @@ services:
       - data:/data
       - config:/config
     read_only: true
+    # Same resource bounds as the deployment Compose: a runaway development
+    # session must not take the host down either.
+    mem_limit: ${MILLIVOLT_MEM_LIMIT:-1g}
+    pids_limit: ${MILLIVOLT_PIDS_LIMIT:-512}
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
     cap_drop:
@@ -32,6 +37,14 @@ services:
         max-size: "10m"
         max-file: "3"
     stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
+    # Same readiness probe as the deployment Compose: healthy means the
+    # durable pipeline can persist, not merely that the process answers.
+    healthcheck:
+      test: ["CMD", "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-readycheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
 volumes:
   data:

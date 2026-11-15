@@ -232,6 +232,7 @@ func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, i
 		typ = sse.TypeUpstreamError
 	}
 	typ, code = metrics.TruncatePreview(typ), metrics.TruncatePreview(code)
+	msg = metrics.TruncateError(msg)
 	var frame []byte
 	switch inbound {
 	case ir.Anthropic:
@@ -264,6 +265,7 @@ func writeProtocolError(w io.Writer, rec *metrics.Record, inbound ir.Protocol, i
 
 // writeProtocolTerminal writes the inbound protocol's terminal frame.
 func writeProtocolTerminal(w io.Writer, rec *metrics.Record, inbound ir.Protocol, id, model string, typ, code, msg string) error {
+	msg = metrics.TruncateError(msg)
 	var frame []byte
 	switch inbound {
 	case ir.Anthropic:
@@ -314,11 +316,8 @@ func translationLossFields(warnings ir.Warnings) []string {
 }
 
 const (
-	// translationLossFieldMax bounds one echoed translation-loss field, and
-	// protocolErrorEchoMax bounds the whole message a pre-commit error writer
-	// may echo from a decoder or translator.
+	// translationLossFieldMax bounds one echoed translation-loss field.
 	translationLossFieldMax = 128
-	protocolErrorEchoMax    = 1024
 )
 
 // writeProtocolHTTPError writes a pre-commit JSON error in the client's
@@ -342,10 +341,11 @@ func writeProtocolHTTPErrorHdr(w http.ResponseWriter, inbound ir.Protocol, statu
 // code), sets the proxy-owned content type and nosniff fence, preserves extra
 // headers, and returns the body byte count for callers that book it.
 func writeProtocolHTTPErrorCodeHdr(w http.ResponseWriter, inbound ir.Protocol, status int, typ, code, msg string, extra http.Header) int {
-	// Provider-captured type and code use the shared preview bound, matching
-	// the format decoders and the in-band writer above.
+	// Provider-captured type and code use the shared preview bound, and the
+	// message the shared error bound, matching the in-band writer and the
+	// format decoders.
 	typ, code = metrics.TruncatePreview(typ), metrics.TruncatePreview(code)
-	msg = retainedText(msg, protocolErrorEchoMax)
+	msg = metrics.TruncateError(msg)
 	// An unknown path has no inbound protocol. This sink's contract keeps the
 	// historical OpenAI envelope for Chat and unknown paths, so normalize the
 	// zero value instead of letting EncodeError reject it and falling back to

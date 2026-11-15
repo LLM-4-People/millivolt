@@ -2,10 +2,11 @@ package storage
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // snapshotDirSyncHook is a test seam (production nil) for observing or failing
@@ -166,7 +167,7 @@ func removeMarkerlessSnapshotDebris(previous string) error {
 	wal := previous + "-wal"
 	if info, err := os.Stat(wal); err == nil {
 		if info.Size() > 0 {
-			log.Printf("storage: markerless snapshot recovery: discarding non-empty rollback WAL %s (%d bytes); without a state marker its committed frames cannot be distinguished from debris and may be lost", wal, info.Size())
+			logging.Printf("", "storage: markerless snapshot recovery: discarding non-empty rollback WAL %s (%d bytes); without a state marker its committed frames cannot be distinguished from debris and may be lost", wal, info.Size())
 		}
 	} else if !os.IsNotExist(err) {
 		return err
@@ -274,9 +275,11 @@ func restorePendingSnapshot(path, previous, state string) error {
 	if _, err := os.Stat(incoming); err == nil {
 		// Failing here must not fall through to admission: re-admitting the
 		// interrupted file is exactly what this fence exists to prevent.
-		if err := quarantinePendingSnapshot(incoming, pendingSnapshotInterruptedSuffix); err != nil {
+		quarantined, err := quarantinePendingSnapshot(incoming, pendingSnapshotInterruptedSuffix)
+		if err != nil {
 			return fmt.Errorf("quarantine interrupted pending snapshot: %w", err)
 		}
+		logging.Printf("", "storage: preserved interrupted pending snapshot as %s", quarantined)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -285,7 +288,7 @@ func restorePendingSnapshot(path, previous, state string) error {
 			return err
 		}
 	}
-	log.Printf("storage: restored database from interrupted pending snapshot at %s", path)
+	logging.Printf("", "storage: restored database from interrupted pending snapshot at %s", path)
 	return nil
 }
 
@@ -297,7 +300,7 @@ func removeSnapshotDebris(previous string) error {
 	}
 	for _, suffix := range snapshotSidecarSuffixes {
 		if err := removeIfExists(previous + suffix); err != nil {
-			log.Printf("storage: remove rollback sidecar %s: %v", previous+suffix, err)
+			logging.Printf("", "storage: remove rollback sidecar %s: %v", previous+suffix, err)
 		}
 	}
 	return nil

@@ -7,21 +7,23 @@ import (
 	"flag"
 	"fmt"
 	"log"
+
 	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/LLM-4-People/millivolt"
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
@@ -36,8 +38,12 @@ import (
 // boot snapshot); liveProxy is the running proxy server; liveConfigPath is
 // the -config flag value.
 var (
-	liveMu             sync.Mutex
-	reloadMu           sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
+	liveMu   sync.Mutex
+	reloadMu sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
+	// restoreHolders counts restores owning or waiting for reloadMu. A restore
+	// may hold it across a whole streaming upload, so save and reload use the
+	// count to refuse with 409 instead of blocking unboundedly on it.
+	restoreHolders     atomic.Int32
 	liveCfg            *config.Config
 	bootCfg            *config.Config // immutable process-bound settings
 	liveProxy          *proxy.Server
@@ -50,19 +56,24 @@ var (
 	// config POINTER identity: a reload always publishes a fresh clone, so the
 	// cache is invalidated by the swap itself and never by a time window. It
 	// rides the liveCfg declaration because that pointer is its only key.
-	dashPayload config.PayloadMemo
+	// modelCanonMemo does the same for the model-rule snapshot the SSE observer
+	// reads per event.
+	dashPayload    config.PayloadMemo
+	modelCanonMemo config.ModelCanonMemo
 )
 
 // rejectUnless is the RFC 9110 method gate for mux handlers in this
 // file. Mux patterns stay unmethoded so a wrong-method request cannot
-// fall through to the LLM proxy; Allow lists the one supported method.
-func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
+// fall through to the LLM proxy; Allow lists the one supported method. The
+// returned reason is the audit twin of the answer body, so a refusal and its
+// audit line can never word themselves differently.
+func rejectUnless(w http.ResponseWriter, r *http.Request, method string) (refusal string) {
 	if r.Method == method {
-		return true
+		return ""
 	}
 	w.Header().Set("Allow", method)
 	adminjson.WriteError(w, http.StatusMethodNotAllowed, method+" only")
-	return false
+	return method + " only (request was " + r.Method + ")"
 }
 
 // newHTTPServer builds the proxy's http.Server: the caller-supplied request
@@ -77,7 +88,7 @@ func newHTTPServer(handler http.Handler, readHeaderTimeout, idleTimeout time.Dur
 		// The deadline layer arms a per-request body-read bound and a per-write
 		// progress bound, so no handler can pin a connection forever while the
 		// server keeps its intentional zero ReadTimeout/WriteTimeout policy.
-		Handler:           deadlineHandler{next: handler, policy: policy},
+		Handler:           secureTransportHeaders(deadlineHandler{next: handler, policy: policy}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		// No WriteTimeout: it would cut off long-lived SSE streams.
@@ -91,42 +102,58 @@ type reservedNamespace struct {
 	handler http.Handler
 }
 
-// operatorNamespaces returns the reserved operator-namespace registrations,
-// built from the boot config. The /admin, /metrics and /mcp namespaces own no
-// unregistered handler: reserving both the roots and the subtrees means
-// neither the unauthenticated gate nor an authenticated request can forward a
-// namespace look-alike to the upstream catch-all. The /session root is the
-// registered handshake itself: it is the one open operator route, kept outside
-// /admin so an external authentication layer can front the admin plane without
-// gating millivolt's own login, and its subtree row reserves every unregistered
-// spelling. Registered exact patterns (pause, config, agg/*, ...) keep mux
-// precedence. newOperatorMux installs exactly this set, and the route tests
-// drive that same function, so a dropped /admin, /session or /metrics
+// operatorNamespaces returns the reserved namespace registrations, generated
+// from the canonical table in internal/web. The /admin, /metrics and /mcp
+// namespaces own no unregistered handler: reserving both the roots and the
+// subtrees means neither the unauthenticated gate nor an authenticated request
+// can forward a namespace look-alike to the upstream catch-all. The /session
+// root is the registered handshake itself: it is the one open operator route,
+// kept outside /admin so an external authentication layer can front the admin
+// plane without gating millivolt's own login, and its subtree row reserves every
+// unregistered spelling. The open probes are registered roots for the same
+// reason: a load balancer that spells /healthz/ must not get the inference
+// catch-all's answer. Registered exact patterns (pause, config, agg/*, ...)
+// keep mux precedence. newOperatorMux installs exactly this set, and the route
+// tests drive that same function, so a dropped /admin, /session or /metrics
 // registration fails the default suite instead of only the opt-in live one.
 func operatorNamespaces(gate *operatorGate, dispatch http.Handler, boot *config.Config) []reservedNamespace {
-	namespaces := []reservedNamespace{
-		{"/admin", http.NotFoundHandler()},
-		{"/admin/", http.NotFoundHandler()},
-		// The session handshake mints the operator cookie; it is exempt
-		// from the credential gate by definition and owns its own failure
-		// throttling and same-origin wrapper. /session/ reserves every
-		// unregistered subpath for the 404 handler.
-		{"/session", http.NewCrossOriginProtection().Handler(http.HandlerFunc(gate.handleOperatorSession))},
-		{"/session/", http.NotFoundHandler()},
-		{"/metrics", http.NotFoundHandler()},
-		{"/metrics/", http.NotFoundHandler()},
+	namespaces := make([]reservedNamespace, 0, 2*len(web.ReservedNamespaces()))
+	for _, ns := range web.ReservedNamespaces() {
+		if !ns.Reserved {
+			continue
+		}
+		namespaces = append(namespaces,
+			reservedNamespace{ns.Root, namespaceRootHandler(ns.Root, gate, dispatch, boot)},
+			reservedNamespace{ns.Root + "/", http.NotFoundHandler()})
 	}
-	// The MCP streamable HTTP endpoint is registered from the boot config's
-	// mcp_enabled and gated like /metrics. When it is off the root stays
-	// reserved for the 404 handler - the gate passes an authenticated /mcp
-	// to the mux, so an unregistered root would fall through to the inference
-	// catch-all - and /mcp/ reserves every look-alike in either boot.
-	if boot.MCPEnabled {
-		namespaces = append(namespaces, reservedNamespace{"/mcp", newMCPHandler(gate, dispatch, mcp.LimitsFromConfig(boot))})
-	} else {
-		namespaces = append(namespaces, reservedNamespace{"/mcp", http.NotFoundHandler()})
+	return namespaces
+}
+
+// namespaceRootHandler picks the root handler of one reserved namespace: the
+// session handshake, the MCP endpoint (or its reserved 404 when disabled), the
+// open probes, and the reserved 404 for everything else.
+func namespaceRootHandler(root string, gate *operatorGate, dispatch http.Handler, boot *config.Config) http.Handler {
+	switch root {
+	case "/session":
+		// The handshake mints the operator cookie; it is exempt from the
+		// credential gate by definition and owns its own failure throttling
+		// and same-origin wrapper.
+		return sameOriginGuard(http.HandlerFunc(gate.handleOperatorSession))
+	case "/healthz":
+		return http.HandlerFunc(handleHealthz)
+	case "/readyz":
+		// liveStore is set before the mux is built; Ready is nil-safe, so a
+		// disabled store answers ready.
+		return handleReadyz(liveStore.Ready)
+	case "/mcp":
+		// Registered only when enabled; the root stays reserved otherwise -
+		// the gate passes an authenticated /mcp to the mux, so an
+		// unregistered root would fall through to the inference catch-all.
+		if boot.MCPEnabled {
+			return newMCPHandler(gate, dispatch, mcp.LimitsFromConfig(boot))
+		}
 	}
-	return append(namespaces, reservedNamespace{"/mcp/", http.NotFoundHandler()})
+	return http.NotFoundHandler()
 }
 
 // newOperatorMux builds the route table the proxy serves and installs the
@@ -147,6 +174,25 @@ func newOperatorMux(gate *operatorGate, boot *config.Config) (*http.ServeMux, ht
 	return mux, handler
 }
 
+// processDrain is the process-wide drain every fatal boot or resume path runs
+// before exiting, so buffered metrics are not discarded by a bare os.Exit. main
+// installs the single drainStore closure once the store and proxy exist; a nil
+// value (a failure before they do) simply exits. It is a variable rather than a
+// dependency because inheritedListener runs before the restarter is built.
+var processDrain func()
+
+// fatalDrain is the one fatal exit for the boot and resume paths that run after
+// the store exists. log.Fatalf exits immediately and skips the write-channel
+// drain and final flush, so a resumed-but-unusable process would drop every
+// buffered record; this drains first and keeps Fatalf's exit status.
+func fatalDrain(format string, args ...any) {
+	logging.Printf("", format, args...)
+	if processDrain != nil {
+		processDrain()
+	}
+	os.Exit(1)
+}
+
 func main() {
 	configPath := flag.String("config", "proxy.yaml", "path to config file (empty for built-in defaults)")
 	printConfig := flag.Bool("print-config", false, "print documented built-in defaults as YAML and exit without loading configuration")
@@ -162,6 +208,7 @@ func main() {
 	// with its own pid on boot.
 	pidFile := flag.String("pid-file", "", "write the process pid to this file after boot")
 	healthcheck := flag.Bool("healthcheck", false, "probe GET /healthz on the configured listen address and exit nonzero on failure (Docker HEALTHCHECK); loads config read-only")
+	readycheck := flag.Bool("readycheck", false, "probe GET /readyz on the configured listen address and exit nonzero when storage is not ready (Compose readiness); loads config read-only")
 	flag.Parse()
 	// Boot-time globals the healthcheck and reload helpers share. Set before
 	// any mode that reads configuration.
@@ -200,8 +247,14 @@ func main() {
 		return
 	}
 	// Docker HEALTHCHECK mode: probe and exit; nothing below runs.
+	if *healthcheck && *readycheck {
+		log.Fatal("-healthcheck and -readycheck are mutually exclusive")
+	}
 	if *healthcheck {
 		os.Exit(runHealthcheck())
+	}
+	if *readycheck {
+		os.Exit(runReadycheck())
 	}
 
 	cfg, skipped, err := config.LoadFileRepair(*configPath)
@@ -210,7 +263,9 @@ func main() {
 	}
 	logDroppedConfigKeys(*configPath, skipped)
 	recordReloadStatus(true, "", skipped, nil)
-	applyCLIOverrides(cfg)
+	if err := applyCLIOverrides(cfg); err != nil {
+		log.Fatalf("config: %v", err)
+	}
 	// The soft runtime memory limit is startup-only by design: it must be
 	// active before the startup projection preload allocates its burst. A
 	// zero config value leaves an operator GOMEMLIMIT untouched and otherwise
@@ -221,7 +276,7 @@ func main() {
 	if limit := effectiveMemoryLimit(int64(cfg.MemoryLimit), os.Getenv("GOMEMLIMIT"), cgroupLimit, hasCgroup); limit > 0 {
 		debug.SetMemoryLimit(limit)
 		if cfg.MemoryLimit == 0 {
-			log.Printf("runtime: soft memory limit %d MiB from cgroup memory ceiling %d MiB", limit>>20, cgroupLimit>>20)
+			logging.Printf("", "runtime: soft memory limit %d MiB from cgroup memory ceiling %d MiB", limit>>20, cgroupLimit>>20)
 		}
 	}
 
@@ -260,7 +315,7 @@ func main() {
 				log.Fatalf("provider_aliases: %v", err)
 			}
 			if renamed > 0 {
-				log.Printf("provider_aliases: merged %d records into canonical labels", renamed)
+				logging.Printf("", "provider_aliases: merged %d records into canonical labels", renamed)
 			}
 		}
 
@@ -275,10 +330,10 @@ func main() {
 		if err != nil {
 			// Degraded but not fatal: boot with an empty ring (history is still
 			// in SQLite). Never fail silently - log the persistence failure.
-			log.Printf("backfill skipped: %v", err)
+			logging.Printf("", "backfill skipped: %v", err)
 		} else {
 			buf.Backfill(recs)
-			log.Printf("backfilled %d records from storage", len(recs))
+			logging.Printf("", "backfilled %d records from storage", len(recs))
 		}
 		// Cap full live snapshots to the newest window - durable storage is
 		// on here, so applySnapshotLimit applies the cap (see its doc for the
@@ -314,15 +369,21 @@ func main() {
 	gate := newOperatorGate(mustOperatorToken())
 
 	mux, handler := newOperatorMux(gate, cfg)
-	// The liveness probe is the one open server route besides inference:
+	// Liveness and readiness are the open server routes besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
-	// credential. Depth (storage, feeds) stays on the gated dashboard.
-	mux.HandleFunc(string(mcp.RouteHealthz), handleHealthz)
+	// credential. /healthz owns process liveness; /readyz adds the durable
+	// pipeline (a wedged writer or a failed flush). Depth (feeds, dashboard)
+	// stays on the gated surfaces. Both are installed by the namespace table
+	// like every other reserved root, so their subtrees answer the reserved
+	// 404 instead of the inference catch-all.
 	// The SSE feed is not gzipped (it flushes event-by-event; every other
 	// dashboard route is buffered text and compresses).
 	mux.Handle("/metrics/live/stream", http.HandlerFunc(buf.HandleStream))
 	mux.Handle(string(mcp.RoutePrometheus), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		metrics.HandlePrometheus(w, r, buf)
+		// The storage block renders per scrape: queue depth and drops move
+		// without a finalized record, so the ring-revision memo must not
+		// freeze them.
+		metrics.HandlePrometheus(w, r, buf, store.WritePrometheus)
 	}))
 	// Dashboard aggregates: every non-table metric surface is computed here
 	// against all requests since inception (durable store + un-flushed ring
@@ -330,7 +391,7 @@ func main() {
 	// durable storage is disabled).
 	agg := web.NewAggAPI(buf, store, cfg.StorageQueryTimeout)
 	if err := agg.PreloadHistory(context.Background()); err != nil {
-		log.Printf("dashboard: initial analytical history load failed (reads will retry): %v", err)
+		logging.Printf("", "dashboard: initial analytical history load failed (reads will retry): %v", err)
 	}
 	// Bootstrap state providers: the effective config, operator pause holds,
 	// and provider limits ride the boot payload so a fresh page paints in one
@@ -353,10 +414,13 @@ func main() {
 	// Model canonicalization rules (config.CanonicalModel semantics) ride the
 	// bootstrap so the client mirror groups identically to the server fold;
 	// read live per request so a Settings save hot-applies on the next tick.
+	// The memo hands back one rule slice per live config: the observer's
+	// compiled-rule cache skips its whole-set compare only for a repeated
+	// backing array, and this provider is called per SSE event.
 	agg.ModelCanon = func() config.ModelCanon {
 		liveMu.Lock()
 		defer liveMu.Unlock()
-		return liveCfg.ModelCanon()
+		return modelCanonMemo.Canon(liveCfg)
 	}
 	buf.SetModelObserver(agg.ObserveModels)
 	proxySrv.ModelObserver = agg.ObserveModelNames
@@ -371,7 +435,11 @@ func main() {
 	// Profiling evidence for CPU/RAM work: the standard handlers under the
 	// same operator gate as every /metrics route (pprof.go owns the mounting
 	// contract).
-	registerPprofRoutes(mux)
+	registerPprofRoutes(mux, func() time.Duration {
+		liveMu.Lock()
+		defer liveMu.Unlock()
+		return liveCfg.ResponseWriteTimeout
+	})
 
 	// Operator pause: in-flight requests finish, new ones queue until resume.
 	// The dashboard Pause/Resume button is the UI for this.
@@ -412,7 +480,28 @@ func main() {
 	if dbDesc == "" {
 		dbDesc = "(in-memory only)"
 	}
-	log.Printf("millivolt listening on %s  db=%s", cfg.Listen, dbDesc)
+	logging.Printf("", "millivolt listening on %s  db=%s", cfg.Listen, dbDesc)
+
+	// drainStore is the shared close before every loop exit (serve failure,
+	// clean return, signal shutdown): stop the throttle writer and flush its
+	// latest policy, then drain the write channel and final flush. logging.Printf -
+	// never Fatalf - so a close failure still lets the exit path run. It is
+	// defined before the listener so the fatal boot and resume paths, which
+	// would otherwise os.Exit straight past the drain, can publish it here
+	// (see fatalDrain).
+	drainStore := func() {
+		if proxySrv != nil {
+			if err := proxySrv.CloseThrottlePersist(context.Background()); err != nil {
+				logging.Printf("", "throttle persist close: %v", err)
+			}
+		}
+		if store != nil {
+			if err := store.Close(); err != nil {
+				logging.Printf("", "storage close: %v", err)
+			}
+		}
+	}
+	processDrain = drainStore
 
 	// Claim the port, killing any stale proxy instance holding it - unless
 	// this process was started by a restart handoff, which passes the live
@@ -433,7 +522,7 @@ func main() {
 		grace := cfg.ShutdownTimeout + sigtermCloseDrainMargin
 		ln, err = claimPort(cfg.Listen, grace)
 		if err != nil {
-			log.Fatalf("serve: %v", err)
+			fatalDrain("serve: %v", err)
 		}
 	}
 	// srvCtx is the base context for every request. Cancelling it on shutdown
@@ -478,7 +567,7 @@ func main() {
 			return newHTTPServer(handler, readHeaderTimeout, idleTimeout, deadlinePolicyFn, srvCtx)
 		},
 		closeFeeds: buf.CloseFeeds,
-		flushStore: func() error {
+		flushStore: func(ctx context.Context) error {
 			// The flush is the durability barrier: no config reload may
 			// start or commit after it, or a provider-alias rename or
 			// operator persistence could write the store after the child
@@ -487,21 +576,33 @@ func main() {
 			// when serving resumes.
 			fenceReloadsForHandoff(rst)
 			if proxySrv != nil {
-				if err := proxySrv.FlushThrottles(context.Background()); err != nil {
+				if err := proxySrv.FlushThrottles(ctx); err != nil {
 					return fmt.Errorf("throttle flush: %w", err)
 				}
 			}
 			if store == nil {
 				return nil
 			}
-			return store.Flush()
+			// Store.Flush drains the write channel and does not take a
+			// context; race it so the handoff bound still holds. A timed-out
+			// flush leaves its goroutine writing, which is harmless because
+			// the store stays open on the aborted handoff.
+			flushed := make(chan error, 1)
+			go func() { flushed <- store.Flush() }()
+			select {
+			case err := <-flushed:
+				return err
+			case <-ctx.Done():
+				return fmt.Errorf("store flush: %w", ctx.Err())
+			}
 		},
 		drainTimeout: func() time.Duration {
 			liveMu.Lock()
 			defer liveMu.Unlock()
 			return liveCfg.RestartDrainTimeout
 		},
-		args: os.Args[1:],
+		args:    os.Args[1:],
+		pidFile: *pidFile,
 	})
 	// Self-restart eligibility rides the boot payload, so a binary that can
 	// never restart (a -trimpath build, no source tree, no go toolchain) does
@@ -514,12 +615,10 @@ func main() {
 	// A handoff child refreshes the pid file it inherited (scripts/dev.sh
 	// stays authoritative across UI-triggered restarts), then tells the
 	// waiting parent it is fully booted - store open, totals scanned, ring
-	// backfilled, holds restored - and is about to serve.
-	if *pidFile != "" {
-		if perr := os.WriteFile(*pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); perr != nil {
-			log.Printf("pid file: %v", perr)
-		}
-	}
+	// backfilled, holds restored - and is about to serve. The write goes
+	// through the restarter's one owner so this boot write and the resume
+	// rewrite cannot drift.
+	rst.refreshPIDFile()
 	signalReady()
 
 	serveErr := make(chan error, 1)
@@ -527,23 +626,6 @@ func main() {
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-
-	// drainStore is the shared close before every loop exit (serve failure,
-	// clean return, signal shutdown): stop the throttle writer and flush its
-	// latest policy, then drain the write channel and final flush. log.Printf -
-	// never Fatalf - so a close failure still lets the exit path run.
-	drainStore := func() {
-		if proxySrv != nil {
-			if err := proxySrv.CloseThrottlePersist(context.Background()); err != nil {
-				log.Printf("throttle persist close: %v", err)
-			}
-		}
-		if store != nil {
-			if err := store.Close(); err != nil {
-				log.Printf("storage close: %v", err)
-			}
-		}
-	}
 
 	// Loop so SIGHUP reloads config without exiting; SIGINT/SIGTERM break out to
 	// a graceful shutdown. A serve error exits immediately (store drained first).
@@ -562,12 +644,10 @@ loop:
 				continue
 			}
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
-				// A mid-life serve failure. Drain the store before exiting (the
-				// same guarantee the signal path gives) - log.Printf, not
-				// Fatalf, so the drain actually runs before we exit nonzero.
-				log.Printf("serve: %v", err)
-				drainStore()
-				os.Exit(1)
+				// A mid-life serve failure. fatalDrain is the one fatal exit
+				// after the store exists, so the drain gets the same ordering
+				// guarantee the signal path gives.
+				fatalDrain("serve: %v", err)
 			}
 			// Serve returned cleanly without a signal (e.g. listener closed).
 			// Drain the store before exiting so no buffered metrics are lost.
@@ -583,13 +663,13 @@ loop:
 				// this loop. A skipped SIGHUP is logged, not queued.
 				skipped, ran, err := tryReloadConfig()
 				if !ran {
-					log.Printf("received SIGHUP while a config transaction holds the reload lock; reload skipped")
+					logging.Printf("", "received SIGHUP while a config transaction holds the reload lock; reload skipped")
 					continue
 				}
 				if err == nil && len(skipped) > 0 {
-					log.Printf("config reloaded; restart required for: %s", strings.Join(skipped, ", "))
+					logging.Printf("", "config reloaded; restart required for: %s", strings.Join(skipped, ", "))
 				} else if err == nil {
-					log.Printf("config reloaded from %s", liveConfigPath)
+					logging.Printf("", "config reloaded from %s", liveConfigPath)
 				}
 				continue
 			}
@@ -598,7 +678,7 @@ loop:
 				// → handoff → exit). Racing it with a second shutdown would
 				// abort the very streams the handoff is draining; wait it out
 				// and keep looping if serving resumed.
-				log.Printf("received %v during restart handoff; the handoff owns shutdown", sig)
+				logging.Printf("", "received %v during restart handoff; the handoff owns shutdown", sig)
 				<-handoffDone
 				continue
 			}
@@ -606,7 +686,7 @@ loop:
 			break loop
 		}
 	}
-	log.Printf("received %s, shutting down", shutdownSig)
+	logging.Printf("", "received %s, shutting down", shutdownSig)
 
 	// Abort live streams first so Shutdown returns promptly instead of waiting
 	// the full timeout for SSE connections that never finish on their own.
@@ -620,7 +700,7 @@ loop:
 	if err := rst.drain(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		// DeadlineExceeded is a benign outcome for streaming workloads (a
 		// connection outlived the grace window); anything else is real.
-		log.Printf("shutdown: %v", err)
+		logging.Printf("", "shutdown: %v", err)
 	}
 	// In-flight requests have completed (or been aborted); safe to close the
 	// store, which drains its write channel regardless of the HTTP outcome.
@@ -631,7 +711,7 @@ func logDroppedConfigKeys(path string, skipped []string) {
 	if len(skipped) == 0 {
 		return
 	}
-	log.Printf("config: dropped unknown or invalid keys from %s: %s", path, strings.Join(skipped, ", "))
+	logging.Printf("", "config: dropped unknown keys or salvaged fail-closed keys from %s: %s", path, strings.Join(skipped, ", "))
 }
 
 // reloadStatus carries the outcome of the most recent configuration
@@ -721,10 +801,11 @@ func adminConfigHandler() *config.Handler {
 		// Settings POST holds Handler.mu then reloadMu (Serialize), so its
 		// read/validate/write/reload cannot interleave with a backup restore
 		// (which holds reloadMu alone) or another reload trigger. Persist is
-		// the locked variant because this handler already holds reloadMu.
-		Serialize: func() func() {
-			reloadMu.Lock()
-			return reloadMu.Unlock
+		// the locked variant because this handler already holds reloadMu. A
+		// restore's transaction spans its whole upload, so a save answers 409
+		// instead of blocking on it.
+		Serialize: func() (func(), bool) {
+			return lockReloadTransaction()
 		},
 		Persist:      reloadConfigLocked,
 		Backup:       backupStatus,
@@ -741,22 +822,31 @@ func adminConfigHandler() *config.Handler {
 // flag pointer is main-local; the two are equal for the process lifetime.
 func reloadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !rejectUnless(w, r, http.MethodPost) {
+		if refusal := rejectUnless(w, r, http.MethodPost); refusal != "" {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		skipped, dropped, err := reloadConfigWithDropped()
+		skipped, dropped, busy, err := reloadConfigWithDropped()
+		if busy {
+			adminjson.WriteError(w, http.StatusConflict, "a restore is running; retry the reload when it finishes")
+			return
+		}
 		if err != nil {
 			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		log.Printf("config reloaded from %s (restart-required fields skipped: %s)", liveConfigPath, strings.Join(skipped, ","))
+		logging.Printf("", "config reloaded from %s (restart-required fields skipped: %s)", liveConfigPath, strings.Join(skipped, ","))
 		enc, _ := json.Marshal(map[string]any{"ok": true, "restart_required": skipped, "dropped_keys": dropped})
 		w.Write(enc)
 	}
 }
 
-func applyCLIOverrides(cfg *config.Config) {
+// applyCLIOverrides applies the startup flags that beat the file, then
+// validates the effective document. The loader already validated the file
+// before these overrides, so an override that is only invalid on its own would
+// otherwise reach the listener or the store unchecked. This is the one function
+// that applies the overrides, so no call site can forget the revalidation.
+func applyCLIOverrides(cfg *config.Config) error {
 	if liveListenOverride != "" {
 		cfg.Listen = liveListenOverride
 	}
@@ -768,6 +858,7 @@ func applyCLIOverrides(cfg *config.Config) {
 	default:
 		cfg.DBPath = liveDBOverride
 	}
+	return cfg.Validate()
 }
 
 // reloadConfig re-reads the config file and hot-applies the reloadable subset
@@ -793,11 +884,46 @@ func reloadConfig() ([]string, error) {
 // concurrent reload cannot swap the status slot between the apply and the
 // response. dropped_keys names only unknown/obsolete debris (invalid values
 // fail the reload); it is never silently omitted from a success response.
-func reloadConfigWithDropped() (skipped, dropped []string, err error) {
-	reloadMu.Lock()
-	defer reloadMu.Unlock()
+// busy reports a restore holding the lock: its transaction can span a whole
+// streaming upload, so the caller refuses instead of blocking on it.
+func reloadConfigWithDropped() (skipped, dropped []string, busy bool, err error) {
+	unlock, busy := lockReloadTransaction()
+	if busy {
+		return nil, nil, true, nil
+	}
+	defer unlock()
 	skipped, err = reloadConfigLocked()
-	return skipped, lastReloadDropped(), err
+	return skipped, lastReloadDropped(), false, err
+}
+
+// lockRestoreTransaction serializes one restore against every other config
+// transaction and marks the transaction as restore-owned until the returned
+// unlock runs. A restore holds the lock across a streaming upload and a
+// database-sized stage, so save and reload refuse during that window instead of
+// waiting for it.
+func lockRestoreTransaction() (unlock func()) {
+	restoreHolders.Add(1)
+	reloadMu.Lock()
+	return func() {
+		reloadMu.Unlock()
+		restoreHolders.Add(-1)
+	}
+}
+
+// lockReloadTransaction takes reloadMu for an operator save or reload. A
+// restore owning or queued for it answers busy instead of blocking; any other
+// holder (a reload, a handoff fence) is waited for as before. The count is
+// raised before the restore takes the lock, so a failed attempt observes it,
+// and it spans a queued second restore rather than only the holder.
+func lockReloadTransaction() (unlock func(), busy bool) {
+	if reloadMu.TryLock() {
+		return reloadMu.Unlock, false
+	}
+	if restoreHolders.Load() > 0 {
+		return nil, true
+	}
+	reloadMu.Lock()
+	return reloadMu.Unlock, false
 }
 
 // tryReloadConfig is the signal-loop variant of reloadConfig. It never waits
@@ -852,12 +978,16 @@ func reloadConfigLocked() ([]string, error) {
 		// history, so every failure leaves exactly one record regardless
 		// of the trigger (SIGHUP, POST /admin/reload, Settings save,
 		// backup restore - they all funnel through here).
-		log.Printf("config reload failed (keeping current): %v", err)
+		logging.Printf("", "config reload failed (keeping current): %v", err)
 		recordReloadStatus(false, err.Error(), nil, nil)
 		return nil, err
 	}
 	logDroppedConfigKeys(liveConfigPath, dropped)
-	applyCLIOverrides(fresh)
+	if err := applyCLIOverrides(fresh); err != nil {
+		logging.Printf("", "config reload failed (keeping current): %v", err)
+		recordReloadStatus(false, err.Error(), dropped, nil)
+		return nil, err
+	}
 	// Compute which startup-bound fields changed (these can't move on a live
 	// process) so we can report them as restart-required. Schema().HotReload
 	// is the single source of that classification.
@@ -871,7 +1001,7 @@ func reloadConfigLocked() ([]string, error) {
 	if store != nil && !maps.Equal(current.ProviderAliases, fresh.ProviderAliases) {
 		if _, err := store.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
 			err = fmt.Errorf("provider_aliases: %w", err)
-			log.Printf("config reload failed (keeping current): %v", err)
+			logging.Printf("", "config reload failed (keeping current): %v", err)
 			recordReloadStatus(false, err.Error(), dropped, nil)
 			return nil, err
 		}

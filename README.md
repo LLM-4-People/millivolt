@@ -169,10 +169,14 @@ error, time, or key without losing the selected filter.
 ### <kbd>C</kbd> Intervene: before the retry storm
 
 Pause new sends and retries by client, provider, or all traffic; running sends
-finish. Set provider-wide concurrency, request-rate, and token-rate limits, plus
-an opt-in anti-burst ramp that eases a new provider+key group up to the
-concurrency target. Capture scoped debug bodies, export exactly the records you
-filtered, and turn on error-storm protection with recovery probes. These are
+finish. Cap concurrency, request rate, or token rate for any combination of
+provider, model, client, key and conversation, or the whole proxy, with an
+optional recurring server-local schedule and an opt-in anti-burst ramp on a
+single-provider rule. A header readout stays `steady` or names every active
+hold, capture and enforcing limit, an `off schedule` policy that is stored but
+admitting everything, and any restart or gated backlog; one operator console
+opens the policies, export and restart controls. Capture scoped debug bodies, export exactly the records
+you filtered, and turn on error-storm protection with recovery probes. These are
 operator actions, not per-user permissions.
 
 One Go service also carries the dashboard, SQLite, and a 22-tool MCP server at

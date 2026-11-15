@@ -173,9 +173,9 @@ func TestSettingsConcurrentRevisionAndReadIsolation(t *testing.T) {
 func TestSettingsTransactionHookBracketsSave(t *testing.T) {
 	h := &Handler{Path: filepath.Join(t.TempDir(), "config.yaml")}
 	var events []string
-	h.Serialize = func() func() {
+	h.Serialize = func() (func(), bool) {
 		events = append(events, "enter")
-		return func() { events = append(events, "exit") }
+		return func() { events = append(events, "exit") }, false
 	}
 	h.Persist = func() ([]string, error) {
 		events = append(events, "persist")
@@ -196,6 +196,39 @@ func TestSettingsTransactionHookBracketsSave(t *testing.T) {
 	}
 	if want := []string{"enter", "exit"}; !slices.Equal(events, want) {
 		t.Fatalf("stale-save events = %v, want %v", events, want)
+	}
+}
+
+// TestSettingsSaveRefusesWhileTheTransactionIsBusy pins the busy arm: a
+// restore can hold the serializer across a whole upload, so a save answers a
+// distinct 409 instead of waiting, and neither the file nor Persist is touched.
+func TestSettingsSaveRefusesWhileTheTransactionIsBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("max_retries: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{Path: path}
+	h.Serialize = func() (func(), bool) { return nil, true }
+	persisted := false
+	h.Persist = func() ([]string, error) {
+		persisted = true
+		return nil, nil
+	}
+	// A revision the file would reject is still refused for being busy, so the
+	// check happens before the file read.
+	rr := settingsPost(h, "stale", `{"max_retries":3}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("busy save status = %d %s, want 409", rr.Code, rr.Body.String())
+	}
+	if persisted {
+		t.Fatal("a busy save persisted")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "max_retries: 3") {
+		t.Fatalf("a busy save wrote the file: %q", raw)
 	}
 }
 

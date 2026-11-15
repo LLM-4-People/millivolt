@@ -55,11 +55,13 @@ func pauseShow(ctx *Context) (Result, error) {
 			rows = append(rows, []string{
 				displayValue(hold["id"]), displayValue(hold["all"]), displayValue(hold["new"]),
 				displayValue(hold["clients"]), displayValue(hold["providers"]),
+				displayValue(hold["models"]), displayValue(hold["key_hashes"]),
+				displayValue(hold["conversations"]),
 				displayValue(hold["duration"]), displayValue(hold["until"]),
 				displayValue(hold["queued"]), displayValue(hold["reason"]),
 			})
 		}
-		pretty += "\n" + table([]string{"id", "all", "new", "clients", "providers", "duration", "until", "queued", "reason"}, rows)
+		pretty += "\n" + table([]string{"id", "all", "new", "clients", "providers", "models", "keys", "conversations", "duration", "until", "queued", "reason"}, rows)
 	}
 	return Result{Pretty: pretty, Data: raw}, nil
 }
@@ -69,25 +71,36 @@ func pauseOn(ctx *Context) (Result, error) {
 	if err != nil {
 		return exitUsage(fmt.Errorf("--client: %w", err))
 	}
-	providers, err := splitNames(ctx.Flags.String("provider", ""))
-	if err != nil {
-		return exitUsage(fmt.Errorf("--provider: %w", err))
+	scopes := map[string][]string{"client": clients}
+	for _, dim := range []struct{ flag, field string }{
+		{"provider", "providers"}, {"model", "models"},
+		{"key-hash", "key_hashes"}, {"conversation", "conversations"},
+	} {
+		names, err := splitNames(ctx.Flags.String(dim.flag, ""))
+		if err != nil {
+			return exitUsage(fmt.Errorf("--%s: %w", dim.flag, err))
+		}
+		scopes[dim.field] = names
 	}
+	providers := scopes["providers"]
 	all := ctx.Flags.Bool("all", false)
 	newOnly := ctx.Flags.Bool("new", false)
 	id := ctx.Flags.String("id", "")
-	if all && (newOnly || len(clients) > 0 || len(providers) > 0) {
-		return exitUsage(errors.New("--all cannot be combined with --new, --client or --provider"))
+	named := len(clients) > 0 || len(providers) > 0 || len(scopes["models"]) > 0 ||
+		len(scopes["key_hashes"]) > 0 || len(scopes["conversations"]) > 0
+	if all && (newOnly || named) {
+		return exitUsage(errors.New("--all cannot be combined with --new or a scope flag"))
 	}
-	if newOnly && (len(clients) > 0 || len(providers) > 0) {
-		return exitUsage(errors.New("--new cannot be combined with --client or --provider"))
+	if newOnly && named {
+		return exitUsage(errors.New("--new cannot be combined with a scope flag"))
 	}
-	if id == "" && !all && !newOnly && len(clients) == 0 && len(providers) == 0 {
-		return exitUsage(errors.New("pause on requires --client, --provider, --new or --all"))
+	if id == "" && !all && !newOnly && !named {
+		return exitUsage(errors.New("pause on requires a scope flag, --new or --all"))
 	}
 	pause := mcp.SetPauseInput{
 		Paused: true, HoldID: id, All: all, New: newOnly,
-		Clients: clients, Providers: providers,
+		Clients: clients, Providers: providers, Models: scopes["models"],
+		KeyHashes: scopes["key_hashes"], Conversations: scopes["conversations"],
 	}
 	if ctx.Flags.Present("duration") {
 		value := ctx.Flags.String("duration", "")
@@ -101,7 +114,7 @@ func pauseOn(ctx *Context) (Result, error) {
 	if err != nil {
 		return exitUsage(err)
 	}
-	action := "pause " + pauseScope(clients, providers, all, newOnly)
+	action := "pause " + pauseScope(scopes, all, newOnly)
 	if id != "" {
 		action = "edit pause hold " + id
 	}
@@ -151,19 +164,28 @@ func pauseOff(ctx *Context) (Result, error) {
 	return Result{Pretty: green("pause updated") + "\n" + prettyJSON(out), Data: out}, nil
 }
 
-func pauseScope(clients, providers []string, all, newOnly bool) string {
-	switch {
-	case all:
+// pauseScope names every dimension the hold will select on, in one stable
+// order, so the confirmation line an operator reads matches what the request
+// carries. It iterates the same keys as the body, so a new dimension cannot be
+// sent without being named.
+func pauseScope(scopes map[string][]string, all, newOnly bool) string {
+	if all {
 		return "every client and provider"
-	case newOnly:
-		return "new clients only"
-	case len(clients) > 0 && len(providers) > 0:
-		return "clients " + strings.Join(clients, ",") + " and providers " + strings.Join(providers, ",")
-	case len(clients) > 0:
-		return "clients " + strings.Join(clients, ",")
-	default:
-		return "providers " + strings.Join(providers, ",")
 	}
+	if newOnly {
+		return "new clients only"
+	}
+	parts := make([]string, 0, len(scopes))
+	for _, dim := range []string{"clients", "providers", "models", "key_hashes", "conversations"} {
+		if len(scopes[dim]) == 0 {
+			continue
+		}
+		parts = append(parts, strings.ReplaceAll(dim, "_", " ")+" "+strings.Join(scopes[dim], ","))
+	}
+	if len(parts) == 0 {
+		return "no scope"
+	}
+	return strings.Join(parts, " and ")
 }
 
 func cmdDebug(ctx *Context) (Result, error) {

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -607,6 +608,103 @@ func TestMapByteSizesAreStrings(t *testing.T) {
 	}
 }
 
+// TestSchemaBandsMatchValidate is the generic guard the per-field range checks
+// never had. Schema's Min/Max are the Settings hint; Validate is the deny-by-
+// default gate. A field whose two owners disagree either offers an input the
+// server refuses or accepts a value the UI calls invalid - and with five pairs
+// named by hand, the sixth field to drift was invisible.
+//
+// It reads the struct by yaml tag, sets the field to each declared bound and one
+// step outside it, and requires Validate to agree with the schema. Only integer
+// and byte fields are driven: a duration's canonical nanosecond value is easy to
+// step wrongly, and its bounds already have their own formatter pin.
+//
+// A few fields are bounded relative to another field rather than by a fixed
+// range, so their declared band is only one half of the rule. Those are listed
+// below with the check they belong to and are exercised by that check's own
+// test; driving them here would assert a half-rule the server never claims.
+// The list is the point: a new coupled field must be added deliberately rather
+// than silently weakening the guard.
+func TestSchemaBandsMatchValidate(t *testing.T) {
+	rt := reflect.TypeOf(Config{})
+	byTag := map[string]reflect.StructField{}
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		tag := strings.Split(sf.Tag.Get("yaml"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		byTag[tag] = sf
+	}
+	// Fields whose validity depends on another field, and the Validate site that
+	// owns the pair. Each is covered where that pair is tested.
+	coupled := map[string]string{
+		"translated_response_max_bytes": "cannot exceed max_inflight_response_bytes",
+		"max_inflight_response_bytes":   "bounds translated_response_max_bytes",
+		"storage_write_chan_cap":        "bounds storage_batch_cap",
+		"storage_batch_cap":             "bounded by storage_write_chan_cap",
+		"max_idle_conns_per_host":       "cannot exceed max_conns_per_host",
+		"max_conns_per_host":            "bounds max_idle_conns_per_host",
+	}
+	checked := 0
+	for _, f := range Schema() {
+		if _, isCoupled := coupled[f.Key]; isCoupled {
+			continue
+		}
+		if f.Min == nil || f.Max == nil {
+			continue
+		}
+		if f.Kind != KindInt && f.Kind != KindBytes {
+			continue
+		}
+		sf, ok := byTag[f.Key]
+		if !ok {
+			continue
+		}
+		low, high := int64(*f.Min), int64(*f.Max)
+		if high <= low {
+			t.Errorf("%s: schema band %d..%d is empty", f.Key, low, high)
+			continue
+		}
+		// The direction that matters is the one the Settings input takes: a
+		// value the schema calls valid must pass Validate. Asserting only the
+		// reverse would pass whenever Validate is the stricter owner, which is
+		// exactly how a schema-only widening went unnoticed.
+		for _, tc := range []struct {
+			name  string
+			value int64
+			ok    bool
+		}{
+			{"the declared minimum", low, true},
+			{"the declared maximum", high, true},
+			{"below the minimum", low - 1, false},
+			{"above the maximum", high + 1, false},
+		} {
+			c := Default()
+			field := reflect.ValueOf(c).Elem().FieldByName(sf.Name)
+			switch field.Kind() {
+			case reflect.Int, reflect.Int64:
+				field.SetInt(tc.value)
+			default:
+				continue
+			}
+			err := c.Validate()
+			if tc.ok && err != nil {
+				t.Errorf("%s: schema band %d..%d offers %d (%s) but Validate refuses it: %v",
+					f.Key, low, high, tc.value, tc.name, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("%s: schema band %d..%d but Validate accepted %d (%s)",
+					f.Key, low, high, tc.value, tc.name)
+			}
+			checked++
+		}
+	}
+	if checked < 40 {
+		t.Fatalf("only %d schema bands were driven; the reflection lost its mapping", checked)
+	}
+}
+
 func TestSchemaZeroTokenMatchesFormatters(t *testing.T) {
 	for _, f := range Schema() {
 		switch f.Kind {
@@ -624,6 +722,55 @@ func TestSchemaZeroTokenMatchesFormatters(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestSchemaZeroMeansFieldsAcceptZero pins the one contract the Settings client
+// reads to decide whether zero is a setting or a lapse. A field that declares
+// zero_means is telling the operator what zero does, and the server must accept
+// that zero: four fields carry a positive minimum (the Go memory limit, the
+// debug store, and both in-flight body budgets) and skip their range check for
+// zero specifically. A field whose zero is rejected must not advertise a
+// sentence for it, because the client would then accept a value the server
+// refuses.
+func TestSchemaZeroMeansFieldsAcceptZero(t *testing.T) {
+	for _, f := range Schema() {
+		if f.ZeroMeans == "" {
+			continue
+		}
+		if f.Min != nil && *f.Min > 0 {
+			// The field's own validator must permit the zero it advertises.
+			c := Default()
+			if err := setFieldBytes(c, f.Key, 0); err != nil {
+				t.Errorf("%s declares zero_means %q but the config shape cannot hold zero: %v",
+					f.Key, f.ZeroMeans, err)
+				continue
+			}
+			if err := c.Validate(); err != nil {
+				t.Errorf("%s declares zero_means %q but validation rejects zero: %v",
+					f.Key, f.ZeroMeans, err)
+			}
+		}
+	}
+}
+
+// setFieldBytes writes zero into a byte-size field by its schema key so the
+// check above exercises the real field rather than a synthetic one.
+func setFieldBytes(c *Config, key string, n int64) error {
+	switch key {
+	case "go_memory_limit":
+		c.MemoryLimit = ByteSize(n)
+	case "debug_store_max_bytes":
+		c.DebugStoreMaxBytes = ByteSize(n)
+	case "max_inflight_body_bytes":
+		c.MaxInflightBodyBytes = ByteSize(n)
+	case "max_inflight_response_bytes":
+		c.MaxInflightResponseBytes = ByteSize(n)
+	default:
+		// A new zero_means byte field joins this switch, which is the point:
+		// the test then proves its zero reaches validation.
+		return fmt.Errorf("no setter for zero_means field %q", key)
+	}
+	return nil
 }
 
 // TestSchemaBoundLabelsMatchFormatter pins MinLabel/MaxLabel to the same
@@ -929,7 +1076,7 @@ func TestDocsStateRuntimeContracts(t *testing.T) {
 		{"strip is not inbound-limited", operations, "not limited to Chat Completions or Anthropic inbound"},
 		{"strip operations wording", operations, "tracked client-body fields"},
 		{"strip protocol scope", protocol, "client request body before relay or translation. It applies to any JSON body, including a Responses client body"},
-		{"transport header exception", operations, "`accept-encoding` and `range` are the exception"},
+		{"transport header exception", operations, "`accept-encoding` and `range` are stripped from the final upstream request before send"},
 		{"transport header client map", operations, "`X-Proxy-Headers` and an `X-Proxy-Auth-Header` naming one"},
 		{"transport header protocol row", protocol, "`accept-encoding` and `range` are proxy-owned and rejected with 400"},
 		{"transport header provider comment", configSource, "accept-encoding and range are proxy-owned: the X-Proxy-Headers map rejects them with 400"},

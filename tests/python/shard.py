@@ -12,6 +12,36 @@ MODULE = "github.com/LLM-4-People/millivolt"
 PROXY = MODULE + "/internal/proxy"
 STORAGE = MODULE + "/internal/storage"
 ROOT_PACKAGE = MODULE
+GO_TESTS = Path("tests/_go")
+
+# The constructs that prove a test starts or joins a goroutine. A matched test
+# must name a race selector; a test whose goroutine is a pure client helper
+# around no shared production state belongs here with its reason. The guard
+# rejects an entry that a selector already covers, so widening a selector
+# cannot leave a stale allowlist behind.
+GOROUTINE_ALLOWLIST: dict[tuple[str, str], str] = {}
+
+_GOROUTINE = re.compile(r"\bgo\s+\S|WaitGroup|\.Go\(func")
+_TEST_BODY = re.compile(r"^func (Test\w+)\(", re.M)
+_NEXT_DECL = re.compile(r"^func ", re.M)
+
+
+def goroutine_tests() -> dict[str, set[str]]:
+    """Return each package's tests whose body starts or joins a goroutine."""
+    found: dict[str, set[str]] = {}
+    root = shard.ROOT / GO_TESTS
+    for path in sorted(root.rglob("*.go")):
+        relative = path.parent.relative_to(root).as_posix()
+        package = MODULE if relative == "." else f"{MODULE}/{relative}"
+        code = race_scope._strip_comments_and_literals(path.read_text(encoding="utf-8"))
+        for match in _TEST_BODY.finditer(code):
+            end = len(code)
+            following = _NEXT_DECL.search(code, match.end())
+            if following:
+                end = following.start()
+            if _GOROUTINE.search(code, match.end(), end):
+                found.setdefault(package, set()).add(match.group(1))
+    return found
 
 
 class ShardTests(unittest.TestCase):
@@ -70,6 +100,12 @@ class ShardTests(unittest.TestCase):
         self.assertIn("-test.count=1", command)
         self.assertIn("-test.benchtime=200ms", command)
         self.assertIn("^(?:TestA|TestB)$", command)
+        # A compiled binary's own default is -test.timeout 0, so the shard must
+        # supply the bound: without it a wedged test is ended only by CI's job
+        # budget, and a local run has no bound at all.
+        self.assertIn("-test.timeout", command)
+        self.assertEqual(command[command.index("-test.timeout") + 1], shard.TEST_TIMEOUT)
+        self.assertNotEqual(shard.TEST_TIMEOUT, "0")
 
     def test_single_shard_task_runs_only_its_assigned_names(self):
         task = shard.Task("example.invalid/pkg", ("TestAlpha", "TestBeta"), 0, 1)
@@ -81,7 +117,8 @@ class ShardTests(unittest.TestCase):
 
     def test_run_pattern_escapes_regex_metacharacters(self):
         task = shard.Task("example.invalid/pkg", ("TestA.1", "TestB[2]"), 0, 1)
-        pattern = task.command("/tmp/example.test")[4]
+        command = task.command("/tmp/example.test")
+        pattern = command[command.index("-test.run") + 1]
         self.assertEqual(pattern, r"^(?:TestA\.1|TestB\[2\])$")
 
 
@@ -122,6 +159,29 @@ class RaceScopeTests(unittest.TestCase):
         race, plain = race_scope.select(MODULE + "/cmd/proxy", names)
         self.assertEqual(race, names)
         self.assertEqual(plain, [])
+
+    def test_goroutine_tests_are_race_selected(self):
+        # Race coverage follows the goroutine, not the package. A test that
+        # starts one and no selector matches runs plain and its accesses are
+        # never checked, so the name must be declared or explicitly exempt.
+        found = goroutine_tests()
+        self.assertTrue(found, "the goroutine scan found no test")
+        failures: list[str] = []
+        for package, names in sorted(found.items()):
+            for name in sorted(names):
+                key = (package, name)
+                selected = race_scope.matches(name, race_scope.selectors_for(package))
+                if key in GOROUTINE_ALLOWLIST:
+                    if not GOROUTINE_ALLOWLIST[key].strip():
+                        failures.append(f"{name}: allowlisted without evidence")
+                    elif selected:
+                        failures.append(
+                            f"{name}: allowlisted but a selector already covers it")
+                    continue
+                if not selected:
+                    failures.append(
+                        f"{package}: {name} starts a goroutine but no selector matches")
+        self.assertEqual(failures, [])
 
     def test_proxy_byte_ceiling_is_not_race_selected(self):
         # The 37,000 B allocation ceiling is meaningful only without race

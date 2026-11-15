@@ -85,16 +85,17 @@ type Scheduler struct {
 	holdCountMu sync.Mutex
 	holdCount   map[string]int // waiters currently parked, keyed by hold id
 
-	// gates is the per-provider throttle map (concurrency / requests-per-window /
-	// tokens-per-window). Keyed by Record.Provider, NOT provider|key - one
-	// client setting a header applies across every key of that provider.
+	// gates is the operator limit policy map, keyed by the canonical policy
+	// identity (selector plus schedule). Each gate owns its own counters, so a
+	// request that matches several policies is charged in each.
 	throttleMu sync.Mutex
-	gates      map[string]*providerGate
-	// gateSnap is the lock-free read view of gates. gate() must never take
-	// throttleMu: admission calls it while holding a group's mutex, and the
-	// throttle writers take throttleMu -> gate/group mutexes. Reading through
-	// an immutable replacement removes that inversion entirely.
-	gateSnap atomic.Pointer[map[string]*providerGate]
+	gates      map[string]*policyGate
+	// policySnap is the lock-free read view of gates: provider-independent
+	// policies plus one list per named provider. policySnap is never written
+	// in place. Admission calls it while holding a group's mutex, and policy
+	// writers take throttleMu -> gate/group mutexes, so reading through an
+	// immutable replacement removes that inversion entirely.
+	policySnap atomic.Pointer[policyIndex]
 
 	// drainSeq publishes one monotonic generation per operator drain and
 	// drainTickets remembers the most recent drains with their scopes. A
@@ -196,9 +197,9 @@ func (s *Scheduler) queueDrained(snapshot uint64, provider, model, client string
 // config.Default(), never re-derived here, so there is exactly one source of
 // truth and no conflicting fallback values.
 func New(opts Options) *Scheduler {
-	s := &Scheduler{opts: opts, groups: make(map[string]*group), groupCap: maxSchedulerGroups, providerGroups: make(map[string]*providerIndex), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
+	s := &Scheduler{opts: opts, groups: make(map[string]*group), groupCap: maxSchedulerGroups, providerGroups: make(map[string]*providerIndex), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*policyGate)}
 	s.policy.Store(&policySnap{})
-	s.publishGatesLocked()
+	s.publishPolicyLocked()
 	s.storms.configure(opts.Storm)
 	return s
 }
@@ -235,10 +236,17 @@ type Stats struct {
 	// pacing window parks both populations, so operator-facing totals add
 	// them; keeping them separate preserves the queue bound's own meaning.
 	SendWaiters int `json:"send_waiters"`
+	// StormWaiters counts requests parked in the storm/quota gate, which runs
+	// before admission. They are in neither Queued nor SendWaiters, so a
+	// fully parked proxy would otherwise read as idle. They are kept separate
+	// because operator queue draining cannot release them: only the gate
+	// opening does, so folding them into a drainable total would make the
+	// drain action promise something it cannot do.
+	StormWaiters int `json:"storm_waiters"`
 }
 
-// Stats sums in-flight slots, admission waiters and send-gate waiters across
-// every group.
+// Stats sums in-flight slots, admission waiters, send-gate waiters and
+// storm-gate waiters across every group.
 func (s *Scheduler) Stats() Stats {
 	st := Stats{Paused: s.Paused()}
 	s.mu.Lock()
@@ -250,6 +258,12 @@ func (s *Scheduler) Stats() Stats {
 		st.SendWaiters += g.sendWaiters
 		g.mu.Unlock()
 	}
+	// s.mu then the storm state's own mutex is the order UpdateOptions already
+	// takes, so this adds no new lock edge. stormState.queued is the one
+	// process-wide count: the per-scope counters are incremented once per
+	// matching scope per waiter, so summing scopes would count a model waiter
+	// parked behind its provider twice.
+	st.StormWaiters = s.storms.queuedCount()
 	return st
 }
 

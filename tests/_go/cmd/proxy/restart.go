@@ -8,13 +8,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -32,7 +37,7 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return 90 * time.Second },
 	})
 	rs.mu.Lock()
@@ -55,6 +60,7 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 		Rank           int    `json:"rank"`
 		DrainTimeoutMs int64  `json:"drain_timeout_ms"`
 		DrainElapsedMs int64  `json:"drain_elapsed_ms"`
+		BudgetMs       int64  `json:"budget_ms"`
 	}
 	dec := json.NewDecoder(rec.Body)
 	dec.DisallowUnknownFields()
@@ -67,23 +73,27 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 	if doc.DrainTimeoutMs != 90000 || doc.DrainElapsedMs < 0 {
 		t.Fatalf("drain window = %+v, want the wired 90s bound and a live elapsed value", doc)
 	}
+	// budget_ms is the sum the dashboard polls against, so the client never
+	// mirrors the build, flush and ready bounds as its own literals.
+	if want := (restartBuildTimeout + 90*time.Second + restartFlushTimeout + restartReadyTimeout).Milliseconds(); doc.BudgetMs != want {
+		t.Fatalf("budget_ms = %d, want %d (build + drain + flush + ready)", doc.BudgetMs, want)
+	}
 }
 
-// TestRestartBudgetMirrorsPinned pins the three choreography bounds the
-// dashboard's poll fallback mirrors as literals (chrome_restart.js
-// RESTART_BUILD_BUDGET_MS / RESTART_READY_BUDGET_MS / RESTART_DRAIN_FALLBACK_
-// MS = 300000 / 300000 / 600000): the build bound, the child-ready bound, and
-// the config default the fallback renders for documents that omit or zero
-// the drain bound.
-func TestRestartBudgetMirrorsPinned(t *testing.T) {
+// TestRestartChoreographyBoundsPinned pins the internal choreography bounds. The dashboard does not mirror them: statusLocked publishes their sum
+// as budget_ms, so these values exist in exactly one language.
+func TestRestartChoreographyBoundsPinned(t *testing.T) {
 	if restartBuildTimeout != 5*time.Minute {
-		t.Errorf("restartBuildTimeout = %v, want 5 minutes (dashboard RESTART_BUILD_BUDGET_MS 300000)", restartBuildTimeout)
+		t.Errorf("restartBuildTimeout = %v, want 5 minutes", restartBuildTimeout)
 	}
 	if restartReadyTimeout != 5*time.Minute {
-		t.Errorf("restartReadyTimeout = %v, want 5 minutes (dashboard RESTART_READY_BUDGET_MS 300000)", restartReadyTimeout)
+		t.Errorf("restartReadyTimeout = %v, want 5 minutes", restartReadyTimeout)
+	}
+	if restartFlushTimeout != 30*time.Second {
+		t.Errorf("restartFlushTimeout = %v, want 30 seconds", restartFlushTimeout)
 	}
 	if got := config.Default().RestartDrainTimeout; got != 10*time.Minute {
-		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes (dashboard RESTART_DRAIN_FALLBACK_MS 600000)", got)
+		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes", got)
 	}
 }
 
@@ -281,7 +291,22 @@ func TestRestartHandoffProtocol(t *testing.T) {
 		t.Fatal(err)
 	}
 	readyW.Close() // the parent never writes; the child holds the only write end
-	defer cmd.Process.Kill()
+	// The child serves until this teardown kills it. Reaping it turns a child
+	// that quietly stopped serving into a failure instead of a leaked zombie:
+	// Wait must report exactly the SIGKILL sent here, never a clean exit or a
+	// crash status of its own.
+	defer func() {
+		killErr := cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		var exit *exec.ExitError
+		if !errors.As(waitErr, &exit) {
+			t.Errorf("child Wait = %v, want the teardown signal", waitErr)
+			return
+		}
+		if status, ok := exit.Sys().(syscall.WaitStatus); !ok || status.Signal() != syscall.SIGKILL {
+			t.Errorf("child status = %v (kill error %v), want SIGKILL from teardown", waitErr, killErr)
+		}
+	}()
 
 	if err := awaitReady(readyR, 15*time.Second); err != nil {
 		t.Fatalf("child readiness: %v", err)
@@ -321,7 +346,7 @@ func TestHandleRestartGuards(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
 	// Wrong method → 405 with Allow (RFC 9110), never a fall-through.
@@ -384,7 +409,7 @@ func TestFailAndResumeTwiceKeepsRestarterUsable(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
 	for i := 1; i <= 2; i++ {
@@ -419,7 +444,7 @@ func TestRestartWatchFlagStrictQuery(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
 	for _, tc := range []struct{ name, query, want string }{
@@ -492,16 +517,24 @@ func TestPrepareHandoffRequiresDrainAndFlushSuccess(t *testing.T) {
 	}()
 	<-entered
 	flushed := false
-	rs := newRestarter(&restartDeps{server: srv.Config, flushStore: func() error { flushed = true; return errors.New("disk failure") }})
+	var flushErr error
+	rs := newRestarter(&restartDeps{server: srv.Config, flushStore: func(context.Context) error {
+		flushed = true
+		return flushErr
+	}})
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := rs.prepareHandoff(ctx); !errors.Is(err, context.Canceled) || flushed {
-		t.Errorf("failed drain passed flush fence: err=%v flushed=%v", err, flushed)
+	// The flush is the durability barrier, so a drain that never completed
+	// still flushes; the canceled drain itself stays a handoff failure.
+	if _, err := rs.prepareHandoff(ctx); !errors.Is(err, context.Canceled) || !flushed {
+		t.Errorf("failed drain skipped the flush or passed the handoff fence: err=%v flushed=%v", err, flushed)
 	}
 	close(release)
 	<-done
 	srv.Close()
-	if err := rs.prepareHandoff(t.Context()); err == nil || !flushed {
+	flushed = false
+	flushErr = errors.New("disk failure")
+	if _, err := rs.prepareHandoff(t.Context()); err == nil || !flushed {
 		t.Errorf("failed flush passed handoff fence: err=%v flushed=%v", err, flushed)
 	}
 	if rs.status()["phase"] == "handing_off" {
@@ -549,7 +582,7 @@ func TestRestartWatchStreamsPhases(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return 90 * time.Second },
 	})
 	srv := httptest.NewServer(http.HandlerFunc(rs.handleRestart))
@@ -634,7 +667,7 @@ func TestRestartWatchStreamsPhases(t *testing.T) {
 
 func TestRestartProgressStopsAfterDependencyPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		rs := newRestarter(&restartDeps{server: &http.Server{}, flushStore: func() error { panic("test flush panic") }})
+		rs := newRestarter(&restartDeps{server: &http.Server{}, flushStore: func(context.Context) error { panic("test flush panic") }})
 		ch := make(chan map[string]any, 16)
 		rs.addWatcher(ch)
 		defer rs.removeWatcher(ch)
@@ -663,7 +696,7 @@ func TestRestartWatchUnaffectedByShutdown(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return 30 * time.Second },
 	})
 	srv := httptest.NewServer(http.HandlerFunc(rs.handleRestart))
@@ -690,4 +723,411 @@ func TestRestartWatchUnaffectedByShutdown(t *testing.T) {
 	}
 	// The stream is still functional afterwards: phases keep flowing.
 	rs.setPhase(restartBuilding, "")
+}
+
+// TestHandoffSurvivesExpiredDrain pins the drain/handoff split: a drain window
+// that expires with a request still in flight is not a failed restart. The
+// flush runs under its own fresh bound and the handoff continues.
+func TestHandoffSurvivesExpiredDrain(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+	}))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := srv.Client().Get(srv.URL)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+	var flushCtxErr error
+	rs := newRestarter(&restartDeps{server: srv.Config, flushStore: func(ctx context.Context) error {
+		flushCtxErr = ctx.Err()
+		return nil
+	}})
+	if _, err := rs.prepareWithProgress(20 * time.Millisecond); err != nil {
+		t.Fatalf("expired drain aborted the handoff: %v", err)
+	}
+	if flushCtxErr != nil {
+		t.Fatalf("flush ran under the spent drain context: %v", flushCtxErr)
+	}
+	if rs.status()["phase"] != "flushing" {
+		t.Fatalf("phase after the flush = %v", rs.status()["phase"])
+	}
+	close(release)
+	<-done
+	srv.Close()
+}
+
+// TestRestartExpiredDrainIsWordedAsACut pins the operator log: an expired drain
+// hands off after a clean flush, so the commit line must not claim the
+// in-flight streams finished next to prepareHandoff's own expired-drain line.
+func TestRestartExpiredDrainIsWordedAsACut(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+	// An empty body is not a program, so the run resumes instead of exiting.
+	rs, addr := restartRunFixtureHandler(t, "not a program", func(context.Context) error { return nil }, handler)
+	rs.deps.drainTimeout = func() time.Duration { return 20 * time.Millisecond }
+
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	requested := make(chan struct{})
+	go func() {
+		defer close(requested)
+		resp, err := http.Get("http://" + addr + "/")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+	rs.run()
+	close(release)
+	<-requested
+
+	out := buf.String()
+	if !strings.Contains(out, "drain window expired with requests still in flight") {
+		t.Fatalf("expired drain not logged: %q", out)
+	}
+	line := ""
+	for _, candidate := range strings.Split(out, "\n") {
+		if strings.Contains(candidate, "restart: drained in ") {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatalf("no commit drain line: %q", out)
+	}
+	if !strings.Contains(line, "were cut") || strings.Contains(line, "in-flight streams finished") {
+		t.Fatalf("commit line = %q, want the cut wording, not a finished claim", line)
+	}
+}
+
+// TestRestartBudgetIncludesFlushBound pins budget_ms as the whole choreography
+// bound: a client polling toward it must not give up during a legal flush.
+func TestRestartBudgetIncludesFlushBound(t *testing.T) {
+	drain := 20 * time.Second
+	rs := newRestarter(&restartDeps{
+		cloneServer:  func() *http.Server { return nil },
+		closeFeeds:   func() {},
+		flushStore:   func(context.Context) error { return nil },
+		drainTimeout: func() time.Duration { return drain },
+	})
+	want := (restartBuildTimeout + drain + restartFlushTimeout + restartReadyTimeout).Milliseconds()
+	if got := rs.status()["budget_ms"]; got != want {
+		t.Fatalf("budget_ms = %v, want %d (build + drain + flush + ready)", got, want)
+	}
+}
+
+// TestRestartPanicLogsTheStack pins the recovered-panic diagnosis: the line
+// carried only the panic value, so a choreography panic after the commit point
+// was a one-liner with no call site. The stack must be in the log.
+func TestRestartPanicLogsTheStack(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	rs := newRestarter(&restartDeps{
+		listener:     ln,
+		server:       &http.Server{},
+		cloneServer:  func() *http.Server { return &http.Server{} },
+		closeFeeds:   func() {},
+		drainTimeout: func() time.Duration { return time.Second },
+		flushStore:   func(context.Context) error { panic("fixture flush panic") },
+	})
+	rs.run()
+	logged := buf.String()
+	if !strings.Contains(logged, "restart: panic: fixture flush panic") {
+		t.Fatalf("panic value missing from the log: %s", logged)
+	}
+	if !strings.Contains(logged, "goroutine ") || !strings.Contains(logged, "cmd/proxy") {
+		t.Fatalf("panic logged without a stack: %s", logged)
+	}
+}
+
+// TestRestartRefusedWhileAConfigOperationHoldsTheReloadLock pins O4: the
+// handoff later takes reloadMu for its flush fence, so a held reload
+// transaction made the flush wait unboundedly. The start is refused up front
+// with 409 naming the operation, and the run is not begun.
+func TestRestartRefusedWhileAConfigOperationHoldsTheReloadLock(t *testing.T) {
+	rs := newRestarter(&restartDeps{
+		cloneServer:  func() *http.Server { return nil },
+		closeFeeds:   func() {},
+		flushStore:   func(context.Context) error { return nil },
+		drainTimeout: func() time.Duration { return time.Second },
+	})
+	// The test environment holds the reload lock like a Settings save would.
+	reloadMu.Lock()
+	rec := httptest.NewRecorder()
+	rs.handleRestart(rec, httptest.NewRequest(http.MethodPost, "/admin/restart", nil))
+	if rec.Code != http.StatusConflict {
+		reloadMu.Unlock()
+		t.Fatalf("POST while the reload lock is held = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "config operation is in progress") {
+		reloadMu.Unlock()
+		t.Fatalf("refusal does not name the operation: %s", rec.Body.String())
+	}
+	if phase := rs.status()["phase"]; phase != "idle" {
+		reloadMu.Unlock()
+		t.Fatalf("phase after the refusal = %v, want idle", phase)
+	}
+	reloadMu.Unlock()
+
+	// Released: the same request is accepted.
+	rec = httptest.NewRecorder()
+	rs.handleRestart(rec, httptest.NewRequest(http.MethodPost, "/admin/restart", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST after release = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestResumeRewritesThePIDFile pins O5: the handoff child rewrites the pid file
+// with its own pid before it is ready, so a child that dies before readiness
+// (or is killed) leaves the file naming a dead process while the parent keeps
+// serving. Every resume path must restore the parent's own pid.
+func TestResumeRewritesThePIDFile(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "instance.pid")
+	// The child's pid stands in the file after its pre-readiness rewrite. A
+	// pid that cannot be alive keeps the resume path's listener step away.
+	if err := os.WriteFile(pidFile, []byte("999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	rs := newRestarter(&restartDeps{
+		listener:     ln,
+		server:       &http.Server{},
+		cloneServer:  func() *http.Server { return &http.Server{} },
+		closeFeeds:   func() {},
+		drainTimeout: func() time.Duration { return time.Second },
+		flushStore:   func(context.Context) error { return nil },
+		pidFile:      pidFile,
+	})
+	rs.failAndResume(errors.New("fixture handoff failure"), nil, "")
+	body, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(body)), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("pid file = %q, want the parent's own pid %q", got, want)
+	}
+}
+
+// TestNoPIDFileIsNotAnError pins the empty flag: a process started without
+// -pid-file resumes without writing one.
+func TestNoPIDFileIsNotAnError(t *testing.T) {
+	rs := newRestarter(&restartDeps{server: &http.Server{}, cloneServer: func() *http.Server { return &http.Server{} }, closeFeeds: func() {}})
+	rs.refreshPIDFile()
+}
+
+// TestRestartBuildNamesAnUnwritableTempDir pins O14: the rebuild writes its
+// output into the process temp directory, and an unusable TMPDIR used to
+// surface as a bare temp-error beside a successful compile, which reads like a
+// build fault. The reason must name the directory and the requirement.
+func TestRestartBuildNamesAnUnwritableTempDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent-tmpdir")
+	t.Setenv("TMPDIR", missing)
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go toolchain")
+	}
+	root, why := findModuleRoot()
+	if root == "" {
+		t.Skipf("no module root: %s", why)
+	}
+	rs := newRestarter(&restartDeps{})
+	rs.mu.Lock()
+	rs.root, rs.goBin = root, goBin
+	rs.mu.Unlock()
+	_, err = rs.build()
+	if err == nil {
+		t.Fatal("build succeeded with an absent TMPDIR")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, missing) || !strings.Contains(msg, "writable process temp directory") {
+		t.Fatalf("build error = %q, want the temp directory and the requirement named", msg)
+	}
+}
+
+// restartRunFixture wires a real listener/server to a fake go toolchain, so
+// run() can be driven through every failure branch without compiling.
+func restartRunFixture(t *testing.T, body string, flush func(context.Context) error) (*restarter, string) {
+	t.Helper()
+	return restartRunFixtureHandler(t, body, flush, nil)
+}
+
+// restartRunFixtureHandler is restartRunFixture with a caller-supplied request
+// handler; nil keeps the instant 204 used by the choreography cases.
+func restartRunFixtureHandler(t *testing.T, body string, flush func(context.Context) error, handle http.Handler) (*restarter, string) {
+	t.Helper()
+	goBin := filepath.Join(t.TempDir(), "fake-go")
+	script := `#!/bin/sh
+out=
+while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out=$2; fi; shift; done
+if [ "$MILLIVOLT_TEST_BUILD_FAIL" = 1 ]; then echo "fixture build error" >&2; exit 1; fi
+printf '%s' "$MILLIVOLT_TEST_BUILD_BODY" > "$out"
+chmod +x "$out"
+`
+	if err := os.WriteFile(goBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MILLIVOLT_TEST_BUILD_BODY", body)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	handler := handle
+	if handler == nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	}
+	server := &http.Server{Handler: handler}
+	go server.Serve(ln)
+	t.Cleanup(func() { server.Close() })
+	rs := newRestarter(&restartDeps{
+		listener:     ln,
+		server:       server,
+		cloneServer:  func() *http.Server { return &http.Server{Handler: handler} },
+		closeFeeds:   func() {},
+		flushStore:   flush,
+		drainTimeout: func() time.Duration { return time.Second },
+		pidFile:      filepath.Join(t.TempDir(), "proxy.pid"),
+	})
+	rs.mu.Lock()
+	rs.root, rs.goBin = t.TempDir(), goBin
+	rs.mu.Unlock()
+	return rs, ln.Addr().String()
+}
+
+// drainRestartPhases collects the live phase stream until the run retires.
+// The watcher channel is filled by setPhase/publish (buffered, nonblocking),
+// so no fast transition is missed the way a poll would miss it.
+func drainRestartPhases(t *testing.T, rs *restarter, ch chan map[string]any) []string {
+	t.Helper()
+	var phases []string
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("phase stream closed before idle; saw %v", phases)
+			}
+			phase, _ := ev["phase"].(string)
+			phases = append(phases, phase)
+			if phase == "idle" {
+				rs.removeWatcher(ch)
+				return phases
+			}
+		case <-deadline:
+			t.Fatalf("restart never retired; saw %v", phases)
+		}
+	}
+}
+
+func restartServes(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + addr)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the old server stopped serving")
+}
+
+// TestRestartRunChoreography drives run() through its failure branches: a build
+// failure never commits and keeps the old server, a spawn failure commits then
+// resumes it, and a panic in the flush is recovered into the same resume path.
+// Each ends idle with the error, an ordered phase history and the handoff fence
+// released.
+func TestRestartRunChoreography(t *testing.T) {
+	t.Run("build failure leaves the old server serving", func(t *testing.T) {
+		rs, addr := restartRunFixture(t, "", func(context.Context) error { return nil })
+		restartServes(t, addr)
+		t.Setenv("MILLIVOLT_TEST_BUILD_FAIL", "1")
+		ch := make(chan map[string]any, 64)
+		rs.addWatcher(ch)
+		if ok, why := rs.request(); !ok {
+			t.Fatalf("request refused: %s", why)
+		}
+		phases := drainRestartPhases(t, rs, ch)
+		if !strings.Contains(rs.status()["error"].(string), "fixture build error") {
+			t.Fatalf("error = %v, want the build failure", rs.status()["error"])
+		}
+		if rs.committed() {
+			t.Fatal("a build failure must not commit the handoff")
+		}
+		restartServes(t, addr)
+		if phases[0] != "building" || phases[len(phases)-1] != "idle" {
+			t.Fatalf("phases = %v, want building..idle", phases)
+		}
+	})
+
+	t.Run("spawn failure commits and resumes", func(t *testing.T) {
+		// A mode-755 file that is not a program makes Start itself fail.
+		rs, addr := restartRunFixture(t, "not a program", func(context.Context) error { return nil })
+		t.Setenv("MILLIVOLT_TEST_BUILD_FAIL", "")
+		ch := make(chan map[string]any, 64)
+		rs.addWatcher(ch)
+		if ok, why := rs.request(); !ok {
+			t.Fatalf("request refused: %s", why)
+		}
+		phases := drainRestartPhases(t, rs, ch)
+		if !strings.Contains(rs.status()["error"].(string), "spawn") {
+			t.Fatalf("error = %v, want the spawn failure", rs.status()["error"])
+		}
+		if rs.committed() {
+			t.Fatal("a resumed run must release the handoff fence")
+		}
+		restartServes(t, addr)
+		want := []string{"building", "draining", "flushing", "handing_off", "idle"}
+		if strings.Join(phases, ">") != strings.Join(want, ">") {
+			t.Fatalf("phases = %v, want %v", phases, want)
+		}
+	})
+
+	t.Run("a flush panic is recovered into the resume path", func(t *testing.T) {
+		rs, addr := restartRunFixture(t, "", func(context.Context) error { panic("fixture flush panic") })
+		t.Setenv("MILLIVOLT_TEST_BUILD_FAIL", "")
+		ch := make(chan map[string]any, 64)
+		rs.addWatcher(ch)
+		if ok, why := rs.request(); !ok {
+			t.Fatalf("request refused: %s", why)
+		}
+		phases := drainRestartPhases(t, rs, ch)
+		if !strings.Contains(rs.status()["error"].(string), "panic") {
+			t.Fatalf("error = %v, want the recovered panic", rs.status()["error"])
+		}
+		if rs.committed() {
+			t.Fatal("a recovered panic must release the handoff fence")
+		}
+		restartServes(t, addr)
+		if !slices.Contains(phases, "flushing") || phases[len(phases)-1] != "idle" {
+			t.Fatalf("phases = %v, want the flush failed then idle", phases)
+		}
+	})
 }

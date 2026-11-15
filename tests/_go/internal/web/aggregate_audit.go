@@ -142,7 +142,7 @@ func TestObserverModelDictionaryAndTimeAcrossBootstrapAndArchive(t *testing.T) {
 		t.Fatal("observer mutated live record")
 	}
 	a.ModelCanon = func() config.ModelCanon { return config.ModelCanon{} }
-	changed := a.ObserveModelNames([]string{"MODEL"}).(modelObserverState)
+	changed := observerStateOf(t, a.ObserveModelNames([]string{"MODEL"}))
 	if changed.Revision == canon["revision"] || changed.Names["MODEL"] != "MODEL" {
 		t.Fatalf("rule change not applied: %+v", changed)
 	}
@@ -154,8 +154,8 @@ func TestObserverRulesOnlyTravelWithFullSnapshots(t *testing.T) {
 		return config.ModelCanon{Rules: []config.ModelRule{{Mode: config.ModelRuleLower}}}
 	}
 	records := []*metrics.Record{{Model: "  PADDED  "}}
-	full := a.ObserveModels(true, records).(modelObserverState)
-	delta := a.ObserveModels(false, records).(modelObserverState)
+	full := observerStateOf(t, a.ObserveModels(true, records))
+	delta := observerStateOf(t, a.ObserveModels(false, records))
 	if full.Rules == nil || delta.Rules != nil || delta.Names["  PADDED  "] != "padded" || full.Revision != delta.Revision {
 		t.Fatalf("full=%+v delta=%+v", full, delta)
 	}

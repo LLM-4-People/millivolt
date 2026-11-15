@@ -91,10 +91,10 @@ func TestHandlePauseReplaceFrontendUpdateKeepsProviderScope(t *testing.T) {
 	if h["all"] != false {
 		t.Fatalf("update set all=%v, want false", h["all"])
 	}
-	if !p.scheduler.HoldsTarget("client-a", "gamma.example") {
+	if !p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "client-a", Provider: "gamma.example"}) {
 		t.Fatal("provider hold dropped")
 	}
-	if p.scheduler.HoldsTarget("client-a", "beta.example") || p.scheduler.Holds("client-a") {
+	if p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "client-a", Provider: "beta.example"}) || p.scheduler.Holds("client-a") {
 		t.Fatal("update applied the hold to every request")
 	}
 	rel, err := p.scheduler.AcquireWith(context.Background(), "k", 0, scheduler.WaiterHooks{
@@ -133,10 +133,10 @@ func TestHandlePauseReplaceDurationOnlyKeepsProviderScope(t *testing.T) {
 	if len(provs) != 1 || provs[0] != "gamma.example" {
 		t.Fatalf("providers = %v, want [gamma.example]", h["providers"])
 	}
-	if p.scheduler.HoldsTarget("client-a", "beta.example") || p.scheduler.Holds("client-a") {
+	if p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "client-a", Provider: "beta.example"}) || p.scheduler.Holds("client-a") {
 		t.Fatal("timer-only update applied the hold to every request")
 	}
-	if !p.scheduler.HoldsTarget("client-a", "gamma.example") {
+	if !p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "client-a", Provider: "gamma.example"}) {
 		t.Fatal("timer-only update dropped the provider hold")
 	}
 	rel, err := p.scheduler.AcquireWith(context.Background(), "k", 0, scheduler.WaiterHooks{
@@ -174,7 +174,7 @@ func TestHandlePauseReplaceOmittedScopeKeepsPrevious(t *testing.T) {
 	if h["all"] != false || h["until"] != until {
 		t.Fatalf("omitted-scope replace mutated hold %v", h)
 	}
-	if p.scheduler.HoldsTarget("c", "beta.example") || !p.scheduler.HoldsTarget("c", "gamma.example") {
+	if p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "c", Provider: "beta.example"}) || !p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "c", Provider: "gamma.example"}) {
 		t.Fatalf("omitted-scope replace became %+v", st["holds"])
 	}
 }

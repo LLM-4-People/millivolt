@@ -10,7 +10,8 @@
      --rail, --border, --border2), the four accent roles (--accent,
      --accent-hover, --accent2, --cyan), and the two material roles
      (--shadow-rgb, --veil-rgb) for both data-mode values.
-   - The mode block owns text, semantic status colors, scrim alpha and
+   - The mode block owns text, muted, the faded-affordance muted ink,
+     semantic status colors, scrim alpha and
      elevation composition, and the graduated-scale/well neutrals, so status
      meaning and contrast stay consistent across themes. It also owns the
      pre-normalization material fallbacks. Contrast is the one deliberate
@@ -41,6 +42,9 @@
   --cyan: #0b5f66;
   --text: #2a241a;
   --muted: #5f574a;
+  /* Faded-affordance ink: deep enough that a .6 or .7 site opacity still
+     composites to AA on every Clear surface. See dashboard.css :root. */
+  --muted-off: #07080a;
   --ok: #0c5d33;
   --warn: #6b4200;
   --err: #8f1418;
@@ -82,6 +86,7 @@ html[data-mode="clear"] { color-scheme: light; }
   --cyan: #38d5c0;
   --text: #e8e4de;
   --muted: #97907e;
+  --muted-off: #e4e0d9;
   --ok: #2fd186;
   --warn: #f4c14d;
   --err: #ff7b7b;
@@ -342,6 +347,7 @@ html[data-mode="clear"] { color-scheme: light; }
   --rail: #000000;
   --text: #ffffff;
   --muted: #c9c9c9;
+  --muted-off: #e4e0d9;
   --accent: #ffe14d;
   --accent-hover: #fff08a;
   --accent2: #7cc7ff;
@@ -358,6 +364,7 @@ html[data-mode="clear"] { color-scheme: light; }
   --rail: #f2f2f2;
   --text: #000000;
   --muted: #444444;
+  --muted-off: #07080a;
   --accent: #000000;
   --accent-hover: #1a1a1a;
   --accent2: #003f8f;

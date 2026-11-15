@@ -8,14 +8,14 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-func attemptsBackup(t *testing.T, id, attempts string) []byte {
+func jsonColumnBackup(t *testing.T, id, column, value string) []byte {
 	t.Helper()
 	src := openTestStore(t)
 	src.Record(&metrics.Record{ID: id, Provider: "backup.example", Model: "m", StatusCode: 200, Start: time.Now()})
 	if err := src.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := src.db.Exec(`UPDATE requests SET attempts = ? WHERE id = ?`, attempts, id); err != nil {
+	if _, err := src.db.Exec(`UPDATE requests SET "`+column+`" = ? WHERE id = ?`, value, id); err != nil {
 		t.Fatal(err)
 	}
 	data, err := src.Snapshot(t.Context())
@@ -26,6 +26,50 @@ func attemptsBackup(t *testing.T, id, attempts string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func attemptsBackup(t *testing.T, id, attempts string) []byte {
+	t.Helper()
+	return jsonColumnBackup(t, id, "attempts", attempts)
+}
+
+// TestMergeCanonicalizesEmptyJSONNoValueColumns pins the shared column list:
+// the legacy empty spelling of every JSON no-value column, not only attempts,
+// lands as the canonical 'null' so a raw json_each/json_extract consumer keeps
+// working. A non-empty document stays byte-identical (pinned separately).
+func TestMergeCanonicalizesEmptyJSONNoValueColumns(t *testing.T) {
+	for _, column := range jsonNoValueColumns {
+		t.Run(column, func(t *testing.T) {
+			live := openTestStore(t)
+			defer live.Close()
+			live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "m", StatusCode: 200})
+			if err := live.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			id := "empty-" + column
+			inserted, skipped, err := live.MergeSnapshot(t.Context(), jsonColumnBackup(t, id, column, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if inserted != 1 || skipped != 0 {
+				t.Fatalf("inserted=%d skipped=%d, want 1/0", inserted, skipped)
+			}
+			var stored string
+			if err := live.rdb.QueryRow(`SELECT "`+column+`" FROM requests WHERE id = ?`, id).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored != "null" {
+				t.Fatalf("merged %s = %q, want canonical null", column, stored)
+			}
+			var valid int
+			if err := live.rdb.QueryRow(`SELECT json_valid("`+column+`") FROM requests WHERE id = ?`, id).Scan(&valid); err != nil {
+				t.Fatal(err)
+			}
+			if valid != 1 {
+				t.Fatalf("merged %s is not valid JSON", column)
+			}
+		})
+	}
 }
 
 // TestMergeCanonicalizesEmptyAttempts pins the merge-side JSON invariant: the

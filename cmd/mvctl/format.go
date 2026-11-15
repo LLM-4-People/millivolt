@@ -205,6 +205,25 @@ func numPtr(v *float64) string {
 	return num(*v)
 }
 
+// float64Ptr lifts a decoded JSON number for the pointer-shaped display
+// helpers; a missing or non-numeric field stays nil ("n/a").
+func float64Ptr(value any) *float64 {
+	n, ok := value.(float64)
+	if !ok {
+		return nil
+	}
+	return &n
+}
+
+// jsonLen is the element count of a decoded JSON array, 0 for anything else.
+func jsonLen(value any) int {
+	items, ok := value.([]any)
+	if !ok {
+		return 0
+	}
+	return len(items)
+}
+
 func cost(n float64) string {
 	switch {
 	case n >= 100:

@@ -559,7 +559,7 @@ func TestChartDecodeWindow(t *testing.T) {
 
 	// Destructive invalidation: a full purge rebuilds the projection from an
 	// empty history - the third metric order must not survive it.
-	if _, err := s.Clear(t.Context(), nil, nil); err != nil {
+	if _, err := s.Clear(t.Context(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	p = get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=60")

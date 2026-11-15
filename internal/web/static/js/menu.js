@@ -25,8 +25,13 @@
 // and .mn-rail-fill. choiceMenu emits the panel, head, body, section, row and
 // check classes; the remaining blocks are what conversion bodies compose.
 
-const MENU_SHEET_QUERY = '(max-width: 800px)';
+// MENU_SHEET_PX is the one number behind the narrow-viewport decision: a
+// panel is a sheet at this width or below and an anchored menu above it.
+// MENU_SHEET_QUERY is derived from it rather than written out again, because
+// the same 800 appeared as a media-query string beside the comparison and the
+// two could be edited apart.
 const MENU_SHEET_PX = 800;
+const MENU_SHEET_QUERY = '(max-width: ' + MENU_SHEET_PX + 'px)';
 const MENU_GAP_PX = 4;
 const MENU_EDGE_PX = 8;
 const MENU_ITEM_SELECTOR = '[role^="menuitem"], .mn-item';
@@ -51,6 +56,18 @@ function menuPlacement() {
   return window.innerWidth <= MENU_SHEET_PX ? 'sheet' : 'anchor';
 }
 
+// menuDialogAbove reports whether the event happened inside a modal dialog
+// that does not contain the open panel - a confirmation, the operator prompt,
+// the settings sheet from another surface. Such a dialog is the active
+// surface: it owns Escape and its own presses, and the menu underneath must
+// stay open. A picker that menu.js moved onto a modal sheet is still inside
+// that sheet, so the menu keeps owning its own dismissal there.
+function menuDialogAbove(event, panel) {
+  const node = event.target instanceof Element ? event.target : null;
+  const dialog = node?.closest('[role="dialog"][aria-modal="true"]:not([hidden]):not([inert])');
+  return !!dialog && !dialog.contains(panel);
+}
+
 // menuOpen opens a panel on a trigger. It closes the currently open menu
 // first (one open menu at a time), clears the panel's geometry for the
 // placement menuPlacement chooses, and owns the dismissal and re-anchor
@@ -58,6 +75,8 @@ function menuPlacement() {
 //   align: 'start' | 'end' (default 'end') - anchor alignment to the trigger
 //   onClose: called exactly once on every close, after the state clears
 //   roving: enable arrow/Home/End/Enter/Space roving over MENU_ITEM_SELECTOR
+//   trap: keep Tab inside the panel (a panel that covers the page it sits
+//     over, like the operator console)
 //   initialFocus: 'item' | 'panel' | 'none' (default 'item' when roving,
 //     else 'panel')
 //   container: an optional positioned ancestor whose padding box is the
@@ -79,6 +98,7 @@ function menuOpen(trigger, panel, opts = {}) {
       align: opts.align === 'start' ? 'start' : 'end',
       onClose: typeof opts.onClose === 'function' ? opts.onClose : null,
       roving,
+      trap: !!opts.trap,
       initialFocus: opts.initialFocus || (roving ? 'item' : 'panel'),
       container: opts.container && typeof opts.container.getBoundingClientRect === 'function' ? opts.container : null,
       scrim: opts.scrim !== false,
@@ -314,14 +334,38 @@ function menuFocusInitial(state) {
 
 // menuKeydown closes on Escape and owns the key while a menu is open: the
 // capture listener consumes it so no underlying surface (a settings sheet, a
-// drawer) closes in the same press. menuClose is the one focus owner; this
-// handler only routes the key and stops its further dispatch.
+// drawer) closes in the same press. A trapped menu also owns Tab. menuClose is
+// the one focus owner; this handler only routes the keys and stops their
+// further dispatch.
 function menuKeydown(event) {
+  const state = menuOpenState;
+  if (!state) return;
+  if (menuDialogAbove(event, state.panel)) return;
+  if (event.key === 'Tab' && state.opts.trap) {
+    menuTrapTab(state.panel, event);
+    return;
+  }
   if (event.key !== 'Escape') return;
-  if (!menuOpenState) return;
-  menuClose(menuOpenState.panel);
+  menuClose(state.panel);
   event.preventDefault();
   event.stopPropagation();
+}
+
+// menuTrapTab keeps the Tab stop inside a trapped panel, wrapping at both
+// ends. core.js already owns the focusable inventory (modalFocusables) and the
+// other modal surfaces use the same walk, so the console does not spell a
+// second one. A pointer press outside still closes the panel, so only the
+// keyboard is contained.
+function menuTrapTab(panel, event) {
+  const items = modalFocusables(panel);
+  const first = items[0], last = items[items.length - 1];
+  if (!first) { event.preventDefault(); panel.focus(); return; }
+  const active = document.activeElement;
+  if (!panel.contains(active)) { event.preventDefault(); (event.shiftKey ? last : first).focus(); return; }
+  if (event.shiftKey ? active === first : active === last) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
 }
 
 // menuPointerdown closes on any press outside the panel and its trigger. The
@@ -330,6 +374,7 @@ function menuKeydown(event) {
 function menuPointerdown(event) {
   const state = menuOpenState;
   if (!state) return;
+  if (menuDialogAbove(event, state.panel)) return;
   const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
   if (path.includes(state.panel) || path.includes(state.trigger)) return;
   menuClose(state.panel);
@@ -347,7 +392,7 @@ function menuEnabledRows(panel, selector) {
 // modified arrows stay with the browser; Enter/Space activate through the
 // row's own click so every surface keeps one activation path.
 function menuRovingKey(panel, event) {
-  if (event.altKey || event.ctrlKey || event.metaKey) return;
+  if (keyModified(event)) return;
   const selector = _menuRovingSelectors.get(panel) || MENU_ITEM_SELECTOR;
   const rows = menuEnabledRows(panel, selector);
   const index = rows.indexOf(event.target);

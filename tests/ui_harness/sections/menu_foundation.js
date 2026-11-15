@@ -205,6 +205,23 @@ module.exports = async function menuFoundation(H) {
       await settleUntil(() => panel.dataset.placement === 'anchor' && panel.style.top === '136px'));
     check('the scrim is hidden again outside sheet mode', !!scrim && scrim.hidden);
     w.menuClose(panel);
+
+    // The breakpoint is one number with one owner: MENU_SHEET_QUERY derives
+    // from MENU_SHEET_PX, and the innerWidth fallback treats the boundary as
+    // inclusive at 800 and exclusive at 801. Nothing exercised either side, so
+    // a flipped comparison would have moved every sheet one pixel with no
+    // failing check anywhere.
+    {
+      const saved = [stubValue(w, 'innerWidth', 800), stubValue(w, 'matchMedia', undefined)];
+      check('the sheet query derives from its one number',
+        w.eval('MENU_SHEET_QUERY') === '(max-width: ' + w.eval('MENU_SHEET_PX') + 'px)');
+      check('the fallback treats the breakpoint itself as a sheet',
+        w.eval('menuPlacement()') === 'sheet');
+      w.innerWidth = 801;
+      check('one pixel above the breakpoint is an anchored panel',
+        w.eval('menuPlacement()') === 'anchor');
+      for (const restore of saved.reverse()) restore();
+    }
   }
 
   // ---- roving focus ----

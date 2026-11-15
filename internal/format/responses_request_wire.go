@@ -67,6 +67,16 @@ type responsesWireTool struct {
 	Async          *bool           `json:"async"`
 	DeferLoading   *bool           `json:"defer_loading"`
 	OutputSchema   json.RawMessage `json:"output_schema"`
+	// Tools holds the member functions of a namespace group. The group itself
+	// declares no parameters; every member is an ordinary function tool.
+	Tools []responsesWireTool `json:"tools"`
+}
+
+// responsesWireInputItem is the shallow shape one additional_tools input item
+// needs; the message decoder never materializes its tool list.
+type responsesWireInputItem struct {
+	Type  string          `json:"type"`
+	Tools json.RawMessage `json:"tools"`
 }
 
 // responsesWireAnnotation is one output_text annotation. The flat url shape
@@ -90,6 +100,7 @@ type responsesWireItem struct {
 
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
+	Namespace string          `json:"namespace"`
 	Arguments string          `json:"arguments"`
 	Output    json.RawMessage `json:"output"`
 

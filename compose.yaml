@@ -5,7 +5,8 @@ services:
     # main is the moving stable alias and excludes prereleases. Pin a version
     # tag or digest with MILLIVOLT_IMAGE for a reproducible deployment.
     image: ${MILLIVOLT_IMAGE:-ghcr.io/llm-4-people/millivolt:main}
-    container_name: millivolt
+    # No container_name: the project-scoped name keeps a second deployment (a
+    # second project or COMPOSE_PROJECT_NAME) from colliding with this one.
     ports:
       - "127.0.0.1:${MILLIVOLT_PORT:-8080}:8080"
     environment:
@@ -17,6 +18,12 @@ services:
       - data:/data
       - config:/config
     read_only: true
+    # Resource bounds. The memory ceiling is what the runtime's own soft limit
+    # derives from (80% of a detected cgroup ceiling, see go_memory_limit), so
+    # it must stay comfortably above the documented steady state; the process
+    # cap bounds fork/thread amplification. Both are inputs, not server config.
+    mem_limit: ${MILLIVOLT_MEM_LIMIT:-1g}
+    pids_limit: ${MILLIVOLT_PIDS_LIMIT:-512}
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
     cap_drop:
@@ -34,6 +41,16 @@ services:
     # SIGTERM cancels streams. Allow time beyond shutdown_timeout for SQLite
     # draining; this grace is configurable, not a lossless shutdown guarantee.
     stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
+    # Readiness, not liveness: the image's HEALTHCHECK stays the liveness
+    # contract (/healthz), while Compose reports healthy only when the durable
+    # write pipeline can persist (/readyz). start_period covers the boot
+    # history scan.
+    healthcheck:
+      test: ["CMD", "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-readycheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
 volumes:
   data:

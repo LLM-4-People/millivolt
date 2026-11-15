@@ -1,7 +1,10 @@
 package sse
 
 import (
+	"bytes"
+	"encoding/json"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
@@ -22,6 +25,33 @@ func (a *Analyzer) retainToolName(name string) {
 	}
 	a.toolNameSet[name] = struct{}{}
 	a.toolNames = append(a.toolNames, name)
+}
+
+// retainToolNameToken is retainToolName for a raw name string token. A name
+// already retained is found by an allocation-free bytes-to-string map probe;
+// only a new, escaped or non-UTF-8 name is materialized once.
+func (a *Analyzer) retainToolNameToken(raw []byte) {
+	// len <= 2 is the empty string token ("") or an absent key.
+	if len(raw) <= 2 || len(a.toolNames) >= metrics.RetainedToolNamesMax {
+		return
+	}
+	body := raw[1 : len(raw)-1]
+	if bytes.IndexByte(body, '\\') >= 0 {
+		a.retainToolName(jsonValueString(raw))
+		return
+	}
+	if utf8.Valid(body) {
+		if _, duplicate := a.toolNameSet[string(body)]; duplicate {
+			return
+		}
+		a.retainToolName(string(body))
+		return
+	}
+	// encoding/json replaces each invalid UTF-8 byte with U+FFFD.
+	var name string
+	if json.Unmarshal(raw, &name) == nil {
+		a.retainToolName(name)
+	}
 }
 
 // Fill populates rec with the analyzer's accumulated state. Call after the

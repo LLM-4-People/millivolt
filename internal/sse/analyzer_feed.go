@@ -1,12 +1,10 @@
 package sse
 
 import (
-	"bytes"
 	"encoding/json"
 	"strings"
 	"time"
 
-	"github.com/LLM-4-People/millivolt/internal/jsonnum"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -141,55 +139,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// name and index sets are bounded while streaming, so neither can grow with
 	// a hostile stream.
 	if hasToolCall {
-		// Decode each element independently. A malformed index in one element
-		// must not discard its healthy siblings or turn the whole frame into
-		// an empty tool call. The index is an exact non-negative integer;
-		// 0.0 and 1e3 are valid, while a string, fraction, negative or
-		// out-of-range value falls back to id presence.
-		var calls []json.RawMessage
-		if json.Unmarshal(toolBlock, &calls) == nil {
-			for _, raw := range calls {
-				var call struct {
-					Index    json.RawMessage `json:"index"`
-					ID       string          `json:"id"`
-					Function struct {
-						Name string `json:"name"`
-					} `json:"function"`
-				}
-				if json.Unmarshal(raw, &call) != nil {
-					continue
-				}
-				index := 0
-				hasIndex := false
-				if trimmed := bytes.TrimSpace(call.Index); len(trimmed) > 0 {
-					if n, err := jsonnum.Parse(trimmed); err == nil && n >= 0 {
-						index, hasIndex = n, true
-					}
-				}
-				if !hasIndex {
-					a.retainToolName(call.Function.Name)
-					if call.ID != "" {
-						a.toolCalls++
-					}
-					continue
-				}
-				if _, counted := a.toolCallIndexes[index]; counted {
-					a.retainToolName(call.Function.Name)
-					continue
-				}
-				if call.ID == "" && call.Function.Name == "" {
-					continue
-				}
-				if a.toolCallIndexes == nil {
-					a.toolCallIndexes = make(map[int]struct{}, 4)
-				}
-				if len(a.toolCallIndexes) < metrics.RetainedToolCallIDsMax {
-					a.toolCallIndexes[index] = struct{}{}
-				}
-				a.toolCalls++
-				a.retainToolName(call.Function.Name)
-			}
-		}
+		a.feedToolCalls(toolBlock)
 	}
 
 	// Capture finish_reason: "finish_reason":"stop" etc. A non-null value is a

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
@@ -86,7 +86,8 @@ func (s *Server) registerPendingCapture(id string) func() {
 
 // waitPendingCapture blocks while id has an in-flight sidecar save. It reports
 // false when ctx ends first, so a disconnected drawer client stops waiting; a
-// caller with no pending marker reads storage immediately.
+// caller with no pending marker reads storage immediately. The outcome only
+// bounds the wait - storage stays authoritative either way.
 func (s *Server) waitPendingCapture(ctx context.Context, id string) bool {
 	s.debug.mu.Lock()
 	done := s.debug.pendingCaptures[id]
@@ -108,7 +109,7 @@ func decodeDebug(raw []byte) []persistedDebug {
 	}
 	var doc persistedDebugDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		log.Printf("debug: decode: %v", err)
+		logging.Printf("", "debug: decode: %v", err)
 		return nil
 	}
 	if len(doc.Sessions) == 0 {
@@ -121,11 +122,11 @@ func (s *Server) attachDebugPersist(p pausePersist) {
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	if _, err := p.ExpireDebugCaptures(ctx, time.Now().UnixMilli()); err != nil {
-		log.Printf("debug: expire: %v", err)
+		logging.Printf("", "debug: expire: %v", err)
 	}
 	raw, err := p.LoadDebugSessions(ctx)
 	if err != nil {
-		log.Printf("debug: load: %v", err)
+		logging.Printf("", "debug: load: %v", err)
 		return
 	}
 	sessions := decodeDebug(raw)
@@ -147,7 +148,7 @@ func (s *Server) attachDebugPersist(p pausePersist) {
 		return
 	}
 	s.applyDebug(kept)
-	log.Printf("debug restored (%s)", debugDescribeAll(kept))
+	logging.Printf("", "debug restored (%s)", debugDescribeAll(kept))
 }
 
 func canonicalModel(m string) string {
@@ -408,7 +409,7 @@ func (s *Server) rearmDebugTimersLocked() {
 		id, until := d.ID, d.Until
 		s.debug.timers[id] = time.AfterFunc(wait, func() {
 			if removed, _ := s.removeDebug(id, until); removed {
-				log.Printf("debug session %s ended (timer elapsed)", id)
+				logging.Printf("", "debug session %s ended (timer elapsed)", id)
 			}
 		})
 	}
@@ -512,7 +513,7 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		if id != "" {
 			found, err := s.removeDebug(id, time.Time{})
 			if err != nil {
-				log.Printf("debug session %s stop failed: %v", id, err)
+				logging.Printf("", "debug session %s stop failed: %v", id, err)
 				writeOperatorState(w, s.DebugSnapshot(), err)
 				return
 			}
@@ -520,7 +521,7 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 				adminjson.WriteError(w, http.StatusNotFound, "debug session not found")
 				return
 			}
-			log.Printf("debug session %s stopped", id)
+			logging.Printf("", "debug session %s stopped", id)
 			writeOperatorState(w, s.DebugSnapshot(), nil)
 		} else {
 			s.resetOperatorState(w, s.DebugSnapshot, func() error { return s.applyDebug(nil) },
@@ -587,9 +588,9 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasPrev {
-		log.Printf("debug session updated %s (%s)", id, debugDescribe(snap))
+		logging.Printf("", "debug session updated %s (%s)", id, debugDescribe(snap))
 	} else {
-		log.Printf("debug session started (%s)", debugDescribe(snap))
+		logging.Printf("", "debug session started (%s)", debugDescribe(snap))
 	}
 	state := s.DebugSnapshot()
 	if !hasPrev && snap.ID != "" {
@@ -627,7 +628,7 @@ func (s *Server) DebugSnapshot() map[string]any {
 			n, err := s.pause.persist.CountDebugSession(ctx, d.ID)
 			cancel()
 			if err != nil {
-				log.Printf("debug: count session %s: %v", d.ID, err)
+				logging.Printf("", "debug: count session %s: %v", d.ID, err)
 			} else {
 				captures = n
 			}
@@ -656,7 +657,10 @@ func (s *Server) DebugSnapshot() map[string]any {
 	}
 	knownModels := s.pause.models.list()
 	state := map[string]any{
-		"ok":              true,
+		"ok": true,
+		// Same clock anchor as the pause document: a capture window is also
+		// absolute server time.
+		"server_ms":       serverClockMs(),
 		"enabled":         active > 0,
 		"sessions":        out,
 		"known_clients":   nullSlice(s.pause.clients.list()),
@@ -731,16 +735,17 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	// A fetch that follows the live end can arrive while the sidecar save is
 	// still running. Wait for that request's marker instead of exposing a
 	// transient 404; the request context stops the wait when the drawer client
-	// disconnects. No pending marker means the save already resolved (or never
-	// existed), so the ordinary storage read below is authoritative.
-	if !s.waitPendingCapture(r.Context(), id) {
-		return
-	}
+	// disconnects. The wait ending early only shortens that grace, so the
+	// storage read below answers either way: an expired wait against a missing
+	// capture is the ordinary 404, never an empty 200. The wait is bounded by
+	// the client, not by the storage budget, so the query timeout starts only
+	// after it: otherwise a slow save spends the budget the read needs.
+	s.waitPendingCapture(r.Context(), id)
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	raw, err := s.pause.persist.LoadDebugCapture(ctx, id)
 	if err != nil {
-		log.Printf("debug: load capture %s: %v", id, err)
+		logging.Printf("", "debug: load capture %s: %v", id, err)
 		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

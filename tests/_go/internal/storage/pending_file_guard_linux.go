@@ -39,9 +39,10 @@ func TestOpenRejectsFIFOPendingSnapshot(t *testing.T) {
 		t.Fatal("Open blocked on a FIFO pending snapshot")
 	}
 	requireLiveRow(t, dstPath, "keep-old")
-	info, err := os.Lstat(incoming + pendingSnapshotInvalidSuffix)
+	quarantined := requireQuarantined(t, incoming)
+	info, err := os.Lstat(quarantined)
 	if err != nil {
-		t.Fatalf("FIFO pending snapshot was not quarantined: %v", err)
+		t.Fatalf("FIFO pending snapshot quarantine missing: %v", err)
 	}
 	if info.Mode()&os.ModeNamedPipe == 0 {
 		t.Fatalf("quarantined FIFO mode = %v, want a named pipe", info.Mode())

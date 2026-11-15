@@ -40,9 +40,31 @@ type ResponsesStreamEncoder struct {
 	usage       ir.Usage
 	metadata    map[string]string
 	serviceTier string
-	failed      *ir.Error
-	retained    int
-	doneSent    bool
+	// toolNames maps a flat wire name back to the declared tool, so a
+	// function call closes with the namespace group the client offered.
+	toolNames map[string]ir.Tool
+	failed    *ir.Error
+	retained  int
+	doneSent  bool
+}
+
+// callItem renders one function-call item. A call whose flat name the request
+// declared inside a namespace group names that group again, so the client sees
+// the tool it offered rather than the flattened spelling the target required.
+func (e *ResponsesStreamEncoder) callItem(item *responsesItemState, args, status string) map[string]any {
+	name := item.name
+	namespace := ""
+	if tool, ok := e.toolNames[item.name]; ok && tool.Namespace != "" {
+		name, namespace = tool.Name, tool.Namespace
+	}
+	out := map[string]any{
+		"type": "function_call", "id": item.id, "call_id": item.callID,
+		"name": name, "arguments": args, "status": status,
+	}
+	if namespace != "" {
+		out["namespace"] = namespace
+	}
+	return out
 }
 
 type responsesItemState struct {
@@ -202,10 +224,7 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			return e.emit("response.output_item.added", map[string]any{
 				"type": "response.output_item.added", "sequence_number": e.nextSeq(),
 				"output_index": item.outputIndex,
-				"item": map[string]any{
-					"type": "function_call", "id": item.id, "call_id": item.callID,
-					"name": item.name, "arguments": "", "status": "in_progress",
-				},
+				"item":         e.callItem(item, "", "in_progress"),
 			})
 		case ir.BlockReasoning, ir.BlockRedactedReasoning:
 			item, err := e.startItem(ev.Index, ev.Block.Type)
@@ -372,10 +391,7 @@ func (e *ResponsesStreamEncoder) outputItems(status string) []map[string]any {
 			if args == "" {
 				args = "{}"
 			}
-			out = append(out, map[string]any{
-				"type": "function_call", "id": item.id, "call_id": item.callID,
-				"name": item.name, "arguments": args, "status": itemStatus,
-			})
+			out = append(out, e.callItem(item, args, itemStatus))
 		case "reasoning":
 			out = append(out, reasoningItem(item, item.reasoning.String(), itemStatus))
 		}
@@ -486,10 +502,7 @@ func (e *ResponsesStreamEncoder) closeItem(item *responsesItemState) error {
 		return e.emit("response.output_item.done", map[string]any{
 			"type": "response.output_item.done", "sequence_number": e.nextSeq(),
 			"output_index": item.outputIndex,
-			"item": map[string]any{
-				"type": "function_call", "id": item.id, "call_id": item.callID,
-				"name": item.name, "arguments": args, "status": item.status,
-			},
+			"item":         e.callItem(item, args, item.status),
 		})
 	case "reasoning":
 		text := item.reasoning.String()

@@ -11,6 +11,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
 func TestHandlePauseRequiresPausedField(t *testing.T) {
@@ -141,7 +142,7 @@ func TestHandlePauseProviderAndSecondClient(t *testing.T) {
 	if st["paused"] != true {
 		t.Fatalf("state = %v", st)
 	}
-	if !p.scheduler.HoldsTarget("anyone", "alpha.example") || p.scheduler.HoldsTarget("anyone", "beta.example") {
+	if !p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "anyone", Provider: "alpha.example"}) || p.scheduler.HoldsTarget(scheduler.PolicyTarget{Client: "anyone", Provider: "beta.example"}) {
 		t.Fatal("provider hold mismatch")
 	}
 	rr = httptest.NewRecorder()
@@ -382,20 +383,10 @@ func TestPauseSnapshotMatchesGET(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if get.Body.String() != string(snap)+"\n" && get.Body.String() != string(snap) {
-		// The operator response marshals the same map; compare canonically.
-		var a, b map[string]any
-		if err := json.Unmarshal(get.Body.Bytes(), &a); err != nil {
-			t.Fatal(err)
-		}
-		if err := json.Unmarshal(snap, &b); err != nil {
-			t.Fatal(err)
-		}
-		ka, _ := json.Marshal(a)
-		kb, _ := json.Marshal(b)
-		if string(ka) != string(kb) {
-			t.Fatalf("GET body %s != PauseSnapshot %s", get.Body.String(), snap)
-		}
+	// Compare what the document means, not the wall clock it was rendered at:
+	// server_ms differs whenever the two calls straddle a millisecond.
+	if got, want := snapshotWithoutClock(t, get.Body.Bytes()), snapshotWithoutClock(t, snap); got != want {
+		t.Fatalf("GET body %s != PauseSnapshot %s", got, want)
 	}
 
 	// The state must also track a live hold.

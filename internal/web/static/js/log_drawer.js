@@ -56,6 +56,24 @@ function detailHero(r) {
     `<div class="d-hero-top">${status}${method}${pathRow}</div>` +
     (ident.length ? `<div class="d-hero-ident">${ident.join('<span class="d-sep" aria-hidden="true">·</span>')}</div>` : '') +
     (stats.length ? `<div class="d-stats">${stats.join('')}</div>` : '') +
+    detailOperatorActions(r) +
+    `</div>`;
+}
+
+// detailOperatorActions offers the two console prefills a request record can
+// seed. They are prefills, not commits: the composer still gates every write.
+// Without them the operator had to read the client or model here, close the
+// drawer, open the console and retype it into a picker.
+function detailOperatorActions(r) {
+  if (!r || !r.id) return '';
+  const canHold = !!(r.client || r.provider);
+  const canCapture = !!(r.client || r.provider || r.model);
+  if (!canHold && !canCapture) return '';
+  return `<div class="d-ops">` +
+    (canHold ? `<button class="btn" type="button" data-drawer-operator="pause"` +
+      ` title="open a named hold scoped to this request">hold this scope</button>` : '') +
+    (canCapture ? `<button class="btn" type="button" data-drawer-operator="capture"` +
+      ` title="open a capture scoped to this request">capture this scope</button>` : '') +
     `</div>`;
 }
 
@@ -483,6 +501,14 @@ function closeDrawer() {
   if ($('drawer-title')) $('drawer-title').textContent = '';
   highlightRow();
 }
+// drawerSyncNav is the one writer of the drawer's arrow state: an arrow with no
+// record beyond it disables, so "nothing happened" is never the only signal.
+function drawerSyncNav(at, total) {
+  const prev = $('drawer-prev'), next = $('drawer-next');
+  if (prev) prev.disabled = at <= 0;
+  if (next) next.disabled = at < 0 || at >= total - 1;
+}
+
 function drawerNav(dir) {
   // Same set + order as the request log: explorer scope + the grown window.
   // prev/next navigates requests; the attempt mode does not travel with it.
@@ -524,6 +550,17 @@ function renderDrawer() {
   const focusInDebug = !!(prevFocus && root.contains(prevFocus) && prevFocus.closest('#drawer-debug'));
   const focusToken = root ? captureFocus(root, detailFocusKey) : null;
   const base = reqIdentityText(r);
+  // Navigation follows the visible window. At either end the arrow is a dead
+  // control unless it is disabled, and a scope change can leave the open
+  // record outside the window entirely: then both arrows point at nothing and
+  // the drawer says so and offers the way back into scope.
+  const visible = logVisible();
+  const at = visible.findIndex(v => v.id === drawerId);
+  const outside = at < 0;
+  drawerSyncNav(at, visible.length);
+  const scopeNote = outside
+    ? `<div class="oc-banner" role="status"><strong>Not in the current scope.</strong> The active filters hide this request from the log. <button type="button" class="oc-link" data-drawer-scope>show all traffic</button></div>`
+    : '';
   if (a) {
     // The title carries the attempt identity: index, real status (transport
     // for status-less failures) and the provider request id that matches a
@@ -531,12 +568,12 @@ function renderDrawer() {
     const status = a.status_code ? String(a.status_code) : 'transport';
     const ident = ` · attempt ${retryOrdinal(r, drawerAttempt)} of ${retryAttempts(r).length} · ${status}`
       + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
-    $('drawer-title').innerHTML = `<button type="button" class="btn drawer-back" id="drawer-back" onclick="drawerBackToRequest()" title="back to request" data-focus-key="drawer-back">‹ request</button>` +
+    $('drawer-title').innerHTML = `<button type="button" class="btn drawer-back" id="drawer-back" data-drawer-back title="back to request" data-focus-key="drawer-back">‹ request</button>` +
       `<span class="d-title-text" title="${escapeHtml(base + ident)}">${escapeHtml(base + ident)}</span>`;
-    body.innerHTML = formatAttemptDetail(r, drawerAttempt);
+    body.innerHTML = scopeNote + formatAttemptDetail(r, drawerAttempt);
   } else {
     $('drawer-title').innerHTML = `<span class="d-title-text" title="${escapeHtml(base)}">${escapeHtml(base)}</span>`;
-    body.innerHTML = formatDetail(r);
+    body.innerHTML = scopeNote + formatDetail(r);
   }
   detailWireGroups();
   body.scrollTop = scroll;
@@ -565,11 +602,36 @@ function drawerCopyRecord() {
 // attempt index opens that attempt in the request's drawer; one without an
 // index (deny by default) opens the request itself. Delegated on the drawer
 // body so re-renders never drop the handler; keyboard-activatable too.
+// The back affordance is rebuilt with every title render, so it is not in the
+// shell's id table: one delegated listener on the drawer owns it.
+$('drawer').addEventListener('click', e => {
+  if (e.target.closest('[data-drawer-back]')) drawerBackToRequest();
+});
+
 function openAttemptLink(el) {
   if (el.dataset.attempt !== undefined) openDrawerAttempt(el.dataset.openReq, el.dataset.attempt);
   else openDrawer(el.dataset.openReq);
 }
 $('drawer-body').addEventListener('click', e => {
+  // A drawer operator action seeds a console draft. The drawer is modal and
+  // marks every other body child inert, so it must close first: opening the
+  // console over it would leave a visible but unfocusable panel.
+  if (e.target.closest('[data-drawer-scope]')) { clearLogScope(); return; }
+  const op = e.target.closest('[data-drawer-operator]');
+  if (op) {
+    const record = recordById(drawerId);
+    const kind = op.dataset.drawerOperator;
+    closeDrawer();
+    // The press that got here is still propagating. chrome_menus' outside-press
+    // handler runs after it, does not recognise a drawer button as part of the
+    // console, and would close the console this click just opened. Opening on
+    // the next task lets that handler finish first.
+    if (record && typeof ocOpenOperatorForRecord === 'function') {
+      const open = () => ocOpenOperatorForRecord(kind, record);
+      if (typeof queueMicrotask === 'function') queueMicrotask(open); else setTimeout(open, 0);
+    }
+    return;
+  }
   const el = e.target.closest('.attempt-link[data-open-req]');
   if (el) openAttemptLink(el);
 });

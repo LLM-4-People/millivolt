@@ -36,7 +36,7 @@ func TestQueryBeforeCandidatesProjectsMatcherFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10)
+	candidates, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10, LogCandidatesAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestQueryBeforeCandidatesAppliesExactFilterAndCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidates, err := s.QueryBeforeCandidates(t.Context(), before, filter, 5)
+	candidates, err := s.QueryBeforeCandidates(t.Context(), before, filter, 5, LogCandidatesAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestLogPageRecordsPreservesAcceptedOrder(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	all, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10)
+	all, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10, LogCandidatesAll)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +138,64 @@ func TestLogPageRecordsPreservesAcceptedOrder(t *testing.T) {
 	}
 }
 
+// TestQueryBeforeCandidatesSelectsOnlyRequestedFields pins the field mask: a
+// plan that names no derived field must not decode any stored JSON, and a mask
+// naming one field must leave the others zero. Status and the cursor are always
+// present.
+func TestQueryBeforeCandidatesSelectsOnlyRequestedFields(t *testing.T) {
+	s := openTestStore(t)
+	base := time.UnixMilli(1_800_000_000_000)
+	s.Record(&metrics.Record{ID: "r", Provider: "p", Model: "model-r", Start: base, StatusCode: 500,
+		ToolNames: []string{"search"}, ErrorType: "upstream", ErrorCode: "E2", ErrorMsg: "boom",
+		Attempts: []metrics.RetryAttempt{{StatusCode: 503, ErrorType: "overloaded"}}})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		fields LogCandidateFields
+		want   func(t *testing.T, c LogCandidate)
+	}{
+		{"no fields", 0, func(t *testing.T, c LogCandidate) {
+			if c.Model != "" || c.ToolNames != nil || c.Attempts != nil || c.ErrorType != "" ||
+				c.ErrorCode != "" || c.ErrorMsg != "" {
+				t.Fatalf("candidate = %+v, want only the cursor and status", c)
+			}
+		}},
+		{"tools only", LogCandidatesTools, func(t *testing.T, c LogCandidate) {
+			if !reflect.DeepEqual(c.ToolNames, []string{"search"}) || c.Model != "" || c.Attempts != nil {
+				t.Fatalf("candidate = %+v, want only the tool names", c)
+			}
+		}},
+		{"errors only", LogCandidatesErrors, func(t *testing.T, c LogCandidate) {
+			if c.ErrorType != "upstream" || c.ErrorCode != "E2" || c.ErrorMsg != "boom" ||
+				len(c.Attempts) != 1 || c.ToolNames != nil || c.Model != "" {
+				t.Fatalf("candidate = %+v, want only the error columns", c)
+			}
+		}},
+		{"model only", LogCandidatesModel, func(t *testing.T, c LogCandidate) {
+			if c.Model != "model-r" || c.ToolNames != nil || c.Attempts != nil {
+				t.Fatalf("candidate = %+v, want only the model", c)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidates, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 1, tc.fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(candidates) != 1 {
+				t.Fatalf("candidates = %d, want 1", len(candidates))
+			}
+			if candidates[0].Cursor.ID != "r" || candidates[0].Cursor.StartMs != base.UnixMilli() ||
+				candidates[0].Status != 500 {
+				t.Fatalf("cursor/status = %+v/%d, want r/%d/500", candidates[0].Cursor, candidates[0].Status, base.UnixMilli())
+			}
+			tc.want(t, candidates[0])
+		})
+	}
+}
+
 // TestLogPageRecordsAcceptsEmptyRecordID pins that the schema's empty id is a
 // valid exact key. QueryBeforeCandidates returns an accepted row with id "",
 // and the log page used to reject that same key during materialization, so one
@@ -156,7 +214,7 @@ func TestLogPageRecordsAcceptsEmptyRecordID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	candidates, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10)
+	candidates, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10, LogCandidatesAll)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,8 +24,7 @@ function dayKey(r) {
   if (k !== undefined) return k;
   const t = recStartMs(r);
   if (!t) { dayKeyCache.set(r, ''); return ''; }
-  const d = new Date(t);
-  k = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+  k = fmtDateKey(new Date(t));
   dayKeyCache.set(r, k);
   return k;
 }
@@ -33,19 +32,16 @@ function dayKey(r) {
 // dayDividerLabel renders the day's stamp: today / yesterday for the fresh
 // groups, else weekday · month day, with the year only when it differs from
 // the current one.
-const DAY_NAMES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
-const MONTH_NAMES = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 function dayDividerLabel(r) {
   const t = recStartMs(r);
   if (!t) return '';
   const d = new Date(t);
   const now = new Date();
-  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-  if (sameDay(d, now)) return 'TODAY';
+  if (sameLocalDay(d, now)) return 'today';
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (sameDay(d, yesterday)) return 'YESTERDAY';
-  let label = DAY_NAMES[d.getDay()] + ' · ' + MONTH_NAMES[d.getMonth()] + ' ' + d.getDate();
+  if (sameLocalDay(d, yesterday)) return 'yesterday';
+  let label = CAL_DAYS[d.getDay()].short + ' · ' + CAL_MONTHS[d.getMonth()] + ' ' + d.getDate();
   if (d.getFullYear() !== now.getFullYear()) label += ' ' + d.getFullYear();
   return label;
 }
@@ -147,20 +143,22 @@ function turnsTitle(r) {
 // the pill opens the capture's session for editing.
 function debugBadge(r) {
   if (!r || !r.debug) return '';
-  return ` <span class="pill debug" data-edit-debug title="full debug capture - click to edit the session">dbg</span>`;
+  return ` <button type="button" class="pill debug" data-edit-debug title="full debug capture - click to edit the session">dbg</button>`;
 }
 
 // liveStatusCell is the one owner of the in-flight status pill (log row +
 // drawer). Classification is statusClass(); the retry badge stays outside so
 // reqRow can concatenate it - the drawer's status row carries no retry badge,
 // only the debug pill above. The drawer's status row uses this helper directly.
+// The two actionable pills are buttons, because opening the hold and the
+// throttling rule is otherwise a pointer-only gesture.
 function liveStatusCell(r) {
   const sc = statusClass(r);
   if (sc === 'paused') {
-    return `<span class="pill paused" data-edit-pause title="held by operator pause - click to edit the hold">paused</span>` + debugBadge(r);
+    return `<button type="button" class="pill paused" data-edit-pause title="held by operator pause - click to edit the hold">paused</button>` + debugBadge(r);
   }
   if (sc === 'throttled') {
-    return `<span class="pill throttled" data-edit-limit title="queued by the proxy - not yet sent upstream; click to edit provider limits">throttled</span>` + debugBadge(r);
+    return `<button type="button" class="pill throttled" data-edit-limit title="queued by the proxy - not yet sent upstream; click to edit provider limits">throttled</button>` + debugBadge(r);
   }
   const title = sc === 'streaming' ? 'request in flight - streaming' : 'request in flight - pending';
   return `<span class="pill live" title="${title}">${sc}</span>` + debugBadge(r);
@@ -227,6 +225,16 @@ function reqIdentityText(r) {
   return `${clientLabel(r && r.client) || '?'} · ${(r && r.provider) || '?'} · ${canonicalModel(r && r.model) || '-'}`;
 }
 
+// openerLabel names one row's opener. Every row repeats the same glyph, so a
+// bare "Open request details" left eleven identical controls in the table. The
+// time and identity say which request it is; the id tail separates rows that
+// share a second and a client/model (ids share their time prefix, so the tail
+// is the distinguishing end).
+function openerLabel(r) {
+  return `Open request details for ${new Date(r.start).toLocaleTimeString()} ${reqIdentityText(r)}` +
+    ` (${String(r.id || '').slice(-6)})`;
+}
+
 // retryAttempts returns the absorbed retry attempts paired with their index in
 // the record's attempts array. An in-band entry records the upstream status a
 // committed keepalive 200 could not relay; it is health evidence, not a retry,
@@ -265,10 +273,11 @@ function reqRow(r, sepLabel) {
     // (cursor's parked turn reports an estimated prompt), but a plain 0 is
     // "not counted yet", never a real number - show a bare … like every
     // other not-yet-known cell.
+    const openLabel = openerLabel(r);
     return `<tr class="exp-row live-row" data-id="${escapeHtml(r.id)}">
       <td style="color:var(--muted)" title="${escapeHtml(new Date(r.start).toLocaleString())}">${new Date(r.start).toLocaleTimeString()}</td>
-      <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
       <td>${liveStatusCell(r)}${liveRetry}</td>
+      <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
       <td title="${r.ttft_ms ? escapeHtml(fmtDur(r.ttft_ms)) : ''}">${r.ttft_ms ? fmtDur(r.ttft_ms) : '…'}</td>
       <td>-</td>
       <td>${inTok ? fmt(inTok) + '/…' : '…'}</td>
@@ -279,7 +288,7 @@ function reqRow(r, sepLabel) {
       <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
       <td>-</td>
       <td>-</td>
-      <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
+      <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="${escapeHtml(openLabel)}">›</button></td>
     </tr>`;
   }
   // Retry badge: show the actual status that was retried (not a hardcoded
@@ -308,8 +317,8 @@ function reqRow(r, sepLabel) {
   const costText = fmtMoney(r.cost);
   const main = `<tr class="exp-row ${drawerId===r.id ? 'expanding' : ''}" data-id="${escapeHtml(r.id)}">
     <td style="color:var(--muted)" title="${escapeHtml(start.toLocaleString())}">${timeText}</td>
-    <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
+    <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td title="${escapeHtml(fmtTTFT(r.ttft_ms))}">${fmtTTFT(r.ttft_ms)}</td>
     <td title="${escapeHtml(r.gen_tps ? tpsText + ' tok/s' : '')}">${tpsText}</td>
     <td title="${escapeHtml(inOutTitle)}">${inOutText}</td>
@@ -320,7 +329,7 @@ function reqRow(r, sepLabel) {
     <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
     <td style="color:${r.queue_wait_ms ? 'var(--warn)' : 'var(--muted)'}" title="${r.queue_wait_ms ? escapeHtml(fmtDur(r.queue_wait_ms)) : ''}">${r.queue_wait_ms ? fmtDur(r.queue_wait_ms) : '-'}</td>
     <td title="estimated cost ${escapeHtml(costText)}">${costText}</td>
-    <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
+    <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="${escapeHtml(openerLabel(r))}">›</button></td>
   </tr>`;
   // One collapsed sub-row per absorbed attempt (hidden until the badge toggle).
   // Sub-rows are clickable: data-attempt carries the attempt index, so a
@@ -333,7 +342,10 @@ function reqRow(r, sepLabel) {
     const asc = attemptPillClass(a);
     const when = a.at ? new Date(a.at).toLocaleTimeString() : '-';
     const label = a.error_type || (a.status_code ? 'http ' + a.status_code : 'transport');
-    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" hidden>
+    // The sub-row is a keyboard stop as well as a click target, so it is
+    // announced as the control it is; the row's own cells stay the reading,
+    // and the name states the attempt and its outcome.
+    return `<tr class="retry-sub exp-row" role="button" aria-label="${escapeHtml(`open attempt ${pos + 1} of ${label} at ${when} - ${a.error_msg || a.error_type || '-'}`)}" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" tabindex="0" hidden>
       <td>${when}</td>
       <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${pos + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
       <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}"><span class="retry-sub-text">${escapeHtml(a.error_msg || '-')}</span></td>
@@ -346,10 +358,13 @@ function reqRow(r, sepLabel) {
 // Columns are content-sized, not assigned pixel widths: REQ_FLOORS records the
 // widest value each column has needed this session, so REQ_COLS (the day
 // divider and retry sub-row span) can never drift from the header.
+// Status sits before the identity: the outcome is the question the log answers
+// first, and the identity column is the widest one, so a phone that has to
+// scroll sideways would otherwise lose the outcome before the first screen.
 const REQ_COLUMNS = [
   ['time'],
-  ['client · provider · model'],
   ['status'],
+  ['client · provider · model'],
   ['ttft'],
   ['tps'],
   ['in/out'],
@@ -467,9 +482,4 @@ function reqWidthRelevant(prev, rec) {
     !!prev.live !== !!rec.live || !!prev.paused !== !!rec.paused ||
     !!prev.throttled !== !!rec.throttled || !!prev.stream !== !!rec.stream ||
     !!prev.debug !== !!rec.debug;
-}
-
-function escapeHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }

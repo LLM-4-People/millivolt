@@ -124,9 +124,9 @@ function shortId(dim, id) {
 // TIME_BUCKET_LABELS renders the four time buckets (see timeBucket) as readable
 // windows. Single source for the bucket → label mapping.
 const TIME_BUCKET_LABELS = {
-  night: 'night 00–08',
-  work: 'work 08–16',
-  evening: 'evening 16–24',
+  night: 'night ' + fmtClockRange('00', '08'),
+  work: 'work ' + fmtClockRange('08', '16'),
+  evening: 'evening ' + fmtClockRange('16', '24'),
   weekend: 'weekend',
 };
 
@@ -400,6 +400,11 @@ function renderGallery(st) {
   // The matching payload carries groups pre-sorted and pre-capped by the
   // server; the client applies no cuts or math.
   const gallery = $('xp-gallery');
+  // A repaint replaces the cards, and the gallery is its own scroller: a
+  // background refresh dropped the operator back to the top of a list they had
+  // scrolled. Keep the offset beside the focus identity and put it back with
+  // the new cards.
+  const scrollTop = gallery.scrollTop;
   const focus = captureFocus(gallery, el => {
     const key = el.closest('.xp-node[data-xp-key]')?.dataset.xpKey;
     return key == null ? null : `.xp-node[data-xp-key="${CSS.escape(key)}"]`;
@@ -412,12 +417,28 @@ function renderGallery(st) {
     const failed = explorerFailure && explorerFailure.scopeKey === scopeKey &&
       explorerFailure.dim === st.activeDim;
     if (failed) _galleryFocus = null;
-    if (updateSection('xp-gallery', `<div class="empty">${failed ? 'breakdown unavailable' : 'loading breakdown…'}</div>`)) restoreFocus(focus);
+    // A failure keeps its reason and the way out: the tick retries on its own,
+    // but an automatic-only retry is a dead end when it keeps failing.
+    const body = failed
+      ? ocEmptyHTML('breakdown unavailable.',
+        escapeHtml(explorerFailure.reason ? explorerFailure.reason + '. ' : 'The scan did not answer. ') +
+        '<button type="button" class="oc-link" data-xp-retry>retry</button> the breakdown.')
+      : ocEmptyHTML('loading breakdown…', 'Counting the values of this dimension across the scope.');
+    if (updateSection('xp-gallery', `<div class="empty">${body}</div>`)) restoreFocus(focus);
     return;
   }
   if (!payload.groups || !payload.groups.length) {
     _galleryFocus = null;
-    if (updateSection('xp-gallery', `<div class="empty">no ${entityType(st.activeDim).label.toLowerCase()} values yet</div>`)) restoreFocus(focus);
+    // No values has two causes, exactly like the log: a filter that matches
+    // nothing, or a scope with no traffic in it at all.
+    const scope = logScopePhrase();
+    const body = scope
+      ? ocEmptyHTML('nothing matches the active filter.',
+        'The breakdown is scoped by ' + escapeHtml(scope) + '. ' +
+        '<button type="button" class="oc-link" data-xp-clear>clear all filters</button> to see every value.')
+      : ocEmptyHTML('no ' + entityType(st.activeDim).label.toLowerCase() + ' values yet.',
+        'Nothing in the stored history carries this dimension. Traffic appears here as it lands.');
+    if (updateSection('xp-gallery', `<div class="empty">${body}</div>`)) restoreFocus(focus);
     return;
   }
   const cards = payload.groups.map(e => xpNodeCard(st, e, payload)).join('');
@@ -429,6 +450,7 @@ function renderGallery(st) {
   // Only a changed gallery needs the post-layout sizing pass; an identical
   // payload leaves both the DOM and the layout untouched.
   if (updateSection('xp-gallery', cards)) {
+    if (scrollTop && gallery.scrollTop !== scrollTop) gallery.scrollTop = scrollTop;
     restoreFocus(restore);
     sizeGallery();
   }
@@ -670,6 +692,8 @@ $('explorer').addEventListener('click', e => {
   const st = explorerState();
   const clear = e.target.closest('[data-xp-clear]');
   if (clear) { _scopeFocus = scopeFocusToken(clear); navigateTo([]); return; }
+  // A failed breakdown scan: ask again now instead of waiting for the tick.
+  if (e.target.closest('[data-xp-retry]')) { fetchExplorer('invalidate'); return; }
   const chipX = e.target.closest('.chip-x[data-chip-dim]');
   if (chipX) {
     _scopeFocus = scopeFocusToken(chipX);

@@ -135,6 +135,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 					FallbackModel: rec.Model,
 					ToolBlocksMax: s.cfg().StreamToolCallsMax,
 					EventMaxBytes: eventMax,
+					ToolNames:     t.toolNames,
 				})
 				pw.CloseWithError(translationErr)
 			}()
@@ -248,14 +249,11 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		// same way at the read site.
 		now := time.Now()
 		if _, err := writeCounted(w, rec, frame); err != nil {
-			markClientGone(rec)
-			// An in-band provider error that already reached the client is
-			// the turn's outcome even though the following write failed; the
-			// native streamBody twin fills it in clientGone. Without this the
-			// 499 erases the provider classification.
-			if a.HasInBandError() {
-				fillRecord(&a, rec)
-			}
+			// The shared abort owner: the 499 plus the class the analyzer
+			// decided. An in-band provider error that already reached the
+			// client is the turn's outcome even though the write failed;
+			// clientGone fills it in and keeps that class.
+			clientGone(&a, rec)
 			return false
 		}
 		// Feed the analyzer from the bytes actually delivered, in line order.
@@ -300,14 +298,48 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	// A scanner error is the transformer's failure arriving through the pipe
 	// (CloseWithError): classify it here, in the handler, so the classification
 	// stays race-free with the deferred record finalize. markStreamErr keeps a
-	// client-disconnect-induced pipe close out of the error fields.
+	// client-disconnect-induced pipe close out of the error fields; when the
+	// local context was canceled it stamped the disconnect instead, so the
+	// aborted attempt keeps the class it reached - the native read-error arm
+	// shares that owner.
 	if err := scanner.Err(); err != nil {
 		markStreamErr(ctx, rec, err)
+		if rec.ClientDisconnected {
+			abortOutcome(&a, rec)
+		}
 	}
 	fillRecord(&a, rec)
 	if err := scanner.Err(); errors.Is(err, metrics.ErrMetricRange) {
 		invalidateUsage(rec, err)
 	}
+}
+
+// abortOutcome stamps the aborted attempt's own outcome. A disconnect is not
+// health: the delivery shape (a clean EOF that beat the transport's
+// cancellation, a failed client write, an upstream read error) must not decide
+// the class, so a truncated turn keeps the failure the analyzer already
+// observed. Only a provider's own in-band error keeps its class. The one owner
+// of the abort's failure class for both streaming relays; the Cursor
+// bidirectional path keeps its own documented exception (TurnResult.ClientAbort
+// in cursor_bidi.go - the upstream DID answer, so its 200 stays).
+func abortOutcome(a *sse.Analyzer, rec *metrics.Record) {
+	if code := a.OutcomeCode(); code != "" && !a.HasInBandError() {
+		rec.ErrorType = sse.TypeUpstreamError
+		rec.ErrorCode = code
+		rec.ErrorMsg = metrics.DegenerateMessage(code)
+	}
+}
+
+// clientGone records a write-detected abort: the disconnect stamps the 499 and
+// the analyzer fills the record unconditionally, so an aborted stream keeps the
+// finish reason, usage, cost and any in-band outcome it had already observed -
+// the same accounting its 200 twin gets - instead of landing as an all-zero
+// 499. Every caller returns immediately, so the fill runs at most once, and
+// markClientGone leaves a decided 4xx/5xx status alone.
+func clientGone(a *sse.Analyzer, rec *metrics.Record) {
+	markClientGone(rec)
+	fillRecord(a, rec)
+	abortOutcome(a, rec)
 }
 
 // fillRecord is the one stream-side bridge from analyzer accounting to the

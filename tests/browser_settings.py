@@ -11,8 +11,11 @@ async def settings_checks(page, results):
     final rendered DOM rather than in a template string.
     """
     await page.click('#btn-settings')
+    # An arrow-function source is injected through callFunctionOn; a bare
+    # expression is compiled with eval, which the dashboard CSP forbids, so a
+    # predicate that is false on the first poll would fail outright.
     await page.wait_for_function(
-        "window.settingsModule && "
+        "() => window.settingsModule && "
         "document.querySelectorAll('#settings-fields .st-row').length > 0")
     probe = await page.evaluate("""() => {
         const controls = [...document.querySelectorAll(

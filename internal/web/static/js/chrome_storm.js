@@ -10,6 +10,13 @@ let stormSnapshot = {valid: false, enabled: false, storms: []};
 let stormDialogKey = '';
 let quotaResumeError = '';
 const stormIncidentKey = s => JSON.stringify([s.provider, s.scope, s.model]);
+// STORM_STATE_WORDS is the one reading of the two states the server publishes.
+// The banner and both dialog variants spelled this ternary themselves, so a
+// wording change reached one surface at a time and only the half-open branch was
+// ever asserted. The state names are the server's; the words are this
+// dashboard's.
+const STORM_STATE_WORDS = { open: 'Holding requests', half_open: 'Checking recovery' };
+const stormStateWord = state => STORM_STATE_WORDS[state] || state;
 function applyStormState(st) {
   const banner = $('storm-banner');
   if (!banner) return;
@@ -18,11 +25,11 @@ function applyStormState(st) {
     ['open', 'half_open'].includes(s.state) && typeof s.reason === 'string' &&
     typeof s.quota === 'boolean' && (!s.quota || s.scope === 'provider') &&
     Number.isFinite(s.error_percent) && s.error_percent >= 0 && s.error_percent <= 100 &&
-    (s.scope !== 'provider' || Number.isSafeInteger(s.active_models) && s.active_models >= 0 &&
-      Number.isSafeInteger(s.affected_models) && s.affected_models >= 0 && s.affected_models <= s.active_models &&
+    (s.scope !== 'provider' || isCount(s.active_models) &&
+      isCount(s.affected_models) && s.affected_models <= s.active_models &&
       Number.isFinite(s.affected_model_percent) && s.affected_model_percent >= 0 && s.affected_model_percent <= 100) &&
     ['error_requests', 'failures', 'samples', 'window_ms', 'queued', 'recovery_successes', 'recovery_required'].every(key =>
-      Number.isSafeInteger(s[key]) && s[key] >= 0) && s.failures <= s.samples && s.window_ms > 0 &&
+      isCount(s[key])) && s.failures <= s.samples && s.window_ms > 0 &&
     s.error_requests <= s.failures &&
     s.recovery_required > 0 && s.recovery_successes <= s.recovery_required &&
     typeof s.retry_at === 'string' && Number.isFinite(Date.parse(s.retry_at));
@@ -44,7 +51,7 @@ function applyStormState(st) {
     const detail = s.quota
       ? `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>Quota pause</span><span>${fmt(s.queued)} queued</span><span>${fmt(s.recovery_successes)} / ${fmt(s.recovery_required)} recovery probes</span>`
       : `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(pctValue(s.error_percent, 1, true))} failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span>`;
-    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail">${detail}</span>`;
+    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${escapeHtml(stormStateWord(s.state))}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail">${detail}</span>`;
     let row = existing.get(key);
     existing.delete(key);
     if (!row) {
@@ -135,12 +142,12 @@ function renderStormDetails() {
   if (title) title.textContent = s.quota ? 'Provider quota pause' : 'Error storm details';
   const entries = s.quota ? [
     ['Provider', s.provider], ['Model scope', 'All models'],
-    ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
+    ['State', stormStateWord(s.state)], ['Error', s.reason],
     ['Queued requests', fmt(s.queued)], ['Next retry', new Date(s.retry_at).toLocaleString()],
     ['Successful recovery probes', s.recovery_successes + ' / ' + s.recovery_required],
   ] : [
     ['Provider', s.provider], ['Model scope', s.scope === 'provider' ? 'All models' : s.model || '(unspecified model)'],
-    ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
+    ['State', stormStateWord(s.state)], ['Error', s.reason],
     ['Requests affected', fmt(s.error_requests)], ['Failed upstream attempts', fmt(s.failures)],
     ['Sampled upstream attempts', fmt(s.samples)], ['Upstream attempt failure rate', pctValue(s.error_percent, 1, true)],
     ['Detection window', fmtDur(s.window_ms)], ['Queued requests', fmt(s.queued)],
@@ -160,10 +167,12 @@ function renderStormDetails() {
 
 // resumeQuotaProvider is the retry-mode quota gate's operator action: the
 // confirmed response is the shared storm snapshot, so the banner and dialog
-// repaint from the same authoritative state; a failure keeps the dialog open
-// with the message beside the button.
+// repaint from the same authoritative state; a failure leaves the message in
+// quotaResumeError for the dialog. It answers whether the gate was released so
+// a caller with its own surface (the console overview) can report in place
+// instead of reading the dialog's private error slot.
 async function resumeQuotaProvider(provider) {
-  if (!provider) return;
+  if (!provider) return false;
   try {
     const st = await operatorJsonBody('/admin/quota', {
       method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({provider, resume: true}),
@@ -171,8 +180,24 @@ async function resumeQuotaProvider(provider) {
     if (!st || !Array.isArray(st.storms)) throw new Error('unexpected resume response');
     quotaResumeError = '';
     applyStormState(st);
+    return true;
   } catch (err) {
     quotaResumeError = String(err.message || 'resume failed');
+    return false;
+  } finally {
+    renderStormDetails();
   }
-  renderStormDetails();
+}
+
+// quotaPausedProviders is the one reading of which providers a durable
+// quota/billing gate is parking. The banner honours storm_banner_enabled, so it
+// cannot be the only surface: with the banner off, these providers were parked
+// with no reachable resume anywhere in the dashboard. The snapshot itself keeps
+// every incident regardless of that display switch.
+function quotaPausedProviders() {
+  if (!stormSnapshot.valid || !stormSnapshot.enabled) return [];
+  return [...new Set(stormSnapshot.storms
+    .filter(s => s.quota)
+    .map(s => s.provider)
+    .filter(Boolean))].sort();
 }

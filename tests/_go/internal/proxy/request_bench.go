@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,10 +34,30 @@ func BenchmarkRequestMetadata(b *testing.B) {
 	}
 }
 
+// requestMessagesBenchBody builds a messages array of n user turns, each with a
+// content string and one tool call, plus the Chat token ceiling. It is the
+// shape that pays every per-message body walk.
+func requestMessagesBenchBody(n, size int) string {
+	var b strings.Builder
+	b.WriteString(`{"model":"fixture-model","max_tokens":1024,"messages":[`)
+	content := strings.Repeat("x", size)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"role":"user","content":"`)
+		b.WriteString(content)
+		b.WriteString(`","tool_calls":[{"id":"call_` + strconv.Itoa(i) + `","type":"function","function":{"name":"fixture","arguments":"{}"}}]}`)
+	}
+	b.WriteString(`]}`)
+	return b.String()
+}
+
 func BenchmarkRequestMetadataShapes(b *testing.B) {
 	const size = 100 * 1024
 	for _, tc := range []struct{ name, body string }{
 		{"escaped", `{"messages":[{"role":"user","content":"` + strings.Repeat(`text\n`, size/6) + `"}]}`},
+		{"many_messages", requestMessagesBenchBody(200, 512)},
 		{"multimodal", `{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,` + strings.Repeat("A", size) + `"}}]}]}`},
 		{"tool_schema", `{"tools":[{"type":"function","function":{"name":"fixture","description":"` + strings.Repeat("description ", size/12) + `","parameters":{"type":"object","properties":{"value":{"type":"string"}}}}}],"metadata":{"nested":{"value":"` + strings.Repeat("x", size/10) + `"}}}`},
 		{"digit_description", `{"tools":[{"description":"` + strings.Repeat("1234567890", size/10) + `"}]}`},

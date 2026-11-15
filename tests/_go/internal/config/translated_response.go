@@ -72,3 +72,49 @@ func TestTranslatedResponseMaxBytesBoundsAndPersistence(t *testing.T) {
 		t.Fatalf("schema help does not state the failure mode: %q", f.Help)
 	}
 }
+
+// TestCoupledFieldsRejectTheirContradiction pins the cross-field rules the
+// generic schema-band test has to exempt. Each of these fields is bounded
+// relative to another rather than by a fixed range, so its declared Min/Max is
+// only half the rule: the pair is what Validate enforces, and the pair is what
+// this asserts in both directions.
+func TestCoupledFieldsRejectTheirContradiction(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		want   string
+	}{
+		{
+			"a batch cap above the write channel",
+			func(c *Config) { c.StorageWriteChanCap = 4; c.StorageBatchCap = 5 },
+			"storage_batch_cap",
+		},
+		{
+			"idle connections above the per-host ceiling",
+			func(c *Config) { c.MaxConnsPerHost = 2; c.MaxIdleConnsPerHost = 3 },
+			"max_idle_conns_per_host",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("rejection %q does not name %s", err.Error(), tc.want)
+			}
+			// The equal values are the boundary both rules allow.
+			switch tc.want {
+			case "storage_batch_cap":
+				c.StorageBatchCap = c.StorageWriteChanCap
+			case "max_idle_conns_per_host":
+				c.MaxIdleConnsPerHost = c.MaxConnsPerHost
+			}
+			if err := c.Validate(); err != nil {
+				t.Fatalf("the equal boundary was rejected: %v", err)
+			}
+		})
+	}
+}

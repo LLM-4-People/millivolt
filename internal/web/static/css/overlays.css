@@ -41,6 +41,14 @@
   .drawer-hd .btn { padding: 4px 8px; border-radius: 7px; }
   .drawer-hd .drawer-back { flex: none; padding: 3px 7px; font-size: 10px; }
   .drawer-hd .drawer-tool { flex: none; font-size: 9.5px; letter-spacing: .04em; padding: 5px 7px; }
+  /* The drawer header is the way through and out of a request on a phone:
+     navigation, copy and close keep the full target there instead of the
+     dense 28px icon box. */
+  @media (hover: none), (pointer: coarse) {
+    .drawer-hd .nav-btns { gap: 4px; }
+    .drawer-hd .nav-btns .btn { width: var(--tap); height: var(--tap); }
+    .drawer-hd .btn { min-height: var(--tap); }
+  }
   .d-key { margin-left: 4px; font-size: 9px; color: var(--muted); }
   .drawer-body {
     overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
@@ -50,10 +58,12 @@
   .drawer-body::-webkit-scrollbar, .st-fields::-webkit-scrollbar { width: 6px; }
 
   /* The one polite copy outcome. It sits above every modal surface because a
-     copy can be initiated from the drawer, Settings or a capture view. */
+     copy can be initiated from the drawer, Settings, the console or a dialog;
+     the storm and operator dialogs are the highest lifted surfaces (120/130),
+     so this rides the top of the z ladder. */
   .toast {
     position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
-    transform: translate(-50%, 10px); z-index: 100; max-width: min(420px, calc(100vw - 24px));
+    transform: translate(-50%, 10px); z-index: 140; max-width: min(420px, calc(100vw - 24px));
     padding: 7px 12px; border: 1px solid var(--border2); border-radius: 8px;
     background: var(--panel); color: var(--text); font: 11px var(--mono);
     box-shadow: 0 10px 30px rgba(var(--shadow-rgb), .45);
@@ -115,7 +125,10 @@
      keeps the label readable and the number beside the row edge. */
   .st-rail-item .rail-n { min-width: 2ch; margin-left: auto; padding-left: 6px; text-align: right; }
   .st-rail-item.has-hit .rail-n { color: var(--accent); }
-  .st-rail-item.is-miss { opacity: .4; }
+  .st-rail-item.is-miss { opacity: .7; }
+  /* The count keeps its own ink; the row fade alone would push --muted under
+     the floor. */
+  .st-rail-item.is-miss .rail-n { color: var(--muted-off); }
   .st-live {
     flex-shrink: 0; padding: 10px 12px 12px; border-top: 1px solid var(--border);
     font: 10px/1.45 var(--mono); color: var(--muted);
@@ -162,7 +175,7 @@
     width: 100%; font: 12px var(--mono); padding: 6px 10px; border-radius: 8px;
     background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
   }
-  .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .5; cursor: not-allowed; }
+  .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .7; cursor: not-allowed; }
   .st-ctl textarea { min-height: 64px; resize: vertical; }
   .st-hint { font: 10px var(--mono); color: var(--muted); }
   .st-help { min-width: 0; max-width: 100%; }
@@ -206,7 +219,9 @@
   /* The provider icon rides the entity system: both emitters (the provider
      card header and the picker menu) set --ent to the provider entity
      color, so the icon and its glow rekey with the entity palette. */
-  .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
+  .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; display: inline-flex; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
+  .prov-ic svg { width: 12px; height: 12px; display: block; stroke: currentColor; fill: none; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+  [data-mode="clear"] .prov-ic { color: var(--ent-ink, var(--ent)); }
   .prov-hd .sp-label {
     flex: 1; min-width: 0; background: transparent; border-color: transparent;
     font: 600 12px var(--mono); color: var(--text); padding: 4px 8px; border-radius: 7px;
@@ -252,20 +267,31 @@
   .prov-add input, .prov-add select { flex: 1; min-width: 0; }
   .prov-add input { border-style: dashed; }
   .prov-add .prov-addbtn { padding: 4px 11px; flex-shrink: 0; font-size: 11px; }
+  /* A provider field's inline reason: under its row, across every track of the
+     row grid, and on its own line inside a flex add row. The ink and the
+     empty state are the shared .st-error pair. */
+  .prov-reason { grid-column: 1 / -1; flex: 0 0 100%; }
+  .prov-add:has(.prov-reason), .prov-hd:has(.prov-reason) { flex-wrap: wrap; }
   /* Model rules editor: the six-slot row (mode | from | → | to | ◉▲▼ | ✕)
      widens .prov-urow's grid; the preview row shares it. Below it live the
      inline validation slot (grid-span), the step trace, the real-traffic
      example table, and the tools row (templates + restore + count). */
-  .mr-row, .mr-preview { grid-template-columns: 78px minmax(120px, 1fr) 14px minmax(120px, 1fr) 52px 24px; }
+  .mr-row, .mr-preview { grid-template-columns: 78px minmax(120px, 1fr) 14px minmax(120px, 1fr) auto auto; }
   .mr-row .mr-mode, .mr-add .mr-mode { font-size: 10px; padding: 4px 5px; }
   .mr-add select { flex: 0 0 78px; }
   .mr-what { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .mr-out { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mr-move { display: flex; gap: 2px; justify-content: flex-end; }
-  .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; }
-  .mr-move button:hover { color: var(--accent); }
+  /* The move buttons and the remove cross size their own tracks (auto): the
+     three reorder actions take the coarse target while a mouse keeps the
+     dense row, so a fixed column could only fit one of them. */
+  .mr-move { display: flex; gap: 4px; justify-content: flex-end; }
+  .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; min-width: 24px; min-height: 24px; }
   .mr-move .mr-vis[aria-pressed="false"] { color: var(--text); }
-  .mr-row[data-mr-off="1"] { opacity: .45; }
+  .mr-row[data-mr-off="1"] { opacity: .7; }
+  /* The row's muted marks keep their own ink: the row fade alone would push
+     --muted under the floor. */
+  .mr-row[data-mr-off="1"] .prov-arrow,
+  .mr-row[data-mr-off="1"] .mr-move button { color: var(--muted-off); }
   .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
   .mr-err:empty { display: none; }
   .mr-err[data-level="error"] { color: var(--err-text); }
@@ -273,7 +299,7 @@
   .mr-hint { font-size: 9.5px; color: var(--muted); line-height: 1.5; margin: 0 0 7px; }
   .mr-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .mr-tools select { font-size: 10px; padding: 3px 5px; max-width: 190px; }
-  .mr-restore { background: none; border: none; color: var(--muted); font: inherit; font-size: 9.5px; cursor: pointer; padding: 0; }
+  .mr-restore { background: none; border: none; color: var(--muted); font: inherit; font-size: 9.5px; cursor: pointer; padding: 0 6px; min-height: 24px; }
   .mr-restore:hover { color: var(--accent); }
   .mr-count { margin-left: auto; font-size: 9.5px; white-space: nowrap; }
   .mr-trace { font-size: 9.5px; line-height: 1.7; margin: 2px 0 4px; overflow-wrap: anywhere; }
@@ -332,6 +358,9 @@
     transition: background .16s ease;
   }
   .prov-menu-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
+  /* The list is its own scroller: the edge rides inside the row so it is
+     never clipped by the scroll box. */
+  .prov-menu-item:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .prov-menu-item .prov-ic { font-size: 11px; }
   .prov-menu-custom { display: flex; gap: 5px; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; }
   .prov-menu-custom input { flex: 1; min-width: 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; }
@@ -350,6 +379,7 @@
     transition: transform .16s ease;
   }
   .prov-chev:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+  .prov-chev:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .st-prov.collapsed .prov-chev svg { transform: rotate(-90deg); }
   .st-prov.collapsed .prov-body { display: none; }
   .prov-x {
@@ -362,6 +392,7 @@
     stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
   }
   .prov-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+  .prov-x:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
   .prov-bad, .prov-bad:focus { border-color: var(--err) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 15%, transparent) !important; }
   .ro-wrap { min-width: 0; max-width: 100%; }
   .ro-wrap .mr-tools { flex-wrap: wrap; }
@@ -385,7 +416,13 @@
     min-width: 0; overflow: hidden; background: var(--panel2);
     border: 1px solid var(--border); border-radius: 9px;
   }
-  .ro-rule:focus, .ro-rule:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+  /* The reordering and destructive settings controls are 9px glyphs with no
+     frame of their own: one shared edge group, at the card's own offset,
+     makes the keyboard stop visible, and each takes a 24px box so the pointer
+     finds it too instead of hunting a two-pixel target. */
+  .ro-rule:focus, .ro-rule:focus-visible,
+  .mr-move button:focus-visible,
+  .mr-restore:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
   .ro-rule-head {
     display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto;
     gap: 8px; align-items: center; min-width: 0; padding: 7px 8px;
@@ -463,7 +500,6 @@
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }
     .ro-head-actions { justify-content: flex-start; }
-    .ro-head-actions button { min-height: 24px; }
     .ro-rule .ro-scope, .ro-rule .ro-body { grid-template-columns: minmax(0, 1fr); }
     .ro-rule-body { padding-inline: 8px; }
   }
@@ -478,4 +514,20 @@
     /* The header controls are the way in and out of the sheet, so they take
        the same touch target as the rail and footer at every touch width. */
     .st-hd .btn, .st-hd input[type="search"] { min-height: var(--tap); }
+    /* The per-row controls are small on purpose at a fine pointer: they sit
+       inside a dense rule card and a mouse hits them reliably. A coarse
+       pointer does not, and these are the destructive and reordering actions -
+       removing a provider, a header override or a rule, and moving or parking
+       one - so a mis-tap costs real state. One inventory, every row action. */
+    .prov-x,
+    .mr-move button,
+    .mr-restore,
+    .ro-head-actions button,
+    .ro-add-btn,
+    .ro-tpl-item,
+    .ro-disclosure,
+    .mr-tools select { min-height: var(--tap); }
+    .mr-move button, .mr-restore { min-width: var(--tap); padding: 0 6px; }
+    .mr-move { gap: 4px; }
+    .prov-x { min-width: var(--tap); min-height: var(--tap); }
   }

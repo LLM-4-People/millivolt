@@ -1,5 +1,6 @@
 """Shared repository location and private-state-safe source discovery."""
 
+import contextlib
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,105 @@ def require(value, message):
     """Test safety gates must remain active when Python runs with -O."""
     if not value:
         raise RuntimeError(message)
+
+
+# The layout probes ask one question: does an element clip content a reader is
+# meant to see? A scroll box reports scrollWidth > clientWidth for the text it
+# clips, which is the defect the probes exist to catch.
+#
+# An element that paints nothing by design reports the same numbers while
+# showing nothing, so it is not a clip. `.visually-hidden` is exactly that shape
+# - 1px, overflow hidden, clip-path inset(50%), which is what makes
+# screen-reader-only text work - and the three chart triggers gained such spans
+# when their accessible names moved to aria-labelledby. The probes then failed a
+# correct page. The same latent trap sits under the hidden live region: it is
+# empty today, and any status text would trip a probe the moment it is not.
+#
+# So the exclusion is a property of the reading, not of those spans: an element
+# whose own content is invisible (display none, visibility hidden, zero opacity,
+# a clip) or that sits inside a clipped or opacity-0 ancestor paints nothing.
+# Three probes and any future one share this one definition.
+CLIP_PROBE_JS = r"""
+const paintsNothing = e => {
+  const own = getComputedStyle(e);
+  // visibility inherits, so the element's own computed value already answers
+  // for an ancestor rule; a child that overrides it back to visible still
+  // paints and must not be excluded.
+  if (own.display === 'none' || own.visibility === 'hidden') return true;
+  for (let n = e; n && n.nodeType === 1; n = n.parentElement) {
+    const cs = getComputedStyle(n);
+    if (parseFloat(cs.opacity) === 0) return true;
+    if (cs.contentVisibility === 'hidden') return true;
+    // Both spellings: the modern clip-path and the clip-rect fallback the
+    // dashboard's visually-hidden rule still carries for older engines.
+    if (cs.clipPath === 'inset(50%)') return true;
+    const clip = (cs.clip || '').replace(/\s+/g, '');
+    if (clip === 'rect(0px,0px,0px,0px)' || clip === 'rect(0,0,0,0)') return true;
+  }
+  return false;
+};
+const clipsPaintedContent = (e, slop = 2) =>
+  e.clientWidth > 0 && e.scrollWidth > e.clientWidth + slop && !paintsNothing(e);
+const clipped = (root, slop = 2) =>
+  [...root.querySelectorAll('*')].filter(e => clipsPaintedContent(e, slop));
+"""
+
+
+def clip_js(script):
+    """Give one page probe the shared clip predicate.
+
+    Playwright calls the string form `async () => { ... }` as a function, so a
+    declaration prepended to the script would replace it with a statement whose
+    completion value is never invoked. The declaration goes inside the body,
+    where it is still a statement, and every probe then reads the same
+    definition instead of restating the comparison.
+    """
+    head = 'async () => {'
+    if not script.startswith(head):
+        raise RuntimeError('clip_js expects an async arrow function body: ' + script[:40])
+    return head + CLIP_PROBE_JS + script[len(head):]
+
+
+# A probe that installs its own rows is a fixture, and the page does not know
+# it exists: the bootstrap poll repaints the table from the server's rows, and
+# the footer clock repaints its own line. Whatever a probe measured can be
+# replaced between its write and its read, which is a race the probe loses at
+# random under load. browser_drawer.py cleared the dashboard tick for this
+# reason; the request-table width probe then failed the same way on the insert
+# path, where the learned floor survived but the injected row did not.
+#
+# These are the timers the page arms for itself. The scope is one probe: pause
+# on entry, and on exit re-arm through the page's own functions, so the cadence
+# stays owned by the page and every later check sees the normal timer set.
+PAUSE_AMBIENT_JS = """() => {
+  // These are top-level `let` bindings in a classic script: they live in the
+  // global lexical environment, not on `window`, so they must be named
+  // directly. Indexing window by name silently finds nothing.
+  window.__ambientWas = {dash: !!_dashTickTimer, clock: !!_clockTimer};
+  if (_dashTickTimer) { clearInterval(_dashTickTimer); _dashTickTimer = null; }
+  if (_clockTimer) { clearInterval(_clockTimer); _clockTimer = null; }
+  if (_xpLiveTimer) { clearTimeout(_xpLiveTimer); _xpLiveTimer = null; }
+  if (logRetryTimer) { clearTimeout(logRetryTimer); logRetryTimer = null; }
+}"""
+
+RESUME_AMBIENT_JS = """() => {
+  const was = window.__ambientWas || {};
+  delete window.__ambientWas;
+  // Only re-arm what the page had armed. A hidden page arms neither, and a
+  // probe must not force a cadence the page deliberately withheld.
+  if (was.dash && !_wasHidden) armDashboardTicks();
+  if (was.clock && !_wasHidden) _armClock();
+}"""
+
+
+@contextlib.asynccontextmanager
+async def paused_ambient(page):
+    """Stop the timers the page arms for itself while one fixture is measured."""
+    await page.evaluate(PAUSE_AMBIENT_JS)
+    try:
+        yield
+    finally:
+        await page.evaluate(RESUME_AMBIENT_JS)
 
 
 async def pick_chart_control(page, trigger, value):
@@ -507,6 +607,156 @@ def spark_height_mirror_errors(pairs):
         errors.append(SPARK_HEIGHT_JS + ': CHART_SPARK_H=' + str(height)
                       + ' no longer mirrors the .chart-total .spark height=' + str(rule)
                       + 'px in ' + SPARK_HEIGHT_CSS)
+    return errors
+
+
+VENDOR_BANNER = 'internal/web/static/vendor/uplot.js'
+VENDOR_NOTICE = 'THIRD_PARTY_NOTICES.md'
+
+
+def vendor_notice_errors(pairs):
+    """The vendored library's version is one fact in three places: the banner
+    the upstream build writes, the notice's version link, and the notice's
+    license link. Only the first is generated, so a bump that replaces the file
+    silently leaves a stale version in a legally meaningful notice."""
+    errors = []
+    # The vendored bundle is outside the JS scan corpus on purpose (third-party
+    # code is never linted as ours), so its banner is read directly.
+    try:
+        banner = (ROOT / VENDOR_BANNER).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return [VENDOR_BANNER + ': unreadable']
+    try:
+        text = (ROOT / VENDOR_NOTICE).read_text(encoding='utf-8')
+    except OSError:
+        return [VENDOR_NOTICE + ': unreadable']
+    match = re.search(r'uPlot \(v(\d+\.\d+\.\d+)\)', banner)
+    if not match:
+        return [VENDOR_BANNER + ': version banner not found']
+    version = match.group(1)
+    if version not in text:
+        errors.append(VENDOR_NOTICE + ': notice does not name the vendored uPlot '
+                      + version + ' the banner declares')
+    for label, pattern in (
+        ('tree link', r'\(https://github\.com/leeoniya/uPlot/tree/(\d+\.\d+\.\d+)\)'),
+        ('license link', r'\(https://github\.com/leeoniya/uPlot/blob/(\d+\.\d+\.\d+)/LICENSE\)'),
+    ):
+        found = re.search(pattern, text)
+        if not found:
+            errors.append(VENDOR_NOTICE + ': ' + label + ' does not name a version')
+        elif found.group(1) != version:
+            errors.append(VENDOR_NOTICE + ': ' + label + ' names ' + found.group(1)
+                          + ', the vendored banner declares ' + version)
+    return errors
+
+
+# A coarse pointer cannot hover, aim finely or recover a clipped value, so every
+# control a dense layout sizes below the shared target must be raised by the
+# coarse block that owns its surface. --tap is that target.
+TAP_TOKEN_PX = 44
+# One reading of "this selector names a control". A class-based control is any
+# element whose final class name ends in a word from the control vocabulary this
+# dashboard uses: a button, tab, row, item, chip, disclosure, close, undo, and
+# so on. The suffix list is intentionally broad - a false positive costs one
+# coarse rule, while a false negative is a 20px target nobody sees.
+CONTROL_SUFFIXES = (
+    'btn', 'button', 'tab', 'row', 'item', 'chip', 'toggle', 'move', 'vis',
+    'restore', 'select', 'close', 'undo', 'disclosure', 'opt', 'action',
+    'link', 'trigger', 'x', 'switch',
+)
+
+
+def css_names_control(selector):
+    """True when the selector's last compound names something a finger taps."""
+    last = selector.split()[-1] if selector.split() else selector
+    for part in re.split(r'[>:+~]', last):
+        part = part.strip()
+        if not part:
+            continue
+        if part in ('button', 'select', 'input', 'summary', 'textarea'):
+            return True
+        if part.startswith('#') and 'legend' not in part:
+            # An id selector on an interactive surface (a specific control).
+            return True
+        for cls in re.findall(r'\.([A-Za-z][\w-]*)', part):
+            if cls in ('btn', 'prov-x', 'mini-btn', 'copy-btn'):
+                return True
+            if any(cls == suffix or cls.endswith('-' + suffix) for suffix in CONTROL_SUFFIXES):
+                return True
+    return False
+
+
+def _css_blocks(text):
+    """(media context, selector, declarations) for every CSS block.
+
+    Comments are removed first: they contain braces and quoted selectors, and a
+    naive scan would attribute a declaration to whichever comment preceded it.
+    """
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
+    out, stack, token = [], [], ''
+    for char in text:
+        if char == '{':
+            stack.append(token.strip())
+            token = ''
+        elif char == '}':
+            if stack:
+                out.append((stack[-2] if len(stack) > 1 else '', stack[-1], token))
+            token = ''
+            if stack:
+                stack.pop()
+        else:
+            token += char
+    return out
+
+
+def tap_target_errors(pairs):
+    """Every interactive control a fine-pointer rule sizes below --tap must be
+    named by the coarse block for its surface.
+
+    A dense dashboard legitimately renders 20-28px rows: they are read at a desk
+    with a mouse. The same rules also reach a phone, where a mis-tap on the
+    remove, park or move control beside a rule costs real operator state. This
+    check asks the two questions a reviewer cannot: which controls are declared
+    short, and which of them some coarse block actually raises.
+    """
+    errors = []
+    for name, text in pairs:
+        if not name.startswith('internal/web/static/css/') or not name.endswith('.css'):
+            continue
+        blocks = _css_blocks(text)
+        if not blocks:
+            continue
+        short = {}
+        for media, selector, body in blocks:
+            if media:
+                continue
+            match = re.search(r'min-height:\s*(\d+)px', body)
+            if not match or int(match.group(1)) >= TAP_TOKEN_PX:
+                continue
+            for part in selector.split(','):
+                part = part.strip()
+                if part and css_names_control(part):
+                    short.setdefault(part, int(match.group(1)))
+        if not short:
+            continue
+        covered = set()
+        for media, selector, body in blocks:
+            if 'pointer: coarse' not in media and 'hover: none' not in media:
+                continue
+            for part in selector.split(','):
+                part = part.strip()
+                if not part:
+                    continue
+                # A coarse rule may name the control itself or qualify it with
+                # its surface prefix; either reaches the same element.
+                covered.add(part)
+                covered.add(part.split()[-1])
+        for selector, px in sorted(short.items()):
+            if selector in covered or selector.split()[-1] in covered:
+                continue
+            errors.append(name + ': ' + selector + ' is ' + str(px)
+                          + 'px at a fine pointer and no coarse block raises it to the '
+                          + str(TAP_TOKEN_PX) + 'px target')
     return errors
 
 

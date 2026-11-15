@@ -66,8 +66,10 @@ func readRequest(r *http.Request, maxBytes int64, preview bool, cfg *config.Conf
 
 // readRequestHint reads one inbound body. charge, when set, is called with each
 // chunk actually read and refuses (returns false) once the process-wide body
-// budget would be crossed; the declared Content-Length is never reserved up
-// front, so an idle connection cannot hold budget it has not used.
+// budget would be crossed. Admission has already charged the bounded allocation
+// hint for this declaration (requestBodyHint), so charge only has to reconcile
+// the real bytes against it: short bodies refund, understated declarations are
+// charged the overshoot.
 //
 // The per-request cap owns the status when both apply: an over-cap body is
 // answered 413 and a budget refusal only applies to a body that fits. A
@@ -140,6 +142,19 @@ func chargeRefusalError(body io.Reader, read, maxBytes int64) error {
 		}
 	}
 	return errBodyBudget
+}
+
+// requestBodyHint is the body-budget admission charge: the bytes
+// readRequestBody is about to allocate, which is the declared length bounded by
+// the request cap (plus its overflow probe byte) and the speculative read hint.
+// An absent, chunked or zero length charges nothing because nothing is
+// allocated up front, and a declaration past the hint charges only the hint.
+// chargeRead reconciles the rest as the body arrives.
+func requestBodyHint(contentLength, maxBytes int64) int64 {
+	if contentLength <= 0 {
+		return 0
+	}
+	return min(contentLength, maxBytes+1, requestReadHintMax)
 }
 
 // readRequestBody reads at most maxBytes+1 bytes. A declared length that fits

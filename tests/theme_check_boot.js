@@ -187,4 +187,6 @@ async function bootChecks(context) {
   return [reloaded, legacy, invalid, mixed];
 }
 
-module.exports = { STATIC, STORAGE_KEY, boot, bootChecks, loaded };
+const { watchdog, WATCHDOG_MS } = require('./watchdog');
+
+module.exports = { STATIC, STORAGE_KEY, boot, bootChecks, loaded, watchdog, WATCHDOG_MS };

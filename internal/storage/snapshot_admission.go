@@ -1,13 +1,16 @@
 package storage
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // snapshotAdmission is an installed pending snapshot. Open commits it only
@@ -25,7 +28,50 @@ type snapshotAdmission struct {
 // so a structurally valid but incompatible file is quarantined while the live
 // database stays untouched. Its errors are returned bare: Open owns the
 // single "pending snapshot:" label.
+//
+// A rejected successor leaves the slot empty, but a crash between preserving a
+// pre-existing pending snapshot and discarding its preserved name can leave
+// that snapshot as a private sibling. The sibling is the queue entry, so it is
+// renamed back onto the slot and admitted once instead of aging out under the
+// staging sweep.
 func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
+	a, err := admitPendingSnapshotOnce(path)
+	if err != nil {
+		return nil, err
+	}
+	if a != nil {
+		// The admitted successor supersedes the preserved sibling, which either
+		// duplicates the pre-existing slot inode or is the snapshot the
+		// successor replaces. Cleanup is best effort; the sweep can still take
+		// it.
+		removePreservedPendingSiblings(path)
+		return a, nil
+	}
+	if _, err := os.Lstat(path + pendingSnapshotSuffix); err == nil {
+		// A slot that survived the checks needs nothing else.
+		return nil, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	// The slot is empty. Either its successor was just rejected, or a preserve
+	// fallback moved the queue entry aside and a crash followed. A preserved
+	// sibling is the queue entry in both shapes.
+	sibling, err := newestPreservedPendingSibling(path)
+	if err != nil || sibling == "" {
+		return nil, err
+	}
+	if err := os.Rename(sibling, path+pendingSnapshotSuffix); err != nil {
+		return nil, fmt.Errorf("re-admit preserved pending snapshot: %w", err)
+	}
+	return admitPendingSnapshotOnce(path)
+}
+
+// admitPendingSnapshotOnce runs one admission pass: the checks, the quarantine
+// of a rejected slot, and the install of an accepted one. A nil admission
+// without an error means the slot is empty.
+func admitPendingSnapshotOnce(path string) (a *snapshotAdmission, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), maintenanceTimeout)
+	defer cancel()
 	if err := recoverInterruptedSnapshot(path); err != nil {
 		return nil, err
 	}
@@ -41,10 +87,7 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
 			return nil, err
 		}
-		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
-			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
-		}
-		log.Printf("storage: pending snapshot rejected: %v", err)
+		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
 	// A packed pending snapshot is a self-contained file. Any sidecar beside
@@ -62,27 +105,105 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
 			return nil, err
 		}
-		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
-			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
-		}
-		log.Printf("storage: pending snapshot rejected: %v", err)
+		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
-	if err := preflightPendingSnapshot(incoming); err != nil {
+	if err := preflightPendingSnapshot(ctx, incoming); err != nil {
 		// An incoming file that cannot be initialized in place is no more
 		// usable than an integrity-invalid one: preserve its bytes as
 		// quarantine and keep serving the live database.
-		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
-			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
-		}
-		log.Printf("storage: pending snapshot rejected: %v", err)
+		rejectPendingSnapshot(incoming, err)
 		return nil, nil
 	}
-	a := &snapshotAdmission{path: path}
+	a = &snapshotAdmission{path: path}
 	if err := a.install(); err != nil {
 		return nil, err
 	}
 	return a, nil
+}
+
+// preservedPendingSiblings lists the crash-preserved pending snapshots beside
+// the admission slot, newest first. The preserve owner links them in place
+// before a successor can replace the slot and removes them on every resolved
+// path, so an existing one means a crash.
+func preservedPendingSiblings(path string) ([]string, error) {
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No database directory yet: no sibling can exist, and Open owns the
+			// missing-directory diagnostic.
+			return nil, nil
+		}
+		return nil, err
+	}
+	type candidate struct {
+		name string
+		mod  time.Time
+	}
+	var found []candidate
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !backup.MatchesStagingPattern(backup.RestorePendingStagingPattern, e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		found = append(found, candidate{name: filepath.Join(dir, e.Name()), mod: info.ModTime()})
+	}
+	sort.Slice(found, func(i, j int) bool {
+		if !found[i].mod.Equal(found[j].mod) {
+			return found[i].mod.After(found[j].mod)
+		}
+		return found[i].name > found[j].name
+	})
+	names := make([]string, len(found))
+	for i, c := range found {
+		names[i] = c.name
+	}
+	return names, nil
+}
+
+// newestPreservedPendingSibling returns the newest preserved pending snapshot,
+// or an empty string when none exists.
+func newestPreservedPendingSibling(path string) (string, error) {
+	names, err := preservedPendingSiblings(path)
+	if err != nil || len(names) == 0 {
+		return "", err
+	}
+	return names[0], nil
+}
+
+// removePreservedPendingSiblings drops every preserved pending snapshot after a
+// different snapshot was admitted from the slot.
+func removePreservedPendingSiblings(path string) {
+	names, err := preservedPendingSiblings(path)
+	if err != nil {
+		logging.Printf("", "storage: list preserved pending snapshots: %v", err)
+		return
+	}
+	for _, name := range names {
+		if err := removeIfExists(name); err != nil {
+			logging.Printf("", "storage: remove preserved pending snapshot %s: %v", name, err)
+		}
+	}
+}
+
+// rejectPendingSnapshot preserves a rejected incoming file and logs both the
+// rejection and the preserved name. A failed quarantine logs the rename error
+// too but leaves the file at its original name for the next boot to classify
+// again, so admission still declines to install it.
+func rejectPendingSnapshot(incoming string, reason error) {
+	quarantined, err := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix)
+	if err != nil {
+		logging.Printf("", "storage: quarantine pending snapshot %s: %v", incoming, err)
+	}
+	if quarantined != "" {
+		logging.Printf("", "storage: pending snapshot rejected: %v (preserved as %s)", reason, quarantined)
+		return
+	}
+	logging.Printf("", "storage: pending snapshot rejected: %v", reason)
 }
 
 // install moves the live database aside and renames the preflighted incoming
@@ -248,13 +369,13 @@ func (a *snapshotAdmission) commit() error {
 	}
 	if a.previous {
 		if err := removeSnapshotDebris(a.path + pendingSnapshotPreviousSuffix); err != nil {
-			log.Printf("storage: remove pending snapshot rollback set: %v", err)
+			logging.Printf("", "storage: remove pending snapshot rollback set: %v", err)
 		} else {
 			a.previous = false
 		}
 	}
 	if err := syncSnapshotDir(filepath.Dir(a.path)); err != nil {
-		log.Printf("storage: sync database directory after snapshot commit: %v", err)
+		logging.Printf("", "storage: sync database directory after snapshot commit: %v", err)
 	}
 	return nil
 }

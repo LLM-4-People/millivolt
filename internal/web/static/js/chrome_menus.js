@@ -1,11 +1,21 @@
 // Header menu registry and lifecycle, the nav/dimension class menus, duration
-// parsing, dash value application, and the shared safe-delete and log-export
-// filter menus. The duration vocabulary lives in chrome_lists.js, which loads
-// before this module because FILTER_AGES reads it at initialization.
+// parsing, dash value application, and the shared safe-delete filter menu.
+// The operator console owns every policy surface; the theme tray is the one
+// remaining header menu in this registry. The duration vocabulary lives in
+// chrome_lists.js, which loads before this module because FILTER_AGES reads it
+// at initialization.
 
-const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-restart': 'restart-menu', 'btn-theme': 'theme-menu' };
+// HEADER_MENU_IDS names the one remaining header menu's two elements once. The
+// registry below pairs them, and theme.js - which owns that menu's contents -
+// reads the same two names instead of spelling them again at each lookup, so a
+// renamed element reaches both the lifecycle and the module that fills it.
+const HEADER_MENU_IDS = { themeTrigger: 'btn-theme', themeMenu: 'theme-menu' };
+const HEADER_MENUS = { [HEADER_MENU_IDS.themeTrigger]: HEADER_MENU_IDS.themeMenu };
 function closeHeaderMenus(except, restoreFocus = false) {
   if (except && except !== 'settings') closeSettings(true);
+  // The console is the operator plane's one open surface: opening another
+  // header surface closes it, and its own open path closes them first.
+  if (except !== 'operator-console' && typeof closeOperatorConsole === 'function') closeOperatorConsole();
   let closed = false;
   for (const [button, id] of Object.entries(HEADER_MENUS)) {
     if (id === except) continue;
@@ -90,47 +100,10 @@ function hideHdrMenu(id) {
   if (!el) return false;
   const wasOpen = !el.hidden;
   el.hidden = true;
-  disarmConfirmations(el);
   if (wasOpen) HEADER_MENU_CLOSE.get(id)?.();
   syncHdrMenuExpanded();
   return wasOpen;
 }
-
-// A broad action gets one explicit second click instead of a blocking
-// dialog: the first click arms the button and renames it, the second runs
-// the inline owner, and five seconds, a menu close or another arm disarms
-// it. Capture phase intercepts before the inline onclick, so the action
-// owner never needs to know this exists.
-const CONFIRM_ARM_MS = 5000;
-let _confirmTimer = 0;
-function disarmConfirm(btn) {
-  if (!btn) return;
-  if (btn.dataset.confirmLabel) {
-    btn.textContent = btn.dataset.confirmLabel;
-    delete btn.dataset.confirmLabel;
-  }
-  delete btn.dataset.armed;
-}
-function disarmConfirmations(root) {
-  if (!root || !root.querySelectorAll) return;
-  root.querySelectorAll('[data-armed="1"]').forEach(disarmConfirm);
-  clearTimeout(_confirmTimer);
-}
-document.addEventListener('click', e => {
-  const btn = e.target.closest('[data-confirm]');
-  if (!btn || btn.disabled) return;
-  if (btn.dataset.armed === '1') {
-    disarmConfirm(btn);
-    return;
-  }
-  e.preventDefault();
-  e.stopPropagation();
-  disarmConfirmations(btn.closest('.hdr-menu') || document);
-  btn.dataset.confirmLabel = btn.textContent;
-  btn.dataset.armed = '1';
-  btn.textContent = btn.dataset.confirm;
-  _confirmTimer = setTimeout(() => disarmConfirm(btn), CONFIRM_ARM_MS);
-}, true);
 
 // maxGoDurationMS is time.ParseDuration's int64 nanosecond ceiling expressed
 // in milliseconds; the server rejects anything beyond it.
@@ -155,7 +128,8 @@ function parseGoDurationValue(s) {
   }
   if (s === '0') return 0;
   if (!s) return null;
-  const unitMS = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1, s:1000, m:60000, h:3600000};
+  const unitMS = {ns:1e-6, us:0.001, 'µs':0.001, 'μs':0.001, ms:1,
+    s:TIME_MS.second, m:TIME_MS.minute, h:TIME_MS.hour};
   const isDigit = ch => ch >= '0' && ch <= '9';
   let total = 0, i = 0, groups = 0;
   while (i < s.length) {
@@ -261,36 +235,46 @@ function applyDashValues(v) {
 // status / errors / debug / age) with a live count preview before anything is
 // deleted, and Delete everything wipes the whole database. Every request is
 // one self-contained row (retries live in the row's attempts JSON), so a
-// filtered delete can never leave orphan entries. The Logs ▾ menu reuses the
-// same filter options (and the same backend count endpoint) for choosing
-// exactly what to download.
-
-function toggleFilterMenu(e, menuId, prefix, refresh) {
-  toggleHdrMenu(e, menuId, () => populateFilterMenu(prefix, refresh), refresh);
-}
+// filtered delete can never leave orphan entries.
 // Use the dispatch path: a delegated action may replace/detach its target
 // before this later document listener runs. Live ancestry then lies about
 // where the click originated; the composed event path remains stable.
 document.addEventListener('click', e => {
   const path = e.composedPath();
   const inside = selector => path.some(node => node.matches?.(selector));
-  if (!inside('.menu-wrap')) closeHeaderMenus();
-  if (!inside('#hdr-actions') && !inside('#btn-nav')) closeNavMenu();
+  // A modal dialog is its own surface: a press inside the operator
+  // confirmation, the storm details or the settings sheet must not dismiss the
+  // panel that opened it. They render outside the header and the console, and a
+  // close from inside the sheet can reopen the console in the same click, which
+  // this later listener would otherwise close straight back.
+  if (!inside('.menu-wrap') && !inside('#operator-console') && !inside('#btn-controls') &&
+      !inside('.operator-dialog') && !inside('.storm-dialog') &&
+      !inside('.st-sheet')) closeHeaderMenus();
+  if (!inside('#hdr-actions') && !inside('#btn-nav') && !inside('#operator-console')) closeNavMenu();
   if (!inside('.xp-rail-col')) closeDimMenu();
   if (!inside('#chart-metrics')) setMetricsMenuOpen(false);
 });
 
-// populateFilterMenu fills a filter surface's dropdowns from the current
-// record set (shared by the Logs menu and the settings sheet's
-// delete-matching block - same options, same values). onChange wires the
-// per-select count refresh for surfaces without their own delegated
-// listener (the logs menu); the settings block passes none because its
-// #settings-fields change delegation owns the refresh.
+// populateFilterMenu fills the settings sheet's delete-matching dropdowns
+// from the current record set. onChange wires the per-select count refresh
+// for a surface without its own delegated listener; the settings block
+// passes none because its #settings-fields change delegation owns it.
 const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
-// Filter ages reuse the shared hour wording for '1h'; the longer spans are
-// deliberately day/week wording in the age context, not clock arithmetic.
+// FILTER_AGES is the one history-window vocabulary: the age spans every
+// surface offers, with the word each reads as in a delete filter. The tokens
+// are canonical Go duration spellings because every consumer derives a
+// `before_ms` from them through parseGoDuration, and a Go test round-trips
+// each one through ParseDuration and FormatDuration.
+//
+// The tokens are shared; the prose is not. An export says what a window
+// includes and a delete filter says what it matches, so operator_export.js
+// derives its choices from this list while keeping its own wording.
 const FILTER_AGES = [['', 'any'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
+
+// FILTER_AGE_TOKENS is the token column alone, for surfaces that supply their
+// own words.
+const FILTER_AGE_TOKENS = FILTER_AGES.map(([token]) => token);
 
 function populateFilterMenu(prefix, onChange) {
   const recs = lastData?.records || [];
@@ -337,9 +321,8 @@ function populateFilterMenu(prefix, onChange) {
   if (onChange) [prefix+'-provider', prefix+'-model', prefix+'-client', prefix+'-status', prefix+'-errors', prefix+'-debug', prefix+'-age'].forEach(id => { $(id).onchange = onChange; });
 }
 
-// filterFromUI reads a filter surface (by id prefix: del = the settings
-// sheet's delete-matching block, lf = the logs menu) into a filter object
-// matching the backend PurgeFilter JSON shape.
+// filterFromUI reads the settings sheet's delete-matching block (id prefix
+// del) into a filter object matching the backend PurgeFilter JSON shape.
 function filterFromUI(prefix, now = Date.now()) {
   const age = parseGoDuration($(prefix+'-age').value);
   return {
@@ -356,13 +339,31 @@ function clearFilterActive(f) {
   return f.provider || f.model || f.client || f.status_code || f.has_error || f.debug || f.before_ms;
 }
 
-// updateFilterCount POSTs /admin/purge/count for the Logs menu or the
-// delete-matching block and writes the preview into elId / enables btnId.
-// phrase(count) is the label; the optional busy predicate lets a surface
-// disable its action while its own mutation is in flight. Each surface owns
-// its latest preview, including the exact older-than instant. Empty
-// selections invalidate it too. Actions reuse this predicate, never a newly
-// calculated Date.now() that would widen the confirmed deletion.
+// purgeCount is the one count reader for both purge surfaces: the console's
+// export preview and the Settings sheet's delete-matching block. Both must
+// preview with the exact predicate they act on, so the request, the fallback
+// message and the count validation live here once. It lives in this module
+// because this module loads first and owns the purge filter vocabulary; the
+// export module reads it rather than keeping a second copy.
+async function purgeCount(filter) {
+  // No filter is the bodyless full-set preview, exactly like the bodyless
+  // delete: all history is a predicate, and the same route must count it.
+  const options = { method: 'POST', headers: JSON_HEADERS };
+  if (filter) options.body = JSON.stringify({ filter });
+  const doc = await operatorJsonBody('/admin/purge/count', options, PURGE_COUNT_UNAVAILABLE);
+  if (!isCount(doc.count)) throw new Error(doc.error || PURGE_COUNT_UNAVAILABLE);
+  return doc.count;
+}
+
+// The one sentence a failed or malformed count reports.
+const PURGE_COUNT_UNAVAILABLE = 'count unavailable';
+
+// updateFilterCount paints the delete-matching block's preview into elId and
+// gates btnId on it. phrase(count) is the label; the optional busy predicate
+// lets a surface disable its action while its own mutation is in flight. Each
+// surface owns its latest preview, including the exact older-than instant.
+// Empty selections invalidate it too. Actions reuse this predicate, never a
+// newly calculated Date.now() that would widen the confirmed deletion.
 const _filterPreviews = new Map();
 function filterSelection(prefix) { return JSON.stringify(filterFromUI(prefix, 0)); }
 function previewedFilter(prefix) {
@@ -370,7 +371,6 @@ function previewedFilter(prefix) {
   return preview && preview.count > 0 && preview.selection === filterSelection(prefix) ? preview : null;
 }
 async function updateFilterCount(prefix, elId, btnId, phrase, busy) {
-  const fail = 'count unavailable';
   const f = filterFromUI(prefix);
   const el = $(elId);
   const preview = {filter: f, selection: filterSelection(prefix), count: null};
@@ -379,19 +379,22 @@ async function updateFilterCount(prefix, elId, btnId, phrase, busy) {
   if (!clearFilterActive(f)) { el.textContent = ''; return; }
   el.textContent = 'counting…';
   try {
-    const d = await operatorJsonBody('/admin/purge/count', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(f) }, fail);
+    const count = await purgeCount(f);
     if (_filterPreviews.get(prefix) !== preview || preview.selection !== filterSelection(prefix)) return;
-    if (!Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || fail);
-    preview.count = d.count;
-    el.textContent = phrase(d.count);
-    $(btnId).disabled = d.count === 0 || !!(busy && busy());
+    preview.count = count;
+    el.textContent = phrase(count);
+    $(btnId).disabled = count === 0 || !!(busy && busy());
   } catch (e) {
+    // A reply that lands after the selection moved on says nothing about the
+    // current one, so it writes neither the count nor the failure.
     if (_filterPreviews.get(prefix) === preview && preview.selection === filterSelection(prefix)) {
-      el.textContent = String(e.message || fail);
+      el.textContent = String(e.message || PURGE_COUNT_UNAVAILABLE);
     }
   }
 }
-function recPhrase(n) { return fmt(n) + ' record' + (n === 1 ? '' : 's'); }
+// One shape, one owner: the count-agreement rule and the record noun both
+// live beside fmt, so this is a call rather than a second spelling.
+function recPhrase(n) { return countPhrase(n, 'record'); }
 // refreshAggregates invalidates and re-pulls the since-inception numeric
 // surfaces now so a purge (or any wipe) is visible before the next tick. The
 // invalidation clears the cached payloads and paints loading before each
@@ -417,65 +420,4 @@ function refreshAfterRestart(bootstrapApplied = false) {
   refreshAggregates();
   // Settings is lazy: only refresh its document after the module has loaded.
   if (typeof fetchSettings === 'function') fetchSettings();
-}
-
-// ---------- log export (Logs ▾ menu) ----------
-// Pick exactly what to download: the same filter dimensions as the
-// delete-matching block (provider / model / client / status / errors /
-// debug / age), applied and previewed against the full database via the
-// shared count endpoint - the export then streams the same rows the
-// preview announced. "Download all" exports everything.
-
-function toggleLogsMenu(e) { toggleFilterMenu(e, 'logs-menu', 'lf', updateLogsCount); }
-
-// logsExportURL turns a filter into the export endpoint query (GET-only,
-// read-only, streams the whole DB - the preview count and the download can
-// never disagree: both use the same predicate).
-function logsExportURL(f) {
-  const p = new URLSearchParams();
-  if (f.provider) p.set('provider', f.provider);
-  if (f.model) p.set('model', f.model);
-  if (f.client) p.set('client', f.client);
-  if (f.status_code) p.set('status_code', String(f.status_code));
-  if (f.has_error) p.set('has_error', '1');
-  if (f.debug) p.set('debug', '1');
-  if (f.before_ms) p.set('before_ms', String(f.before_ms));
-  const qs = p.toString();
-  return '/metrics/export' + (qs ? '?' + qs : '');
-}
-
-function updateLogsCount() {
-  const summary = $('logs-summary');
-  if (summary) {
-    summary.textContent = clearFilterActive(filterFromUI('lf'))
-      ? 'Filtered export. Matching uses the same predicate as the preview.'
-      : 'Every stored record. Add a filter to narrow the export.';
-  }
-  const source = typeof storageState !== 'undefined' && storageState && storageState.enabled
-    ? 'durable history'
-    : 'live buffer';
-  return updateFilterCount('lf', 'logs-count', 'btn-logs-filtered',
-    n => 'download ' + recPhrase(n) + ' from the ' + source);
-}
-
-// resetLogsFilters is the one reset owner for the export surface: every
-// select returns to its empty "any" choice, then the preview re-runs once.
-function resetLogsFilters() {
-  for (const name of ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']) {
-    const el = $('lf-' + name);
-    if (el) el.value = '';
-  }
-  return updateLogsCount();
-}
-
-function downloadLogsFiltered() {
-  const preview = previewedFilter('lf');
-  if (!preview) return updateLogsCount();
-  triggerDownload(logsExportURL(preview.filter), '');
-  hideHdrMenu('logs-menu');
-}
-
-function downloadLogsAll() {
-  triggerDownload('/metrics/export', '');
-  hideHdrMenu('logs-menu');
 }

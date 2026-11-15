@@ -124,6 +124,9 @@ func TestRestoreStreamsExplicitSelection(t *testing.T) {
 	if code != 0 || stderr != "" || !strings.Contains(stdout, "inspect complete") {
 		t.Fatalf("inspect = %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
+	if !strings.Contains(stdout, "decoded and preflighted the whole database member") {
+		t.Fatalf("inspect does not state its server-side cost: %q", stdout)
+	}
 	calls := fixture.callsFor("/admin/restore")
 	if !strings.Contains(calls[len(calls)-1].Query, "inspect=1") {
 		t.Fatalf("inspect query = %q", calls[len(calls)-1].Query)

@@ -31,9 +31,11 @@ case "$mode" in
       python3 -B -O -m tests.python.repository
       python3 -B -m tests.repository_check
       python3 -B -O -m tests.python.site
+      python3 -B -O -m tests.python.mcp_docs
       python3 -B -O -m tests.python.workflows
       python3 -B -O -m tests.python.release
       python3 -B -O -m tests.python.backup_db
+      python3 -B -O -m tests.python.dev_scripts
       python3 -B -O -m tests.python.go
       python3 -B -O -m tests.python.shard
     }
@@ -52,6 +54,12 @@ case "$mode" in
     [ -z "$unformatted" ] || die "gofmt required: $unformatted"
     for script in scripts/*.sh; do bash -n "$script"; done
     go mod verify
+    # -diff reports a stale module file without rewriting it: a requirement left
+    # unused by a deleted import is invisible to `go mod verify` (which checks
+    # downloaded hashes) and to -mod=readonly (which only fails on a missing
+    # requirement). tests/README.md names this as the tidy owner; this is the
+    # gate that actually runs it.
+    python3 -B -m tests.go mod tidy -diff
     # Explicit command paths make missing command source fail on a fresh checkout.
     go list ./cmd/proxy ./cmd/stress ./cmd/release ./cmd/mvctl
     go build -mod=readonly -o "$check_dir/" ./...
@@ -63,8 +71,15 @@ case "$mode" in
     # The shard runs two passes over the same overlay: tests declared by
     # tests/race_scope.py under the race detector, the rest plain. Every test
     # runs exactly once, and fixed-port packages stay serial and locked.
-    python3 -B -O -m tests.shard
+    #
+    # The status is captured rather than left to `set -e`: aborting here skipped
+    # wait_background, so the two background suites' captured logs were deleted
+    # by the exit trap and never printed - precisely when a run has two causes
+    # to show. Every suite now reports whatever the first failure was.
+    shard_status=0
+    python3 -B -O -m tests.shard || shard_status=$?
     wait_background
+    (( shard_status == 0 )) || exit "$shard_status"
     ;;
   race)
     (( $# == 1 )) || die "$usage"
@@ -90,9 +105,11 @@ case "$mode" in
     # no longer exists in its package. Extend this list when a fixed sleep is
     # replaced by a condition wait and the test keeps a timing contract.
     flake_proxy='^(TestConsecutiveFailuresDoubleBackoff|TestRecoveredRequestResetsBackoff|TestConsecutiveExhausted429sDoubleBackoff|TestExhaustedRetriesPaceNextFirstSend|TestRetryAfterNotClampedToMaxBackoff|TestShortRetryAfterDoesNotResetAttemptBackoff|TestQuota429OnLastAttemptDoesNotPace|TestQuota429DoesNotPaceSibling|TestQuota429MaxRetriesZeroDoesNotPace|TestQuotaPauseRetryHonorsRetryAfterAndOperatorRelease)$'
-    flake_scheduler='^(TestRateLimitPacing|TestAdaptiveBackoff|TestBackoffForShortHintKeepsGrowing|TestBackoffForHonorsLongRetryAfter|TestBackoffForCapsPathologicalHint|TestWaitSendRetryAfterRemainingAcrossPause|TestWaitSendRetryAfterRemainingAfterShortPause|TestBackoffForDoesNotTripGroup|TestFailSendDoublesRequestBackoff|TestFailSendOwnClearsAttemptBackoff|TestQuotaGatePacingGrowsOnProbeFailuresAndHonorsRetryAfter|TestMixedFacetCloseKeepsTheQuotaProbePaced)$'
+    flake_scheduler='^(TestRateLimitPacing|TestAdaptiveBackoff|TestBackoffForShortHintKeepsGrowing|TestBackoffForHonorsLongRetryAfter|TestBackoffForCapsPathologicalHint|TestWaitSendRetryAfterRemainingAcrossPause|TestWaitSendRetryAfterRemainingAfterShortPause|TestBackoffForDoesNotTripGroup|TestFailSendDoublesRequestBackoff|TestFailSendOwnClearsAttemptBackoff|TestQuotaGatePacingGrowsOnProbeFailuresAndHonorsRetryAfter|TestMixedFacetCloseKeepsTheQuotaProbePaced|TestAddHoldWakesCapWaiter|TestReplaceHoldWakesCapWaiter)$'
+    flake_cmd_proxy='^(TestReloadPublishesNewConfigObject)$'
     python3 -B -m tests.go test -race -count=5 -run "$flake_proxy" ./internal/proxy
     python3 -B -m tests.go test -race -count=5 -run "$flake_scheduler" ./internal/scheduler
+    python3 -B -m tests.go test -race -count=5 -run "$flake_cmd_proxy" ./cmd/proxy
     ;;
   go)
     (( $# >= 2 )) || die "$usage"

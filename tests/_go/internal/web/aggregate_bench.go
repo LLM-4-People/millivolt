@@ -103,6 +103,25 @@ func BenchmarkAggregateFold(b *testing.B) {
 			_ = f.payload()
 		}
 	})
+	// The tool dimension is the multi-membership shape: it keeps one flat
+	// occurrence list instead of one slot per row. The fixture adds one tool
+	// name to a copy so the shared rows stay unchanged.
+	b.Run("explorer_tool", func(b *testing.B) {
+		withTools := make([]contrib, len(rows))
+		copy(withTools, rows)
+		for i := range withTools {
+			withTools[i].toolsL = []string{"fixture-tool"}
+		}
+		b.ReportAllocs()
+		for b.Loop() {
+			f := newExplorerFold("tool", "", nil)
+			f.prepare(p, nil)
+			for i := range withTools {
+				_ = f.fold(&withTools[i])
+			}
+			_ = f.payload()
+		}
+	})
 	// A bounded chart window must touch only the blocks whose newest row is
 	// inside the window; the visitor owns that skip.
 	b.Run("chart_window", func(b *testing.B) {
@@ -225,9 +244,38 @@ func BenchmarkProjectionMetricAppend(b *testing.B) {
 			}
 		})
 	}
+	// append_cross_* is the read path: the append that pushes pending over the
+	// threshold, which now only folds the delta and arms the background merge.
 	for _, history := range []int{100_000, 1_000_000} {
-		b.Run(fmt.Sprintf("compact_%d", history), func(b *testing.B) {
+		b.Run(fmt.Sprintf("append_cross_%d", history), func(b *testing.B) {
 			benchmarkProjectionCompaction(b, history)
+		})
+	}
+}
+
+// BenchmarkProjectionMetricCompact times the background fold itself, off any
+// request: one merge of the threshold-sized pending delta into the base.
+func BenchmarkProjectionMetricCompact(b *testing.B) {
+	for _, history := range []int{100_000, 1_000_000} {
+		b.Run(fmt.Sprintf("history_%d", history), func(b *testing.B) {
+			pendingRows := (metricOrderPendingSamples - 1) / 3
+			rows := benchmarkMetricRows(history + pendingRows + 8)
+			var p historyProjection
+			p.data.metrics.append(rows[:history], 0)
+			// One row past the bound leaves the delta foldable.
+			p.data.metrics.append(rows[:history+pendingRows+1], history)
+			armed := p.data.metrics
+			if armed.pending.sampleCount() < metricOrderPendingSamples {
+				b.Fatalf("pending = %d, want at least %d", armed.pending.sampleCount(), metricOrderPendingSamples)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				p.mu.Lock()
+				p.data.metrics = armed
+				p.mu.Unlock()
+				p.compactMetrics(nil)
+			}
+			benchmarkProjectionMetrics = p.data.metrics
 		})
 	}
 }
@@ -495,6 +543,42 @@ func BenchmarkAggregateUncached(b *testing.B) {
 			if _, err := api.explorer(b.Context(), "provider", nil, ""); err != nil {
 				b.Fatal(err)
 			}
+		}
+	})
+}
+
+var benchmarkAggregateUnchanged bool
+
+// BenchmarkAggregateUnchanged measures the publish-time stability recheck at the
+// 64-rule maximum. The recheck must not re-read the config or re-marshal the
+// rule set: the caller hands it the identity its fold already used, so only the
+// revisions (and, with a store, the data version) are compared.
+func BenchmarkAggregateUnchanged(b *testing.B) {
+	rules := make([]config.ModelRule, 64)
+	for i := range rules {
+		rules[i] = config.ModelRule{Mode: config.ModelRuleLower}
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), nil, time.Second)
+	api.ModelCanon = func() config.ModelCanon { return config.ModelCanon{Rules: rules} }
+	mcz := api.canonizer()
+	ctx := b.Context()
+	key, ok := api.aggregateKey(ctx, "view=15", mcz.identity, false)
+	if !ok {
+		b.Fatal("uncacheable key")
+	}
+	b.Run("identity_marshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = modelCanonIdentity(api.modelCanon())
+		}
+	})
+	b.Run("unchanged", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			benchmarkAggregateUnchanged = api.aggregateUnchanged(ctx, key, mcz.identity, false)
+		}
+		if !benchmarkAggregateUnchanged {
+			b.Fatal("an unchanged revision reported a change")
 		}
 	})
 }

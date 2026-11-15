@@ -24,6 +24,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // Route is one documented operator-plane endpoint. This is the closed set of
@@ -36,6 +38,7 @@ type Route string
 
 const (
 	RouteHealthz      Route = "/healthz"
+	RouteReadyz       Route = "/readyz"
 	RouteQuery        Route = "/metrics/query"
 	RouteExplorer     Route = "/metrics/agg/explorer"
 	RouteChart        Route = "/metrics/agg/chart"
@@ -57,12 +60,13 @@ const (
 	RouteRestore      Route = "/admin/restore"
 )
 
-// MaxResponseBytes bounds one response body read. An internal guardrail
-// against a runaway payload, not a user-tunable: the proxy already bounds its
-// own surfaces (storage_query_max_bytes for SQL results, debug_capture_max_bytes
-// for a capture document). The in-process transport exposes it so the recorder
-// it dispatches through never buffers more than this client can read.
-const MaxResponseBytes = 64 << 20
+// MaxResponseBytes bounds one response body read. It is the config owner's
+// number rather than a second declaration: a per-surface byte budget above it
+// could never be delivered, so config validation caps every MCP byte setting at
+// the same value and this read reflects it. The in-process transport exposes it
+// so the recorder it dispatches through never buffers more than this client can
+// read.
+const MaxResponseBytes = config.MCPResponseBytesMax
 
 // maxErrorBodyBytes bounds how much of a failure body is read back into a tool
 // message. The proxy's flat {"error": "..."} body is far smaller; the rest of
@@ -659,8 +663,9 @@ func (b *boundedBody) drain() error {
 // RedactionMarker replaces every credential form removed from model-visible
 // text. It stays visible on purpose: silent removal leaves an operator
 // wondering why the proxy's own message changed. Exported so a command-line
-// caller prints the same marker instead of inventing a second spelling.
-const RedactionMarker = "[redacted]"
+// caller prints the same marker instead of inventing a second spelling; the
+// value is owned by internal/config because Config.Apply restores it.
+const RedactionMarker = config.RedactionMarker
 
 // truncationMarker ends an excerpt cut at the byte budget. Its length is part
 // of the published bound (the model-visible text runs up to this marker past

@@ -807,7 +807,7 @@ async def theme_checks(page, browser, base, errors, results, route_handler):
         touch_page = await touch_context.new_page()
         touch_page.on('pageerror', lambda error: errors.append(str(error)))
         await touch_page.goto(base + '/', wait_until='domcontentloaded')
-        await touch_page.wait_for_function('chartAgg && explorerAgg && lastData')
+        await touch_page.wait_for_function('() => chartAgg && explorerAgg && lastData')
         await touch_page.click('#btn-nav')
         await touch_page.click('#btn-theme')
         touch_state = await touch_page.evaluate("""() => {
@@ -979,6 +979,14 @@ async def theme_checks(page, browser, base, errors, results, route_handler):
                 coarse: matchMedia('(pointer: coarse)').matches,
                 width: rect.width,
                 height: rect.height,
+                // Every header trigger that stays in the rail, measured, not a
+                // named pair: a new trigger inherits the requirement.
+                triggers: [...document.querySelectorAll('header button')]
+                    .filter(button => button.getBoundingClientRect().width > 0)
+                    .map(button => {
+                        const box = button.getBoundingClientRect();
+                        return {id: button.id, width: box.width, height: box.height};
+                    }),
                 navVisible: getComputedStyle(document.getElementById('btn-nav')).display !== 'none',
                 panes: getComputedStyle(document.querySelector('.theme-panes')).display,
                 caption: getComputedStyle(document.querySelector('.theme-caption-bar')).display,
@@ -990,6 +998,9 @@ async def theme_checks(page, browser, base, errors, results, route_handler):
                 abs(coarse_desktop['width'] - 44) <= 0.5 and
                 abs(coarse_desktop['height'] - 44) <= 0.5 and
                 not coarse_desktop['navVisible'], coarse_desktop)
+        require(coarse_desktop['triggers'] and all(
+            trigger['width'] >= 43.5 and trigger['height'] >= 43.5
+            for trigger in coarse_desktop['triggers']), coarse_desktop['triggers'])
         require(coarse_desktop['panes'] == 'none' and
                 coarse_desktop['previewCaption'] == 'none' and
                 coarse_desktop['caption'] != 'none', coarse_desktop)

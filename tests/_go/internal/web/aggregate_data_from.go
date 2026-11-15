@@ -102,7 +102,7 @@ func TestDataFromMsFollowsClearFence(t *testing.T) {
 	}
 
 	// Filtered clear: the oldest row is removed, the surviving minimum stays.
-	if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "drop.example"}, nil); err != nil {
+	if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "drop.example"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	bootstrap = get(t, http.HandlerFunc(api.HandleBootstrap), "/metrics/bootstrap")
@@ -115,7 +115,7 @@ func TestDataFromMsFollowsClearFence(t *testing.T) {
 	}
 
 	// Full clear: no stored history remains.
-	if _, err := s.Clear(t.Context(), nil, nil); err != nil {
+	if _, err := s.Clear(t.Context(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	bootstrap = get(t, http.HandlerFunc(api.HandleBootstrap), "/metrics/bootstrap")

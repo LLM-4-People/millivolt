@@ -84,7 +84,8 @@ idle_timeout: 2m
 request_body_idle_timeout: 30s
 
 # Absolute bound for reading one inbound request body after headers. Must be at least
-# request_body_idle_timeout. Applies to requests started after reload.
+# request_body_idle_timeout. The restore upload is exempt (idle bound only). Applies to
+# requests started after reload.
 # Hot-reload: yes.
 #   type: duration · range > 0s · default 10m
 request_body_read_timeout: 10m
@@ -147,8 +148,9 @@ capture_body_preview: false
 #   type: duration · range 1h..168h · default 24h
 debug_capture_ttl: 24h
 
-# Cap on one debug capture (request body plus client-facing response bytes). Past the cap
-# the rest is dropped and the capture is marked truncated.
+# Cap on one debug capture: retained headers are charged first and the remainder is split
+# between the request body and the client-facing response bytes. Past the cap the rest is
+# dropped and the capture is marked truncated.
 # Hot-reload: yes.
 #   type: bytes · range 4KiB..16MiB · default 1MiB
 debug_capture_max_bytes: 1MiB
@@ -370,7 +372,7 @@ max_queue_wait: 10m
 # Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s
 # follow quota_pause_mode instead of this budget.
 # Hot-reload: yes.
-#   type: int · range >= 0 (0 = no retries) · default 5
+#   type: int · range 0..100 (0 = no retries) · default 5
 max_retries: 5
 
 # Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP
@@ -724,7 +726,9 @@ storage_write_chan_cap: 8192
 #   type: int · range >= 1 · default 256
 storage_batch_cap: 256
 
-# Partial-batch flush cadence. Must be > 0 (a zero ticker panics). Restart required.
+# Partial-batch flush cadence. Must be > 0 (a zero ticker panics). Readiness convicts a
+# wedged writer after one interval plus a progress window of four intervals clamped to
+# 30s..2m. Restart required.
 # Hot-reload: NO (restart required).
 #   type: duration · range > 0s · default 500ms
 storage_flush_interval: 500ms
@@ -750,9 +754,9 @@ storage_query_max_rows: 10000
 
 # ---- Backup ----
 # Download or restore a self-checked archive of the saved config, the SQLite history, or
-# both. Restore inspects first: merge keeps live defaults and live request ids; replace
-# loads and validates the backup, writes canonical YAML, and preserves CLI-overridden
-# listen and db_path.
+# both. Restore inspects first and the apply is confirmed. Merge keeps live defaults and
+# live request ids; replace loads and validates the backup, writes canonical YAML, and
+# preserves CLI-overridden listen and db_path.
 # Maximum size of one Settings backup download or restore upload. Larger archives are
 # refused. Downloads and restores stream through private staging files; this is the
 # admit/reject ceiling, not a heap guarantee.
@@ -788,14 +792,14 @@ mcp_query_max_rows: 200
 # Client-side cap on the encoded size of one query tool result. Keeps whole rows,
 # truncating with an explicit marker rather than silently. Restart required.
 # Hot-reload: NO (restart required).
-#   type: bytes · range >= 1B · default 128KiB
+#   type: bytes · range 1B..64MiB · default 128KiB
 mcp_query_max_bytes: 128KiB
 
 # Size above which a stored capture document is withheld whole from the audit_capture_get
 # tool; a document that large is more than a model should read in one call. Restart
 # required.
 # Hot-reload: NO (restart required).
-#   type: bytes · range >= 1B · default 256KiB
+#   type: bytes · range 1B..64MiB · default 256KiB
 mcp_capture_max_bytes: 256KiB
 
 # Bounds one proxy read the endpoint makes that is not the proxy's own bounded SQL reader
@@ -952,10 +956,11 @@ provider_aliases: {}
 # or replaces upstream headers (names are canonicalized, values must be non-empty
 # single-line), remove_headers deletes them, and body sets max_tokens /
 # max_completion_tokens (1..1000000) on a Chat Completions or Anthropic client body.
-# Credential and protocol headers are rejected at load. Credential class is judged by
-# role, not by a list of vendor spellings: any name carrying authorization/auth, api-key,
-# secret, password, credential, bearer, jwt, signature, cookie, key or token is refused,
-# so x-auth-key, x-amz-credential, x-functions-key and x-subscription-key are covered.
+# Credential and protocol headers are rejected in an override at load (provider headers
+# may use them; they apply after the credential). Credential class is judged by role, not
+# by a list of vendor spellings: any name carrying authorization/auth, api-key, secret,
+# password, credential, bearer, jwt, signature, cookie, key or token is refused, so
+# x-auth-key, x-amz-credential, x-functions-key and x-subscription-key are covered.
 # Identifier and accounting shapes stay admitted: key-id, cache-key, idempotency-key, and
 # the token counters (x-prompt-tokens, x-token-count) plus the x-ratelimit-* and
 # anthropic-ratelimit-* families. Protocol and framing names (host, content-type,

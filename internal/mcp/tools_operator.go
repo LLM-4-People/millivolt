@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
 // OperatorStateOutput reads every operator control in one call: the pause
@@ -75,14 +76,17 @@ func (s *Service) operatorState(ctx context.Context, _ OperatorStateInput) (*Ope
 // SetPauseInput creates, edits or resumes pause holds.
 type SetPauseInput struct {
 	// Paused false resumes. With no HoldID it resumes EVERYTHING.
-	Paused    bool     `json:"paused" jsonschema:"true parks matching new requests, false resumes"`
-	HoldID    string   `json:"hold_id,omitempty" jsonschema:"edit or resume exactly this hold"`
-	All       bool     `json:"all,omitempty" jsonschema:"hold ALL traffic. On a CREATE, naming no scope at all is the SAME global hold; on an EDIT (hold_id set), omitted scope fields preserve that hold's existing scope, so it is not widened"`
-	New       bool     `json:"new,omitempty" jsonschema:"hold clients that were unseen when the hold was created"`
-	Clients   []string `json:"clients,omitempty" jsonschema:"client scope; names within one dimension are alternatives"`
-	Providers []string `json:"providers,omitempty" jsonschema:"provider scope; provider and client constraints intersect"`
-	Duration  *string  `json:"duration,omitempty" jsonschema:"15m, 1h, 6h, 12h, 24h, or empty until resumed; omit on an edit to preserve the existing deadline"`
-	MaxQueued *int     `json:"max_queued,omitempty" jsonschema:"how many matching waiters the hold parks before refusing"`
+	Paused        bool     `json:"paused" jsonschema:"true parks matching new requests, false resumes"`
+	HoldID        string   `json:"hold_id,omitempty" jsonschema:"edit or resume exactly this hold"`
+	All           bool     `json:"all,omitempty" jsonschema:"hold ALL traffic. On a CREATE, naming no scope at all is the SAME global hold; on an EDIT (hold_id set), omitted scope fields preserve that hold's existing scope, so it is not widened"`
+	New           bool     `json:"new,omitempty" jsonschema:"hold clients that were unseen when the hold was created"`
+	Clients       []string `json:"clients,omitempty" jsonschema:"client scope; names within one dimension are alternatives"`
+	Providers     []string `json:"providers,omitempty" jsonschema:"provider scope; set dimensions intersect"`
+	Models        []string `json:"models,omitempty" jsonschema:"model scope; set dimensions intersect"`
+	KeyHashes     []string `json:"key_hashes,omitempty" jsonschema:"upstream key hash scope; set dimensions intersect"`
+	Conversations []string `json:"conversations,omitempty" jsonschema:"conversation scope; set dimensions intersect"`
+	Duration      *string  `json:"duration,omitempty" jsonschema:"15m, 1h, 6h, 12h, 24h, or empty until resumed; omit on an edit to preserve the existing deadline"`
+	MaxQueued     *int     `json:"max_queued,omitempty" jsonschema:"how many matching waiters the hold parks before refusing"`
 }
 
 // SetPauseOutput is the resulting pause state.
@@ -112,6 +116,7 @@ func (in SetPauseInput) Document() (map[string]any, error) {
 		// scope-selective resume. Refuse a scope instead of silently dropping
 		// it, which would resume more traffic than the caller named.
 		if in.All || in.New || in.Clients != nil || in.Providers != nil ||
+			in.Models != nil || in.KeyHashes != nil || in.Conversations != nil ||
 			in.Duration != nil || in.MaxQueued != nil {
 			return nil, fmt.Errorf("a resume carries only hold_id; scope, duration and max_queued apply to a create or edit")
 		}
@@ -123,8 +128,9 @@ func (in SetPauseInput) Document() (map[string]any, error) {
 		}
 		body["duration"] = *in.Duration
 	}
-	if in.All && (in.New || in.Clients != nil || in.Providers != nil) {
-		return nil, fmt.Errorf("all cannot be combined with new, clients, or providers")
+	if in.All && (in.New || in.Clients != nil || in.Providers != nil ||
+		in.Models != nil || in.KeyHashes != nil || in.Conversations != nil) {
+		return nil, fmt.Errorf("all cannot be combined with new or a scope dimension")
 	}
 	if in.All {
 		body["all"] = true
@@ -137,6 +143,15 @@ func (in SetPauseInput) Document() (map[string]any, error) {
 	}
 	if in.Providers != nil {
 		body["providers"] = in.Providers
+	}
+	if in.Models != nil {
+		body["models"] = in.Models
+	}
+	if in.KeyHashes != nil {
+		body["key_hashes"] = in.KeyHashes
+	}
+	if in.Conversations != nil {
+		body["conversations"] = in.Conversations
 	}
 	if in.MaxQueued != nil {
 		if *in.MaxQueued < 0 {
@@ -187,8 +202,23 @@ func describePauseState(in SetPauseInput, state map[string]any) string {
 func describePauseHold(id string, hold map[string]any) string {
 	all, _ := hold["all"].(bool)
 	newc, _ := hold["new"].(bool)
-	clients := pauseHoldNames(hold["clients"])
-	providers := pauseHoldNames(hold["providers"])
+	// One projection from the hold document to its scope sentence. Every
+	// dimension the scheduler matches is named here, so a model-only hold is
+	// never described to a model as a global pause.
+	scope := pauseScopeParts(all, newc,
+		pauseHoldNames(hold["clients"]), pauseHoldNames(hold["providers"]),
+		pauseHoldNames(hold["models"]), pauseHoldNames(hold["key_hashes"]),
+		pauseHoldNames(hold["conversations"]))
+	if len(scope) == 0 {
+		return "edited hold " + id + " in place"
+	}
+	return "edited hold " + id + ": " + strings.Join(scope, " and ")
+}
+
+// pauseScopeParts is the one scope sentence for a pause, shared by the
+// request-derived and the state-derived descriptions so the two cannot name
+// different dimensions for the same hold.
+func pauseScopeParts(all, newc bool, clients, providers, models, keys, conversations []string) []string {
 	parts := []string{}
 	if all {
 		parts = append(parts, "all traffic")
@@ -196,16 +226,18 @@ func describePauseHold(id string, hold map[string]any) string {
 	if newc {
 		parts = append(parts, "clients unseen at hold creation")
 	}
-	if len(clients) > 0 {
-		parts = append(parts, "clients "+strings.Join(clients, ","))
+	for _, dim := range []struct {
+		label  string
+		values []string
+	}{
+		{"clients", clients}, {"providers", providers}, {"models", models},
+		{"keys", keys}, {"conversations", conversations},
+	} {
+		if len(dim.values) > 0 {
+			parts = append(parts, dim.label+" "+strings.Join(dim.values, ","))
+		}
 	}
-	if len(providers) > 0 {
-		parts = append(parts, "providers "+strings.Join(providers, ","))
-	}
-	if len(parts) == 0 {
-		return "edited hold " + id + " in place"
-	}
-	return "edited hold " + id + ": " + strings.Join(parts, " and ")
+	return parts
 }
 
 func pauseHoldNames(value any) []string {
@@ -231,19 +263,11 @@ func describePauseScope(in SetPauseInput) string {
 		}
 		return "resumed every hold"
 	}
-	parts := []string{}
-	if in.All || (in.HoldID == "" && !in.New && len(in.Clients) == 0 && len(in.Providers) == 0) {
-		parts = append(parts, "all traffic")
-	}
-	if in.New {
-		parts = append(parts, "clients unseen at hold creation")
-	}
-	if len(in.Clients) > 0 {
-		parts = append(parts, "clients "+strings.Join(in.Clients, ","))
-	}
-	if len(in.Providers) > 0 {
-		parts = append(parts, "providers "+strings.Join(in.Providers, ","))
-	}
+	nameless := in.HoldID == "" && !in.New && len(in.Clients) == 0 &&
+		len(in.Providers) == 0 && len(in.Models) == 0 &&
+		len(in.KeyHashes) == 0 && len(in.Conversations) == 0
+	parts := pauseScopeParts(in.All || nameless, in.New,
+		in.Clients, in.Providers, in.Models, in.KeyHashes, in.Conversations)
 	if len(parts) == 0 {
 		if in.HoldID != "" {
 			return "edited hold " + in.HoldID + " in place"
@@ -287,17 +311,17 @@ const throttleNote = "the request budget is a strict sliding window: no window o
 	"that permits oversized reservations by going into debt. anti_burst only ramps a fresh provider+key group up to the concurrency target " +
 	"rather than capping concurrency bursts outright"
 
-// The bands the proxy enforces on a provider limit (internal/proxy/throttle.go
-// maxLimit* and min/maxLimitWindow). Applying them here turns a typo into a
-// readable message instead of a 400, and stops a request the proxy would refuse
-// after it was already assembled. The anti-burst ramp reuses the window band;
-// its grammar and that band stay owned by the proxy.
+// The bands the proxy enforces on a provider limit. Applying them here turns a
+// typo into a readable message instead of a 400, and stops a request the proxy
+// would refuse after it was already assembled. They are read from the scheduler
+// package, which owns them and which the proxy also reads, so this surface
+// cannot carry a second copy that drifts from enforcement.
 const (
-	maxLimitConcurrency = 100_000
-	maxLimitRequests    = 1_000_000_000
-	maxLimitTokens      = 1_000_000_000_000
-	minLimitWindow      = time.Second
-	maxLimitWindow      = 24 * time.Hour
+	maxLimitConcurrency = scheduler.LimitConcurrencyMax
+	maxLimitRequests    = scheduler.LimitRequestsMax
+	maxLimitTokens      = scheduler.LimitTokensMax
+	minLimitWindow      = scheduler.LimitWindowMin
+	maxLimitWindow      = scheduler.LimitWindowMax
 )
 
 // setThrottleDescription is the model-visible documentation of set_throttle.
@@ -826,33 +850,35 @@ func (f PurgeFilterInput) Validate() error {
 }
 
 // IsEmpty reports whether the filter constrains nothing. An empty filter is the
-// delete-everything command, and the MCP server refuses to send it.
+// delete-everything command, and the MCP server refuses to send it. It reads the
+// rendered document so a whitespace-only field counts as unset exactly like the
+// wire does.
 func (f PurgeFilterInput) IsEmpty() bool {
-	return f.Provider == "" && f.Model == "" && f.Client == "" && f.ConversationID == "" &&
-		f.ErrorType == "" && f.StatusCode == 0 && !f.HasError && !f.HasDebug &&
-		f.BeforeMs == 0 && f.AfterMs == 0
+	return len(f.Document()) == 0
 }
 
-// Document renders the filter in the proxy's exact wire shape. Zero values are
-// omitted so the proxy reads them as "no constraint", never as a match on 0.
-// This is the one owner of the purge request shape, shared with the operator
-// command; the tool-facing field "has_debug" maps to the proxy's "debug" here.
+// Document renders the filter in the proxy's exact wire shape. String fields
+// are trimmed once here, so a padded model or provider name previews its own
+// rows instead of zero. Zero values are omitted so the proxy reads them as "no
+// constraint", never as a match on 0. This is the one owner of the purge
+// request shape, shared with the operator command; the tool-facing field
+// "has_debug" maps to the proxy's "debug" here.
 func (f PurgeFilterInput) Document() map[string]any {
 	document := map[string]any{}
-	if f.Provider != "" {
-		document["provider"] = f.Provider
+	if v := strings.TrimSpace(f.Provider); v != "" {
+		document["provider"] = v
 	}
-	if f.Model != "" {
-		document["model"] = f.Model
+	if v := strings.TrimSpace(f.Model); v != "" {
+		document["model"] = v
 	}
-	if f.Client != "" {
-		document["client"] = f.Client
+	if v := strings.TrimSpace(f.Client); v != "" {
+		document["client"] = v
 	}
-	if f.ConversationID != "" {
-		document["conversation_id"] = f.ConversationID
+	if v := strings.TrimSpace(f.ConversationID); v != "" {
+		document["conversation_id"] = v
 	}
-	if f.ErrorType != "" {
-		document["error_type"] = f.ErrorType
+	if v := strings.TrimSpace(f.ErrorType); v != "" {
+		document["error_type"] = v
 	}
 	if f.StatusCode != 0 {
 		document["status_code"] = f.StatusCode
@@ -870,6 +896,18 @@ func (f PurgeFilterInput) Document() map[string]any {
 		document["after_ms"] = f.AfterMs
 	}
 	return document
+}
+
+// Body composes the POST /admin/purge wire document: the filter under "filter"
+// and, when the caller previewed a count, that count under "reviewed_count" so
+// the proxy re-checks it inside the delete transaction. The count route takes
+// the same document without one.
+func (f PurgeFilterInput) Body(reviewed *int64) map[string]any {
+	body := map[string]any{"filter": f.Document()}
+	if reviewed != nil {
+		body["reviewed_count"] = *reviewed
+	}
+	return body
 }
 
 func (f PurgeFilterInput) describe() string {
@@ -902,13 +940,12 @@ type PurgePreviewOutput struct {
 }
 
 // purgePreviewWarning is the standing caveat, stated narrowly on purpose. The
-// re-check and the delete are two HTTP requests with no shared transaction, so
-// live traffic committed between them is removed without having been previewed.
-// No client-side guard closes that window, and claiming one would be a lie the
-// operator discovers only after the rows are gone.
-const purgePreviewWarning = "the preview authorizes this filter at this count, and the count is re-checked immediately before deleting; " +
-	"live traffic committed between that re-check and the deletion is removed without having been previewed, " +
-	"because the two are separate requests with no shared transaction"
+// preview count and the delete are two HTTP requests, but the delete carries
+// the reviewed count back and the proxy re-counts it inside the delete
+// transaction, so a population that moved in between refuses the deletion
+// instead of removing rows the operator never saw.
+const purgePreviewWarning = "the preview authorizes this filter at this count; the delete carries the count back and the proxy checks it inside the delete transaction, " +
+	"so a row set that moved since the preview refuses the deletion instead of deleting unpredicted rows. A refused call needs a fresh purge_preview"
 
 // PurgePreview counts the rows a purge filter would delete, without deleting
 // anything, and issues the token that authorizes exactly that deletion.
@@ -922,7 +959,7 @@ func (s *Service) purgePreview(ctx context.Context, in PurgePreviewInput) (*Purg
 	var payload struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &payload); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Body(nil), &payload); err != nil {
 		return nil, err
 	}
 	token, err := s.previewToken.issue(in.Filter, payload.Count, time.Now())
@@ -1004,13 +1041,15 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	if err != nil {
 		return nil, err
 	}
-	// Re-count before deleting, so a row set that visibly moved since the
-	// preview refuses the call. It does NOT close the check/delete gap: rows
-	// committed after this count are still removed.
+	// Re-count immediately before deleting, so a row set that visibly moved
+	// since the preview refuses the call with a readable message instead of an
+	// opaque 409. The count also travels with the delete, where the proxy
+	// counts it again inside the delete transaction; that pair is the actual
+	// binding, this recount only produces the clearer error.
 	var current struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &current); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Body(nil), &current); err != nil {
 		return nil, fmt.Errorf("verify the reviewed count before deleting: %v", err)
 	}
 	if current.Count != reviewed {
@@ -1019,7 +1058,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 		return nil, fmt.Errorf("the row set for this filter no longer matches the one purge_preview reviewed, so the deletion is refused. " +
 			"Re-run purge_preview and confirm again against the count it reports")
 	}
-	if err := s.client.postJSON(ctx, RoutePurge, in.Filter.Document(), nil); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurge, in.Filter.Body(&reviewed), nil); err != nil {
 		return nil, err
 	}
 	out := &PurgeOutput{
@@ -1030,7 +1069,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	var remaining struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &remaining); err == nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Body(nil), &remaining); err == nil {
 		out.Recount = &remaining.Count
 	}
 	return out, nil

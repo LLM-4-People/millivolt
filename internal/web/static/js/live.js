@@ -19,6 +19,9 @@ let explorerAgg = null;
 // view; anything else falls back to an honest loading/failure state instead
 // of painting another scope's cards.
 let explorerFailure = null;
+// explorerFailureMsg is the last scan's rejection text, carried into the
+// failure state so the operator reads the reason instead of a dead end.
+let explorerFailureMsg = '';
 let _pendingRevision = -1; // server lifecycle revision, scoped to the accepted feed
 
 // EMPTY_KPI is the pre-aggregation KPI document: the same wire key set the
@@ -103,8 +106,32 @@ const chartRequest = requestGate(true);
 // previous window/scope totals on screen.
 let chartKey = null;
 let chartFailure = null;
+// chartStatusCharted reports whether the Requests-card status filter can be
+// answered by the chart at all. The chart folds finalized contributions only,
+// so a live in-flight class (the same set the log draws as pills) can never
+// match there, and the server refuses it with 400 invalid scope instead of a
+// zeroed grid that would read as "no traffic". Asking anyway is what turned a
+// permanent condition into a perpetual "retrying" banner: the picker offers
+// "paused" unconditionally, and the 15s refresh re-sent it forever.
+//
+// The class list has one owner, LIVE_STATUS_FILTERS; this only asks whether a
+// selector is a member of it.
+function chartStatusCharted() {
+  return !LIVE_STATUS_FILTERS[filters.status];
+}
+// chartScopeQS is the chart's scope: the shared log scope minus a status
+// selector the chart cannot answer. Every other scope dimension (the explorer
+// filter set) applies to the chart unchanged.
+function chartScopeQS() {
+  if (chartStatusCharted()) return scopeQS();
+  const parts = [];
+  for (const f of explorerFilters()) {
+    parts.push('f=' + encodeURIComponent(f.dim + ':' + f.id));
+  }
+  return parts.join('&');
+}
 function chartReqKey() {
-  const scope = scopeQS();
+  const scope = chartScopeQS();
   return 'window=' + chartWindowToken() + (scope ? '&' + scope : '');
 }
 // chartQuery is the wire query for one chart fetch: the effective selection
@@ -116,7 +143,7 @@ function chartQuery() {
   const r = tfResolve(chartWindowToken(), Date.now());
   const params = r.kind === 'range' ? 'from_ms=' + r.fromMs + '&to_ms=' + r.toMs
     : r.kind === 'duration' ? 'window=' + r.minutes : 'window=all';
-  const scope = scopeQS();
+  const scope = chartScopeQS();
   return scope ? params + '&' + scope : params;
 }
 function markChartFailure(key) {
@@ -202,7 +229,10 @@ function fetchExplorer(mode = 'reuse') {
   // inception (the filter set is a scoping signal, never a client record set).
   return explorerRequest(q, (accept, signal) => {
     operatorJson('/metrics/agg/explorer?' + q, {signal})
-      .then(p => accept(p, true)).catch(() => accept(null, false));
+      .then(p => accept(p, true)).catch(err => {
+        explorerFailureMsg = String((err && err.message) || err || '').trim();
+        accept(null, false);
+      });
   }, p => {
     // Hash state can change before its navigation event dispatches.
     if (q !== explorerReq()) { fetchExplorer(); return; }
@@ -228,7 +258,8 @@ function fetchExplorer(mode = 'reuse') {
 // renders a failure message while the dashboard tick retries.
 function markExplorerFailure(scope, dim) {
   explorerAgg = null;
-  explorerFailure = {scopeKey: scope, dim};
+  explorerFailure = {scopeKey: scope, dim, reason: explorerFailureMsg};
+  explorerFailureMsg = '';
   renderExplorer();
   updateScopeLine();
 }
@@ -371,7 +402,7 @@ function derive(data) {
   let flightLeft = '', flightRight = '', flightRightCls = '';
   if (queuedLive) {
     if (activeLive) flightLeft = fmt(activeLive) + ' active';
-    flightRight = fmt(queuedLive) + ' queued';
+    flightRight = ocPopulation(queuedLive, OC_POPULATIONS.queued);
     flightRightCls = liveBuckets.throttled ? 'q-throttled' : 'q-paused';
   } else if (activeLive) {
     flightLeft = fmt(activeLive) + ' ' +
@@ -414,8 +445,8 @@ function derive(data) {
   let kpiHtml = _kpiHtml;
   if (_kpiHtmlKey !== kpiKey) {
     kpiHtml = `
-    <div class="kpi"><h2>Requests</h2><div class="val">${vt(fmt(a.requests))}</div><div class="sub2">all tracked</div></div>
-    <div class="kpi k-flight ${inFlight ? 'k-err' : ''}"><h2>In-flight</h2><div class="val">${vt(fmt(inFlight))}</div><div class="sub2 flight-sub"><span>${flightLeft}</span>${flightRight ? `<span class="${flightRightCls}">${flightRight}</span>` : ''}</div>${flightMix}</div>
+    <div class="kpi"><h2>Request count</h2><div class="val">${vt(fmt(a.requests))}</div><div class="sub2">all tracked</div></div>
+    <div class="kpi k-flight"><h2>In-flight</h2><div class="val">${vt(fmt(inFlight))}</div><div class="sub2 flight-sub"><span>${flightLeft}</span>${flightRight ? `<span class="${flightRightCls}">${flightRight}</span>` : ''}</div>${flightMix}</div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">${vt(fmtMoney(totalCost), 'est USD · ' + fmtMoney(totalCost))}</div><div class="sub2">${costPerReq != null ? vt('~' + fmtMoney(costPerReq) + '/req') : '-'}</div></div>
     <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">${costPerMtok != null ? vt(fmtMoney(costPerMtok)) + '<span class="unit">/Mtok</span>' : '-'}</div><div class="sub2">${costPerMtok != null ? vt('priced in+out', 'blended over cost-reporting requests only') : '-'}</div></div>
     <div class="kpi"><h2>Tokens in/out</h2><div class="val val-duo">${vt(fmt(inTotal), fmtFull(inTotal))}<span class="unit">/</span>${vt(fmt(outTotal), fmtFull(outTotal))}</div><div class="sub2">${reasonTotal > 0 ? vt('reasoning ' + fmt(reasonTotal) + ' tok', 'reasoning ' + fmtFull(reasonTotal) + ' tok') : 'no reasoning'}</div></div>
@@ -500,7 +531,7 @@ function bumpRecords() { recordsRevision++; }
 function setCounters(counters, pendingRevision) {
   if (!counters) return counters;
   const prev = lastData?.counters || {};
-  if (!Number.isSafeInteger(pendingRevision) || pendingRevision < 0 || pendingRevision < _pendingRevision) {
+  if (!isCount(pendingRevision) || pendingRevision < _pendingRevision) {
     counters = {...counters, in_flight: prev.in_flight};
   } else {
     _pendingRevision = pendingRevision;
@@ -578,6 +609,9 @@ function renderLive() {
 let _navScopeKey = null;
 let _navActiveDim = null;
 let _routedHash = null;
+// _resyncScope is the scope the last full render painted; a resync over the
+// same one preserves the log's scroll instead of jumping to the top.
+let _resyncScope = null;
 
 function renderAll(data) {
   lastData = data;
@@ -585,9 +619,17 @@ function renderAll(data) {
   // them before any row is classified so the browser's pills and error groups
   // agree with the server's aggregates.
   setRateLimitVocabulary(data && data.rate_limit_classes);
+  // A resync always rebuilds the window, but only a scope change re-reads the
+  // list from its newest row: a background resync over the same scope keeps
+  // the operator's place and the window size that place needs.
+  const scope = scopeQS();
+  const sameScope = scope === _resyncScope;
+  const box = $('tbl-requests');
+  const keep = sameScope ? { limit: logLimit, scroll: box ? box.scrollTop : 0 } : null;
   // Reset scroll against the old layout, before any DOM writes. Setting it
   // after inserting the table forces a complete synchronous table layout.
   resetLogWindow();
+  if (keep) logLimit = keep.limit;
   const d = derive(data);
   updateSection('kpis', d.kpiHtml);
 
@@ -597,7 +639,9 @@ function renderAll(data) {
   updateSection('f-status', d.statusHtml);
   if ($('f-status').value !== filters.status) $('f-status').value = filters.status;
   renderRequests(d.scopedRecs);
+  if (keep && keep.scroll) $('tbl-requests').scrollTop = keep.scroll;
   updateLogStats(d);
+  _resyncScope = scope;
   renderExplorer();
 
   // Keep the open drawer in sync as new records stream in.
@@ -764,7 +808,7 @@ function upsertRec(rec) {
 function upsertPendingRec(rec, pendingRevision) {
   const recs = lastData?.records || [];
   if (!rec || !rec.id) return recs;
-  if (!Number.isSafeInteger(pendingRevision) || pendingRevision < 0) return recs;
+  if (!isCount(pendingRevision)) return recs;
   let i = _recIdx.get(rec.id);
   if (i !== undefined && recs[i]?.id === rec.id) {
     // The same request's watermark orders every pending field, including
@@ -799,7 +843,8 @@ function startStream(since, feed) {
   stream.onerror = () => { if (current()) setFooterLive(false); };
   stream.addEventListener('snapshot', (e) => {
     if (source !== stream) return;
-    try { applySnapshotPayload(JSON.parse(e.data)); } catch(err) {}
+    try { applySnapshotPayload(JSON.parse(e.data)); }
+    catch (err) { reportProblem('live snapshot frame', err); }
   });
   stream.addEventListener('reset', (e) => {
     if (!current()) return;
@@ -808,7 +853,7 @@ function startStream(since, feed) {
       if (typeof next !== 'string' || !next || next === feedId) return;
       // The full-bootstrap gate owns close, invalidation and cursor-safe reopen.
       fetchBootstrap('full');
-    } catch(err) {}
+    } catch (err) { reportProblem('live reset frame', err); }
   });
   // A finalized record from the ring. The event's Last-Event-ID (the id:
   // field the stream carries) is the resume cursor - on reconnect the browser
@@ -824,7 +869,7 @@ function startStream(since, feed) {
       if (!isNaN(seq)) lastSeq = Math.max(lastSeq, seq);
       upsertRec(rec);
       scheduleRenderLive();
-    } catch(err) {}
+    } catch (err) { reportProblem('live record frame', err); }
   });
   // Per-request lifecycle: a request appears the moment it starts ("begin") and
   // is finalized when it completes ("end"), so the log shows it streaming live
@@ -859,7 +904,7 @@ function startStream(since, feed) {
       }
       scheduleRenderLive();
       scheduleExplorerLiveRefresh();
-    } catch(err) {}
+    } catch (err) { reportProblem('live lifecycle frame (' + e.type + ')', err); }
   };
   stream.addEventListener('begin', upsertLive);
   stream.addEventListener('end', upsertLive);
@@ -1066,6 +1111,20 @@ onNavigate(() => {
 // resync must never re-apply pre-purge rows after the fresh snapshot landed.
 let _bootReq = 0;
 let _bootFull = null; // mandatory replacement; ordinary polls join instead of superseding it
+// _bootLastOk is the last accepted bootstrap response. The poll is the only
+// source for operator policy state, and its failure branch used to swallow
+// everything: holders, limits and captures kept their last values with no
+// marker, so the header readout presented minutes-old policy as current. The
+// timestamp is what lets the readout say it is not current.
+let _bootLastOk = 0;
+// operatorPollStale reports whether the periodic poll has been failing long
+// enough that operator surfaces may show values the server no longer holds.
+// A page that has never polled successfully is still loading, not stale.
+function operatorPollStale() {
+  if (!_bootLastOk) return false;
+  const poll = (typeof dashCfg === 'object' && dashCfg && dashCfg.poll_ms) || 5000;
+  return Date.now() - _bootLastOk > Math.max(poll * 3, 15000);
+}
 function refreshDashboardVersion(version) {
   if (dashboardReloading) return true;
   if (typeof version !== 'string' || !DASHBOARD_VERSION_RE.test(version) ||
@@ -1090,8 +1149,8 @@ function takeEmbeddedBootstrap() {
     const p = JSON.parse(raw);
     if (!p || typeof p !== 'object' || !Array.isArray(p.records) ||
         !p.counters || typeof p.counters !== 'object' || !p.kpi || typeof p.kpi !== 'object' ||
-        typeof p.feed_id !== 'string' || !p.feed_id || !Number.isSafeInteger(p.seq) || p.seq < 0 ||
-        !Number.isSafeInteger(p.pending_revision) || p.pending_revision < 0 ||
+        typeof p.feed_id !== 'string' || !p.feed_id || !isCount(p.seq) ||
+        !isCount(p.pending_revision) ||
         p.incremental !== false || !DASHBOARD_VERSION_RE.test(p.dashboard_version)) return null;
     return p;
   } catch (_) { return null; }
@@ -1135,6 +1194,7 @@ function fetchBootstrap(mode, after) {
             (p.feed_id === feedId && !p.incremental && (p.seq < lastSeq || p.pending_revision < _pendingRevision))) {
           return fetchBootstrap('full');
         }
+        _bootLastOk = Date.now();
         applyBootstrapState(p, operatorRevisions);
         const stateChanged = previous && (previous._rev || 0) !== revision;
         if (mode !== 'none' && !applySnapshotPayload(p, true)) return _bootFull;
@@ -1150,6 +1210,10 @@ function fetchBootstrap(mode, after) {
       // Failed boot/resync falls back to the stream's full snapshot. Only the
       // latest mandatory replacement may reopen; an older failure stays inert.
       if (mode === 'full' && _bootFull === request && !dashboardReloading) startStream(0, feedId);
+      // The operator surfaces now hold values the server has not confirmed.
+      // Repaint the readout so it says so instead of waiting for the next
+      // unrelated render to notice.
+      if (typeof refreshOperatorReadout === 'function') refreshOperatorReadout();
       return null;
     })
     .finally(() => { if (_bootFull === request) _bootFull = null; })
@@ -1182,7 +1246,7 @@ function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
   if (p.debug) applyDebugState(p.debug, revisions.debug);
   applyRestartState(p.restart);
   applyStormState(p.storm);
-  if (p.storage && typeof p.storage.enabled === 'boolean' && Number.isSafeInteger(p.storage.dropped) && p.storage.dropped >= 0) {
+  if (p.storage && typeof p.storage.enabled === 'boolean' && isCount(p.storage.dropped)) {
     storageState = p.storage;
     refreshFooterState();
   }

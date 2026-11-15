@@ -22,10 +22,9 @@ function detailFocusKey(el) {
 function fmtStamp(t) {
   if (!t) return '';
   const d = new Date(t);
-  if (isNaN(d) || d.getTime() < 86400000) return '';
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
-    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.` +
+  if (isNaN(d) || d.getTime() < TIME_MS.day) return '';
+  return `${fmtDateKey(d)} ` +
+    `${fmtClock(d.getHours(), d.getMinutes())}:${pad2(d.getSeconds())}.` +
     String(d.getMilliseconds()).padStart(3, '0');
 }
 
@@ -286,7 +285,7 @@ function detailSelectGroup(key, moveFocus) {
     const active = t === tab;
     t.setAttribute('aria-selected', active ? 'true' : 'false');
     t.tabIndex = active ? 0 : -1;
-    const panel = document.getElementById(t.getAttribute('aria-controls'));
+    const panel = $(t.getAttribute('aria-controls'));
     if (panel) panel.hidden = !active;
   });
   if (moveFocus) tab.focus();
@@ -338,6 +337,10 @@ document.addEventListener('click', e => {
 // WAI-ARIA tabs: the group strip is one tab stop, and Left/Right/Home/End move
 // selection and focus without leaving the strip.
 document.addEventListener('keydown', e => {
+  // Modified keys stay with the browser: Alt+Left/Right are Back and Forward,
+  // and Cmd+Left/Right are line navigation. Without this the drawer's tab
+  // strip consumed them.
+  if (keyModified(e)) return;
   const tab = e.target && typeof e.target.closest === 'function'
     ? e.target.closest('[data-group-tab]') : null;
   if (!tab) return;

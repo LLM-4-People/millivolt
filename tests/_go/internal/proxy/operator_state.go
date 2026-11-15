@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -562,5 +563,77 @@ func TestDebugModelsUseTheSharedVocabulary(t *testing.T) {
 	models, _ := first["models"].([]any)
 	if len(models) != 2 || models[0] != "m1" || models[1] != "m2" {
 		t.Fatalf("models = %v, want the trimmed unique [m1 m2]", models)
+	}
+}
+
+// TestCorruptOperatorDocumentsReportDegradedRestore pins the difference between
+// "nothing was stored" and "a stored document could not be read". Both boot with
+// no holds and no caps, but only the second means the proxy lost state it had.
+// Before the signal existed, a truncated document silently booted the proxy as
+// healthy and unpaused, and the first operator write replaced the only evidence.
+func TestCorruptOperatorDocumentsReportDegradedRestore(t *testing.T) {
+	dir := t.TempDir()
+
+	// A store holding a hold, then truncated: the bytes exist but no longer
+	// decode, which is what a partial write or a corrupted page looks like.
+	pausePath := filepath.Join(dir, "pause.db")
+	store, _ := openProxyTestStore(t, pausePath)
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+	rr := httptest.NewRecorder()
+	p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
+		strings.NewReader(`{"paused":true,"all":true,"duration":"1h"}`)))
+	if rr.Code != 200 {
+		t.Fatalf("pause: status = %d body %s", rr.Code, rr.Body.Bytes())
+	}
+	if got := p.PauseSnapshot()["restore_degraded"]; got != false {
+		t.Fatalf("restore_degraded before corruption = %v, want false", got)
+	}
+	if err := store.SavePause(context.Background(), []byte(`{"holds":[{"id":`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store2, _ := openProxyTestStore(t, pausePath)
+	t.Cleanup(func() { store2.Close() })
+	p2 := New(config.Default(), metrics.Noop{})
+	p2.AttachPausePersist(store2)
+	snap := p2.PauseSnapshot()
+	if snap["restore_degraded"] != true {
+		t.Fatalf("restore_degraded after a corrupt hold document = %v, want true", snap["restore_degraded"])
+	}
+	// The healthy facts stay truthful beside it: the proxy really is unpaused.
+	if snap["paused"] != false {
+		t.Fatalf("paused = %v, want false", snap["paused"])
+	}
+
+	// The cap document follows the same rule.
+	throttlePath := filepath.Join(dir, "throttle.db")
+	tstore, _ := openProxyTestStore(t, throttlePath)
+	tp := New(config.Default(), metrics.Noop{})
+	tp.AttachPausePersist(tstore)
+	if err := tstore.SaveThrottle(context.Background(), []byte(`{"throttles":[`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tstore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tstore2, _ := openProxyTestStore(t, throttlePath)
+	t.Cleanup(func() { tstore2.Close() })
+	tp2 := New(config.Default(), metrics.Noop{})
+	tp2.AttachPausePersist(tstore2)
+	if got := tp2.ThrottleSnapshot()["restore_degraded"]; got != true {
+		t.Fatalf("restore_degraded after a corrupt cap document = %v, want true", got)
+	}
+
+	// An empty store is not degraded: it never held anything.
+	emptyPath := filepath.Join(dir, "empty.db")
+	estore, _ := openProxyTestStore(t, emptyPath)
+	ep := New(config.Default(), metrics.Noop{})
+	ep.AttachPausePersist(estore)
+	if got := ep.PauseSnapshot()["restore_degraded"]; got != false {
+		t.Fatalf("restore_degraded on an empty store = %v, want false", got)
 	}
 }

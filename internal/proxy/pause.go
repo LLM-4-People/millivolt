@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"maps"
 	"net/http"
 	"slices"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -45,17 +45,47 @@ type pausePersist interface {
 // restart mid-window keeps the remaining time. Reason is the system label
 // of an auto-created hold (the durable quota/billing token); operator edits
 // preserve it and it is never accepted from the HTTP surface.
+// persistedPause is one stored operator pause. Its scope dimensions are the
+// same five a limit policy has, because the console offers one scope strip for
+// every rule kind and the scheduler matches holds against the same request
+// identity it matches limits against.
+//
+// The wire shape is additive: `clients` and `providers` keep their existing
+// names and meaning, and `models`, `key_hashes` and `conversations` are new
+// optional arrays. A document written before this change reads back with three
+// empty dimensions, which mean "any value" - exactly the behaviour it had.
 type persistedPause struct {
-	ID         string    `json:"id,omitempty"`
-	All        bool      `json:"all,omitempty"`
-	New        bool      `json:"new,omitempty"`
-	Clients    []string  `json:"clients,omitempty"`
-	Providers  []string  `json:"providers,omitempty"`
-	KnownAtNew []string  `json:"known_at_new,omitempty"`
-	Duration   string    `json:"duration,omitempty"`
-	Until      time.Time `json:"until,omitempty"`
-	MaxQueued  int       `json:"max_queued,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
+	ID            string    `json:"id,omitempty"`
+	All           bool      `json:"all,omitempty"`
+	New           bool      `json:"new,omitempty"`
+	Clients       []string  `json:"clients,omitempty"`
+	Providers     []string  `json:"providers,omitempty"`
+	Models        []string  `json:"models,omitempty"`
+	KeyHashes     []string  `json:"key_hashes,omitempty"`
+	Conversations []string  `json:"conversations,omitempty"`
+	KnownAtNew    []string  `json:"known_at_new,omitempty"`
+	Duration      string    `json:"duration,omitempty"`
+	Until         time.Time `json:"until,omitempty"`
+	MaxQueued     int       `json:"max_queued,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+}
+
+// scope projects the persisted dimensions onto the shared scope type. It is
+// the one conversion between storage and the scheduler, so a new dimension
+// cannot be honoured by one and dropped by the other.
+func (p persistedPause) scope() scheduler.LimitScope {
+	return scheduler.LimitScope{
+		Providers:     p.Providers,
+		Models:        p.Models,
+		Clients:       p.Clients,
+		KeyHashes:     p.KeyHashes,
+		Conversations: p.Conversations,
+	}
+}
+
+// hasScope reports whether this pause names any request it covers.
+func (p persistedPause) hasScope() bool {
+	return p.All || p.New || !p.scope().Empty()
 }
 
 type persistedDoc struct {
@@ -163,6 +193,11 @@ type pauseRuntime struct {
 	holds      []persistedPause
 	timers     map[string]*time.Timer
 	persistGen uint64
+	// restoreDegraded records that a durable document existed but could not be
+	// read, so this process is running without the holds it had before the
+	// restart. It is a distinct fact from "no holds": a silent empty list reads
+	// as "nothing is held", while this says the state could not be recovered.
+	restoreDegraded bool
 }
 
 // nameSet is one operator-known dimension (clients, providers, canonical
@@ -417,19 +452,29 @@ func newPauseID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func decodePause(raw []byte) []persistedPause {
+// decodePause reads the persisted hold document. The second result reports a
+// document that existed but could not be decoded: an empty store and a corrupt
+// one both yield no holds, and only the caller can tell the operator that the
+// difference means state was lost rather than never written. The flag is the
+// whole contract: it stays true for the life of the process, so the served
+// snapshot keeps reporting restore_degraded until a restart reads a document
+// that decodes. The document itself is NOT preserved - the first accepted
+// operator write replaces it, because the store owns one value per key. An
+// operator who wants the unreadable bytes must read them before mutating
+// anything.
+func decodePause(raw []byte) (holds []persistedPause, degraded bool) {
 	if len(raw) == 0 {
-		return nil
+		return nil, false
 	}
 	var doc persistedDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		log.Printf("pause: decode: %v", err)
-		return nil
+		logging.Printf("", "pause: decode: %v", err)
+		return nil, true
 	}
 	if len(doc.Holds) == 0 {
-		return nil
+		return nil, false
 	}
-	return doc.Holds
+	return doc.Holds, false
 }
 
 // AttachPausePersist restores the hold from durable storage and seeds the
@@ -439,25 +484,30 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	if cs, err := p.ListClients(ctx); err != nil {
-		log.Printf("pause: list clients: %v", err)
+		logging.Printf("", "pause: list clients: %v", err)
 	} else {
 		s.pause.clients.seed(cs)
 	}
 	if ps, err := p.ListProviders(ctx); err != nil {
-		log.Printf("pause: list providers: %v", err)
+		logging.Printf("", "pause: list providers: %v", err)
 	} else {
 		s.pause.providers.seed(ps)
 	}
 	if ms, err := p.ListModels(ctx); err != nil {
-		log.Printf("pause: list models: %v", err)
+		logging.Printf("", "pause: list models: %v", err)
 	} else {
 		s.pause.models.seed(canonicalModelList(ms))
 	}
 	raw, err := p.LoadPause(ctx)
 	if err != nil {
-		log.Printf("pause: load: %v", err)
+		logging.Printf("", "pause: load: %v", err)
 	} else {
-		holds := decodePause(raw)
+		holds, degraded := decodePause(raw)
+		if degraded {
+			s.pause.mu.Lock()
+			s.pause.restoreDegraded = true
+			s.pause.mu.Unlock()
+		}
 		kept := holds[:0]
 		for _, h := range holds {
 			// KnownAtNew is the observed vocabulary snapshot the hold compared
@@ -475,7 +525,7 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 			}
 		} else {
 			s.applyHolds(kept)
-			log.Printf("pause restored (%s)", pauseDescribeAll(kept))
+			logging.Printf("", "pause restored (%s)", pauseDescribeAll(kept))
 		}
 	}
 	s.attachThrottlePersist(p)
@@ -505,14 +555,17 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Paused    *bool           `json:"paused"`
-		All       pauseBool       `json:"all"`
-		New       pauseBool       `json:"new"`
-		Clients   pauseNames      `json:"clients"`
-		Providers pauseNames      `json:"providers"`
-		Duration  *string         `json:"duration"`
-		MaxQueued *int            `json:"max_queued"`
-		ID        json.RawMessage `json:"id"`
+		Paused        *bool           `json:"paused"`
+		All           pauseBool       `json:"all"`
+		New           pauseBool       `json:"new"`
+		Clients       pauseNames      `json:"clients"`
+		Providers     pauseNames      `json:"providers"`
+		Models        pauseNames      `json:"models"`
+		KeyHashes     pauseNames      `json:"key_hashes"`
+		Conversations pauseNames      `json:"conversations"`
+		Duration      *string         `json:"duration"`
+		MaxQueued     *int            `json:"max_queued"`
+		ID            json.RawMessage `json:"id"`
 	}
 	// Surface the strict decoder's cause; io.EOF is the empty-body
 	// command, which falls through to the requirement message below.
@@ -547,6 +600,7 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		// same shapes; this is the HTTP trust boundary those wrappers cannot
 		// protect.
 		if body.All.set || body.New.set || body.Clients != nil || body.Providers != nil ||
+			body.Models != nil || body.KeyHashes != nil || body.Conversations != nil ||
 			body.Duration != nil || body.MaxQueued != nil {
 			adminjson.WriteError(w, http.StatusBadRequest,
 				"a resume carries only id; scope, duration and max_queued apply to a create or edit")
@@ -574,18 +628,37 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		// Scope presence is per dimension: an omitted dimension preserves the
 		// edited hold's value, while an explicitly empty array clears it. A
 		// create starts with every omitted dimension empty ("any").
-		clients, providers := prev.Clients, prev.Providers
+		//
+		// The five dimensions are merged by one loop over the shared names so a
+		// new dimension cannot be accepted by the decoder and then dropped
+		// here, which would install a hold narrower than the caller asked for.
+		supplied := map[string]pauseNames{
+			"providers":     body.Providers,
+			"models":        body.Models,
+			"clients":       body.Clients,
+			"key_hashes":    body.KeyHashes,
+			"conversations": body.Conversations,
+		}
+		merged := map[string][]string{
+			"providers": prev.Providers, "models": prev.Models,
+			"clients": prev.Clients, "key_hashes": prev.KeyHashes,
+			"conversations": prev.Conversations,
+		}
 		if !hasPrev {
-			clients, providers = nil, nil
+			for name := range merged {
+				merged[name] = nil
+			}
 		}
-		if body.Clients != nil {
-			clients = sanitizeNameList(body.Clients)
-		}
-		if body.Providers != nil {
-			providers = sanitizeNameList(body.Providers)
+		scopeSupplied := false
+		for name, names := range supplied {
+			if names == nil {
+				continue
+			}
+			scopeSupplied = true
+			merged[name] = sanitizeNameList(names)
 		}
 		newc := body.New.value
-		scopeOmitted := !body.All.set && !body.New.set && body.Clients == nil && body.Providers == nil
+		scopeOmitted := !body.All.set && !body.New.set && !scopeSupplied
 		var all bool
 		if hasPrev && scopeOmitted {
 			// Replace without restated scope keeps the hold. Compat
@@ -593,22 +666,18 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			all, newc = prev.All, prev.New
 		} else {
 			all = scopeOmitted || body.All.value
-			// An explicit empty / whitespace-only scope is not a
-			// global hold - deny by default.
-			if !all && !newc && len(clients) == 0 && len(providers) == 0 {
-				return prev, fmt.Errorf("all, new, clients, or providers required")
-			}
 			// "all" already covers every narrower scope; accepting both
 			// would let a caller believe the hold was narrowed while the
 			// proxy installs the global one. Names within a dimension and
 			// New plus named clients remain valid unions (documented).
-			if all && (body.New.set || body.Clients != nil || body.Providers != nil) {
-				return prev, fmt.Errorf("all cannot be combined with new, clients, or providers")
+			if all && (body.New.set || scopeSupplied) {
+				return prev, fmt.Errorf("all cannot be combined with new or a scope dimension")
 			}
 			if all {
 				newc = false
-				clients = nil
-				providers = nil
+				for name := range merged {
+					merged[name] = nil
+				}
 			}
 		}
 		capn := s.defaultPauseCap()
@@ -618,11 +687,20 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			capn = prev.MaxQueued
 		}
 		snap = persistedPause{
-			ID: newPauseID(), All: all, New: newc, Clients: clients,
-			Providers: providers, Duration: dur, MaxQueued: capn,
+			ID: newPauseID(), All: all, New: newc,
+			Clients: merged["clients"], Providers: merged["providers"],
+			Models: merged["models"], KeyHashes: merged["key_hashes"],
+			Conversations: merged["conversations"],
+			Duration:      dur, MaxQueued: capn,
 			// An edit re-states scope, deadline and cap; the system origin
 			// of an auto-created hold is never restated or cleared.
 			Reason: prev.Reason,
+		}
+		// An explicit empty / whitespace-only scope is not a global hold -
+		// deny by default. The one predicate reads the built snapshot, so a
+		// new dimension cannot be accepted here and missed by the guard.
+		if !snap.hasScope() {
+			return prev, fmt.Errorf("all, new, or at least one scope dimension is required")
 		}
 		if hasPrev {
 			snap.ID = id
@@ -643,13 +721,18 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasPrev {
-		log.Printf("proxy pause updated %s (%s)", id, pauseDescribe(snap))
+		logging.Printf("", "proxy pause updated %s (%s)", id, pauseDescribe(snap))
 	} else {
-		log.Printf("proxy paused (%s)", pauseDescribe(snap))
+		logging.Printf("", "proxy paused (%s)", pauseDescribe(snap))
 	}
 	writeOperatorState(w, s.PauseSnapshot(), nil)
 }
 
+// sanitizeNameList trims, deduplicates and sorts one operator-supplied name
+// list. The result is capped at nameSetMax: the lists are persisted operator
+// state matched linearly per request, so an unbounded document would grow the
+// snapshot and the per-request scan together. Sorting first makes the retained
+// subset deterministic.
 func sanitizeNameList(in []string) []string {
 	if len(in) == 0 {
 		return nil
@@ -661,14 +744,17 @@ func sanitizeNameList(in []string) []string {
 			seen[c] = struct{}{}
 		}
 	}
-	return slices.Sorted(maps.Keys(seen))
+	out := slices.Sorted(maps.Keys(seen))
+	if len(out) > nameSetMax {
+		out = out[:nameSetMax]
+	}
+	return out
 }
 
 func toSchedHold(h persistedPause) scheduler.Hold {
 	return scheduler.Hold{
-		ID: h.ID, All: h.All, New: h.New, Clients: h.Clients,
-		Providers: h.Providers, KnownAtNew: h.KnownAtNew,
-		Until: h.Until, MaxQueued: h.MaxQueued,
+		ID: h.ID, All: h.All, New: h.New, Scope: h.scope(),
+		KnownAtNew: h.KnownAtNew, Until: h.Until, MaxQueued: h.MaxQueued,
 	}
 }
 
@@ -694,6 +780,14 @@ func (s *Server) applyHolds(holds []persistedPause) error {
 // document releases its names instead of pinning them for the process lifetime.
 // Names that could not be stored because the vocabulary is entirely pinned are
 // logged, never dropped silently.
+//
+// The roster is both read and applied under the document locks. Every writer
+// commits its document under the same lock and syncs right after, so the last
+// applier is also the freshest reader: a derivation that started before a
+// commit cannot land its older roster after the newer derivation and unpin a
+// scope that now exists. Without that, the read spans (holds, sessions,
+// policies) were three independent windows and a stale writer won the apply.
+//
 // firstN returns at most n entries, for a bounded log line.
 func firstN(in []string, n int) []string {
 	if len(in) <= n {
@@ -704,30 +798,48 @@ func firstN(in []string, n int) []string {
 
 func (s *Server) syncNamePins() {
 	s.pause.mu.Lock()
-	var holdClients, holdProviders []string
+	defer s.pause.mu.Unlock()
+	s.debug.mu.Lock()
+	defer s.debug.mu.Unlock()
+	var holdClients, holdProviders, holdModels []string
 	for _, h := range s.pause.holds {
 		holdClients = append(holdClients, h.Clients...)
 		holdProviders = append(holdProviders, h.Providers...)
+		// A hold may now name models, so its spellings have to stay known:
+		// the vocabulary is what keeps a name offered after the traffic that
+		// introduced it has left the bounded ring.
+		holdModels = append(holdModels, canonicalModelList(h.Models)...)
 	}
-	s.pause.mu.Unlock()
 
-	s.debug.mu.Lock()
 	var debugClients, debugProviders, debugModels []string
 	for _, d := range s.debug.sessions {
 		debugClients = append(debugClients, d.Clients...)
 		debugProviders = append(debugProviders, d.Providers...)
 		debugModels = append(debugModels, canonicalModelList(d.Models)...)
 	}
-	s.debug.mu.Unlock()
+
+	var policyClients, policyProviders, policyModels []string
+	for _, policy := range s.scheduler.ThrottlePolicies() {
+		policyClients = append(policyClients, policy.Scope.Clients...)
+		policyProviders = append(policyProviders, policy.Scope.Providers...)
+		policyModels = append(policyModels, canonicalModelList(policy.Scope.Models)...)
+	}
 
 	var dropped []string
+	if s.namePinHook != nil {
+		s.namePinHook()
+	}
 	dropped = append(dropped, s.pause.clients.setPins("pause", holdClients)...)
 	dropped = append(dropped, s.pause.clients.setPins("debug", debugClients)...)
+	dropped = append(dropped, s.pause.clients.setPins("limit", policyClients)...)
 	dropped = append(dropped, s.pause.providers.setPins("pause", holdProviders)...)
 	dropped = append(dropped, s.pause.providers.setPins("debug", debugProviders)...)
+	dropped = append(dropped, s.pause.providers.setPins("limit", policyProviders)...)
 	dropped = append(dropped, s.pause.models.setPins("debug", debugModels)...)
+	dropped = append(dropped, s.pause.models.setPins("pause", holdModels)...)
+	dropped = append(dropped, s.pause.models.setPins("limit", policyModels)...)
 	if len(dropped) > 0 {
-		log.Printf("pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
+		logging.Printf("", "pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
 			len(dropped), strings.Join(firstN(dropped, 8), ", "))
 	}
 }
@@ -826,6 +938,17 @@ func (s *Server) finishPauseLocked() ([]persistedPause, uint64) {
 // holds pauseMu and must not touch it after this returns; the same lock
 // discipline as commitHolds applies.
 func (s *Server) commitPause() error {
+	snap, gen := s.finalizePause()
+	return s.persistLatest(snap, gen)
+}
+
+// finalizePause is the shared tail of every accepted hold mutation: it
+// finalizes the set, releases pause.mu and derives the pins, then returns the
+// snapshot and generation for persistence. Callers hold pause.mu. A caller that
+// waits on the write (commitPause) and one that hands it to a helper (the quota
+// path, where the relay must never wait on SQLite) share this owner, so a
+// quota hold pins its scope exactly like a manual one.
+func (s *Server) finalizePause() ([]persistedPause, uint64) {
 	snap, gen := s.finishPauseLocked()
 	s.pause.mu.Unlock()
 	// Every accepted hold mutation passes through here - create, edit, resume,
@@ -833,7 +956,7 @@ func (s *Server) commitPause() error {
 	// per handler instead would leave the removal and expiry paths pinning a
 	// scope that no longer exists.
 	s.syncNamePins()
-	return s.persistLatest(snap, gen)
+	return snap, gen
 }
 
 func (s *Server) persistHolds(holds []persistedPause) error {
@@ -886,7 +1009,7 @@ func pauseDescribeAll(holds []persistedPause) string {
 }
 
 func pauseDescribe(snap persistedPause) string {
-	if !snap.All && !snap.New && len(snap.Clients) == 0 && len(snap.Providers) == 0 {
+	if !snap.All && !snap.New && snap.scope().Empty() {
 		return "cleared"
 	}
 	var b strings.Builder
@@ -896,17 +1019,24 @@ func pauseDescribe(snap persistedPause) string {
 		if snap.New {
 			b.WriteString("new")
 		}
-		if len(snap.Clients) > 0 {
+		// The log line names every dimension the hold selects on, in one
+		// stable order, so an operator reading the log can tell a model hold
+		// from a client one. The order matches LimitScope's field order.
+		for _, part := range []struct {
+			values []string
+			prefix string
+		}{
+			{snap.Clients, ""}, {snap.Providers, ""}, {snap.Models, "model:"},
+			{snap.KeyHashes, "key:"}, {snap.Conversations, "conv:"},
+		} {
+			if len(part.values) == 0 {
+				continue
+			}
 			if b.Len() > 0 {
 				b.WriteString("+")
 			}
-			b.WriteString(strings.Join(snap.Clients, ","))
-		}
-		if len(snap.Providers) > 0 {
-			if b.Len() > 0 {
-				b.WriteString("+")
-			}
-			b.WriteString(strings.Join(snap.Providers, ","))
+			b.WriteString(part.prefix)
+			b.WriteString(strings.Join(part.values, ","))
 		}
 	}
 	if snap.Reason != "" {
@@ -934,6 +1064,7 @@ func (s *Server) PauseSnapshot() map[string]any {
 	st := s.scheduler.Stats()
 	s.pause.mu.Lock()
 	holds := append([]persistedPause(nil), s.pause.holds...)
+	restoreDegraded := s.pause.restoreDegraded
 	s.pause.mu.Unlock()
 
 	var clients, providers []string
@@ -949,21 +1080,27 @@ func (s *Server) PauseSnapshot() map[string]any {
 			soonest = h.Until
 		}
 		outHolds = append(outHolds, map[string]any{
-			"id":           h.ID,
-			"all":          h.All,
-			"new":          h.New,
-			"clients":      nullSlice(h.Clients),
-			"providers":    nullSlice(h.Providers),
-			"known_at_new": nullSlice(h.KnownAtNew),
-			"duration":     h.Duration,
-			"until":        rfc3339OrNil(h.Until),
-			"max_queued":   h.MaxQueued,
-			"reason":       h.Reason,
-			"queued":       s.scheduler.HoldQueued(h.ID),
+			"id":            h.ID,
+			"all":           h.All,
+			"new":           h.New,
+			"clients":       nullSlice(h.Clients),
+			"providers":     nullSlice(h.Providers),
+			"models":        nullSlice(h.Models),
+			"key_hashes":    nullSlice(h.KeyHashes),
+			"conversations": nullSlice(h.Conversations),
+			"known_at_new":  nullSlice(h.KnownAtNew),
+			"duration":      h.Duration,
+			"until":         rfc3339OrNil(h.Until),
+			"max_queued":    h.MaxQueued,
+			"reason":        h.Reason,
+			"queued":        s.scheduler.HoldQueued(h.ID),
 		})
 	}
 	return map[string]any{
-		"ok":                 true,
+		"ok": true,
+		// The clock every deadline in this document is measured against. It is
+		// not state: the client uses only its own elapsed time anchored here.
+		"server_ms":          serverClockMs(),
 		"paused":             len(outHolds) > 0,
 		"clients":            nullSlice(sanitizeNameList(clients)),
 		"providers":          nullSlice(sanitizeNameList(providers)),
@@ -973,8 +1110,21 @@ func (s *Server) PauseSnapshot() map[string]any {
 		"until":              rfc3339OrNil(soonest),
 		"default_max_queued": s.defaultPauseCap(),
 		// Every request the scheduler is parking: admission waiters plus
-		// send-gate waiters (429/5xx retry pacing, probe serialization).
+		// send-gate waiters (429/5xx retry pacing, probe serialization). These
+		// are the populations an operator drain can release.
 		"queued": st.Queued + st.SendWaiters,
+		// Requests parked by the storm/quota gate. They wait before admission,
+		// so they are in neither admission nor send waiters above, and a proxy
+		// holding every new request would otherwise publish zero queued. They
+		// are reported apart because draining the queue cannot release them:
+		// only the gate opening or an operator resume does.
+		"storm_waiters": st.StormWaiters,
+		// A durable hold document existed but could not be read, so this
+		// process is running without state it had before the restart. It is a
+		// distinct fact from an empty holds list, which reads as "nothing is
+		// held" - the failure a silently truncated document would otherwise
+		// present as a healthy, unpaused proxy.
+		"restore_degraded": restoreDegraded,
 	}
 }
 

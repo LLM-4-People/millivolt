@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,91 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
+
+// TestAbsorbHTTPRetryBoundsTheAttemptLog pins C5: a durable quota pause
+// re-sends without burning max_retries, so the attempt log needs its own bound
+// or it grows for the whole pause. The newest entries survive, the retry
+// counter keeps counting every absorbed try, and a zero budget still keeps one.
+func TestAbsorbHTTPRetryBoundsTheAttemptLog(t *testing.T) {
+	resp := func() *http.Response {
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: http.NoBody}
+	}
+	cfg := config.Default()
+	cfg.MaxRetries = 3
+	cfg.StormMaxRetries = 0 // the ordinary budget alone bounds this case
+	s := New(cfg, metrics.Noop{})
+	rec := &metrics.Record{}
+	for i := range 10 {
+		s.absorbHTTPRetry(rec, resp(), []byte(fmt.Sprintf(`{"error":{"message":"try %d"}}`, i)), "", metrics.ClassQuota)
+	}
+	if len(rec.Attempts) != 3 {
+		t.Fatalf("attempts = %d, want the max_retries bound 3", len(rec.Attempts))
+	}
+	if !strings.Contains(rec.Attempts[2].ErrorMsg, "try 9") || !strings.Contains(rec.Attempts[0].ErrorMsg, "try 7") {
+		t.Fatalf("the newest entries must be kept: %+v", rec.Attempts)
+	}
+	if rec.Retries != 10 {
+		t.Fatalf("retries = %d, want every absorbed try counted", rec.Retries)
+	}
+
+	zero := config.Default()
+	zero.MaxRetries = 0
+	zero.StormMaxRetries = 0
+	s = New(zero, metrics.Noop{})
+	rec = &metrics.Record{}
+	s.absorbHTTPRetry(rec, resp(), []byte(`{"error":{"message":"only"}}`), "", metrics.ClassQuota)
+	if len(rec.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want the one-entry floor", len(rec.Attempts))
+	}
+}
+
+// TestAbsorbTransportRetryBoundsTheAttemptLog is the transport twin of the
+// HTTP bound above: both attempt writers share one bound, the sum of the two
+// configured retry budgets, so a transport retry ladder cannot log more history
+// than an HTTP one on the same budget. The newest entries survive and the zero
+// budget still keeps one.
+func TestAbsorbTransportRetryBoundsTheAttemptLog(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxRetries = 3
+	cfg.StormMaxRetries = 0
+	s := New(cfg, metrics.Noop{})
+	rec := &metrics.Record{}
+	for i := range 10 {
+		s.absorbTransportRetry(rec, "", fmt.Sprintf("dial %d", i), true)
+	}
+	if len(rec.Attempts) != 3 {
+		t.Fatalf("attempts = %d, want the same max_retries bound 3 the HTTP writer keeps", len(rec.Attempts))
+	}
+	if !strings.Contains(rec.Attempts[2].ErrorMsg, "dial 9") || !strings.Contains(rec.Attempts[0].ErrorMsg, "dial 7") {
+		t.Fatalf("the newest entries must be kept: %+v", rec.Attempts)
+	}
+	if rec.Retries != 10 {
+		t.Fatalf("retries = %d, want every absorbed try counted", rec.Retries)
+	}
+
+	// The storm budget widens the shared bound for both writers.
+	storm := config.Default()
+	storm.MaxRetries = 3
+	storm.StormMaxRetries = 2
+	s = New(storm, metrics.Noop{})
+	rec = &metrics.Record{}
+	for i := range 10 {
+		s.absorbTransportRetry(rec, "", fmt.Sprintf("dial %d", i), true)
+	}
+	if len(rec.Attempts) != 5 {
+		t.Fatalf("attempts = %d, want the max_retries+storm_max_retries bound 5", len(rec.Attempts))
+	}
+
+	zero := config.Default()
+	zero.MaxRetries = 0
+	zero.StormMaxRetries = 0
+	s = New(zero, metrics.Noop{})
+	rec = &metrics.Record{}
+	s.absorbTransportRetry(rec, "", "only", true)
+	if len(rec.Attempts) != 1 {
+		t.Fatalf("attempts = %d, want the one-entry floor", len(rec.Attempts))
+	}
+}
 
 // TestQualityRetryEmptyBody: a chat request answered with a completely empty
 // 200 body is the degenerate class in its purest form - retried transparently.

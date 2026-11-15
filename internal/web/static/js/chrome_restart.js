@@ -25,40 +25,27 @@ function syncRestartControls() {
   const btn = $('btn-restart-now');
   if (btn) {
     btn.disabled = active || unavailable;
-    btn.textContent = active ? 'Restarting…' : 'Restart now';
+    btn.textContent = active ? 'restarting…' : 'restart now';
     btn.setAttribute('aria-busy', String(active));
   }
-  const trigger = $('btn-restart');
-  if (trigger) {
-    // Keep the menu accessible so progress can be reopened during a restart.
-    if (active) trigger.dataset.busy = '1'; else delete trigger.dataset.busy;
-    trigger.title = active ? 'Restarting - view progress' : 'Restart';
-    trigger.setAttribute('aria-label', trigger.title);
-  }
-  // A binary that cannot restart is not offered at all: the whole control and
-  // its menu leave the row (the wrap is the unit - the menu means nothing
-  // without its trigger, and an empty wrap would hold the row's gap open). A
-  // run in progress keeps it reachable so progress can still be reopened.
-  // Hiding the control also hides the eligibility REASON: nothing tells the
-  // operator why the row lost its Restart entry, because the one surface that
-  // could (the menu's status line, fed by fetchRestartStatus) is itself
-  // unreachable once the trigger is gone.
-  const wrap = $('restart-wrap');
-  if (wrap) wrap.hidden = unavailable && !active;
+  // The console's system section owns the action, so a build that cannot
+  // restart says why in place instead of hiding a header control.
+  if (typeof refreshOperatorReadout === 'function') refreshOperatorReadout();
 }
 
 // applyRestartState folds the bootstrap's boot-time eligibility into the
-// restart state and re-syncs the controls, so a page that never opens the menu
-// still knows whether to OFFER the action. The verdict rides the bootstrap the
-// page already loads: no extra round trip, and a payload without the section
-// (or without a boolean available) leaves the current behaviour alone. Only the
-// verdict is adopted. The accompanying reason is deliberately NOT: the control
-// is hidden exactly when the verdict is false, so there is nowhere to render it.
-// The server's own refusal (POST /admin/restart) still carries the same string
-// for a caller of the API.
+// restart state, so a page that never opens the system section still knows
+// whether to offer the action. The verdict rides the bootstrap the page
+// already loads: no extra round trip, and a payload without the section (or
+// without a boolean available) leaves the current behaviour alone. The reason
+// is adopted with the verdict because the system section names it in place.
 function applyRestartState(st) {
   if (!st || typeof st.available !== 'boolean') return;
-  restartServerState = { ...restartServerState, available: st.available };
+  restartServerState = {
+    ...restartServerState,
+    available: st.available,
+    reason: typeof st.reason === 'string' ? st.reason : '',
+  };
   syncRestartControls();
 }
 
@@ -73,30 +60,35 @@ const RESTART_STEPS = [
   { rank: 3, label: 'start the new process' },
 ];
 
-// The poll fallback's budget and cadence. The deadline must cover the whole
-// remaining choreography or the fallback gives up while the server is still
-// draining: the server bounds the build (restartBuildTimeout, 5 minutes) and
-// the child's ready wait (restartReadyTimeout, 5 minutes) on its side, and
-// the status document carries the drain bound as drain_timeout_ms (the
-// configured restart_drain_timeout; 0 = the server waits indefinitely).
-// RESTART_DRAIN_FALLBACK_MS mirrors the server-side default drain timeout
-// (internal/config Default: RestartDrainTimeout, 10 minutes) for documents
-// that omit the bound or report an unbounded drain.
-const RESTART_BUILD_BUDGET_MS = 300000;
-const RESTART_READY_BUDGET_MS = 300000;
-const RESTART_DRAIN_FALLBACK_MS = 600000;
+// The poll fallback's cadence. There is deliberately no budget constant here:
+// the status document publishes budget_ms, the whole choreography bound, from
+// the binary that enforces its parts (restartBuildTimeout, restartFlushTimeout,
+// restartReadyTimeout and the configured restart_drain_timeout). Mirroring
+// those as literals put the same durations in two languages, where the
+// copy could silently disagree with the value the server actually applied.
+//
+// budget_ms 0 means the operator configured restart_drain_timeout: 0, which
+// the server documents as "wait indefinitely". An unbounded drain has no
+// deadline: the watch stream, a reported failure and the fresh process's own
+// started_at are the completion evidence. Substituting a fallback for that
+// case made this client announce a timeout during a healthy handoff.
+//
 // Poll cadence while the choreography runs; each poll is raced against the
 // hang bound because drain-phase polls sit unanswered in the inherited
 // socket's backlog.
 const RESTART_POLL_INTERVAL_MS = 750;
 const RESTART_POLL_HANG_MS = 5000;
-// How long the success notice stays up before the menu closes.
-const RESTART_DONE_MS = 2500;
-
 // renderRestartSteps paints the step list from a status document
 // {rank, phase, drain_elapsed_ms, drain_timeout_ms, error}. Steps below rank
 // are done, the ranked one is active (with the live drain timer), the rest
 // pending; an error marks the active step failed.
+// RESTART_STEP_WORDS is the state word each step carries in text. The dot is
+// colour alone, so without this a screen reader heard four identical labels and
+// a colour-blind operator saw four identical rows: a failed build read exactly
+// like a finished one. The word is visually hidden because the dot already
+// carries it for sighted users, but it is part of the step's accessible text.
+const RESTART_STEP_WORDS = {done: 'done', active: 'now', failed: 'failed', pending: 'pending'};
+
 function renderRestartSteps(st) {
   const ol = $('restart-steps');
   if (!ol) return;
@@ -107,21 +99,37 @@ function renderRestartSteps(st) {
     const state = s.rank < st.rank ? 'done' : (s.rank === st.rank ? (fail ? 'failed' : 'active') : 'pending');
     let sub = '';
     if (state === 'active' && s.rank === 1 && st.drain_timeout_ms > 0) {
-      sub = `<span class="rs-sub">${fmtDur(Math.round((st.drain_elapsed_ms || 0) / 1000) * 1000)} / ${fmtDur(st.drain_timeout_ms)}</span>`;
+      sub = `<span class="rs-sub">${fmtDur(Math.round((st.drain_elapsed_ms || 0) / TIME_MS.second) * TIME_MS.second)} / ${fmtDur(st.drain_timeout_ms)}</span>`;
     }
-    return `<li class="rs-step ${state}"><span class="rs-dot" aria-hidden="true"></span><span class="rs-label">${s.label}</span>${sub}</li>`;
+    // aria-current marks the running step for assistive technology; the word
+    // states it for everyone else. Both come from the same state so they
+    // cannot disagree.
+    const current = state === 'active' ? ' aria-current="step"' : '';
+    return `<li class="rs-step ${state}"${current}><span class="rs-dot" aria-hidden="true"></span>` +
+      `<span class="rs-label">${s.label}</span>` +
+      `<span class="visually-hidden"> - ${RESTART_STEP_WORDS[state]}</span>${sub}</li>`;
   }).join('');
-}
-
-function toggleRestartMenu(e) {
-  toggleHdrMenu(e, 'restart-menu', null, fetchRestartStatus);
+  // One announcement per transition, not one per repaint: the poll fires every
+  // 750ms with the same rank, and setText suppresses the repeats.
+  const ranked = RESTART_STEPS[Math.min(st.rank, RESTART_STEPS.length - 1)];
+  setText($('restart-announce'),
+    fail ? 'restart failed at ' + ranked.label
+      : st.rank >= RESTART_STEPS.length ? 'restart complete'
+        : 'restart step: ' + ranked.label);
 }
 
 function setRestartStatus(text, err) {
   const el = $('restart-count');
-  if (!el) return;
-  el.textContent = text || '';
-  if (err) el.dataset.err = '1'; else delete el.dataset.err;
+  if (el) {
+    // setText: this is a status region and the poll repaints it with the same
+    // sentence on every tick until the phase changes.
+    setText(el, text || '');
+    if (err) el.dataset.err = '1'; else delete el.dataset.err;
+    return;
+  }
+  // The system section is closed. A failure still has to reach the operator,
+  // so it takes the one toast path; routine progress stays silent.
+  if (err && text) toast(text, 'err');
 }
 
 function fetchRestartStatus() {
@@ -132,6 +140,11 @@ function fetchRestartStatus() {
       if (st && st.available === false) {
         setRestartStatus(st.reason || 'restart unavailable', true);
       }
+      // The count line and the action repaint in place, but the refusal
+      // sentence belongs to the system section's markup. Patch just that
+      // paragraph: a full section repaint would schedule another status fetch
+      // from the render path and chase its own tail.
+      if (typeof ocSyncRestartVerdict === 'function') ocSyncRestartVerdict();
       return st || {};
     })
     .catch(() => { setRestartStatus('could not check restart status', true); return {}; });
@@ -173,6 +186,16 @@ async function watchRestart(onEvent, signal) {
 
 async function restartProxy() {
   if (restartInProgress()) return;
+  // A restored database is staged until the next boot: this is that boot.
+  const staged = typeof settingsDoc !== 'undefined' && settingsDoc &&
+    settingsDoc.backup && settingsDoc.backup.pending_database
+    ? ' A restored database is staged and is applied first.' : '';
+  const ok = await ocConfirm({
+    title: 'Rebuild and restart?',
+    body: 'Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.' + staged,
+    confirm: 'restart now',
+  });
+  if (!ok) return;
   const beforeFeed = feedId;
   const watcher = new AbortController();
   // Lock before the first await: rapid clicks must not start two preflights.
@@ -180,8 +203,14 @@ async function restartProxy() {
   syncRestartControls();
   try {
     const before = await fetchRestartStatus();
-    if (before.available === false || before.phase !== 'idle') return;
-    if (!confirm('Rebuild from source and restart the proxy?\n\nIn-flight streams finish; new requests queue until the fresh process takes over.')) return;
+    if (before.available === false || before.phase !== 'idle') {
+      if (before.available === false) setRestartStatus(before.reason || 'restart unavailable', true);
+      // A restart already running is a refusal too. Returning silently after
+      // the operator confirmed made a real no-op look like a missed click, and
+      // two tabs restarting at once is the ordinary way to reach this branch.
+      else setRestartStatus('a restart is already running', true);
+      return;
+    }
     restartFailed = false;
     setRestartStatus('');
     renderRestartSteps(null);
@@ -213,8 +242,13 @@ async function restartProxy() {
     // each is raced against the hang bound. The deadline derives from the
     // status document's drain_timeout_ms plus the server's own build and
     // ready budgets, so a long drain never reads as a timeout.
-    const drainMs = Number(doc.drain_timeout_ms) > 0 ? Number(doc.drain_timeout_ms) : RESTART_DRAIN_FALLBACK_MS;
-    const deadline = Date.now() + RESTART_BUILD_BUDGET_MS + drainMs + RESTART_READY_BUDGET_MS;
+    const budgetMs = Number(doc.budget_ms);
+    // Infinity for a server-declared unbounded drain: the loop below then
+    // exits only on real evidence (a new started_at, a failure, or an abort
+    // through restartFailed), which is exactly what the server promised.
+    const deadline = Number.isFinite(budgetMs) && budgetMs > 0
+      ? Date.now() + budgetMs
+      : Infinity;
     const pollDone = (async () => {
       while (Date.now() < deadline) {
         await new Promise(res => setTimeout(res, RESTART_POLL_INTERVAL_MS));
@@ -236,10 +270,12 @@ async function restartProxy() {
       applyRestartEvent(st);
       renderRestartSteps({ rank: RESTART_STEPS.length, error: '' });
       setRestartStatus('restarted ✓ (pid ' + st.pid + ')');
+      // The ledger is the one announcement owner; it toasts only when the
+      // console is closed and the ledger cannot be heard.
+      if (typeof ocRecordChange === 'function') ocRecordChange('restarted the proxy', null, 'ok');
       // SSE normally detects the new feed first. If it is disconnected,
       // check fresh assets/state immediately through the same bootstrap gate.
       if (feedId === beforeFeed) fetchBootstrap('resume');
-      setTimeout(() => { hideHdrMenu('restart-menu'); setRestartStatus(''); const ol = $('restart-steps'); if (ol) { ol.hidden = true; ol.innerHTML = ''; } }, RESTART_DONE_MS);
       return;
     }
     setRestartStatus('restart did not complete in time', true);

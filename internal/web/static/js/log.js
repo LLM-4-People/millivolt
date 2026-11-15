@@ -23,6 +23,8 @@ function updateLogStats(d) {
   // The retry owner keeps trying on its own; the status line stays honest
   // until a page lands or the window resets.
   if (logFetchFailed) el.textContent += ' · history unavailable';
+  // The terminal row states the same paging condition after the last record.
+  renderLogEnd();
 }
 
 // logWindowSameSet reports whether logHTML's id set is exactly the visible
@@ -237,6 +239,31 @@ function appendOlderLogRows(recs) {
 // logCap() rows). First paint is dash_log_rows; scrolling grows it.
 // This is the full rebuild (navigation/first paint/full resync); live events
 // use renderRequestsIncremental instead. It also seeds the logHTML map so the
+// logScopePhrase names the active narrowing in the operator's words: the exact
+// status selector and each explorer filter. It returns '' for the global view,
+// which is what the empty state branches on.
+function logScopePhrase() {
+  const bits = [];
+  if (filters.status) bits.push('status ' + filters.status);
+  for (const f of explorerFilters()) bits.push(entityType(f.dim).label.toLowerCase() + ' ' + dimLabel(f.dim, f.id));
+  return bits.join(' · ');
+}
+
+// logEmptyHTML is the log's one empty state, in the console's bold-lead frame.
+// An empty list has two different answers - a filter hides traffic that exists,
+// or the scope simply has none yet - so the consequence and the way out follow
+// the actual cause, and the active filter is named.
+function logEmptyHTML() {
+  const scope = logScopePhrase();
+  if (scope) {
+    return ocEmptyHTML('No request matches the active filter.',
+      'The log is narrowed to ' + escapeHtml(scope) + ', and nothing in the stored window matches it. ' +
+      '<button type="button" class="oc-link" data-log-clear>clear the filter</button> to see the log again.');
+  }
+  return ocEmptyHTML('No requests in this window yet.',
+    'Nothing has crossed the proxy since the ring was last reset. New requests land here as they complete.');
+}
+
 // incremental path can diff against what is actually in the DOM.
 function renderRequests(recs) {
   recs = mergeLogArchive(recs);
@@ -249,7 +276,7 @@ function renderRequests(recs) {
   // (nav / filter / resync), even when the window HTML matches first paint.
   delete lastRender['tbl-requests'];
   if (!recent.length) {
-    updateSection('tbl-requests', '<div class="empty">no matching requests</div>');
+    updateSection('tbl-requests', `<div class="empty">${logEmptyHTML()}</div>`);
     restoreFocus(focus);
     // An empty scope (its records predate the ring - a provider not used in a
     // while) must still probe the store: nothing will ever scroll here, so the
@@ -268,29 +295,38 @@ function renderRequests(recs) {
   // first paint already carries every floor this rebuild needs.
   reqMeasureRows(rows);
   updateSection('tbl-requests', `<table>${reqThead()}<tbody>${rows.join('')}</tbody></table>`);
+  renderLogEnd();
   restoreFocus(focus);
   scheduleLogFill();
+}
+
+// PILL_EDITS is the pill's data-edit vocabulary in one table: a state pill
+// opens its matching operator rule, or a new draft scoped to the record when
+// the rule has ended. The pills are painted in two places (the log rows and
+// the detail drawer), so activation is one function both roots delegate to.
+const PILL_EDITS = [
+  ['.pill.paused[data-edit-pause]', 'pause'],
+  ['.pill.debug[data-edit-debug]', 'capture'],
+  ['.pill.throttled[data-edit-limit]', 'limit'],
+];
+function activatePillEdit(e) {
+  const hit = PILL_EDITS.find(([sel]) => e.target.closest(sel));
+  if (!hit) return false;
+  e.stopPropagation();
+  const tr = e.target.closest('.exp-row[data-id]');
+  // In the drawer the record identity is the open drawer's; the drawer is a
+  // modal, so it closes first or the console would open inert behind it.
+  const id = tr ? tr.dataset.id : drawerId;
+  if (!tr) closeDrawer();
+  if (id) ocOpenOperatorForRecord(hit[1], recordById(id));
+  return true;
 }
 
 // Delegated row clicks - no inline onclick interpolating the record id.
 $('tbl-requests').addEventListener('click', e => {
   // A pivot/entity link navigates via the hash router - never open the drawer.
   if (e.target.closest('a.ent-link')) return;
-  // A state pill edits its matching operator hold/session/limit (the same
-  // form as clicking the hold row in the header menu): one table keyed by
-  // the pill's data-edit vocabulary, one branch.
-  const pillEdits = [
-    ['.pill.paused[data-edit-pause]', editHoldForRecord],
-    ['.pill.debug[data-edit-debug]', editDebugForRecord],
-    ['.pill.throttled[data-edit-limit]', editLimitForRecord],
-  ];
-  for (const [sel, edit] of pillEdits) {
-    if (!e.target.closest(sel)) continue;
-    e.stopPropagation();
-    const tr = e.target.closest('.exp-row[data-id]');
-    if (tr) edit(recordById(tr.dataset.id));
-    return;
-  }
+  if (activatePillEdit(e)) return;
   // The retry badge toggles the absorbed-attempt sub-rows (collapsed default).
   const tog = e.target.closest('.retry-toggle[data-retry-for]');
   if (tog) {
@@ -308,4 +344,33 @@ $('tbl-requests').addEventListener('click', e => {
   const tr = e.target.closest('.exp-row[data-id]');
   if (tr && tr.dataset.attempt !== undefined) openDrawerAttempt(tr.dataset.id, tr.dataset.attempt);
   else if (tr) openDrawer(tr.dataset.id);
+});
+
+// The drawer paints the same live pills in its status row; a pressed pill must
+// act there too, not only in the log.
+$('drawer').addEventListener('click', activatePillEdit);
+
+// clearLogScope is the one way back to the full log: the status selector and
+// the explorer filters are cleared through their own owners. The empty state
+// and the out-of-scope drawer both offer it.
+function clearLogScope() {
+  if (filters.status) { $('f-status').value = ''; doFilter(); }
+  if (explorerState().filters.length) navigateTo([]);
+}
+
+$('tbl-requests').addEventListener('click', e => {
+  if (e.target.closest('[data-log-clear]')) clearLogScope();
+});
+
+// An attempt sub-row is a row, not a control, so it needs the keyboard press
+// that a row cannot get from the browser. The main rows already carry the
+// focusable opener button; the sub-rows are only reachable if the row itself
+// is a tab stop, which log_rows marks. A press on a nested control stays with
+// that control.
+$('tbl-requests').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const tr = e.target.closest('tr.retry-sub[data-id]');
+  if (!tr || e.target !== tr) return;
+  e.preventDefault();
+  openDrawerAttempt(tr.dataset.id, tr.dataset.attempt);
 });

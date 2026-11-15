@@ -52,6 +52,12 @@ var ErrSnapshotStaging = errors.New("snapshot staging directory is required")
 // returned or served.
 var ErrTooLarge = errors.New("backup exceeds backup_max_bytes")
 
+// ErrPayloadTooLarge reports a decoded payload past the ceiling the caller
+// admitted. The restore path answers it exactly like ErrTooLarge: a compressed
+// body under the upload cap can still expand past it, and the pending snapshot
+// must not be published larger than the operator configured.
+var ErrPayloadTooLarge = errors.New("backup payload exceeds maximum size")
+
 const (
 	archiveVersion = 1
 	flagConfig     = 1 << 0
@@ -748,17 +754,23 @@ func DecodeFile(stageDir, path string) (Archive, error) {
 // the outer payload hash and framing are still checked, so a config-only
 // restore or preview needs no live database volume and no SQLite staging.
 //
+// maxPayload is the caller's request cap (the configured backup_max_bytes). The
+// decoded payload is bounded by min(maxPayload, payloadMax), the same way the
+// encoded artifact and the upload are, so a small compressed upload cannot
+// publish an uncompressed member larger than the operator configured. Over-cap
+// payloads answer ErrPayloadTooLarge.
+//
 // A caller that staged the upload itself passes the descriptor it wrote
 // instead of a path, so the bytes decoded are exactly the bytes it wrote:
 // re-opening a path lets a second writer with access to that directory rename
 // a different file into place between the write and the decode, and every
 // admission check would then run on the substitute.
-func DecodeFileReader(stageDir string, src io.Reader, keepDatabase bool) (Archive, error) {
-	return decodeFileSelected(stageDir, src, payloadMax, keepDatabase)
+func DecodeFileReader(stageDir string, src io.Reader, keepDatabase bool, maxPayload int64) (Archive, error) {
+	return decodeFileSelected(stageDir, src, min(maxPayload, payloadMax), keepDatabase)
 }
 
 func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, error) {
-	return decodeFileSelected(stageDir, src, maxPayload, true)
+	return decodeFileSelected(stageDir, src, min(maxPayload, payloadMax), true)
 }
 
 // decodeFileSelected is the one file-backed decode owner. Its member sink
@@ -855,7 +867,7 @@ func decodeFileSelected(stageDir string, src io.Reader, maxPayload int64, keepDa
 	})
 	if stream.n > maxPayload {
 		cleanup()
-		return Archive{}, fmt.Errorf("decompress backup: backup payload exceeds maximum size")
+		return Archive{}, ErrPayloadTooLarge
 	}
 	if err != nil {
 		cleanup()
@@ -901,7 +913,7 @@ func decodeMembers(r io.Reader, flags byte, limit int64, consume memberConsumer)
 		kind := hdr[0]
 		size := binary.BigEndian.Uint64(hdr[1:])
 		if size > uint64(limit) {
-			return fmt.Errorf("backup payload exceeds maximum size")
+			return ErrPayloadTooLarge
 		}
 		if seen[kind] {
 			return fmt.Errorf("backup has a duplicate member")

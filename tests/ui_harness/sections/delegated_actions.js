@@ -4,42 +4,122 @@ module.exports = async function delegatedActions(H) {
   const {TEST_DASHBOARD_VERSION, assembleHTML, check, dashboardDOM, loaded, mkRec, modelFixture, observerFixture, pageOptions, settleUntil, sleep} = H;
   const state = H.state;
 
-  // Delegated operator actions repaint in place, so the clicked node stays
-  // connected through the action itself. Outside-click dismissal still uses
-  // the original event path rather than live target ancestry, for both edits
-  // and pending/confirmed mutations.
-  for (const [kind, action] of [['pause','pause-edit'], ['pause','pause-resume'], ['debug','debug-edit'], ['debug','debug-stop'], ['limits','limit-edit']]) {
+  // The console is the one action surface. A row action rebuilds the pane, so
+  // the clicked node itself is expected to detach: identity is the row's id,
+  // not the node. Edit opens that row's composer, remove/resume/stop posts
+  // exactly one mutation and leaves the console open, and only a genuine
+  // outside press dismisses it. Each case gets its own page so no operator
+  // state leaks between them.
+  for (const spec of [
+    {
+      kind: 'limit', section: 'limits', draft: 'limit', endpoint: '/admin/throttle',
+      edit: '[data-oc-edit="limit"]', destroy: '[data-oc-remove="limit"]',
+      rowEdit: '.oc-rule-main',
+      compose: '.oc-compose[data-kind="limit"]',
+      post: {id: 'first', clear: true},
+      seed(sw) {
+        sw.applyThrottleState({ok: true, active: true, known_providers: ['p'], throttles: [{
+          id: 'first', scope: {providers: ['p']}, concurrency: 0, requests: 3,
+          request_window: '2m', tokens: 0, token_window: '', anti_burst: false,
+          ramp_duration: '', source: 'console', updated_by: '', in_flight: 0, queued: 0,
+          requests_remaining: 1, requests_capacity: 3, tokens_remaining: 0, tokens_capacity: 0,
+        }]});
+      },
+      confirmed: {ok: true, active: false, known_providers: ['p'], throttles: []},
+      gone(sw) { return sw.eval('throttleState.throttles.length') === 0; },
+    },
+    {
+      kind: 'pause', section: 'pause', draft: 'pause', endpoint: '/admin/pause',
+      edit: '[data-oc-edit="pause"]', destroy: '[data-oc-resume="first"]',
+      rowEdit: '.oc-rule-main',
+      compose: '.oc-compose[data-kind="pause"]',
+      post: {paused: false, id: 'first'},
+      seed(sw) {
+        sw.applyPauseState({ok: true, paused: true,
+          holds: [{id: 'first', all: true, duration: '15m', max_queued: 7}],
+          clients: [], providers: [], known_clients: ['c'], known_providers: ['p'],
+          until: null, queued: 0, default_max_queued: 0});
+      },
+      confirmed: {ok: true, paused: false, holds: [], clients: [], providers: [],
+        known_clients: ['c'], known_providers: ['p'], until: null, queued: 0, default_max_queued: 0},
+      gone(sw) { return !sw.pauseActive() && sw.eval('pauseState.holds.length') === 0; },
+    },
+    {
+      kind: 'capture', section: 'capture', draft: 'capture', endpoint: '/admin/debug',
+      edit: '[data-oc-edit="capture"]', destroy: '[data-oc-stop="first"]',
+      rowEdit: '.oc-rule-main',
+      compose: '.oc-compose[data-kind="capture"]',
+      post: {enabled: false, id: 'first'},
+      seed(sw) {
+        sw.applyDebugState(observerFixture({ok: true, enabled: true,
+          sessions: [{id: 'first', clients: ['c'], providers: [], models: [], duration: '15m'}],
+          known_clients: ['c'], known_providers: ['p'], known_models: []}));
+      },
+      confirmed: observerFixture({ok: true, enabled: false, sessions: [],
+        known_clients: ['c'], known_providers: ['p'], known_models: []}),
+      gone(sw) { return !sw.debugActive() && sw.eval('debugState.sessions.length') === 0; },
+    },
+  ]) {
     const isolated = dashboardDOM(assembleHTML(), pageOptions);
     await loaded(isolated);
     const sw = isolated.window, sd = sw.document;
     try {
       await settleUntil(() => sw.eval('!!lastData'));
-      let resolveMutation;
+      spec.seed(sw);
+      const shell = sd.getElementById('operator-console');
+      sw.openOperatorConsole(spec.section);
+      const row = () => sd.querySelector('#oc-pane [data-oc-rule="first"]');
+      check(spec.kind + ' rule row renders inside the console', !!row() && !shell.hidden);
+      // The row itself is the one edit target: it opens the composer and the
+      // clicked node detaches because the pane rebuilds, which is why identity
+      // is the row id and never the element. A separate side "edit" button
+      // would duplicate this action and take width the scope needs.
+      const rowEdit = row().querySelector(spec.rowEdit);
+      check(spec.kind + ' row has no duplicate side edit action',
+        !row().querySelector('.oc-rule-actions ' + spec.edit));
+      rowEdit.click();
+      check(spec.kind + ' edit swaps in a composer that keeps the row identity',
+        !rowEdit.isConnected && !!sd.querySelector('#oc-pane ' + spec.compose) &&
+        sw.eval('ocDrafts.' + spec.draft + '.id') === 'first');
+      sd.querySelector('#oc-pane [data-oc-cancel]').click();
+      check(spec.kind + ' cancel closes the composer and restores the row',
+        !sd.querySelector('#oc-pane ' + spec.compose) && !!row());
+      const mainEdit = row().querySelector('.oc-rule-main');
+      mainEdit.click();
+      check(spec.kind + ' the row body is the same edit action as the side button',
+        !mainEdit.isConnected && !!sd.querySelector('#oc-pane ' + spec.compose) &&
+        sw.eval('ocDrafts.' + spec.draft + '.id') === 'first');
+      sd.querySelector('#oc-pane [data-oc-cancel]').click();
+      const posts = [];
       const originalFetch = sw.fetch;
-      sw.fetch = (url, options) => options?.method === 'POST'
-        ? new Promise(resolve => { resolveMutation = resolve; }) : originalFetch(url, options);
-      const pause = {ok:true,paused:true,holds:[{id:'first',all:true,duration:'15m',max_queued:7}],known_clients:['c'],known_providers:['p']};
-      const debug = observerFixture({ok:true,enabled:true,sessions:[{id:'first',clients:['c'],duration:'15m'},{id:'second',clients:['second'],duration:'1h'}],known_clients:['c','second'],known_models:[]});
-      sw.applyPauseState(pause);
-      sw.applyDebugState(debug);
-      sw.applyThrottleState({ok:true,active:true,known_providers:['p'],throttles:[{provider:'p',requests:3,request_window:'2m'}]});
-      const toggle = kind === 'pause' ? sw.togglePauseMenu : kind === 'debug' ? sw.toggleDebugMenu : sw.toggleLimitsMenu;
-      toggle({stopPropagation(){}});
-      const menu = sd.getElementById(kind + '-menu');
-      const button = menu.querySelector('[data-operator="' + action + '"]');
-      let originalPathInside = false;
-      sd.addEventListener('click', e => { if (e.target === button) originalPathInside = e.composedPath().includes(menu); });
-      button.click();
-      check(action + ' keeps its clicked row in place and stays open through its own delegated click',
-        button.isConnected && originalPathInside && !menu.hidden);
-      if (resolveMutation) {
-        const confirmed = kind === 'pause' ? {...pause,paused:false,holds:[]} : {...debug,sessions:[debug.sessions[1]]};
-        resolveMutation({ok:true,json:async()=>confirmed});
-        await sleep(5); // negative proof: a confirmed scoped mutation must not close the menu
-        check(action + ' remains open after confirmed scoped mutation', !menu.hidden);
+      const originalConfirm = sw.ocConfirm;
+      sw.ocConfirm = () => Promise.resolve(true);
+      sw.fetch = (url, options) => {
+        if (options?.method === 'POST') {
+          posts.push({url: String(url), body: JSON.parse(options.body)});
+          return Promise.resolve({ok: true, json: async () => spec.confirmed});
+        }
+        return originalFetch(url, options);
+      };
+      try {
+        row().querySelector(spec.destroy).click();
+        check(spec.kind + ' remove/resume/stop posts exactly one mutation',
+          await settleUntil(() => posts.length === 1) &&
+          posts[0].url === spec.endpoint &&
+          JSON.stringify(posts[0].body) === JSON.stringify(spec.post));
+        check(spec.kind + ' confirmed mutation clears the rule through the shared state owner',
+          await settleUntil(() => spec.gone(sw)));
+        await sleep(10); // negative proof: one confirmed mutation must not be followed by a second
+        check(spec.kind + ' console stays open after its confirmed mutation',
+          posts.length === 1 && !shell.hidden && sw.menuIsOpen(shell) && !row());
+      } finally {
+        sw.fetch = originalFetch;
+        sw.ocConfirm = originalConfirm;
       }
+      sd.querySelector('main').dispatchEvent(new sw.Event('pointerdown', {bubbles: true, composed: true}));
       sd.querySelector('main').click();
-      check(action + ' still closes on a genuine outside click', menu.hidden);
+      check(spec.kind + ' console closes on a genuine outside press',
+        shell.hidden && !sw.menuIsOpen(shell));
     } finally { sw.close(); }
   }
 
@@ -95,12 +175,63 @@ module.exports = async function delegatedActions(H) {
       sw.applyBootstrapState({...state, storage: {enabled: true, dropped: 0}});
       check('a clean storage signal renders no degraded footnote',
         !sd.getElementById('f-state').textContent.includes('totals degraded') && !sd.getElementById('f-state').title);
+      // A dropped stream is a health fact, and a hold or a capture owns the
+      // words that would otherwise say "live": offline must still land.
+      {
+        const footer = sd.getElementById('f-state');
+        sw.applyPauseState({ok: true, paused: true, holds: [{id: 'offline-hold', all: true}],
+          clients: [], providers: [], known_clients: [], known_providers: [], until: null,
+          queued: 0, storm_waiters: 0, default_max_queued: 0});
+        sw.setFooterLive(false);
+        check('a dropped stream names offline even while a hold owns the footer',
+          footer.textContent.includes('offline') && footer.title.includes('event stream is down'));
+        sw.setFooterLive(true);
+        check('the offline footnote clears on reconnect',
+          !footer.textContent.includes('offline'));
+        sw.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+          known_clients: [], known_providers: [], until: null, queued: 0,
+          storm_waiters: 0, default_max_queued: 0});
+      }
+      // A degraded operator-state restore is the twin of a degraded boot scan:
+      // a durable hold or cap document existed and could not be read, so rules
+      // saved before the restart are not in force. It must read apart from
+      // "nothing is held", which is what an empty list would otherwise say.
+      {
+        const emptyPause = {ok: true, paused: false, holds: [], clients: [], providers: [],
+          known_clients: [], known_providers: [], until: null, queued: 0,
+          storm_waiters: 0, default_max_queued: 0};
+        sw.applyPauseState({...emptyPause, restore_degraded: true});
+        const footer = sd.getElementById('f-state');
+        check('a degraded hold restore is named in the footer, not read as "nothing is held"',
+          footer.textContent.includes('state degraded') &&
+          footer.title.includes('could not be read at startup') &&
+          !footer.textContent.includes('paused'));
+        sw.applyPauseState({...emptyPause, restore_degraded: false});
+        check('a healthy restore clears the degraded footnote',
+          !sd.getElementById('f-state').textContent.includes('state degraded'));
+        // The cap document reports the same fact through the same footnote.
+        sw.applyThrottleState({ok: true, active: false, throttles: [], known_providers: [],
+          known_clients: [], known_models: [], restore_degraded: true});
+        check('a degraded cap restore reaches the same footnote',
+          sd.getElementById('f-state').textContent.includes('state degraded'));
+        sw.applyThrottleState({ok: true, active: false, throttles: [], known_providers: [],
+          known_clients: [], known_models: [], restore_degraded: false});
+        check('the footnote clears once both documents restore cleanly',
+          !sd.getElementById('f-state').textContent.includes('state degraded'));
+      }
       const banner = sd.getElementById('storm-banner');
       check('embedded bootstrap exposes compact actionable provider storm summaries',
         banner && !banner.hidden && banner.getAttribute('role') === 'status' && banner.getAttribute('aria-live') === 'polite' &&
         banner.textContent.includes('neutral.example · all models') && banner.textContent.includes('http_503') &&
         banner.textContent.includes('75% failed attempts') && banner.textContent.includes('9 requests affected') &&
-        banner.textContent.includes('4 queued') && banner.querySelector('button[aria-haspopup="dialog"]'));
+        banner.textContent.includes('4 queued') && banner.querySelector('button[aria-haspopup="dialog"]') &&
+        // Both state words come from one table now. Only the half-open branch
+        // was ever asserted, so the open branch - the one that says requests
+        // are still being held - went untested.
+        banner.textContent.includes('Holding requests') &&
+        sw.eval('stormStateWord("open")') === 'Holding requests' &&
+        sw.eval('stormStateWord("half_open")') === 'Checking recovery' &&
+        sw.eval('stormStateWord("unknown_state")') === 'unknown_state');
       const incidentButton = banner.querySelector('button');
       incidentButton.focus();
       incidentButton.click();
@@ -226,16 +357,19 @@ module.exports = async function delegatedActions(H) {
             incidentDialog.textContent.includes('quota endpoint unavailable')));
         closeIncident.click();
         adminReply = null;
-        sw.togglePauseMenu({stopPropagation(){}});
         sw.applyBootstrapState({...state,
           pause: {ok:true, paused:true, clients: [], providers: ['neutral.example'],
             holds: [{id:'q1', all:false, new:false, clients: [], providers: ['neutral.example'], known_at_new: [],
               duration:'', until:null, max_queued:0, reason:'insufficient_quota', queued:0}],
             known_clients: [], known_providers: ['neutral.example'], until: null, queued: 0, default_max_queued: 0}});
+        sw.openOperatorConsole('pause');
+        const quotaRule = sd.querySelector('#oc-pane [data-oc-rule="q1"]');
         check('manual-mode quota holds show the system reason beside their scope',
-          sd.getElementById('pf-holds').textContent.includes('neutral.example · insufficient_quota'));
-        sw.togglePauseMenu({stopPropagation(){}});
-        sw.applyBootstrapState(state);
+          !!quotaRule && quotaRule.textContent.includes('neutral.example') &&
+          quotaRule.textContent.includes('insufficient_quota'));
+        sw.closeOperatorConsole();
+        sw.applyPauseState({ok:true, paused:false, holds:[], clients:[], providers:[],
+          known_clients: [], known_providers: [], until: null, queued: 0, default_max_queued: 0});
         // The quota surface consumed the shared admin POST tally; hand the
         // later busy-gate assertions the same zero baseline they assume.
         adminCalls = 0;
@@ -274,111 +408,167 @@ module.exports = async function delegatedActions(H) {
 
       const debug = observerFixture({ok:true, enabled:true, sessions:[{id:'dbg-safe',clients:['c'],duration:'15m'}],known_clients:['c'],known_models:[],model_canon:baseCanon});
       sw.applyDebugState(debug);
-      sw.toggleDebugMenu({stopPropagation(){}});
-      sw.editDebugSession('dbg-safe');
-      check('editing Debug retains an allowed preset duration', sd.getElementById('df-dur').value === '15m');
+      sw.openOperatorConsole('capture');
+      const captureRow = () => sd.querySelector('#oc-pane [data-oc-rule="dbg-safe"]');
+      const captureApply = () => sd.querySelector('#oc-pane [data-oc-apply="capture"]');
+      captureRow().querySelector('.oc-rule-main').click();
+      check('editing a capture keeps its row id and an allowed preset duration',
+        sw.eval('ocDrafts.capture.id') === 'dbg-safe' &&
+        sd.querySelector('#oc-pane [data-oc-choice="capture-duration"][data-oc-value="15m"]').getAttribute('aria-pressed') === 'true');
       let release;
       adminReply = new Promise(resolve => {release = resolve;});
-      const mutation = sw.stopDebugSession('dbg-safe');
-      sw.stopDebugSession('dbg-safe');
+      sw.ocStopSession('dbg-safe');
+      sw.ocStopSession('dbg-safe');
       sw.applyDebugState({...debug, enabled:false,sessions:[]});
-      check('Debug busy gate disables related actions and ignores duplicate submissions/stale polls',
-        adminCalls === 1 && sd.getElementById('btn-debug-stop').disabled && sw.eval('debugState.sessions.length') === 1);
+      check('capture busy gate disables the composer action and ignores duplicate submissions/stale polls',
+        adminCalls === 1 && captureApply().disabled && sw.eval('debugState.sessions.length') === 1);
       release({ok:false,json:async()=>({error:'disk unavailable'})});
-      await mutation;
-      check('failed Debug stop preserves its confirmed session, draft, and visible error',
-        sw.eval('debugState.sessions.length') === 1 && sw.eval('debugEditID') === 'dbg-safe' && sd.getElementById('debug-count').textContent.includes('disk unavailable'));
+      check('failed capture stop preserves its confirmed session, edit draft, and names the error',
+        await settleUntil(() => sw.eval('debugState.sessions.length') === 1 &&
+          sw.eval('ocDrafts.capture.id') === 'dbg-safe' &&
+          sd.querySelector('#oc-pane .oc-banner[role="alert"]')?.textContent.includes('disk unavailable')));
       const oldRevisions = sw.captureOperatorRevisions();
       adminReply = Promise.resolve({ok:true,json:async()=>({...debug, enabled:false,sessions:[],warning:'not persisted'})});
-      await sw.stopDebugMenu();
+      sw.ocStopSession('dbg-safe');
       sw.applyDebugState(debug, oldRevisions.debug);
-      check('successful Debug warnings remain visible and late pre-mutation state cannot restore the session',
-        sw.eval('debugState.sessions.length') === 0 && !sd.getElementById('debug-menu').hidden && sd.getElementById('debug-count').textContent.includes('not persisted'));
+      check('successful capture warnings stay visible and late pre-mutation state cannot restore the session',
+        await settleUntil(() => sw.eval('debugState.sessions.length') === 0 &&
+          sd.querySelector('#oc-pane .oc-banner')?.textContent.includes('not persisted')) &&
+        !sd.getElementById('operator-console').hidden);
 
       const hostile = 'x'.repeat(227) + "');window.__operatorXSS=1;//";
-      sw.applyThrottleState({ok:true,active:true,known_providers:[hostile],throttles:[{provider:hostile,requests:2,request_window:'2m',anti_burst:true,ramp_duration:'10s'}]});
-      sw.toggleLimitsMenu({stopPropagation(){}});
-      sd.querySelector('#lim-holds [data-operator]').click();
-      check('provider actions are inert delegated data, including quotes and script text',
-        !sw.__operatorXSS && sd.getElementById('lim-provider').value === hostile && !sd.querySelector('#lim-holds [onclick]'));
-      check('Limits custom duration survives edit and refresh', sd.getElementById('lim-reqw').value === '2m');
-      check('a 255-byte provider keeps its stored anti-burst controls exact and inert',
-        hostile.length === 255 && sd.getElementById('lim-antiburst').checked &&
-        sd.getElementById('lim-ramp').value === '10s' &&
-        sd.getElementById('lim-count').textContent === 'anti-burst 10s' &&
+      sw.applyThrottleState({ok:true,active:true,known_providers:[hostile],throttles:[{
+        id:'hostile-limit',scope:{providers:[hostile]},concurrency:0,requests:2,request_window:'2m',
+        tokens:0,token_window:'',anti_burst:true,ramp_duration:'10s',source:'console',updated_by:'',
+        in_flight:0,queued:0,requests_remaining:0,requests_capacity:2,tokens_remaining:0,tokens_capacity:0,
+      }]});
+      sw.openOperatorConsole('limits');
+      const hostileRow = sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]');
+      check('a 255-byte provider is inert delegated data in the rule row, quotes and script text included',
+        !!hostileRow && hostile.length === 255 &&
+        hostileRow.textContent.includes(hostile) &&
+        !sd.querySelector('#oc-pane [onclick]') && !sw.__operatorXSS);
+      check('the hostile rule row keeps its stored window and budget wording',
+        hostileRow.querySelector('.oc-rule-budget').textContent.includes('2 requests / 2m'));
+      hostileRow.querySelector('.oc-rule-main').click();
+      check('editing the hostile rule keeps its stored budgets, ramp and custom window',
+        sd.querySelector('#oc-pane [data-oc-field="requests"]')?.value === '2' &&
+        sw.eval('ocDrafts.limit.requestWindow') === '2m' &&
+        // The preview and the row read one budget owner, so the same draft
+        // prints the same sentence above and below it. The edit repainted the
+        // pane, so the row is looked up again rather than reusing the node.
+        sd.getElementById('oc-lim-preview')?.textContent.includes('2 requests / 2m') &&
+        sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]')
+          ?.querySelector('.oc-rule-budget')?.textContent.includes('2 requests / 2m') &&
+        sd.querySelector('#oc-pane [data-oc-field="antiBurst"]')?.checked &&
+        sd.querySelector('#oc-pane [data-oc-choice="ramp"]')?.value === '10s' &&
         !sw.__operatorXSS);
+      const reqInput = () => sd.querySelector('#oc-pane [data-oc-field="requests"]');
       for (const [value,want] of [['1e3',1000],['1.5',NaN],['-1',NaN],['',0]]) {
-        sd.getElementById('lim-conc').value=value;
-        check('Limits whole-number parsing: '+JSON.stringify(value), Object.is(sw.limitNum('lim-conc'),want));
+        reqInput().value = value;
+        reqInput().dispatchEvent(new sw.Event('input', {bubbles: true}));
+        check('limit whole-number parsing: ' + JSON.stringify(value),
+          Object.is(sw.eval('ocDrafts.limit.requests'), value) && Object.is(sw.ocNumber(value), want));
       }
-      sd.getElementById('lim-conc').value='-1';
-      const beforeInvalid=adminCalls;
-      sw.applyLimitsMenu();
-      check('invalid Limits input is rejected before any request', adminCalls===beforeInvalid && sd.getElementById('lim-count').textContent.includes('whole numbers'));
-      adminReply=Promise.resolve({ok:false,json:async()=>({error:'limit write failed'})});
-      await sw.clearLimitsMenu();
-      check('failed Limits clear preserves the confirmed limit and shows an error', sw.eval('throttleState.throttles.length')===1 && sd.getElementById('lim-count').textContent.includes('limit write failed'));
-      // GAP-B pin: operatorCountClear's limits repaint is load-bearing, not
-      // behavior-neutral: updateLimitCount early-returns while the count line
-      // carries the error flag, so the err clear in the shared reset is what
-      // lets a later provider edit repaint the live facts. Pin the whole
-      // sequence: failed write (err flagged) -> provider edit -> repaint.
-      check('the failed Limits write flags the count line as an error', sd.getElementById('lim-count').dataset.err === '1');
+      reqInput().value = '-1';
+      reqInput().dispatchEvent(new sw.Event('input', {bubbles: true}));
+      const beforeInvalid = adminCalls;
+      const invalidApply = sd.querySelector('#oc-pane [data-oc-apply="limit"]');
+      check('a negative limit count disables Apply before any request',
+        invalidApply.disabled && sw.eval('ocDrafts.limit.requests') === '-1');
+      sw.eval('ocApplyLimit()');
+      check('a negative limit count is rejected before any request',
+        adminCalls === beforeInvalid &&
+        sd.querySelector('#oc-pane .oc-error')?.textContent.includes('whole numbers'));
+      adminReply = Promise.resolve({ok:false,json:async()=>({error:'limit write failed'})});
+      {
+        const savedConfirm = sw.ocConfirm;
+        sw.ocConfirm = () => Promise.resolve(true);
+        try { await sw.ocRemoveLimit('hostile-limit'); } finally { sw.ocConfirm = savedConfirm; }
+      }
+      check('a failed limit remove keeps the confirmed rule and names the error in the banner',
+        await settleUntil(() => !!sd.querySelector('#oc-pane .oc-banner[role="alert"]') &&
+          sd.querySelector('#oc-pane .oc-banner').textContent.includes('limit write failed')) &&
+        sw.eval('throttleState.throttles.length') === 1 &&
+        !!sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]'));
+      // GAP-B pin: the console's banner is the one rejection surface, and a
+      // later accepted poll must clear it while the confirmed rule stays.
+      check('the failed limit write paints the one console banner as an alert',
+        sd.querySelector('#oc-pane .oc-banner').getAttribute('data-tone') === 'err');
       sw.applyThrottleState({ok:true,active:true,known_providers:[hostile],
-        throttles:[{provider:hostile,source:'ui',in_flight:1,queued:2,requests:10,requests_capacity:20,requests_remaining:5}]});
-      const errLine = sd.getElementById('lim-count').textContent;
-      sw.onLimitProviderChange();
-      check('a provider edit repaints the limits count line after a failed write',
-        !sd.getElementById('lim-count').dataset.err &&
-          sd.getElementById('lim-count').textContent === 'set in UI · in-flight 1 · queued 2 · 5/20 req' &&
-          errLine.includes('limit write failed'));
+        throttles:[{id:'hostile-limit',scope:{providers:[hostile]},source:'console',in_flight:1,queued:2,
+          concurrency:0,requests:10,request_window:'1m',tokens:0,token_window:'',anti_burst:false,ramp_duration:'',
+          requests_capacity:20,requests_remaining:5,tokens_remaining:0,tokens_capacity:0}]});
+      check('an accepted throttle poll repaints the live rule facts',
+        await settleUntil(() => sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]')
+          ?.querySelector('.oc-rule-live')?.textContent.includes('5 of 20 requests left')));
+      sw.eval("ocOperatorErrorClear()");
+      // Only the rejection is dismissed: an open edit of a rule the poll just
+      // moved keeps its own (informational) stale banner.
+      check('dismissing the rejection banner leaves the confirmed rule in place',
+        !sd.querySelector('#oc-pane .oc-banner[data-tone="err"]') &&
+        !!sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]'));
 
-      // The anti-burst pair rides the same full-form Apply: a stored ramp
+      // The anti-burst pair rides the same composer Apply: a stored ramp
       // survives with its flag off, an active cap sends both fields, and an
-      // empty cap form clears them so no on-ramp follows a zero limit.
+      // empty form is refused so no rule is written without a budget.
       {
         const policyState = policy => ({ok:true,active:true,known_providers:['provider-a'],
-          throttles:[{provider:'provider-a',source:'ui',concurrency:2,requests:3,request_window:'2m',
-            tokens:0,token_window:'',...policy}]});
-        const anti = sd.getElementById('lim-antiburst');
-        const ramp = sd.getElementById('lim-ramp');
+          throttles:[{id:'burst-limit',scope:{providers:['provider-a']},source:'console',updated_by:'',
+            concurrency:2,requests:3,request_window:'1m',tokens:0,token_window:'',
+            in_flight:0,queued:0,requests_remaining:0,requests_capacity:3,
+            tokens_remaining:0,tokens_capacity:0,...policy}]});
+        const field = key => sd.querySelector(`#oc-pane [data-oc-field="${key}"]`);
+        const choice = name => sd.querySelector(`#oc-pane [data-oc-choice="${name}"]`);
+        const pickChoice = (name, value) => {
+          const el = choice(name);
+          el.value = value;
+          el.dispatchEvent(new sw.Event('change', {bubbles: true}));
+        };
+        const applyButton = () => sd.querySelector('#oc-pane [data-oc-apply="limit"]');
         sw.applyThrottleState(policyState({anti_burst:false,ramp_duration:'10s'}));
-        sw.syncLimitsMenuState();
-        sw.onLimitProviderChange();
-        check('editing a provider keeps a stored ramp selected while its flag is off',
-          !anti.checked && ramp.value === '10s' &&
-          sd.getElementById('lim-conc').value === '2' &&
-          sd.getElementById('lim-req').value === '3' &&
-          sd.getElementById('lim-reqw').value === '2m');
-        anti.checked = true;
-        ramp.value = '30s';
+        sw.ocOpenLimitComposer('burst-limit');
+        check('editing a rule keeps a stored ramp selected while its flag is off',
+          !field('antiBurst').checked && choice('ramp').value === '10s' &&
+          field('concurrency').value === '2' && field('requests').value === '3' &&
+          choice('request-window').value === '1m');
+        field('antiBurst').checked = true;
+        field('antiBurst').dispatchEvent(new sw.Event('change', {bubbles: true}));
+        pickChoice('ramp', '30s');
+        check('the anti-burst ramp picker derives its tokens from the window vocabulary',
+          JSON.stringify([...choice('ramp').options].map(option => option.value)) ===
+            JSON.stringify([''].concat(sw.eval('LIMIT_WINDOWS').map(([v]) => v))) &&
+          choice('ramp').value === '30s');
         let releaseApply;
         adminReply = new Promise(resolve => { releaseApply = resolve; });
         const applyIndex = adminBodies.length;
-        const applying = sw.applyLimitsMenu();
-        check('the Limits busy gate disables both anti-burst controls and Apply',
-          adminBodies.length === applyIndex + 1 && anti.disabled && ramp.disabled &&
-          sd.getElementById('btn-limits-apply').disabled);
+        applyButton().click();
+        check('the limits busy gate disables the composer Apply while the write is pending',
+          adminBodies.length === applyIndex + 1 && applyButton().disabled &&
+          sw.eval('operatorState.throttle.busy'));
         releaseApply({ok:true,json:async()=>policyState({anti_burst:true,ramp_duration:'30s'})});
-        await applying;
-        check('Limits Apply sends the exact active-cap body with its anti-burst policy',
-          JSON.stringify(JSON.parse(adminBodies[applyIndex])) === JSON.stringify({
-            provider:'provider-a', concurrency:2, requests:3, request_window:'2m',
-            tokens:0, token_window:'', anti_burst:true, ramp_duration:'30s',
-          }));
-        check('the confirmed anti-burst policy repaints both controls and the count line',
-          anti.checked && ramp.value === '30s' &&
-          sd.getElementById('lim-count').textContent === 'set in UI · anti-burst 30s');
+        check('the confirmed anti-burst policy lands and leaves the composer',
+          await settleUntil(() => !sw.eval('operatorState.throttle.busy') &&
+            !sd.querySelector('#oc-pane .oc-compose[data-kind="limit"]') &&
+            sd.querySelector('#oc-pane [data-oc-rule="burst-limit"]')));
+        check('apply sends the exact active-cap body with its anti-burst policy',
+          JSON.stringify(Object.entries(JSON.parse(adminBodies[applyIndex])).sort()) === JSON.stringify(Object.entries({
+            id:'burst-limit',providers:['provider-a'],models:[],clients:[],key_hashes:[],conversations:[],
+            days:[],start_minute:0,end_minute:0,concurrency:2,requests:3,request_window:'1m',
+            tokens:0,token_window:'',anti_burst:true,ramp_duration:'30s',
+          }).sort()));
         sw.applyThrottleState(policyState({anti_burst:true,ramp_duration:'30s'}));
-        sw.onLimitProviderChange();
-        for (const id of ['lim-conc','lim-req','lim-tok']) sd.getElementById(id).value = '0';
-        anti.checked = true;
-        ramp.value = '30s';
+        sw.ocOpenLimitComposer('burst-limit');
+        check('an applied anti-burst rule reopens with both controls live',
+          field('antiBurst').checked && !field('antiBurst').disabled &&
+          !sd.querySelector('#oc-pane .oc-advanced .oc-note'));
+        sw.eval("ocDrafts.limit.concurrency = ''; ocDrafts.limit.requests = ''; ocDrafts.limit.tokens = ''");
         const emptyIndex = adminBodies.length;
-        await sw.applyLimitsMenu();
-        check('an empty cap form is refused; Clear is the only removal path',
-          adminBodies.length === emptyIndex &&
-          sd.getElementById('lim-count').textContent.includes('use Clear'));
+        const emptyAfter = adminCalls;
+        sw.eval('ocApplyLimit()');
+        check('an empty composer is refused before any request',
+          adminBodies.length === emptyIndex && adminCalls === emptyAfter &&
+          sd.querySelector('#oc-pane .oc-error').textContent.includes('at least one budget'));
       }
 
       const draft=sd.createElement('div');
@@ -392,7 +582,7 @@ module.exports = async function delegatedActions(H) {
       check('draft preview never executes backtracking pattern rules', sw.mrDraftSteps(draft).length===1);
       check('basic Settings controls have accessible names', ['int','strings','duration'].every(kind => sw.settingsFieldHTML({kind,key:'sample',label:'Sample setting'},1).includes('aria-label="Sample setting"')));
 
-      sw.hideHdrMenu('limits-menu');
+      sw.closeOperatorConsole();
       for (const button of sd.querySelectorAll('.menu-wrap > button[aria-controls]')) {
         const menu = sd.getElementById(button.getAttribute('aria-controls'));
         sw.closeHeaderMenus();
@@ -528,7 +718,12 @@ module.exports = async function delegatedActions(H) {
       provider.remove();
 
       const savedFetch=sw.fetch;
+      const savedRestartConfirm=sw.ocConfirm;
       let watchedSignal, readerCanceled=0;
+      sw.ocConfirm = () => Promise.resolve(true);
+      // The restart status line lives in the console's system section now, so
+      // open it before driving the restart to read that surface.
+      sw.openOperatorConsole('system');
       sw.fetch=(url, options)=>{
         if(String(url).includes('watch=1')) {
           watchedSignal=options.signal;
@@ -541,11 +736,15 @@ module.exports = async function delegatedActions(H) {
           json:async()=>options?.method==='POST'?{error:'restart rejected'}:{available:true,phase:'idle',started_at:1}});
         return savedFetch(url,options);
       };
-      await sw.restartProxy();
-      check('a rejected restart cancels its already-open watcher and releases the reader',
-        await settleUntil(() => watchedSignal?.aborted && readerCanceled===1 &&
-          sd.getElementById('restart-count').textContent.includes('restart rejected')));
-      sw.fetch=savedFetch;
+      try {
+        await sw.restartProxy();
+        check('a rejected restart cancels its already-open watcher and releases the reader',
+          await settleUntil(() => watchedSignal?.aborted && readerCanceled===1 &&
+            sd.getElementById('restart-count')?.textContent.includes('restart rejected')));
+      } finally {
+        sw.fetch=savedFetch;
+        sw.ocConfirm=savedRestartConfirm;
+      }
 
       const OriginalDate=sw.Date, oldTZ=process.env.TZ;
       process.env.TZ='America/Toronto';
@@ -556,7 +755,7 @@ module.exports = async function delegatedActions(H) {
         ]) {
           sw.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[now]));}};
           check('Yesterday uses calendar subtraction across DST '+now,
-            sw.dayDividerLabel({start:yesterday})==='YESTERDAY' && sw.dayDividerLabel({start:older})!=='YESTERDAY');
+            sw.dayDividerLabel({start:yesterday})==='yesterday' && sw.dayDividerLabel({start:older})!=='yesterday');
         }
       } finally {sw.Date=OriginalDate;if(oldTZ===undefined)delete process.env.TZ;else process.env.TZ=oldTZ;}
     } finally {sw.close();}

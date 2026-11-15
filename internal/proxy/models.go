@@ -117,10 +117,19 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 	}
 }
 
-// modelsUpstreamURL builds the upstream /v1/models URL from the base URL. The
-// base may already end in /v1 (clients point at ".../v1"); avoid doubling it.
-func modelsUpstreamURL(t *target) string {
-	return joinUpstreamURL(t.baseURL, "/v1/models")
+// modelsUpstreamURL builds one discovery URL through the same target owner as
+// a relayed request: X-Proxy-Path replaces the format's default discovery
+// endpoint and X-Proxy-Query rides as the query, while an absent override keeps
+// the base-relative default. The translator's own inference path is ignored:
+// both inference endpoints are POST-only upstream, so a discovery GET would
+// fail there. The client's own query is empty on a discovery call, so only the
+// header override can set one.
+func modelsUpstreamURL(t *target, defaultPath string) (*url.URL, error) {
+	path := ""
+	if t.pathSet {
+		path = t.path
+	}
+	return upstreamURL(t.baseURL, upstreamPath(path, defaultPath), t.query, "")
 }
 
 // serveOpenAIModels fetches an OpenAI-compatible upstream's /v1/models and
@@ -130,7 +139,12 @@ func modelsUpstreamURL(t *target) string {
 // recognizable list degrades to verbatim passthrough - never a fabricated
 // empty list, never a 502 over a merely unfamiliar shape.
 func (s *Server) serveOpenAIModels(d *modelsDiscovery, w http.ResponseWriter, r *http.Request, t *target, key string) {
-	body, err := s.fetchModelsUpstream(d, t, key, modelsUpstreamURL(t))
+	u, err := modelsUpstreamURL(t, "/v1/models")
+	if err != nil {
+		writeModelsError(w, err)
+		return
+	}
+	body, err := s.fetchModelsUpstream(d, t, key, u)
 	if err != nil {
 		writeModelsError(w, err)
 		return
@@ -190,11 +204,15 @@ func writeModelsError(w http.ResponseWriter, err error) {
 // (the caller surfaces them); metadata bodies share the bounded discovery
 // reader, never the LLM stream path. Provider-configured headers ride along so
 // discovery presents the same wire fingerprint as LLM calls.
-func (s *Server) fetchModelsUpstream(d *modelsDiscovery, t *target, key, u string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(d.ctx, http.MethodGet, u, nil)
+func (s *Server) fetchModelsUpstream(d *modelsDiscovery, t *target, key string, u *url.URL) ([]byte, error) {
+	req, err := http.NewRequestWithContext(d.ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+	// NewRequest re-parses the URL string, where a literal "#" in the query
+	// becomes a fragment and truncates it. Keep the structurally built URL the
+	// transport will serialize instead.
+	req.URL = u
 	setResolvedAuth(req.Header, t, key)
 	return s.fetchModelsResponse(d, req, t, key)
 }
@@ -225,7 +243,7 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 		s.setCursorIdentity(req, t, key)
 		req.Header.Set("Content-Type", "application/proto")
 	} else {
-		s.applyProviderHeaders(req.Header, t.provider)
+		s.applyProviderHeaders(req, t.provider)
 		stripTransportModeHeaders(req.Header)
 	}
 	resp, err := s.httpClient().Do(req)
@@ -513,7 +531,11 @@ func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, e
 	if !ok || ov.ModelsPath == "" || len(ov.ModelsKeys) == 0 || len(entries) == 0 {
 		return
 	}
-	body, err := s.fetchModelsUpstream(d, t, key, joinUpstreamURL(t.baseURL, ov.ModelsPath))
+	u, err := upstreamURL(t.baseURL, ov.ModelsPath, "", "")
+	if err != nil {
+		return
+	}
+	body, err := s.fetchModelsUpstream(d, t, key, u)
 	if err != nil {
 		return
 	}
@@ -563,15 +585,23 @@ func (s *Server) serveAnthropicModels(d *modelsDiscovery, w http.ResponseWriter,
 	seenCursors := make(map[string]struct{})
 	after := ""
 	for {
-		u := modelsUpstreamURL(t) + "?limit=" + pageLimit
-		if after != "" {
-			u += "&after_id=" + url.QueryEscape(after)
-		}
-		req, err := http.NewRequestWithContext(d.ctx, http.MethodGet, u, nil)
+		u, err := modelsUpstreamURL(t, "/v1/models")
 		if err != nil {
 			writeModelsError(w, err)
 			return
 		}
+		q := u.Query()
+		q.Set("limit", pageLimit)
+		if after != "" {
+			q.Set("after_id", after)
+		}
+		u.RawQuery = q.Encode()
+		req, err := http.NewRequestWithContext(d.ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			writeModelsError(w, err)
+			return
+		}
+		req.URL = u
 		// Discovery uses the resolved target auth header and prefix, the same
 		// construction as the relay. t.authHeader always carries a value
 		// (Authorization unless the client names one), so Anthropic discovery

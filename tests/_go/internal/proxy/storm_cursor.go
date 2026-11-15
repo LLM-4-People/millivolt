@@ -275,3 +275,110 @@ func TestStormCursorQualityFailureSettlesBeforeReask(t *testing.T) {
 		t.Fatal("quality re-ask success did not settle recovery")
 	}
 }
+
+// TestCursorRetryHonorsMaxRetries pins the native cursor ladder to the shared
+// retry verdict: it used to retry only while the storm gate allowed it, so a
+// plain transient budget was ignored. With storm protection off, max_retries
+// alone must bound the loop and the exhausted error must surface.
+func TestCursorRetryHonorsMaxRetries(t *testing.T) {
+	cfg := stormTestConfig()
+	cfg.StormEnabled = false
+	cfg.MaxRetries = 2
+	s := New(cfg, metrics.NewBuffer(10))
+	rec := &metrics.Record{Model: "neutral-model", Provider: "neutral.invalid"}
+	ctx := context.WithValue(context.Background(), stormContextKey{}, &stormRequestState{rec: rec})
+	var calls atomic.Int32
+	s.cursorClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		readFrame(t, r.Body)
+		return stormCursorReply(503, `{"error":{"type":"unavailable"}}`), nil
+	})}
+	target := &target{baseURL: "http://neutral.invalid", timeout: time.Second}
+	resp, pw, cancel, err := s.openCursorHTTP(ctx, target, "", []byte("native-frame"), "native-budget", scheduler.WaiterHooks{Provider: rec.Provider}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exhaustion surfaces the last upstream response as-is, never a synthetic
+	// error: the fail-fast contract of the shared ladder.
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("surfaced status = %d, want the final 503", resp.StatusCode)
+	}
+	cancel()
+	pw.Close()
+	resp.Body.Close()
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("upstream calls = %d, want 1 attempt + 2 retries", got)
+	}
+	if rec.Retries != 2 || len(rec.Attempts) != 2 {
+		t.Fatalf("record = %+v attempts = %+v, want two absorbed attempts", rec, rec.Attempts)
+	}
+}
+
+// TestCursorRetriedSuccessKeepsOneProbe pins the second half of that verdict:
+// a retried success must leave the provider+key group at one probe, exactly
+// like the generic ladder, instead of always restoring full concurrency. Two
+// concurrent siblings are the discriminator - with serial retention the second
+// parks until the first releases.
+func TestCursorRetriedSuccessKeepsOneProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		retried  bool
+		wantPark bool
+	}{
+		{"clean first-attempt success restores concurrency", false, false},
+		{"a retried success keeps one probe", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := stormTestConfig()
+			cfg.BaseBackoff = time.Millisecond
+			cfg.MaxBackoff = time.Millisecond
+			s := New(cfg, metrics.NewBuffer(10))
+			const group = "native-group"
+			if !s.scheduler.Trip(group, 0) {
+				t.Fatal("could not claim the send token")
+			}
+			s.cursorEndSend(group, true, false, tc.retried)
+
+			first, err := s.scheduler.WaitSend(context.Background(), group, scheduler.WaiterHooks{}, false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// With concurrency restored the group is untripped, so a first
+			// attempt needs no probe token; with serial retention the probe is
+			// exactly what the first sibling must own.
+			if tc.wantPark && !first {
+				t.Fatal("the probe was not owned by the first sibling")
+			}
+			parked := make(chan bool, 1)
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if _, werr := s.scheduler.WaitSend(ctx, group, scheduler.WaiterHooks{}, false, false); werr != nil {
+					parked <- false
+					return
+				}
+				parked <- true
+			}()
+			select {
+			case <-parked:
+				if tc.wantPark {
+					t.Fatal("the second sibling was admitted without waiting")
+				}
+			case <-time.After(120 * time.Millisecond):
+				if !tc.wantPark {
+					t.Fatal("the second sibling parked although concurrency was restored")
+				}
+			}
+			// Release the probe; with serial retention the parked sibling now
+			// takes it.
+			s.scheduler.EndSend(group, true)
+			if tc.wantPark {
+				select {
+				case <-parked:
+				case <-time.After(2 * time.Second):
+					t.Fatal("the parked sibling never took the released probe")
+				}
+			}
+		})
+	}
+}

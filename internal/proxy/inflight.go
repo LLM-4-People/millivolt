@@ -67,35 +67,45 @@ func (l *inflightLimiter) release(bodyBytes int64) {
 var errBodyBudget = errors.New("proxy is at its in-flight body budget")
 
 // bodyReservation is one in-flight request's share of the buffered-body
-// budget. It reserves no body capacity up front and charges the delta as bytes
-// actually arrive, so the budget follows the heap actually held rather than a
-// declared length.
+// budget. It charges the admitted allocation hint up front, then reconciles
+// against the bytes actually read, so an idle socket holds the buffer it has
+// really allocated and nothing more.
 //
-// Reserving the full declared Content-Length up front let an idle connection
+// Charging the full declared Content-Length up front let an idle connection
 // hold budget it never used: eight clients declaring 32 MiB each exhausted the
 // default 256 MiB budget and denied inference to every other client, while the
 // separate request-count bound implies tolerance for thousands of clients.
-// Reserving even one read hint per socket kept a smaller version of the same
-// lever (256 sockets at the default budget, and one socket when
-// max_request_bytes was configured small), so the reservation starts at zero.
+// Charging nothing at all had the opposite hole: the body owner allocates the
+// whole admitted hint on receipt (request_body.go), so thousands of idle
+// declarations held uncharged heap. The hint is the allocation that really
+// happens (bounded by the request cap and the read hint), and chargeRead
+// refunds the part of it the body turns out not to need.
 type bodyReservation struct {
 	l       *inflightLimiter
 	charged int64
 	read    int64
 }
 
-// acquireBody reserves one request slot and no body bytes. A refusal backs the
-// slot out, so a rejected request leaks nothing.
-func (l *inflightLimiter) acquireBody() (*bodyReservation, bool) {
-	if !l.acquire(0) {
+// acquireBody reserves one request slot and charges the admitted body hint, the
+// bytes the caller is about to allocate. A refusal backs both out, so a
+// rejected request leaks nothing and never allocates.
+func (l *inflightLimiter) acquireBody(bodyHint int64) (*bodyReservation, bool) {
+	if bodyHint < 0 {
+		bodyHint = 0
+	}
+	if !l.acquire(bodyHint) {
 		return nil, false
 	}
-	return &bodyReservation{l: l}, true
+	return &bodyReservation{l: l, charged: bodyHint}, true
 }
 
-// chargeRead charges the budget for n bytes just read. A refusal leaves the
-// counter unchanged; the charged reader aborts retention on that chunk and
-// the handler releases the whole reservation on return.
+// chargeRead reconciles the budget with n bytes just read. The delta is
+// normally negative: the admitted hint over-covers the bytes a short body
+// actually sends, so those reserved bytes are refunded as soon as the body
+// proves short. A declared length that lied the other way (a body longer than
+// its Content-Length) is charged the overshoot instead. A refusal leaves the
+// counter unchanged; the charged reader aborts retention on that chunk and the
+// handler releases the whole reservation on return.
 func (r *bodyReservation) chargeRead(n int64) bool {
 	if n <= 0 {
 		return true
@@ -114,8 +124,9 @@ func (r *bodyReservation) chargeRead(n int64) bool {
 
 func (r *bodyReservation) release() { r.l.release(r.charged) }
 
-// chargedReader charges every byte it delivers to the body reservation, so a
-// declared length never reserves capacity the client does not send.
+// chargedReader reconciles the body reservation against every byte it
+// delivers, so a declared length never keeps capacity the client does not send
+// and an understated one is charged as it grows.
 //
 // A refused chunk is counted but not delivered: the reader returns the refusal
 // error immediately, so readRequestBody releases its scratch instead of

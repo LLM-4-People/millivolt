@@ -39,13 +39,71 @@ module.exports = async function mcpCategory(H) {
     check('every mcp row is restart-required and the category banner says so',
       mcpRows.every(r => r.dataset.hot === '0') &&
       d.querySelector('#settings-pane-hd .st-banner').textContent === 'takes a process restart');
-    check('the mcp rail badge resolves through SETTINGS_CAT_REF to the tool entity',
-      d.querySelector('[data-st-cat="mcp"] .ent-ic').textContent === w.eval('ENTITY_TYPES.tool.icon') &&
-      d.querySelector('[data-st-cat="mcp"] .rail-n').textContent === '7');
+    {
+      // The rail badge is the registry's authored tool glyph, path for path
+      // (the serializer closes empty paths, so the geometry is compared).
+      const paths = html => {
+        const host = d.createElement('div');
+        host.innerHTML = html;
+        return [...host.querySelectorAll('path')].map(p => p.getAttribute('d')).join('|');
+      };
+      const rendered = paths(d.querySelector('[data-st-cat="mcp"] .ent-ic').innerHTML);
+      check('the mcp rail badge resolves through SETTINGS_CAT_REF to the tool entity',
+        rendered === paths(w.eval('ENTITY_TYPES.tool.icon')) && rendered.length > 0 &&
+        d.querySelector('[data-st-cat="mcp"] .rail-n').textContent === '7');
+    }
     w.__mcpDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__mcpDoc; fillSettingsForm(settingsDoc)');
     w.closeSettings(true);
     delete w.__mcpDoc;
+  }
+
+  // A zero that the schema declares is a setting, not a lapse. Four fields carry
+  // a positive minimum and a zero_means sentence because the server skips its
+  // range check for zero; the client rejected that same zero and blocked Apply.
+  {
+    w.__zeroDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval("settingsDoc = window.__zeroDoc; settingsCat = 'server'; fillSettingsForm(settingsDoc)");
+    d.getElementById('settings-sheet').hidden = false;
+    const box = d.getElementById('settings-fields');
+    const zeroInput = box.querySelector('input[data-key="go_memory_limit"]');
+    check('a bytes field whose zero is declared carries the schema sentence',
+      !!zeroInput && zeroInput.dataset.stZeroMeans === 'auto cgroup, else unbounded' &&
+      zeroInput.value === '0B' &&
+      w.settingsScalarRangeError(zeroInput) === '');
+    check('the declared zero keeps its range on both sides',
+      (() => {
+        const probe = value => {
+          const el = d.createElement('input');
+          el.dataset.stScalar = '1';
+          el.dataset.stKind = 'bytes';
+          el.dataset.stMin = zeroInput.dataset.stMin;
+          el.dataset.stMinLabel = zeroInput.dataset.stMinLabel;
+          el.dataset.stMax = zeroInput.dataset.stMax;
+          el.dataset.stMaxLabel = zeroInput.dataset.stMaxLabel;
+          el.dataset.stZeroMeans = zeroInput.dataset.stZeroMeans;
+          el.value = value;
+          return w.settingsScalarRangeError(el);
+        };
+        return probe('16MiB') === 'must be at least 32MiB' &&
+          probe('2048GiB') === 'must be at most 1024GiB' &&
+          probe('32MiB') === '' && probe('1024GiB') === '';
+      })());
+    // A field with no declared zero keeps rejecting zero.
+    check('a bytes field without a declared zero still rejects zero',
+      (() => {
+        const el = d.createElement('input');
+        el.dataset.stScalar = '1';
+        el.dataset.stKind = 'bytes';
+        el.dataset.stMin = '33554432';
+        el.dataset.stMinLabel = '32MiB';
+        el.dataset.stMax = '';
+        el.dataset.stMaxLabel = '';
+        el.value = '0B';
+        return w.settingsScalarRangeError(el) === 'must be at least 32MiB';
+      })());
+    w.closeSettings(true);
+    delete w.__zeroDoc;
   }
 
   // Settings transactions: preserve drafts across late loads/saves and reject
@@ -161,6 +219,21 @@ module.exports = async function mcpCategory(H) {
     check('incomplete existing mapping rows remain in the draft for server validation',
       Object.hasOwn(w.collectSettingsValues().providers['epsilon.example'].usage_keys, 'input_tokens') &&
       w.collectSettingsValues().provider_aliases['old.example'] === '');
+    // A rejected provider field names its reason in a described element, not
+    // in title alone, and the slot goes away with the error.
+    const headerName = d.querySelector('[data-kind="providers"] .prov-add-h .sp-hname');
+    headerName.value = 'bad name';
+    headerName.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const reasonId = headerName.getAttribute('aria-describedby');
+    const reasonEl = reasonId && d.getElementById(reasonId);
+    check('a rejected provider header name exposes its reason as a description',
+      headerName.getAttribute('aria-invalid') === 'true' && !!reasonEl &&
+      /valid HTTP header name/.test(reasonEl.textContent));
+    headerName.value = 'X-Test';
+    headerName.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('a corrected provider header name drops its reason slot',
+      !headerName.hasAttribute('aria-describedby') && !d.getElementById(reasonId) &&
+      !headerName.hasAttribute('aria-invalid'));
     w.fetch = originalFetch;
     w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
@@ -289,6 +362,31 @@ module.exports = async function mcpCategory(H) {
     check('Apply with an invalid model-rules draft blocks the save without an uncaught TypeError',
       state.failures.length === failuresBefore &&
         d.getElementById('settings-count').textContent === 'model rules - fix the highlighted rule first');
+    // One table owns every structured editor's save gate, and the save path
+    // asks the table rather than spelling the sequence per editor. Both
+    // directions are asserted: every declared editor row is exercised by the
+    // three gate checks in this suite, and every kind the save path gates on
+    // is declared here.
+    check('one table owns every structured save gate',
+      JSON.stringify(w.eval('SETTINGS_SAVE_GATES.map(g => g.kind)')) ===
+        JSON.stringify(['model_rules', 'request_overrides', 'sub_conversations']) &&
+      w.eval('SETTINGS_SAVE_GATES.every(g => typeof g.validate === "function")') &&
+      w.eval('SETTINGS_SAVE_GATES.every(g => Array.isArray(g.focus) && g.focus.length > 0)') &&
+      w.eval('new Set(SETTINGS_SAVE_GATES.map(g => g.message)).size') === 3 &&
+      // The ordered list keeps the editor's own precedence, which a comma
+      // selector does not: a comma selector returns document order. Paint the
+      // client field first and assert the header field still wins.
+      (() => {
+        const card = w.eval('(function () {\n'
+          + '  const c = document.createElement("div");\n'
+          + '  const client = document.createElement("input"); client.className = "ro-client";\n'
+          + '  const header = document.createElement("input"); header.className = "prov-bad";\n'
+          + '  c.append(client, header);\n'
+          + '  const got = settingsGateFocus(c, [".prov-bad", ".ro-client"]);\n'
+          + '  return got === header;\n'
+          + '})()');
+        return card;
+      })());
     // The hidden-offender drive (the W53 live-verified bug, the mr leg): the
     // sheet showing another category hides the rules block's .st-row, so
     // the gate's focus() and scrollIntoView() were silent no-ops on it -

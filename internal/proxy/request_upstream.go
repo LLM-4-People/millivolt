@@ -33,19 +33,10 @@ func setResolvedAuth(h http.Header, t *target, key string) {
 }
 
 func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *target, key string, body []byte) (*http.Request, error) {
-	path := t.path
-	if path == "" {
-		// EscapedPath preserves the client's percent-encoding: Path alone
-		// would turn %2F, %3F and %23 into path separators or query/fragment
-		// delimiters before the upstream sees them.
-		path = r.URL.EscapedPath()
-		if path == "" {
-			path = "/"
-		}
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+	// EscapedPath preserves the client's percent-encoding: Path alone would
+	// turn %2F, %3F and %23 into path separators or query/fragment delimiters
+	// before the upstream sees them.
+	path := upstreamPath(t.path, r.URL.EscapedPath())
 	u, err := upstreamURL(t.baseURL, path, t.query, r.URL.RawQuery)
 	if err != nil {
 		return nil, err
@@ -95,7 +86,7 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	// X-Proxy-Headers injection map below still wins over them, and the
 	// resolved request_overrides merge applies LAST of all - the operator's
 	// config is the point of an override, so it wins over every other source.
-	s.applyProviderHeaders(req.Header, t.provider)
+	s.applyProviderHeaders(req, t.provider)
 
 	// Extra headers the app asked us to add (or override), filtered.
 	for k, vs := range t.extraHeader {
@@ -131,13 +122,24 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 // is set, never deleted: empty values are rejected at config load
 // (config.ValidHeaderValue plus the mapping's non-empty rule), so there is no
 // delete feature - deny by default.
-func (s *Server) applyProviderHeaders(h http.Header, provider string) {
+//
+// Host is the mapping's one special case: net/http sends a request's Host
+// field, not a Header entry, so a configured Host must be written to req.Host
+// and kept out of the map (a map entry would be dead weight the transport
+// ignores). The value may carry a port and is the origin the upstream sees.
+func (s *Server) applyProviderHeaders(req *http.Request, provider string) {
 	ov, ok := s.cfg().Providers[provider]
 	if !ok || len(ov.Headers) == 0 {
 		return
 	}
 	for name, value := range ov.Headers {
-		h.Set(name, expandHeaderTemplates(value))
+		v := expandHeaderTemplates(value)
+		if http.CanonicalHeaderKey(name) == "Host" {
+			req.Host = v
+			req.Header.Del(name)
+			continue
+		}
+		req.Header.Set(name, v)
 	}
 }
 

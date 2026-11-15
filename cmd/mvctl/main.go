@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/LLM-4-People/millivolt"
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
@@ -115,8 +116,12 @@ func newOperatorClient(g Global) (*mcp.Client, error) {
 	// The per-request deadline lives on the command context: the shared client
 	// is built without a blanket http.Client.Timeout so backup and restore can
 	// stream for as long as the operator allows, and every bounded command
-	// wraps its own context.
-	return mcp.NewCommandClient(g.BaseURL, g.Token)
+	// wraps its own context. The query timeout is the documented
+	// config-derived default; a zero value would expire every fold instantly.
+	limits := mcp.LimitsFromConfig(config.Default())
+	limits.Timeout = 0
+	limits.QueryTimeout = g.Settings.QueryTimeout
+	return mcp.NewCommandClient(g.BaseURL, g.Token, limits)
 }
 
 func versionLine() string {

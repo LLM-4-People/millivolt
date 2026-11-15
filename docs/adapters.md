@@ -94,6 +94,22 @@ target cannot consume them:
   target reasoning blocks. The proxy does not deduplicate across channels: a
   native client accumulating the source observes the same two channels, and
   merging them would corrupt genuinely distinct summary and content text.
+- Responses namespace tools are flattened, not dropped. A client may group
+  function tools under `{"type":"namespace","name":"mcp__context7","tools":[...]}`;
+  the target receives each member as an ordinary function whose name is
+  `<namespace>__<tool>`, and a returned call names the group again in the
+  client's `function_call` item. The flattened spelling is truncated to the
+  target name class and suffixed with a hash when it is longer than
+  Chat's 64-character limit, and two members that flatten to the same string
+  receive a numeric suffix, so every declared tool stays addressable.
+- Provider-executed tool definitions (web_search, file_search, mcp,
+  image_generation, tool_search and similar) are optional to the client's
+  remaining tools and are dropped with a `tool.<type>` warning when the target
+  cannot execute them; `translation_loss: reject` fails the request instead.
+- A freeform `custom` tool is dropped the same way. Its input is a grammar,
+  not a JSON schema, and the client expects a `custom_tool_call` item back, so
+  declaring it as a function would hand the model a tool whose call the client
+  cannot dispatch.
 - Provider-executed blocks such as server tool use and web search results have
   no cross-protocol equivalent and are dropped with a warning.
 - A Responses `max_tool_calls` request field has no cross-protocol equivalent.

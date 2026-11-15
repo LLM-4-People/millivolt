@@ -91,7 +91,11 @@ ATTEMPT_METRIC_FIELDS = frozenset(('status_code', 'retry_after_ms', 'processing_
                                     'rate_limit_remaining', 'rate_limit_limit'))
 ATTEMPT_DROPPED_FIELDS = frozenset(('provider_request_id', 'provider_server', 'response_headers'))
 MARKER_KEY = 'docs_redaction'
-POLICY_VERSION = 1
+# The marker also lives beside the file. A boot migration rewrites meta and
+# drops it, so the sidecar is what proves provenance after the served copy has
+# booted once.
+MARKER_SIDECAR_SUFFIX = '.redaction'
+POLICY_VERSION = 2
 ALIAS_NUMBER = r'[1-9][0-9]*'
 HASH = re.compile(r'^[0-9a-f]{64}$')
 STAMP = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$')
@@ -323,12 +327,17 @@ def _record(columns, values, number, aliases=None):
 
 class _Manifest:
     def __init__(self, columns):
-        self.digest = hashlib.sha256((_encode(columns) + '\n').encode())
+        # Sorted by name, not positional: a boot migration may rebuild the
+        # table and reorder columns, and the served data is the same rows.
+        self.columns = sorted(columns)
+        self.digest = hashlib.sha256((_encode(self.columns) + '\n').encode())
         self.summary = dict.fromkeys(SUMMARY_SUMS, 0)
         self.summary.update(records=0, min_started_ms=None, max_started_ms=None, parent_declarations=0)
 
     def add(self, values, record):
-        self.digest.update((_encode(values) + '\n').encode())
+        # `record` is keyed by column name, so a caller's positional order
+        # cannot matter either.
+        self.digest.update((_encode([[name, record[name]] for name in self.columns]) + '\n').encode())
         summary = self.summary
         summary['records'] += 1
         summary['parent_declarations'] += bool(record['parent_conversation_id'])
@@ -373,15 +382,26 @@ def _derive(snapshot, destination):
                 dst.execute('CREATE TABLE requests (' + definitions + ')')
                 dst.execute('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
                 placeholders = ','.join('?' for _ in columns)
+                # Boot repairs current writers never produce are applied here, so
+                # the served copy is already in the shape the first boot would
+                # settle on and the provenance digest survives that boot.
                 with dst:
                     for number, row in enumerate(src.execute('SELECT ' + projection + ' FROM requests ORDER BY rowid'), 1):
-                        values, record = _record(columns, row, number, aliases)
+                        _, record = _record(columns, row, number, aliases)
+                        for empty in ('attempts', 'tool_names'):
+                            if record[empty] == '':
+                                record[empty] = 'null'
+                        if record['ttft_ms'] and record['final_attempt_at'] == 0:
+                            record['ttft_ms'] = 0
+                        values = [record[name] for name in columns]
                         dst.execute('INSERT INTO requests VALUES (' + placeholders + ')', values)
                         manifest.add(values, record)
                     dst.execute('INSERT INTO meta VALUES (?, ?)', (MARKER_KEY, _encode(manifest.marker())))
+            Path(str(destination) + MARKER_SIDECAR_SUFFIX).write_text(_encode(manifest.marker()), encoding='utf-8')
             verify_docs_copy(destination)
         except BaseException:
             destination.unlink(missing_ok=True)
+            Path(str(destination) + MARKER_SIDECAR_SUFFIX).unlink(missing_ok=True)
             raise
 
 
@@ -423,9 +443,11 @@ def verify_docs_copy(path):
                     'unexpected projection state')
         metadata = dict(connection.execute('SELECT key, value FROM meta'))
         require(set(metadata) <= {MARKER_KEY, 'attempts_repaired', 'tool_names_repaired',
-                                  'ttft_anchor_repaired', 'totals'}
-                and MARKER_KEY in metadata,
-                'missing provenance or unexpected operator metadata')
+                                  'ttft_anchor_repaired', 'totals'},
+                'unexpected operator metadata')
+        sidecar = Path(str(path) + MARKER_SIDECAR_SUFFIX)
+        require(MARKER_KEY in metadata or sidecar.is_file(), 'missing provenance')
+        require(not sidecar.is_symlink(), 'symlinked provenance sidecar')
         for marker_key in ('attempts_repaired', 'tool_names_repaired', 'ttft_anchor_repaired'):
             require(metadata.get(marker_key, '1') == '1', 'unexpected migration metadata')
         if 'totals' in metadata:
@@ -453,7 +475,8 @@ def verify_docs_copy(path):
                         'invalid persisted totals number')
             require(totals['requests'] == connection.execute('SELECT COUNT(*) FROM requests').fetchone()[0],
                     'persisted totals count does not match the publication')
-        marker = _json(metadata[MARKER_KEY])
+        marker = _json(sidecar.read_text(encoding='utf-8') if sidecar.is_file()
+                       else metadata[MARKER_KEY])
         require(type(marker) is dict and set(marker) == {'policy', 'sha256', 'summary'}
                 and type(marker['policy']) is int and marker['policy'] == POLICY_VERSION,
                 'unrecognized documentation provenance')

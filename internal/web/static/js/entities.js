@@ -101,17 +101,30 @@ function recordIsError(r) {
 // a dark theme); parent/child pairs share a hue family (provider→model).
 // Error reserves vermillion and never shares it. Every surface
 // (rail, gallery, scope chips, inspector) renders through entityBadge().
+//
+// `ink` is the same hue carried into the light palette. The eight hues are
+// picked against a dark ground and fall to 1.3-2.4:1 on the Clear surfaces;
+// the ring keeps the hue as identity while the ink is what carries the glyph
+// and the hovered label at 5:1 or better.
+// svgIcon is the one wrapper of a type glyph. The registry used to carry
+// Unicode symbols, so every type arrived in whatever weight, width and font
+// fallback the OS chose; the authored 14px path box draws all ten in one
+// stroke language beside the header icons.
+function svgIcon(paths) {
+  return '<svg viewBox="0 0 14 14" aria-hidden="true" focusable="false">' + paths + '</svg>';
+}
+
 const ENTITY_TYPES = {
-  client:       { label: 'Client',       color: '#56B4E9', icon: '◈' }, // app-window (sky blue)
-  provider:     { label: 'Provider',     color: '#0072B2', icon: '☁' }, // cloud (blue)
-  model:        { label: 'Model',        color: '#CC79A7', icon: '◆' }, // bot (reddish purple)
-  conversation: { label: 'Conversation', color: '#009E73', icon: '❝' }, // messages (bluish green)
-  key:          { label: 'Key',          color: '#F0E442', icon: '⚷' }, // key (yellow)
-  status:       { label: 'Status',       color: '#8A8F98', icon: '●' }, // circle (neutral grey)
-  time:         { label: 'Time',         color: '#5AC8FA', icon: '◷' }, // clock (light cyan)
-  tool:         { label: 'Tool',         color: '#1ABC9C', icon: '⚒' }, // hammer-pick (teal)
-  request:      { label: 'Request',      color: '#E69F00', icon: '⇄' }, // arrow-left-right (orange)
-  error:        { label: 'Error',        color: '#D55E00', icon: '⚠' }, // triangle-alert (vermillion)
+  client:       { label: 'Client',       color: '#56B4E9', ink: '#14607f', icon: svgIcon('<rect x="1.9" y="2.9" width="10.2" height="8.2" rx="1.1"/><path d="M1.9 5.5h10.2"/>') }, // app window
+  provider:     { label: 'Provider',     color: '#0072B2', ink: '#005f96', icon: svgIcon('<path d="M4.4 10.2a2.5 2.5 0 0 1 .3-5 3.3 3.3 0 0 1 6.2.9 2.1 2.1 0 0 1-.4 4.1z"/>') }, // cloud
+  model:        { label: 'Model',        color: '#CC79A7', ink: '#9c4272', icon: svgIcon('<rect x="4.1" y="4.1" width="5.8" height="5.8" rx="1"/><path d="M2.4 5.4H4M2.4 8.6H4M10 5.4h1.6M10 8.6h1.6M5.4 2.4V4M8.6 2.4V4M5.4 10v1.6M8.6 10v1.6"/>') }, // chip
+  conversation: { label: 'Conversation', color: '#009E73', ink: '#00785a', icon: svgIcon('<path d="M2.2 2.9h6.2v4.4H5.2L3.3 8.9V7.3H2.2z"/><path d="M5.6 6.4h6.2v4.4h-1.1v1.6L8.8 10.8H5.6z"/>') }, // messages
+  key:          { label: 'Key',          color: '#F0E442', ink: '#7a6100', icon: svgIcon('<circle cx="4.9" cy="9.1" r="2.1"/><path d="M6.5 7.5 11 3M9.1 4.9l1.5 1.5"/>') }, // key
+  status:       { label: 'Status',       color: '#8A8F98', ink: '#5b6068', icon: svgIcon('<circle cx="7" cy="7" r="4.7"/><circle cx="7" cy="7" r="1.6" fill="currentColor" stroke="none"/>') }, // target
+  time:         { label: 'Time',         color: '#5AC8FA', ink: '#0f6c8c', icon: svgIcon('<circle cx="7" cy="7" r="4.8"/><path d="M7 4.1V7l1.9 1.2"/>') }, // clock
+  tool:         { label: 'Tool',         color: '#1ABC9C', ink: '#0b7a66', icon: svgIcon('<path d="M9.9 2.4a2.9 2.9 0 0 0-3.4 3.7L2.7 10a1.1 1.1 0 0 0 1.6 1.6l3.9-3.8a2.9 2.9 0 0 0 3.7-3.4L10 6.2 7.9 5.9 7.6 3.8z"/>') }, // wrench
+  request:      { label: 'Request',      color: '#E69F00', ink: '#8a5f00', icon: svgIcon('<path d="M2.2 5h8M8.2 3 10.2 5 8.2 7M11.8 9h-8M5.8 7 3.8 9l2 2"/>') }, // arrows
+  error:        { label: 'Error',        color: '#D55E00', ink: '#b04600', icon: svgIcon('<path d="M7 2.2 12 11.6H2z"/><path d="M7 5.6v2.6M7 9.8v.3"/>') }, // alert triangle
 };
 // entityType returns the registry entry for a dimension (defaults to request).
 function entityType(dim) { return ENTITY_TYPES[dim] || ENTITY_TYPES.request; }
@@ -151,7 +164,7 @@ function entityBadge(dim, id, label, rec, labelTitle) {
   // element a pointer actually hovers, not on a wrapper that never receives
   // the event.
   const labelTitleAttr = labelTitle ? ` title="${escapeHtml(labelTitle)}"` : '';
-  return `<span class="ent" style="--ent:${t.color}"${ttl}${extra}>${icon}<span class="ent-lb"${labelTitleAttr}>${escapeHtml(disp)}</span></span>`;
+  return `<span class="ent" style="--ent:${t.color};--ent-ink:${t.ink}"${ttl}${extra}>${icon}<span class="ent-lb"${labelTitleAttr}>${escapeHtml(disp)}</span></span>`;
 }
 
 // entityPivot wraps entityBadge in a pivot link so an entity reference is both
@@ -219,6 +232,10 @@ function showClientTip(el) {
   if (!html) { hideClientTip(); return; }
   tip.innerHTML = html;
   tip.hidden = false;
+  // The card is the only place the identity and the request config meet, so
+  // the hovered badge describes it for assistive technology; the label keeps
+  // the name, the description carries the detail.
+  el.setAttribute('aria-describedby', 'client-tip');
   const box = el.getBoundingClientRect();
   const tw = tip.offsetWidth, th = tip.offsetHeight;
   let x = box.left, y = box.bottom + 6;
@@ -232,6 +249,8 @@ function showClientTip(el) {
 function hideClientTip() {
   const tip = $('client-tip');
   if (tip) tip.hidden = true;
+  document.querySelectorAll('[data-client][aria-describedby="client-tip"]')
+    .forEach(el => el.removeAttribute('aria-describedby'));
 }
 
 {

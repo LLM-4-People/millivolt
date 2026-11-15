@@ -76,6 +76,30 @@ module.exports = async function drawerRedesign(H) {
   check('live pause and throttle flags are explicit rows',
     pausedDetail.includes('<span class="k">paused</span><span class="v">true</span>') &&
     pausedDetail.includes('<span class="k">throttled</span><span class="v">true</span>'));
+  check('the drawer paints the live pill as a button too', (() => {
+    const root = d.createElement('div');
+    root.innerHTML = pausedDetail;
+    const pill = root.querySelector('.d-hero .pill.paused');
+    return pill?.tagName === 'BUTTON' && pill.type === 'button' &&
+      pill.hasAttribute('data-edit-pause');
+  })());
+  {
+    // Pressing it must act where it is painted: the drawer closes (it is the
+    // modal) and the console opens on the record's hold.
+    const liveId = 'drawer-pill-live';
+    fire('begin', {record: {...mkRec(liveId, 0), live: true, paused: true, stream: true}, in_flight: 1});
+    await settleUntil(() => !!w.eval(`recordById('${liveId}')`));
+    w.openDrawer(liveId);
+    d.querySelector('#drawer .d-hero .pill.paused')?.click();
+    check('a pressed pill in the drawer closes it and opens the console',
+      !d.getElementById('drawer').classList.contains('open') &&
+      !d.getElementById('operator-console').hidden);
+    w.closeOperatorConsole();
+    fire('end', {record: {...mkRec(liveId, 0), paused: false}, in_flight: 0});
+    await settleUntil(() => !w.eval(`!!recordById('${liveId}')?.live`));
+    // The rest of the section reads the original drawer.
+    w.openDrawer('redesign');
+  }
 
   const cleanDetail = w.formatDetail({...mkRec('clean-200'), status_code: 200});
   const limitedDetail = w.formatDetail({...mkRec('limited-429'), status_code: 429});
@@ -303,6 +327,39 @@ module.exports = async function drawerRedesign(H) {
   await settleUntil(() => copied.includes('type: upstream_unreachable'));
   check('the error block copies its type, code and message together',
     copied.includes('code: dial_timeout') && copied.includes('message: dial tcp'));
+
+  // Two console prefills sit under the readings. They are the only operator
+  // affordance a healthy record has, and the drawer must close before the
+  // console opens, because the modal marks every other body child inert.
+  {
+    const holdBtn = body.querySelector('[data-drawer-operator="pause"]');
+    const capBtn = body.querySelector('[data-drawer-operator="capture"]');
+    check('a request record offers the two console prefills it can seed',
+      !!holdBtn && !!capBtn &&
+      holdBtn.textContent === 'hold this scope' && capBtn.textContent === 'capture this scope');
+    holdBtn.click();
+    // The console opens on the task after the press, so that the outside-press
+    // closer cannot dismiss the surface this click just opened.
+    check('a drawer hold prefill closes the drawer and opens a scoped console',
+      await settleUntil(() => w.eval('ocMounted') === true, 2000) &&
+      d.getElementById('drawer').classList.contains('open') === false &&
+      !d.getElementById('operator-console').hidden &&
+      w.eval('ocDrafts.pause && ocDrafts.pause.mode') === 'named' &&
+      JSON.stringify(w.eval('ocDrafts.pause && ocDrafts.pause.scope.clients')) ===
+        JSON.stringify(['client-long/1.2.3']));
+    w.closeOperatorConsole();
+    w.openDrawer('redesign');
+    const capBtn2 = d.getElementById('drawer-body').querySelector('[data-drawer-operator="capture"]');
+    capBtn2.click();
+    check('a drawer capture prefill seeds the client, provider and model scope',
+      await settleUntil(() => w.eval('ocMounted') === true &&
+        !!w.eval('ocDrafts.capture'), 2000) &&
+      w.eval('ocDrafts.capture.id') === '' &&
+      JSON.stringify(w.eval('ocDrafts.capture.scope.models')) ===
+        JSON.stringify(['family/model-2026-10-29']));
+    w.closeOperatorConsole();
+    w.openDrawer('redesign');
+  }
 
   w.drawerCopyRecord();
   await settleUntil(() => { try { return JSON.parse(copied).id === 'redesign'; } catch (e) { return false; } });

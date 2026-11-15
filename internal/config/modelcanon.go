@@ -195,3 +195,18 @@ func (c *Config) ModelCanon() ModelCanon {
 	copy(rules, c.ModelRules)
 	return ModelCanon{Rules: rules}
 }
+
+// ModelCanonMemo returns one shared ModelCanon per live *Config. The dashboard
+// observer reads it per SSE event, and the compiled-rule cache can only skip its
+// whole-set element compare when consecutive reads hand back the same backing
+// array; an unmemoized ModelCanon() copies the rule slice (up to the 64-rule
+// maximum) on every event and re-pays that compare. See pointerMemo for the
+// invalidation contract.
+type ModelCanonMemo struct{ pointerMemo[ModelCanon] }
+
+// Canon returns the canonicalization snapshot for cfg, derived at most once per
+// distinct *Config. The result is SHARED with every caller until the live config
+// pointer changes and must be treated as immutable.
+func (m *ModelCanonMemo) Canon(cfg *Config) ModelCanon {
+	return m.get(cfg, (*Config).ModelCanon)
+}

@@ -1,16 +1,19 @@
 package storage
 
 import (
+	"context"
 	"errors"
-	"log"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 type queuedRecord struct {
 	record *metrics.Record
 	seq    uint64
+	// queued is the producer's arrival time, the age the wedge verdict reads.
+	queued time.Time
 }
 
 // Recorder couples the live ring and durable enqueue at their shared, short
@@ -48,7 +51,7 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 	// send-on-closed-channel impossible, so a panic here would be a real bug.
 	defer func() {
 		if recover() != nil {
-			s.incrDrops()
+			s.drop(DropPanic)
 		}
 	}()
 	// Bound exactly once at the shared publication fence. The ring path's
@@ -67,29 +70,44 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 		metrics.RetainRecord(r)
 	}
 	if s.shut {
-		s.incrDrops()
+		s.drop(DropAfterClose)
 		return
 	}
+	// A record arriving into an empty queue starts the wedge clock: the writer
+	// may die before it ever picks the record up, and then nothing else would
+	// age it.
+	now := time.Now()
+	if len(s.ch) == 0 {
+		s.health.noteQueued(now)
+	}
 	select {
-	case s.ch <- queuedRecord{record: r, seq: s.accepted + 1}:
+	case s.ch <- queuedRecord{record: r, seq: s.accepted + 1, queued: now}:
 		s.accepted++
 	case <-s.done:
-		s.incrDrops()
+		s.drop(DropAfterClose)
 	default:
 		// Drop on overflow to protect the hot path. This is intentional:
 		// the ring buffer already holds the most recent records in memory.
-		s.incrDrops()
+		s.drop(DropOverflow)
 	}
 }
 
-func (s *Store) incrDrops() {
+func (s *Store) drop(cause string) {
 	// Atomic: the overload path must not serialize producers on a mutex
 	// exactly when records are already being lost.
-	s.drops.Add(1)
+	s.health.drop(cause)
 }
 
-// Dropped returns the number of records dropped due to a full write channel.
-func (s *Store) Dropped() uint64 { return s.drops.Load() }
+// Dropped returns every record dropped from the durable pipeline, whatever the
+// cause (overflow, a post-Close arrival, a recovered panic or a failed batch).
+// Health().Drops splits the same total by cause.
+func (s *Store) Dropped() uint64 {
+	var total uint64
+	for i := range s.health.drops {
+		total += s.health.drops[i].Load()
+	}
+	return total
+}
 
 func (s *Store) writer() {
 	defer func() { close(s.writerDone); s.wg.Done() }()
@@ -99,17 +117,23 @@ func (s *Store) writer() {
 			return nil
 		}
 		err := s.insertBatch(batch)
+		// The batch is durable (or lost) and differs no longer. Retire it before
+		// publishing the flush stamp, so a reader that sees the fresh stamp also
+		// sees the settled count, and clear the age clock when nothing waits.
+		s.health.settled(len(batch))
+		if err == nil && len(s.ch) == 0 {
+			s.health.queuedDrained()
+		}
+		s.health.recordFlush(err, time.Now())
 		if err != nil {
 			if s.writerErr == nil {
 				s.writerErr = err
 			}
-			log.Printf("storage: insert batch: %v", err)
+			logging.Printf("", "storage: insert batch: %v", err)
 			// Count flush failures as drops so durable-write loss is visible
-			// alongside channel-overflow drops (metrics are best-effort, but
+			// alongside the producer-side causes (metrics are best-effort, but
 			// never silently lost).
-			for range batch {
-				s.incrDrops()
-			}
+			s.health.dropN(DropFlushFailed, len(batch))
 		}
 		clear(batch)
 		batch = batch[:0]
@@ -118,6 +142,7 @@ func (s *Store) writer() {
 	var consumed uint64
 	appendRecord := func(r queuedRecord) error {
 		consumed = r.seq
+		s.health.inFlight.Add(1)
 		batch = append(batch, r.record)
 		if len(batch) >= cap(batch) {
 			return flush()
@@ -149,6 +174,7 @@ func (s *Store) writer() {
 				firstErr = errors.New("storage: closed before purge boundary")
 				break
 			}
+			s.health.noteQueued(r.queued)
 			if err := appendRecord(r); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -170,6 +196,8 @@ func (s *Store) writer() {
 		return usedHeld, writeErr
 	}
 	accept := func(r queuedRecord) error {
+		// The arrived record now ages the queue for the wedge verdict.
+		s.health.noteQueued(r.queued)
 		used, err := servicePurge(&r)
 		if used {
 			return err
@@ -179,10 +207,10 @@ func (s *Store) writer() {
 	ticker := time.NewTicker(s.opts.FlushInterval)
 	defer ticker.Stop()
 	// The continuation cadence is independent of the configured flush interval
-	// so a large expired sidecar set still drains promptly when that interval
-	// is long.
-	debugTicker := time.NewTicker(debugExpireRetryInterval)
-	defer debugTicker.Stop()
+	// so a large expired sidecar set, or a checkpoint a reader deferred, still
+	// drains promptly when that interval is long.
+	maintenanceTicker := time.NewTicker(maintenanceRetryInterval)
+	defer maintenanceTicker.Stop()
 	for {
 		select {
 		case r, ok := <-s.ch:
@@ -225,12 +253,13 @@ func (s *Store) writer() {
 		case <-ticker.C:
 			flush()
 			s.expireDebugCapturesIfDue()
-		case <-debugTicker.C:
+		case <-maintenanceTicker.C:
 			s.continueDebugExpire()
+			s.continueWALCheckpoint()
 		case <-s.done:
-			// Shutdown: Close closes s.ch right after s.done, so range drains
-			// every buffered record - including any a producer raced in after
-			// the done check - before the final flush.
+			// Shutdown: Close closes s.ch right after s.done, so this drain
+			// takes every buffered record - including any a producer raced in
+			// after the done check - before the final flush.
 			for r := range s.ch {
 				accept(r)
 			}
@@ -250,12 +279,23 @@ func (s *Store) writer() {
 // a failed-handoff resume. Concurrent Close waits for the actual final drain,
 // including its error; a sealed input channel alone does not prove durability.
 func (s *Store) Flush() error {
+	return s.flushWithin(context.Background())
+}
+
+// flushWithin is Flush bounded by ctx. It is the interactive variant: a wedged
+// writer (holding the sole connection) never answers the barrier, so a read
+// preview uses this to give up and answer from the committed snapshot. Giving
+// up abandons only the wait - the writer still owns the buffered reply
+// channel, so a late completion has somewhere to go.
+func (s *Store) flushWithin(ctx context.Context) error {
 	ret := make(chan error, 1)
 	select {
 	case s.flushCh <- ret:
 	case <-s.done:
 		<-s.writerDone
 		return s.writerErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 	select {
 	case err := <-ret:
@@ -263,6 +303,8 @@ func (s *Store) Flush() error {
 	case <-s.done:
 		<-s.writerDone
 		return s.writerErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

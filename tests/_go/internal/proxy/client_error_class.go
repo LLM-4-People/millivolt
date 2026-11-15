@@ -12,6 +12,7 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -179,6 +180,60 @@ func TestOperatorRateLimitExtensionDrivesRetryAndClass(t *testing.T) {
 	}
 	if got := w.Header().Get("X-Should-Retry"); got != "true" {
 		t.Fatalf("X-Should-Retry = %q, want true", got)
+	}
+}
+
+// timeoutRoundTripper fails every send with a header timeout, without a
+// network round trip.
+type timeoutRoundTripper struct{}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout awaiting response headers" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+func (timeoutRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, &url.Error{Op: "Post", URL: r.URL.String(), Err: timeoutErr{}}
+}
+
+// TestClientErrorClassTransportFailure pins C2: a transport failure has no
+// provider response to classify, so it must never be filed as a proxy fault
+// with X-Should-Retry: false. It classifies unreachable (timeout for a timed
+// out send) and stays retryable, while an ordinary provider 502 keeps its own
+// class.
+func TestClientErrorClassTransportFailure(t *testing.T) {
+	// A closed local listener refuses immediately; 127.0.0.1:1 dials until the
+	// dial timeout on some hosts and would test the timeout arm twice.
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	refusedURL := closed.URL
+	closed.Close()
+	for _, tc := range []struct {
+		name      string
+		transport http.RoundTripper
+		wantClass string
+	}{
+		{"connection refused", rewriteTransport{target: refusedURL}, string(metrics.ClassUnreachable)},
+		{"header timeout", timeoutRoundTripper{}, string(metrics.ClassTimeout)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.MaxRetries = 0
+			cfg.ClientErrorClass = config.ClientErrorClassHeader
+			s := New(cfg, metrics.Noop{})
+			s.client.Store(&http.Client{Transport: tc.transport})
+			w := proxyRequest(t, s, "/v1/chat/completions", "",
+				`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+			if w.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("X-Proxy-Error-Class"); got != tc.wantClass {
+				t.Fatalf("X-Proxy-Error-Class = %q, want %q", got, tc.wantClass)
+			}
+			if got := w.Header().Get("X-Should-Retry"); got != "true" {
+				t.Fatalf("X-Should-Retry = %q, want true for a transport failure", got)
+			}
+		})
 	}
 }
 

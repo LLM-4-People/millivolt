@@ -83,9 +83,16 @@ const cfgDoc = {
   fields: [
     { key: 'providers', category: 'providers', label: 'Provider field maps', help: 'Per-provider JSON key-path overrides.', kind: 'providers', hot_reload: true },
     { key: 'provider_aliases', category: 'providers', label: 'Provider aliases', help: 'Merge an old provider label into its canonical one (old → canonical).', kind: 'aliases', hot_reload: true },
+    // A bytes field whose schema minimum is positive but whose zero is a real
+    // setting. The server skips its range check for zero and publishes the
+    // sentence that says what zero means; the client must accept the same zero
+    // instead of blocking Apply on a value the server itself wrote.
+    { key: 'go_memory_limit', category: 'server', label: 'Go memory limit', kind: 'bytes',
+      hot_reload: false, min: 33554432, max: 1099511627776, min_label: '32MiB',
+      max_label: '1024GiB', zero_means: 'auto cgroup, else unbounded' },
   ],
   categories: [{ id: 'providers', label: 'Providers', help: 'Per-provider usage/cost JSON field-name maps.' }],
-  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, ensure_tools: ['bash', 'read'], headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' } },
+  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, ensure_tools: ['bash', 'read'], headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' }, go_memory_limit: '0B' },
   defaults: { providers: {}, model_rules: DEF_RULES },
   effective: {},
   overrides: {},
@@ -164,6 +171,10 @@ const pageOptions = {
         (typeof k === 'string' ? () => {} : undefined)),
       set: () => true,
     });
+    // Read a page global for a stub document at request time.
+    const liveOperator = name => {
+      try { return window.eval(name) || {}; } catch { return {}; }
+    };
     window.fetch = (url, opts) => {
       const u = typeof url === 'string' ? url : '';
       state.initialFetches.push(u);
@@ -210,7 +221,7 @@ const pageOptions = {
         })});
       }
       if (url.includes('/admin/purge/count')) return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
-      if (url.includes('/admin/purge')) return Promise.resolve({ ok: true, json: async () => ({ok: true}) });
+      if (url.includes('/admin/purge')) return Promise.resolve({ ok: true, json: async () => ({deleted: 3, buffer_removed: 0}) });
       // /metrics/bootstrap: the real payload carries the snapshot PLUS the
       // state surfaces (kpi, dash, pause, throttle) - mirror the shapes the
       // dedicated /admin/ endpoints serve so state-driven UI stays exercised.
@@ -227,6 +238,11 @@ const pageOptions = {
         const brecs = bsince
           ? (bsameFeed ? bp.records.filter(r => r.__seq > Number(bsince)) : [])
           : bp.records;
+        const pollDocs = {
+          pause: { ok: true, ...liveOperator('pauseState'), server_ms: Date.now() },
+          throttle: { ok: true, ...liveOperator('throttleState'), server_ms: Date.now() },
+          debug: { ok: true, ...liveOperator('debugState'), server_ms: Date.now() },
+        };
         return Promise.resolve({ ok: true, json: async () => ({
           records: JSON.parse(JSON.stringify(brecs)),
           in_flight_records: bp.in_flight_records,
@@ -252,9 +268,11 @@ const pageOptions = {
           model_canon: {rules: []},
           dash: {},
           storage: { enabled: true, dropped: 0, totals_degraded: false },
-          pause: { ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 },
-          throttle: { ok: true, throttles: [], known_providers: ['p'], active: false },
-          debug: { ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' },
+          // The documents the page itself holds, as a live poll serves them: a
+          // canned copy dropped the vocabulary the current step seeded (the
+          // picker row it is about to press). The moving server instant is part
+          // of a real document, so every tick still flows through the repaint.
+          ...pollDocs,
         }) });
       }
       const fp = state.fullPayload;

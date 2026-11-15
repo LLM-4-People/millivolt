@@ -127,6 +127,24 @@ func growBackoff(cur, base, cap time.Duration) time.Duration {
 	return cur
 }
 
+// Provider-limit bands. A limit is supplied by an operator header or the
+// dashboard, so these are safety guardrails on a hostile or typo'd value rather
+// than an implementation detail: they stop a cap from stalling a provider
+// forever or overflowing a token bucket. They live here because both the proxy
+// that enforces them and the MCP surface that validates them before sending
+// must read one declaration, and scheduler is the package both already import.
+//
+// The window ceiling is intentionally the same 24h as MaxRetryHint: a daily
+// quota window is the longest span either feature reasons about, and the
+// anti-burst ramp reuses the same band.
+const (
+	LimitConcurrencyMax = 100_000
+	LimitRequestsMax    = 1_000_000_000
+	LimitTokensMax      = 1_000_000_000_000
+	LimitWindowMin      = time.Second
+	LimitWindowMax      = 24 * time.Hour
+)
+
 // MaxRetryHint is the ceiling on a provider-supplied Retry-After /
 // rate-limit-reset duration. Daily quota windows routinely last tens of
 // minutes and can run until UTC midnight (~24h). This is a safety guardrail
@@ -154,6 +172,14 @@ func ClampRetryHint(d time.Duration) time.Duration {
 	default:
 		return d
 	}
+}
+
+// backoffState reads a group's stored attempt- and request-level backoff under
+// its lock, so diagnostics share one accessor instead of reaching the fields.
+func (g *group) backoffState() (attempt, request time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.backoff, g.requestBackoff
 }
 
 // BackoffFor computes the pacing delay after a retryable failure. Adaptive

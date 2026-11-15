@@ -21,6 +21,7 @@ from .browser_chart import chart_checks, focus_checks
 from .browser_drawer import drawer_checks
 from .browser_fixture import BODY, BODY_429, BODY_HEAD, BODY_TAIL, DEV_DIR, Upstream
 from .browser_log import log_checks
+from .browser_console import console_rail_checks
 from .browser_settings import settings_checks
 from .browser_storm import storm_checks as run_storm_checks
 from .browser_theme import theme_checks
@@ -142,13 +143,13 @@ async def check(base, screenshot):
                              'messages': [{'role': 'user', 'content': 'throttle ' + str(i)}]})
                     require(response.ok and await response.body() == BODY, 'throttle fixture recovery changed')
                 await page.goto(base + '/#client=' + label, wait_until='domcontentloaded')
-                await page.wait_for_function('chartAgg && explorerAgg && lastData')
+                await page.wait_for_function('() => chartAgg && explorerAgg && lastData')
                 # Stash the untouched full chart payload: later canvas checks
                 # rewrite chartAgg with trimmed buckets, but the Overview
                 # period-total assertions need every request-bearing bucket.
                 await page.evaluate('window.__fullChart = chartAgg')
                 await pick_chart_control(page, '#chart-preset', 'latency')
-                await page.wait_for_function('chartAgg && chartAgg.tps_p.some(v => v != null)')
+                await page.wait_for_function('() => chartAgg && chartAgg.tps_p.some(v => v != null)')
                 results = []
                 layout_checks = []
                 await chart_checks(page, screenshot, results, layout_checks)
@@ -164,13 +165,20 @@ async def check(base, screenshot):
                     const table = box.querySelector('table');
                     return {
                         clientWidth: box.clientWidth,
+                        offsetWidth: box.offsetWidth,
                         scrollWidth: box.scrollWidth,
                         tableWidth: table ? Math.round(table.getBoundingClientRect().width) : 0,
                         layout: table ? getComputedStyle(table).tableLayout : '',
+                        pad: table ? getComputedStyle(table.tHead.rows[0].cells[0]).paddingLeft : '',
+                        cols: table ? [...table.tHead.rows[0].cells].map(c => Math.round(c.getBoundingClientRect().width)) : [],
+                        floors: typeof REQ_FLOORS === 'undefined' ? [] : REQ_FLOORS.slice(),
                     };
                 }""")
                 require(docs_table['layout'] == 'auto' and
                         docs_table['scrollWidth'] <= docs_table['clientWidth'] + 2, docs_table)
+                # 14 columns at 10px spend 280px on air alone; the 8px density
+                # is what keeps the widest fixture row inside a desktop card.
+                require(docs_table['pad'] == '8px', docs_table)
                 results.append({'docs_table': docs_table})
                 await page.set_viewport_size({'width': 1440, 'height': 1000})
 
@@ -178,11 +186,12 @@ async def check(base, screenshot):
                 await log_checks(page, results)
                 await drawer_checks(page, results)
                 await settings_checks(page, results)
+                await console_rail_checks(page, results)
 
                 await theme_checks(page, browser, base, errors, results, browser_route)
 
                 await page.reload(wait_until='domcontentloaded')
-                await page.wait_for_function('chartAgg && explorerAgg && lastData')
+                await page.wait_for_function('() => chartAgg && explorerAgg && lastData')
                 require(await page.evaluate('chartView.preset') == 'latency', 'saved chart preset lost')
                 require(await page.evaluate('chartView.pct') == 99, 'saved chart percentile lost')
                 storm_checks = []
@@ -198,7 +207,7 @@ async def check(base, screenshot):
                 # server's purge fence handles pending asynchronous writes.
                 try:
                     if cleanup_needed:
-                        cleanup = await page.request.post(base + '/admin/purge', max_redirects=0, data={'client': label}, headers=operator_headers())
+                        cleanup = await page.request.post(base + '/admin/purge', max_redirects=0, data={'filter': {'client': label}}, headers=operator_headers())
                         if not cleanup.ok:
                             raise RuntimeError('fixture cleanup failed: ' + await cleanup.text())
                 finally:

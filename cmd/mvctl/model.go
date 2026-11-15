@@ -37,6 +37,10 @@ type StorageState struct {
 type PauseState struct {
 	Paused bool    `json:"paused"`
 	Queued float64 `json:"queued"`
+	// StormWaiters counts requests parked by the storm/quota gate, which runs
+	// before admission. They are absent from Queued because an operator drain
+	// cannot release them, so the view names them apart.
+	StormWaiters float64 `json:"storm_waiters"`
 }
 
 type ThrottleState struct {

@@ -2,6 +2,14 @@ name: Docs checks
 
 on:
   push:
+    # GitHub runs a push workflow only for the ref kinds it names. With
+    # tags-ignore alone and no branches, this job never fired on a branch
+    # push: 226 commits touching Markdown landed on testing unvalidated while
+    # check.yml skipped them by path. Naming both ref kinds is what makes the
+    # paths filter below apply to the pushes it was written for.
+    branches:
+      - main
+      - testing
     tags-ignore:
       - '**'
     # The main checks workflow skips docs and site-only pushes so they never
@@ -56,7 +64,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-docs.txt
       - name: Install docs dependencies
-        run: python3 -m pip install -r requirements-docs.txt
+        run: python3 -m pip install --require-hashes -r requirements-docs.txt
       - name: Check Markdown links, anchors and typography
         run: python3 -B -m tests.repository_check
       - name: Build and validate the static site

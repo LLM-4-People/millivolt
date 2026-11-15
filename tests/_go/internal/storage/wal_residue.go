@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -49,7 +50,7 @@ func TestPurgeCheckpointsWAL(t *testing.T) {
 		t.Fatalf("fixture: marker missing from the WAL (main=%v)", main)
 	}
 
-	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: marker}, nil); err != nil {
+	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: marker}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if main, wal := walCarries(t, path, marker); main || wal {
@@ -121,5 +122,97 @@ func TestSaveDebugCaptureCheckpointsInlineExpiry(t *testing.T) {
 	}
 	if main, wal := walCarries(t, path, marker); main || wal {
 		t.Fatalf("inline expiry left the capture payload readable (main=%v wal=%v)", main, wal)
+	}
+}
+
+// pinReader takes a read transaction on the read pool and materializes its
+// snapshot. An open WAL read transaction is what makes TRUNCATE return busy;
+// the transaction must be rolled back by the caller to release the pin.
+func pinReader(t *testing.T, s *Store) *sql.Tx {
+	t.Helper()
+	tx, err := s.rdb.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := tx.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM requests`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return tx
+}
+
+// A reader that pinned the log when the delete committed only defers the
+// checkpoint. Nothing destructive may need to run again for the frames to go:
+// the writer's near-term tick retries until the reader is gone.
+func TestDeferredCheckpointRetriesWhenTheReaderEnds(t *testing.T) {
+	const marker = "wal-residue-deferred-8a40"
+	path := filepath.Join(t.TempDir(), "deferred-wal.db")
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.Record(&metrics.Record{ID: "deferred-row", Provider: marker, Start: time.Now()})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	tx := pinReader(t, s)
+	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: marker}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !s.walCheckpointPending.Load() {
+		t.Fatal("busy checkpoint was treated as final, want pending")
+	}
+	if _, wal := walCarries(t, path, marker); !wal {
+		t.Fatal("fixture: the pinned reader did not defer the checkpoint")
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for s.walCheckpointPending.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if s.walCheckpointPending.Load() {
+		t.Fatal("writer tick never retried the deferred checkpoint")
+	}
+	if main, wal := walCarries(t, path, marker); main || wal {
+		t.Fatalf("deferred checkpoint left the deleted provider readable (main=%v wal=%v)", main, wal)
+	}
+}
+
+// Shutdown is the last retry: once the read pool is closed nothing can pin the
+// log any more, so a clean restart must not inherit the deleted frames.
+func TestShutdownDrainsDeferredCheckpoint(t *testing.T) {
+	const marker = "wal-residue-shutdown-2e77"
+	path := filepath.Join(t.TempDir(), "shutdown-wal.db")
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.Record(&metrics.Record{ID: "shutdown-row", Provider: marker, Start: time.Now()})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	tx := pinReader(t, s)
+	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: marker}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !s.walCheckpointPending.Load() {
+		t.Fatal("busy checkpoint was treated as final, want pending")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	s.drainWALCheckpoint()
+	if s.walCheckpointPending.Load() {
+		t.Fatal("shutdown drain left the checkpoint pending")
+	}
+	if main, wal := walCarries(t, path, marker); main || wal {
+		t.Fatalf("shutdown left the deleted provider readable (main=%v wal=%v)", main, wal)
 	}
 }
