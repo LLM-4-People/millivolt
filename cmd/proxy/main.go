@@ -21,6 +21,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt"
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/atomicfile"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -527,7 +528,9 @@ func main() {
 	// waiting parent it is fully booted - store open, totals scanned, ring
 	// backfilled, holds restored - and is about to serve.
 	if *pidFile != "" {
-		if perr := os.WriteFile(*pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); perr != nil {
+		// Atomic replace, following a symlinked pid path: the inherited file
+		// is refreshed before readiness, so no reader sees a truncated pid.
+		if perr := atomicfile.WriteFile(*pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); perr != nil {
 			log.Printf("pid file: %v", perr)
 		}
 	}

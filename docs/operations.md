@@ -483,8 +483,10 @@ directories owned by `65532:65532` before the first start, or
 again. Named volumes avoid this entirely: Docker seeds them from the image
 with correct ownership.
 
-Settings saves by creating a temporary file beside the config and atomically
-renaming it. A read-only mount, or a bind mount of only the config file, cannot
+Settings saves by creating a temporary file beside the resolved config and
+atomically renaming it; a symlinked config path is followed to its final
+target, so the link stays in place and the target receives the document. A
+read-only mount, or a bind mount of only the config file, cannot
 support that save contract. Mount the whole writable directory, or deliberately
 use read-only configuration and update it outside the dashboard. Do not mount
 the committed example as a mutable runtime config.
