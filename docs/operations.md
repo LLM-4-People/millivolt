@@ -2087,7 +2087,10 @@ separate acceptance criteria. A short successful burst does not establish
 sustainable writer throughput or an absolute request-capacity ceiling.
 
 `storage_query_timeout` bounds interactive dashboard reads (chart, explorer,
-log/bootstrap, capture reads) and the ad-hoc query route. Startup projection
+log/bootstrap, capture reads) and the ad-hoc query route. A capture read waits
+first for the in-flight sidecar save of the same request, bounded by the
+drawer client's own request context, and only then starts the read budget, so a
+slow save cannot spend the budget the read needs. Startup projection
 preload, the boot totals rebuild, an administrative purge, and a backup merge's
 totals scan run under a separate internal ten-minute maintenance budget: they
 legitimately read or rewrite full history and must not inherit the interactive

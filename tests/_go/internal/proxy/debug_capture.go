@@ -466,6 +466,45 @@ func TestDebugCaptureSaveFailureResolvesPendingMarker(t *testing.T) {
 	}
 }
 
+// captureLoadPersist serves a capture document and fails like a real reader
+// once its context is done.
+type captureLoadPersist struct{ pausePersist }
+
+func (captureLoadPersist) LoadDebugCapture(ctx context.Context, id string) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	return []byte(`{"id":"` + id + `"}`), nil
+}
+
+// TestDebugCapturePendingWaitDoesNotSpendTheQueryBudget: the storage-read
+// budget must start after the client-bounded pending wait. A capture whose
+// sidecar save lands after the configured query timeout is still served, so
+// the wait length never turns a stored capture into a 500.
+func TestDebugCapturePendingWaitDoesNotSpendTheQueryBudget(t *testing.T) {
+	cfg := config.Default()
+	cfg.StorageQueryTimeout = 50 * time.Millisecond
+	p := New(cfg, metrics.Noop{})
+	p.pause.persist = captureLoadPersist{}
+
+	release := p.registerPendingCapture("slow")
+	go func() {
+		time.Sleep(120 * time.Millisecond)
+		release()
+	}()
+
+	w := httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=slow", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("fetch after a slow pending wait = %d %s, want the 200 capture", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"id":"slow"`) {
+		t.Fatalf("fetch body = %q, want the stored capture", w.Body.String())
+	}
+}
+
 // TestDebugCaptureWaitStopsWithRequestContext pins the disconnect contract:
 // a drawer fetch waiting on an in-flight sidecar save stops when its request
 // context ends instead of outliving the client.

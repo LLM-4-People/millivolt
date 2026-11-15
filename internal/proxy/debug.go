@@ -737,10 +737,12 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	// transient 404; the request context stops the wait when the drawer client
 	// disconnects. The wait ending early only shortens that grace, so the
 	// storage read below answers either way: an expired wait against a missing
-	// capture is the ordinary 404, never an empty 200.
+	// capture is the ordinary 404, never an empty 200. The wait is bounded by
+	// the client, not by the storage budget, so the query timeout starts only
+	// after it: otherwise a slow save spends the budget the read needs.
+	s.waitPendingCapture(r.Context(), id)
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
-	s.waitPendingCapture(r.Context(), id)
 	raw, err := s.pause.persist.LoadDebugCapture(ctx, id)
 	if err != nil {
 		logging.Printf("", "debug: load capture %s: %v", id, err)
