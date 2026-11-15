@@ -15,7 +15,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"math"
 	"net/http"
 	"strconv"
@@ -23,6 +22,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
@@ -405,11 +405,11 @@ func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 	c.tps = gen
 	atts, attErr := storage.DecodeAttemptsColumn(attemptsJSON)
 	if attErr != nil {
-		log.Printf("aggregate: parse attempts for %s: %v", c.id, attErr)
+		logging.Printf("", "aggregate: parse attempts for %s: %v", c.id, attErr)
 	}
 	toolsL, toolErr := storage.DecodeToolNamesColumn(toolNamesJSON)
 	if toolErr != nil {
-		log.Printf("aggregate: parse tool names for %s: %v", c.id, toolErr)
+		logging.Printf("", "aggregate: parse tool names for %s: %v", c.id, toolErr)
 	}
 	c.toolsL = toolsL
 	r := metrics.Record{

@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // snapshotAdmission is an installed pending snapshot. Open commits it only
@@ -86,13 +86,13 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 func rejectPendingSnapshot(incoming string, reason error) {
 	quarantined, err := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix)
 	if err != nil {
-		log.Printf("storage: quarantine pending snapshot %s: %v", incoming, err)
+		logging.Printf("", "storage: quarantine pending snapshot %s: %v", incoming, err)
 	}
 	if quarantined != "" {
-		log.Printf("storage: pending snapshot rejected: %v (preserved as %s)", reason, quarantined)
+		logging.Printf("", "storage: pending snapshot rejected: %v (preserved as %s)", reason, quarantined)
 		return
 	}
-	log.Printf("storage: pending snapshot rejected: %v", reason)
+	logging.Printf("", "storage: pending snapshot rejected: %v", reason)
 }
 
 // install moves the live database aside and renames the preflighted incoming
@@ -258,13 +258,13 @@ func (a *snapshotAdmission) commit() error {
 	}
 	if a.previous {
 		if err := removeSnapshotDebris(a.path + pendingSnapshotPreviousSuffix); err != nil {
-			log.Printf("storage: remove pending snapshot rollback set: %v", err)
+			logging.Printf("", "storage: remove pending snapshot rollback set: %v", err)
 		} else {
 			a.previous = false
 		}
 	}
 	if err := syncSnapshotDir(filepath.Dir(a.path)); err != nil {
-		log.Printf("storage: sync database directory after snapshot commit: %v", err)
+		logging.Printf("", "storage: sync database directory after snapshot commit: %v", err)
 	}
 	return nil
 }

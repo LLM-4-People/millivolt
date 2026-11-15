@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/atomicfile"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // The restart choreography (POST /admin/restart) performs a graceful binary
@@ -431,7 +431,7 @@ func (rs *restarter) prepareHandoff(ctx context.Context) error {
 	}
 	if drainErr != nil {
 		if errors.Is(drainErr, context.DeadlineExceeded) {
-			log.Printf("restart: drain window expired with requests still in flight; handed off after a clean flush")
+			logging.Printf("", "restart: drain window expired with requests still in flight; handed off after a clean flush")
 			return nil
 		}
 		return fmt.Errorf("drain failed; restart aborted: %w", drainErr)
@@ -444,7 +444,7 @@ func (rs *restarter) run() {
 	var bin string
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("restart: panic: %v\n%s", r, debug.Stack())
+			logging.Printf("", "restart: panic: %v\n%s", r, debug.Stack())
 			rs.failAndResume(fmt.Errorf("panic: %v", r), listenFile, bin)
 		}
 		if listenFile != nil {
@@ -456,7 +456,7 @@ func (rs *restarter) run() {
 	var err error
 	bin, err = rs.build()
 	if err != nil {
-		log.Printf("restart: %v (proxy untouched, still serving)", err)
+		logging.Printf("", "restart: %v (proxy untouched, still serving)", err)
 		rs.finishFailure(err)
 		return
 	}
@@ -496,7 +496,7 @@ func (rs *restarter) run() {
 		rs.failAndResume(err, listenFile, bin)
 		return
 	}
-	log.Printf("restart: drained in %s (in-flight streams finished; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
+	logging.Printf("", "restart: drained in %s (in-flight streams finished; restart_drain_timeout=%s)", time.Since(drainStart).Round(time.Millisecond), drainTo)
 
 	// prepareHandoff already drained every server and flushed metrics. The
 	// child may now open the database without overlapping predecessor writes.
@@ -520,7 +520,7 @@ func (rs *restarter) run() {
 		return
 	}
 
-	log.Printf("restart: handed off to pid %d; old process (pid %d) exiting", cmd.Process.Pid, rs.pid)
+	logging.Printf("", "restart: handed off to pid %d; old process (pid %d) exiting", cmd.Process.Pid, rs.pid)
 	os.Remove(bin) // os.Exit skips defers; keep /tmp clean (safe: the child runs from its own inode)
 	os.Exit(0)
 }
@@ -664,7 +664,7 @@ func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
 					fatalDrain("restart: resumed server failed: %v", serr)
 				}
 			}()
-			log.Printf("restart: serving resumed on the inherited socket")
+			logging.Printf("", "restart: serving resumed on the inherited socket")
 		}
 	}
 	if resumeErr != nil {
@@ -673,7 +673,7 @@ func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
 		fatalDrain("restart: %v; resume failed: %v - manual restart required", err, resumeErr)
 	}
 	rs.finishFailure(err)
-	log.Printf("restart: FAILED: %v (proxy resumed; no requests lost)", err)
+	logging.Printf("", "restart: FAILED: %v (proxy resumed; no requests lost)", err)
 }
 
 // Both build failures and resumed handoffs retire the run atomically.
@@ -701,7 +701,7 @@ func (rs *restarter) refreshPIDFile() {
 		return
 	}
 	if err := atomicfile.WriteFile(rs.deps.pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
-		log.Printf("restart: pid file: %v", err)
+		logging.Printf("", "restart: pid file: %v", err)
 	}
 }
 
@@ -876,7 +876,7 @@ func inheritedListener() (net.Listener, bool) {
 		fatalDrain("restart: inherited listener: %v", err)
 	}
 	f.Close() // FileListener owns a duplicate; do not leak the inherited FD.
-	log.Printf("restart: inherited listening socket (fd %d); claimPort bypassed", fd)
+	logging.Printf("", "restart: inherited listening socket (fd %d); claimPort bypassed", fd)
 	return ln, true
 }
 

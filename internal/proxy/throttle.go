@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -184,7 +184,7 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	defer cancel()
 	raw, err := p.LoadThrottle(ctx)
 	if err != nil {
-		log.Printf("throttle: load: %v", err)
+		logging.Printf("", "throttle: load: %v", err)
 		return
 	}
 	items, degraded := decodeThrottles(raw)
@@ -200,7 +200,7 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	for _, it := range items {
 		t, err := persistedToThrottle(it)
 		if err != nil {
-			log.Printf("throttle: skip %s: %v", it.Provider, err)
+			logging.Printf("", "throttle: skip %s: %v", it.Provider, err)
 			continue
 		}
 		s.notePolicyScope(t)
@@ -208,7 +208,7 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	}
 	s.scheduler.RestoreThrottles(ts)
 	if len(ts) > 0 {
-		log.Printf("throttle restored (%d provider caps)", len(ts))
+		logging.Printf("", "throttle restored (%d provider caps)", len(ts))
 	}
 }
 
@@ -222,7 +222,7 @@ func decodeThrottles(raw []byte) (items []persistedThrottle, degraded bool) {
 	}
 	var doc persistedThrottleDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		log.Printf("throttle: decode: %v", err)
+		logging.Printf("", "throttle: decode: %v", err)
 		return nil, true
 	}
 	return doc.Throttles, false
@@ -648,7 +648,7 @@ func (s *Server) runThrottlePersister() {
 			// of hammering the dead handle until shutdown. A busy store stays
 			// on the ladder.
 			if throttleStoreGone(err) {
-				log.Printf("throttle: persist stopped, store is closed: %v", err)
+				logging.Printf("", "throttle: persist stopped, store is closed: %v", err)
 				return
 			}
 			// persistOperatorDocCtx already logged the store failure. Wait the
@@ -1322,7 +1322,7 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if applied.Limit.Active() {
-		log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s burst=%t ramp=%s)", applied.ID,
+		logging.Printf("", "throttle set (%s conc=%d req=%d/%s tok=%d/%s burst=%t ramp=%s)", applied.ID,
 			next.Concurrency, next.Requests, config.FormatDuration(next.ReqWindow),
 			next.Tokens, config.FormatDuration(next.TokWindow),
 			next.AntiBurst, config.FormatDuration(next.RampDuration))

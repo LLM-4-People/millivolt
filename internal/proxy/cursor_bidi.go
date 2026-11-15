@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -33,6 +32,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"golang.org/x/net/http2"
 )
 
@@ -210,7 +210,7 @@ func cursorSendFailure(err, waitErr error) (paced bool, msg string) {
 // logCursorRequestShape logs the request's message SHAPE only (roles, content
 // lengths, tool_call ids). Oversized messages get a 4-byte sha256 prefix for
 // correlation - never content bytes (message content must not reach logs).
-func (s *Server) logCursorRequestShape(r *http.Request, body []byte) {
+func (s *Server) logCursorRequestShape(r *http.Request, body []byte, rec *metrics.Record) {
 	var in struct {
 		Messages []struct {
 			Role       string          `json:"role"`
@@ -230,7 +230,7 @@ func (s *Server) logCursorRequestShape(r *http.Request, body []byte) {
 		}
 		parts = append(parts, p)
 	}
-	log.Printf("cursor-shape session=%s n=%d msgs=%s", shortID(r.Header.Get("X-Session-Id")), len(in.Messages), strings.Join(parts, " "))
+	logging.Printf(rec.ID, "cursor-shape session=%s n=%d msgs=%s", shortID(r.Header.Get("X-Session-Id")), len(in.Messages), strings.Join(parts, " "))
 }
 
 // shortID renders a tool_call/session id as an 8-char suffix prefix (used in
@@ -248,7 +248,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// the same request): it fires per request, so an ungated log would
 	// scale log volume with traffic.
 	if rec.Debug {
-		s.logCursorRequestShape(r, body)
+		s.logCursorRequestShape(r, body, rec)
 	}
 	requestBody := body
 	rr := cursorTurnRender{
@@ -270,7 +270,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 				// everything, and a void outcome is flagged (empty_turn).
 				s.cursorRuns.drop(run)
 				run.Close()
-				log.Printf("cursor-run: COLD-START (parked stream died: %s…)", shortID(ids[len(ids)-1]))
+				logging.Printf(rec.ID, "cursor-run: COLD-START (parked stream died: %s…)", shortID(ids[len(ids)-1]))
 			} else {
 				// Only the trailing results are this turn's answers; older ids in the
 				// cumulative history were consumed turns ago.
@@ -287,7 +287,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 						}
 					}
 				}
-				log.Printf("cursor-run: RESUME ids=%d of %d", len(current), len(ids))
+				logging.Printf(rec.ID, "cursor-run: RESUME ids=%d of %d", len(current), len(ids))
 				// Resumed turns never open an upstream request, so StatusCode is
 				// never set by the fresh-run path below. With status 0 the dashboard
 				// keeps rendering the row as an in-flight "streaming" row forever.
@@ -298,7 +298,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 				return
 			}
 		} else {
-			log.Printf("cursor-run: COLD-START (trailing id not parked: %s…)", shortID(ids[len(ids)-1]))
+			logging.Printf(rec.ID, "cursor-run: COLD-START (trailing id not parked: %s…)", shortID(ids[len(ids)-1]))
 		}
 		// No live parked run owns these ids - fall through to a fresh Run (the
 		// history the client sent already carries the tool call + result).
@@ -1037,9 +1037,9 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 		// (park() fails at capacity → close and let the client cold-start.)
 		if !s.cursorRuns.park(rr.scope, run) {
 			run.Close()
-			log.Printf("cursor-run: park FAILED (capacity) - run closed, client will cold-start")
+			logging.Printf(rec.ID, "cursor-run: park FAILED (capacity) - run closed, client will cold-start")
 		} else {
-			log.Printf("cursor-run: PARKED %d calls (%s…)", len(result.ToolCalls), shortID(result.ToolCalls[len(result.ToolCalls)-1].CallID))
+			logging.Printf(rec.ID, "cursor-run: PARKED %d calls (%s…)", len(result.ToolCalls), shortID(result.ToolCalls[len(result.ToolCalls)-1].CallID))
 		}
 		rec.FinishReason = "tool_calls"
 		emitFinal("tool_calls")

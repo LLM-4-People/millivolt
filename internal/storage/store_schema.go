@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // requestDebugDDL is the single owner of the request_debug schema: the
@@ -446,7 +446,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err != nil {
 				return fmt.Errorf("repair ttft anchor: %w", err)
 			}
-			log.Printf("storage: repaired %d pre-0.3.34 TTFT anchors (ttft_ms reset to 0)", n)
+			logging.Printf("", "storage: repaired %d pre-0.3.34 TTFT anchors (ttft_ms reset to 0)", n)
 		}
 		if _, err := db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, ttftAnchorRepairMetaKey); err != nil {
 			return fmt.Errorf("repair ttft anchor marker: %w", err)
@@ -480,12 +480,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 func reclaimIndexPages(ctx context.Context, db *sql.DB) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		log.Printf("storage: reclaim freed index pages: acquire connection: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)
+		logging.Printf("", "storage: reclaim freed index pages: acquire connection: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)
 		return
 	}
 	defer conn.Close()
 	if _, err := conn.ExecContext(ctx, "VACUUM"); err != nil {
-		log.Printf("storage: reclaim freed index pages: VACUUM failed: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)
+		logging.Printf("", "storage: reclaim freed index pages: VACUUM failed: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)
 		return
 	}
 	// VACUUM may renumber implicit rowids on a table whose primary key is not
@@ -496,7 +496,7 @@ func reclaimIndexPages(ctx context.Context, db *sql.DB) {
 		SET epoch = epoch + 1,
 			high_rowid = MAX(0, COALESCE((SELECT MAX(rowid) FROM requests), 0))
 		WHERE singleton = 1`); err != nil {
-		log.Printf("storage: reclaim freed index pages: reset analytical projection: %v (request rows are intact; aggregates will rebuild)", err)
+		logging.Printf("", "storage: reclaim freed index pages: reset analytical projection: %v (request rows are intact; aggregates will rebuild)", err)
 	}
 }
 

@@ -2,13 +2,13 @@ package web
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -394,7 +394,7 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 		payload, err = a.chart(ctx, winMin, fs, statusCode, now)
 	}
 	if err != nil {
-		log.Printf("agg chart: %v", err)
+		logging.Printf("", "agg chart: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "aggregate failed")
 		return
 	}

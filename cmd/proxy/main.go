@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+
 	"maps"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/LLM-4-People/millivolt"
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
@@ -166,7 +168,7 @@ var processDrain func()
 // drain and final flush, so a resumed-but-unusable process would drop every
 // buffered record; this drains first and keeps Fatalf's exit status.
 func fatalDrain(format string, args ...any) {
-	log.Printf(format, args...)
+	logging.Printf("", format, args...)
 	if processDrain != nil {
 		processDrain()
 	}
@@ -256,7 +258,7 @@ func main() {
 	if limit := effectiveMemoryLimit(int64(cfg.MemoryLimit), os.Getenv("GOMEMLIMIT"), cgroupLimit, hasCgroup); limit > 0 {
 		debug.SetMemoryLimit(limit)
 		if cfg.MemoryLimit == 0 {
-			log.Printf("runtime: soft memory limit %d MiB from cgroup memory ceiling %d MiB", limit>>20, cgroupLimit>>20)
+			logging.Printf("", "runtime: soft memory limit %d MiB from cgroup memory ceiling %d MiB", limit>>20, cgroupLimit>>20)
 		}
 	}
 
@@ -295,7 +297,7 @@ func main() {
 				log.Fatalf("provider_aliases: %v", err)
 			}
 			if renamed > 0 {
-				log.Printf("provider_aliases: merged %d records into canonical labels", renamed)
+				logging.Printf("", "provider_aliases: merged %d records into canonical labels", renamed)
 			}
 		}
 
@@ -310,10 +312,10 @@ func main() {
 		if err != nil {
 			// Degraded but not fatal: boot with an empty ring (history is still
 			// in SQLite). Never fail silently - log the persistence failure.
-			log.Printf("backfill skipped: %v", err)
+			logging.Printf("", "backfill skipped: %v", err)
 		} else {
 			buf.Backfill(recs)
-			log.Printf("backfilled %d records from storage", len(recs))
+			logging.Printf("", "backfilled %d records from storage", len(recs))
 		}
 		// Cap full live snapshots to the newest window - durable storage is
 		// on here, so applySnapshotLimit applies the cap (see its doc for the
@@ -371,7 +373,7 @@ func main() {
 	// durable storage is disabled).
 	agg := web.NewAggAPI(buf, store, cfg.StorageQueryTimeout)
 	if err := agg.PreloadHistory(context.Background()); err != nil {
-		log.Printf("dashboard: initial analytical history load failed (reads will retry): %v", err)
+		logging.Printf("", "dashboard: initial analytical history load failed (reads will retry): %v", err)
 	}
 	// Bootstrap state providers: the effective config, operator pause holds,
 	// and provider limits ride the boot payload so a fresh page paints in one
@@ -457,11 +459,11 @@ func main() {
 	if dbDesc == "" {
 		dbDesc = "(in-memory only)"
 	}
-	log.Printf("millivolt listening on %s  db=%s", cfg.Listen, dbDesc)
+	logging.Printf("", "millivolt listening on %s  db=%s", cfg.Listen, dbDesc)
 
 	// drainStore is the shared close before every loop exit (serve failure,
 	// clean return, signal shutdown): stop the throttle writer and flush its
-	// latest policy, then drain the write channel and final flush. log.Printf -
+	// latest policy, then drain the write channel and final flush. logging.Printf -
 	// never Fatalf - so a close failure still lets the exit path run. It is
 	// defined before the listener so the fatal boot and resume paths, which
 	// would otherwise os.Exit straight past the drain, can publish it here
@@ -469,12 +471,12 @@ func main() {
 	drainStore := func() {
 		if proxySrv != nil {
 			if err := proxySrv.CloseThrottlePersist(context.Background()); err != nil {
-				log.Printf("throttle persist close: %v", err)
+				logging.Printf("", "throttle persist close: %v", err)
 			}
 		}
 		if store != nil {
 			if err := store.Close(); err != nil {
-				log.Printf("storage close: %v", err)
+				logging.Printf("", "storage close: %v", err)
 			}
 		}
 	}
@@ -622,9 +624,9 @@ loop:
 			}
 			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				// A mid-life serve failure. Drain the store before exiting (the
-				// same guarantee the signal path gives) - log.Printf, not
+				// same guarantee the signal path gives) - logging.Printf, not
 				// Fatalf, so the drain actually runs before we exit nonzero.
-				log.Printf("serve: %v", err)
+				logging.Printf("", "serve: %v", err)
 				drainStore()
 				os.Exit(1)
 			}
@@ -642,13 +644,13 @@ loop:
 				// this loop. A skipped SIGHUP is logged, not queued.
 				skipped, ran, err := tryReloadConfig()
 				if !ran {
-					log.Printf("received SIGHUP while a config transaction holds the reload lock; reload skipped")
+					logging.Printf("", "received SIGHUP while a config transaction holds the reload lock; reload skipped")
 					continue
 				}
 				if err == nil && len(skipped) > 0 {
-					log.Printf("config reloaded; restart required for: %s", strings.Join(skipped, ", "))
+					logging.Printf("", "config reloaded; restart required for: %s", strings.Join(skipped, ", "))
 				} else if err == nil {
-					log.Printf("config reloaded from %s", liveConfigPath)
+					logging.Printf("", "config reloaded from %s", liveConfigPath)
 				}
 				continue
 			}
@@ -657,7 +659,7 @@ loop:
 				// → handoff → exit). Racing it with a second shutdown would
 				// abort the very streams the handoff is draining; wait it out
 				// and keep looping if serving resumed.
-				log.Printf("received %v during restart handoff; the handoff owns shutdown", sig)
+				logging.Printf("", "received %v during restart handoff; the handoff owns shutdown", sig)
 				<-handoffDone
 				continue
 			}
@@ -665,7 +667,7 @@ loop:
 			break loop
 		}
 	}
-	log.Printf("received %s, shutting down", shutdownSig)
+	logging.Printf("", "received %s, shutting down", shutdownSig)
 
 	// Abort live streams first so Shutdown returns promptly instead of waiting
 	// the full timeout for SSE connections that never finish on their own.
@@ -679,7 +681,7 @@ loop:
 	if err := rst.drain(ctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		// DeadlineExceeded is a benign outcome for streaming workloads (a
 		// connection outlived the grace window); anything else is real.
-		log.Printf("shutdown: %v", err)
+		logging.Printf("", "shutdown: %v", err)
 	}
 	// In-flight requests have completed (or been aborted); safe to close the
 	// store, which drains its write channel regardless of the HTTP outcome.
@@ -690,7 +692,7 @@ func logDroppedConfigKeys(path string, skipped []string) {
 	if len(skipped) == 0 {
 		return
 	}
-	log.Printf("config: dropped unknown keys or salvaged fail-closed keys from %s: %s", path, strings.Join(skipped, ", "))
+	logging.Printf("", "config: dropped unknown keys or salvaged fail-closed keys from %s: %s", path, strings.Join(skipped, ", "))
 }
 
 // reloadStatus carries the outcome of the most recent configuration
@@ -809,7 +811,7 @@ func reloadHandler() http.HandlerFunc {
 			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		log.Printf("config reloaded from %s (restart-required fields skipped: %s)", liveConfigPath, strings.Join(skipped, ","))
+		logging.Printf("", "config reloaded from %s (restart-required fields skipped: %s)", liveConfigPath, strings.Join(skipped, ","))
 		enc, _ := json.Marshal(map[string]any{"ok": true, "restart_required": skipped, "dropped_keys": dropped})
 		w.Write(enc)
 	}
@@ -917,13 +919,13 @@ func reloadConfigLocked() ([]string, error) {
 		// history, so every failure leaves exactly one record regardless
 		// of the trigger (SIGHUP, POST /admin/reload, Settings save,
 		// backup restore - they all funnel through here).
-		log.Printf("config reload failed (keeping current): %v", err)
+		logging.Printf("", "config reload failed (keeping current): %v", err)
 		recordReloadStatus(false, err.Error(), nil, nil)
 		return nil, err
 	}
 	logDroppedConfigKeys(liveConfigPath, dropped)
 	if err := applyCLIOverrides(fresh); err != nil {
-		log.Printf("config reload failed (keeping current): %v", err)
+		logging.Printf("", "config reload failed (keeping current): %v", err)
 		recordReloadStatus(false, err.Error(), dropped, nil)
 		return nil, err
 	}
@@ -940,7 +942,7 @@ func reloadConfigLocked() ([]string, error) {
 	if store != nil && !maps.Equal(current.ProviderAliases, fresh.ProviderAliases) {
 		if _, err := store.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
 			err = fmt.Errorf("provider_aliases: %w", err)
-			log.Printf("config reload failed (keeping current): %v", err)
+			logging.Printf("", "config reload failed (keeping current): %v", err)
 			recordReloadStatus(false, err.Error(), dropped, nil)
 			return nil, err
 		}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +21,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -95,7 +95,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 			return
 		}
-		log.Printf("backup: encode failed: %v", err)
+		logging.Printf("", "backup: encode failed: %v", err)
 		fail("encode: " + err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -106,7 +106,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	defer os.Remove(path)
 	f, err := os.Open(path)
 	if err != nil {
-		log.Printf("backup: open encoded archive: %v", err)
+		logging.Printf("", "backup: open encoded archive: %v", err)
 		fail("open archive: " + err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -121,7 +121,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// large it was.
 	auditLog("backup", "outcome", "ok", "members", members, "bytes", size)
 	if _, err := io.Copy(w, f); err != nil {
-		log.Printf("backup: download failed: %v", err)
+		logging.Printf("", "backup: download failed: %v", err)
 	}
 }
 
@@ -239,7 +239,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 			return
 		}
-		log.Printf("restore: stage upload: %v", err)
+		logging.Printf("", "restore: stage upload: %v", err)
 		audit("failed", "error", "stage upload: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
@@ -247,10 +247,10 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	uploadPath := uploadFile.Name()
 	defer func() {
 		if err := uploadFile.Close(); err != nil {
-			log.Printf("restore: close staged upload %s: %v", uploadPath, err)
+			logging.Printf("", "restore: close staged upload %s: %v", uploadPath, err)
 		}
 		if err := os.Remove(uploadPath); err != nil && !os.IsNotExist(err) {
-			log.Printf("restore: remove staged upload %s: %v", uploadPath, err)
+			logging.Printf("", "restore: remove staged upload %s: %v", uploadPath, err)
 		}
 	}()
 	// Decode the staged descriptor, never its path: the bytes validated are
@@ -284,7 +284,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			dir := filepath.Dir(arch.DatabasePath)
 			if err := os.RemoveAll(dir); err != nil {
-				log.Printf("restore: remove decoded database staging %s: %v", dir, err)
+				logging.Printf("", "restore: remove decoded database staging %s: %v", dir, err)
 			}
 		}()
 	}
@@ -947,7 +947,7 @@ func (g *restorePendingGuard) discard() {
 		return
 	}
 	if err := os.Remove(g.backup); err != nil && !os.IsNotExist(err) {
-		log.Printf("restore: remove preserved pending snapshot %s: %v", g.backup, err)
+		logging.Printf("", "restore: remove preserved pending snapshot %s: %v", g.backup, err)
 	}
 	g.backup = ""
 }
@@ -1179,7 +1179,7 @@ func backupStatus() map[string]any {
 		// (and report a stale slot the next boot will ignore).
 		resolved, err := storage.ResolveDatabasePath(dbPath)
 		if err != nil {
-			log.Printf("backup status: %v", err)
+			logging.Printf("", "backup status: %v", err)
 		} else {
 			_, statErr := os.Stat(storage.PendingSnapshotPath(resolved))
 			pending = statErr == nil

@@ -24,6 +24,15 @@ defines their supported combinations.
 | [cmd/mvctl](../cmd/mvctl/main.go) | the human operator client: command dispatch, per-command flags, human and JSON rendering, and destructive-action guards. It reuses `internal/mcp` for the operator HTTP client, `internal/config` for setting kinds and bands, and `internal/backup` for archive and query grammar. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
 
+## Logging
+
+[internal/logging](../internal/logging/logging.go) is the one owner of process
+log lines. It wraps the standard logger's sink and gives a request-scoped line
+the record id minted at the read boundary, so the line joins its stored row,
+capture and neighbouring lines. Process and operator-state lines pass no id.
+`log.Fatal` exits and the earliest flag errors that precede the process logger
+stay direct.
+
 ## Release identity and promotion
 
 [version.go](../version.go) owns VERSION validation and SemVer precedence. The

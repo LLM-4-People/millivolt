@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
-	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -413,7 +413,7 @@ func (s *Server) saveDebugCapture(tap *debugTap, rec *metrics.Record, now, expir
 	enc := json.NewEncoder(buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(doc); err != nil {
-		log.Printf("debug: encode capture %s: %v", rec.ID, err)
+		logging.Printf(rec.ID, "debug: encode capture: %v", err)
 		return
 	}
 	// Encoder.Encode terminates the document with a newline; drop it so the
@@ -423,7 +423,7 @@ func (s *Server) saveDebugCapture(tap *debugTap, rec *metrics.Record, now, expir
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	if err := s.pause.persist.SaveDebugCapture(ctx, rec.ID, rec.DebugSessionID, now.UnixMilli(), expires.UnixMilli(), raw); err != nil {
-		log.Printf("debug: save capture %s: %v", rec.ID, err)
+		logging.Printf(rec.ID, "debug: save capture: %v", err)
 	}
 }
 

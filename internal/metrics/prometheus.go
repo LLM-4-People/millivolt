@@ -3,13 +3,14 @@ package metrics
 import (
 	"fmt"
 	"io"
-	"log"
 	"maps"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // HandlePrometheus renders the /metrics/prometheus exposition. It reuses the
@@ -30,7 +31,7 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer, extra
 	w.Header().Set("Cache-Control", "no-store")
 	body, err := buf.PrometheusExposition(renderPrometheusExposition)
 	if err != nil {
-		log.Printf("metrics: aggregate: %v", err)
+		logging.Printf("", "metrics: aggregate: %v", err)
 		http.Error(w, "metrics cannot be represented", http.StatusInternalServerError)
 		return
 	}

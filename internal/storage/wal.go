@@ -2,7 +2,8 @@ package storage
 
 import (
 	"context"
-	"log"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // checkpointWAL folds the committed database pages into the main file and
@@ -56,13 +57,13 @@ func (s *Store) runWALCheckpoint(logFailure bool) bool {
 	var busy, logFrames, checkpointed int
 	if err := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
 		if logFailure && ctx.Err() == nil {
-			log.Printf("storage: checkpoint after delete: %v", err)
+			logging.Printf("", "storage: checkpoint after delete: %v", err)
 		}
 		return false
 	}
 	if busy != 0 {
 		if logFailure {
-			log.Printf("storage: checkpoint after delete deferred: %d of %d frames checkpointed", checkpointed, logFrames)
+			logging.Printf("", "storage: checkpoint after delete deferred: %d of %d frames checkpointed", checkpointed, logFrames)
 		}
 		return false
 	}

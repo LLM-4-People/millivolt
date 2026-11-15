@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -150,16 +150,16 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 	}
 	if s.respHdr != "" {
 		if err := json.Unmarshal([]byte(s.respHdr), &r.ResponseHeaders); err != nil {
-			log.Printf("storage: parse response headers for %s: %v", r.ID, err)
+			logging.Printf("", "storage: parse response headers for %s: %v", r.ID, err)
 		}
 	}
 	if names, err := DecodeToolNamesColumn(s.toolNames); err != nil {
-		log.Printf("storage: parse tool names for %s: %v", r.ID, err)
+		logging.Printf("", "storage: parse tool names for %s: %v", r.ID, err)
 	} else {
 		r.ToolNames = names
 	}
 	if attempts, err := DecodeAttemptsColumn(s.attemptsJSON); err != nil {
-		log.Printf("storage: parse attempts for %s: %v", r.ID, err)
+		logging.Printf("", "storage: parse attempts for %s: %v", r.ID, err)
 	} else {
 		r.Attempts = attempts
 	}
@@ -171,7 +171,7 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 	restoreRequestParams(&r, s.reqPresence)
 	if s.clientMetaJSON != "" && s.clientMetaJSON != "{}" {
 		if err := json.Unmarshal([]byte(s.clientMetaJSON), &r.ClientMeta); err != nil {
-			log.Printf("storage: parse client_meta for %s: %v", r.ID, err)
+			logging.Printf("", "storage: parse client_meta for %s: %v", r.ID, err)
 		}
 	}
 	return &r, debugCapture, nil
@@ -481,14 +481,14 @@ func (s *Store) QueryBeforeCandidates(ctx context.Context, before *LogCursor, fi
 		}
 		if fields&LogCandidatesTools != 0 {
 			if names, err := DecodeToolNamesColumn(raw.toolNames); err != nil {
-				log.Printf("storage: parse tool names for %s: %v", c.Cursor.ID, err)
+				logging.Printf("", "storage: parse tool names for %s: %v", c.Cursor.ID, err)
 			} else {
 				c.ToolNames = names
 			}
 		}
 		if fields&LogCandidatesErrors != 0 {
 			if attempts, err := DecodeAttemptsColumn(raw.attempts); err != nil {
-				log.Printf("storage: parse attempts for %s: %v", c.Cursor.ID, err)
+				logging.Printf("", "storage: parse attempts for %s: %v", c.Cursor.ID, err)
 			} else {
 				c.Attempts = attempts
 			}

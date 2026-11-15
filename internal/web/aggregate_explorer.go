@@ -1,12 +1,12 @@
 package web
 
 import (
-	"log"
 	"net/http"
 	"sort"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -733,7 +733,7 @@ func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := a.explorer(ctx, dim, allFS, statusCode)
 	if err != nil {
-		log.Printf("agg explorer: %v", err)
+		logging.Printf("", "agg explorer: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "aggregate failed")
 		return
 	}

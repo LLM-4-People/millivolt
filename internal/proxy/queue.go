@@ -9,12 +9,12 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -61,7 +61,7 @@ func (s *Server) HandleQueueDrain(w http.ResponseWriter, r *http.Request) {
 		scope = scheduler.DrainScope{}
 	}
 	seq := s.scheduler.DrainQueue(scope)
-	log.Printf("queue drained (%s)", drainScopeLabel(scope))
+	logging.Printf("", "queue drained (%s)", drainScopeLabel(scope))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"drained_through": seq,

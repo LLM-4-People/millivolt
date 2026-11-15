@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // sseHeartbeat keeps idle SSE connections alive through proxies that drop
@@ -270,7 +270,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	feedID := snapshot.FeedID
 	snap, err := json.Marshal(ObserveSnapshot(snapshot, b.observerModels(true, snapshot.Records, snapshot.InFlightRecords)))
 	if err != nil {
-		log.Printf("metrics: encode snapshot: %v", err)
+		logging.Printf("", "metrics: encode snapshot: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "serialize")
 		return
 	}
@@ -328,7 +328,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			// same event when one cache is attached.
 			data, err := b.encodeRingEvent(ev)
 			if err != nil {
-				log.Printf("metrics: encode record event: %v", err)
+				logging.Printf("", "metrics: encode record event: %v", err)
 				return
 			}
 			if err := stream.frame("record", ev.Seq, true, data); err != nil {
@@ -348,7 +348,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			// this event.
 			data, err := b.encodeLiveEvent(liveEv)
 			if err != nil {
-				log.Printf("metrics: encode live event: %v", err)
+				logging.Printf("", "metrics: encode live event: %v", err)
 				return
 			}
 			if err := stream.frame(liveEv.Phase, 0, false, data); err != nil {
@@ -386,7 +386,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				}
 				data, err := b.encodeRingEvent(ev)
 				if err != nil {
-					log.Printf("metrics: encode record event: %v", err)
+					logging.Printf("", "metrics: encode record event: %v", err)
 					return
 				}
 				if err := stream.frame("record", ev.Seq, true, data); err != nil {
@@ -402,7 +402,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				}
 				data, err := b.encodeLiveEvent(liveEv)
 				if err != nil {
-					log.Printf("metrics: encode live event: %v", err)
+					logging.Printf("", "metrics: encode live event: %v", err)
 					return
 				}
 				if err := stream.frame(liveEv.Phase, 0, false, data); err != nil {

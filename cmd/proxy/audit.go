@@ -2,10 +2,10 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
@@ -31,7 +31,7 @@ func auditLog(action string, fields ...any) {
 		}
 		b.WriteByte('"')
 	}
-	log.Print(b.String())
+	logging.Printf("", "%s", b.String())
 }
 
 // describeMembers renders the archive member selection of a backup or restore

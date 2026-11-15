@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 const (
@@ -191,7 +191,7 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 	dir := s.stageDir()
 	d, err := os.Open(dir)
 	if err != nil {
-		log.Printf("storage: inspect staging directory %s: %v", dir, err)
+		logging.Printf("", "storage: inspect staging directory %s: %v", dir, err)
 		return 0
 	}
 	defer d.Close()
@@ -200,7 +200,7 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 	if err != nil {
 		// A live database whose identity cannot be resolved must never be
 		// guessed at: skip the destructive sweep and leave boot working.
-		log.Printf("storage: staging sweep skipped: %v", err)
+		logging.Printf("", "storage: staging sweep skipped: %v", err)
 		return 0
 	}
 	scanned := 0
@@ -209,7 +209,7 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 		entries, readErr := d.ReadDir(batch)
 		if len(entries) == 0 {
 			if readErr != nil && !errors.Is(readErr, io.EOF) {
-				log.Printf("storage: read staging directory %s: %v", dir, readErr)
+				logging.Printf("", "storage: read staging directory %s: %v", dir, readErr)
 			}
 			break
 		}
@@ -231,7 +231,7 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 			info, err := entry.Info()
 			if err != nil {
 				if !os.IsNotExist(err) {
-					log.Printf("storage: inspect staging entry %s: %v", path, err)
+					logging.Printf("", "storage: inspect staging entry %s: %v", path, err)
 				}
 				continue
 			}
@@ -245,20 +245,20 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 				err = os.Remove(path)
 			}
 			if err != nil && !os.IsNotExist(err) {
-				log.Printf("storage: remove orphaned staging entry %s: %v", path, err)
+				logging.Printf("", "storage: remove orphaned staging entry %s: %v", path, err)
 				continue
 			}
 			removed++
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				log.Printf("storage: read staging directory %s: %v", dir, readErr)
+				logging.Printf("", "storage: read staging directory %s: %v", dir, readErr)
 			}
 			break
 		}
 	}
 	if scanned >= stagingSweepMaxEntries {
-		log.Printf("storage: staging sweep reached its %d-entry budget in %s", stagingSweepMaxEntries, dir)
+		logging.Printf("", "storage: staging sweep reached its %d-entry budget in %s", stagingSweepMaxEntries, dir)
 	}
 	return removed
 }

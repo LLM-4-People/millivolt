@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 const (
@@ -292,7 +293,7 @@ func killIfProxy(pids []string, listeners map[string]struct{}, grace time.Durati
 		// then SIGKILL if still alive. A failed signal is reported: it
 		// otherwise only shows up as the retry loop running out.
 		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-			log.Printf("port claim: SIGTERM pid %d: %v", pid, err)
+			logging.Printf("", "port claim: SIGTERM pid %d: %v", pid, err)
 		}
 		deadline := time.Now().Add(grace)
 		for time.Now().Before(deadline) && processAlive(pid) {
@@ -300,7 +301,7 @@ func killIfProxy(pids []string, listeners map[string]struct{}, grace time.Durati
 		}
 		if processAlive(pid) {
 			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
-				log.Printf("port claim: SIGKILL pid %d: %v", pid, err)
+				logging.Printf("", "port claim: SIGKILL pid %d: %v", pid, err)
 			}
 		}
 		killed = true

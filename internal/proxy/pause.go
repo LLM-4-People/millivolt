@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"maps"
 	"net/http"
 	"slices"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -468,7 +468,7 @@ func decodePause(raw []byte) (holds []persistedPause, degraded bool) {
 	}
 	var doc persistedDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		log.Printf("pause: decode: %v", err)
+		logging.Printf("", "pause: decode: %v", err)
 		return nil, true
 	}
 	if len(doc.Holds) == 0 {
@@ -484,23 +484,23 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	if cs, err := p.ListClients(ctx); err != nil {
-		log.Printf("pause: list clients: %v", err)
+		logging.Printf("", "pause: list clients: %v", err)
 	} else {
 		s.pause.clients.seed(cs)
 	}
 	if ps, err := p.ListProviders(ctx); err != nil {
-		log.Printf("pause: list providers: %v", err)
+		logging.Printf("", "pause: list providers: %v", err)
 	} else {
 		s.pause.providers.seed(ps)
 	}
 	if ms, err := p.ListModels(ctx); err != nil {
-		log.Printf("pause: list models: %v", err)
+		logging.Printf("", "pause: list models: %v", err)
 	} else {
 		s.pause.models.seed(canonicalModelList(ms))
 	}
 	raw, err := p.LoadPause(ctx)
 	if err != nil {
-		log.Printf("pause: load: %v", err)
+		logging.Printf("", "pause: load: %v", err)
 	} else {
 		holds, degraded := decodePause(raw)
 		if degraded {
@@ -525,7 +525,7 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 			}
 		} else {
 			s.applyHolds(kept)
-			log.Printf("pause restored (%s)", pauseDescribeAll(kept))
+			logging.Printf("", "pause restored (%s)", pauseDescribeAll(kept))
 		}
 	}
 	s.attachThrottlePersist(p)
@@ -721,9 +721,9 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasPrev {
-		log.Printf("proxy pause updated %s (%s)", id, pauseDescribe(snap))
+		logging.Printf("", "proxy pause updated %s (%s)", id, pauseDescribe(snap))
 	} else {
-		log.Printf("proxy paused (%s)", pauseDescribe(snap))
+		logging.Printf("", "proxy paused (%s)", pauseDescribe(snap))
 	}
 	writeOperatorState(w, s.PauseSnapshot(), nil)
 }
@@ -839,7 +839,7 @@ func (s *Server) syncNamePins() {
 	dropped = append(dropped, s.pause.models.setPins("pause", holdModels)...)
 	dropped = append(dropped, s.pause.models.setPins("limit", policyModels)...)
 	if len(dropped) > 0 {
-		log.Printf("pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
+		logging.Printf("", "pause: known-name vocabulary is full of operator scopes; %d name(s) not listed: %s",
 			len(dropped), strings.Join(firstN(dropped, 8), ", "))
 	}
 }

@@ -2,9 +2,9 @@ package storage
 
 import (
 	"errors"
-	"log"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -112,7 +112,7 @@ func (s *Store) writer() {
 			if s.writerErr == nil {
 				s.writerErr = err
 			}
-			log.Printf("storage: insert batch: %v", err)
+			logging.Printf("", "storage: insert batch: %v", err)
 			// Count flush failures as drops so durable-write loss is visible
 			// alongside the producer-side causes (metrics are best-effort, but
 			// never silently lost).

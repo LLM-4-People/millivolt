@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"net/http"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -112,7 +112,7 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 	// writer.
 	b, err := json.Marshal(body)
 	if err != nil {
-		log.Printf("admin config: encode failed: %v", err)
+		logging.Printf("", "admin config: encode failed: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

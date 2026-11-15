@@ -9,8 +9,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
+
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/web"
 )
@@ -90,17 +92,17 @@ func loadOperatorToken() (string, error) {
 	value, ok := os.LookupEnv(mcp.ProxyTokenEnv)
 	switch {
 	case !ok:
-		log.Printf("operator plane disabled: %s is not set, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
+		logging.Printf("", "operator plane disabled: %s is not set, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
 		return "", nil
 	case value == "":
-		log.Printf("operator plane disabled: %s is empty, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
+		logging.Printf("", "operator plane disabled: %s is empty, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
 		return "", nil
 	case len(value) < mcp.OperatorTokenMinLen:
 		return "", errors.New(mcp.ProxyTokenEnv + " must be at least " + strconv.Itoa(mcp.OperatorTokenMinLen) + " bytes")
 	case len(value) > mcp.OperatorTokenMaxLen:
 		return "", errors.New(mcp.ProxyTokenEnv + " must be at most " + strconv.Itoa(mcp.OperatorTokenMaxLen) + " bytes")
 	}
-	log.Printf("operator plane enabled (%s)", mcp.ProxyTokenEnv)
+	logging.Printf("", "operator plane enabled (%s)", mcp.ProxyTokenEnv)
 	return value, nil
 }
 
@@ -386,7 +388,7 @@ func (l *authLimiter) failure(ip string, now time.Time) time.Duration {
 				// Nothing could be freed: the source is denied without being
 				// tracked, so its failures never escalate to a lockout.
 				if !l.fullLogged {
-					log.Printf("operator gate: failure table holds its %d address cap and cannot free a slot; new sources are denied without tracking", authMaxIPs)
+					logging.Printf("", "operator gate: failure table holds its %d address cap and cannot free a slot; new sources are denied without tracking", authMaxIPs)
 					l.fullLogged = true
 				}
 				return 0
@@ -396,7 +398,7 @@ func (l *authLimiter) failure(ip string, now time.Time) time.Duration {
 			// now on. Logged once per full episode, not per request: under a
 			// spoofed flood every request would otherwise add a line.
 			if !l.fullLogged {
-				log.Printf("operator gate: failure table at its %d address cap; the oldest entry was evicted for a new source", authMaxIPs)
+				logging.Printf("", "operator gate: failure table at its %d address cap; the oldest entry was evicted for a new source", authMaxIPs)
 				l.fullLogged = true
 			}
 		} else {
@@ -413,7 +415,7 @@ func (l *authLimiter) failure(ip string, now time.Time) time.Duration {
 	if state.failures == authFailureThreshold {
 		// The crossing is logged once per source, not on every later attempt:
 		// the dashboard would otherwise gain a line per guess.
-		log.Printf("operator gate: %s crossed %d rejected credentials; lockouts start now", ip, authFailureThreshold)
+		logging.Printf("", "operator gate: %s crossed %d rejected credentials; lockouts start now", ip, authFailureThreshold)
 	}
 	lockout := authLockoutBase << min(state.failures-authFailureThreshold, 16)
 	if lockout > authLockoutMax || lockout <= 0 {
@@ -545,7 +547,7 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			// Log-only: the cookie is a convenience re-mint beside an
 			// already-authenticated response; a side-effect failure must
 			// not convert a working request into a 500.
-			log.Printf("operator gate: mint session cookie: %v", err)
+			logging.Printf("", "operator gate: mint session cookie: %v", err)
 			return
 		}
 		// The gate already forced no-store for this admitted response, so a
@@ -801,7 +803,7 @@ func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Requ
 		deadline := time.Now().Add(sessionBodyReadTimeout)
 		rc := http.NewResponseController(w)
 		if err := rc.SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			log.Printf("operator session: read deadline: %v", err)
+			logging.Printf("", "operator session: read deadline: %v", err)
 			denyOperator(w, http.StatusInternalServerError, "unsupported connection")
 			return
 		}
@@ -828,7 +830,7 @@ func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Requ
 			// 303/204 would loop the operator back to the login page with
 			// no explanation. The only source is crypto/rand, which cannot
 			// fail on this toolchain; this is contract hygiene.
-			log.Printf("operator session: mint cookie: %v", err)
+			logging.Printf("", "operator session: mint cookie: %v", err)
 			denyOperator(w, http.StatusInternalServerError, "session unavailable")
 			return
 		}

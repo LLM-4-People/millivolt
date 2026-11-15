@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -181,7 +181,7 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 		cancel()
 		if rebuildErr != nil {
 			degraded = true
-			log.Printf("storage: rebuild stale totals base: %v", rebuildErr)
+			logging.Printf("", "storage: rebuild stale totals base: %v", rebuildErr)
 		} else {
 			next, degraded = rebuilt, false
 		}
@@ -201,7 +201,7 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 			} else if b, err := json.Marshal(r.ResponseHeaders); err == nil {
 				hdrJSON = string(b)
 			} else {
-				log.Printf("storage: marshal response headers for %s: %v", r.ID, err)
+				logging.Printf("", "storage: marshal response headers for %s: %v", r.ID, err)
 				hdrJSON = ""
 			}
 		}
@@ -210,7 +210,7 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 			if b, err := json.Marshal(r.ToolNames); err == nil {
 				toolNamesJSON = string(b)
 			} else {
-				log.Printf("storage: marshal tool names for %s: %v", r.ID, err)
+				logging.Printf("", "storage: marshal tool names for %s: %v", r.ID, err)
 				toolNamesJSON = ""
 			}
 		}
@@ -219,7 +219,7 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 			if b, err := json.Marshal(r.Attempts); err == nil {
 				attemptsJSON = string(b)
 			} else {
-				log.Printf("storage: marshal attempts for %s: %v", r.ID, err)
+				logging.Printf("", "storage: marshal attempts for %s: %v", r.ID, err)
 				// 'null', never '': the attempts column must hold valid JSON -
 				// migrate repairs pre-attempts '' rows for exactly this reason.
 				attemptsJSON = jsonNull

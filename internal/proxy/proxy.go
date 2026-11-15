@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -525,7 +525,7 @@ func policyTargetOf(rec *metrics.Record) scheduler.PolicyTarget {
 // body and every other line of the same request instead of being an orphan
 // message under concurrent traffic.
 func requestLog(rec *metrics.Record, format string, args ...any) {
-	log.Printf("request %s: "+format, append([]any{rec.ID}, args...)...)
+	logging.Printf(rec.ID, format, args...)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

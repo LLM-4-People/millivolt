@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
@@ -38,7 +38,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 	err := enc.Encode(v)
 	if err != nil {
 		releaseJSONBuffer(buf)
-		log.Printf("agg encode: %v", err)
+		logging.Printf("", "agg encode: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(adminjson.ErrorBody("aggregate cannot be represented"))
 		return
@@ -301,7 +301,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			}
 			candidates, err := a.store.QueryBeforeCandidates(ctx, cursor, &plan.filter, batch, plan.fields)
 			if err != nil {
-				log.Printf("agg log page: %v", err)
+				logging.Printf("", "agg log page: %v", err)
 				adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")
 				return
 			}
@@ -344,7 +344,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	if len(accepted) > 0 {
 		out, err = a.store.LogPageRecords(ctx, accepted)
 		if err != nil {
-			log.Printf("agg log page: %v", err)
+			logging.Printf("", "agg log page: %v", err)
 			adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")
 			return
 		}

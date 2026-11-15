@@ -3,13 +3,13 @@ package proxy
 import (
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -109,7 +109,7 @@ func (s *Server) addQuotaHold(target scheduler.PolicyTarget, reason string) bool
 			// than assumed to be provider-wide.
 			return s.scheduler.HoldsTarget(target)
 		}
-		log.Printf("quota pause: hold %s: %v", provider, err)
+		logging.Printf("", "quota pause: hold %s: %v", provider, err)
 		return false
 	}
 	s.pause.holds = append(s.pause.holds, h)
@@ -117,10 +117,10 @@ func (s *Server) addQuotaHold(target scheduler.PolicyTarget, reason string) bool
 	// and must keep its provider offered) and releases pause.mu; only the write
 	// moves to the helper goroutine.
 	snap, gen := s.finalizePause()
-	log.Printf("quota pause: provider %s paused (%s)", provider, reason)
+	logging.Printf("", "quota pause: provider %s paused (%s)", provider, reason)
 	go func() {
 		if err := s.persistLatest(snap, gen); err != nil {
-			log.Printf("quota pause: hold %s: %v", provider, err)
+			logging.Printf("", "quota pause: hold %s: %v", provider, err)
 		}
 	}()
 	return true
@@ -165,7 +165,7 @@ func (s *Server) HandleQuotaPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.scheduler.ReleaseQuota(provider) {
-		log.Printf("quota pause: provider %s resumed by operator", provider)
+		logging.Printf("", "quota pause: provider %s resumed by operator", provider)
 	}
 	writeOperatorState(w, s.StormSnapshot(), nil)
 }

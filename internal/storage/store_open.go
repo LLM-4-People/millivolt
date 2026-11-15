@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"modernc.org/sqlite"
 	"modernc.org/sqlite/lib"
 )
@@ -524,7 +524,7 @@ func Open(path string, opts Options) (*Store, error) {
 		// written by earlier processes. A read failure leaves the counter
 		// unseeded and SaveDebugCapture retries the seed before enforcing.
 		if err := s.seedDebugBytes(context.Background()); err != nil {
-			log.Printf("storage: seed debug byte counter: %v", err)
+			logging.Printf("", "storage: seed debug byte counter: %v", err)
 		}
 	}
 	// Since-inception totals are a durable meta row maintained in the same
@@ -537,10 +537,10 @@ func Open(path string, opts Options) (*Store, error) {
 		s.installTotals(persisted, witness.epoch, witness.highRowID)
 	} else {
 		if err != nil {
-			log.Printf("storage: persisted totals unreadable (%v); rebuilding", err)
+			logging.Printf("", "storage: persisted totals unreadable (%v); rebuilding", err)
 		}
 		if err := s.computeTotals(tctx); err != nil {
-			log.Printf("storage: initial totals scan failed (dashboard aggregates degraded): %v", err)
+			logging.Printf("", "storage: initial totals scan failed (dashboard aggregates degraded): %v", err)
 			s.aggMu.Lock()
 			s.totalsDegraded = true
 			s.aggMu.Unlock()
@@ -562,7 +562,7 @@ func Open(path string, opts Options) (*Store, error) {
 	// This runs after admission so the sweep cannot touch the pending slot it
 	// just resolved, and it never blocks or fails boot.
 	if removed := s.sweepOrphanedStaging(time.Now()); removed > 0 {
-		log.Printf("storage: reclaimed %d orphaned staging entries in %s", removed, s.stageDir())
+		logging.Printf("", "storage: reclaimed %d orphaned staging entries in %s", removed, s.stageDir())
 	}
 	return s, nil
 }
@@ -586,14 +586,14 @@ func ensureRequestStatistics(db *sql.DB) {
 	defer cancel()
 	stale, err := requestStatisticsStale(ctx, db)
 	if err != nil {
-		log.Printf("storage: inspect planner statistics: %v", err)
+		logging.Printf("", "storage: inspect planner statistics: %v", err)
 		return
 	}
 	if !stale {
 		return
 	}
 	if _, err := db.ExecContext(ctx, "ANALYZE requests"); err != nil {
-		log.Printf("storage: refresh planner statistics: %v", err)
+		logging.Printf("", "storage: refresh planner statistics: %v", err)
 	}
 }
 

@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"modernc.org/sqlite"
 	"modernc.org/sqlite/lib"
 )
@@ -344,7 +344,7 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The verbatim body serves the operator's browser (operator-gated
 		// path); the server-side log is the durable record of the cause.
-		log.Printf("storage: query failed: %v", err)
+		logging.Printf("", "storage: query failed: %v", err)
 		status := http.StatusInternalServerError
 		if errors.Is(err, ErrQueryLimit) {
 			status = http.StatusRequestEntityTooLarge

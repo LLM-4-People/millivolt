@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // MergeSnapshot inserts snapshot rows whose ids are not already in the live
@@ -350,7 +350,7 @@ func (s *Store) mergeDebugTable(ctx context.Context, db mergeConn) (int64, error
 		return 0, err
 	}
 	if remaining := s.debugMaxBytes - current; incomingBytes > remaining {
-		log.Printf("storage: backup merge skipped %d debug captures (%d bytes) over the %d-byte store cap",
+		logging.Printf("", "storage: backup merge skipped %d debug captures (%d bytes) over the %d-byte store cap",
 			incomingRows, incomingBytes, s.debugMaxBytes)
 		return 0, nil
 	}

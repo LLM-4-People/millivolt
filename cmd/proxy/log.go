@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
@@ -206,7 +206,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			err = zw.Close()
 		}
 		if err != nil {
-			log.Printf("metrics export failed: %v", err)
+			logging.Printf("", "metrics export failed: %v", err)
 			exportFailed(w, ew, err)
 		}
 	})
@@ -323,7 +323,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 		if err != nil {
-			log.Printf("count failed: %v", err)
+			logging.Printf("", "count failed: %v", err)
 			adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}

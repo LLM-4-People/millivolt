@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // DBPath is the running database's own file: the resolved boot-time path the
@@ -55,7 +55,7 @@ func (s *Store) SnapshotFile(ctx context.Context) (path string, cleanup func(), 
 	}
 	cleanup = func() {
 		if err := os.RemoveAll(dir); err != nil {
-			log.Printf("storage: remove snapshot staging %s: %v", dir, err)
+			logging.Printf("", "storage: remove snapshot staging %s: %v", dir, err)
 		}
 	}
 	dest := filepath.Join(dir, "snapshot.db")

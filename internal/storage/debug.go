@@ -5,8 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/logging"
 )
 
 // SaveDebugCapture writes one request's debug document (sidecar). Synchronous
@@ -394,7 +395,7 @@ func (s *Store) sweepDebugCaptures(now time.Time) {
 	total, more, err := s.expireDebugCaptures(ctx, now.UnixMilli(), debugExpireBatchesPerSweep)
 	s.debugExpirePending.Store(err == nil && more)
 	if err != nil && ctx.Err() == nil {
-		log.Printf("storage: expire debug captures: %v", err)
+		logging.Printf("", "storage: expire debug captures: %v", err)
 	}
 	// Only the drained sweep checkpoints: a large expired set continues on
 	// the near-term tick, and truncating the log after every bounded batch

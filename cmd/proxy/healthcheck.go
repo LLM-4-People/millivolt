@@ -2,7 +2,6 @@ package main
 
 import (
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/logging"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
@@ -46,13 +46,13 @@ func runProbe(route mcp.Route) int {
 		// a port this deployment may not use. Only an empty -config reaches
 		// the built-in defaults, and LoadFileStrict already answers those
 		// without an error.
-		log.Printf("probe %s: config %q: %v", route, liveConfigPath, err)
+		logging.Printf("", "probe %s: config %q: %v", route, liveConfigPath, err)
 		return 1
 	}
 	applyCLIOverrides(cfg)
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
-		log.Printf("probe %s: listen address %q: %v", route, cfg.Listen, err)
+		logging.Printf("", "probe %s: listen address %q: %v", route, cfg.Listen, err)
 		return 1
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
@@ -68,19 +68,19 @@ func runProbe(route mcp.Route) int {
 	}
 	resp, err := client.Get(target.String())
 	if err != nil {
-		log.Printf("probe %s: %v", route, err)
+		logging.Printf("", "probe %s: %v", route, err)
 		return 1
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
 	if err != nil {
-		log.Printf("probe %s: body: %v", route, err)
+		logging.Printf("", "probe %s: body: %v", route, err)
 		return 1
 	}
 	if resp.StatusCode != http.StatusOK || string(body) != probeOKBody {
 		// The readiness failure reason is in the body; surface it instead of
 		// leaving the operator with only a status code.
-		log.Printf("probe %s: HTTP %d from %s: %s", route, resp.StatusCode, target.String(), strings.TrimRight(string(body), "\n"))
+		logging.Printf("", "probe %s: HTTP %d from %s: %s", route, resp.StatusCode, target.String(), strings.TrimRight(string(body), "\n"))
 		return 1
 	}
 	return 0
