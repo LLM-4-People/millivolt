@@ -584,6 +584,33 @@ module.exports = async function operatorMenus(H) {
             claimants.length >= 4 && unguarded.length === 0);
         }
       }
+      // The console covers the page it sits over, so Tab is contained: a
+      // roving Tab that walked into covered content would move focus somewhere
+      // the operator cannot see.
+      {
+        const items = w.modalFocusables(shell);
+        const pressTab = (target, shiftKey) => target.dispatchEvent(
+          new w.KeyboardEvent('keydown', {key: 'Tab', shiftKey, bubbles: true, cancelable: true}));
+        items.at(-1).focus();
+        pressTab(d.activeElement, false);
+        check('Tab from the last console control wraps to its first', d.activeElement === items[0]);
+        pressTab(d.activeElement, true);
+        check('shift+Tab from the first console control wraps to its last',
+          d.activeElement === items.at(-1));
+        // A press inside a confirmation dialog above the console stays with
+        // that dialog's own focus order.
+        const confirm = d.createElement('section');
+        confirm.setAttribute('role', 'dialog');
+        confirm.setAttribute('aria-modal', 'true');
+        const inside = d.createElement('button');
+        confirm.appendChild(inside);
+        d.body.appendChild(confirm);
+        inside.focus();
+        pressTab(inside, false);
+        check('a Tab inside a dialog above the console is not pulled back',
+          d.activeElement === inside);
+        confirm.remove();
+      }
       w.closeOperatorConsole();
     }
 

@@ -75,6 +75,8 @@ function menuDialogAbove(event, panel) {
 //   align: 'start' | 'end' (default 'end') - anchor alignment to the trigger
 //   onClose: called exactly once on every close, after the state clears
 //   roving: enable arrow/Home/End/Enter/Space roving over MENU_ITEM_SELECTOR
+//   trap: keep Tab inside the panel (a panel that covers the page it sits
+//     over, like the operator console)
 //   initialFocus: 'item' | 'panel' | 'none' (default 'item' when roving,
 //     else 'panel')
 //   container: an optional positioned ancestor whose padding box is the
@@ -96,6 +98,7 @@ function menuOpen(trigger, panel, opts = {}) {
       align: opts.align === 'start' ? 'start' : 'end',
       onClose: typeof opts.onClose === 'function' ? opts.onClose : null,
       roving,
+      trap: !!opts.trap,
       initialFocus: opts.initialFocus || (roving ? 'item' : 'panel'),
       container: opts.container && typeof opts.container.getBoundingClientRect === 'function' ? opts.container : null,
       scrim: opts.scrim !== false,
@@ -331,15 +334,38 @@ function menuFocusInitial(state) {
 
 // menuKeydown closes on Escape and owns the key while a menu is open: the
 // capture listener consumes it so no underlying surface (a settings sheet, a
-// drawer) closes in the same press. menuClose is the one focus owner; this
-// handler only routes the key and stops its further dispatch.
+// drawer) closes in the same press. A trapped menu also owns Tab. menuClose is
+// the one focus owner; this handler only routes the keys and stops their
+// further dispatch.
 function menuKeydown(event) {
+  const state = menuOpenState;
+  if (!state) return;
+  if (menuDialogAbove(event, state.panel)) return;
+  if (event.key === 'Tab' && state.opts.trap) {
+    menuTrapTab(state.panel, event);
+    return;
+  }
   if (event.key !== 'Escape') return;
-  if (!menuOpenState) return;
-  if (menuDialogAbove(event, menuOpenState.panel)) return;
-  menuClose(menuOpenState.panel);
+  menuClose(state.panel);
   event.preventDefault();
   event.stopPropagation();
+}
+
+// menuTrapTab keeps the Tab stop inside a trapped panel, wrapping at both
+// ends. core.js already owns the focusable inventory (modalFocusables) and the
+// other modal surfaces use the same walk, so the console does not spell a
+// second one. A pointer press outside still closes the panel, so only the
+// keyboard is contained.
+function menuTrapTab(panel, event) {
+  const items = modalFocusables(panel);
+  const first = items[0], last = items[items.length - 1];
+  if (!first) { event.preventDefault(); panel.focus(); return; }
+  const active = document.activeElement;
+  if (!panel.contains(active)) { event.preventDefault(); (event.shiftKey ? last : first).focus(); return; }
+  if (event.shiftKey ? active === first : active === last) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
 }
 
 // menuPointerdown closes on any press outside the panel and its trigger. The

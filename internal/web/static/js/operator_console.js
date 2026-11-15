@@ -555,6 +555,9 @@ function openOperatorConsole(section, view) {
     menuOpen($('btn-controls'), shell, {
       align: 'end',
       initialFocus: 'panel',
+      // The console covers the page behind it, so Tab stays inside until it
+      // closes.
+      trap: true,
       // Escape and an outside press close through menu.js; this keeps the
       // console's mounted state truthful so nothing repaints into a hidden
       // panel after the operator dismisses it.
