@@ -108,7 +108,9 @@ JSON rows intentionally omit captured content previews, response headers and
 retry attempts. Use the dashboard capture drawer when full bodies are needed.
 
 `query` accepts `--query-timeout DURATION`; the default is the shipped MCP
-query bound, and an explicit value must be greater than zero. The statement
+query bound, and an explicit value must be greater than zero. The shared HTTP
+client carries that shipped bound too, so a full-history fold cannot expire
+before it starts. The statement
 must be a single `SELECT` without a semicolon, using the same pre-check as the
 MCP query tool. The SQL text is sent as one `q` parameter and is never logged.
 

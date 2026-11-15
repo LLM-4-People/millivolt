@@ -16,19 +16,27 @@ import (
 	"strings"
 )
 
-// NewCommandClient builds the shared client for a command-line caller. It
-// deliberately leaves the blanket http.Client.Timeout unset: a backup or
-// restore streams for as long as the proxy needs, and every bounded command
-// supplies its own context deadline. The command's SQL bound is a flag, so
-// this client carries no unused query timeout of its own.
-func NewCommandClient(proxyURL, token string) (*Client, error) {
-	return NewClientWithTransport(proxyURL, token, Limits{}, nil)
+// NewCommandClient builds the shared client for a command-line caller with the
+// limits the caller derived from the documented defaults. The caller leaves the
+// blanket http.Client.Timeout unset: a backup or restore streams for as long as
+// the proxy needs, and every bounded command supplies its own context deadline.
+// A zero query timeout would expire a fold immediately, so the caller supplies
+// the config-derived value instead of the empty Limits set.
+func NewCommandClient(proxyURL, token string, limits Limits) (*Client, error) {
+	return NewClientWithTransport(proxyURL, token, limits, nil)
 }
 
 // GetJSON performs one authenticated GET and decodes the JSON body into out.
 // A non-2xx status becomes an *APIError carrying the proxy's redacted message.
 func (c *Client) GetJSON(ctx context.Context, route Route, query url.Values, out any) error {
 	return c.getJSON(ctx, route, query, out)
+}
+
+// GetJSONQuery is GetJSON for a full-history read (the chart and explorer
+// folds), bounded by the config-derived query timeout rather than the generic
+// client timeout.
+func (c *Client) GetJSONQuery(ctx context.Context, route Route, query url.Values, out any) error {
+	return c.getJSONQuery(ctx, route, query, out)
 }
 
 // PostJSON performs one authenticated POST with a JSON body and decodes the
