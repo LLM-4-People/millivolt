@@ -376,8 +376,9 @@ final 400 so both health surfaces carry data.
 
 Normal [compose.yaml](compose.yaml) only runs a published image. For a local
 source build, use [compose.dev.yaml](compose.dev.yaml) from the checkout root.
-It is a complete Compose file, not an overlay: service, container and project
-are all `millivolt-dev`.
+It is a complete Compose file, not an overlay: project and service are both
+`millivolt-dev`, and the container takes the project-scoped name Compose
+derives from them.
 
 ```sh
 docker compose -f compose.dev.yaml up -d --build
