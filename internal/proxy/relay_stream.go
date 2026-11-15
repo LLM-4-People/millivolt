@@ -139,17 +139,16 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		return wireDataOpen
 	}
-	// clientGone records a write-detected abort: the disconnect stamps
-	// the 499, and the analyzer's in-band error - when one reached the
-	// wire - still fills the record, so the abort counts like its 200
-	// twin exactly as the read-detected paths do. Every caller returns
-	// immediately, so the fill runs at most once; a stream without an
-	// in-band error keeps the plain disconnect accounting.
+	// clientGone records a write-detected abort: the disconnect stamps the 499
+	// and the analyzer fills the record unconditionally, so an aborted stream
+	// keeps the finish reason, usage, cost and any in-band outcome it had
+	// already observed - the same accounting its 200 twin gets - instead of
+	// landing as an all-zero 499. Every caller returns immediately, so the
+	// fill runs at most once, and markClientGone leaves a decided 4xx/5xx
+	// status alone.
 	clientGone := func() {
 		markClientGone(rec)
-		if a.HasInBandError() {
-			fillRecord(&a, rec)
-		}
+		fillRecord(&a, rec)
 	}
 	writeOut := func() bool {
 		if out.Len() == 0 {
@@ -220,8 +219,16 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// left here is flusher.Flush, whose error net/http discards - so
 			// the disconnect is stamped here (the write-detected abort's
 			// exact accounting, in-band error kept) instead of finalizing the
-			// abort away as a clean 200.
+			// abort away as a clean 200. The wire is gone, so the degenerate
+			// frames cannot be written, but the class the analyzer decided is
+			// still stamped on the record: the same 499 must not read as
+			// healthy just because a truncation arrived with the abort.
 			clientGone()
+			if code := a.OutcomeCode(); code != "" && !a.HasInBandError() {
+				rec.ErrorType = sse.TypeUpstreamError
+				rec.ErrorCode = code
+				rec.ErrorMsg = metrics.DegenerateMessage(code)
+			}
 			return false
 		}
 		code := a.OutcomeCode()
