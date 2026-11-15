@@ -325,6 +325,8 @@ func TestResponsesProviderToolDropped(t *testing.T) {
 	body := `{"model":"m","input":"hi","tools":[` +
 		`{"type":"function","name":"exec_command","parameters":{}},` +
 		`{"type":"web_search"},` +
+		`{"type":"custom","name":"exec","format":{"type":"grammar"}},` +
+		`{"type":"tool_search"},` +
 		`{"type":"namespace","name":"ns","tools":[{"type":"web_search"}]}]}`
 	req, err := DecodeResponsesRequest([]byte(body))
 	if err != nil {
@@ -333,7 +335,9 @@ func TestResponsesProviderToolDropped(t *testing.T) {
 	if len(req.Tools) != 1 || req.Tools[0].Name != "exec_command" {
 		t.Fatalf("provider tools were not dropped: %+v", req.Tools)
 	}
-	if !warningField(req.Warnings, "tool.web_search") {
-		t.Fatalf("drop was not reported: %+v", req.Warnings)
+	for _, field := range []string{"tool.web_search", "tool.custom", "tool.tool_search"} {
+		if !warningField(req.Warnings, field) {
+			t.Fatalf("%s drop was not reported: %+v", field, req.Warnings)
+		}
 	}
 }

@@ -37,14 +37,21 @@ func toolVocabularyError(target, field, value, pattern string) error {
 // warning instead of failing the turn. An unknown type still fails closed: a
 // tool this proxy cannot classify must not be silently discarded.
 var droppableProviderTools = map[string]bool{
-	"web_search":           true,
-	"web_search_preview":   true,
-	"file_search":          true,
-	"code_interpreter":     true,
-	"image_generation":     true,
-	"computer":             true,
-	"computer_use_preview": true,
-	"mcp":                  true,
+	"web_search":                true,
+	"web_search_preview":        true,
+	"file_search":               true,
+	"code_interpreter":          true,
+	"image_generation":          true,
+	"computer":                  true,
+	"computer_use_preview":      true,
+	"mcp":                       true,
+	"tool_search":               true,
+	"programmatic_tool_calling": true,
+	// A custom tool carries freeform input with a grammar instead of a JSON
+	// schema. Chat has no equivalent, and a client that declared it expects a
+	// custom_tool_call item back, which a function call cannot satisfy, so the
+	// tool is dropped rather than declared in a shape the client cannot use.
+	"custom": true,
 }
 
 // toolNameSeparator joins a Responses namespace and its tool name into the flat
