@@ -799,13 +799,16 @@ def landing_metrics(root: Path = ROOT) -> dict[str, str]:
     if not exact:
         raise DataError("bundle has no exact sustained stage")
     point = next((s for s in exact if s.get("workers") == 48), max(exact, key=lambda s: s["rps"]))
-    seconds = _number(point["seconds"], "sustained seconds")
+    method = bundle["method"]
+    # The headline describes the configured stage, not its measured elapsed
+    # time: a 300-second run finishes at 300.0x seconds, and rounding that into
+    # a "minutes" label would either lie or lose the intended shape.
+    seconds = _number(method["sustained_duration_s"], "sustained duration")
     workers = _num(_number(point["workers"], "workers"))
     if seconds >= 120 and seconds % 60 == 0:
         sustained = f"{int(seconds // 60)} minutes at {workers} workers"
     else:
         sustained = f"{_num(seconds)} s at {workers} workers"
-    method = bundle["method"]
     revision = str(method.get("revision") or "")
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise DataError("method revision is not a full commit hash")
