@@ -483,6 +483,46 @@ func TestThrottleHeaderMissingWindowRejected(t *testing.T) {
 	}
 }
 
+// A window with no count bounds nothing, so a fresh policy accepted it, stored
+// no cap and answered 200 inactive. Refuse it, but keep the useful shape: a
+// window that retunes an already stored count.
+func TestThrottleBareWindowIsRefused(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	provider := "neutral.example"
+	for _, body := range []string{
+		`{"provider":"` + provider + `","request_window":"2m"}`,
+		`{"provider":"` + provider + `","token_window":"2m"}`,
+	} {
+		rr := postThrottle(t, p, body)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d, want 400 body %s", body, rr.Code, rr.Body.Bytes())
+		}
+	}
+	if n := len(p.scheduler.ListThrottles()); n != 0 {
+		t.Fatalf("refused windows stored %d policies", n)
+	}
+
+	// With a stored count the same bare window retunes the window only.
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","requests":30,"tokens":10,"request_window":"1m","token_window":"1m"}`); rr.Code != 200 {
+		t.Fatalf("seed = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","request_window":"5m"}`); rr.Code != 200 {
+		t.Fatalf("window retune = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	th := schedThrottleFor(p.scheduler, provider)
+	if th.Limit.Requests != 30 || th.Limit.ReqWindow != 5*time.Minute {
+		t.Fatalf("retune = %+v, want requests 30 over 5m", th.Limit)
+	}
+	// An explicit zero still clears the dimension and its window.
+	if rr := postThrottle(t, p, `{"provider":"`+provider+`","requests":0}`); rr.Code != 200 {
+		t.Fatalf("clear requests = %d %s", rr.Code, rr.Body.Bytes())
+	}
+	th = schedThrottleFor(p.scheduler, provider)
+	if th.Limit.Requests != 0 || th.Limit.ReqWindow != 0 || th.Limit.Tokens != 10 {
+		t.Fatalf("clear = %+v", th.Limit)
+	}
+}
+
 func TestThrottlePOSTAndClear(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
 	rr := postThrottle(t, p, `{"provider":"alpha.example","concurrency":4,"requests":30,"request_window":"1m","tokens":90000,"token_window":"1m","anti_burst":true,"ramp_duration":"10s"}`)

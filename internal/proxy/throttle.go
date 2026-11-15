@@ -1230,6 +1230,13 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 				return cur
 			}
 			if n == 0 {
+				// The window had no count to bound: storing it would answer
+				// 200 with an inactive policy, so name the missing half. The
+				// same rule the ramp below follows.
+				if body.Requests == nil {
+					updateErr = fmt.Errorf("request_window requires requests")
+					return cur
+				}
 				next.Requests = 0
 				next.ReqWindow = 0
 			} else {
@@ -1262,6 +1269,10 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 				return cur
 			}
 			if n == 0 {
+				if body.Tokens == nil {
+					updateErr = fmt.Errorf("token_window requires tokens")
+					return cur
+				}
 				next.Tokens = 0
 				next.TokWindow = 0
 			} else {
