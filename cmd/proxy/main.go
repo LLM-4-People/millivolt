@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,7 +20,6 @@ import (
 
 	"github.com/LLM-4-People/millivolt"
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
-	"github.com/LLM-4-People/millivolt/internal/atomicfile"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -559,7 +557,8 @@ func main() {
 			defer liveMu.Unlock()
 			return liveCfg.RestartDrainTimeout
 		},
-		args: os.Args[1:],
+		args:    os.Args[1:],
+		pidFile: *pidFile,
 	})
 	// Self-restart eligibility rides the boot payload, so a binary that can
 	// never restart (a -trimpath build, no source tree, no go toolchain) does
@@ -572,14 +571,10 @@ func main() {
 	// A handoff child refreshes the pid file it inherited (scripts/dev.sh
 	// stays authoritative across UI-triggered restarts), then tells the
 	// waiting parent it is fully booted - store open, totals scanned, ring
-	// backfilled, holds restored - and is about to serve.
-	if *pidFile != "" {
-		// Atomic replace, following a symlinked pid path: the inherited file
-		// is refreshed before readiness, so no reader sees a truncated pid.
-		if perr := atomicfile.WriteFile(*pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); perr != nil {
-			log.Printf("pid file: %v", perr)
-		}
-	}
+	// backfilled, holds restored - and is about to serve. The write goes
+	// through the restarter's one owner so this boot write and the resume
+	// rewrite cannot drift.
+	rst.refreshPIDFile()
 	signalReady()
 
 	serveErr := make(chan error, 1)

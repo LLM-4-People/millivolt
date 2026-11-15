@@ -330,6 +330,11 @@ serves reads only and denies every mutation.
 
 `scripts/dev.sh status` reports the private instance. The script builds first,
 then replaces only its tracked dev process; a failed build leaves it running.
+The tracked identity is the pid file, and `status`/`stop` fall back to the
+listener on the instance's port when the file names a dead pid: a rebuild child
+rewrites the file only once it is fully booted, so a child that dies before
+readiness would otherwise strand the instance. The fallback still requires the
+process to carry this instance's exact `-pid-file` flag.
 Starting/restarting development resets its disposable database and private config,
 seeded from the public example by default. `DEV_CONFIG=proxy.yaml` explicitly
 opts into copying an operator config; it is never selected implicitly.

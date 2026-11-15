@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/atomicfile"
 )
 
 // The restart choreography (POST /admin/restart) performs a graceful binary
@@ -132,6 +133,11 @@ type restartDeps struct {
 	drainTimeout func() time.Duration
 	// args are the child's argv (the parent's own flags, verbatim).
 	args []string
+	// pidFile is the -pid-file path, empty when none was given. The child
+	// rewrites it before signalling readiness, so a child that dies before
+	// readiness leaves the file naming itself while the parent keeps serving;
+	// every resume path therefore rewrites it with the parent's own pid.
+	pidFile string
 }
 
 type restarter struct {
@@ -622,6 +628,11 @@ func awaitReady(r *os.File, timeout time.Duration) error {
 // another attempt is possible. The store was only flushed, never closed, so
 // metrics keep working end to end.
 func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
+	// Restore the pid file identity first: the handoff child rewrote it before
+	// readiness, so whatever happens next the file must name the process that
+	// is still serving. This covers a killed child, a garbled readiness, a
+	// failed resume and a pre-commit abort alike.
+	rs.refreshPIDFile()
 	if bin != "" {
 		os.Remove(bin)
 	}
@@ -671,6 +682,18 @@ func (rs *restarter) finishFailure(err error) {
 	close(rs.resumed)
 	rs.resumed = make(chan struct{})
 	rs.mu.Unlock()
+}
+
+// refreshPIDFile is the one owner of every pid-file write: the boot write, the
+// handoff child's pre-readiness rewrite, and the resume rewrite. It is atomic
+// and follows a symlinked path, so a reader never sees a truncated pid.
+func (rs *restarter) refreshPIDFile() {
+	if rs.deps == nil || rs.deps.pidFile == "" {
+		return
+	}
+	if err := atomicfile.WriteFile(rs.deps.pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		log.Printf("restart: pid file: %v", err)
+	}
 }
 
 func (rs *restarter) handoffDone() <-chan struct{} {

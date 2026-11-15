@@ -98,14 +98,23 @@ CONFIG_FILE="$DEV_BASE.yaml"
 BIN="$DEV_BASE-bin"
 mkdir -p "$DEV_DIR"
 
-is_running() {
-  local pid_file="${1:-$PID_FILE}" pid args i
+# pid_file_pid prints the pid a pid file names when that pid is alive and
+# carries this exact -pid-file flag. It is the primary identity: a rebuild child
+# inherits the flag, so a UI-triggered restart stays tracked.
+pid_file_pid() {
+  local pid_file="$1" pid args i
   [ -f "$pid_file" ] || return 1
   pid="$(cat "$pid_file")"
   [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )) || return 1
+  pid_carries_pid_file "$pid" "$pid_file"
+}
+
+# pid_carries_pid_file reports whether pid is alive and was started with this
+# pid-file flag. An unrelated process that merely reused the pid is refused.
+pid_carries_pid_file() {
+  local pid="$1" pid_file="$2" args i
   [ -r "/proc/$pid/cmdline" ] || return 1
   mapfile -d '' -t args < "/proc/$pid/cmdline"
-  # The rebuild child has a new executable name, but inherits this exact flag.
   for ((i=0; i+1<${#args[@]}; i++)); do
     if [ "${args[i]}" = -pid-file ] && [ "${args[i+1]}" = "$pid_file" ]; then
       kill -0 "$pid" 2>/dev/null
@@ -113,6 +122,43 @@ is_running() {
     fi
   done
   return 1
+}
+
+# port_owner_pid prints the pid of the process LISTENING on this instance's
+# port, or fails. It is the fallback identity: a handoff child rewrites the pid
+# file only after it is fully booted, so a child that dies before readiness
+# leaves the file naming itself while the parent keeps serving. Requiring the
+# socket owner plus the same -pid-file flag keeps the match narrow.
+port_owner_pid() {
+  local port="$1" out pid
+  command -v ss >/dev/null 2>&1 || return 1
+  out="$(ss -tlnpH "sport = :$port" 2>/dev/null)" || return 1
+  pid="${out#*pid=}"
+  [ "$pid" != "$out" ] || return 1
+  pid="${pid%%,*}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$pid"
+}
+
+# running_pid prints the pid of the instance a pid file names, falling back to
+# the listener on that file's port. The port comes from the file name, so the
+# same helper serves DEV_PORT and every tracked instance.
+running_pid() {
+  local pid_file="${1:-$PID_FILE}" port pid
+  if pid="$(pid_file_pid "$pid_file")"; then
+    printf '%s' "$pid"
+    return 0
+  fi
+  port="${pid_file##*/millivolt-dev-}"
+  port="${port%.pid}"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  pid="$(port_owner_pid "$port")" || return 1
+  pid_carries_pid_file "$pid" "$pid_file" || return 1
+  printf '%s' "$pid"
+}
+
+is_running() {
+  running_pid "${1:-$PID_FILE}" >/dev/null
 }
 
 # tracked_ports prints the ports with a live dev instance, comma-separated. It
@@ -279,8 +325,8 @@ stop_grace_tenths() {
 }
 
 stop() {
-  if is_running; then
-    local pid ticks; pid="$(cat "$PID_FILE")"
+  local pid ticks
+  if pid="$(running_pid)"; then
     # Derive the budget before signalling: a config this cannot read must
     # refuse the stop, never start one it has no wait for.
     ticks="$(stop_grace_tenths)"
@@ -299,7 +345,11 @@ stop() {
 case "${1:-up}" in
   stop)   stop; exit 0 ;;
   status)
-    if is_running; then echo "dev instance running (pid $(cat "$PID_FILE")) at http://${LISTEN}"; else not_running; fi
+    if pid="$(running_pid)"; then
+      echo "dev instance running (pid $pid) at http://${LISTEN}"
+    else
+      not_running
+    fi
     exit 0 ;;
   up|restart|"") ;; # fall through
   *) echo "unknown command: $1 (use: up | stop | status)" >&2; exit 2 ;;

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -824,4 +825,47 @@ func TestRestartRefusedWhileAConfigOperationHoldsTheReloadLock(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST after release = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
+}
+
+// TestResumeRewritesThePIDFile pins O5: the handoff child rewrites the pid file
+// with its own pid before it is ready, so a child that dies before readiness
+// (or is killed) leaves the file naming a dead process while the parent keeps
+// serving. Every resume path must restore the parent's own pid.
+func TestResumeRewritesThePIDFile(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "instance.pid")
+	// The child's pid stands in the file after its pre-readiness rewrite. A
+	// pid that cannot be alive keeps the resume path's listener step away.
+	if err := os.WriteFile(pidFile, []byte("999999\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	rs := newRestarter(&restartDeps{
+		listener:     ln,
+		server:       &http.Server{},
+		cloneServer:  func() *http.Server { return &http.Server{} },
+		closeFeeds:   func() {},
+		drainTimeout: func() time.Duration { return time.Second },
+		flushStore:   func(context.Context) error { return nil },
+		pidFile:      pidFile,
+	})
+	rs.failAndResume(errors.New("fixture handoff failure"), nil, "")
+	body, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSpace(string(body)), strconv.Itoa(os.Getpid()); got != want {
+		t.Fatalf("pid file = %q, want the parent's own pid %q", got, want)
+	}
+}
+
+// TestNoPIDFileIsNotAnError pins the empty flag: a process started without
+// -pid-file resumes without writing one.
+func TestNoPIDFileIsNotAnError(t *testing.T) {
+	rs := newRestarter(&restartDeps{server: &http.Server{}, cloneServer: func() *http.Server { return &http.Server{} }, closeFeeds: func() {}})
+	rs.refreshPIDFile()
 }
