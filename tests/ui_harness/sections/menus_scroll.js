@@ -283,7 +283,7 @@ module.exports = async function menusScroll(H) {
     };
     await sleep(5); // drain the previous case's queued count render before the fetch swap
     await w.deleteMatching();
-    check('filtered deletion uses the previewed cutoff, not a later time', submitted.before_ms === preview.filter.before_ms);
+    check('filtered deletion uses the previewed cutoff, not a later time', submitted.filter.before_ms === preview.filter.before_ms);
     check('failed deletion reports through the sheet status without wiping or resyncing the log', resyncs === 0 &&
       d.getElementById('settings-count').textContent === 'delete rejected' &&
       d.getElementById('del-count').textContent === 'will delete 3 records' &&

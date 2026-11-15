@@ -296,8 +296,8 @@ module.exports = async function logsMenu(H) {
       await settleUntil(() => countCalls === 1 &&
         d.getElementById('oc-export-receipt').textContent === '3 records · JSON, gzip'));
     check('the count preview posts the same predicate the download uses',
-      countBody && countBody.provider === 'p' &&
-      JSON.stringify(Object.keys(countBody).sort()) === JSON.stringify([
+      countBody && countBody.filter.provider === 'p' &&
+      JSON.stringify(Object.keys(countBody.filter).sort()) === JSON.stringify([
         'after_ms', 'before_ms', 'client', 'conversation_id', 'debug', 'error_type',
         'has_error', 'model', 'provider', 'status_code']));
 

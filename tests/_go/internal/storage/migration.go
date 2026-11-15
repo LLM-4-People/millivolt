@@ -245,7 +245,7 @@ func TestMigratePreAttemptsRowsKeepErrorPurgeWorking(t *testing.T) {
 	}
 
 	// The errors-only purge must delete exactly the 500 row.
-	result, err := s.Clear(t.Context(), &PurgeFilter{HasError: true}, nil)
+	result, err := s.Clear(t.Context(), &PurgeFilter{HasError: true}, nil, nil)
 	if err != nil {
 		t.Fatalf("errors-only purge on pre-attempts rows: %v", err)
 	}

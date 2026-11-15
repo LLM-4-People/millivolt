@@ -18,18 +18,32 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
+// logFilterRequest is the one wire document of both purge routes, decoded by
+// decodeLogFilter for the count and the delete alike. The filter keeps its own
+// strict field grammar (PurgeFilter.UnmarshalJSON) and gains no field;
+// reviewed_count is the optional row count the caller previewed. It is absent
+// for a plain preview, for a bodyless full deletion, and for callers that do
+// not preview first.
+type logFilterRequest struct {
+	Filter        storage.PurgeFilter `json:"filter"`
+	ReviewedCount *int64              `json:"reviewed_count"`
+}
+
 // decodeLogFilter distinguishes an explicit, genuinely empty full-history
 // command from a malformed/nonempty document. Content-Length is never authority.
-func decodeLogFilter(w http.ResponseWriter, r *http.Request) (storage.PurgeFilter, bool, error) {
-	var f storage.PurgeFilter
-	err := adminjson.Decode(w, r, &f)
+func decodeLogFilter(w http.ResponseWriter, r *http.Request) (logFilterRequest, bool, error) {
+	var req logFilterRequest
+	err := adminjson.Decode(w, r, &req)
 	if errors.Is(err, io.EOF) {
-		return f, false, nil
+		return req, false, nil
 	}
 	if err != nil {
-		return f, true, err
+		return req, true, err
 	}
-	return f, true, f.Validate()
+	if req.ReviewedCount != nil && *req.ReviewedCount < 0 {
+		return req, true, errors.New("reviewed_count must be zero or greater")
+	}
+	return req, true, req.Filter.Validate()
 }
 
 // rejectPurgeQuery denies every query key on the body-only purge routes before
@@ -99,6 +113,13 @@ func exportLogFilter(q url.Values) (storage.PurgeFilter, error) {
 		}
 	}
 	return f, f.Validate()
+}
+
+// purgeResponse is the /admin/purge success document: the store-level
+// PurgeResult on the wire so an operator sees what the deletion removed.
+type purgeResponse struct {
+	Deleted       int64 `json:"deleted"`
+	BufferRemoved int   `json:"buffer_removed"`
 }
 
 type exportWriter struct {
@@ -200,8 +221,8 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectPurgeQuery(w, r) {
 			return
 		}
-		f, hasBody, err := decodeLogFilter(w, r)
-		if err == nil && hasBody && f.IsEmpty() {
+		req, hasBody, err := decodeLogFilter(w, r)
+		if err == nil && hasBody && req.Filter.IsEmpty() {
 			err = errors.New("empty purge filter; send no body to delete everything")
 		}
 		if err != nil {
@@ -209,29 +230,61 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			return
 		}
 		var filter *storage.PurgeFilter
+		var reviewed *int64
 		if hasBody {
-			filter = &f
+			filter = &req.Filter
+			reviewed = req.ReviewedCount
 		}
+		var result storage.PurgeResult
 		if store != nil {
-			// The deletion counts are storage.PurgeResult, the store-level
-			// contract; no wire consumer reads them (the dashboard confirms
-			// from the count preview and bootstraps after), so the response
-			// carries ok only.
-			_, err = store.Clear(r.Context(), filter, buffer)
+			// The store counts the reviewed row set inside the delete
+			// transaction and refuses a moved population with a distinct
+			// error, so a preview from this route can never authorize a
+			// broader deletion than the operator saw.
+			result, err = store.Clear(r.Context(), filter, reviewed, buffer)
 		} else if err = r.Context().Err(); err == nil {
-			if filter == nil {
-				buffer.Reset()
-			} else {
-				buffer.RemoveWhere(filter.MatchRecord)
+			// Without a store there is no transaction to count in. The ring
+			// is the only history and it cannot grow while the handler runs,
+			// so the check is exact - but it must run before the removal, or a
+			// refused deletion would still have emptied it.
+			if reviewed != nil {
+				live := int64(buffer.Len())
+				if filter != nil {
+					live = 0
+					for _, row := range buffer.Snapshot() {
+						if filter.MatchRecord(row) {
+							live++
+						}
+					}
+				}
+				if live != *reviewed {
+					err = storage.ErrPurgeCountChanged
+				}
 			}
+			if err == nil {
+				if filter == nil {
+					result.BufferRemoved = buffer.Len()
+					buffer.Reset()
+				} else {
+					result.BufferRemoved = buffer.RemoveWhere(filter.MatchRecord)
+				}
+			}
+		}
+		if errors.Is(err, storage.ErrPurgeCountChanged) {
+			adminjson.WriteErrorJSON(w, http.StatusConflict,
+				"the row set changed since the preview; preview again and confirm the new count")
+			return
 		}
 		if err != nil {
 			log.Printf("purge failed: %v", err)
 			adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		// One line, same wording family as the failure path, so a purge is
+		// reconstructable after the response is gone.
+		log.Printf("purge: deleted %d durable rows, removed %d live records", result.Deleted, result.BufferRemoved)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		_ = json.NewEncoder(w).Encode(purgeResponse{Deleted: result.Deleted, BufferRemoved: result.BufferRemoved})
 	})
 	mux.HandleFunc(string(mcp.RoutePurgeCount), func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
@@ -240,7 +293,8 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectPurgeQuery(w, r) {
 			return
 		}
-		f, _, err := decodeLogFilter(w, r)
+		req, _, err := decodeLogFilter(w, r)
+		f := req.Filter
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return

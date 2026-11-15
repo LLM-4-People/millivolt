@@ -1001,7 +1001,7 @@ func purgeFixture(t *testing.T, count int64) (*Service, *fakeProxy, string) {
 	t.Helper()
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":`+strconv.FormatInt(count, 10)+`}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 	preview, err := service.purgePreview(context.Background(), PurgePreviewInput{Filter: PurgeFilterInput{Provider: "local"}})
 	if err != nil {
@@ -1063,7 +1063,7 @@ func TestPurgeRefusesATokenForAnotherFilter(t *testing.T) {
 	// Both filters match exactly 4 rows, so a count-only guard cannot tell them
 	// apart. This is the whole reason the guard is a token.
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":4}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 
@@ -1098,7 +1098,7 @@ func TestPurgeRefusesATokenForAnotherFilter(t *testing.T) {
 func TestPurgeRefusesAnExpiredToken(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":4}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 	filter := PurgeFilterInput{Provider: "local"}
 
@@ -1144,7 +1144,7 @@ func mustIssue(t *testing.T, service *Service, filter PurgeFilterInput, count in
 func TestPurgeRefusesATokenThatWasNeverIssued(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":4}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 	filter := PurgeFilterInput{Provider: "local"}
 
@@ -1232,7 +1232,7 @@ func TestPurgeRefusalDisclosesNoCount(t *testing.T) {
 	proxy := newFakeProxy(t)
 	// The preview authorized 4 rows; by delete time the filter matches 3.
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":4}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 	filter := PurgeFilterInput{Provider: "local"}
 	preview, err := service.purgePreview(context.Background(), PurgePreviewInput{Filter: filter})
@@ -1333,7 +1333,7 @@ func TestPurgeFilterValidationMatchesTheProxy(t *testing.T) {
 func TestPurgeWarnsThatCapturesAreDeleted(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":4}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 
@@ -1367,14 +1367,14 @@ func TestPurgeWarnsThatCapturesAreDeleted(t *testing.T) {
 	if !strings.Contains(out.Captures, "stored capture document is deleted") {
 		t.Fatalf("the deletion output must repeat the capture effect: %q", out.Captures)
 	}
-	// The residual TOCTOU gap is stated in both directions, not claimed away.
-	for _, needle := range []string{"no shared transaction", "without having been previewed"} {
+	// The count binding is stated in both directions, not claimed away.
+	for _, needle := range []string{"inside the delete transaction", "refuses the deletion"} {
 		if !strings.Contains(preview.Warning, needle) {
-			t.Fatalf("the preview warning must state the residual gap (%q): %q", needle, preview.Warning)
+			t.Fatalf("the preview warning must state the delete-time count check (%q): %q", needle, preview.Warning)
 		}
 	}
-	if !strings.Contains(purgePreviewWarning, "no shared transaction") {
-		t.Fatal("the residual check/delete gap must be stated in the standing warning")
+	if !strings.Contains(purgePreviewWarning, "refuses the deletion") {
+		t.Fatal("the delete-time count check must be stated in the standing warning")
 	}
 }
 
@@ -1384,7 +1384,7 @@ func TestPurgeWarnsThatCapturesAreDeleted(t *testing.T) {
 func TestPurgeSendsTheExactReviewedFilter(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":4}`)
-	proxy.json(http.MethodPost, purgePath, `{"ok":true}`)
+	proxy.json(http.MethodPost, purgePath, `{"deleted":4,"buffer_removed":0}`)
 	service := newTestService(t, proxy, Limits{})
 
 	filter := PurgeFilterInput{Client: "dev", HasError: true, StatusCode: 500, BeforeMs: 1000}
@@ -1410,13 +1410,21 @@ func TestPurgeSendsTheExactReviewedFilter(t *testing.T) {
 	}
 	assertAuth(t, requests[0])
 	body := decodeBody(t, requests[0])
-	if body["client"] != "dev" || body["has_error"] != true || body["status_code"].(float64) != 500 || body["before_ms"].(float64) != 1000 {
+	filterBody, ok := body["filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("purge body must carry the filter document: %v", body)
+	}
+	if filterBody["client"] != "dev" || filterBody["has_error"] != true || filterBody["status_code"].(float64) != 500 || filterBody["before_ms"].(float64) != 1000 {
 		t.Fatalf("purge body = %v", body)
 	}
 	for _, absent := range []string{"provider", "model", "conversation_id", "error_type", "debug", "after_ms"} {
-		if _, present := body[absent]; present {
-			t.Fatalf("an unset constraint must be omitted, but %q was sent: %v", absent, body)
+		if _, present := filterBody[absent]; present {
+			t.Fatalf("an unset constraint must be omitted, but %q was sent: %v", absent, filterBody)
 		}
+	}
+	// The reviewed count must travel with the delete, and only with it.
+	if reviewed, present := body["reviewed_count"].(float64); !present || reviewed != 4 {
+		t.Fatalf("purge body must carry the reviewed count 4: %v", body)
 	}
 	// The pre-delete and post-delete counts both used the deleted filter.
 	counts := proxy.requestsFor(http.MethodPost, purgeCountPat)
@@ -1424,8 +1432,12 @@ func TestPurgeSendsTheExactReviewedFilter(t *testing.T) {
 		t.Fatalf("expected the preview, the pre-delete re-check and the recount, got %d", len(counts))
 	}
 	for i, count := range counts {
-		if count.Body != requests[0].Body {
-			t.Fatalf("count %d must use the deleted filter: %q vs %q", i, count.Body, requests[0].Body)
+		countBody := decodeBody(t, count)
+		if _, present := countBody["reviewed_count"]; present {
+			t.Fatalf("count %d must not carry a reviewed count: %v", i, countBody)
+		}
+		if !reflect.DeepEqual(countBody["filter"], filterBody) {
+			t.Fatalf("count %d must use the deleted filter: %v vs %v", i, countBody["filter"], filterBody)
 		}
 	}
 }
@@ -1483,8 +1495,8 @@ func TestPurgePreviewOutput(t *testing.T) {
 	if out.PreviewToken == "" {
 		t.Fatal("the preview must issue the token that authorizes the matching deletion")
 	}
-	// The residual gap is stated, not claimed away.
-	if !strings.Contains(out.Warning, "no shared transaction") {
+	// The delete-time count check is stated, not claimed away.
+	if !strings.Contains(out.Warning, "inside the delete transaction") {
 		t.Fatalf("preview warning = %q", out.Warning)
 	}
 	if !strings.Contains(out.Filter, "provider=local") || !strings.Contains(out.Filter, "before_ms=100") {

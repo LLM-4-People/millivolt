@@ -896,6 +896,18 @@ func (f PurgeFilterInput) Document() map[string]any {
 	return document
 }
 
+// Body composes the POST /admin/purge wire document: the filter under "filter"
+// and, when the caller previewed a count, that count under "reviewed_count" so
+// the proxy re-checks it inside the delete transaction. The count route takes
+// the same document without one.
+func (f PurgeFilterInput) Body(reviewed *int64) map[string]any {
+	body := map[string]any{"filter": f.Document()}
+	if reviewed != nil {
+		body["reviewed_count"] = *reviewed
+	}
+	return body
+}
+
 func (f PurgeFilterInput) describe() string {
 	parts := []string{}
 	for key, value := range f.Document() {
@@ -926,13 +938,12 @@ type PurgePreviewOutput struct {
 }
 
 // purgePreviewWarning is the standing caveat, stated narrowly on purpose. The
-// re-check and the delete are two HTTP requests with no shared transaction, so
-// live traffic committed between them is removed without having been previewed.
-// No client-side guard closes that window, and claiming one would be a lie the
-// operator discovers only after the rows are gone.
-const purgePreviewWarning = "the preview authorizes this filter at this count, and the count is re-checked immediately before deleting; " +
-	"live traffic committed between that re-check and the deletion is removed without having been previewed, " +
-	"because the two are separate requests with no shared transaction"
+// preview count and the delete are two HTTP requests, but the delete carries
+// the reviewed count back and the proxy re-counts it inside the delete
+// transaction, so a population that moved in between refuses the deletion
+// instead of removing rows the operator never saw.
+const purgePreviewWarning = "the preview authorizes this filter at this count; the delete carries the count back and the proxy checks it inside the delete transaction, " +
+	"so a row set that moved since the preview refuses the deletion instead of deleting unpredicted rows. A refused call needs a fresh purge_preview"
 
 // PurgePreview counts the rows a purge filter would delete, without deleting
 // anything, and issues the token that authorizes exactly that deletion.
@@ -946,7 +957,7 @@ func (s *Service) purgePreview(ctx context.Context, in PurgePreviewInput) (*Purg
 	var payload struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &payload); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Body(nil), &payload); err != nil {
 		return nil, err
 	}
 	token, err := s.previewToken.issue(in.Filter, payload.Count, time.Now())
@@ -1028,13 +1039,15 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	if err != nil {
 		return nil, err
 	}
-	// Re-count before deleting, so a row set that visibly moved since the
-	// preview refuses the call. It does NOT close the check/delete gap: rows
-	// committed after this count are still removed.
+	// Re-count immediately before deleting, so a row set that visibly moved
+	// since the preview refuses the call with a readable message instead of an
+	// opaque 409. The count also travels with the delete, where the proxy
+	// counts it again inside the delete transaction; that pair is the actual
+	// binding, this recount only produces the clearer error.
 	var current struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &current); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Body(nil), &current); err != nil {
 		return nil, fmt.Errorf("verify the reviewed count before deleting: %v", err)
 	}
 	if current.Count != reviewed {
@@ -1043,7 +1056,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 		return nil, fmt.Errorf("the row set for this filter no longer matches the one purge_preview reviewed, so the deletion is refused. " +
 			"Re-run purge_preview and confirm again against the count it reports")
 	}
-	if err := s.client.postJSON(ctx, RoutePurge, in.Filter.Document(), nil); err != nil {
+	if err := s.client.postJSON(ctx, RoutePurge, in.Filter.Body(&reviewed), nil); err != nil {
 		return nil, err
 	}
 	out := &PurgeOutput{
@@ -1054,7 +1067,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	var remaining struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Document(), &remaining); err == nil {
+	if err := s.client.postJSON(ctx, RoutePurgeCount, in.Filter.Body(nil), &remaining); err == nil {
 		out.Recount = &remaining.Count
 	}
 	return out, nil

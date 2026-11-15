@@ -1685,7 +1685,7 @@ module.exports = async function operatorMenus(H) {
       try {
         check('all history previews the same record count as a filter',
           await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
-          countBody && countBody.provider === '' && !d.getElementById('oc-export-download').disabled &&
+          countBody && countBody.filter.provider === '' && !d.getElementById('oc-export-download').disabled &&
           countCalls >= 1);
         click('#oc-pane [data-oc-download]');
         // The artifact streams, so the client cannot observe the transfer's
@@ -1705,10 +1705,10 @@ module.exports = async function operatorMenus(H) {
             await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
             !d.getElementById('oc-export-download').disabled);
           check('the count preview uses the same provider predicate as the download',
-            countBody && countBody.provider === 'prov-a' && countBody.model === '' &&
-            countBody.client === '' && countBody.conversation_id === '' &&
-            countBody.status_code === 0 && countBody.has_error === false &&
-            countBody.debug === false);
+            countBody && countBody.filter.provider === 'prov-a' && countBody.filter.model === '' &&
+            countBody.filter.client === '' && countBody.filter.conversation_id === '' &&
+            countBody.filter.status_code === 0 && countBody.filter.has_error === false &&
+            countBody.filter.debug === false);
           click('#oc-pane [data-oc-download]');
           check('the filtered download uses the exact previewed URL',
             JSON.stringify(downloads[1]) ===
@@ -1727,7 +1727,7 @@ module.exports = async function operatorMenus(H) {
           check('the mode, the receipt and the URL agree after a mode switch',
             JSON.stringify(downloads[downloads.length - 1]) ===
               JSON.stringify(['/metrics/export', '']) &&
-            countBody && countBody.provider === '');
+            countBody && countBody.filter.provider === '');
           choose('export-mode', 'filter');
           check('returning to filter mode restores the filter work',
             await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
@@ -1788,7 +1788,7 @@ module.exports = async function operatorMenus(H) {
           check('an age filter still lands its count after a round trip',
             await settleUntil(() => text('#oc-export-receipt') === '12 records · JSON, gzip', 3000) &&
             !d.getElementById('oc-export-download').disabled &&
-            !!seen && seen.before_ms > 0 && seen.after_ms === 0);
+            !!seen && seen.filter.before_ms > 0 && seen.filter.after_ms === 0);
           // The download must reuse the epoch the count measured, not the
           // current clock: otherwise the file describes a slightly later
           // window than the receipt the operator just read.

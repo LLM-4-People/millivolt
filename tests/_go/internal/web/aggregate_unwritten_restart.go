@@ -57,7 +57,7 @@ func TestKPIUnwrittenRingExactAcrossRestart(t *testing.T) {
 	purgedEarly.Client = "purge-me"
 	first.Record(purgedEarly)
 	waitTotals(t, first, 3)
-	if _, err := first.Clear(ctx, &storage.PurgeFilter{Client: "purge-me"}, nil); err != nil {
+	if _, err := first.Clear(ctx, &storage.PurgeFilter{Client: "purge-me"}, nil, nil); err != nil {
 		t.Fatalf("purge before restart: %v", err)
 	}
 	if got := first.Totals().Requests; got != 2 {
@@ -122,7 +122,7 @@ func TestKPIUnwrittenRingExactAcrossRestart(t *testing.T) {
 	livePurged.Client = "purge-me"
 	rec.Record(livePurged)
 	waitTotals(t, second, 5)
-	res, err := second.Clear(ctx, &storage.PurgeFilter{Client: "purge-me"}, buf)
+	res, err := second.Clear(ctx, &storage.PurgeFilter{Client: "purge-me"}, nil, buf)
 	if err != nil {
 		t.Fatalf("purge between polls: %v", err)
 	}

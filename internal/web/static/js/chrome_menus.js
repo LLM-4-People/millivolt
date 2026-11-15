@@ -344,7 +344,7 @@ function clearFilterActive(f) {
 // export module reads it rather than keeping a second copy.
 async function purgeCount(filter) {
   const doc = await operatorJsonBody('/admin/purge/count', {
-    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(filter),
+    method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({filter}),
   }, PURGE_COUNT_UNAVAILABLE);
   if (!isCount(doc.count)) throw new Error(doc.error || PURGE_COUNT_UNAVAILABLE);
   return doc.count;

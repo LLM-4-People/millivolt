@@ -79,7 +79,7 @@ func TestPurgeRebuildsTotals(t *testing.T) {
 	if s.Totals().Errors != 1 {
 		t.Fatalf("errors = %d, want 1", s.Totals().Errors)
 	}
-	if _, err := s.Clear(context.Background(), &storage.PurgeFilter{Provider: "p"}, nil); err != nil {
+	if _, err := s.Clear(context.Background(), &storage.PurgeFilter{Provider: "p"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if s.Totals().Requests != 0 || s.Totals().Errors != 0 {

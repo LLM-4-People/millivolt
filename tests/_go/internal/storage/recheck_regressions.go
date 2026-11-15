@@ -556,7 +556,7 @@ func TestRestoreAttemptsJSONInvariant(t *testing.T) {
 		if _, err := live.ExportWhere(t.Context(), PurgeFilter{HasError: true}, &buf); err != nil {
 			t.Fatalf("HasError export after attempts %q: %v", stored, err)
 		}
-		if _, err := live.Clear(t.Context(), &PurgeFilter{HasError: true}, metrics.NewBuffer(1)); err != nil {
+		if _, err := live.Clear(t.Context(), &PurgeFilter{HasError: true}, nil, metrics.NewBuffer(1)); err != nil {
 			t.Fatalf("HasError purge after attempts %q: %v", stored, err)
 		}
 	}

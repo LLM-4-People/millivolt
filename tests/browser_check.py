@@ -198,7 +198,7 @@ async def check(base, screenshot):
                 # server's purge fence handles pending asynchronous writes.
                 try:
                     if cleanup_needed:
-                        cleanup = await page.request.post(base + '/admin/purge', max_redirects=0, data={'client': label}, headers=operator_headers())
+                        cleanup = await page.request.post(base + '/admin/purge', max_redirects=0, data={'filter': {'client': label}}, headers=operator_headers())
                         if not cleanup.ok:
                             raise RuntimeError('fixture cleanup failed: ' + await cleanup.text())
                 finally:

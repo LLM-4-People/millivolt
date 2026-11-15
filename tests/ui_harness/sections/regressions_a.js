@@ -342,7 +342,7 @@ module.exports = async function regressionsA(H) {
       w.fetch = (url, opts) => {
         const u = String(url);
         if (u.includes('/admin/purge') && !u.includes('/count')) {
-          return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+          return Promise.resolve({ ok: true, json: async () => ({ deleted: 3, buffer_removed: 0 }) });
         }
         if (u.includes('/metrics/agg/chart')) {
           if (phase === 'hold') return new Promise((resolve, reject) => hold.chart.push({ resolve, reject }));

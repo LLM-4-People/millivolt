@@ -223,11 +223,12 @@ usage error rather than an omitted constraint. `--all` cannot be combined with
 a filter. The command always calls `/admin/purge/count` first and prints the
 count; only `--yes` calls `/admin/purge`, and an unfiltered purge also needs
 `--all`. Before deleting, the command re-counts and refuses when the total
-changed since the preview. That compares counts, not row identities, and rows
-committed after the re-count are still deleted: the check catches a population
-change, not every concurrent insert. A missing, fractional, negative or
-non-finite count is a failure, never zero. A genuinely bodyless purge is the
-proxy's delete-everything form.
+changed since the preview, then sends that count with the delete so the proxy
+checks it once more inside the delete transaction. That compares counts, not
+row identities, so the guarantee is a refused moved population rather than a
+row-identity binding. A missing, fractional, negative or non-finite count is a
+failure, never zero. A genuinely bodyless purge is the proxy's
+delete-everything form.
 
 `backup --out FILE` is required; there is no default path. `--config` and
 `--database` default to true (the command's settings surface) and are always

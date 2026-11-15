@@ -217,7 +217,7 @@ const pageOptions = {
         })});
       }
       if (url.includes('/admin/purge/count')) return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
-      if (url.includes('/admin/purge')) return Promise.resolve({ ok: true, json: async () => ({ok: true}) });
+      if (url.includes('/admin/purge')) return Promise.resolve({ ok: true, json: async () => ({deleted: 3, buffer_removed: 0}) });
       // /metrics/bootstrap: the real payload carries the snapshot PLUS the
       // state surfaces (kpi, dash, pause, throttle) - mirror the shapes the
       // dedicated /admin/ endpoints serve so state-driven UI stays exercised.

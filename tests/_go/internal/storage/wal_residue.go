@@ -49,7 +49,7 @@ func TestPurgeCheckpointsWAL(t *testing.T) {
 		t.Fatalf("fixture: marker missing from the WAL (main=%v)", main)
 	}
 
-	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: marker}, nil); err != nil {
+	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: marker}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if main, wal := walCarries(t, path, marker); main || wal {

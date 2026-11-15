@@ -338,11 +338,12 @@ Always run `purge_preview` first and pass its `preview_token` back verbatim.
 Stated plainly, because an operator needs to know the size of the remaining
 window:
 
-- **The re-check and the delete are two HTTP requests with no shared
-  transaction.** The count is re-checked immediately before deleting, and a
-  deletion is refused when it no longer matches. But rows committed between that
-  re-check and the delete are still removed without having been previewed. The
-  preview authorizes a *filter* and a *count*; it is not a lock on the row set.
+- **The count compares a population, not row identities.** The count is
+  re-checked immediately before deleting, and the reviewed count travels with
+  the delete, where the proxy counts it again inside the delete transaction and
+  refuses with 409 when it moved. Nothing un-previewed is deleted by a refused
+  call, but two different populations with the same row count are
+  indistinguishable, and a refusal means previewing again.
 - **A filter that reaches a captured request deletes its capture document too.**
   The preview and the deletion both say so in their output.
 

@@ -174,7 +174,7 @@ func TestFullPurgePersistsZeroTotals(t *testing.T) {
 		t.Fatal(err)
 	}
 	seedTotalsRows(t, s)
-	if _, err := s.Clear(t.Context(), nil, nil); err != nil {
+	if _, err := s.Clear(t.Context(), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

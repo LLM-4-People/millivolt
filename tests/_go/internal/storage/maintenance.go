@@ -25,7 +25,7 @@ func TestFullPurgeUsesMaintenanceBudget(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	result, err := s.Clear(t.Context(), nil, nil)
+	result, err := s.Clear(t.Context(), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("full purge under a short interactive timeout: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestPurgeExpiredMaintenanceDeadlineRollsBack(t *testing.T) {
 	}
 	result := make(chan error, 1)
 	go func() {
-		_, err := s.Clear(t.Context(), nil, b)
+		_, err := s.Clear(t.Context(), nil, nil, b)
 		result <- err
 	}()
 	select {

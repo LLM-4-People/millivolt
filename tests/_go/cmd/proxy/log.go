@@ -75,10 +75,11 @@ func TestLogFilterRejectsMalformedAndNullConstraints(t *testing.T) {
 	}
 	for _, route := range []string{"/admin/purge", "/admin/purge/count"} {
 		for _, body := range []string{
-			` `, `null`, `[]`, `{"provder":"target"}`, `{"provider":"target"} {}`,
-			`{"provider":"target","Provider":"unrelated"}`, `{"status_code":-1}`,
-			`{"provider":null,"has_error":true}`, `{"provider":"target","before_ms":null}`,
-			`{"before_ms":1,"after_ms":2}`, `{"debug":"true"}`,
+			` `, `null`, `[]`, `{"filter":{"provder":"target"}}`, `{"filter":{"provider":"target"}} {}`,
+			`{"filter":{"provider":"target","Provider":"unrelated"}}`, `{"filter":{"status_code":-1}}`,
+			`{"filter":{"provider":null,"has_error":true}}`, `{"filter":{"provider":"target","before_ms":null}}`,
+			`{"filter":{"before_ms":1,"after_ms":2}}`, `{"filter":{"debug":"true"}}`,
+			`{"provider":"target"}`, `{"filter":null}`, `{"filter":{"provider":"target"},"reviewed_count":-1}`,
 		} {
 			t.Run(route+body, func(t *testing.T) {
 				req := httptest.NewRequest(http.MethodPost, route, strings.NewReader(body))
@@ -94,7 +95,7 @@ func TestLogFilterRejectsMalformedAndNullConstraints(t *testing.T) {
 			})
 		}
 	}
-	for _, body := range []string{`{}`, `{"provider":""}`, `{"has_error":false}`} {
+	for _, body := range []string{`{}`, `{"filter":{}}`, `{"filter":{"provider":""}}`, `{"filter":{"has_error":false}}`, `{"reviewed_count":1}`} {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(body)))
 		if w.Code != http.StatusBadRequest {
@@ -149,7 +150,7 @@ func TestPurgeRoutesRejectQueryFilters(t *testing.T) {
 				{"case variant", "Provider=alpha", "", "unknown key Provider"},
 				{"bare key", "provider", "", "unknown key provider"},
 				{"malformed pair", "provider=%zz", "", "invalid query"},
-				{"unknown key with filter body", "inspect=1", `{"provider":"target"}`, "unknown key inspect"},
+				{"unknown key with filter body", "inspect=1", `{"filter":{"provider":"target"}}`, "unknown key inspect"},
 				{"unknown key before a malformed body", "provider=alpha", "not json", "unknown key provider"},
 			} {
 				for _, route := range []string{"/admin/purge", "/admin/purge/count"} {
@@ -174,7 +175,7 @@ func TestPurgeRoutesRejectQueryFilters(t *testing.T) {
 			// matching rows, and a genuinely query-less, body-less request still
 			// deletes everything.
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(`{"provider":"target"}`)))
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(`{"filter":{"provider":"target"}}`)))
 			if w.Code != http.StatusOK || b.Len() != 1 {
 				t.Fatalf("filtered purge: status=%d body=%q ring=%d, want 200 and one row", w.Code, w.Body.String(), b.Len())
 			}
@@ -215,7 +216,7 @@ func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			body := `{"provider":"target","conversation_id":"conversation","error_type":"upstream","after_ms":2000,"before_ms":3000}`
+			body := `{"filter":{"provider":"target","conversation_id":"conversation","error_type":"upstream","after_ms":2000,"before_ms":3000}}`
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge/count", strings.NewReader(body)))
 			if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"count":1}` {
@@ -473,10 +474,9 @@ func TestExportFilterKeysMatchPurgeFilterTags(t *testing.T) {
 }
 
 // TestPurgeResponseWireKeysStrict pins the /admin/purge response to exactly
-// {"ok": true}. The W15 drop removed the wire-only deleted and
-// buffer_removed counts (the store-level PurgeResult keeps them); the
-// count-focused tests never read the response body, so a re-added key must
-// redden on this strict decode instead of passing unnoticed.
+// deleted and buffer_removed, the store-level PurgeResult on the wire. A
+// re-added or renamed key must redden on this strict decode instead of passing
+// unnoticed by the count-focused tests, which never read the response body.
 func TestPurgeResponseWireKeysStrict(t *testing.T) {
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
@@ -491,26 +491,104 @@ func TestPurgeResponseWireKeysStrict(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for _, body := range []string{`{"provider":"neutral.example"}`, ""} {
+			for i, body := range []string{`{"filter":{"provider":"neutral.example"}}`, ""} {
 				w := httptest.NewRecorder()
 				mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(body)))
 				if w.Code != 200 {
 					t.Fatalf("purge %q = %d %s", body, w.Code, w.Body.String())
 				}
 				var purge struct {
-					OK bool `json:"ok"`
+					Deleted       int64 `json:"deleted"`
+					BufferRemoved int   `json:"buffer_removed"`
 				}
 				dec := json.NewDecoder(w.Body)
 				dec.DisallowUnknownFields()
 				if err := dec.Decode(&purge); err != nil {
 					t.Fatalf("strict decode of the purge response: %v (%s)", err, w.Body.String())
 				}
-				if !purge.OK {
-					t.Fatalf("purge response ok = false: %s", w.Body.String())
+				// The first deletion removes the only row; the second finds
+				// nothing left.
+				want := int64(0)
+				if durable && i == 0 {
+					want = 1
+				}
+				if purge.Deleted != want || purge.BufferRemoved != 1-i {
+					t.Fatalf("purge response deleted=%d buffer_removed=%d, want %d and %d: %s",
+						purge.Deleted, purge.BufferRemoved, want, 1-i, w.Body.String())
 				}
 			}
 			if b.Len() != 0 {
 				t.Fatalf("ring = %d, want both purges to clear it", b.Len())
+			}
+		})
+	}
+}
+
+// TestPurgeReviewedCountRefusesAMovedRowSet pins the preview binding: a
+// reviewed count that no longer matches the row set refuses the deletion with
+// 409 and deletes nothing, and the count is compared inside the delete
+// transaction rather than by a separate query. The matching count deletes and
+// reports both net counts.
+func TestPurgeReviewedCountRefusesAMovedRowSet(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			mux, b, s := logRoutesForTest(t, durable)
+			var recorder metrics.Recorder = b
+			if s != nil {
+				recorder = s.Recorder(b)
+			}
+			recorder.Record(&metrics.Record{ID: "reviewed-a", Provider: "target", StatusCode: 200, Start: time.Now()})
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Preview one row, then let a second matching row land.
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge/count",
+				strings.NewReader(`{"filter":{"provider":"target"}}`)))
+			if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"count":1}` {
+				t.Fatalf("preview = %d %s", w.Code, w.Body.String())
+			}
+			recorder.Record(&metrics.Record{ID: "reviewed-b", Provider: "target", StatusCode: 200, Start: time.Now()})
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stale := httptest.NewRecorder()
+			mux.ServeHTTP(stale, httptest.NewRequest(http.MethodPost, "/admin/purge",
+				strings.NewReader(`{"filter":{"provider":"target"},"reviewed_count":1}`)))
+			if stale.Code != http.StatusConflict {
+				t.Fatalf("stale reviewed count = %d %s, want 409", stale.Code, stale.Body.String())
+			}
+			if b.Len() != 2 {
+				t.Fatalf("refused purge removed live rows: ring=%d, want 2", b.Len())
+			}
+			if s != nil {
+				if n, err := s.CountWhere(t.Context(), storage.PurgeFilter{}); err != nil || n != 2 {
+					t.Fatalf("refused purge removed durable rows: n=%d err=%v", n, err)
+				}
+			}
+			ok := httptest.NewRecorder()
+			mux.ServeHTTP(ok, httptest.NewRequest(http.MethodPost, "/admin/purge",
+				strings.NewReader(`{"filter":{"provider":"target"},"reviewed_count":2}`)))
+			if ok.Code != 200 || b.Len() != 0 {
+				t.Fatalf("matching reviewed count = %d %s ring=%d, want 200 and an empty ring", ok.Code, ok.Body.String(), b.Len())
+			}
+			var deleted struct {
+				Deleted       int64 `json:"deleted"`
+				BufferRemoved int   `json:"buffer_removed"`
+			}
+			if err := json.Unmarshal(ok.Body.Bytes(), &deleted); err != nil {
+				t.Fatalf("decode: %v (%s)", err, ok.Body.String())
+			}
+			wantDurable := int64(0)
+			if durable {
+				wantDurable = 2
+			}
+			if deleted.Deleted != wantDurable || deleted.BufferRemoved != 2 {
+				t.Fatalf("deleted=%d buffer_removed=%d, want %d and 2", deleted.Deleted, deleted.BufferRemoved, wantDurable)
 			}
 		})
 	}

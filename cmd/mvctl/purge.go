@@ -29,7 +29,7 @@ func cmdPurge(ctx *Context) (Result, error) {
 		return exitUsage(errors.New("refusing an unfiltered purge; add a filter or pass --all"))
 	}
 	document := filter.Document()
-	var countBody any = document
+	var countBody any = filter.Body(nil)
 	if all {
 		countBody = nil
 	}
@@ -52,7 +52,8 @@ func cmdPurge(ctx *Context) (Result, error) {
 	}
 	// The delete is authorized by this run's preview, not by a count a previous
 	// invocation saw. Re-count immediately before deleting and refuse when the
-	// population moved: the operator confirmed the rows they were shown.
+	// population moved; the delete also carries the count so the proxy checks
+	// it again inside the delete transaction.
 	recount, err := purgeCount(ctx, countBody)
 	if err != nil {
 		return Result{Code: exitFailure, Data: result.Data}, fmt.Errorf("re-count before deleting: %w", err)
@@ -63,7 +64,9 @@ func cmdPurge(ctx *Context) (Result, error) {
 	}
 	deleteCtx, cancelDelete := ctx.bounded()
 	defer cancelDelete()
-	var deleteBody any = document
+	// The delete carries the count this run previewed, so the proxy refuses it
+	// if the population moved between the recount and the transaction.
+	var deleteBody any = filter.Body(&count)
 	if all {
 		deleteBody = nil
 	}

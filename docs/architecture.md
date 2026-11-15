@@ -565,9 +565,11 @@ and a rotated credential invalidates every outstanding preview. It carries its
 own expiry, enforced when the token is verified, so a preview authorizes a
 deletion only shortly after it was taken. A refusal discloses no count, because
 a refusal that reports the live count is a count oracle a model can retry its
-way through. The residual gap is stated rather than claimed away:
-the re-check and the delete are two requests with no shared transaction, so rows
-committed between them are removed un-previewed. Capture refuses to start without
+way through. The count is compared a second time inside the delete transaction
+in `Store.purgeTransaction`, so a population that moved refuses with 409 before
+any row is removed; the remaining limit is stated rather than claimed away: a
+count compares a population, not row identities, so a same-size different row
+set passes and a refusal needs a fresh preview. Capture refuses to start without
 durable storage, and checks a scope name against the vocabulary the proxy
 reports, because either way the session would report success and store nothing.
 Stopping a capture session deletes nothing, and a purge deletes the stored

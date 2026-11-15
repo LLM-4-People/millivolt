@@ -558,7 +558,7 @@ async def check(args):
         finally:
             try:
                 if cleanup_needed:
-                    response = await context.request.post(base + '/admin/purge', max_redirects=0, data={'client': label}, headers=operator_headers())
+                    response = await context.request.post(base + '/admin/purge', max_redirects=0, data={'filter': {'client': label}}, headers=operator_headers())
                     try:
                         require(response.status == 200, ('scoped fixture cleanup failed', response.status, label))
                     finally:

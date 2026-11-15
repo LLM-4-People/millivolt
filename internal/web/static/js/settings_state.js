@@ -640,7 +640,9 @@ async function deleteMatching() {
   if (!preview) return updateDelCount();
   if (!confirm(`Delete ${recPhrase(preview.count)} matching the selected filter?\n\nThis cannot be undone.`)) return;
   settingsStatus('deleting');
-  if (await purgeMetrics(preview.filter)) settingsStatus(recPhrase(preview.count) + ' deleted', 'ok');
+  // The rendered count travels with the delete: the proxy recounts it inside
+  // the delete transaction and refuses the call when the row set moved.
+  if (await purgeMetrics({filter: preview.filter, reviewed_count: preview.count})) settingsStatus(recPhrase(preview.count) + ' deleted', 'ok');
 }
 
 async function purgeAll() {
@@ -650,11 +652,13 @@ async function purgeAll() {
   if (await purgeMetrics(null)) settingsStatus('all metrics history deleted', 'ok');
 }
 
-// Confirmed success is the only path that clears UI state. The same gate
-// handles full/filtered deletion from either action, disables repeat
-// submits, and reports failures to the settings status line - the one
-// surface both actions live on.
-async function purgeMetrics(filter) {
+// Confirmed success is the only path that clears UI state. body is the purge
+// document ({filter, reviewed_count}) or null for the bodyless full delete. The
+// same gate handles full/filtered deletion from either action, disables repeat
+// submits, and reports failures to the settings status line - the one surface
+// both actions live on. A refused count is a distinct message: the server saw
+// a different row set than the preview and nothing was deleted.
+async function purgeMetrics(body) {
   const fail = 'could not delete records';
   if (_purgeBusy) return;
   _purgeBusy = true;
@@ -665,9 +669,9 @@ async function purgeMetrics(filter) {
   document.querySelectorAll('#settings-fields [data-purge="matching"] select').forEach(el => { el.disabled = true; });
   try {
     const options = {method: 'POST'};
-    if (filter) { options.headers = JSON_HEADERS; options.body = JSON.stringify(filter); }
+    if (body) { options.headers = JSON_HEADERS; options.body = JSON.stringify(body); }
     const result = await operatorJsonBody('/admin/purge', options, fail);
-    if (result.ok !== true) throw new Error(result.error || fail);
+    if (!isCount(result.deleted)) throw new Error(result.error || fail);
     _filterPreviews.clear();
     // The scoped block's preview text describes records that just ceased
     // to exist; the next sheet fill rebuilds it empty either way.
