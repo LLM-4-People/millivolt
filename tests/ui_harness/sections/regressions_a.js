@@ -316,6 +316,13 @@ module.exports = async function regressionsA(H) {
         check('a measured explorer zero renders as a real zero',
           d.querySelector('#xp-rail [data-xp-dim="provider"] .rail-n').textContent === '0' &&
           triggerValue() === '0');
+        // A same-scope repaint keeps the gallery offset: a background refresh
+        // must not throw the operator back to the top of a scrolled list.
+        w.eval('explorerAgg = {dim: "provider", scopeKey: scopeQS(), rail: {provider: 12}, total: 12, error_total: 0, scope: {matches: 12, errors: 0}, groups: Array.from({length: 12}, (_, i) => ({name: "g" + i + ".example", n: 12 - i, cost: 0, in: 0, out: 0, cache: 0, tools: 0, err_final: 0, rate_limit_requests: 0, cost_per_mtok: null, ttft_p50: null, ttft_p95: null, tps_p50: null, tps_p95: null}))}');
+        const gal = d.getElementById('xp-gallery');
+        gal.scrollTop = 96;
+        w.renderGallery(w.explorerState());
+        check('a same-scope repaint keeps the gallery scroll offset', gal.scrollTop === 96);
       } finally {
         w.fetch = savedFetch;
         w.navigateTo([]);

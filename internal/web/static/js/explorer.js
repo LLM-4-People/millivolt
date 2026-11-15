@@ -400,6 +400,11 @@ function renderGallery(st) {
   // The matching payload carries groups pre-sorted and pre-capped by the
   // server; the client applies no cuts or math.
   const gallery = $('xp-gallery');
+  // A repaint replaces the cards, and the gallery is its own scroller: a
+  // background refresh dropped the operator back to the top of a list they had
+  // scrolled. Keep the offset beside the focus identity and put it back with
+  // the new cards.
+  const scrollTop = gallery.scrollTop;
   const focus = captureFocus(gallery, el => {
     const key = el.closest('.xp-node[data-xp-key]')?.dataset.xpKey;
     return key == null ? null : `.xp-node[data-xp-key="${CSS.escape(key)}"]`;
@@ -445,6 +450,7 @@ function renderGallery(st) {
   // Only a changed gallery needs the post-layout sizing pass; an identical
   // payload leaves both the DOM and the layout untouched.
   if (updateSection('xp-gallery', cards)) {
+    if (scrollTop && gallery.scrollTop !== scrollTop) gallery.scrollTop = scrollTop;
     restoreFocus(restore);
     sizeGallery();
   }
