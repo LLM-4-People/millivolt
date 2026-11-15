@@ -234,17 +234,40 @@
     return indexPromise;
   };
 
-  const resultFor = (entry, term) => {
+  // Every indexed document is either a page (its lede and title) or a section
+  // (one h2 and its text). Flattening here keeps the ranking in one place and
+  // lets a result link straight to the section that matched.
+  const documents = () => {
+    const docs = [];
+    for (const entry of index) {
+      docs.push({
+        title: entry.title,
+        url: entry.url,
+        context: "Page",
+        body: [entry.description, entry.text, (entry.headings || []).map((h) => h.text).join(" ")]
+          .join(" "),
+      });
+      for (const section of entry.sections || []) {
+        docs.push({
+          title: section.heading,
+          url: entry.url + "#" + section.id,
+          context: entry.title,
+          body: section.text,
+        });
+      }
+    }
+    return docs;
+  };
+
+  const resultFor = (doc) => {
     const item = document.createElement("li");
     const link = document.createElement("a");
-    link.href = root + entry.url;
+    link.href = root + doc.url;
     const title = document.createElement("strong");
-    title.textContent = entry.title;
+    title.textContent = doc.title;
     link.appendChild(title);
-    const heading = (entry.headings || []).find((item) => item.text.toLowerCase().includes(term));
-    if (heading && heading.id) link.href = root + entry.url + "#" + heading.id;
     const detail = document.createElement("span");
-    detail.textContent = heading ? heading.text : entry.description;
+    detail.textContent = doc.context;
     link.appendChild(detail);
     item.appendChild(link);
     return item;
@@ -268,19 +291,21 @@
     }
     const terms = term.split(/\s+/).filter(Boolean);
     const matches = [];
-    for (const entry of index) {
-      const headings = (entry.headings || []).map((item) => item.text).join(" ");
-      const haystack = [entry.title, entry.description, headings, entry.text].join(" ").toLowerCase();
+    for (const doc of documents()) {
+      const haystack = doc.body.toLowerCase();
       if (!terms.every((part) => haystack.includes(part))) continue;
-      let score = 0;
-      if (entry.title.toLowerCase().includes(term)) score += 8;
-      if (headings.toLowerCase().includes(term)) score += 4;
-      if (entry.description.toLowerCase().includes(term)) score += 2;
-      matches.push({ entry, score });
+      const title = doc.title.toLowerCase();
+      let score = 1;
+      if (title.includes(term)) score += 8;
+      if (title.startsWith(term)) score += 4;
+      if (doc.context.toLowerCase().includes(term)) score += 2;
+      matches.push({ doc, score, title });
     }
-    matches.sort((a, b) => b.score - a.score || a.entry.title.localeCompare(b.entry.title));
-    const shown = matches.slice(0, 12);
-    shown.forEach(({ entry }) => results.appendChild(resultFor(entry, term)));
+    matches.sort((a, b) => b.score - a.score ||
+      (a.doc.context === "Page" ? -1 : b.doc.context === "Page" ? 1 : 0) ||
+      a.doc.title.localeCompare(b.doc.title));
+    const shown = matches.slice(0, 20);
+    shown.forEach(({ doc }) => results.appendChild(resultFor(doc)));
     empty.hidden = matches.length > 0;
     if (!matches.length) empty.textContent = "No matching page. Try a shorter term or browse the docs.";
     live.textContent = !matches.length
@@ -319,6 +344,13 @@
     input.addEventListener("input", () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => search(input.value), 90);
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowDown" || !results) return;
+      const first = results.querySelector("a");
+      if (!first) return;
+      event.preventDefault();
+      first.focus();
     });
   }
 
