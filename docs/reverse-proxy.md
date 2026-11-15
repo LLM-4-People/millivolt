@@ -115,7 +115,11 @@ plane. If another load balancer is in front of NGINX, list its addresses in
 `set_real_ip_from` and switch `real_ip_recursive` on, so the trusted chain
 matches reality; a hop that appends to `X-Forwarded-For` without being listed
 is ignored on the left of the real client. TLS encrypts traffic but does not
-authorize callers.
+authorize callers. A secure presentation also makes millivolt answer
+`Strict-Transport-Security: max-age=15552000` (180 days, no
+`includeSubDomains`) so a browser pins the scheme; NGINX's own `add_header`
+is not needed for it, and adding a second HSTS header at the edge would send
+two values.
 See NGINX's [access module](https://nginx.org/en/docs/http/ngx_http_access_module.html)
 and [TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html).
 

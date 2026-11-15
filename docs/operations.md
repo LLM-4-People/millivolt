@@ -1022,6 +1022,15 @@ header is a list: the canonical NGINX sample overwrites it with this server's
 `http` must not downgrade the cookie - hence any token, not the first. A
 loopback plain-HTTP dashboard keeps working
 while a TLS presentation gets the flag.
+
+Every response to a secure presentation also carries
+`Strict-Transport-Security: max-age=15552000` (180 days), set once at the
+outermost server wrapper from the same secure-presentation test. There is no
+`includeSubDomains`, because millivolt cannot know whether sibling or parent
+hostnames are TLS-capable. A plain-HTTP response carries no header at all
+(browsers ignore it there), so the dev instance is unaffected. The lifespan is
+deliberately under a quarter: moving the dashboard off TLS becomes reachable
+again within that window instead of pinning a browser for a year.
 Do not expose the listener over plaintext networks anyway. The login page
 served for unauthenticated dashboard visits exchanges the entered value for
 that cookie through `POST /session` and works without JavaScript; API

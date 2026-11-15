@@ -78,7 +78,7 @@ func newHTTPServer(handler http.Handler, readHeaderTimeout, idleTimeout time.Dur
 		// The deadline layer arms a per-request body-read bound and a per-write
 		// progress bound, so no handler can pin a connection forever while the
 		// server keeps its intentional zero ReadTimeout/WriteTimeout policy.
-		Handler:           deadlineHandler{next: handler, policy: policy},
+		Handler:           secureTransportHeaders(deadlineHandler{next: handler, policy: policy}),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		// No WriteTimeout: it would cut off long-lived SSE streams.

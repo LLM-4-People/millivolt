@@ -1039,8 +1039,9 @@ func TestApplySnapshotLimitGatedOnDurableStore(t *testing.T) {
 // went unnoticed. The tie is asserted behaviorally: the context the server
 // hands its listeners IS the caller's srvCtx, so cancelling it is observable
 // by every connection the server accepted. The delivery wrapper is asserted
-// through the constructor too: Handler must be deadlineHandler, not the raw
-// handler, and a request must still reach the wrapped handler.
+// through the constructor too: Handler must be the transport-header wrapper
+// around the delivery wrapper (a nil policy still refuses through the deadline
+// layer), and a request must still reach the wrapped handler.
 func TestNewHTTPServerContract(t *testing.T) {
 	cfg := config.Default()
 	cfg.ReadHeaderTimeout = 3 * time.Second
@@ -1052,15 +1053,18 @@ func TestNewHTTPServerContract(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	srv := newHTTPServer(next, cfg.ReadHeaderTimeout, cfg.IdleTimeout, deliveryPolicyFor(cfg), srvCtx)
-	wrapped, ok := srv.Handler.(deadlineHandler)
+	outer, ok := srv.Handler.(http.HandlerFunc)
 	if !ok {
-		t.Fatalf("Handler = %T, want the deadlineHandler delivery wrapper", srv.Handler)
+		t.Fatalf("Handler = %T, want the transport-header wrapper", srv.Handler)
 	}
 	rr := httptest.NewRecorder()
-	wrapped.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
+	outer.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "https://proxy.example/", nil))
 	if rr.Code != http.StatusNoContent || rr.Header().Get("X-Fixture-Handler") != "reached" {
 		t.Fatalf("wrapped handler = status %d header %q, want the constructor's handler reached",
 			rr.Code, rr.Header().Get("X-Fixture-Handler"))
+	}
+	if rr.Header().Get("Strict-Transport-Security") == "" {
+		t.Fatal("the transport-header layer did not run on a secure presentation")
 	}
 	if srv.ReadHeaderTimeout != cfg.ReadHeaderTimeout || srv.IdleTimeout != cfg.IdleTimeout {
 		t.Fatalf("timeouts = (%v, %v), want the boot config's (%v, %v)",
