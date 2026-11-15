@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import tempfile
 from pathlib import Path
 
@@ -199,7 +200,7 @@ def check_docs_site(checks: dict, errors: list[str]) -> None:
         errors.append("docs.yml: docs site changes need a pull request trigger")
     docs_text = all_run_text(docs)
     docs_commands = (
-        "python3 -m pip install -r requirements-docs.txt",
+        "python3 -m pip install --require-hashes -r requirements-docs.txt",
         "python3 -B -m tests.repository_check",
         "python3 -B -O -m tests.python.site",
         "python3 -B -O -m tests.python.repository",
@@ -290,7 +291,7 @@ def check_docs_site(checks: dict, errors: list[str]) -> None:
             errors.append("pages.yml: deploy needs pages: write and id-token: write")
     pages_text = all_run_text(pages)
     pages_commands = (
-        "python3 -m pip install -r requirements-docs.txt",
+        "python3 -m pip install --require-hashes -r requirements-docs.txt",
         "python3 -B -O -m tests.python.site",
         'python3 scripts/build_site.py --output site --base-url "$SITE_URL"',
     )
@@ -303,9 +304,11 @@ def check_docs_site(checks: dict, errors: list[str]) -> None:
             errors.append(f"workflows self-check: a commented-out pages command must fail: {command}")
 
 
-GOVULNCHECK_VERSION = "v1.1.4"
-GOVULNCHECK_COMMAND = (
-    f"go run golang.org/x/vuln/cmd/govulncheck@{GOVULNCHECK_VERSION} ./...")
+GOVULNCHECK_MODULE = "golang.org/x/vuln"
+# No @version: tools.go pins the scanner in this module, so go.sum covers the
+# binary that judges the tree. The module pin below keeps the bare command from
+# floating to whatever the proxy resolves at run time.
+GOVULNCHECK_COMMAND = f"go run {GOVULNCHECK_MODULE}/cmd/govulncheck ./..."
 DEPENDENCY_REVIEW_SETTINGS = {
     "fail-on-severity": "high",
     "fail-on-scopes": "runtime",
@@ -314,13 +317,21 @@ DEPENDENCY_REVIEW_SETTINGS = {
 
 
 def security_scan_errors(workflow: dict) -> list[str]:
-    """Pin the vulnerability scanner version and its whole-module target."""
+    """Pin the vulnerability scanner to the module graph and its whole target."""
     errors = []
     scan = next((step for step in steps((workflow.get("jobs") or {}).get("govulncheck", {}))
                  if step.get("name") == "Scan the Go module graph"), {})
     command = " ".join(str(scan.get("run", "")).split())
     if command != GOVULNCHECK_COMMAND:
         errors.append("security.yml: govulncheck must run exactly " + GOVULNCHECK_COMMAND)
+    # The command carries no @version, so the version it resolves to must be
+    # proven pinned here: a required module plus the tool import.
+    module = (ROOT / "go.mod").read_text(encoding="utf-8")
+    if not re.search(rf"^\s*{re.escape(GOVULNCHECK_MODULE)} v\S+$", module, re.M):
+        errors.append("go.mod: " + GOVULNCHECK_MODULE + " must be a pinned requirement")
+    tools = (ROOT / "tools.go").read_text(encoding="utf-8")
+    if f'import _ "{GOVULNCHECK_MODULE}/cmd/govulncheck"' not in tools:
+        errors.append("tools.go: must import " + GOVULNCHECK_MODULE + "/cmd/govulncheck")
     return errors
 
 
@@ -368,11 +379,11 @@ def check_security_review(errors: list[str]) -> None:
     errors.extend(security_scan_errors(security))
     for label, command in (
         ("floating the govulncheck version",
-         "go run golang.org/x/vuln/cmd/govulncheck@latest ./..."),
+         f"go run {GOVULNCHECK_MODULE}/cmd/govulncheck@latest ./..."),
         ("narrowing the govulncheck target",
-         f"go run golang.org/x/vuln/cmd/govulncheck@{GOVULNCHECK_VERSION} ./internal/..."),
+         f"go run {GOVULNCHECK_MODULE}/cmd/govulncheck ./internal/..."),
         ("dropping the govulncheck module target",
-         f"go run golang.org/x/vuln/cmd/govulncheck@{GOVULNCHECK_VERSION}"),
+         f"go run {GOVULNCHECK_MODULE}/cmd/govulncheck"),
     ):
         mutated = copy.deepcopy(security)
         scan = next(step for step in steps(mutated["jobs"]["govulncheck"])

@@ -732,7 +732,7 @@ def check_gate_proof(checks: dict, errors: list[str]) -> None:
         if missing_commands(docs_validation_run, ("set -euo pipefail",)):
             errors.append("check.yml: docs-only validation must keep set -euo pipefail as a command line")
         docs_commands = (
-            "python3 -m pip install -r requirements-docs.txt",
+            "python3 -m pip install --require-hashes -r requirements-docs.txt",
             "python3 -B -O -m tests.python.site",
             "python3 -B -O -m tests.python.repository",
             "python3 -B -O -m tests.python.workflows",
