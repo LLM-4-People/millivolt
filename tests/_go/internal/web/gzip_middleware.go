@@ -52,12 +52,22 @@ func TestGzipMiddleware(t *testing.T) {
 
 	// A fractional non-zero qvalue is acceptance (RFC 9110 §12.5.3) - the
 	// old parser refused every q=0.x, so pin the fix.
-	rec = get("br;q=1.0, gzip;q=0.5")
-	if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
-		t.Fatalf("gzip;q=0.5: Content-Encoding = %q, want gzip", enc)
+	for _, accept := range []string{
+		"br;q=1.0, gzip;q=0.5",
+		"gzip;q=0.5;level=1",
+		"*",
+		"*;q=0.5",
+		"br, *;q=0.1",
+		"gzip;level=1;q=0.5",
+		"gzip;Q=0.5",
+	} {
+		rec = get(accept)
+		if enc := rec.Header().Get("Content-Encoding"); enc != "gzip" {
+			t.Fatalf("Accept-Encoding %q: Content-Encoding = %q, want gzip", accept, enc)
+		}
 	}
 
-	for _, deny := range []string{"", "identity", "br", "gzip;q=0", "br;q=1.0, gzip;q=0.000", "gzip;q=high", "gzip;q=", "gzip;q=NaN", "gzip;q=+Inf", "gzip;q=-Inf", "gzip;q=2", "gzip;q=-0.5"} {
+	for _, deny := range []string{"", "identity", "br", "gzip;q=0", "br;q=1.0, gzip;q=0.000", "gzip;q=high", "gzip;q=", "gzip;q=NaN", "gzip;q=+Inf", "gzip;q=-Inf", "gzip;q=2", "gzip;q=-0.5", "*;q=0", "*;q=0.000", "gzip;q=0, *", "*;q=high"} {
 		rec := get(deny)
 		if enc := rec.Header().Get("Content-Encoding"); enc != "" {
 			t.Errorf("Accept-Encoding %q: Content-Encoding = %q, want none", deny, enc)
