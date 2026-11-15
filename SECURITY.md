@@ -5,12 +5,12 @@
 millivolt is a trusted-operator tool, not a multi-user security boundary. It
 has no authorization roles or tenant isolation. The whole dashboard is gated
 by the shared `MILLIVOLT_OPERATOR_TOKEN` environment credential and denied
-while it is unset (see [operator access](docs/operations.md#operator-access)):
+while it is unset (see [operator access](docs/routes.md#operator-access)):
 there is one operator identity, no per-user accounts and no audit trail of
 who acted. Only the `GET /healthz` liveness and `GET /readyz` readiness probes,
 the `POST /session` login handshake, origin-root brand/PWA assets and transparent
 inference stay open at the application gate; the canonical open-path list is
-[operator access](docs/operations.md#operator-access). The upstream API key is
+[operator access](docs/routes.md#operator-access). The upstream API key is
 forwarded for inference; it does not secure the dashboard or administration.
 
 The supplied listen address binds all interfaces. Prefer an explicit loopback

@@ -33,7 +33,7 @@ import (
 // path, so no request can reach the proxy's transparent inference catch-all.
 // The MCP tool layer exposes a subset; the backup, restore, drain and health
 // routes exist for the operator command in cmd/mvctl. The paths are the
-// canonical set documented in docs/operations.md#operator-and-data-routes.
+// canonical set documented in docs/routes.md#operator-and-data-routes.
 type Route string
 
 const (

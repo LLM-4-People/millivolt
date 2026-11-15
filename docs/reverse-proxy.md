@@ -7,7 +7,7 @@ application gate, only the unauthenticated `/healthz` and `/readyz` probes, the
 `POST /session` login handshake, origin-root brand/PWA files and transparent
 inference stay open, so a load balancer can health-check the service without
 holding the credential and a browser can reach the login handshake. The canonical
-open-path list is in [operator access](operations.md#operator-access); this
+open-path list is in [operator access](routes.md#operator-access); this
 guide only adds the ingress boundary. Read [Security](../SECURITY.md) first.
 
 ![Reverse proxy topology: the API client and dashboard browser reach NGINX over TLS, NGINX forwards over loopback to millivolt, and millivolt sends requests to the selected upstream](images/diagrams/reverse-proxy.svg)

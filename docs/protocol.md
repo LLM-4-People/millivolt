@@ -9,7 +9,7 @@ documents the canonical model and its loss policy. No endpoint/API-key registry
 is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
-([operator access](operations.md#operator-access)); only `/healthz` and
+([operator access](routes.md#operator-access)); only `/healthz` and
 `/readyz`, `/favicon.ico` (and the other origin-root brand/PWA files), the
 `/session` login handshake and the relay stay open.
 
@@ -18,7 +18,7 @@ and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
 The dashboard, embedded assets, `/admin/*` actions, `/healthz`, `/readyz`, the
 `/session` login handshake, the `/mcp` MCP endpoint and registered `/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
-[operations](operations.md#operator-and-data-routes). `GET /v1/models` and
+[routes and debugging](routes.md#operator-and-data-routes). `GET /v1/models` and
 `GET /models` use the discovery path described below. `POST /v1/chat/completions`,
 `POST /v1/responses` and `POST /v1/messages` select the client wire protocol.
 Other paths reach the relay catch-all and require valid routing headers; the
@@ -161,7 +161,7 @@ model, client, key hash, conversation or schedule are untouched. The operator
 console shows every policy, its schedule and its source. Request rates are strict sliding windows over the
 configured length, so no window ever admits more than the configured count;
 token rates remain continuously refilled budgets. See
-[Pause and Limits](operations.md#pause-and-limits) for charging and window
+[Pause and Limits](routes.md#pause-and-limits) for charging and window
 behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
@@ -543,7 +543,7 @@ structured error counts as the upstream error it observed. That is the
 provider's in-band stream failure the client aborted around, or a truncated
 stream whose completion marker never arrived - an abort must be classified by
 its outcome, never by which relay write happened to fail.
-See [metric interpretation](operations.md#dashboard-data-and-request-inspection)
+See [metric interpretation](routes.md#dashboard-data-and-request-inspection)
 for duration, first-token latency and throughput.
 
 ### Error storm protection

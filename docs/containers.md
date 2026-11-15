@@ -48,42 +48,8 @@ kill. `pids_limit` bounds process and thread amplification, not goroutines.
 The image carries a Dockerfile `HEALTHCHECK` that probes the unauthenticated
 `/healthz` through the binary's `-healthcheck` mode, so `docker compose ps`
 reports health without any operator credential. Both Compose files replace that
-probe with the readiness check below, which is strictly stronger.
-
-Liveness (`/healthz`) answers "the process is up and serving HTTP". Readiness
-(`/readyz`) additionally answers "this instance can persist": it fails with
-`503` and a reason when the durable writer is wedged. Two arms answer that: the
-oldest record on the queue has waited, or no flush has succeeded, for longer
-than one flush interval plus a progress window. The window is four flush
-intervals clamped to at least 30 seconds and at most two minutes; the record's
-own interval is allowed on top, so a record inside its own cadence never
-convicts and a long configured interval cannot postpone the verdict by more
-than that one cadence. Every clock starts on arrival: the oldest record on the
-queue ages the first arm, and while no flush has succeeded since boot the first
-accepted record ages the second one, so a writer that never picks records up is
-convicted all the same. Readiness also fails when
-any durable flush has failed since boot.
-Readiness stays red after the first failed flush even once writes recover,
-because a lost batch is worth an operator's attention; restart or investigate.
-With durable storage disabled both routes answer `200`, since there is no
-pipeline to wedge.
-
-The Compose files use `-readycheck` as the service healthcheck, so
-`docker compose ps` reports `healthy` only for an instance that can persist.
-Point an external load balancer or orchestrator at `/readyz` for the same
-signal; both probe routes are unauthenticated and answer the exact body
-`{"ok":true}` on success.
-
-Storage state is also scrapeable at `/metrics/prometheus` (behind the operator
-credential) as `llm_proxy_storage_enabled`,
-`llm_proxy_storage_queue_depth`, `llm_proxy_storage_queue_capacity`,
-`llm_proxy_storage_dropped_total{cause}` (`overflow`, `after_close`, `panic`,
-`flush_failed`), `llm_proxy_storage_flush_failed_total`,
-`llm_proxy_storage_last_flush_timestamp_seconds` and
-`llm_proxy_storage_wedged`. The block is rendered on every scrape, outside the
-memoized request aggregate, so queue and drop movement shows up immediately.
-Alert on `llm_proxy_storage_wedged`, on a rising `flush_failed` counter, and on
-`overflow` drops that are not explained by a burst.
+probe with the [readiness check](operations.md#health-and-readiness), which is
+strictly stronger.
 
 ```sh
 # Start or adopt a newly pulled image while preserving volumes.

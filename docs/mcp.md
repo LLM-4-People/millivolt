@@ -235,7 +235,7 @@ also in the tool descriptions, which is where a model reads them.
   `strftime('%s','now')*1000`, for example
   `WHERE started_at >= strftime('%s','now')*1000 - 3600000` for the last hour.
   Ready-to-run analysis SQL for exactly these time-ranged questions is
-  collected in the [operator recipes](operations.md#operator-recipes).
+  collected in the [operator recipes](routes.md#operator-recipes).
 - An **unknown filter value is an empty result, not an error.** A misspelled
   client, provider, model, tool, conversation or key produces a confident zero.
   Call `values` before filtering on one of those. Model filters take the
@@ -461,7 +461,7 @@ runs outside that harness on purpose:
 This page is mechanically pinned by `tests/python/mcp_docs.py`: the tool table
 must match the `addTool` registrations, every "<n> tools" mention must match
 that count, every route the client owns must appear in the
-[operations route table](operations.md#operator-and-data-routes), and this page
+[routes and debugging route table](routes.md#operator-and-data-routes), and this page
 may name no operator path the client does not own.
 
 The live integration test starts a private instance through

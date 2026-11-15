@@ -216,8 +216,9 @@ It includes enabled compatibility profiles without registering provider keys or
 upstream URLs. Your local `proxy.yaml` is ignored; do not commit it.
 
 Defaults, example profiles, and validation are defined in `internal/config`;
-Settings uses that same schema. See [operations](docs/operations.md) for
-overrides, reloads, backups, and restart requirements.
+Settings uses that same schema. See [configuration](docs/configuration.md) for
+overrides and reloads, and [containers and data](docs/containers.md) for
+backups and restart requirements.
 
 `VERSION` owns the application version; [versions and images](docs/containers.md#versions-and-images)
 covers publication and verification.

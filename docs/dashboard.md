@@ -25,7 +25,7 @@ recovery probe state. Provider incidents require all models active in the same
 window to have elevated errors. The banner shows that active-model evidence;
 its attempt percentage differs from the Errors chart's affected-request rate.
 It clears when protection recovers and can be hidden independently in Settings.
-See [configuration and behavior](operations.md#error-storm-protection).
+See [configuration and behavior](routes.md#error-storm-protection).
 The static captures below show no banner because the capture session has no
 active incident; the banner stays hidden until protection fires.
 
@@ -191,7 +191,7 @@ Model cards group configured model variants for comparison. Selecting one scopes
 the timeline and request log together. Model grouping is configuration-owned;
 stored model spellings remain available for exact export and deletion filters.
 Adapters can normalize those spellings before storage; see
-[request metadata](operations.md#request-rows-and-details).
+[request metadata](routes.md#request-rows-and-details).
 
 ![Model explorer with pseudonymous model groups and recorded usage metrics](images/explorer/models.png)
 
@@ -494,8 +494,9 @@ is committed, no rule is selected and no filter is armed.
 
 ![System section with restart available and the step list](images/console/system.png)
 
-See [operations](operations.md) for exact admission, persistence, filtering,
-restart and failure behavior before using these controls.
+See [routes and debugging](routes.md) for exact admission, filtering and
+failure behavior, [containers and data](containers.md) for restart, and
+[operations](operations.md) for persistence, before using these controls.
 
 ## Theme
 

@@ -318,7 +318,7 @@ gate, and push the fix. Do not leave `testing` or `main` red or start unrelated
 work on top of a failing run.
 
 For changes to configuration, update the Config/default/validation/schema owners
-and regenerate the example as described in [operations](docs/operations.md).
+and regenerate the example as described in [configuration](docs/configuration.md).
 Do not edit `proxy.yaml`: it may be a running operator's configuration.
 
 ## Isolated development
