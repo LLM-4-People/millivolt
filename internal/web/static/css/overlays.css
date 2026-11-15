@@ -50,10 +50,12 @@
   .drawer-body::-webkit-scrollbar, .st-fields::-webkit-scrollbar { width: 6px; }
 
   /* The one polite copy outcome. It sits above every modal surface because a
-     copy can be initiated from the drawer, Settings or a capture view. */
+     copy can be initiated from the drawer, Settings, the console or a dialog;
+     the storm and operator dialogs are the highest lifted surfaces (120/130),
+     so this rides the top of the z ladder. */
   .toast {
     position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px));
-    transform: translate(-50%, 10px); z-index: 100; max-width: min(420px, calc(100vw - 24px));
+    transform: translate(-50%, 10px); z-index: 140; max-width: min(420px, calc(100vw - 24px));
     padding: 7px 12px; border: 1px solid var(--border2); border-radius: 8px;
     background: var(--panel); color: var(--text); font: 11px var(--mono);
     box-shadow: 0 10px 30px rgba(var(--shadow-rgb), .45);
