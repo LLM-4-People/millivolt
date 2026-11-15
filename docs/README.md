@@ -6,42 +6,35 @@ that matches what you need to do.
 
 ## First ten minutes
 
-1. [Run the Compose quickstart](../README.md#quickstart).
-2. [Connect a client](../README.md#connect-a-client) and send one request.
-3. Open the [dashboard](dashboard.md) and find that request.
+1. [Install and first run](install.md) from Compose or a source checkout.
+2. Send one request on a client protocol and find it in the
+   [dashboard](dashboard.md).
+3. Read [configuration](configuration.md) before changing the example or a
+   setting.
 4. Read [security](../SECURITY.md) before exposing the listener.
+5. Keep [operations](operations.md) nearby for health, storage and the known
+   limits.
 
-## Choose a path
+## If you want to ...
 
-| Goal | Start with |
+| If you want to ... | Start with ... |
 | --- | --- |
-| Evaluate the proxy | [Protocol](protocol.md), [dashboard tour](dashboard.md) |
-| Operate a deployment | [Operations](operations.md), [operator CLI](cli.md), [reverse proxy](reverse-proxy.md), [performance](performance.md) |
-| Integrate a client or agent | [Adapters](adapters.md), [MCP server](mcp.md) |
-| Contribute a change | [Contributing](../CONTRIBUTING.md), [support](../SUPPORT.md) |
+| Install and send a first request | [Install and first run](install.md) |
+| Configure a setting, request override or provider alias | [Configuration](configuration.md) |
+| Expose the listener behind TLS or a network boundary | [Reverse proxy](reverse-proxy.md), [security](../SECURITY.md) |
+| Debug a 429 or a 5xx | [Routes and debugging](routes.md#error-storm-protection), [pause and limits](routes.md#pause-and-limits) |
+| Back up or restore | [Settings backup and restore](containers.md#settings-backup-and-restore), [image-only backup](containers.md#image-only-backup-and-restore), [online database backup](operations.md#storage-and-accounting) |
+| Upgrade or restart | [Versions and images](containers.md#versions-and-images), [reload, restart and shutdown](containers.md#reload-restart-and-shutdown) |
+| Integrate a client or translate between protocols | [Protocol](protocol.md), [adapters](adapters.md) |
+| Drive the operator plane from an LLM | [MCP server](mcp.md) |
+| Drive it from a terminal | [Operator CLI](cli.md) |
+| Contribute a change | [Contributing](../CONTRIBUTING.md), [architecture](architecture.md), [support](../SUPPORT.md) |
 
-## Guides
-
-- [Upstream compatibility and adapters](adapters.md) - OpenAI-compatible, Anthropic Messages, Cursor Connect, and token refresh.
-- [Reverse proxy](reverse-proxy.md) - protected ingress, credentials, and NGINX.
-- [MCP server](mcp.md) - the 22-tool operator API for LLM-driven analysis.
-- [Operator CLI](cli.md) - a human command-line client over the same operator routes.
-- [Container operation](containers.md#containers) - image selection, volumes, backups, and shutdown.
-
-## Reference
-
-- [Operations](operations.md) - configuration, persistence, routes, storage, performance, and limits.
-- [Performance and resource usage](performance.md) - current measured tables, method, commands, and limitations.
-- [Architecture](architecture.md) - ownership, invariants, and where each behavior lives.
-- [Versions and images](containers.md#versions-and-images) - version identity, promotion, tags, and verification.
-
-## Project
-
-- [What you get](../README.md#what-you-get) - the short feature overview.
-- [Contributing](../CONTRIBUTING.md) - development, checks, branch promotion, screenshots, and release policy.
-- [Security](../SECURITY.md) - exposure boundary, reporting, and supported versions.
-- [Releases](https://github.com/LLM-4-People/millivolt/releases) - published versions and notes.
-- [License](../LICENSE) - MIT terms and dependency notices.
+The [operations overview](operations.md) owns health, storage and the runtime
+cost model. Measurements live in [performance](performance.md); ownership and
+invariants live in [architecture](architecture.md). Project pages are
+[support](../SUPPORT.md), [releases](https://github.com/LLM-4-People/millivolt/releases),
+[license](../LICENSE) and [third-party notices](../THIRD_PARTY_NOTICES.md).
 
 ## Verification and limitations
 
