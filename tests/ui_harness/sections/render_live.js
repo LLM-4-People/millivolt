@@ -29,6 +29,21 @@ module.exports = async function renderLive(H) {
     })());
     check('the actions header has an accessible name',
       ths[13]?.getAttribute('aria-label') === 'Request actions');
+    check('an actionable status pill is a button, not a pointer-only span', (() => {
+      const rec = {client: 'c', provider: 'p', model: 'm', status_code: 0, live: true,
+        paused: true, throttled: false, stream: true, debug: true};
+      const host = d.createElement('div');
+      host.innerHTML = w.liveStatusCell(rec);
+      const throttled = d.createElement('div');
+      throttled.innerHTML = w.liveStatusCell({...rec, paused: false, throttled: true});
+      const debugOnly = d.createElement('div');
+      debugOnly.innerHTML = w.debugBadge({debug: true});
+      const all = [host, throttled, debugOnly].flatMap(box => [...box.querySelectorAll('button')]);
+      return host.querySelector('.pill.paused')?.tagName === 'BUTTON' &&
+        throttled.querySelector('.pill.throttled')?.tagName === 'BUTTON' &&
+        debugOnly.querySelector('.pill.debug')?.tagName === 'BUTTON' &&
+        all.length === 5 && all.every(b => b.type === 'button');
+    })());
     check('request cells clip and ellipsize only as a below-floor backstop',
       !!firstCell && w.getComputedStyle(firstCell).overflow === 'hidden' &&
       w.getComputedStyle(firstCell).textOverflow === 'ellipsis');

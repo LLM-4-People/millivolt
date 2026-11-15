@@ -119,6 +119,14 @@
   tr:hover td { background: var(--panel2); }
   td { color: var(--text); }
   .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; font-family: var(--mono); font-weight: 600; }
+  /* A pill that acts is a button, so it can be reached and pressed from the
+     keyboard: the UA button skin (border, fill, type ramp) is reset so the
+     token paints the same as a painted pill. */
+  button.pill {
+    border: 0; font-family: var(--mono); font-size: 10px; font-weight: 600;
+    line-height: normal; color: inherit;
+  }
+  .pill:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .pill.ok { background: color-mix(in srgb, var(--ok) var(--pill-tint), transparent); color: var(--ok); }
   .pill.err { background: color-mix(in srgb, var(--err) var(--pill-tint), transparent); color: var(--err); }
   .pill.warn { background: color-mix(in srgb, var(--warn) var(--pill-tint), transparent); color: var(--warn); }

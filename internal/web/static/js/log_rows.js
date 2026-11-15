@@ -143,20 +143,22 @@ function turnsTitle(r) {
 // the pill opens the capture's session for editing.
 function debugBadge(r) {
   if (!r || !r.debug) return '';
-  return ` <span class="pill debug" data-edit-debug title="full debug capture - click to edit the session">dbg</span>`;
+  return ` <button type="button" class="pill debug" data-edit-debug title="full debug capture - click to edit the session">dbg</button>`;
 }
 
 // liveStatusCell is the one owner of the in-flight status pill (log row +
 // drawer). Classification is statusClass(); the retry badge stays outside so
 // reqRow can concatenate it - the drawer's status row carries no retry badge,
 // only the debug pill above. The drawer's status row uses this helper directly.
+// The two actionable pills are buttons, because opening the hold and the
+// throttling rule is otherwise a pointer-only gesture.
 function liveStatusCell(r) {
   const sc = statusClass(r);
   if (sc === 'paused') {
-    return `<span class="pill paused" data-edit-pause title="held by operator pause - click to edit the hold">paused</span>` + debugBadge(r);
+    return `<button type="button" class="pill paused" data-edit-pause title="held by operator pause - click to edit the hold">paused</button>` + debugBadge(r);
   }
   if (sc === 'throttled') {
-    return `<span class="pill throttled" data-edit-limit title="queued by the proxy - not yet sent upstream; click to edit provider limits">throttled</span>` + debugBadge(r);
+    return `<button type="button" class="pill throttled" data-edit-limit title="queued by the proxy - not yet sent upstream; click to edit provider limits">throttled</button>` + debugBadge(r);
   }
   const title = sc === 'streaming' ? 'request in flight - streaming' : 'request in flight - pending';
   return `<span class="pill live" title="${title}">${sc}</span>` + debugBadge(r);
