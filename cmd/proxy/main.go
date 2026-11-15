@@ -56,7 +56,10 @@ var (
 	// config POINTER identity: a reload always publishes a fresh clone, so the
 	// cache is invalidated by the swap itself and never by a time window. It
 	// rides the liveCfg declaration because that pointer is its only key.
-	dashPayload config.PayloadMemo
+	// modelCanonMemo does the same for the model-rule snapshot the SSE observer
+	// reads per event.
+	dashPayload    config.PayloadMemo
+	modelCanonMemo config.ModelCanonMemo
 )
 
 // rejectUnless is the RFC 9110 method gate for mux handlers in this
@@ -409,10 +412,13 @@ func main() {
 	// Model canonicalization rules (config.CanonicalModel semantics) ride the
 	// bootstrap so the client mirror groups identically to the server fold;
 	// read live per request so a Settings save hot-applies on the next tick.
+	// The memo hands back one rule slice per live config: the observer's
+	// compiled-rule cache skips its whole-set compare only for a repeated
+	// backing array, and this provider is called per SSE event.
 	agg.ModelCanon = func() config.ModelCanon {
 		liveMu.Lock()
 		defer liveMu.Unlock()
-		return liveCfg.ModelCanon()
+		return modelCanonMemo.Canon(liveCfg)
 	}
 	buf.SetModelObserver(agg.ObserveModels)
 	proxySrv.ModelObserver = agg.ObserveModelNames

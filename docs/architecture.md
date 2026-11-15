@@ -594,7 +594,12 @@ the rules or re-sort thousands of names. The single-name memo owns the whole
 payload under one mutex keyed by the rules revision, so a repeat at event rate
 costs one lock and one lookup: 121-264 ns, 392 B/op and 4 allocs became 44-88
 ns, 24 B/op and 1 alloc, and 323-366 ns became 54-86 ns at the 64-rule maximum
-(`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`).
+(`BenchmarkObserveModelNameEvent`, `BenchmarkObserveModelNames4096`). The canon
+the observer reads is memoized per live config pointer, so consecutive events
+hand the compiled-rule cache the same backing array and it skips the whole-set
+compare; the wired shape holds 53 ns, 24 B/op and 1 alloc at the 64-rule maximum
+against 1062 ns, 4120 B/op and 2 allocs when the provider copied the rules per
+event (`BenchmarkObserveModelNameEventWired`).
 
 Pinned names are derived from the live holds, debug sessions and limit policies,
 never accumulated, so a removed document releases its scope. The derivation
