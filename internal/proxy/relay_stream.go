@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -131,12 +130,18 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	// can no longer prove a complete document and the lines join verbatim.
 	var dataHead []byte
 	var headFull bool
+	// head spans the same bytes as dataHead for the completeness verdict.
+	var head headScan
+	resetHead := func() {
+		dataHead = dataHead[:0]
+		headFull = false
+		head = headScan{}
+	}
 	// noteDataHead records one complete client-visible line. A blank line
 	// closes the event and clears the head; a field line is not payload.
 	noteDataHead := func(line []byte) {
 		if len(bytes.TrimSpace(line)) == 0 {
-			dataHead = dataHead[:0]
-			headFull = false
+			resetHead()
 			return
 		}
 		payload, isData := sse.DataPayload(line)
@@ -154,13 +159,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return
 		}
 		dataHead = append(dataHead, payload...)
+		head.add(payload)
 	}
 	// separateBefore is the one separator predicate: a data line gets a
 	// synthetic blank boundary only when the current head is already a
-	// complete document (valid JSON) or the line is the [DONE] sentinel.
-	// Otherwise it is a continuation line of a multi-line payload. A separator
-	// retires the completed head, so the next note starts the new event
-	// instead of accumulating a second document onto the old one.
+	// complete document or the line is the [DONE] sentinel. Otherwise it is a
+	// continuation line of a multi-line payload. A separator retires the
+	// completed head, so the next note starts the new event instead of
+	// accumulating a second document onto the old one.
 	separateBefore := func(line []byte) bool {
 		payload, isData := sse.DataPayload(line)
 		if !isData {
@@ -172,11 +178,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		if headFull || len(dataHead) == 0 {
 			return false
 		}
-		if !sse.DonePayload(payload) && !json.Valid(bytes.TrimSpace(dataHead)) {
+		if !sse.DonePayload(payload) && !head.complete() {
 			return false
 		}
-		dataHead = dataHead[:0]
-		headFull = false
+		resetHead()
 		return true
 	}
 	// appendHeld frames one complete line into the withheld region, starting a
@@ -253,8 +258,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		out.Reset()
 		hold = hold[:0]
-		dataHead = dataHead[:0]
-		headFull = false
+		resetHead()
 		holding = false
 		if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
 			clientGone()
@@ -458,7 +462,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		raw := make([]byte, 0, len(eventName)+len(eventBody))
 		raw = append(raw, eventName...)
 		raw = append(raw, eventBody...)
-		for _, line := range bytes.Split(raw, []byte("\n")) {
+		// Every buffered line ends with its newline; trim the final one so the
+		// split yields lines only. A trailing empty element would read as a
+		// blank boundary and reset the head the document is still inside.
+		for _, line := range bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n")) {
 			noteDataHead(line)
 		}
 		out.Write(raw)
@@ -907,6 +914,72 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			return rescueNone
 		}
 	}
+}
+
+// headScan tracks whether the data head accumulated for the event on the wire
+// is already one complete JSON document. separateBefore runs for every data
+// line, so re-validating the whole head each time is quadratic in the line
+// count; the scan instead costs linear time over each new payload and keeps a
+// constant-size state: structural depth, open string, and escape (a raw quote
+// inside a string value must not look like a document boundary). It replaces
+// the earlier json.Valid call, whose verdict it reaches for a closed document
+// and for a bare scalar, without its per-line rescan.
+type headScan struct {
+	depth    int
+	inString bool
+	escape   bool
+	content  bool
+	// last is the last significant byte outside whitespace: a head ending in
+	// ',' or ':' is still a member fragment, not a document, however balanced
+	// its brackets are.
+	last byte
+}
+
+// add feeds the bytes of one complete data payload.
+func (h *headScan) add(b []byte) {
+	for _, c := range b {
+		if h.escape {
+			h.escape = false
+			h.last = c
+			continue
+		}
+		if h.inString {
+			switch c {
+			case '\\':
+				h.escape = true
+			case '"':
+				h.inString = false
+			}
+			h.last = c
+			continue
+		}
+		switch c {
+		case '"':
+			h.inString = true
+			h.content = true
+		case '{', '[':
+			h.depth++
+			h.content = true
+		case '}', ']':
+			if h.depth > 0 {
+				h.depth--
+			}
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			h.content = true
+		}
+		h.last = c
+	}
+}
+
+// complete reports whether the head ends as one closed document: content seen,
+// no open string, every structural bracket closed, and a final significant byte
+// that ends a value rather than a member separator. A mismatched bracket pair
+// still counts as closed, which over-separates rather than joining two
+// documents into one payload a parser would drop.
+func (h *headScan) complete() bool {
+	return h.content && h.depth == 0 && !h.inString && h.last != ',' && h.last != ':'
 }
 
 // emitDegenerateResponses replaces a withheld Responses terminal region with a

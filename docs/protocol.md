@@ -384,7 +384,9 @@ with an error. Relay framing follows SSE's own join rule: the data lines of one
 event are joined with a newline, so a multi-line (pretty-printed) payload stays
 one event and a synthetic blank separator is inserted only when the event's
 joined data is already one complete JSON document, or before the `[DONE]`
-sentinel. Two single-line events a provider sent without a separator therefore
+sentinel. The completeness check is incremental, so one long event costs linear
+time in its bytes rather than quadratic in its line count. Two single-line
+events a provider sent without a separator therefore
 stay two events instead of merging into an unparseable payload.
 Non-streaming quality retries may make another upstream request;
 the adopted attempt's response is spooled under the fixed 1 MiB quality buffer

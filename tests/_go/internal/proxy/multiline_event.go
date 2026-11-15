@@ -7,13 +7,17 @@ package proxy
 // before the [DONE] sentinel.
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -50,6 +54,62 @@ func assertParseableEvents(t *testing.T, body string) int {
 }
 
 func jsonValid(s string) bool { return json.Valid([]byte(s)) }
+
+// prettyEventLines builds one non-terminal event whose single JSON document is
+// split over `lines` data lines of roughly `payload/lines` bytes each.
+func prettyEventLines(payload, lines int) []byte {
+	per := payload / lines
+	var b strings.Builder
+	b.WriteString("data: {\n")
+	for i := 0; i < lines; i++ {
+		fmt.Fprintf(&b, "data:   \"k%06d\":\"%s\",\n", i, strings.Repeat("x", per))
+	}
+	b.WriteString("data:   \"end\":true\n")
+	b.WriteString("data: }\n\n")
+	return []byte(b.String())
+}
+
+// streamPrettyBodyTime relays body through streamBody and returns the client
+// wire plus the elapsed relay time.
+func streamPrettyBodyTime(t *testing.T, body []byte) (string, time.Duration) {
+	t.Helper()
+	s := New(config.Default(), metrics.Noop{})
+	rec := &metrics.Record{StatusCode: http.StatusOK}
+	var uerr upstreamErrorRescue
+	w := httptest.NewRecorder()
+	start := time.Now()
+	s.streamBody(context.Background(), w, &splitChunkReader{chunks: [][]byte{body}}, rec, false, false, &uerr, ir.Chat)
+	return w.Body.String(), time.Since(start)
+}
+
+// TestStreamDataHeadScanIsLinearInLines pins R1-11: the completeness verdict
+// that decides a synthetic separator used to re-validate the whole accumulated
+// head with json.Valid on every data line, so one event cost time quadratic in
+// its line count (a 16 KiB event split over 4000 lines took ~12x the time of
+// the same bytes over 1000 lines). Four times the lines must stay near four
+// times the work, and the wire must still parse event by event.
+func TestStreamDataHeadScanIsLinearInLines(t *testing.T) {
+	const payload = 16 << 10
+	best := func(lines int) time.Duration {
+		body := prettyEventLines(payload, lines)
+		var fastest time.Duration
+		for i := 0; i < 5; i++ {
+			got, took := streamPrettyBodyTime(t, body)
+			assertParseableEvents(t, got)
+			if i == 0 || took < fastest {
+				fastest = took
+			}
+		}
+		return fastest
+	}
+	small := best(1000)
+	large := best(4000)
+	ratio := float64(large) / float64(small)
+	t.Logf("1000 lines %v, 4000 lines %v, ratio %.1fx for 4x the lines", small, large, ratio)
+	if ratio >= 8 {
+		t.Fatalf("4x the lines cost %.1fx: the head completeness is being recomputed per line", ratio)
+	}
+}
 
 func TestStreamPrettyPrintedTerminalEventStaysOneEvent(t *testing.T) {
 	frames := `data: {"id":"A","choices":[{"delta":{"content":"hello"}}]}` + "\n\n" +
