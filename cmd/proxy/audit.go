@@ -13,9 +13,10 @@ import (
 // and restore change state that no request log would reconstruct, so each of
 // them emits exactly one line per terminal outcome: the values an operator or a
 // log reader needs to tell what was asked for and what happened, including when
-// the response itself was lost. Fields are key/value pairs rendered as
-// key="value" so a value carrying a space or an equals sign stays one token;
-// an odd trailing field is a programming error and is rendered bare.
+// the response itself was lost. Fields are key/value pairs, each value rendered
+// with strconv.Quote so a space, an equals sign, a quote or a newline stays one
+// token on one physical line; an odd trailing field is a programming error and
+// is rendered as an empty value.
 func auditLog(action string, fields ...any) {
 	var b strings.Builder
 	b.WriteString("audit: ")
@@ -23,13 +24,12 @@ func auditLog(action string, fields ...any) {
 	for i := 0; i < len(fields); i += 2 {
 		b.WriteByte(' ')
 		fmt.Fprint(&b, fields[i])
-		b.WriteString(`="`)
+		b.WriteByte('=')
 		if i+1 < len(fields) {
-			fmt.Fprintf(&b, "%v", fields[i+1])
+			b.WriteString(strconv.Quote(fmt.Sprint(fields[i+1])))
 		} else {
-			fields = append(fields, "")
+			b.WriteString(`""`)
 		}
-		b.WriteByte('"')
 	}
 	logging.Printf("", "%s", b.String())
 }

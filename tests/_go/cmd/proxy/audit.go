@@ -33,6 +33,27 @@ func TestAuditLogShape(t *testing.T) {
 	}
 }
 
+// TestAuditLogEscapesValueContent pins the one-line, one-token guarantee: a
+// client label may carry a newline and an error a quote, and neither may split
+// the record or break the quoting.
+func TestAuditLogEscapesValueContent(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	auditLog("purge", "outcome", "ok", "filter", "client=alpha\nbeta", "error", `a"b`)
+	got := buf.String()
+	if n := strings.Count(strings.TrimSuffix(got, "\n"), "\n"); n != 0 {
+		t.Fatalf("audit line spans %d physical lines: %q", n+1, got)
+	}
+	if _, after, ok := strings.Cut(got, "audit: "); ok {
+		got = "audit: " + strings.TrimSpace(after)
+	}
+	want := `audit: purge outcome="ok" filter="client=alpha\nbeta" error="a\"b"`
+	if got != want {
+		t.Fatalf("audit line = %q, want %q", got, want)
+	}
+}
+
 // TestDescribeFilter pins the audit rendering of a purge selection and its nil
 // case: the bodyless full deletion must read "all", and a real filter must name
 // exactly the constraints, never a JSON blob.
