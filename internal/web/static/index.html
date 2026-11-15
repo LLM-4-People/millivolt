@@ -289,7 +289,7 @@ try {
 <section class="st-sheet" id="settings-sheet" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="settings-title">
   <div class="st-hd">
     <h3 id="settings-title">Settings</h3>
-    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" oninput="filterSettings()" aria-label="find a setting" aria-controls="settings-fields" aria-describedby="settings-count">
+    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" oninput="filterSettings()" aria-label="find a setting" aria-controls="settings-fields" aria-describedby="settings-pane-hd">
     <button class="btn" type="button" id="btn-settings-close" onclick="closeSettings()" aria-label="close settings">✕<span class="d-key" aria-hidden="true">esc</span></button>
   </div>
   <div class="st-body">
@@ -298,7 +298,7 @@ try {
       <div class="st-live" id="settings-live"></div>
     </div>
     <div class="st-main">
-      <div class="st-pane-hd" id="settings-pane-hd"></div>
+      <div class="st-pane-hd" id="settings-pane-hd" aria-live="polite"></div>
       <div class="st-fields" id="settings-fields"></div>
     </div>
   </div>
