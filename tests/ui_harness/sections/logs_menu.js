@@ -5,6 +5,16 @@
 module.exports = async function logsMenu(H) {
   const {check, d, mkRec, settleUntil, w} = H;
 
+  const q = sel => d.querySelector(sel);
+  // The pane is repainted by the page's own poll, so a press waits for its node
+  // instead of dereferencing whatever the last render left behind.
+  const clickWait = async sel => {
+    await settleUntil(() => !!q(sel));
+    const el = q(sel);
+    el.click();
+    return el;
+  };
+
   const savedRecords = w.eval('lastData && lastData.records');
   const savedFetch = w.fetch;
   const savedDownload = w.triggerDownload;
@@ -87,31 +97,31 @@ module.exports = async function logsMenu(H) {
     d.body.appendChild(host);
     w.populateFilterMenu('del');
 
-    d.querySelector('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]').click();
+    await clickWait('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]');
     // A mode switch invalidates the count, so the receipt asks for a filter
     // rather than showing the unfiltered total beside a download that would
     // act on a different predicate.
     check('filter mode without an active filter asks for one and disables download',
       await settleUntil(() =>
-        d.getElementById('oc-export-receipt').textContent === 'choose a filter to preview the export', 3000) &&
-      d.querySelector('#oc-pane [data-oc-download]').disabled);
-    const exportValues = dim => {
-      d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+        q('#oc-export-receipt')?.textContent === 'choose a filter to preview the export' &&
+        q('#oc-pane [data-oc-download]')?.disabled === true, 3000));
+    const exportValues = async dim => {
+      await clickWait(`#oc-pane [data-oc-filter-pick="${dim}"]`);
       const values = [...d.querySelectorAll(`#oc-pane [data-oc-filter-value="${dim}"]`)]
         .map(row => row.dataset.ocValue).filter(value => value !== '');
-      d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+      q(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
       return values;
     };
     const delValues = dim => [...d.getElementById('del-' + dim).options]
       .map(option => option.value).filter(value => value !== '');
     check('settings delete and console export derive the same provider values',
-      JSON.stringify(exportValues('provider')) === JSON.stringify(delValues('provider')));
+      JSON.stringify(await exportValues('provider')) === JSON.stringify(delValues('provider')));
     check('settings delete and console export derive the same model values',
-      JSON.stringify(exportValues('model')) === JSON.stringify(delValues('model')));
+      JSON.stringify(await exportValues('model')) === JSON.stringify(delValues('model')));
     check('settings delete and console export derive the same client values',
-      JSON.stringify(exportValues('client')) === JSON.stringify(delValues('client')));
+      JSON.stringify(await exportValues('client')) === JSON.stringify(delValues('client')));
     check('settings delete and console export derive the same status values',
-      JSON.stringify(exportValues('status')) === JSON.stringify(delValues('status')));
+      JSON.stringify(await exportValues('status')) === JSON.stringify(delValues('status')));
     // Exporting history is the section's purpose, and after a restart the
     // live ring is empty while the server still knows what ran. A dimension
     // fed only from the ring would have nothing to offer and no way to type.
@@ -122,25 +132,25 @@ module.exports = async function logsMenu(H) {
         throttles: []});
       w.eval('lastData.records = []');
       w.openOperatorConsole('export');
-      d.querySelector('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]').click();
-      const offered = dim => {
-        d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+      await clickWait('#oc-pane [data-oc-choice="export-mode"][data-oc-value="filter"]');
+      const offered = async dim => {
+        await clickWait(`#oc-pane [data-oc-filter-pick="${dim}"]`);
         const values = [...d.querySelectorAll(`#oc-pane [data-oc-filter-value="${dim}"]`)]
           .map(row => row.dataset.ocValue).filter(value => value !== '');
-        d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
+        q(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
         return values;
       };
       check('an empty record ring still offers the server provider and client vocabularies',
-        offered('provider').includes('p') && offered('client').includes('c'));
+        (await offered('provider')).includes('p') && (await offered('client')).includes('c'));
       // offered() repaints through the section, which closes the picker, so
       // open one directly and read the fallback field it renders.
-      const typedField = dim => {
-        d.querySelector(`#oc-pane [data-oc-filter-pick="${dim}"]`).click();
-        const field = d.querySelector(`#oc-pane [data-oc-filter-custom="${dim}"]`);
+      const typedField = async dim => {
+        await clickWait(`#oc-pane [data-oc-filter-pick="${dim}"]`);
+        const field = q(`#oc-pane [data-oc-filter-custom="${dim}"]`);
         return !!field;
       };
       check('a quiet proxy can still filter an export by a typed model or provider',
-        typedField('model') && typedField('provider') && typedField('client'));
+        await typedField('model') && await typedField('provider') && await typedField('client'));
       w.eval('lastData.records = ' + JSON.stringify(savedRecords || null));
     }
 
@@ -289,8 +299,8 @@ module.exports = async function logsMenu(H) {
       }
       return savedFetch(url, options);
     };
-    d.querySelector('#oc-pane [data-oc-filter-pick="provider"]').click();
-    d.querySelector('#oc-pane [data-oc-filter-value="provider"][data-oc-value="p"]').click();
+    await clickWait('#oc-pane [data-oc-filter-pick="provider"]');
+    await clickWait('#oc-pane [data-oc-filter-value="provider"][data-oc-value="p"]');
     check('the export count waits behind the debounce', countCalls === 0);
     check('the debounced export count lands and paints its receipt',
       await settleUntil(() => countCalls === 1 &&
@@ -303,20 +313,20 @@ module.exports = async function logsMenu(H) {
 
     let downloaded = null;
     w.triggerDownload = (href, download) => { downloaded = { href, download }; };
-    d.querySelector('#oc-pane [data-oc-download]').click();
+    await clickWait('#oc-pane [data-oc-download]');
     // The artifact streams, so this code cannot observe its status. The phrase
     // reports the action taken, not an outcome nobody watched.
     check('download uses the previewed filter URL and reports the request it made',
       downloaded && downloaded.href === '/metrics/export?provider=p' && downloaded.download === '' &&
-      !d.querySelector('#oc-pane [data-oc-download]').disabled &&
+      q('#oc-pane [data-oc-download]')?.disabled === false &&
       d.getElementById('oc-change').textContent === 'downloading 3 records');
 
-    d.querySelector('#oc-pane [data-oc-reset-export]').click();
+    await clickWait('#oc-pane [data-oc-reset-export]');
     check('reset returns the export section to all history and recounts it',
       await settleUntil(() =>
-        /^\d+ records? · JSON, gzip$/.test(d.getElementById('oc-export-receipt').textContent), 3000) &&
-      d.querySelector('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
-        .getAttribute('aria-pressed') === 'true');
+        /^\d+ records? · JSON, gzip$/.test(d.getElementById('oc-export-receipt').textContent) &&
+        q('#oc-pane [data-oc-choice="export-mode"][data-oc-value="all"]')
+          ?.getAttribute('aria-pressed') === 'true', 3000));
   } finally {
     w.fetch = savedFetch;
     w.triggerDownload = savedDownload;

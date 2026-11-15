@@ -4,6 +4,13 @@ module.exports = async function selectionDrawer(H) {
   const {check, d, fire, mkRec, rows, settleUntil, w} = H;
   const state = H.state;
 
+  // A repaint can replace a control between the query and the press, so a press
+  // waits for its node first.
+  const clickWait = async sel => {
+    await settleUntil(() => !!d.querySelector(sel));
+    d.querySelector(sel).click();
+  };
+
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
   // folds missed records exactly like the stream does, and replay-tolerant
   // delivery (the same record twice) must not duplicate the row.
@@ -226,7 +233,7 @@ module.exports = async function selectionDrawer(H) {
       check('an out-of-scope record says so and disables both arrows',
         !!d.querySelector('#drawer-body [data-drawer-scope]') &&
         d.getElementById('drawer-prev').disabled && d.getElementById('drawer-next').disabled);
-      d.querySelector('#drawer-body [data-drawer-scope]').click();
+      await clickWait('#drawer-body [data-drawer-scope]');
       await settleUntil(() => !!d.querySelector(`#tbl-requests tr.exp-row[data-id="${firstId}"]`));
       check('the way back restores the record to the window and the arrows with it',
         !/Not in the current scope/.test(d.getElementById('drawer-body').textContent) &&
@@ -236,7 +243,7 @@ module.exports = async function selectionDrawer(H) {
 
     // The log retry-sub rows open the same attempt mode (their index rides
     // data-attempt).
-    d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();
+    await clickWait('.retry-toggle[data-retry-for="att-open"]');
     const sub = () => d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="1"]');
     check('the retry-sub rows carry their attempt index', !!sub() && !sub().hidden);
     const subRow = sub();
@@ -300,7 +307,7 @@ module.exports = async function selectionDrawer(H) {
     d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
     check('Escape closes the drawer and clears the attempt mode',
       d.getElementById('drawer').hidden && w.eval('drawerId') === null && attemptSel() === null);
-    d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();
+    await clickWait('.retry-toggle[data-retry-for="att-open"]');
     const sub0 = d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="0"]');
     if (sub0) sub0.click();
     check('a fresh open from a sub-row click lands in attempt mode',
@@ -331,13 +338,13 @@ module.exports = async function selectionDrawer(H) {
     const listPill = d.querySelector('.attempt-link .pill');
     check('the drawer retry list classes the degenerate 200 attempt warn',
       listPill.classList.contains('warn') && !listPill.classList.contains('err'));
-    d.querySelector('.attempt-link').click();
+    await clickWait('.attempt-link');
     const viewPill = [...d.querySelectorAll('#drawer-body .detail-kv')]
       .find(el => el.querySelector('.k')?.textContent === 'status')?.querySelector('.v .pill');
     check('the attempt view status pill wears the same class',
       viewPill && viewPill.classList.contains('warn') && !viewPill.classList.contains('err'));
     w.closeDrawer();
-    d.querySelector('.retry-toggle[data-retry-for="att-200"]').click();
+    await clickWait('.retry-toggle[data-retry-for="att-200"]');
     const subPill = d.querySelector('tr.retry-sub[data-retry-of="att-200"] .pill');
     check('the log sub-row pill wears the same shared class',
       subPill && subPill.classList.contains('warn') && !subPill.classList.contains('err'));

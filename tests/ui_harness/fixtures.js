@@ -171,6 +171,10 @@ const pageOptions = {
         (typeof k === 'string' ? () => {} : undefined)),
       set: () => true,
     });
+    // Read a page global for a stub document at request time.
+    const liveOperator = name => {
+      try { return window.eval(name) || {}; } catch { return {}; }
+    };
     window.fetch = (url, opts) => {
       const u = typeof url === 'string' ? url : '';
       state.initialFetches.push(u);
@@ -234,6 +238,11 @@ const pageOptions = {
         const brecs = bsince
           ? (bsameFeed ? bp.records.filter(r => r.__seq > Number(bsince)) : [])
           : bp.records;
+        const pollDocs = {
+          pause: { ok: true, ...liveOperator('pauseState'), server_ms: Date.now() },
+          throttle: { ok: true, ...liveOperator('throttleState'), server_ms: Date.now() },
+          debug: { ok: true, ...liveOperator('debugState'), server_ms: Date.now() },
+        };
         return Promise.resolve({ ok: true, json: async () => ({
           records: JSON.parse(JSON.stringify(brecs)),
           in_flight_records: bp.in_flight_records,
@@ -259,9 +268,11 @@ const pageOptions = {
           model_canon: {rules: []},
           dash: {},
           storage: { enabled: true, dropped: 0, totals_degraded: false },
-          pause: { ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 },
-          throttle: { ok: true, throttles: [], known_providers: ['p'], active: false },
-          debug: { ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' },
+          // The documents the page itself holds, as a live poll serves them: a
+          // canned copy dropped the vocabulary the current step seeded (the
+          // picker row it is about to press). The moving server instant is part
+          // of a real document, so every tick still flows through the repaint.
+          ...pollDocs,
         }) });
       }
       const fp = state.fullPayload;

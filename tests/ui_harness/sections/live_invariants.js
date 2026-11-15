@@ -428,8 +428,8 @@ module.exports = async function liveInvariants(H) {
       await settleUntil(() => d.querySelector('#xp-rail [data-xp-dim="model"] .rail-n')?.textContent === '999');
       const next = d.querySelector('#xp-rail [data-xp-dim="model"]');
       check('a rail count repaint keeps focus on the same dimension button',
-        next !== focused && d.activeElement === next &&
-        next.querySelector('.rail-n').textContent === '999');
+        !!next && next !== focused && d.activeElement === next &&
+        next.querySelector('.rail-n')?.textContent === '999');
     } finally {
       w.setTimeout = originalTimeout;
       w.fetch = originalFetch;

@@ -4,6 +4,13 @@ module.exports = async function modelCanon(H) {
   const {DEF_RULES, cfgDoc, check, d, modelFixture, path, rows, settleUntil, w} = H;
   const state = H.state;
 
+  // Pane controls are repainted by the page's own poll, so a press waits for its
+  // node instead of dereferencing whatever the last render left behind.
+  const clickWait = async sel => {
+    await settleUntil(() => !!d.querySelector(sel));
+    d.querySelector(sel).click();
+  };
+
   const canonCases = [
     ['glm-5.3', 'glm-5-3'], ['glm-5-3', 'glm-5-3'], ['GLM-5.3', 'glm-5-3'],
     ['moonshotai/kimi-k3', 'kimi-k3'], ['moonshotai/kimi-k3:nube', 'kimi-k3'],
@@ -36,8 +43,8 @@ module.exports = async function modelCanon(H) {
     w.__knownModels = known;
     w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
     w.openOperatorConsole('capture');
-    d.querySelector('#oc-pane [data-oc-new="capture"]').click();
-    d.querySelector('#oc-pane [data-oc-pick="models"]').click();
+    await clickWait('#oc-pane [data-oc-new="capture"]');
+    await clickWait('#oc-pane [data-oc-pick="models"]');
     const rows = [...d.querySelectorAll('#oc-pane [data-oc-pick-value="models"]')]
       .map(row => row.dataset.ocValue);
     const grouped = w.eval('groupByCanonical(window.__knownModels).flatMap(g => g.variants).sort()');
@@ -52,7 +59,7 @@ module.exports = async function modelCanon(H) {
     w.ocOpenOperatorForRecord('capture', {
       id: 'model-pick', provider: 'p', client: 'c', model: 'moonshotai/kimi-k3:nube',
     });
-    d.querySelector('#oc-pane [data-oc-pick="models"]').click();
+    await clickWait('#oc-pane [data-oc-pick="models"]');
     check('a capture draft keeps the exact model spelling and checks its picker row',
       JSON.stringify(w.eval('ocDrafts.capture.scope.models')) === JSON.stringify(['moonshotai/kimi-k3:nube']) &&
       d.querySelector('#oc-pane [data-oc-pick-value="models"][data-oc-value="moonshotai/kimi-k3:nube"]')
@@ -105,8 +112,8 @@ module.exports = async function modelCanon(H) {
     w.__knownModels = ['deepseek-v4-pro', 'deepseek-v4-pro-0813', 'grok-4.6'];
     w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
     w.openOperatorConsole('capture');
-    d.querySelector('#oc-pane [data-oc-new="capture"]').click();
-    d.querySelector('#oc-pane [data-oc-pick="models"]').click();
+    await clickWait('#oc-pane [data-oc-new="capture"]');
+    await clickWait('#oc-pane [data-oc-pick="models"]');
     check('a config rule groups the capture picker variants under one canonical key',
       w.eval("groupByCanonical(window.__knownModels).length") === 2 &&
       d.querySelectorAll('#oc-pane [data-oc-pick-value="models"]').length === 3);

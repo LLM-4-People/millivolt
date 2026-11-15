@@ -86,7 +86,9 @@ module.exports = async function menusScroll(H) {
     const row = d.querySelector('#settings-fields [data-purge="all"]');
     const purgeBtn = d.getElementById('btn-purge-all');
     const delRow = d.querySelector('#settings-fields [data-purge="matching"]');
-    const delBtn = d.getElementById('btn-del-matching');
+    // The sheet refills on every save, so the action is looked up when it is
+    // used rather than held as a node a refill can strand.
+    const delBtn = () => d.getElementById('btn-del-matching');
     check('the whole-database delete renders as a storage-category action row',
       !!row && row.dataset.cat === 'storage' && !row.hidden && row.classList.contains('st-block') &&
       !!row.querySelector('.st-backup-actions') &&
@@ -99,7 +101,7 @@ module.exports = async function menusScroll(H) {
       [...d.querySelectorAll('#settings-fields .st-row[data-cat="storage"]')].indexOf(delRow) <
         [...d.querySelectorAll('#settings-fields .st-row[data-cat="storage"]')].indexOf(row));
     check('delete matching is the light-red variant and starts disabled with an empty preview',
-      delBtn && delBtn.classList.contains('btn-danger') && delBtn.disabled &&
+      delBtn() && delBtn().classList.contains('btn-danger') && delBtn().disabled &&
       d.getElementById('del-count').textContent === '');
     check('both delete blocks join the rail badge count',
       d.querySelector('#settings-rail [data-st-cat="storage"] .rail-n').textContent === '3');
@@ -112,13 +114,13 @@ module.exports = async function menusScroll(H) {
     w.filterSettings();
     d.getElementById('del-provider').value = 'p';
     d.getElementById('del-provider').dispatchEvent(new w.Event('change', { bubbles: true }));
-    await settleUntil(() => !delBtn.disabled);
+    await settleUntil(() => !delBtn()?.disabled);
     check('a select change re-counts the live preview through the delegated listener',
-      d.getElementById('del-count').textContent === 'will delete 3 records' && !delBtn.disabled);
+      d.getElementById('del-count')?.textContent === 'will delete 3 records' && !delBtn()?.disabled);
     purgeBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
     purgeBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
-    delBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
-    delBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
+    delBtn().dispatchEvent(new w.Event('input', { bubbles: true }));
+    delBtn().dispatchEvent(new w.Event('change', { bubbles: true }));
     const collected = w.collectSettingsValues();
     check('the delete blocks never dirty the form or join value collection',
       w.settingsDirtyCount() === 0 && d.getElementById('btn-settings-revert').disabled &&

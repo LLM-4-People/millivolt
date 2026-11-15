@@ -452,14 +452,16 @@ module.exports = async function delegatedActions(H) {
         hostileRow.querySelector('.oc-rule-budget').textContent.includes('2 requests / 2m'));
       hostileRow.querySelector('.oc-rule-main').click();
       check('editing the hostile rule keeps its stored budgets, ramp and custom window',
-        sd.querySelector('#oc-pane [data-oc-field="requests"]').value === '2' &&
+        sd.querySelector('#oc-pane [data-oc-field="requests"]')?.value === '2' &&
         sw.eval('ocDrafts.limit.requestWindow') === '2m' &&
         // The preview and the row read one budget owner, so the same draft
-        // prints the same sentence above and below it.
-        sd.getElementById('oc-lim-preview').textContent.includes('2 requests / 2m') &&
-        hostileRow.querySelector('.oc-rule-budget').textContent.includes('2 requests / 2m') &&
-        sd.querySelector('#oc-pane [data-oc-field="antiBurst"]').checked &&
-        sd.querySelector('#oc-pane [data-oc-choice="ramp"]').value === '10s' &&
+        // prints the same sentence above and below it. The edit repainted the
+        // pane, so the row is looked up again rather than reusing the node.
+        sd.getElementById('oc-lim-preview')?.textContent.includes('2 requests / 2m') &&
+        sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]')
+          ?.querySelector('.oc-rule-budget')?.textContent.includes('2 requests / 2m') &&
+        sd.querySelector('#oc-pane [data-oc-field="antiBurst"]')?.checked &&
+        sd.querySelector('#oc-pane [data-oc-choice="ramp"]')?.value === '10s' &&
         !sw.__operatorXSS);
       const reqInput = () => sd.querySelector('#oc-pane [data-oc-field="requests"]');
       for (const [value,want] of [['1e3',1000],['1.5',NaN],['-1',NaN],['',0]]) {
@@ -476,7 +478,8 @@ module.exports = async function delegatedActions(H) {
         invalidApply.disabled && sw.eval('ocDrafts.limit.requests') === '-1');
       sw.eval('ocApplyLimit()');
       check('a negative limit count is rejected before any request',
-        adminCalls === beforeInvalid && sd.querySelector('#oc-pane .oc-error').textContent.includes('whole numbers'));
+        adminCalls === beforeInvalid &&
+        sd.querySelector('#oc-pane .oc-error')?.textContent.includes('whole numbers'));
       adminReply = Promise.resolve({ok:false,json:async()=>({error:'limit write failed'})});
       {
         const savedConfirm = sw.ocConfirm;
@@ -498,7 +501,7 @@ module.exports = async function delegatedActions(H) {
           requests_capacity:20,requests_remaining:5,tokens_remaining:0,tokens_capacity:0}]});
       check('an accepted throttle poll repaints the live rule facts',
         await settleUntil(() => sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]')
-          ?.querySelector('.oc-rule-live').textContent.includes('5 of 20 requests left')));
+          ?.querySelector('.oc-rule-live')?.textContent.includes('5 of 20 requests left')));
       sw.eval("ocOperatorErrorClear()");
       // Only the rejection is dismissed: an open edit of a rule the poll just
       // moved keeps its own (informational) stale banner.
@@ -737,7 +740,7 @@ module.exports = async function delegatedActions(H) {
         await sw.restartProxy();
         check('a rejected restart cancels its already-open watcher and releases the reader',
           await settleUntil(() => watchedSignal?.aborted && readerCanceled===1 &&
-            sd.getElementById('restart-count').textContent.includes('restart rejected')));
+            sd.getElementById('restart-count')?.textContent.includes('restart rejected')));
       } finally {
         sw.fetch=savedFetch;
         sw.ocConfirm=savedRestartConfirm;
