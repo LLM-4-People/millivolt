@@ -146,13 +146,23 @@ with tempfile.TemporaryDirectory(prefix='millivolt-capture-guard-') as directory
 
 async def history_method_checks():
     with patch.object(fixture, 'browser_route', new_callable=AsyncMock) as delegated:
-        for method in ('POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT', 'get'):
-            route = SimpleNamespace(request=SimpleNamespace(method=method), abort=AsyncMock())
+        for method in ('PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT', 'get'):
+            route = SimpleNamespace(
+                request=SimpleNamespace(method=method, url=base + '/'), abort=AsyncMock())
             errors = []
             await history_route(route, base, errors)
             route.abort.assert_awaited_once_with()
             delegated.assert_not_awaited()
             require(len(errors) == 1, 'non-read documentation request did not report rejection')
+        # POST is a mutation everywhere except the purge-count preview.
+        for path in ('/v1/chat/completions', '/admin/purge'):
+            route = SimpleNamespace(
+                request=SimpleNamespace(method='POST', url=base + path), abort=AsyncMock())
+            errors = []
+            await history_route(route, base, errors)
+            route.abort.assert_awaited_once_with()
+            delegated.assert_not_awaited()
+            require(len(errors) == 1, 'mutating POST was admitted during capture')
         for method in ('GET', 'HEAD'):
             route = SimpleNamespace(request=SimpleNamespace(method=method, url=base + '/'), abort=AsyncMock())
             errors = []
@@ -161,6 +171,15 @@ async def history_method_checks():
             route.abort.assert_not_awaited()
             require(not errors, 'read-only documentation request was rejected')
             delegated.reset_mock()
+        route = SimpleNamespace(
+            request=SimpleNamespace(method='POST', url=base + '/admin/purge/count'),
+            abort=AsyncMock())
+        errors = []
+        await history_route(route, base, errors)
+        delegated.assert_awaited_once_with(route, base, errors)
+        route.abort.assert_not_awaited()
+        require(not errors, 'purge-count preview was rejected during capture')
+        delegated.reset_mock()
         for path in ('/v1/models', '/v1/chat/completions', '/metrics/export', '/admin/pause',
                      '/dash/../v1/models', '/dash/%2e%2e/private.js', '/dash//private.js',
                      '/dash/../private.js', '/dash/private.db', '/dash/\\private.js'):
