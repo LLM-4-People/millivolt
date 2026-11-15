@@ -142,13 +142,13 @@ async def check(base, screenshot):
                              'messages': [{'role': 'user', 'content': 'throttle ' + str(i)}]})
                     require(response.ok and await response.body() == BODY, 'throttle fixture recovery changed')
                 await page.goto(base + '/#client=' + label, wait_until='domcontentloaded')
-                await page.wait_for_function('chartAgg && explorerAgg && lastData')
+                await page.wait_for_function('() => chartAgg && explorerAgg && lastData')
                 # Stash the untouched full chart payload: later canvas checks
                 # rewrite chartAgg with trimmed buckets, but the Overview
                 # period-total assertions need every request-bearing bucket.
                 await page.evaluate('window.__fullChart = chartAgg')
                 await pick_chart_control(page, '#chart-preset', 'latency')
-                await page.wait_for_function('chartAgg && chartAgg.tps_p.some(v => v != null)')
+                await page.wait_for_function('() => chartAgg && chartAgg.tps_p.some(v => v != null)')
                 results = []
                 layout_checks = []
                 await chart_checks(page, screenshot, results, layout_checks)
@@ -168,10 +168,16 @@ async def check(base, screenshot):
                         scrollWidth: box.scrollWidth,
                         tableWidth: table ? Math.round(table.getBoundingClientRect().width) : 0,
                         layout: table ? getComputedStyle(table).tableLayout : '',
+                        pad: table ? getComputedStyle(table.tHead.rows[0].cells[0]).paddingLeft : '',
+                        cols: table ? [...table.tHead.rows[0].cells].map(c => Math.round(c.getBoundingClientRect().width)) : [],
+                        floors: typeof REQ_FLOORS === 'undefined' ? [] : REQ_FLOORS.slice(),
                     };
                 }""")
                 require(docs_table['layout'] == 'auto' and
                         docs_table['scrollWidth'] <= docs_table['clientWidth'] + 2, docs_table)
+                # 14 columns at 10px spend 280px on air alone; the 8px density
+                # is what keeps the widest fixture row inside a desktop card.
+                require(docs_table['pad'] == '8px', docs_table)
                 results.append({'docs_table': docs_table})
                 await page.set_viewport_size({'width': 1440, 'height': 1000})
 
@@ -183,7 +189,7 @@ async def check(base, screenshot):
                 await theme_checks(page, browser, base, errors, results, browser_route)
 
                 await page.reload(wait_until='domcontentloaded')
-                await page.wait_for_function('chartAgg && explorerAgg && lastData')
+                await page.wait_for_function('() => chartAgg && explorerAgg && lastData')
                 require(await page.evaluate('chartView.preset') == 'latency', 'saved chart preset lost')
                 require(await page.evaluate('chartView.pct') == 99, 'saved chart percentile lost')
                 storm_checks = []
