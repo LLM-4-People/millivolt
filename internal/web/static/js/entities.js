@@ -219,6 +219,10 @@ function showClientTip(el) {
   if (!html) { hideClientTip(); return; }
   tip.innerHTML = html;
   tip.hidden = false;
+  // The card is the only place the identity and the request config meet, so
+  // the hovered badge describes it for assistive technology; the label keeps
+  // the name, the description carries the detail.
+  el.setAttribute('aria-describedby', 'client-tip');
   const box = el.getBoundingClientRect();
   const tw = tip.offsetWidth, th = tip.offsetHeight;
   let x = box.left, y = box.bottom + 6;
@@ -232,6 +236,8 @@ function showClientTip(el) {
 function hideClientTip() {
   const tip = $('client-tip');
   if (tip) tip.hidden = true;
+  document.querySelectorAll('[data-client][aria-describedby="client-tip"]')
+    .forEach(el => el.removeAttribute('aria-describedby'));
 }
 
 {

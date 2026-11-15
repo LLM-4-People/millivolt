@@ -133,9 +133,9 @@ try {
   <button class="btn" id="btn-nav" type="button" onclick="toggleNavMenu(event)" aria-controls="hdr-actions" aria-expanded="false" aria-label="Actions" title="Actions">
     <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>
   </button>
-  <div class="refresh-controls" id="hdr-actions">
+  <div class="refresh-controls" id="hdr-actions" role="group" aria-label="Header actions">
     <div class="menu-wrap">
-      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" onkeydown="themeTriggerKey(event)" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" onkeydown="themeTriggerKey(event)" aria-haspopup="dialog" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path class="theme-ico-fill" d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
         <span class="hdr-btn-label">Theme</span>
       </button>
@@ -198,7 +198,7 @@ try {
        so the first payload only swaps text and nothing below the band
        moves. The live renderer replaces this innerHTML wholesale. -->
   <div class="kpis" id="kpis">
-    <div class="kpi"><h2>Requests</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>Request count</h2><div class="val">-</div><div class="sub2">-</div></div>
     <div class="kpi k-flight"><h2>In-flight</h2><div class="val">-</div><div class="sub2 flight-sub"><span>-</span></div><div class="flight-mix"></div></div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">-</div><div class="sub2">-</div></div>
     <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">-</div><div class="sub2">-</div></div>
@@ -333,7 +333,7 @@ try {
     <span class="f-cell" id="f-clock">-</span>
   </span>
 </footer>
-<div id="client-tip" hidden aria-hidden="true"></div>
+<div id="client-tip" hidden role="tooltip"></div>
 <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script id="dashboard-bootstrap" type="application/json">__DASHBOARD_BOOTSTRAP__</script>

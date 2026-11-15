@@ -438,7 +438,7 @@ function derive(data) {
   let kpiHtml = _kpiHtml;
   if (_kpiHtmlKey !== kpiKey) {
     kpiHtml = `
-    <div class="kpi"><h2>Requests</h2><div class="val">${vt(fmt(a.requests))}</div><div class="sub2">all tracked</div></div>
+    <div class="kpi"><h2>Request count</h2><div class="val">${vt(fmt(a.requests))}</div><div class="sub2">all tracked</div></div>
     <div class="kpi k-flight"><h2>In-flight</h2><div class="val">${vt(fmt(inFlight))}</div><div class="sub2 flight-sub"><span>${flightLeft}</span>${flightRight ? `<span class="${flightRightCls}">${flightRight}</span>` : ''}</div>${flightMix}</div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">${vt(fmtMoney(totalCost), 'est USD · ' + fmtMoney(totalCost))}</div><div class="sub2">${costPerReq != null ? vt('~' + fmtMoney(costPerReq) + '/req') : '-'}</div></div>
     <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">${costPerMtok != null ? vt(fmtMoney(costPerMtok)) + '<span class="unit">/Mtok</span>' : '-'}</div><div class="sub2">${costPerMtok != null ? vt('priced in+out', 'blended over cost-reporting requests only') : '-'}</div></div>

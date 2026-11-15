@@ -571,6 +571,24 @@ module.exports = async function renderLive(H) {
       !/\bk-err\b/.test(erring.split('|')[0]) && /\bk-err\b/.test(erring.split('|')[1]));
   }
 
+  // Two "Requests" headings were one heading too many, and a disclosure that
+  // only expands a panel is not a menu. The band names the measure, the theme
+  // trigger announces the dialog it opens, and the flyout is a named group.
+  {
+    const heads = [...d.querySelectorAll('#kpis h2')].map(h => h.textContent);
+    const nav = d.getElementById('btn-nav');
+    const theme = d.getElementById('btn-theme');
+    check('the band counts this section once by name',
+      heads.filter(h => h === 'Request count').length === 1 &&
+      !heads.includes('Requests') &&
+      d.querySelector('#tbl-requests')?.closest('.card')?.querySelector('.card-hd h2')?.textContent === 'Request log');
+    check('the theme trigger opens a dialog and the flyout is a named group',
+      theme.getAttribute('aria-haspopup') === 'dialog' &&
+      d.getElementById('hdr-actions').getAttribute('role') === 'group' &&
+      d.getElementById('hdr-actions').getAttribute('aria-label') === 'Header actions' &&
+      !nav.hasAttribute('aria-haspopup'));
+  }
+
   // The Avg TPS KPI uses the same compact unit as the Overview timing tile.
   // TPS_UNIT is the single owner; the chart axis, legend and tooltips keep the
   // full tok/s label where there is room.

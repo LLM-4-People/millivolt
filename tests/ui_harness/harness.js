@@ -196,6 +196,23 @@ function checkEntityIdentity() {
     w.dimLabel('client', 'opencode/1.18.32') === 'opencode/1.18.32' &&
     w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
     w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
+  // The client card is the only place identity and request config appear
+  // together, so it is a tooltip that assistive technology can reach, not
+  // decoration behind aria-hidden.
+  {
+    const tip = d.getElementById('client-tip');
+    const badge = d.createElement('span');
+    badge.dataset.client = 'opencode/1.18.32';
+    d.body.appendChild(badge);
+    w.showClientTip(badge);
+    check('the client card is a described tooltip, not hidden decoration',
+      tip.getAttribute('role') === 'tooltip' && !tip.hasAttribute('aria-hidden') &&
+      !tip.hidden && badge.getAttribute('aria-describedby') === 'client-tip');
+    w.hideClientTip();
+    check('hiding the client card drops the description edge',
+      tip.hidden && !badge.hasAttribute('aria-describedby'));
+    badge.remove();
+  }
 }
 // Fixed waits are the exception, not a scheduling shortcut. A wait may stay a
 // literal duration only when the duration itself is the asserted behavior or
