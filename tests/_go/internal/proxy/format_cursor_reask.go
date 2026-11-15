@@ -436,10 +436,12 @@ func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
 	upstream.Start()
 	defer upstream.Close()
 
-	// StormMaxRetries 0 keeps the re-ask's 500 a single deterministic send:
-	// no storm-budget retry ladder runs before the failure surfaces.
+	// Both retry budgets are zero so the re-ask's 500 is a single deterministic
+	// send: no transient (max_retries) or storm-budget ladder runs before the
+	// failure surfaces.
 	cfg := config.Default()
 	cfg.StormMaxRetries = 0
+	cfg.MaxRetries = 0
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()

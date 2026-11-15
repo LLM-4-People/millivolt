@@ -408,7 +408,14 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 // to CursorRun; parked resumes never call this helper or replay a handshake.
 func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clientMessage []byte, groupKey string, hooks scheduler.WaiterHooks, firstSendIsRetry bool) (*http.Response, *io.PipeWriter, context.CancelFunc, error) {
 	own, failed := false, false
-	defer func() { s.cursorEndSend(groupKey, own, failed) }()
+	// ordinary and retried are the shared retry verdict the generic ladder
+	// keeps: the transient budget (max_retries) bounds the loop, and whether
+	// anything was absorbed decides whether the group returns to one probe or
+	// full concurrency. Without both, this driver retried past the configured
+	// budget and always restored full concurrency after a retry.
+	ordinary := 0
+	retried := false
+	defer func() { s.cursorEndSend(groupKey, own, failed, retried) }()
 	// permit and attemptStart are declared outside the loop so the admission
 	// call can assign them (and own) with a plain = : a := would shadow the
 	// outer own inside the loop body and silently drop the Trip-claimed send
@@ -466,11 +473,13 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 			}
 			retryable, msg := cursorSendFailure(err, waitErr)
 			active := s.observeStormTransport(ctx, permit, retryable)
-			if !retryable || !s.allowStormRetry(ctx, active) {
+			if !retryable || ordinary >= s.cfg().MaxRetries && !s.allowStormRetry(ctx, active) {
 				failed = retryable
 				return nil, nil, nil, err
 			}
 			own = s.absorbTransportRetry(state.rec, groupKey, msg, own)
+			ordinary++
+			retried = true
 			continue
 		}
 		// Quota-envelope classification precedes storm observation. Keep the
@@ -482,7 +491,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		stopRead := context.AfterFunc(ctx, upstreamCancel)
 		retryable, class, peekErr := s.cursorOutcome(ctx, resp)
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)
-		if !retryable || !s.allowStormRetry(ctx, active) {
+		if !retryable || ordinary >= s.cfg().MaxRetries && !s.allowStormRetry(ctx, active) {
 			stopRead()
 			if peekErr != nil {
 				// The bounded peek failed mid-body (the whole-document
@@ -516,6 +525,8 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		}
 		s.publishUpdate(state.rec)
 		own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, retryAfter)) || own
+		ordinary++
+		retried = true
 	}
 }
 
@@ -530,15 +541,17 @@ func cursorRunURL(t *target) string {
 	return t.baseURL + path
 }
 
-// cursorEndSend releases the send token. A retryable failure trips the
-// provider+key group; a success or 4xx/quota/cancel does not.
-func (s *Server) cursorEndSend(groupKey string, own, failed bool) {
+// cursorEndSend releases the send token through the shared verdict. A
+// retryable failure trips the provider+key group; a success or 4xx/quota/cancel
+// does not, and a request that absorbed anything leaves the group at one probe
+// instead of restoring full concurrency.
+func (s *Server) cursorEndSend(groupKey string, own, failed, retried bool) {
 	if failed {
 		s.scheduler.FailSend(groupKey, own)
 		return
 	}
 	if own {
-		s.scheduler.EndSend(groupKey, false)
+		s.scheduler.EndSend(groupKey, retried)
 	}
 }
 

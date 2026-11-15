@@ -531,12 +531,13 @@ it. Manual-mode holds persist like every operator pause.
 
 The ordinary HTTP retry budget remains `max_retries`. Selected failures during
 an active storm may use up to `storm_max_retries` additional attempts across the
-logical request, including quality re-asks. Cursor retains its single-handshake
-behavior when protection is off and uses only the additional storm budget for
-failed fresh handshakes. Exhaustion returns the final upstream failure. Retrying
-inference can repeat upstream execution or billing even when no output arrived;
-this feature does not provide exactly-once processing. See the
-[HTTP retry constraints](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2).
+logical request, including quality re-asks. Cursor runs the same verdict: its
+fresh handshakes take the ordinary `max_retries` budget and, with protection
+armed, the additional storm budget, and a retried success leaves the group at
+one probe exactly like the generic ladder. Exhaustion returns the final upstream
+failure. Retrying inference can repeat upstream execution or billing even when
+no output arrived; this feature does not provide exactly-once processing. See
+the [HTTP retry constraints](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2).
 
 `storm_max_queue` bounds callers waiting at storm gates across the process;
 ordinary scheduler queues have their own limits. `storm_max_wait` bounds each
