@@ -712,3 +712,44 @@ func TestPurgeWritesOneAuditLinePerOutcome(t *testing.T) {
 		t.Fatalf("full-delete audit line missing from %q", logged.String())
 	}
 }
+
+// TestPurgeReportsTheCommittedCount pins H19: the wire count is the rows the
+// delete transaction committed, not the population the filter scanned or the
+// previewed number, and the same count reaches the audit line before the
+// response body so a lost response is still diagnosable.
+func TestPurgeReportsTheCommittedCount(t *testing.T) {
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	mux, b, s := logRoutesForTest(t, true)
+	recorder := s.Recorder(b)
+	for _, row := range []struct{ id, provider string }{
+		{"committed-a", "alpha"}, {"committed-b", "alpha"}, {"kept-c", "beta"},
+	} {
+		recorder.Record(&metrics.Record{ID: row.id, Provider: row.provider, StatusCode: 200, Start: time.Now()})
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge",
+		strings.NewReader(`{"filter":{"provider":"alpha"},"reviewed_count":2}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("purge = %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Deleted int64 `json:"deleted"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Deleted != 2 {
+		t.Fatalf("deleted = %d, want the 2 committed rows", body.Deleted)
+	}
+	if !strings.Contains(logged.String(), `deleted="2"`) {
+		t.Fatalf("audit line does not carry the committed count: %q", logged.String())
+	}
+	if n, err := s.CountWhere(t.Context(), storage.PurgeFilter{Provider: "beta"}); err != nil || n != 1 {
+		t.Fatalf("unmatched row count = %d err=%v, want 1 left", n, err)
+	}
+}
