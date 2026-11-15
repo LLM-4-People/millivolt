@@ -40,7 +40,13 @@ extra YAML documents are dropped and the file is rewritten without them. An
 invalid recognized value fails startup without rewriting the file, and an
 unparseable file is moved to `PATH.invalid` and replaced with the documented
 defaults, except an ambiguous duplicate top-level key, which fails closed and
-stays in place. Reload rejects an invalid document without rewriting it.
+stays in place. Because replacing it with defaults would silently widen the
+bind and drop the origin allowlist, an unparseable file first has `listen` and
+`allowed_base_urls` salvaged from it block by block and applied over the
+defaults; both `(unparseable yaml)` and `<key> (salvaged)` are reported in the
+boot log and `last_reload`. A named key with no usable value, or a salvaged
+value the config rejects, fails startup with the original file still in place.
+Reload rejects an invalid document without rewriting it.
 Settings, healthcheck and restore merge treat a missing file as defaults, while
 an invalid or unreadable document fails closed and is reported instead of
 substituting a default. Backup capture is stricter: a missing config file is an

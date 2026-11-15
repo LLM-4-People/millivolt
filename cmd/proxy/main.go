@@ -642,7 +642,7 @@ func logDroppedConfigKeys(path string, skipped []string) {
 	if len(skipped) == 0 {
 		return
 	}
-	log.Printf("config: dropped unknown or invalid keys from %s: %s", path, strings.Join(skipped, ", "))
+	log.Printf("config: dropped unknown keys or salvaged fail-closed keys from %s: %s", path, strings.Join(skipped, ", "))
 }
 
 // reloadStatus carries the outcome of the most recent configuration

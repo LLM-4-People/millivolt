@@ -59,7 +59,11 @@ type userFile struct {
 const (
 	skippedExtraDocument = "(extra yaml document)"
 	skippedUnparseable   = "(unparseable yaml)"
-	invalidConfigSuffix  = ".invalid"
+	// skippedSalvaged marks a fail-closed key recovered from an unparseable
+	// document, so the boot log and last_reload show which boundary was kept
+	// instead of reset.
+	skippedSalvaged     = " (salvaged)"
+	invalidConfigSuffix = ".invalid"
 )
 
 // configParseError is a YAML syntax/shape failure. LoadFileRepair moves the
@@ -197,16 +201,33 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 		if errors.As(err, &duplicate) {
 			return nil, nil, err
 		}
+		// The two fail-closed keys are salvaged from the debris before the
+		// default document replaces it. Without this a corrupt file silently
+		// moved the bind address back to the default and emptied the origin
+		// allowlist, which are exactly the boundaries the sibling paths keep.
+		// A key the debris names but cannot yield fails boot; the source stays
+		// in place so the failure is not repeated against a replacement.
+		cfg = Default()
+		salvaged, serr := salvageFailClosedKeys(b, cfg)
+		if serr != nil {
+			return nil, nil, fmt.Errorf("repair config %s: %w", path, serr)
+		}
+		// A salvaged value can pass its type and still be invalid policy, such
+		// as an allowlist entry without a scheme. Validate the exact document
+		// that would be written, so boot fails here instead of publishing a
+		// boundary the running config never accepted.
+		if verr := cfg.Validate(); verr != nil {
+			return nil, nil, fmt.Errorf("repair config %s: salvaged fail-closed key: %w", path, verr)
+		}
 		invalidPath := path + invalidConfigSuffix
 		_ = os.Remove(invalidPath)
 		if rerr := os.Rename(path, invalidPath); rerr != nil {
 			return nil, nil, fmt.Errorf("repair config %s: %w", path, rerr)
 		}
-		cfg = Default()
 		if werr := WriteFile(path, cfg); werr != nil {
 			return nil, nil, fmt.Errorf("repair config %s: %w", path, werr)
 		}
-		return cfg, []string{skippedUnparseable}, nil
+		return cfg, append([]string{skippedUnparseable}, salvaged...), nil
 	}
 	if len(skipped) > 0 {
 		if err := WriteFile(path, cfg); err != nil {
@@ -214,6 +235,102 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 		}
 	}
 	return cfg, skipped, nil
+}
+
+// salvageFailClosedKeys recovers the fail-closed keys from a document the YAML
+// parser rejected, and applies them over the default config. Only top-level
+// entries of those keys are read, each as an independent block, so the syntax
+// error that broke the document does not have to sit outside them. A named key
+// whose block cannot be read or applied fails closed instead of widening to
+// the default; a key the debris never names keeps its default, exactly like an
+// absent key in a valid document. Append the returned labels to the skipped
+// list so the boot log and last_reload name what was salvaged.
+func salvageFailClosedKeys(raw []byte, cfg *Config) ([]string, error) {
+	blocks := topLevelFailClosedBlocks(raw)
+	keys := slices.Sorted(maps.Keys(blocks))
+	for _, key := range keys {
+		var document yaml.Node
+		if err := yaml.Unmarshal(blocks[key], &document); err != nil {
+			return nil, &configValueError{key: key, err: err}
+		}
+		mapping, err := yamlDocumentMapping(&document)
+		if err != nil {
+			return nil, &configValueError{key: key, err: err}
+		}
+		present, nodes, err := yamlMappingValues(mapping)
+		if err != nil {
+			return nil, &configValueError{key: key, err: err}
+		}
+		valueNode, bad := nodes[key]
+		if !bad {
+			return nil, &configValueError{key: key, err: errors.New("unreadable value")}
+		}
+		loose, err := overlayYAMLKey(cfg, key, valueNode, present[key])
+		if err != nil {
+			return nil, &configValueError{key: key, err: err}
+		}
+		if loose {
+			return nil, &configValueError{key: key, err: errors.New("unknown fields")}
+		}
+	}
+	salvaged := make([]string, 0, len(keys))
+	for _, key := range keys {
+		salvaged = append(salvaged, key+skippedSalvaged)
+	}
+	return salvaged, nil
+}
+
+// topLevelFailClosedBlocks splits an unparseable document into the raw text of
+// its top-level fail-closed entries. A top-level entry starts at column zero;
+// indented lines and blank lines belong to the entry above them. Quoted keys
+// are not read: the fail-closed keys have fixed spellings.
+func topLevelFailClosedBlocks(raw []byte) map[string][]byte {
+	blocks := map[string][]byte{}
+	var key string
+	var block [][]byte
+	flush := func() {
+		if key != "" {
+			blocks[key] = bytes.Join(block, []byte("\n"))
+		}
+		key, block = "", nil
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if name, ok := topLevelYAMLKey(line); ok {
+			flush()
+			if failClosedYAMLKey(name) {
+				key = name
+				block = append(block, line)
+			}
+			continue
+		}
+		if key != "" && (len(line) == 0 || line[0] == ' ' || line[0] == '\t') {
+			block = append(block, line)
+			continue
+		}
+		flush()
+	}
+	flush()
+	return blocks
+}
+
+// topLevelYAMLKey reports a plausible unindented "key:" line and returns the
+// key.
+func topLevelYAMLKey(line []byte) (string, bool) {
+	if len(line) == 0 || line[0] == ' ' || line[0] == '\t' || line[0] == '#' || line[0] == '-' {
+		return "", false
+	}
+	colon := bytes.IndexByte(line, ':')
+	if colon <= 0 {
+		return "", false
+	}
+	key := string(bytes.TrimSpace(line[:colon]))
+	for i, r := range key {
+		letter := r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !letter && !(i > 0 && r >= '0' && r <= '9') {
+			return "", false
+		}
+	}
+	return key, true
 }
 
 // ReadDocument is the one bounded read owner for a configuration document.
