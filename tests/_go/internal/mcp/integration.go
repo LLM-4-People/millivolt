@@ -100,6 +100,11 @@ func TestReserveLoopbackOriginClaimsItsNamespace(t *testing.T) {
 	if _, err := os.Stat(firstDB); err != nil {
 		t.Fatalf("reservation did not claim its database: %v", err)
 	}
+	// Exclusivity, not just creation: another allocator that chose the same
+	// port must lose the claim rather than truncating the winner's file.
+	if err := claimNamespace(firstDB); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("second claim of %s = %v, want fs.ErrExist", firstDB, err)
+	}
 	port, err := strconv.Atoi(portOf(t, second))
 	if err != nil {
 		t.Fatal(err)
