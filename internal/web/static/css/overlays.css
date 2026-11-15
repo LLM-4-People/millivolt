@@ -279,10 +279,8 @@
   /* The move buttons and the remove cross size their own tracks (auto): the
      three reorder actions take the coarse target while a mouse keeps the
      dense row, so a fixed column could only fit one of them. */
-  .mr-move { display: flex; gap: 2px; justify-content: flex-end; }
-  .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; }
-  .mr-move button:hover { color: var(--accent); }
-  .mr-move button:focus-visible { outline: var(--focus-outline); outline-offset: -1px; }
+  .mr-move { display: flex; gap: 4px; justify-content: flex-end; }
+  .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; min-width: 24px; min-height: 24px; }
   .mr-move .mr-vis[aria-pressed="false"] { color: var(--text); }
   .mr-row[data-mr-off="1"] { opacity: .7; }
   .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
@@ -292,9 +290,8 @@
   .mr-hint { font-size: 9.5px; color: var(--muted); line-height: 1.5; margin: 0 0 7px; }
   .mr-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .mr-tools select { font-size: 10px; padding: 3px 5px; max-width: 190px; }
-  .mr-restore { background: none; border: none; color: var(--muted); font: inherit; font-size: 9.5px; cursor: pointer; padding: 0; }
+  .mr-restore { background: none; border: none; color: var(--muted); font: inherit; font-size: 9.5px; cursor: pointer; padding: 0 6px; min-height: 24px; }
   .mr-restore:hover { color: var(--accent); }
-  .mr-restore:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .mr-count { margin-left: auto; font-size: 9.5px; white-space: nowrap; }
   .mr-trace { font-size: 9.5px; line-height: 1.7; margin: 2px 0 4px; overflow-wrap: anywhere; }
   .mr-trace .mr-step-in { color: var(--muted); }
@@ -410,7 +407,13 @@
     min-width: 0; overflow: hidden; background: var(--panel2);
     border: 1px solid var(--border); border-radius: 9px;
   }
-  .ro-rule:focus, .ro-rule:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
+  /* The reordering and destructive settings controls are 9px glyphs with no
+     frame of their own: one shared edge group, at the card's own offset,
+     makes the keyboard stop visible, and each takes a 24px box so the pointer
+     finds it too instead of hunting a two-pixel target. */
+  .ro-rule:focus, .ro-rule:focus-visible,
+  .mr-move button:focus-visible,
+  .mr-restore:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
   .ro-rule-head {
     display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto;
     gap: 8px; align-items: center; min-width: 0; padding: 7px 8px;
