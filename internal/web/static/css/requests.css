@@ -112,16 +112,17 @@
      live row finalizes or a shorter value replaces the widest one. */
   #tbl-requests table { table-layout: auto; }
   #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
+  /* The log is the densest table in the app: 14 columns at 10px inline padding
+     spend 280px on air alone. 9px keeps the columns legible and returns 26px,
+     enough for the widest identity row to fit a desktop card without a
+     sideways scroll. */
+  #tbl-requests th, #tbl-requests td { padding-inline: 9px; }
   /* The row opener is the one control in the log and the table is wider than a
      phone: the actions column pins to the right edge, over the scrolled cells,
      so the way into a request survives every horizontal scroll. */
   #tbl-requests th:last-child,
   #tbl-requests tr.exp-row:not(.retry-sub) td:last-child {
     position: sticky; right: 0; z-index: 1;
-    /* The opener cell is a fixed square, so its padding only needs to separate
-       the edge; 4px keeps the pinned column from pushing a full desktop table
-       into a horizontal scroll. */
-    padding-inline: 4px;
     background: var(--panel);
     box-shadow: inset 1px 0 0 var(--border);
   }
