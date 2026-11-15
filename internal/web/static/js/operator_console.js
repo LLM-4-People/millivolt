@@ -529,14 +529,18 @@ function ocRestoreSettingsOrigin() {
 
 // ocSyncTriggerName repaints the readout's accessible name after the console
 // opens or closes, because the name states the action the trigger performs
-// now. menu.js owns aria-expanded; this only follows it.
+// now. menu.js owns aria-expanded; this only follows it. The tooltip mirrors
+// the same sentence: the static "Operator console" title said nothing about
+// the state and stayed that way while the words clipped behind it.
 function ocSyncTriggerName() {
   const trigger = $('btn-controls');
   if (!trigger) return;
   const text = ($('op-readout-state')?.textContent || 'steady').trim();
   const open = trigger.getAttribute('aria-expanded') === 'true';
-  trigger.setAttribute('aria-label', 'operator state: ' + text + '. '
-    + (open ? 'Close the operator console.' : 'Open the operator console.'));
+  const label = 'operator state: ' + text + '. '
+    + (open ? 'Close the operator console.' : 'Open the operator console.');
+  trigger.setAttribute('aria-label', label);
+  trigger.title = label;
 }
 
 function openOperatorConsole(section, view) {

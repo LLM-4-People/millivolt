@@ -166,6 +166,8 @@ module.exports = async function operatorMenus(H) {
       check('the readout trigger names the same words to assistive tech',
         trigger.getAttribute('aria-label') ===
           'operator state: ' + activeText + '. Open the operator console.');
+      check('the readout tooltip mirrors the same words instead of the control name',
+        trigger.title === trigger.getAttribute('aria-label') && !/^Operator console$/.test(trigger.title));
       check('the readout dot title carries the same words', dot.title === activeText);
 
       // A restart outranks every policy because it explains why traffic is

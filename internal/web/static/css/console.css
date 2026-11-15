@@ -15,8 +15,9 @@
   /* The right edge is pinned by the header's margin-auto, so a growing label
      pushed the left edge - the hit target - leftward under a stationary
      pointer every poll. A stable floor covers the common single-segment
-     state, and the clipping readout absorbs everything past it. */
-  width: auto; min-width: 96px; max-width: min(48vw, 320px); height: auto; min-height: 30px;
+     state; the box then takes whatever the header has left rather than a
+     viewport share, so a three-segment state fits instead of ellipsizing. */
+  width: auto; min-width: 96px; max-width: 100%; height: auto; min-height: 30px;
   padding: 3px 8px; gap: 6px; justify-content: flex-start;
   overflow: hidden;
 }
