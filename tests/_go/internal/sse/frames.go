@@ -60,7 +60,7 @@ func TestDataPayload(t *testing.T) {
 		{"data: [DONE]\r", "[DONE]\r", true},
 		{"data: ", "", true},
 		{"data:", "", true},
-		{"data", "", false},     // never match on a short prefix
+		{"data", "", true},      // bare field line: valid, empty payload
 		{"d", "", false},        // never match on a lone 'd'
 		{"event: x", "", false}, // non-data lines are not payloads
 		{"", "", false},
@@ -70,6 +70,11 @@ func TestDataPayload(t *testing.T) {
 		if ok != c.ok || (ok && string(payload) != c.payload) {
 			t.Fatalf("DataPayload(%q) = (%q, %v), want (%q, %v)", c.line, payload, ok, c.payload, c.ok)
 		}
+	}
+	// EventData joins data fields with a newline, so a bare field line in a
+	// multi-line event contributes an empty line instead of being dropped.
+	if got := string(EventData([]byte("data: {\"a\":\ndata\ndata: 1}"))); got != "{\"a\":\n\n1}" {
+		t.Fatalf("EventData with a bare data line = %q", got)
 	}
 }
 

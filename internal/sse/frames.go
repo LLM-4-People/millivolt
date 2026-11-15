@@ -171,12 +171,15 @@ func EventData(raw []byte) []byte {
 }
 
 // DataPayload extracts the payload of one raw SSE line: ok is false when the
-// line is not a data line - the full "data:" prefix is required (never just a
-// leading 'd') so a short or garbled upstream line can never slice out of
-// range - otherwise payload is the bytes after the prefix with one optional
-// leading space consumed. Trailing \r tolerance stays with the terminal
-// marker comparisons; ordinary payloads keep their bytes verbatim.
+// line is not a data field, otherwise payload is the bytes after the full
+// "data:" prefix (never just a leading 'd') with one optional leading space
+// consumed. The bare "data" spelling is a valid field with an empty payload.
+// Trailing \r tolerance stays with the terminal marker comparisons; ordinary
+// payloads keep their bytes verbatim.
 func DataPayload(line []byte) (payload []byte, ok bool) {
+	if bytes.Equal(line, []byte("data")) {
+		return nil, true
+	}
 	if !bytes.HasPrefix(line, []byte("data:")) {
 		return nil, false
 	}
