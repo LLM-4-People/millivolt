@@ -301,12 +301,14 @@ func etagMatches(header, etag string) bool {
 // The document carries no inline script: the pre-paint theme guard is
 // js/theme_boot.js and every shell control is bound by js/bind_static.js, so
 // script-src is 'self'. The two inline style attributes (theme preview bar
-// heights) still need the attribute allowance on style-src, and img-src names
-// the one remote host the provider favicons come from. Everything else is
-// denied by default: no plugins, no framing, no base or form retargeting, and
-// no referrer for the explorer's location hash.
+// heights) still need the attribute allowance on style-src. img-src names the
+// favicon service and the host it redirects to (www.google.com serves
+// /s2/favicons, which answers from *.gstatic.com), plus data: for the inline
+// SVG fallbacks. Everything else is denied by default: no plugins, no framing,
+// no base or form retargeting, and no referrer for the explorer's location
+// hash.
 const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-	"img-src 'self' https://www.google.com data:; connect-src 'self'; font-src 'self'; " +
+	"img-src 'self' https://www.google.com https://*.gstatic.com data:; connect-src 'self'; font-src 'self'; " +
 	"worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; object-src 'none'; " +
 	"base-uri 'none'; form-action 'self'"
 

@@ -149,7 +149,7 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 		!strings.Contains(got, "script-src 'self'") ||
 		strings.Contains(got, "script-src 'self' 'unsafe-inline'") ||
 		!strings.Contains(got, "style-src 'self' 'unsafe-inline'") ||
-		!strings.Contains(got, "img-src 'self' https://www.google.com data:") {
+		!strings.Contains(got, "img-src 'self' https://www.google.com https://*.gstatic.com data:") {
 		t.Fatalf("dashboard CSP = %q", got)
 	}
 	if rec.Header().Get("X-Content-Type-Options") != "nosniff" || rec.Header().Get("Referrer-Policy") != "no-referrer" {
