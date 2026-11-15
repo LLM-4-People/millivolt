@@ -331,6 +331,18 @@ bounded and best effort; a busy reader raises a pending flag that the writer's
 near-term tick retries, and `Store.Close` makes the final attempt after the read
 pool is closed, without failing the committed deletion.
 
+The restricted SQL console (`GET /metrics/query` and the MCP `query` tool) is
+gated in `validateQuery`: one `SELECT`, no `;`, no
+`ATTACH`/`DETACH`/`PRAGMA`/`LOAD_EXTENSION` word, and no
+`sqlite_dbpage`/`dbstat`/`pragma_*`/`readfile`/`writefile`. The scan is lexical
+over the raw text, string literals included, and the read pool's `mode=ro` pins
+only the main database; SQLite still opens an `ATTACH`ed file writable.
+Follow-up gap: the pinned modernc.org/sqlite v1.61.0 exposes an authorizer per
+physical connection (`AuthorizerRegisterer`, installed through
+`RegisterConnectionHook`) and a `_defensive=1` DSN mode, and this build wires
+in neither. An authorizer policy at read-pool open plus defensive mode would
+turn the keyword list into defense in depth instead of the only owner.
+
 Operator backup and restore stage database-sized work as private files.
 `backup.EncodeFile` streams the packed snapshot, encoded archive and self-check
 in bounded chunks. On restore, the handler streams the capped upload into one

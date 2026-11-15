@@ -220,16 +220,19 @@ func queryEngineLimit(err error) bool {
 // of defense - but mode=ro only pins the MAIN database read-only: SQLite still
 // honors ATTACH on a read-only connection and opens the attached DB read-write.
 // So ATTACH (and other schema/mutation keywords that can ride a SELECT-leading
-// string) are denied here explicitly - the real choke point the driver can't
-// provide (modernc.org/sqlite exposes no authorizer hook).
+// string) are denied here explicitly. The pinned modernc.org/sqlite v1.61.0
+// does expose an authorizer (AuthorizerRegisterer, installable per connection
+// through RegisterConnectionHook) and a _defensive=1 DSN switch, but neither
+// is wired into this build yet, so this keyword boundary remains the owner.
 //
 // A keyword filter alone is not enough, because SQLite also exposes read-only
 // capabilities as ordinary table-valued functions that never spell a denied
 // keyword: sqlite_dbpage returns raw database pages, dbstat returns page
 // statistics, and every result-bearing PRAGMA is reachable as pragma_<name>
 // (pragma_database_list returns the absolute live database path). Those are
-// denied by name below. The engine provides no authorizer hook, so the names
-// are the boundary; docs/operations.md states the accepted surface.
+// denied by name below. That authorizer would eventually let the engine answer
+// the same question; until it is installed, the names are the boundary and
+// docs/operations.md states the accepted surface.
 func validateQuery(q string) error {
 	t := strings.TrimSpace(q)
 	if t == "" {
