@@ -207,28 +207,46 @@ module.exports = async function operatorUnlock(H) {
 
       // Sign-out clears both halves: the tab credential and the signed cookie
       // (the DELETE), then asks again. Clearing only the credential would let
-      // a reload ride the cookie straight back in.
+      // a reload ride the cookie straight back in. A gated call that already
+      // left with the bearer re-mints the cookie on its way back, so the
+      // expiry has to wait for that wave instead of racing it.
       {
         const savedSignOutFetch = w.fetch;
         const deletes = [];
+        let releaseHeld = null;
         w.fetch = (url, options) => {
-          if (String(url) === '/session' && options && options.method === 'DELETE') {
+          const u = String(url);
+          if (u === '/session' && options && options.method === 'DELETE') {
             deletes.push({credentials: options.credentials});
             return Promise.resolve({ok: true, status: 204, json: async () => ({})});
+          }
+          if (u.includes('/metrics/bootstrap') && !releaseHeld) {
+            return new Promise(resolve => { releaseHeld = () => resolve({ok: true, status: 200, json: async () => ({})}); });
           }
           return savedSignOutFetch(url, options);
         };
         try {
-          d.getElementById('btn-signout').click();
           check('the sign-out control is bound in the one id table',
             !!w.eval("STATIC_BINDINGS['btn-signout']"));
+          w.storeOperatorCredential('op-token-correct');
+          const held = w.operatorFetch('/metrics/bootstrap');
+          await settleUntil(() => !!releaseHeld);
+          d.getElementById('btn-signout').click();
+          await new Promise(resolve => setTimeout(resolve, 80));
+          check('sign-out saves the cookie expiry for in-flight gated work', deletes.length === 0);
+          releaseHeld();
+          await held;
           check('sign-out deletes the session with the cookie attached',
             await settleUntil(() => deletes.length === 1) &&
             deletes[0].credentials === 'same-origin');
           check('sign-out clears the stored credential and asks again',
             await settleUntil(() => dialogOpen()) && w.eval('operatorCredential') === '' &&
             w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === null);
-          d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
+          // The prompt sign-out opened is its own: an answer has to be stored,
+          // so the dialog it shows is a real way back in.
+          submitDialog('op-token-after-signout');
+          check('the answer to the sign-out prompt is stored',
+            await settleUntil(() => w.eval('operatorCredential') === 'op-token-after-signout'));
         } finally {
           w.fetch = savedSignOutFetch;
         }

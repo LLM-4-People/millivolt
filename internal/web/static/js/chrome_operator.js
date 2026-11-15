@@ -46,8 +46,35 @@ function storeOperatorCredential(value) {
 async function signOutOperator() {
   storeOperatorCredential('');
   operatorRejected = false;
+  // A gated call that already left with the bearer makes the server mint a new
+  // cookie on its way back, so expiring first would lose the race and a reload
+  // would ride straight back in. Let the in-flight wave land, then expire.
+  await operatorDrain();
   try { await fetch('/session', { method: 'DELETE', credentials: 'same-origin' }); } catch (e) { /* cookie stays until TTL */ }
-  askOperatorToken();
+  // The prompt it opens belongs to this call: an answered token must be stored
+  // here, or the sign-in after a sign-out would validate nothing.
+  const token = await askOperatorToken();
+  if (token) storeOperatorCredential(token);
+}
+
+// OPERATOR_SIGNOUT_DRAIN_MS bounds the sign-out wait: a prompt held open by an
+// already-401ed call must not block the exit.
+const OPERATOR_SIGNOUT_DRAIN_MS = 1500;
+// operatorGated counts the gated calls the page has in flight. Every gated
+// call goes through operatorFetch, so this is the one place that knows.
+let operatorGated = 0;
+
+// operatorDrain resolves once no gated call is outstanding, or at the bound.
+function operatorDrain() {
+  if (!operatorGated) return Promise.resolve();
+  return new Promise(resolve => {
+    const started = Date.now();
+    const tick = () => {
+      if (!operatorGated || Date.now() - started >= OPERATOR_SIGNOUT_DRAIN_MS) resolve();
+      else setTimeout(tick, 25);
+    };
+    setTimeout(tick, 25);
+  });
 }
 
 // One owner for gated-plane calls: attach the stored credential, and on 401
@@ -56,6 +83,11 @@ async function signOutOperator() {
 // (MILLIVOLT_OPERATOR_TOKEN); prompting cannot help, so the response is
 // returned for the caller's error surface.
 async function operatorFetch(url, options = {}) {
+  operatorGated++;
+  try { return await operatorFetchInner(url, options); } finally { operatorGated--; }
+}
+
+async function operatorFetchInner(url, options) {
   const attempt = () => {
     const headers = Object.assign({}, options.headers || {});
     if (operatorCredential) headers['Authorization'] = 'Bearer ' + operatorCredential;
