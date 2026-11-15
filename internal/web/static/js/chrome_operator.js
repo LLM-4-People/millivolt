@@ -9,8 +9,11 @@
 // never outlives the browser session, and it is dropped as soon as the
 // server rejects it.
 const OPERATOR_KEY = 'millivolt.operatorToken';
+// The server compares the bearer byte for byte and a paste carries the
+// surrounding whitespace: the storage owner trims once, on read and on write,
+// so no call site has to.
 let operatorCredential = '';
-try { operatorCredential = sessionStorage.getItem(OPERATOR_KEY) || ''; } catch (e) { operatorCredential = ''; }
+try { operatorCredential = (sessionStorage.getItem(OPERATOR_KEY) || '').trim(); } catch (e) { operatorCredential = ''; }
 // Bumped on every stored/cleared credential so an in-flight request can tell
 // that another call's unlock landed while it was waiting for its response.
 let operatorCredentialEpoch = 0;
@@ -24,10 +27,11 @@ let operatorPrompt = null;
 let operatorDismiss = () => {};
 
 function storeOperatorCredential(value) {
-  operatorCredential = value;
+  const trimmed = (value || '').trim();
+  operatorCredential = trimmed;
   ++operatorCredentialEpoch;
   try {
-    if (value) sessionStorage.setItem(OPERATOR_KEY, value);
+    if (trimmed) sessionStorage.setItem(OPERATOR_KEY, trimmed);
     else sessionStorage.removeItem(OPERATOR_KEY);
   } catch (e) { /* storage denied: tab-only credential */ }
 }
@@ -199,8 +203,8 @@ function askOperatorToken() {
     dialog.querySelector('[data-operator-auth="cancel"]').onclick = () => finish('');
     $('operator-dialog-form').onsubmit = e => {
       e.preventDefault();
-      // Verbatim, like every other presentation path (bearerToken and the
-      // login form never trim): a credential with edge whitespace is valid.
+      // Raw here: storeOperatorCredential owns the one trim, so a pasted
+      // token with edge whitespace still stores the exact bearer value.
       finish(input.value);
     };
     closeHeaderMenus();

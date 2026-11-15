@@ -33,6 +33,19 @@ module.exports = async function operatorUnlock(H) {
     };
     try {
       await settleUntil(() => w.eval('!!lastData'));
+      // The storage owner trims: a pasted token arrives with edge whitespace
+      // and the server compares the bearer byte for byte. Only one trim
+      // happens, here, so the dialog and every other caller stay verbatim.
+      {
+        w.storeOperatorCredential('  padded-token  ');
+        check('a pasted credential is trimmed once at the storage owner',
+          w.eval('operatorCredential') === 'padded-token' &&
+          w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === 'padded-token');
+        w.storeOperatorCredential('   ');
+        check('a whitespace-only entry stores nothing',
+          w.eval('operatorCredential') === '' &&
+          w.sessionStorage.getItem(w.eval('OPERATOR_KEY')) === null);
+      }
       // Freeze the page's own timers so only test-driven calls hit fetch.
       w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearInterval(_clockTimer); _clockTimer = null;');
       w.eval('storeOperatorCredential("")');
@@ -137,8 +150,8 @@ module.exports = async function operatorUnlock(H) {
         await settleUntil(() => w.eval('operatorCredential') === 'op-token-correct' && w.eval('operatorRejected === true')));
       check('the raced post-prompt caller returns its 401', (await gen).status === 401);
 
-      // The dialog presents the entered value VERBATIM (the server never
-      // trims credentials): edge whitespace must reach the wire untouched.
+      // The dialog pastes whatever arrived; the storage owner is the one trim,
+      // so a token copied with edge whitespace reaches the wire clean.
       w.eval('storeOperatorCredential("")');
       const padded = ' padded-token ';
       const paddedCall = w.operatorFetch('/metrics/bootstrap'); // 401 (no credential) -> dialog
@@ -147,13 +160,13 @@ module.exports = async function operatorUnlock(H) {
       w.fetch = (url, options) => {
         const auth = options && options.headers ? (options.headers.Authorization || '') : '';
         calls.push({url: String(url), auth});
-        if (auth === 'Bearer ' + padded) return Promise.resolve({ok: true, status: 200, json: async () => ({})});
+        if (auth === 'Bearer padded-token') return Promise.resolve({ok: true, status: 200, json: async () => ({})});
         return Promise.resolve({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
       };
       submitDialog(padded);
-      check('the dialog presents the token verbatim without trimming',
-        (await paddedCall).status === 200 && w.eval('operatorCredential') === padded &&
-        calls.some(c => c.auth === 'Bearer ' + padded));
+      check('the dialog trims a pasted token once, before the wire',
+        (await paddedCall).status === 200 && w.eval('operatorCredential') === 'padded-token' &&
+        calls.some(c => c.auth === 'Bearer padded-token'));
       w.fetch = savedPadFetch;
 
       // A rejected entry is visible on the next prompt instead of a silent
