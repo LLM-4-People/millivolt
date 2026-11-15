@@ -98,7 +98,7 @@ func TestCorruptAttemptsColumnAbsorbedPerRow(t *testing.T) {
 // spellings (nil, nil), and any other unmarshal failure is returned to the
 // caller - never swallowed, never fatal to the scan.
 func TestDecodeJSONColumnContract(t *testing.T) {
-	for _, raw := range [][]byte{nil, []byte(""), []byte("null")} {
+	for _, raw := range []string{"", "null"} {
 		if atts, err := DecodeAttemptsColumn(raw); atts != nil || err != nil {
 			t.Errorf("DecodeAttemptsColumn(%q) = %v, %v; want nil, nil", raw, atts, err)
 		}
@@ -106,7 +106,7 @@ func TestDecodeJSONColumnContract(t *testing.T) {
 			t.Errorf("DecodeToolNamesColumn(%q) = %v, %v; want nil, nil", raw, names, err)
 		}
 	}
-	for _, raw := range [][]byte{[]byte("{"), []byte(`{"not":"an array"}`), []byte(`[{"bad":`)} {
+	for _, raw := range []string{"{", `{"not":"an array"}`, `[{"bad":`} {
 		if atts, err := DecodeAttemptsColumn(raw); err == nil {
 			t.Errorf("DecodeAttemptsColumn(%q) = %v, nil; want a decode error", raw, atts)
 		}
@@ -114,11 +114,11 @@ func TestDecodeJSONColumnContract(t *testing.T) {
 			t.Errorf("DecodeToolNamesColumn(%q) = %v, nil; want a decode error", raw, names)
 		}
 	}
-	atts, err := DecodeAttemptsColumn([]byte(`[{"status_code":503}]`))
+	atts, err := DecodeAttemptsColumn(`[{"status_code":503}]`)
 	if err != nil || len(atts) != 1 || atts[0].StatusCode != 503 {
 		t.Fatalf("DecodeAttemptsColumn(valid) = %v, %v; want one 503 attempt", atts, err)
 	}
-	names, err := DecodeToolNamesColumn([]byte(`["read","bash"]`))
+	names, err := DecodeToolNamesColumn(`["read","bash"]`)
 	if err != nil || len(names) != 2 || names[0] != "read" || names[1] != "bash" {
 		t.Fatalf("DecodeToolNamesColumn(valid) = %v, %v; want [read bash]", names, err)
 	}

@@ -153,12 +153,12 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 			log.Printf("storage: parse response headers for %s: %v", r.ID, err)
 		}
 	}
-	if names, err := DecodeToolNamesColumn([]byte(s.toolNames)); err != nil {
+	if names, err := DecodeToolNamesColumn(s.toolNames); err != nil {
 		log.Printf("storage: parse tool names for %s: %v", r.ID, err)
 	} else {
 		r.ToolNames = names
 	}
-	if attempts, err := DecodeAttemptsColumn([]byte(s.attemptsJSON)); err != nil {
+	if attempts, err := DecodeAttemptsColumn(s.attemptsJSON); err != nil {
 		log.Printf("storage: parse attempts for %s: %v", r.ID, err)
 	} else {
 		r.Attempts = attempts
@@ -180,13 +180,14 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 // decodeJSONColumn is the shared owner of the stored JSON-column decode:
 // empty and "null" are the canonical no-value spellings and yield nil with
 // no error; any other unmarshal failure is column corruption the caller
-// logs per record (never a failed scan).
-func decodeJSONColumn[T any](raw []byte) ([]T, error) {
-	if len(raw) == 0 || string(raw) == "null" {
+// logs per record (never a failed scan). The scan hands over the stored
+// spelling, so only the unmarshal itself converts it.
+func decodeJSONColumn[T any](raw string) ([]T, error) {
+	if raw == "" || raw == "null" {
 		return nil, nil
 	}
 	var out []T
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -194,13 +195,13 @@ func decodeJSONColumn[T any](raw []byte) ([]T, error) {
 
 // DecodeAttemptsColumn decodes the stored attempts JSON column through the
 // shared decodeJSONColumn contract (external consumers live in internal/web).
-func DecodeAttemptsColumn(raw []byte) ([]metrics.RetryAttempt, error) {
+func DecodeAttemptsColumn(raw string) ([]metrics.RetryAttempt, error) {
 	return decodeJSONColumn[metrics.RetryAttempt](raw)
 }
 
 // DecodeToolNamesColumn decodes the stored tool_names JSON column with the
 // same empty/"null" contract as DecodeAttemptsColumn.
-func DecodeToolNamesColumn(raw []byte) ([]string, error) {
+func DecodeToolNamesColumn(raw string) ([]string, error) {
 	return decodeJSONColumn[string](raw)
 }
 
@@ -238,6 +239,49 @@ type LogCandidate struct {
 	ErrorCode string
 	ErrorMsg  string
 	Attempts  []metrics.RetryAttempt
+}
+
+// LogCandidateFields names the derived candidate columns the caller's matcher
+// will actually read. Every unset field is left out of the statement, so a page
+// scoped only by status class or time never decodes the tool, error or attempt
+// JSON it would discard. Status and the ordering key are always selected.
+type LogCandidateFields uint8
+
+const (
+	// LogCandidatesModel selects the raw model spelling the canonical matcher
+	// derives from.
+	LogCandidatesModel LogCandidateFields = 1 << iota
+	// LogCandidatesTools selects the stored tool names.
+	LogCandidatesTools
+	// LogCandidatesErrors selects the error columns and the attempt log the
+	// derived error signatures read.
+	LogCandidatesErrors
+	// LogCandidatesAll is the every-field mask.
+	LogCandidatesAll = LogCandidatesModel | LogCandidatesTools | LogCandidatesErrors
+)
+
+// logCandidateRaw holds the candidate columns' stored JSON pending decode. The
+// buffer is reused per row and decoded only when its field was requested.
+type logCandidateRaw struct {
+	toolNames string
+	attempts  string
+}
+
+// logCandidateSelect is the ordered table of selectable candidate columns: the
+// mask bit that requests one, its column name and the scan destination it
+// fills. The statement and the destination list are both built from this table,
+// so a new column is one entry and cannot drift between them.
+var logCandidateSelect = []struct {
+	field LogCandidateFields
+	sql   string
+	dest  func(c *LogCandidate, raw *logCandidateRaw) any
+}{
+	{LogCandidatesModel, "model", func(c *LogCandidate, _ *logCandidateRaw) any { return &c.Model }},
+	{LogCandidatesTools, "tool_names", func(_ *LogCandidate, raw *logCandidateRaw) any { return &raw.toolNames }},
+	{LogCandidatesErrors, "error_type", func(c *LogCandidate, _ *logCandidateRaw) any { return &c.ErrorType }},
+	{LogCandidatesErrors, "error_code", func(c *LogCandidate, _ *logCandidateRaw) any { return &c.ErrorCode }},
+	{LogCandidatesErrors, "error_msg", func(c *LogCandidate, _ *logCandidateRaw) any { return &c.ErrorMsg }},
+	{LogCandidatesErrors, "attempts", func(_ *LogCandidate, raw *logCandidateRaw) any { return &raw.attempts }},
 }
 
 // QueryBefore returns a newest-first page below the exclusive cursor. A nil
@@ -336,15 +380,6 @@ func (f *LogFilter) where() (string, []any, error) {
 	return clause, args, nil
 }
 
-// logCandidateColumns is the closed narrow projection the live-log Go matcher
-// reads. Keep it aligned with LogCandidate: every column here is consumed by
-// the derived predicates, never by response materialization. Adding a field
-// means extending both together.
-const logCandidateColumns = `
-	id, started_at, status_code, model, tool_names,
-	error_type, error_code, error_msg, attempts
-`
-
 // buildBeforeQuery is the single owner of the durable log page statement
 // shape: newest-first below an exclusive (started_at,id) cursor, with SQL-safe
 // exact predicates applied by SQLite before decoding. idx_requests_log is the
@@ -407,15 +442,27 @@ func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogF
 
 // QueryBeforeCandidates pages the narrow matcher projection newest-first
 // below the same exclusive cursor and SQL predicates as QueryBefore. It is the
-// log page's scan read: one bounded statement whose rows carry only the
-// derived fields the Go matcher needs, never a full Record.
-func (s *Store) QueryBeforeCandidates(ctx context.Context, before *LogCursor, filter *LogFilter, limit int) ([]LogCandidate, error) {
+// log page's scan read: one bounded statement whose rows carry only the derived
+// fields the Go matcher needs, never a full Record, and only the fields the
+// caller's plan names. Status and the ordering key are always read.
+func (s *Store) QueryBeforeCandidates(ctx context.Context, before *LogCursor, filter *LogFilter, limit int, fields LogCandidateFields) ([]LogCandidate, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
-	q, args, err := buildBeforeQuery(logCandidateColumns, before, filter, limit)
+	var c LogCandidate
+	var raw logCandidateRaw
+	columns := "id, started_at, status_code"
+	dests := []any{&c.Cursor.ID, &c.Cursor.StartMs, &c.Status}
+	for _, column := range logCandidateSelect {
+		if fields&column.field == 0 {
+			continue
+		}
+		columns += ", " + column.sql
+		dests = append(dests, column.dest(&c, &raw))
+	}
+	q, args, err := buildBeforeQuery(columns, before, filter, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -426,23 +473,25 @@ func (s *Store) QueryBeforeCandidates(ctx context.Context, before *LogCursor, fi
 	defer rows.Close()
 	var out []LogCandidate
 	for rows.Next() {
-		var c LogCandidate
-		var toolNames, attemptsJSON string
-		if err := rows.Scan(
-			&c.Cursor.ID, &c.Cursor.StartMs, &c.Status, &c.Model, &toolNames,
-			&c.ErrorType, &c.ErrorCode, &c.ErrorMsg, &attemptsJSON,
-		); err != nil {
+		c.Model, c.ToolNames, c.Attempts = "", nil, nil
+		c.ErrorType, c.ErrorCode, c.ErrorMsg = "", "", ""
+		raw.toolNames, raw.attempts = "", ""
+		if err := rows.Scan(dests...); err != nil {
 			return nil, err
 		}
-		if names, err := DecodeToolNamesColumn([]byte(toolNames)); err != nil {
-			log.Printf("storage: parse tool names for %s: %v", c.Cursor.ID, err)
-		} else {
-			c.ToolNames = names
+		if fields&LogCandidatesTools != 0 {
+			if names, err := DecodeToolNamesColumn(raw.toolNames); err != nil {
+				log.Printf("storage: parse tool names for %s: %v", c.Cursor.ID, err)
+			} else {
+				c.ToolNames = names
+			}
 		}
-		if attempts, err := DecodeAttemptsColumn([]byte(attemptsJSON)); err != nil {
-			log.Printf("storage: parse attempts for %s: %v", c.Cursor.ID, err)
-		} else {
-			c.Attempts = attempts
+		if fields&LogCandidatesErrors != 0 {
+			if attempts, err := DecodeAttemptsColumn(raw.attempts); err != nil {
+				log.Printf("storage: parse attempts for %s: %v", c.Cursor.ID, err)
+			} else {
+				c.Attempts = attempts
+			}
 		}
 		out = append(out, c)
 	}

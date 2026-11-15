@@ -82,18 +82,22 @@ const (
 // exact stored predicates SQL enforces before decode, plus the residual
 // Go-owned scope the authoritative matcher must still evaluate. allPushed
 // reports that every active predicate is represented exactly, so each
-// candidate is expected to be an output row.
+// candidate is expected to be an output row. fields names the candidate
+// columns the residual matcher reads, so the scan decodes nothing else.
 type logPagePlan struct {
 	filter    storage.LogFilter
 	goFilters []scopeFilter
 	goStatus  string
 	allPushed bool
+	fields    storage.LogCandidateFields
 }
 
 // planLogPage derives one request's pushdown and residual scope. Exact stored
 // dimensions become SQL predicates; everything the projection derives (status
 // classes, errors, tools, time buckets, canonical models) stays in the
 // authoritative Go matcher and is matched against the narrow candidate read.
+// Each residual group also declares the candidate columns the matcher will
+// read for it.
 func planLogPage(fs []scopeFilter, statusCode string) logPagePlan {
 	plan := logPagePlan{allPushed: true}
 	// Group by dimension first: OR within one dimension's values, AND across
@@ -134,6 +138,13 @@ func planLogPage(fs []scopeFilter, statusCode string) logPagePlan {
 			// " gpt-4 " that canonically equals "gpt-4". Keep every model
 			// filter Go-owned; a growing scan is the correct cost.
 			pushable = false
+			plan.fields |= storage.LogCandidatesModel
+		case "tool":
+			pushable = false
+			plan.fields |= storage.LogCandidatesTools
+		case "error":
+			pushable = false
+			plan.fields |= storage.LogCandidatesErrors
 		default:
 			pushable = false
 		}
@@ -176,20 +187,28 @@ func logPageQuery(fs []scopeFilter, statusCode string) (filter storage.LogFilter
 // logCandidateMatch evaluates the residual Go-owned scope against the narrow
 // candidate projection. Exact predicates already enforced by the candidate
 // query are deliberately absent from the plan, so every field this matcher
-// reads comes from the scanned row itself.
-func logCandidateMatch(c *storage.LogCandidate, goStatus string, fs []scopeFilter, mcz *modelCanonizer) bool {
-	r := metrics.Record{
-		StatusCode: c.Status, ErrorType: c.ErrorType, ErrorCode: c.ErrorCode,
-		ErrorMsg: c.ErrorMsg, Attempts: c.Attempts,
-		Start: time.UnixMilli(c.Cursor.StartMs),
-	}
+// reads comes from the scanned row itself. Each field group is filled only when
+// the plan asked the scan to decode it, so an error signature or a tool list is
+// never built for a scope that cannot read it.
+func logCandidateMatch(c *storage.LogCandidate, plan logPagePlan, mcz *modelCanonizer) bool {
 	cc := contrib{
 		id: c.Cursor.ID, start: c.Cursor.StartMs, status: c.Status,
-		labels: &contribLabels{model: mcz.model(c.Model)},
-		toolsL: c.ToolNames,
-		ent:    errorEntries(&r),
 	}
-	return scopedMatch(&cc, goStatus, fs)
+	if plan.fields&storage.LogCandidatesModel != 0 {
+		cc.labels = &contribLabels{model: mcz.model(c.Model)}
+	}
+	if plan.fields&storage.LogCandidatesTools != 0 {
+		cc.toolsL = c.ToolNames
+	}
+	if plan.fields&storage.LogCandidatesErrors != 0 {
+		r := metrics.Record{
+			StatusCode: c.Status, ErrorType: c.ErrorType, ErrorCode: c.ErrorCode,
+			ErrorMsg: c.ErrorMsg, Attempts: c.Attempts,
+			Start: time.UnixMilli(c.Cursor.StartMs),
+		}
+		cc.ent = errorEntries(&r)
+	}
+	return scopedMatch(&cc, plan.goStatus, plan.goFilters)
 }
 
 // HandleLogPage starts at durable newest, then pages below an exact (time,id)
@@ -280,7 +299,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			if batch <= 0 {
 				break
 			}
-			candidates, err := a.store.QueryBeforeCandidates(ctx, cursor, &plan.filter, batch)
+			candidates, err := a.store.QueryBeforeCandidates(ctx, cursor, &plan.filter, batch, plan.fields)
 			if err != nil {
 				log.Printf("agg log page: %v", err)
 				adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")
@@ -294,7 +313,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			for i := range candidates {
 				cand := &candidates[i]
 				cursor = &storage.LogCursor{StartMs: cand.Cursor.StartMs, ID: cand.Cursor.ID}
-				if !plan.allPushed && !logCandidateMatch(cand, plan.goStatus, plan.goFilters, mcz) {
+				if !plan.allPushed && !logCandidateMatch(cand, plan, mcz) {
 					continue
 				}
 				accepted = append(accepted, cand.Cursor)

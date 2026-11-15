@@ -577,7 +577,7 @@ func TestRestoreRejectsNonTextExactKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("empty TEXT id rejected: %v", err)
 	}
-	cands, err := live.QueryBeforeCandidates(t.Context(), nil, nil, 10)
+	cands, err := live.QueryBeforeCandidates(t.Context(), nil, nil, 10, LogCandidatesAll)
 	if err != nil {
 		t.Fatal(err)
 	}

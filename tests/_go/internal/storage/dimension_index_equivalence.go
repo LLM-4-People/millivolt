@@ -88,7 +88,7 @@ func snapshotLogQueries(t *testing.T, s *Store) logQuerySnapshot {
 	for _, tc := range fields {
 		for _, before := range []*LogCursor{nil, cursor} {
 			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
-			candidates, err := s.QueryBeforeCandidates(t.Context(), before, filter, 7)
+			candidates, err := s.QueryBeforeCandidates(t.Context(), before, filter, 7, LogCandidatesAll)
 			if err != nil {
 				t.Fatalf("candidates %v/%q: %v", tc.field, tc.value, err)
 			}

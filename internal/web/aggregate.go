@@ -389,7 +389,7 @@ func scanContrib(rows *sql.Rows) (contrib, contribLabels, error) {
 	var startedAt, status, ttft int64
 	var gen float64
 	var errType, errCode, errMsg string
-	var attemptsJSON, toolNamesJSON []byte
+	var attemptsJSON, toolNamesJSON string
 	var model string
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
 		&labels.client, &labels.prov, &model, &labels.key, &labels.conv, &labels.parentConv,

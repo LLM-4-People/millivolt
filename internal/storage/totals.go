@@ -440,7 +440,7 @@ func readTotals(ctx context.Context, db interface {
 	for rows.Next() {
 		var status, ttft int64
 		var errorType string
-		var attemptsJSON []byte
+		var attemptsJSON string
 		var in, out, cacheR, reason int64
 		var cost, gen float64
 		if err := rows.Scan(&status, &errorType, &attemptsJSON,
