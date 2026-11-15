@@ -35,15 +35,15 @@ func wedgedStore(t *testing.T) (*Store, metrics.Recorder, *sql.Conn) {
 	rec.Record(&metrics.Record{ID: "inflight", Start: time.Now()})
 	waitPurgeCondition(t, func() bool { return s.db.Stats().WaitCount > before })
 	rec.Record(&metrics.Record{ID: "queued", Start: time.Now()})
-	// The wedge window is four flush intervals, so backdate past it explicitly
-	// instead of waiting four hours.
+	// One cadence plus the window is the conviction age, so backdate past it
+	// explicitly instead of waiting an hour.
 	s.health.lastFlushUnixNano.Store(time.Now().Add(-5 * time.Hour).UnixNano())
 	return s, rec, conn
 }
 
-// A multi-hour flush interval must not postpone the wedge verdict for hours:
-// the window is clamped, so three stale minutes with a queued record already
-// count even though four configured intervals would be sixteen hours.
+// A multi-hour flush interval must not postpone the wedge verdict by a
+// multiple of that interval: the window tail stays clamped, so one cadence plus
+// three minutes already convicts instead of one cadence plus sixteen.
 func TestHealthClampsTheWedgeWindowAgainstALongFlushInterval(t *testing.T) {
 	opts := testOpts
 	opts.WriteChanCap = 1
@@ -60,13 +60,72 @@ func TestHealthClampsTheWedgeWindowAgainstALongFlushInterval(t *testing.T) {
 	rec.Record(&metrics.Record{ID: "inflight", Start: time.Now()})
 	waitPurgeCondition(t, func() bool { return s.db.Stats().WaitCount > before })
 	rec.Record(&metrics.Record{ID: "queued", Start: time.Now()})
-	s.health.lastFlushUnixNano.Store(time.Now().Add(-3 * time.Minute).UnixNano())
+	// One cadence and one clamped-window minute: still inside.
+	s.health.lastFlushUnixNano.Store(time.Now().Add(-(4*time.Hour + time.Minute)).UnixNano())
+	if h := s.Health(); h.Wedged {
+		t.Fatalf("Health().Wedged = true one cadence and a minute after the last flush (depth %d)", h.QueueDepth)
+	}
+	// One cadence plus the full clamped window: convicted, even though four
+	// unclamped intervals would have been sixteen hours.
+	s.health.lastFlushUnixNano.Store(time.Now().Add(-(4*time.Hour + 3*time.Minute)).UnixNano())
 
 	if h := s.Health(); !h.Wedged {
-		t.Fatalf("Health().Wedged = false with %d queued after a 4h interval and a 3m old flush", h.QueueDepth)
+		t.Fatalf("Health().Wedged = false with %d queued after a 4h interval and a cadence-plus-window old flush", h.QueueDepth)
 	}
 	if ready, reason := s.Ready(); ready {
 		t.Fatalf("Ready() = true, want a wedge refusal, got %q", reason)
+	}
+}
+
+// TestHealthAllowsOneCadenceBeforeConvicting pins CR-3: the window clamp
+// convicted a record that was only waiting for its own flush tick, so with the
+// documented hourly storage_flush_interval readiness was red for almost the
+// whole cycle. A record inside one cadence plus the window never convicts.
+func TestHealthAllowsOneCadenceBeforeConvicting(t *testing.T) {
+	opts := testOpts
+	opts.FlushInterval = time.Hour
+	s := openPurgeTestStore(t, opts)
+	s.Record(&metrics.Record{ID: "queued", Start: time.Now(), StatusCode: 200})
+	waitPurgeCondition(t, func() bool { return s.health.inFlight.Load() == 1 })
+	// Fifty minutes since the last commit is far outside the two-minute clamp
+	// but inside the record's own cadence, so it is not yet a wedge.
+	s.health.lastFlushUnixNano.Store(time.Now().Add(-50 * time.Minute).UnixNano())
+	if h := s.Health(); h.Wedged {
+		t.Fatalf("Health().Wedged = true with one record waiting inside its cadence (depth %d, last flush %v)", h.QueueDepth, h.LastFlush)
+	}
+	if ready, reason := s.Ready(); !ready {
+		t.Fatalf("Ready() = false inside the flush cadence: %q", reason)
+	}
+	// One cadence plus the progress window later the ticker should have taken
+	// it, so the same record convicts.
+	s.health.oldestQueuedUnixNano.Store(time.Now().Add(-(time.Hour + 3*time.Minute)).UnixNano())
+	if h := s.Health(); !h.Wedged {
+		t.Fatalf("Health().Wedged = false with a record older than a cadence and the window (depth %d)", h.QueueDepth)
+	}
+	if ready, _ := s.Ready(); ready {
+		t.Fatal("Ready() = true with a record older than a cadence and the window")
+	}
+}
+
+// The queue clock must start when the record arrives, not only when the writer
+// picks it up: a writer that dies before its first commit still has to convict.
+func TestHealthQueueClockStartsOnArrival(t *testing.T) {
+	opts := testOpts
+	opts.FlushInterval = time.Hour
+	s := openPurgeTestStore(t, opts)
+	if ns := s.health.oldestQueuedUnixNano.Load(); ns != 0 {
+		t.Fatalf("queue clock started before any record: %v", time.Unix(0, ns))
+	}
+	s.Record(&metrics.Record{ID: "queued", Start: time.Now(), StatusCode: 200})
+	if ns := s.health.oldestQueuedUnixNano.Load(); ns == 0 {
+		t.Fatal("arrival did not start the queue clock")
+	}
+	waitPurgeCondition(t, func() bool { return s.health.inFlight.Load() == 1 })
+	// Nothing was ever committed, so only the record's own age can convict.
+	s.health.lastFlushUnixNano.Store(0)
+	s.health.oldestQueuedUnixNano.Store(time.Now().Add(-(time.Hour + 3*time.Minute)).UnixNano())
+	if h := s.Health(); !h.Wedged {
+		t.Fatalf("Health().Wedged = false for an unpicked record past its cadence (depth %d outstanding %d last flush %v)", h.QueueDepth, h.Outstanding, h.LastFlush)
 	}
 }
 
@@ -74,9 +133,11 @@ func TestHealthClampsTheWedgeWindowAgainstALongFlushInterval(t *testing.T) {
 // oldest queued record ages on its own, independent of the last flush.
 func TestHealthWedgesOnTheOldestQueuedRecord(t *testing.T) {
 	s, rec, conn := wedgedStore(t)
-	// A commit just succeeded, so only the record's own age can convict.
+	// A commit just succeeded, so only the record's own age can convict; the
+	// store runs an hourly cadence, so the age must pass a cadence and the
+	// window.
 	s.health.lastFlushUnixNano.Store(time.Now().UnixNano())
-	s.health.oldestQueuedUnixNano.Store(time.Now().Add(-3 * time.Minute).UnixNano())
+	s.health.oldestQueuedUnixNano.Store(time.Now().Add(-(time.Hour + 3*time.Minute)).UnixNano())
 	if h := s.Health(); !h.Wedged {
 		t.Fatalf("Health().Wedged = false with %d queued after a fresh flush", h.QueueDepth)
 	}

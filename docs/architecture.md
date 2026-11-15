@@ -269,11 +269,14 @@ the dashboard counter, and the exposition renders each cause so alerting can
 separate overload from shutdown, a panic and a failing database. The same owner
 publishes the oldest queued record's arrival and stamps every flush attempt, so
 `/readyz` can tell a stalled writer from a merely idle one: a non-empty queue
-whose oldest record, or last successful flush, is older than the wedge window
-(four flush intervals clamped to 30 seconds and 2 minutes) reads wedged. The
-window is clamped so an hourly cadence cannot hide a stuck writer for hours. A
-failed flush stays sticky. `/healthz` stays the liveness contract; readiness is
-the stronger answer a scheduler needs.
+whose oldest record, or last successful flush, has passed one flush interval
+plus the wedge window (four intervals clamped to 30 seconds and 2 minutes)
+reads wedged. The interval on top is the record's own cadence, so a record
+inside it never convicts and a long cadence cannot hide a stuck writer for
+longer than that. The arrival stamp comes from the producer when the queue was
+empty as well as from the writer, so a writer that dies before its first pickup
+still ages the record. A failed flush stays sticky. `/healthz` stays the
+liveness contract; readiness is the stronger answer a scheduler needs.
 `tests/_go/internal/storage/health.go` pins the cause split, the wedge/ready
 transition and the disabled-store answer, and
 `tests/_go/internal/metrics/prometheus_extra.go` pins that the storage block is

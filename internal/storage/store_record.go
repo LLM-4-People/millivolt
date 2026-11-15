@@ -73,6 +73,12 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 		s.drop(DropAfterClose)
 		return
 	}
+	// A record arriving into an empty queue starts the wedge clock: the writer
+	// may die before it ever picks the record up, and then nothing else would
+	// age it.
+	if len(s.ch) == 0 {
+		s.health.noteQueued(time.Now())
+	}
 	select {
 	case s.ch <- queuedRecord{record: r, seq: s.accepted + 1, queued: time.Now()}:
 		s.accepted++
