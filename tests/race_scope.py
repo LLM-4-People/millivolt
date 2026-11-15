@@ -100,17 +100,27 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "*MCPHTTPEndpoint*",
         "*RestartProgress*",
         "*OperatorNamespace*",
-        "*MetricsPprofRoutes*",
+        # Both pprof areas serve concurrent requests from the real listener,
+        # and one drives two captures at once to prove the single-flight.
+        "*Pprof*",
         "*DeadlineHandler*",
+        # The reclaimer parses a live child listener while the parent inspects
+        # the same process table from its own goroutine.
+        "*ClaimPort*",
+        # The staged restore uploads from a goroutine while the handler holds
+        # reloadMu and asserts the fence stays closed.
+        "*RestoreHolds*",
     ),
     # The stress client owns worker goroutines and atomics; the whole package
     # is small and is serialized by the fixed-port lock.
     f"{MODULE}/cmd/stress": ("*",),
-    # One mutex guards settings revision publication. These two tests start
-    # goroutines that write and read it concurrently; YAML parsing is plain.
+    # One mutex guards settings revision publication. The listed tests start
+    # goroutines that write and read it concurrently, and the payload memo
+    # coalesces concurrent polls behind one payload; YAML parsing is plain.
     f"{MODULE}/internal/config": (
         "TestSettingsConcurrentRevisionAndReadIsolation",
         "TestWriteYAMLStringIdentityAndPrivateMode",
+        "TestPayloadMemo*",
     ),
     # Cursor pump, turn publisher and the streaming reader own the package's
     # only goroutines and mutexes. The translation tables are pure functions
@@ -185,6 +195,21 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "*Live*",
         "*DuplicateClientRequestIDs*",
         "*RequestID*",
+        # Cursor resume drives the pump and the turn publisher from a test
+        # goroutine; the pacing area starts one goroutine per queued sibling;
+        # the pre-commit and committed-status envelopes are produced by a
+        # handler goroutine while the test reads the recorder. Name pins and
+        # the persistence warning are published from a competing goroutine.
+        "TestCursorResume*",
+        "TestCursorWaits*",
+        "TestCursorUnparked*",
+        "TestCursorRetried*",
+        "TestTranslatedNonChatPreCommit*",
+        "TestCommittedNonOKStatus*",
+        "TestNamePins*",
+        "TestOperatorPersistence*",
+        "TestPacingWindow*",
+        "TestClientAbort*",
     ),
     # Cond-var wait/send, storm backoff, holds and leases. Cheap enough to run
     # the complete package under race.
