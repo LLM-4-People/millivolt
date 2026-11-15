@@ -399,6 +399,18 @@ func (s *Server) admitSendAttempt(ctx context.Context, groupKey string, hooks sc
 	return own, permit, time.Now(), nil
 }
 
+// boundAttempts keeps the newest in-bound attempt entries. The attempt log is
+// appended by the transport and HTTP retry writers alike, and both share one
+// bound: the sum of the two configured retry budgets, with a one-entry floor
+// so a zero budget still records the re-send it absorbed. One owner, so neither
+// writer can outgrow the other on the same configuration.
+func (s *Server) boundAttempts(rec *metrics.Record) {
+	cfg := s.cfg()
+	if bound := max(cfg.MaxRetries+cfg.StormMaxRetries, 1); len(rec.Attempts) > bound {
+		rec.Attempts = append(rec.Attempts[:0], rec.Attempts[len(rec.Attempts)-bound:]...)
+	}
+}
+
 // absorbTransportRetry books one absorbed transport-level failure: the
 // attempt-log entry (transport class, the caller's rendered message), the
 // retry counter with a live publish, and the Trip that paces the group and
@@ -412,6 +424,7 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 		ErrorMsg:   msg,
 		At:         time.Now(),
 	})
+	s.boundAttempts(rec)
 	rec.Retries++
 	s.publishUpdate(rec)
 	return s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, 0)) || own
@@ -420,8 +433,8 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 // absorbHTTPRetry books one absorbed retryable HTTP response: the provider
 // retry hint (parseRetryAfter) and the attempt-log entry (status, bounded
 // error-body envelope via parseErrorBody, hint milliseconds, the response's
-// upstream metadata via captureUpstreamMeta), appended with the retry
-// counter (bounded to the newest max_retries + storm_max_retries entries).
+// upstream metadata via captureUpstreamMeta), appended with the retry counter
+// through the shared attempt bound (boundAttempts).
 // Returns the hint - the pacing floor for the caller's Trip and RetryAfterMs
 // stamp. The bounded body read, per-send cleanup, record
 // stamps and publish order stay per-transport: the generic relay interplays
@@ -449,17 +462,7 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 	at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
 	captureUpstreamMeta(&at, resp, authHeader)
 	rec.Attempts = append(rec.Attempts, at)
-	// A durable quota wait re-sends without ever burning max_retries, so the
-	// attempt log needs its own bound or it grows for the whole pause. Keep the
-	// newest entries: the tail is the history that explains the wait. The
-	// bound is the sum of the two configured attempt budgets, max_retries and
-	// storm_max_retries, and one entry always survives so a zero budget still
-	// records the re-send it absorbed. This is the one owner; the in-band 429
-	// stamp adds at most one more entry afterwards.
-	cfg := s.cfg()
-	if bound := max(cfg.MaxRetries+cfg.StormMaxRetries, 1); len(rec.Attempts) > bound {
-		rec.Attempts = append(rec.Attempts[:0], rec.Attempts[len(rec.Attempts)-bound:]...)
-	}
+	s.boundAttempts(rec)
 	rec.Retries++
 	return retryAfter
 }

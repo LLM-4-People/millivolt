@@ -165,9 +165,12 @@ type Record struct {
 	// Attempts records each transparently-retried upstream response (the ones
 	// the client never saw) so the proxy logs the history, not just the final
 	// outcome, plus at most one in-band entry for an upstream 429 whose status
-	// line a committed 200 could not relay. Bounded by max_retries (at least
-	// one, newest kept) plus that one entry: a durable quota wait re-sends
-	// without burning the retry budget, so the append alone is unbounded.
+	// line a committed 200 could not relay. Both retry writers (transport and
+	// HTTP) enforce one bound, the sum of max_retries and storm_max_retries
+	// (at least one, newest kept): a durable quota wait re-sends without
+	// burning the retry budget, so the append alone is unbounded. The quality
+	// and thinking rescues add their own configured, bounded budgets, and an
+	// in-band stamp adds at most one entry per committed attempt.
 	Attempts []RetryAttempt `json:"attempts,omitempty"`
 
 	// Derived fields populated at record time for the dashboard/storage.
