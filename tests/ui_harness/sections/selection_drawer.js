@@ -204,7 +204,36 @@ module.exports = async function selectionDrawer(H) {
     if (backBtn) backBtn.click();
     check('the back affordance returns to the request view with focus on the drawer\'s first control',
       !!backBtn && !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F') &&
-        d.activeElement === d.querySelector('#drawer .nav-btns button'));
+        // Focus lands on the first ENABLED control: the newer arrow disables on
+        // the newest row, so the older one is the first stop there.
+        d.activeElement === d.querySelector('#drawer .nav-btns button:not(:disabled)') &&
+        d.activeElement === d.getElementById('drawer-next'));
+    // The arrows disable at the ends of the visible window instead of dying
+    // silently, and a scope change that hides the open record says so and
+    // offers the way back.
+    {
+      const firstId = rows()[0].dataset.id;
+      const lastId = rows()[rows().length - 1].dataset.id;
+      w.openDrawer(firstId);
+      check('the newer arrow disables on the newest record',
+        d.getElementById('drawer-prev').disabled && !d.getElementById('drawer-next').disabled);
+      w.openDrawer(lastId);
+      check('the older arrow disables on the oldest record',
+        d.getElementById('drawer-next').disabled && !d.getElementById('drawer-prev').disabled);
+      w.openDrawer(firstId);
+      w.navigateTo([{ dim: 'provider', id: 'no-such-provider.example' }]);
+      await settleUntil(() => /Not in the current scope/.test(d.getElementById('drawer-body').textContent));
+      check('an out-of-scope record says so and disables both arrows',
+        !!d.querySelector('#drawer-body [data-drawer-scope]') &&
+        d.getElementById('drawer-prev').disabled && d.getElementById('drawer-next').disabled);
+      d.querySelector('#drawer-body [data-drawer-scope]').click();
+      await settleUntil(() => !!d.querySelector(`#tbl-requests tr.exp-row[data-id="${firstId}"]`));
+      check('the way back restores the record to the window and the arrows with it',
+        !/Not in the current scope/.test(d.getElementById('drawer-body').textContent) &&
+        !w.eval('explorerState().filters.length'));
+      w.closeDrawer();
+    }
+
     // The log retry-sub rows open the same attempt mode (their index rides
     // data-attempt).
     d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();

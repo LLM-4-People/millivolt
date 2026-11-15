@@ -501,6 +501,14 @@ function closeDrawer() {
   if ($('drawer-title')) $('drawer-title').textContent = '';
   highlightRow();
 }
+// drawerSyncNav is the one writer of the drawer's arrow state: an arrow with no
+// record beyond it disables, so "nothing happened" is never the only signal.
+function drawerSyncNav(at, total) {
+  const prev = $('drawer-prev'), next = $('drawer-next');
+  if (prev) prev.disabled = at <= 0;
+  if (next) next.disabled = at < 0 || at >= total - 1;
+}
+
 function drawerNav(dir) {
   // Same set + order as the request log: explorer scope + the grown window.
   // prev/next navigates requests; the attempt mode does not travel with it.
@@ -542,6 +550,17 @@ function renderDrawer() {
   const focusInDebug = !!(prevFocus && root.contains(prevFocus) && prevFocus.closest('#drawer-debug'));
   const focusToken = root ? captureFocus(root, detailFocusKey) : null;
   const base = reqIdentityText(r);
+  // Navigation follows the visible window. At either end the arrow is a dead
+  // control unless it is disabled, and a scope change can leave the open
+  // record outside the window entirely: then both arrows point at nothing and
+  // the drawer says so and offers the way back into scope.
+  const visible = logVisible();
+  const at = visible.findIndex(v => v.id === drawerId);
+  const outside = at < 0;
+  drawerSyncNav(at, visible.length);
+  const scopeNote = outside
+    ? `<div class="oc-banner" role="status"><strong>Not in the current scope.</strong> The active filters hide this request from the log. <button type="button" class="oc-link" data-drawer-scope>show all traffic</button></div>`
+    : '';
   if (a) {
     // The title carries the attempt identity: index, real status (transport
     // for status-less failures) and the provider request id that matches a
@@ -551,10 +570,10 @@ function renderDrawer() {
       + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
     $('drawer-title').innerHTML = `<button type="button" class="btn drawer-back" id="drawer-back" onclick="drawerBackToRequest()" title="back to request" data-focus-key="drawer-back">‹ request</button>` +
       `<span class="d-title-text" title="${escapeHtml(base + ident)}">${escapeHtml(base + ident)}</span>`;
-    body.innerHTML = formatAttemptDetail(r, drawerAttempt);
+    body.innerHTML = scopeNote + formatAttemptDetail(r, drawerAttempt);
   } else {
     $('drawer-title').innerHTML = `<span class="d-title-text" title="${escapeHtml(base)}">${escapeHtml(base)}</span>`;
-    body.innerHTML = formatDetail(r);
+    body.innerHTML = scopeNote + formatDetail(r);
   }
   detailWireGroups();
   body.scrollTop = scroll;
@@ -591,6 +610,7 @@ $('drawer-body').addEventListener('click', e => {
   // A drawer operator action seeds a console draft. The drawer is modal and
   // marks every other body child inert, so it must close first: opening the
   // console over it would leave a visible but unfocusable panel.
+  if (e.target.closest('[data-drawer-scope]')) { clearLogScope(); return; }
   const op = e.target.closest('[data-drawer-operator]');
   if (op) {
     const record = recordById(drawerId);

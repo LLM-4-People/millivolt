@@ -316,8 +316,8 @@ try {
   <div class="drawer-hd">
     <h3 id="drawer-title">request</h3>
     <div class="nav-btns">
-      <button class="btn" type="button" onclick="drawerNav(-1)" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
-      <button class="btn" type="button" onclick="drawerNav(1)" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
+      <button class="btn" type="button" id="drawer-prev" onclick="drawerNav(-1)" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
+      <button class="btn" type="button" id="drawer-next" onclick="drawerNav(1)" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
     </div>
     <button class="btn drawer-tool" type="button" onclick="drawerCopyRecord()" aria-label="copy request JSON" title="copy request JSON" data-focus-key="copy-record">JSON</button>
     <button class="btn" type="button" onclick="closeDrawer()" aria-label="close request detail (escape)" title="close (escape)" data-focus-key="close">✕<span class="d-key" aria-hidden="true">esc</span></button>

@@ -350,12 +350,16 @@ $('tbl-requests').addEventListener('click', e => {
 // act there too, not only in the log.
 $('drawer').addEventListener('click', activatePillEdit);
 
-// The log's empty state offers the way back to a full list: the status
-// selector and the explorer filters are cleared through their own owners.
-$('tbl-requests').addEventListener('click', e => {
-  if (!e.target.closest('[data-log-clear]')) return;
+// clearLogScope is the one way back to the full log: the status selector and
+// the explorer filters are cleared through their own owners. The empty state
+// and the out-of-scope drawer both offer it.
+function clearLogScope() {
   if (filters.status) { $('f-status').value = ''; doFilter(); }
   if (explorerState().filters.length) navigateTo([]);
+}
+
+$('tbl-requests').addEventListener('click', e => {
+  if (e.target.closest('[data-log-clear]')) clearLogScope();
 });
 
 // An attempt sub-row is a row, not a control, so it needs the keyboard press
