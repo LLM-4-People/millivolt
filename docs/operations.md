@@ -1583,10 +1583,13 @@ Both actions are irreversible without a backup.
 
 Every purge, backup and restore writes one audit line to the process log with
 its terminal outcome, before the response is written: the action, the rendered
-selection (`filter="all"` for a bodyless full delete), the previewed count when
+selection (`filter="all"` for a bodyless full delete, `filter="unparsed"` while
+the body or query has not been accepted, and `members="unparsed"` likewise for
+a backup/restore), the previewed count when
 one was supplied, and the committed `deleted` / `buffer_removed` counts, or the
-error. A lost or truncated response therefore stays diagnosable, and a retry can
-be compared against what was actually attempted. These lines are the
+error. Even a rejection at the query grammar, before the selection exists,
+leaves a line. A lost or truncated response therefore stays diagnosable, and a
+retry can be compared against what was actually attempted. These lines are the
 destructive-action trail; they are not a general request log.
 
 Export/delete filters are exact raw record fields, not display-name model

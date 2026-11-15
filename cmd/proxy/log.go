@@ -46,8 +46,9 @@ func decodeLogFilter(w http.ResponseWriter, r *http.Request) (logFilterRequest, 
 	return req, true, req.Filter.Validate()
 }
 
-// rejectPurgeQuery denies every query key on the body-only purge routes before
-// their body is decoded. The documented purge predicate travels only in the
+// purgeQueryError refuses every query key on the body-only purge routes before
+// their body is decoded, returning the rejection message so the handler can
+// audit it. The documented purge predicate travels only in the
 // JSON body, so an ignored query key would select the default, broader
 // action: POST /admin/purge?provider=alpha with no body would delete all
 // history instead of the named provider. The shared strict parse runs first,
@@ -56,17 +57,12 @@ func decodeLogFilter(w http.ResponseWriter, r *http.Request) (logFilterRequest, 
 // closed-set rule and its "unknown key <name>" wording; these routes consume
 // no keys, so duplicate and case-variant spellings are unlisted keys too and
 // fail the same way.
-func rejectPurgeQuery(w http.ResponseWriter, r *http.Request) bool {
+func purgeQueryError(r *http.Request) error {
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {
-		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
-		return false
+		return errors.New("invalid query")
 	}
-	if err := adminjson.UnknownQueryKey(q); err != nil {
-		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
-		return false
-	}
-	return true
+	return adminjson.UnknownQueryKey(q)
 }
 
 // exportLogFilter exposes exactly the same predicate fields as JSON count and
@@ -218,7 +214,25 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}
-		if !rejectPurgeQuery(w, r) {
+		// The audit owner sits above every gate: each terminal outcome writes
+		// one line, including a refusal that never reached the selection. The
+		// filter stays "unparsed" until the body supplies one.
+		var filter *storage.PurgeFilter
+		var reviewed *int64
+		parsed := false
+		filterText := func() string {
+			if !parsed {
+				return "unparsed"
+			}
+			return describeFilter(filter)
+		}
+		fail := func(err error) {
+			auditLog("purge", "outcome", "failed", "filter", filterText(),
+				"reviewed", reviewedText(reviewed), "error", err.Error())
+		}
+		if err := purgeQueryError(r); err != nil {
+			fail(err)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		req, hasBody, err := decodeLogFilter(w, r)
@@ -226,11 +240,11 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			err = errors.New("empty purge filter; send no body to delete everything")
 		}
 		if err != nil {
+			fail(err)
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		var filter *storage.PurgeFilter
-		var reviewed *int64
+		parsed = true
 		if hasBody {
 			filter = &req.Filter
 			reviewed = req.ReviewedCount
@@ -268,7 +282,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 		if errors.Is(err, storage.ErrPurgeCountChanged) {
-			auditLog("purge", "outcome", "refused", "filter", describeFilter(filter),
+			auditLog("purge", "outcome", "refused", "filter", filterText(),
 				"reviewed", reviewedText(reviewed), "error", err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusConflict,
 				"the row set changed since the preview; preview again and confirm the new count")
@@ -278,14 +292,13 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			// The failure line is written before the response, so a lost or
 			// truncated response is still diagnosable and a retry can be
 			// compared against what was actually attempted.
-			auditLog("purge", "outcome", "failed", "filter", describeFilter(filter),
-				"reviewed", reviewedText(reviewed), "error", err.Error())
+			fail(err)
 			adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// One line, same wording family as the failure path, so a purge is
 		// reconstructable after the response is gone.
-		auditLog("purge", "outcome", "ok", "filter", describeFilter(filter),
+		auditLog("purge", "outcome", "ok", "filter", filterText(),
 			"reviewed", reviewedText(reviewed), "deleted", result.Deleted,
 			"buffer_removed", result.BufferRemoved)
 		w.Header().Set("Content-Type", "application/json")
@@ -295,7 +308,8 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}
-		if !rejectPurgeQuery(w, r) {
+		if err := purgeQueryError(r); err != nil {
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		req, hasBody, err := decodeLogFilter(w, r)

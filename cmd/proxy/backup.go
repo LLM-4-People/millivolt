@@ -43,12 +43,20 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodGet) {
 		return
 	}
+	// The audit owner sits above every gate: each terminal outcome writes one
+	// line, including a refusal that never reached the member selection.
+	members := "unparsed"
+	fail := func(why string) {
+		auditLog("backup", "outcome", "failed", "members", members, "error", why)
+	}
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {
+		fail("invalid query")
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
 	if err := adminjson.DuplicateQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -57,18 +65,17 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// the archive the same way). The gate order is parse error, duplicates,
 	// unknown keys, then the value grammar.
 	if err := adminjson.UnknownQueryKey(q, backupparams.BackupQueryKeys()...); err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	wantConfig, wantDB, err := parseBackupParts(q)
 	if err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	members := describeMembers(wantConfig, wantDB)
-	fail := func(why string) {
-		auditLog("backup", "outcome", "failed", "members", members, "error", why)
-	}
+	members = describeMembers(wantConfig, wantDB)
 	arch, cleanup, err := buildBackup(r.Context(), wantConfig, wantDB)
 	if err != nil {
 		fail(err.Error())
@@ -126,22 +133,33 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// auditRestoreRejected reports a restore refused before its members and modes
-// could be parsed, so even the earliest rejection leaves an audit line.
-func auditRestoreRejected(err error) {
-	auditLog("restore", "outcome", "failed", "members", "unparsed", "error", err.Error())
-}
-
 func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodPost) {
 		return
 	}
+	// One audit owner for the whole transaction, above every gate: each
+	// terminal outcome names the members, modes and inspect flag that were
+	// actually requested, so a lost response is diagnosable and a retry can be
+	// compared. Fields stay "unparsed" until their grammar accepts a value, so
+	// even the earliest refusal leaves a line.
+	members, configMode, dbMode := "unparsed", "unparsed", "unparsed"
+	inspect := false
+	audit := func(outcome string, extra ...any) {
+		fields := []any{"outcome", outcome, "members", members,
+			"config_mode", configMode, "database_mode", dbMode, "inspect", inspect}
+		auditLog("restore", append(fields, extra...)...)
+	}
+	fail := func(err error) {
+		audit("failed", "error", err.Error())
+	}
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {
+		fail(errors.New("invalid query"))
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
 	if err := adminjson.DuplicateQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -151,42 +169,38 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// silently become the replace default). The gate order is parse error,
 	// duplicates, unknown keys, then the value grammar.
 	if err := adminjson.UnknownQueryKey(q, backupparams.RestoreQueryKeys()...); err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inspect, err := queryFlag(q, backupparams.ParamInspect)
+	inspect, err = queryFlag(q, backupparams.ParamInspect)
 	if err != nil {
-		auditRestoreRejected(err)
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())
 		return
 	}
 	wantConfig, wantDB, err := parseBackupParts(q)
 	if err != nil {
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	configMode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
+	members = describeMembers(wantConfig, wantDB)
+	mode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
 	if err != nil {
-		auditRestoreRejected(err)
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	dbMode, err := parseRestoreMode(q, backupparams.ParamDatabaseMode)
+	configMode = mode
+	mode, err = parseRestoreMode(q, backupparams.ParamDatabaseMode)
 	if err != nil {
-		auditRestoreRejected(err)
+		fail(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	dbMode = mode
 	cap := backupCap()
-	// One audit owner for the whole transaction: every terminal outcome names
-	// the members, modes and inspect flag that were actually requested, so a
-	// lost response is diagnosable and a retry can be compared.
-	members := describeMembers(wantConfig, wantDB)
-	audit := func(outcome string, extra ...any) {
-		fields := []any{"outcome", outcome, "members", members,
-			"config_mode", configMode, "database_mode", dbMode, "inspect", inspect}
-		auditLog("restore", append(fields, extra...)...)
-	}
 	// The upload is streamed into one private file, never read whole into heap.
 	// A database archive stages that file on the live database's volume so the
 	// compressed upload follows the same capacity contract as the decoded
