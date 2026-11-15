@@ -549,6 +549,28 @@ module.exports = async function renderLive(H) {
       JSON.stringify(live));
   }
 
+  // An in-flight count is activity, not failure: the flight tile has no error
+  // voice of its own, so it only wears the coral tick when nothing is wrong.
+  {
+    const cls = w.eval(`(() => {
+      const html = errors => {
+        const saved = kpiAgg;
+        kpiAgg = { requests: 4, errors, in_flight: 3, cost: 0, cost_per_req: null, cost_per_mtok: null,
+          input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null };
+        const host = document.createElement('div');
+        host.innerHTML = derive({ records: [], counters: { in_flight: 3 }, _rev: 3 + errors }).kpiHtml;
+        kpiAgg = saved;
+        const tiles = [...host.querySelectorAll('.kpi')];
+        return [tiles[1].className, tiles[tiles.length - 1].className].join('|');
+      };
+      return html(0) + '#' + html(1);
+    })()`);
+    const [clean, erring] = cls.split('#');
+    check('the in-flight tile keeps the neutral tick beside a zero error rate',
+      !/\bk-err\b/.test(clean.split('|')[0]) &&
+      !/\bk-err\b/.test(erring.split('|')[0]) && /\bk-err\b/.test(erring.split('|')[1]));
+  }
+
   // The Avg TPS KPI uses the same compact unit as the Overview timing tile.
   // TPS_UNIT is the single owner; the chart axis, legend and tooltips keep the
   // full tok/s label where there is room.
