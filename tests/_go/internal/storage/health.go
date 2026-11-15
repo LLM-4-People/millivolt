@@ -116,16 +116,66 @@ func TestHealthQueueClockStartsOnArrival(t *testing.T) {
 	if ns := s.health.oldestQueuedUnixNano.Load(); ns != 0 {
 		t.Fatalf("queue clock started before any record: %v", time.Unix(0, ns))
 	}
+	if ns := s.health.firstQueuedUnixNano.Load(); ns != 0 {
+		t.Fatalf("no-progress clock started before any record: %v", time.Unix(0, ns))
+	}
 	s.Record(&metrics.Record{ID: "queued", Start: time.Now(), StatusCode: 200})
 	if ns := s.health.oldestQueuedUnixNano.Load(); ns == 0 {
 		t.Fatal("arrival did not start the queue clock")
 	}
-	waitPurgeCondition(t, func() bool { return s.health.inFlight.Load() == 1 })
+	first := s.health.firstQueuedUnixNano.Load()
+	if first == 0 {
+		t.Fatal("arrival did not start the no-progress clock")
+	}
+	// Only the first record starts the no-progress clock: a later burst cannot
+	// move it forward and postpone the verdict.
+	s.Record(&metrics.Record{ID: "later", Start: time.Now(), StatusCode: 200})
+	if got := s.health.firstQueuedUnixNano.Load(); got != first {
+		t.Fatalf("a later record moved the no-progress clock from %v to %v", time.Unix(0, first), time.Unix(0, got))
+	}
+	waitPurgeCondition(t, func() bool { return s.health.inFlight.Load() == 2 })
 	// Nothing was ever committed, so only the record's own age can convict.
 	s.health.lastFlushUnixNano.Store(0)
 	s.health.oldestQueuedUnixNano.Store(time.Now().Add(-(time.Hour + 3*time.Minute)).UnixNano())
 	if h := s.Health(); !h.Wedged {
 		t.Fatalf("Health().Wedged = false for an unpicked record past its cadence (depth %d outstanding %d last flush %v)", h.QueueDepth, h.Outstanding, h.LastFlush)
+	}
+}
+
+// The no-progress arm must convict a store that never flushed: a zero
+// last-success stamp used to mean "no verdict", so a boot-time write hang was
+// invisible for a whole cadence after the first record no matter how long the
+// store had been up. The arm now ages from the first accepted record, so "no
+// flush ever succeeded" convicts after the same grace as every other arm.
+func TestHealthNeverFlushedAgesTheNoProgressArm(t *testing.T) {
+	grace := wedgeGrace(time.Hour)
+	for _, tc := range []struct {
+		name   string
+		age    time.Duration
+		wedged bool
+	}{
+		{"inside the grace", grace - time.Second, false},
+		{"past the grace", grace + time.Second, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOpts
+			opts.FlushInterval = time.Hour
+			s := openPurgeTestStore(t, opts)
+			s.Record(&metrics.Record{ID: "queued", Start: time.Now(), StatusCode: 200})
+			waitPurgeCondition(t, func() bool { return s.health.inFlight.Load() == 1 })
+			// Pin the queue-head arm to the present, so only the no-progress arm
+			// can convict, and put the first record at the tested age.
+			s.health.lastFlushUnixNano.Store(0)
+			s.health.oldestQueuedUnixNano.Store(time.Now().UnixNano())
+			s.health.firstQueuedUnixNano.Store(time.Now().Add(-tc.age).UnixNano())
+			if h := s.Health(); h.Wedged != tc.wedged {
+				t.Fatalf("Health().Wedged = %v with the first record %v old and no flush ever (grace %v), want %v",
+					h.Wedged, tc.age, grace, tc.wedged)
+			}
+			if ready, reason := s.Ready(); ready == tc.wedged {
+				t.Fatalf("Ready() = %v, %q with the first record %v old and no flush ever", ready, reason, tc.age)
+			}
+		})
 	}
 }
 

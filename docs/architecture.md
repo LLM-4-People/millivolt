@@ -275,7 +275,9 @@ reads wedged. The interval on top is the record's own cadence, so a record
 inside it never convicts and a long cadence cannot hide a stuck writer for
 longer than that. The arrival stamp comes from the producer when the queue was
 empty as well as from the writer, so a writer that dies before its first pickup
-still ages the record. A failed flush stays sticky. `/healthz` stays the
+still ages the record, and with no flush since boot the first accepted record
+ages the last-success arm too, so a zero flush stamp is not a blind spot. A
+failed flush stays sticky. `/healthz` stays the
 liveness contract; readiness is the stronger answer a scheduler needs.
 `tests/_go/internal/storage/health.go` pins the cause split, the wedge/ready
 transition and the disabled-store answer, and

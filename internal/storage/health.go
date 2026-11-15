@@ -73,6 +73,11 @@ type health struct {
 	// the channel was empty and the writer when it picks a record up, so a
 	// writer that dies before its first commit still ages the queue.
 	oldestQueuedUnixNano atomic.Int64
+	// firstQueuedUnixNano is the arrival of the first record the pipeline took
+	// since boot, zero until one arrives. While no flush has succeeded the
+	// wedge verdict ages its no-progress arm from it, so a writer that never
+	// commits is convicted after the grace even though the flush stamp is zero.
+	firstQueuedUnixNano atomic.Int64
 	// inFlight counts records the writer has received and not yet committed.
 	// The channel length alone misses a record blocked in the current commit.
 	inFlight atomic.Int64
@@ -106,6 +111,7 @@ func (h *health) recordFlush(err error, at time.Time) {
 // is always the true queue head and a drained queue clears the stamp again.
 func (h *health) noteQueued(at time.Time) {
 	ns := at.UnixNano()
+	h.firstQueuedUnixNano.CompareAndSwap(0, ns)
 	if cur := h.oldestQueuedUnixNano.Load(); cur != 0 && cur <= ns {
 		return
 	}
@@ -153,8 +159,9 @@ type Health struct {
 	LastFlush time.Time
 	// Wedged reports a non-empty queue that made no progress for longer than
 	// one flush cadence plus the wedge window: the oldest record has waited
-	// that long, or no flush succeeded in that time. The writer goroutine is
-	// stuck or gone.
+	// that long, or no flush succeeded in that time, or (while nothing has ever
+	// flushed) the first accepted record has. The writer goroutine is stuck or
+	// gone.
 	Wedged bool
 }
 
@@ -181,15 +188,24 @@ func (s *Store) Health() Health {
 		h.LastFlush = time.Unix(0, ns)
 	}
 	// Both arms age against one cadence plus the window, so a record inside its
-	// own flush cadence never convicts. A store that never flushed is judged by
-	// its oldest record alone: the queue clock starts on arrival.
+	// own flush cadence never convicts. The no-progress arm ages from the last
+	// successful flush, or from the first accepted record while nothing has
+	// flushed yet: a zero last-success stamp must not read as "no verdict", or
+	// a boot-time write hang would stay invisible for a whole cadence after
+	// that record.
 	grace := wedgeGrace(s.opts.FlushInterval)
+	progress := h.LastFlush
+	if progress.IsZero() {
+		if ns := s.health.firstQueuedUnixNano.Load(); ns != 0 {
+			progress = time.Unix(0, ns)
+		}
+	}
 	queuedOld := false
 	if ns := s.health.oldestQueuedUnixNano.Load(); ns != 0 {
 		queuedOld = now.Sub(time.Unix(0, ns)) > grace
 	}
-	flushedOld := !h.LastFlush.IsZero() && now.Sub(h.LastFlush) > grace
-	h.Wedged = h.Outstanding > 0 && (queuedOld || flushedOld)
+	noProgress := !progress.IsZero() && now.Sub(progress) > grace
+	h.Wedged = h.Outstanding > 0 && (queuedOld || noProgress)
 	return h
 }
 
@@ -268,7 +284,7 @@ func (h Health) WritePrometheus(w io.Writer) {
 	} else {
 		fmt.Fprintf(w, "llm_proxy_storage_last_flush_timestamp_seconds %d\n", h.LastFlush.Unix())
 	}
-	fmt.Fprintf(w, "# HELP llm_proxy_storage_wedged The durable queue holds work older than one flush cadence plus the wedge window: the oldest record, or the last successful flush, passed it.\n")
+	fmt.Fprintf(w, "# HELP llm_proxy_storage_wedged The durable queue holds work older than one flush cadence plus the wedge window: the oldest record, the last successful flush or, with no flush yet, the first accepted record, passed it.\n")
 	fmt.Fprintf(w, "# TYPE llm_proxy_storage_wedged gauge\n")
 	fmt.Fprintf(w, "llm_proxy_storage_wedged %d\n", boolGauge(h.Wedged))
 }
