@@ -248,6 +248,10 @@ type Store struct {
 	// can publish it off the writer goroutine.
 	lastDebugExpire    time.Time
 	debugExpirePending atomic.Bool
+	// walCheckpointPending marks deleted content the WAL still carries because
+	// a reader made the checkpoint busy. The writer's near-term tick retries it
+	// and Close makes the final attempt after the read pool is gone.
+	walCheckpointPending atomic.Bool
 }
 
 // cantOpenContext explains SQLITE_CANTOPEN startup failures. The bare SQLite
@@ -638,7 +642,6 @@ func (s *Store) Close() error {
 		close(s.ch)   // seal the channel so the writer drains it deterministically
 		s.sendMu.Unlock()
 		s.wg.Wait() // wait for the final flush
-		err = errors.Join(s.writerErr, s.db.Close())
 		s.versionMu.Lock()
 		s.versionClosed = true
 		if s.versionConn != nil {
@@ -654,6 +657,10 @@ func (s *Store) Close() error {
 				err = rerr
 			}
 		}
+		// The read pool is gone, so nothing can still pin the log: fold a
+		// checkpoint a reader deferred before the database itself closes.
+		s.drainWALCheckpoint()
+		err = errors.Join(err, s.writerErr, s.db.Close())
 	})
 	return err
 }

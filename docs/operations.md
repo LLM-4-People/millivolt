@@ -1463,8 +1463,9 @@ purge, and an expired debug-capture sweep, checkpoint-truncates the WAL after
 the committed delete: `secure_delete` zeroes freed cells in the pages SQLite
 writes, and the checkpoint removes the pre-delete frames that would otherwise
 keep the old page images readable in the `-wal` sidecar. A reader holding an
-older snapshot can defer the checkpoint; the next destructive maintenance pass
-retries it.
+older snapshot can defer the checkpoint; the writer's near-term tick retries it
+while the reader is gone, and a clean shutdown makes the final attempt after the
+read pool is closed.
 
 ### Settings and Restart
 

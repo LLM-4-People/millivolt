@@ -289,8 +289,9 @@ every ordinary consumed record. A non-empty purge, and a drained expired-capture
 sweep, checkpoint-truncates the WAL after the commit: `secure_delete` cleans the
 pages SQLite writes, and truncation removes the pre-delete frames that would
 otherwise keep the old page images in the `-wal` sidecar. The checkpoint is
-bounded and best effort; a busy reader defers it to the next destructive pass
-without failing the committed deletion.
+bounded and best effort; a busy reader raises a pending flag that the writer's
+near-term tick retries, and `Store.Close` makes the final attempt after the read
+pool is closed, without failing the committed deletion.
 
 Operator backup and restore stage database-sized work as private files.
 `backup.EncodeFile` streams the packed snapshot, encoded archive and self-check

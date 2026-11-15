@@ -179,10 +179,10 @@ func (s *Store) writer() {
 	ticker := time.NewTicker(s.opts.FlushInterval)
 	defer ticker.Stop()
 	// The continuation cadence is independent of the configured flush interval
-	// so a large expired sidecar set still drains promptly when that interval
-	// is long.
-	debugTicker := time.NewTicker(debugExpireRetryInterval)
-	defer debugTicker.Stop()
+	// so a large expired sidecar set, or a checkpoint a reader deferred, still
+	// drains promptly when that interval is long.
+	maintenanceTicker := time.NewTicker(maintenanceRetryInterval)
+	defer maintenanceTicker.Stop()
 	for {
 		select {
 		case r, ok := <-s.ch:
@@ -225,8 +225,9 @@ func (s *Store) writer() {
 		case <-ticker.C:
 			flush()
 			s.expireDebugCapturesIfDue()
-		case <-debugTicker.C:
+		case <-maintenanceTicker.C:
 			s.continueDebugExpire()
+			s.continueWALCheckpoint()
 		case <-s.done:
 			// Shutdown: Close closes s.ch right after s.done, so range drains
 			// every buffered record - including any a producer raced in after

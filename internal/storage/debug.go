@@ -130,13 +130,15 @@ const debugExpireBatch = 256
 
 // debugExpireBatchesPerSweep bounds one sweep invocation (an explicit call or
 // one writer tick). A large expired set continues on the writer's near-term
-// debugExpireRetryInterval tick instead of monopolizing the writer.
+// maintenanceRetryInterval tick instead of monopolizing the writer.
 const debugExpireBatchesPerSweep = 4
 
-// debugExpireRetryInterval is the writer's near-term continuation cadence when
-// a sweep stopped at debugExpireBatchesPerSweep. It is deliberately independent
-// of storage_flush_interval, which may be configured much longer.
-const debugExpireRetryInterval = 250 * time.Millisecond
+// maintenanceRetryInterval is the writer's near-term continuation cadence for
+// deferred maintenance work: an expired-capture sweep that stopped at
+// debugExpireBatchesPerSweep, or a WAL checkpoint a reader deferred. It is
+// deliberately independent of storage_flush_interval, which may be configured
+// much longer.
+const maintenanceRetryInterval = 250 * time.Millisecond
 
 // debugExpireInterval is how often the writer opportunistically sweeps expired
 // sidecars. The TTL hides expired rows from reads immediately; this bounds the
