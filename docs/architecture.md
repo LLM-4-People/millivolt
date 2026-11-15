@@ -631,6 +631,15 @@ Bearer-only: every POST gets a temporary server session bound to that request's
 credential, nothing survives it, and the dashboard session cookie is refused
 there because a cookie must not create an internal call.
 
+The SDK's own localhost DNS-rebinding `Host` check is deliberately off: the
+documented reverse-proxied placement preserves an external `Host` while dialing
+the proxy over loopback, so the check would reject that placement. Protection
+therefore rests entirely on the Bearer, which the same gate re-validates on
+every request; a missing or wrong credential is denied before any tool runs.
+The consequence is explicit: the endpoint admits any `Host` on the listener it
+is reachable from, with a valid credential, and any `Host`-based allow rule has
+to sit at the ingress rather than here.
+
 The destructive surface is guarded where the risk lives. A purge needs a filter
 that constrains something (the bodyless delete-everything command is never sent),
 an exact confirmation phrase, and the opaque `preview_token` that
