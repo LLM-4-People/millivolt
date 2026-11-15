@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -287,5 +288,41 @@ func TestValidSessionCookieClearsTheFailureBudget(t *testing.T) {
 	gate.limiter.mu.Unlock()
 	if held {
 		t.Fatal("a verified session cookie left the failure budget armed")
+	}
+}
+
+// deadlineRecorder counts read-deadline arms made through its ResponseWriter.
+// http.ResponseController discovers the optional interface, so a handler that
+// arms a bound shows up here even without a real network connection.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	arms int
+}
+
+func (d *deadlineRecorder) SetReadDeadline(time.Time) error {
+	d.arms++
+	return nil
+}
+
+// TestSessionHandshakeBodyDeadlineAppliesToEveryRead pins the handshake's own
+// pre-auth bound: the delivery layer re-arms the generic idle bound before each
+// body read, so one arm before the handler was overwritten on the first read
+// and the constant was inert. The bound must be re-armed per read, and the
+// form must still be read.
+func TestSessionHandshakeBodyDeadlineAppliesToEveryRead(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	gate := newOperatorGate(token)
+	form := url.Values{"token": {token}}.Encode()
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/session", strings.NewReader(form))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	gate.handleOperatorSession(rec, r)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want the form 303; body %s", rec.Code, rec.Body.String())
+	}
+	// One arm before the handler plus at least one per body read; a single arm
+	// in total is the inert-deadline regression.
+	if rec.arms < 2 {
+		t.Fatalf("read deadline armed %d times, want one per read", rec.arms)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"mime"
 	"net"
@@ -722,6 +723,25 @@ func (g *operatorGate) denyBearer(w http.ResponseWriter) {
 	denyOperator(w, http.StatusUnauthorized, "operator token required")
 }
 
+// cappedBody re-arms one absolute read deadline before every read. The delivery
+// layer arms the generic idle bound per read, so a route that owns a tighter
+// pre-auth bound must arm its own on every read as well; a single arm before
+// the handler would survive only until the first read.
+type cappedBody struct {
+	body     io.ReadCloser
+	rc       *http.ResponseController
+	deadline time.Time
+}
+
+func (c cappedBody) Read(p []byte) (int, error) {
+	// A transport without deadline support leaves the read unbounded here; the
+	// handler's initial arm already reported that case.
+	_ = c.rc.SetReadDeadline(c.deadline)
+	return c.body.Read(p)
+}
+
+func (c cappedBody) Close() error { return c.body.Close() }
+
 // handleOperatorSession is POST /session: the one open operator-plane
 // route, because it is the handshake that mints the session cookie. It
 // accepts the credential as a Bearer header (API clients) or as the single
@@ -752,12 +772,18 @@ func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Requ
 		// bytes, so a dribbling client cannot hold a goroutine indefinitely.
 		// Inference and SSE keep the server's no-body-timeout design. A
 		// transport that cannot set deadlines proceeds byte-bounded only.
-		if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(sessionBodyReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		deadline := time.Now().Add(sessionBodyReadTimeout)
+		rc := http.NewResponseController(w)
+		if err := rc.SetReadDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			log.Printf("operator session: read deadline: %v", err)
 			denyOperator(w, http.StatusInternalServerError, "unsupported connection")
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, sessionFormBodyMax)
+		// The shared body wrapper re-arms the generic idle bound before every
+		// read, which would overwrite this one on the first read. Re-arm it per
+		// read too, so the handshake's own tighter bound is the one that
+		// applies to this pre-auth body instead of a reloadable route-wide one.
+		r.Body = http.MaxBytesReader(w, cappedBody{body: r.Body, rc: rc, deadline: deadline}, sessionFormBodyMax)
 		if err := r.ParseForm(); err != nil {
 			denyOperator(w, http.StatusBadRequest, "invalid form body")
 			return
