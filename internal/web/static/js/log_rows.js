@@ -472,8 +472,3 @@ function reqWidthRelevant(prev, rec) {
     !!prev.throttled !== !!rec.throttled || !!prev.stream !== !!rec.stream ||
     !!prev.debug !== !!rec.debug;
 }
-
-function escapeHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}

@@ -515,6 +515,14 @@ function setText(element, text) {
   if (element && element.textContent !== text) element.textContent = text;
 }
 
+// escapeHtml is the one HTML-string sink. It lives beside setText in the first
+// module every page loads, because callers in core itself (vt) and in modules
+// that load before the table rows innerHTML builders all depend on it.
+function escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 // reportProblem is the one place a client-side failure is made visible to
 // whoever debugs the dashboard. The browser console is the only sink the page
 // has: there is no server route for a client log, and inventing one would put

@@ -25,6 +25,21 @@ async function main() {
   await loaded(dom);
   installDiagnostics();
   checkEntityIdentity();
+  // escapeHtml belongs to core, the first module: core's own vt helper and
+  // modules that load before the row builders call it, so keeping it in
+  // log_rows made the load order, not the dependency, decide whether it exists.
+  {
+    const source = name => harness.fs.readFileSync(
+      harness.path.join(harness.STATIC, 'js', name), 'utf8');
+    const order = [...harness.fs.readFileSync(harness.path.join(harness.STATIC, 'index.html'), 'utf8')
+      .matchAll(/<script[^>]+src="\/dash\/js\/([^"?]+)/g)].map(match => match[1]);
+    const coreAt = order.indexOf('core.js');
+    check('escapeHtml is defined once, in core, after which every caller loads',
+      source('core.js').includes('function escapeHtml(') &&
+      !source('log_rows.js').includes('function escapeHtml(') &&
+      coreAt >= 0 && order.every((name, index) =>
+        name === 'core.js' || index > coreAt || !source(name).includes('escapeHtml')));
+  }
   // Shared CSS must preserve sentence case, including protocol acronyms and
   // user-authored names. Inspect every formerly forced-uppercase owner.
   {
