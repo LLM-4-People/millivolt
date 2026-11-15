@@ -74,11 +74,18 @@ const ModelRulesMax = 64
 // unify `.` with `-` between digits. A decoration is what a provider adds
 // around the same weights: a quantization or serving format (`-fp4`,
 // `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`, `-gptq`, `-awq`, `-gguf`), a
-// service tier (`-fast`, `-speed`, `-value`), a release channel (`-preview`,
-// `-latest`, `-beta`), or a build stamp (`-1017`). Model tiers (`-flash`,
-// `-pro`, `-mini`, `-ultra`), fine-tunes (`-abliterated`, `-rl`) and
-// parameter counts stay distinct. Put an `exact` rule ABOVE the list to
-// merge before normalization, BELOW to merge after.
+// service tier (`-fast`, `-speed`, `-value`, `-free`), a release channel
+// (`-preview`, `-latest`, `-beta`, `-alpha`, `-stable`, `-experimental`), a
+// reasoning or effort word (`-thinking`, `-reasoning`, `-xhigh`, `-high`,
+// `-medium`, `-low`, `-minimal`), or a build stamp (`-1017`, `-20250929`).
+// Model tiers (`-flash`, `-pro`, `-mini`, `-ultra`, `-lite`, `-nano`,
+// `-turbo`, `-max`), fine-tunes (`-abliterated`, `-rl`), specifications
+// (`-coder`, `-base`, `-chat`, `-it`) and parameter counts stay distinct.
+// The pattern below is the vocabulary owner; this comment and
+// docs/configuration.md describe it, and the canonical-model table pins one
+// row per word so neither can drift silently.
+// Put an `exact` rule ABOVE the list to merge before normalization, BELOW to
+// merge after.
 func DefaultModelRules() []ModelRule {
 	return []ModelRule{
 		{Mode: ModelRuleLower},
