@@ -214,12 +214,20 @@ func TestComposeIsolationContract(t *testing.T) {
 	if err := validateCompose([]byte(normal), []byte(dev)); err != nil {
 		t.Fatal(err)
 	}
+	// Compose derives the project-scoped container name when container_name is
+	// omitted, so both committed shapes must be accepted.
+	normalDerived := strings.ReplaceAll(normal, `"container_name":"millivolt",`, "")
+	devDerived := strings.ReplaceAll(dev, `"container_name":"millivolt-dev",`, "")
+	if err := validateCompose([]byte(normalDerived), []byte(devDerived)); err != nil {
+		t.Fatalf("derived container name: %v", err)
+	}
 	for _, bad := range []string{
 		strings.Replace(normal, `"read_only":true`, `"read_only":false`, 1),
 		strings.Replace(normal, "127.0.0.1", "0.0.0.0", 1),
 		strings.Replace(normal, `"type":"volume"`, `"type":"bind"`, 1),
 		strings.Replace(normal, `"target":"/config"`, `"target":"/data"`, 1),
 		strings.Replace(normal, `"image":"released"`, `"image":"released","build":{"context":"."}`, 1),
+		strings.Replace(normal, `"container_name":"millivolt"`, `"container_name":"global"`, 1),
 		`{"services":{}}`, `null`, `invalid`,
 	} {
 		if err := validateCompose([]byte(bad), []byte(dev)); err == nil {

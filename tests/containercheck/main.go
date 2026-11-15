@@ -395,8 +395,12 @@ func decodeCompose(data []byte) (composeModel, error) {
 		return model, err
 	}
 	service, ok := model.Services[model.Name]
-	if !ok || model.Name == "" || len(model.Services) != 1 || service.Image == "" || service.ContainerName != model.Name || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Published == "" || service.Ports[0].Target != 8080 {
-		return model, errors.New("Compose must contain one named, read-only, loopback-published service whose name matches the project and container")
+	// The service is named after the project. An explicit container_name is
+	// optional: without one Compose derives the project-scoped container name,
+	// which is what keeps two deployments from colliding; when set, it must not
+	// reintroduce a global name.
+	if !ok || model.Name == "" || len(model.Services) != 1 || service.Image == "" || (service.ContainerName != "" && service.ContainerName != model.Name) || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Published == "" || service.Ports[0].Target != 8080 {
+		return model, errors.New("Compose must contain one read-only, loopback-published service named after the project, with no container name or the same one")
 	}
 	if len(service.Volumes) != 2 || len(model.Volumes) != 2 {
 		return model, errors.New("Compose must keep exactly two named persistence volumes")
