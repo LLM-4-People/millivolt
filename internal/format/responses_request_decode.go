@@ -30,7 +30,7 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	if err := json.Unmarshal(body, &bounds); err != nil {
 		return nil, fmt.Errorf("parse responses request: %w", err)
 	}
-	if err := checkWireArray(bounds.Tools, "tools", WireCollectionMax); err != nil {
+	if err := checkResponsesToolArrays(bounds.Tools, "tools"); err != nil {
 		return nil, err
 	}
 	if err := checkWireArray(bounds.Include, "include", WireCollectionMax); err != nil {
@@ -188,6 +188,16 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		req.Tools = tools
 		req.Warnings = append(req.Warnings, warns...)
 	}
+	// A client that keeps its tool list out of the top-level field declares it
+	// as additional_tools input items instead (Codex does this for a model
+	// whose catalog selects code mode). Both spellings feed one tool list, so
+	// one assignment and one reverse map cover the request.
+	extraTools, warns, err := decodeAdditionalTools(in.Input)
+	if err != nil {
+		return nil, err
+	}
+	req.Tools = append(req.Tools, extraTools...)
+	req.Warnings = append(req.Warnings, warns...)
 	// The flat spelling is one request-wide decision, so it is assigned before
 	// a history call or a named choice resolves against it.
 	assigned := assignToolNames(req.Tools)
@@ -381,11 +391,15 @@ func decodeResponsesInput(raw json.RawMessage, resolve toolNameResolver) ([]ir.M
 			appendAssistant(ir.Block{Type: ir.BlockReasoning, Reasoning: reasoning})
 		case "item_reference":
 			return nil, nil, fmt.Errorf("responses input item %d: item_reference requires server-side storage and cannot be translated", i)
+		case "additional_tools":
+			// The declared tool list was decoded with the request's other
+			// tools before this message walk; the item itself carries no turn
+			// content.
 		case "custom_tool_call", "custom_tool_call_output", "computer_call_output",
 			"local_shell_call", "local_shell_call_output", "shell_call", "shell_call_output",
 			"apply_patch_call", "apply_patch_call_output", "mcp_call", "mcp_list_tools",
 			"mcp_approval_request", "mcp_approval_response", "tool_search_call",
-			"tool_search_output", "additional_tools", "configuration_update",
+			"tool_search_output", "configuration_update",
 			"compaction", "compaction_trigger", "image_generation_call",
 			"code_interpreter_call", "program", "program_output":
 			warns.Add(ir.WarningDropped, "input."+typ, "provider-specific item has no cross-protocol equivalent")
@@ -592,6 +606,76 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, i
 		return nil, nil, err
 	}
 	return &ir.ToolCall{ID: id, Name: item.Name, Arguments: args}, warns, nil
+}
+
+// checkResponsesToolArrays bounds one wire tools array and every namespace
+// member array inside it before the typed decode materializes them. The counts
+// share one aggregate, so a request cannot multiply nested arrays past the
+// collection ceiling.
+func checkResponsesToolArrays(raw json.RawMessage, field string) error {
+	total := 0
+	if err := addWireArray(&total, raw, field, WireCollectionMax); err != nil {
+		return err
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	// A shallow decode keeps only the type and the raw member array; the typed
+	// decode below owns every shape error.
+	var groups []struct {
+		Type  string          `json:"type"`
+		Tools json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &groups); err != nil {
+		return nil
+	}
+	for i, group := range groups {
+		if group.Type != "namespace" {
+			continue
+		}
+		if err := addWireArray(&total, group.Tools, fmt.Sprintf("%s[%d].tools", field, i), WireCollectionMax); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// decodeAdditionalTools decodes the tool list a Responses client carries in
+// additional_tools input items instead of the top-level tools field. The arrays
+// are bounded before the typed decode, exactly like the top-level field.
+func decodeAdditionalTools(raw json.RawMessage) ([]ir.Tool, ir.Warnings, error) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+	var items []responsesWireInputItem
+	if err := json.Unmarshal(raw, &items); err != nil {
+		// The message decoder owns the input shape error.
+		return nil, nil, nil
+	}
+	var (
+		out   []ir.Tool
+		warns ir.Warnings
+	)
+	for i, item := range items {
+		if item.Type != "additional_tools" || len(item.Tools) == 0 {
+			continue
+		}
+		field := fmt.Sprintf("input[%d].tools", i)
+		if err := checkResponsesToolArrays(item.Tools, field); err != nil {
+			return nil, nil, err
+		}
+		var wire []responsesWireTool
+		if err := json.Unmarshal(item.Tools, &wire); err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", field, err)
+		}
+		tools, w, err := decodeResponsesTools(wire)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = append(out, tools...)
+		warns = append(warns, w...)
+	}
+	return out, warns, nil
 }
 
 // decodeResponsesTools decodes declared tools. A namespace group is flattened

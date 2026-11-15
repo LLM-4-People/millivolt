@@ -273,6 +273,51 @@ func TestResponsesNamespaceToolChoice(t *testing.T) {
 	}
 }
 
+// TestResponsesAdditionalToolsDecoded verifies the tool list a client carries
+// as additional_tools input items reaches the outbound wire, including a
+// namespace member, and that an oversized member array is rejected before the
+// typed decode.
+func TestResponsesAdditionalToolsDecoded(t *testing.T) {
+	body := `{"model":"m","input":[` +
+		`{"type":"additional_tools","role":"developer","tools":[` +
+		`{"type":"namespace","name":"functions","tools":[` +
+		`{"type":"function","name":"wait","parameters":{}},` +
+		`{"type":"function","name":"exec","parameters":{}}]}]},` +
+		`{"type":"message","role":"user","content":"hi"}]}`
+	req, err := DecodeResponsesRequest([]byte(body))
+	if err != nil {
+		t.Fatalf("additional_tools was rejected: %v", err)
+	}
+	if len(req.Tools) != 2 {
+		t.Fatalf("tool count = %d, want 2: %+v", len(req.Tools), req.Tools)
+	}
+	if req.Tools[0].ModelName() != "functions__wait" || req.Tools[0].Namespace != "functions" {
+		t.Fatalf("first tool = %+v", req.Tools[0])
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Role != ir.RoleUser {
+		t.Fatalf("messages = %+v", req.Messages)
+	}
+}
+
+// TestResponsesToolArraysBounded verifies a nested member array is bounded
+// before the typed decode, at the same ceiling as the top-level array.
+func TestResponsesToolArraysBounded(t *testing.T) {
+	member := `{"type":"function","name":"f","parameters":{}}`
+	var b strings.Builder
+	b.WriteString(`{"type":"namespace","name":"ns","tools":[`)
+	for i := 0; i <= WireCollectionMax; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(member)
+	}
+	b.WriteString(`]}`)
+	body := `{"model":"m","input":"hi","tools":[` + b.String() + `]}`
+	if _, err := DecodeResponsesRequest([]byte(body)); err == nil {
+		t.Fatal("an over-bound namespace member array was accepted")
+	}
+}
+
 // TestResponsesProviderToolDropped verifies a provider-executed tool (the
 // web_search a Responses client always sends) is dropped with a warning instead
 // of failing the whole turn, at the top level and inside a group.

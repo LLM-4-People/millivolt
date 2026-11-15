@@ -72,6 +72,13 @@ type responsesWireTool struct {
 	Tools []responsesWireTool `json:"tools"`
 }
 
+// responsesWireInputItem is the shallow shape one additional_tools input item
+// needs; the message decoder never materializes its tool list.
+type responsesWireInputItem struct {
+	Type  string          `json:"type"`
+	Tools json.RawMessage `json:"tools"`
+}
+
 // responsesWireAnnotation is one output_text annotation. The flat url shape
 // is also the source field set for a Chat url_citation, so both decoders
 // share the same IR mapping.
