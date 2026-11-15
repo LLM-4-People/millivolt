@@ -86,7 +86,10 @@
     .legend .leg-item { min-height: var(--tap); }
   }
 
-  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
+  /* Every cell is a number, a stamp or a status word in the mono voice; the
+     tabular figures keep a live value from shifting its neighbours as digits
+     land (the Readout Is Mono rule). */
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
   /* Request log: content-sized columns. Automatic layout fits each column to
      its widest cell; log.js ratchets the natural width into a min-width on the
