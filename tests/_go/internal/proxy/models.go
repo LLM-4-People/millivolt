@@ -296,3 +296,41 @@ func TestModelsRefusedUpstreamSurfacesAPIErrorEnvelope(t *testing.T) {
 		t.Fatalf("message = %q, want the %q transport wrap", doc.Error.Message, wrap)
 	}
 }
+
+// TestModelsDiscoveryHonorsPathAndQuery pins H11: the discovery fetch goes
+// through the same target builder as a relayed request, so X-Proxy-Path selects
+// the upstream endpoint and X-Proxy-Query rides the query instead of discovery
+// always addressing base+/v1/models.
+func TestModelsDiscoveryHonorsPathAndQuery(t *testing.T) {
+	var gotPath, gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		w.Write([]byte(`{"object":"list","data":[{"id":"m"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("X-Proxy-Path", "/custom/models")
+	req.Header.Set("X-Proxy-Query", "api-version=2")
+	req.Header.Set("Authorization", "Bearer sk-test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("discovery status = %d", resp.StatusCode)
+	}
+	if gotPath != "/custom/models" {
+		t.Fatalf("upstream path = %q, want the X-Proxy-Path override", gotPath)
+	}
+	if gotQuery != "api-version=2" {
+		t.Fatalf("upstream query = %q, want the X-Proxy-Query override", gotQuery)
+	}
+}

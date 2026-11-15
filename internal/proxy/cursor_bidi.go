@@ -1256,13 +1256,18 @@ func applyCursorUsage(rec *metrics.Record, result *providerformat.TurnResult, es
 // renders them in the OpenAI GET /v1/models shape. This lets OpenAI-compatible
 // clients discover the usable model ids natively instead of hardcoding them.
 func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r *http.Request, t *target, key string) {
-	targetURL := t.baseURL + providerformat.CursorModelsPath()
-	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL,
+	targetURL, err := modelsUpstreamURL(t, providerformat.CursorModelsPath())
+	if err != nil {
+		writeModelsError(w, err)
+		return
+	}
+	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL.String(),
 		bytes.NewReader(providerformat.EncodeGetUsableModelsRequest(nil)))
 	if err != nil {
 		writeModelsError(w, err)
 		return
 	}
+	req.URL = targetURL
 	// Unary call: the shared client is fine (it negotiates h2 via ALPN for
 	// https upstreams; h2c test servers go through the cursor transport's
 	// AllowHTTP dial - but the shared client's UnencryptedHTTP2 also covers it).

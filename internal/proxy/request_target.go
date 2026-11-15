@@ -15,28 +15,16 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// joinUpstreamURL joins a base URL and a request path without duplicating a
-// shared leading path segment. Clients typically request "/v1/chat/completions"
-// while operators variously set the base to "https://host" or
-// "https://host/v1" - naive concatenation would yield ".../v1/v1/..." and 404.
-// If the base's last path segment equals the request path's first segment, the
-// duplicate is dropped. This is purely a path-join convenience; it never strips
-// segments that differ.
+// joinUpstreamURL is the string form of upstreamURL's path join for callers
+// that do not need query handling. It keeps the documented convenience: a base
+// ending in the request path's first segment does not duplicate it. An
+// unparsable base falls back to plain concatenation, as before.
 func joinUpstreamURL(baseURL, path string) string {
-	base := strings.TrimRight(baseURL, "/")
-	bu, err := url.Parse(base)
+	u, err := upstreamURL(baseURL, path, "", "")
 	if err != nil {
-		return base + path
+		return strings.TrimRight(baseURL, "/") + path
 	}
-	baseSegs := strings.Split(strings.Trim(bu.Path, "/"), "/")
-	pathSegs := strings.Split(strings.Trim(path, "/"), "/")
-	// Drop the request path's first segment when it duplicates the base's last
-	// non-empty segment (e.g. base ".../v1" + path "/v1/chat/completions").
-	if len(baseSegs) > 0 && baseSegs[0] != "" && len(pathSegs) > 0 &&
-		baseSegs[len(baseSegs)-1] == pathSegs[0] {
-		path = "/" + strings.Join(pathSegs[1:], "/")
-	}
-	return base + path
+	return u.String()
 }
 
 // upstreamURL builds the request target structurally. The path is already an
