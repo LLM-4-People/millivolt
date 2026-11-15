@@ -36,7 +36,9 @@ a small team.
 ## Quickstart
 
 Linux with Docker Engine and the Compose plugin. No Go, Node, or source
-checkout is needed for the container path.
+checkout is needed for the container path. The full path, including every
+environment variable and a first request on each client protocol, is in
+[install and first run](docs/install.md).
 
 ### Docker Compose
 
