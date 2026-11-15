@@ -74,6 +74,9 @@
   }
   .req-status { margin-left: 8px; padding: 3px 8px; font-size: 10px; }
   select:hover, select:focus { border-color: var(--accent); outline: none; }
+  /* The border move alone is a color cue; a keyboard focus also gets the
+     shared edge so the control is locatable without reading its hue. */
+  select:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   /* The status filter is a primary request-log control; on touch it takes the
      full target instead of the dense desktop box. */
   @media (max-width: 800px), (hover: none), (pointer: coarse) {

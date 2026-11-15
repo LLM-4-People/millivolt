@@ -327,7 +327,7 @@ Time is a ruler over real stored history. The panel draws the coverage rail, the
 - **Shape:** a 320px menu panel opened from the chart-head clock trigger, anchored to the end of the trigger or dropped as a sheet under 800px.
 - **Coverage rail:** 6px high, 3px radius, hairline border, the tick strip as its ground; a 45% Signal Blue fill spans the selection from the earliest stored request to now.
 - **Note and ceiling:** a 10px muted note names the two ends (`4.37m of history · since 00:18`); when any window is gated, a 10px ceiling line states `disabled windows need more stored history` once, in text.
-- **Groups:** `zoom` holds 1m through 1y plus all; `calendar` holds today, yesterday, this week and this month. Disabled chips sit at 45% and explain the limit in their title.
+- **Groups:** `zoom` holds 1m through 1y plus all; `calendar` holds today, yesterday, this week and this month. Disabled chips sit at 60% and explain the limit in their title.
 - **Behavior:** one pick repaints the rail, closes the panel and returns focus to the trigger. The trigger label reads `last 1h`, `all time` or the calendar name.
 
 ### Chart-Head Trigger
@@ -358,7 +358,7 @@ The request outcome in one compact token, read by color and word together.
 The one deliberate native control: the operating system picker is the accessible touch affordance for a long filter vocabulary.
 
 - **Shape:** native select, 6px radius, 10px type in the card head (`all status`), raised fill and a `hairline-strong` border.
-- **States:** hover and focus move the border to Signal Blue. On touch it takes the full 44px target.
+- **States:** hover and focus move the border to Signal Blue; a keyboard focus adds the shared focus outline. On touch it takes the full 44px target.
 - **Grouping:** an `all status` row, then `live states` and `http status` optgroups; a persisted value outside those groups keeps an ungrouped option so the control never loses its value.
 - **Recorded exception:** the closed control is the designed surface; the native popup itself is not styled or replaced.
 
