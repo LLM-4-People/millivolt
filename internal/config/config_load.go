@@ -282,8 +282,11 @@ func salvageFailClosedKeys(raw []byte, cfg *Config) ([]string, error) {
 
 // topLevelFailClosedBlocks splits an unparseable document into the raw text of
 // its top-level fail-closed entries. A top-level entry starts at column zero;
-// indented lines and blank lines belong to the entry above them. Quoted keys
-// are not read: the fail-closed keys have fixed spellings.
+// indented lines and blank lines belong to the entry above them. So does a
+// sequence item written at column zero: it can only belong to the key above,
+// and both spellings are valid YAML. Document markers (--- and ...) end the
+// entry, as does any other unindented line. Quoted keys are not read: the
+// fail-closed keys have fixed spellings.
 func topLevelFailClosedBlocks(raw []byte) map[string][]byte {
 	blocks := map[string][]byte{}
 	var key string
@@ -303,7 +306,7 @@ func topLevelFailClosedBlocks(raw []byte) map[string][]byte {
 			}
 			continue
 		}
-		if key != "" && (len(line) == 0 || line[0] == ' ' || line[0] == '\t') {
+		if key != "" && (len(line) == 0 || line[0] == ' ' || line[0] == '\t' || columnZeroSequenceItem(line)) {
 			block = append(block, line)
 			continue
 		}
@@ -311,6 +314,12 @@ func topLevelFailClosedBlocks(raw []byte) map[string][]byte {
 	}
 	flush()
 	return blocks
+}
+
+// columnZeroSequenceItem reports a "- " item written at the document margin,
+// as opposed to a "---" document marker.
+func columnZeroSequenceItem(line []byte) bool {
+	return len(line) > 0 && line[0] == '-' && (len(line) == 1 || line[1] == ' ' || line[1] == '\t')
 }
 
 // topLevelYAMLKey reports a plausible unindented "key:" line and returns the
