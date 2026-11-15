@@ -479,7 +479,20 @@ there instead of duplicating them.
 Static captures of the operator console publish to `docs/images/console/` from
 the same authorized history workflow as the rest of the gallery. The retired
 menu screenshots were removed with the menus they pictured; git history keeps
-them.
+them. These captures are the neutral starting state of each section: no draft
+is committed, no rule is selected and no filter is armed.
+
+![Console overview with the request, in-flight, error and cost readout](images/console/overview.png)
+
+![Limits section with no policy set](images/console/limits.png)
+
+![Pause section before any hold exists](images/console/pause.png)
+
+![Capture section with no session start](images/console/capture.png)
+
+![Export section previewing the whole-history record count](images/console/export.png)
+
+![System section with restart available and the step list](images/console/system.png)
 
 See [operations](operations.md) for exact admission, persistence, filtering,
 restart and failure behavior before using these controls.
