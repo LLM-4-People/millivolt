@@ -86,11 +86,21 @@ class PromotionGuardTests(unittest.TestCase):
         # The refusal must not leave a merge in progress.
         self.assertFalse((self.repo / ".git" / "MERGE_HEAD").exists())
 
-    def test_check_is_a_noop_off_testing(self):
+    def test_check_enforces_ancestry_on_a_work_branch(self):
+        # A feature branch is pushed with HEAD:testing, so the branch name is
+        # not the promotion target and must carry current main too.
         git(self.repo, "switch", "-q", "-c", "feature")
         result = self.promote("check")
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("nothing to check", result.stderr)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("scripts/promote.sh sync", result.stderr)
+        self.assertEqual(0, self.promote("sync").returncode)
+        self.assertEqual(0, self.promote("check").returncode)
+
+    def test_check_refuses_main(self):
+        git(self.repo, "switch", "-q", "main")
+        result = self.promote("check")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("promote through a pull request", result.stderr)
 
     def test_push_never_targets_main(self):
         text = PROMOTE.read_text(encoding="utf-8")
