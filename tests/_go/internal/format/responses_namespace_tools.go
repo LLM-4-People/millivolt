@@ -232,6 +232,37 @@ func TestResponsesNamespaceNeverDisplacesPlainTool(t *testing.T) {
 	}
 }
 
+// TestResponsesNamespaceUpstreamStreamFlattens verifies a Responses upstream
+// that names a call by namespace reaches a Chat client under the flat spelling,
+// matching the buffered decoder.
+func TestResponsesNamespaceUpstreamStreamFlattens(t *testing.T) {
+	item := `{"type":"function_call","id":"fc_1","call_id":"call_1","name":"query_docs","namespace":"mcp__context7","arguments":"{}"}`
+	source := `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress","model":"m","output":[]}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":` + item + `}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":` + item + `}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[` + item + `],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}
+
+`
+	for _, target := range []ir.Protocol{ir.Chat, ir.Anthropic} {
+		t.Run(target.String(), func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target, ir.Responses, &buf, strings.NewReader(source), nil, nil, StreamOptions{}); err != nil {
+				t.Fatalf("translate stream: %v", err)
+			}
+			if !strings.Contains(buf.String(), "mcp__context7__query_docs") {
+				t.Fatalf("upstream namespace did not flatten: %s", buf.String())
+			}
+		})
+	}
+}
+
 // TestResponsesNamespaceHistoryCall verifies a replayed namespaced call decodes
 // to the flat spelling, so a Chat target history validates.
 func TestResponsesNamespaceHistoryCall(t *testing.T) {

@@ -274,6 +274,11 @@ func (d *ResponsesStreamDecoder) syntheticBlock(block ir.Block, delta *ir.Delta)
 // functionCallTerminalEmission builds the complete block for a function call
 // that appeared only in the terminal document.
 func functionCallTerminalEmission(item responsesWireItem, index int, policy responsesToolArgumentPolicy) (terminalEmission, bool, error) {
+	// One flattening owner for both Responses decoders: the terminal document
+	// and the announced item must name the same flat tool.
+	if item.Namespace != "" {
+		item.Name = flatToolName(item.Namespace, item.Name)
+	}
 	toolID := responsesFunctionCallID(item.CallID, item.ID, index)
 	if err := checkNativeIdentity("tool id", toolID); err != nil {
 		return terminalEmission{}, false, err
