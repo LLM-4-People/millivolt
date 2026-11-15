@@ -166,9 +166,28 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		if response.StatusCode != http.StatusNoContent || len(response.Cookies()) != 1 {
 			t.Errorf("POST /session: status = %d cookies = %d, want 204 + the minted cookie", response.StatusCode, len(response.Cookies()))
 		}
-		// The cross-origin protection wrapper stayed on the moved route.
-		if crossOrigin := post("/session", "https://foreign.example"); crossOrigin.StatusCode != http.StatusForbidden {
-			t.Errorf("foreign origin on POST /session: status = %d, want 403 (the wrapper stayed)", crossOrigin.StatusCode)
+		// The cross-origin protection wrapper stayed on the moved route, and
+		// its denial carries the shared denial shape (no-store, unframeable,
+		// flat body) instead of the stdlib bare http.Error text.
+		crossOrigin := post("/session", "https://foreign.example")
+		if crossOrigin.StatusCode != http.StatusForbidden {
+			t.Fatalf("foreign origin on POST /session: status = %d, want 403 (the wrapper stayed)", crossOrigin.StatusCode)
+		}
+		if got := crossOrigin.Header.Get("Cache-Control"); got != "no-store" {
+			t.Errorf("cross-origin denial Cache-Control = %q, want no-store", got)
+		}
+		if got := crossOrigin.Header.Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
+			t.Errorf("cross-origin denial CSP = %q, want frame-ancestors 'none'", got)
+		}
+		if got := crossOrigin.Header.Get("Content-Type"); got != "text/plain; charset=utf-8" {
+			t.Errorf("cross-origin denial Content-Type = %q, want the shared denial transport", got)
+		}
+		body, err := io.ReadAll(crossOrigin.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "cross-origin request") {
+			t.Errorf("cross-origin denial body = %q, want the reason", body)
 		}
 		// The retired /admin spelling of the handshake must be gone: an
 		// old-style request answers the reserved-namespace 404, never the

@@ -112,7 +112,7 @@ func operatorNamespaces(gate *operatorGate, dispatch http.Handler, boot *config.
 		// from the credential gate by definition and owns its own failure
 		// throttling and same-origin wrapper. /session/ reserves every
 		// unregistered subpath for the 404 handler.
-		{"/session", http.NewCrossOriginProtection().Handler(http.HandlerFunc(gate.handleOperatorSession))},
+		{"/session", sameOriginGuard(http.HandlerFunc(gate.handleOperatorSession))},
 		{"/session/", http.NotFoundHandler()},
 		{"/metrics", http.NotFoundHandler()},
 		{"/metrics/", http.NotFoundHandler()},

@@ -494,8 +494,27 @@ func nonCanonicalPath(path string) bool {
 	return cleaned+"/" != path || stdlibpath.Clean(clean) != clean
 }
 
+// sameOriginGuard is the one owner of the cross-origin control and its denial
+// shape. The stdlib Handler answers a refused request with a bare http.Error,
+// which was the single denial in the operator plane without no-store and
+// frame-ancestors. Its inspectable Check is re-run inside the deny handler: the
+// handler API carries no error, and re-running it (idempotent, no lock held
+// across the deny call) preserves the reason in the shared JSON denial instead
+// of a generic string.
+func sameOriginGuard(next http.Handler) http.Handler {
+	protection := http.NewCrossOriginProtection()
+	protection.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		msg := "cross-origin request refused"
+		if err := protection.Check(r); err != nil {
+			msg = err.Error()
+		}
+		denyOperator(w, http.StatusForbidden, msg)
+	}))
+	return protection.Handler(next)
+}
+
 func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler {
-	sameOrigin := http.NewCrossOriginProtection().Handler(next)
+	sameOrigin := sameOriginGuard(next)
 	mint := func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := gate.mintSessionCookie(r)
 		if err != nil {
