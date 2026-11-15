@@ -93,6 +93,11 @@ func TestPWAInstallability(t *testing.T) {
 	if !strings.Contains(liveFn, "LIVE_PATHS.includes(pathname)") {
 		t.Fatal("livePath does not consult the generated LIVE_PATHS list")
 	}
+	// "/" is an exact row: as a prefix it would make every path live and stop
+	// the worker from answering any dash or brand request.
+	if !strings.Contains(liveFn, "p !== '/'") {
+		t.Fatal("livePath must not treat the / row as a subtree prefix")
+	}
 	// The list is generated from the canonical namespace table, so the served
 	// bytes must carry every live root and its subtree prefix and must not be
 	// left as the source marker.

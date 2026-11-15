@@ -31,7 +31,7 @@ const LIVE_PATHS = __LIVE_PATHS__;
 
 function livePath(pathname) {
   return LIVE_PATHS.includes(pathname) ||
-    LIVE_PATHS.some((p) => p.endsWith('/') && pathname.startsWith(p));
+    LIVE_PATHS.some((p) => p !== '/' && pathname.startsWith(p));
 }
 
 function shellPath(pathname) {

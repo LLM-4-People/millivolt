@@ -9,6 +9,7 @@ const vm = require('vm');
 const SW_PATH = path.join(__dirname, '..', 'internal/web/static/sw.js');
 const ORIGIN = 'https://proxy.example';
 const MARKER = '__DASHBOARD_VERSION__';
+const LIVE_MARKER = '__LIVE_PATHS__';
 const CACHE_PREFIX = 'millivolt-shell-';
 const TEST_VERSION = 'test-version-0123456789abcdef';
 const CACHE_NAME = CACHE_PREFIX + TEST_VERSION;
@@ -18,6 +19,25 @@ const CACHE_NAME = CACHE_PREFIX + TEST_VERSION;
 // has one owner because half of package.json's entry points never load jsdom.
 const {watchdog, WATCHDOG_MS} = require('./watchdog');
 const clearWatchdog = watchdog(WATCHDOG_MS, 'service worker check');
+
+// The served worker is stamped at load by internal/web/loadStatic with the
+// never-cache list generated from internal/web/namespaces.go. This suite runs
+// the raw source, so it derives the same list from that one table instead of
+// keeping a second copy; a table shape this cannot parse fails loudly.
+const NAMESPACES_PATH = path.join(__dirname, '..', 'internal/web/namespaces.go');
+function livePaths() {
+  const table = fs.readFileSync(NAMESPACES_PATH, 'utf8');
+  const live = [];
+  for (const [, root, rest] of table.matchAll(/\{Root: "([^"]+)"([^}]*)\}/g)) {
+    if (!/\bLive: true\b/.test(rest)) continue;
+    live.push(root);
+    if (root !== '/') live.push(root + '/');
+  }
+  for (const must of ['/', '/healthz', '/readyz', '/v1', '/v1/']) {
+    if (!live.includes(must)) throw new Error('namespace table yielded no live path ' + must);
+  }
+  return live;
+}
 
 const failures = [];
 const unhandled = [];
@@ -74,6 +94,9 @@ function loadWorker({ failOpen = false, failMatch = false } = {}) {
   const markers = source.split(MARKER).length - 1;
   check('sw.js carries exactly one dashboard version marker', markers === 1, 'found ' + markers);
   if (markers !== 1) throw new Error('cannot stamp the service worker');
+  const liveMarkers = source.split(LIVE_MARKER).length - 1;
+  check('sw.js carries exactly one live-path marker', liveMarkers === 1, 'found ' + liveMarkers);
+  if (liveMarkers !== 1) throw new Error('cannot stamp the live paths');
 
   const listeners = {};
   const stores = new Map();
@@ -125,7 +148,8 @@ function loadWorker({ failOpen = false, failMatch = false } = {}) {
   };
 
   const context = vm.createContext({ self, caches, fetch, Response: FakeResponse, URL });
-  vm.runInContext(source.replace(MARKER, TEST_VERSION), context, { filename: SW_PATH });
+  const stamped = source.replace(MARKER, TEST_VERSION).replace(LIVE_MARKER, JSON.stringify(livePaths()));
+  vm.runInContext(stamped, context, { filename: SW_PATH });
 
   return {
     listeners,
