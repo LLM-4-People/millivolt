@@ -158,7 +158,9 @@ API (`/admin/throttle`) and the dashboard console, not through MCP.
 `set_pause` refuses a resume that carries a scope, and refuses `all` combined
 with `new`, `clients` or `providers`. `config_get` and the `set_config` echo
 redact credential-class provider headers and last-reload error text; the CLI's
-`--reveal` flag is the explicit operator opt-in.
+`--reveal` flag is the explicit operator opt-in. A redacted document posted
+back through `set_config` keeps the loaded secret: the marker is restored at the
+write owner, so a read-then-repost round trip cannot erase a credential.
 
 ### Filters
 

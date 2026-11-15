@@ -662,8 +662,9 @@ func (b *boundedBody) drain() error {
 // RedactionMarker replaces every credential form removed from model-visible
 // text. It stays visible on purpose: silent removal leaves an operator
 // wondering why the proxy's own message changed. Exported so a command-line
-// caller prints the same marker instead of inventing a second spelling.
-const RedactionMarker = "[redacted]"
+// caller prints the same marker instead of inventing a second spelling; the
+// value is owned by internal/config because Config.Apply restores it.
+const RedactionMarker = config.RedactionMarker
 
 // truncationMarker ends an excerpt cut at the byte budget. Its length is part
 // of the published bound (the model-visible text runs up to this marker past

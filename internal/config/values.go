@@ -70,6 +70,14 @@ func (c *Config) Apply(values map[string]any) error {
 	if values == nil {
 		return fmt.Errorf("values is required")
 	}
+	// Config_get redacts credential-class provider headers to RedactionMarker
+	// before the document reaches a model. Posting that document back unchanged
+	// must keep the loaded secrets, not install the marker as the value. The
+	// pre-apply maps stay valid: setField replaces the whole Providers field.
+	previousHeaders := make(map[string]map[string]string, len(c.Providers))
+	for label, provider := range c.Providers {
+		previousHeaders[label] = provider.Headers
+	}
 	for k, v := range values {
 		f := FieldByKey(k)
 		if f == nil {
@@ -81,8 +89,28 @@ func (c *Config) Apply(values map[string]any) error {
 		if err := c.setField(*f, v); err != nil {
 			return fmt.Errorf("%s: %w", k, err)
 		}
+		if f.Kind == KindProviders {
+			c.restoreRedactedProviderHeaders(previousHeaders)
+		}
 	}
 	return nil
+}
+
+// restoreRedactedProviderHeaders replaces a marker header with the value the
+// pre-apply config held for the same provider label and header name. A marker
+// with no prior value stays as-is: the operator sees that a secret is missing
+// rather than a silently empty header. A genuinely new value is untouched.
+func (c *Config) restoreRedactedProviderHeaders(previous map[string]map[string]string) {
+	for label, provider := range c.Providers {
+		for name, value := range provider.Headers {
+			if value != RedactionMarker {
+				continue
+			}
+			if prior, ok := previous[label][name]; ok {
+				provider.Headers[name] = prior
+			}
+		}
+	}
 }
 
 // StartupBoundChanges returns yaml keys that differ between cur and next and
