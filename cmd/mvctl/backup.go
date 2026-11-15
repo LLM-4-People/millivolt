@@ -210,6 +210,7 @@ func cmdRestore(ctx *Context) (Result, error) {
 		if !ctx.Flags.Bool("reveal", false) {
 			pretty += "\n" + dim("Credential-class provider header values are redacted; pass --reveal to print them.")
 		}
+		pretty += "\n" + dim("The preview decoded and preflighted the whole database member on the server; pass --yes without --inspect to apply directly next time.")
 		return Result{
 			Pretty: pretty,
 			Data: map[string]any{

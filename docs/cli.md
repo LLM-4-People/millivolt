@@ -243,6 +243,9 @@ by cancellation, not by `--timeout`.
 
 `restore` defaults to `inspect=1`, which validates the archive without applying
 it; `--inspect` forces that mode even with `--yes`. `--yes` applies it. The
+preview decodes and preflights the whole archived database member on the server,
+so it costs about as much as the apply's decode; `--yes` alone skips the
+preview and applies directly. The
 member selection (`--config`, `--database`) and the mode (`--config-mode`,
 `--database-mode`; `merge` or `replace`) are always sent explicitly, and both
 the inspect and apply output name the selected members and modes. The default mode is `replace`, the proxy's documented default, so the

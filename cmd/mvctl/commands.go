@@ -123,7 +123,7 @@ func registry() []Command {
 		{Name: "restore", Group: "control", Summary: "Inspect or apply an archive",
 			Flags: []flagSpec{
 				{name: "file", kind: kindString, usage: "archive path (required)"},
-				{name: "inspect", kind: kindBool, usage: "validate and print the archive without applying it"},
+				{name: "inspect", kind: kindBool, usage: "validate and print the archive without applying it; decodes the whole database member, and is implied without --yes"},
 				{name: "reveal", kind: kindBool, usage: "print credential-class provider header values in the inspect document"},
 				restoreConfigFlag(defaults),
 				restoreDatabaseFlag(defaults),
