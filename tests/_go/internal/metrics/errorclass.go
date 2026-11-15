@@ -47,9 +47,14 @@ func TestClassifyDefault(t *testing.T) {
 		{"400 client-fault type with a transient code", ErrorFacts{Status: 400, Type: "invalid_request_error", Code: "internal_error"}, ClassClientError},
 		{"400 invalid_request_error with engine_overloaded", ErrorFacts{Status: 400, Type: "invalid_request_error", Code: "engine_overloaded"}, ClassUnavailable},
 
-		// Transport failures have no response to read.
+		// Transport failures have no response to read. The transport arm
+		// outranks the proxy-minted arm: the transport type is proxy-minted
+		// itself, and reading it as a proxy fault advised against the retry
+		// the class deserves.
 		{"transport timeout", ErrorFacts{Transport: true, Type: "timeout"}, ClassTimeout},
 		{"transport bare", ErrorFacts{Transport: true}, ClassUnreachable},
+		{"transport timeout over local", ErrorFacts{Transport: true, Type: "upstream_unreachable", Code: "timeout", Local: true}, ClassTimeout},
+		{"transport unreachable over local", ErrorFacts{Transport: true, Type: "upstream_unreachable", Local: true}, ClassUnreachable},
 
 		// 2xx content failures.
 		{"200 with empty_completion", ErrorFacts{Status: 200, Type: CodeEmptyCompletion}, ClassContent},

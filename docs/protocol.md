@@ -272,8 +272,13 @@ One classifier owns every error decision: the retry ladder, the storm
 observer, the health counts and the client-facing class all read the same
 canonical class (`rate_limit`, `quota`, `unavailable`, `unreachable`,
 `timeout`, `content`, `client_error`, `proxy`, `canceled`, `upstream`),
-computed from the status AND the provider's own structured type/code - never
-message text. A rate limit announced by a non-429 status (a gateway
+computed from the status, the provider's own structured type/code, and - for
+a transport failure with no response at all - the transport kind, which is
+`unreachable` or, for a timed out send, the narrower `timeout`. Transport
+evidence outranks the proxy-minted arm, so a failure with no provider answer
+is never filed as a proxy fault and never advised against a retry. Message
+text plays no part except for that transport timeout narrowing. A rate limit
+announced by a non-429 status (a gateway
 answering `tier_limit_exceeded` or `resource_exhausted` with a 400) is
 therefore retried, counted in the rate-limit series (and, because the request
 still failed, in the error rate), and labeled `rate_limit` instead of

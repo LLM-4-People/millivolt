@@ -464,17 +464,36 @@ func (c *clientRetryDirective) WriteHeader(status int) {
 // recorded one when a body-forbidden upstream status fails closed to 502) plus
 // the record's structured error members when the relay has them. A proxy-minted
 // type is marked Local so a provider spelling can never be attributed to the
-// provider; an empty type is "no provider claim", not a local failure.
+// provider; an empty type is "no provider claim", not a local failure. A
+// transport failure is the record's own unreachable/transport type, marked
+// Transport as well: its type is proxy-minted but the evidence is stronger
+// than "the proxy minted it", and the classifier lets Transport outrank Local.
+// The timeout text stays the narrower class a client can tell apart.
 func clientErrorFacts(rec *metrics.Record, status int) metrics.ErrorFacts {
 	if rec == nil {
 		return metrics.ErrorFacts{Status: status}
 	}
-	return metrics.ErrorFacts{
-		Status: status,
-		Type:   rec.ErrorType,
-		Code:   rec.ErrorCode,
-		Local:  rec.ErrorType != "" && metrics.IsLocalErrorType(rec.ErrorType),
+	transport := rec.ErrorType == metrics.TypeUpstreamUnreachable || rec.ErrorType == metrics.TypeTransport
+	code := rec.ErrorCode
+	if transport && code == "" && isTransportTimeout(rec.ErrorMsg) {
+		code = "timeout"
 	}
+	return metrics.ErrorFacts{
+		Status:    status,
+		Type:      rec.ErrorType,
+		Code:      code,
+		Transport: transport,
+		Local:     rec.ErrorType != "" && metrics.IsLocalErrorType(rec.ErrorType),
+	}
+}
+
+// isTransportTimeout recognizes the bounded transport texts the proxy stores
+// for a timeout-class failure (net/http's header/dial "timeout" and a fired
+// deadline). The message is the only carrier: every transport failure keeps the
+// one upstream_unreachable type, so this narrows the client class without
+// minting a second type or changing what is recorded.
+func isTransportTimeout(msg string) bool {
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
 }
 
 func (c *clientRetryDirective) Flush() {

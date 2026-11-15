@@ -270,8 +270,8 @@ func isClientFault(typ, code string) bool {
 //  3. rate limit, which outranks the status: a rate-limit code carried by a
 //     400 is a rate limit, and the 429 status is itself a rate limit;
 //  4. the caller's own fault, whose type outranks a transient-looking code;
-//  5. a proxy-minted class;
-//  6. transport failure;
+//  5. transport failure;
+//  6. a proxy-minted class;
 //  7. content (2xx with nothing usable);
 //  8. timeout, before the generic availability class so the client sees the
 //     narrower reason;
@@ -306,19 +306,23 @@ func Classify(f ErrorFacts) ErrorClass {
 	if isClientFault(typ, code) && !extensionMatches(installedClassExtensions().Retryable, typ, code) {
 		return ClassClientError
 	}
-	// 5. Proxy-minted classes, before any provider reading.
-	if f.Local {
-		if c, ok := localClass(typ, code); ok {
-			return c
-		}
-		return ClassProxy
-	}
-	// 6. Transport failures.
+	// 5. Transport failures, before the proxy-minted arm: the transport
+	// evidence is more specific than "the proxy minted the type", and the
+	// transport type is proxy-minted itself. Without precedence here every
+	// transport failure fell into the proxy arm and advised the client not to
+	// retry the one class that always deserves it.
 	if f.Transport {
 		if isTimeoutClass(typ, code) {
 			return ClassTimeout
 		}
 		return ClassUnreachable
+	}
+	// 6. Proxy-minted classes, before any provider reading.
+	if f.Local {
+		if c, ok := localClass(typ, code); ok {
+			return c
+		}
+		return ClassProxy
 	}
 	// 7. A 2xx that carried nothing usable.
 	if f.Status >= 200 && f.Status < 300 {
