@@ -328,7 +328,8 @@ def flake_sweep_errors(script: str) -> list[str]:
     if not re.search(r"(?m)^usage=.*\bflake\b", script):
         errors.append("scripts/check.sh: usage must document the flake entry point")
     for package, directory in (("proxy", "internal/proxy"),
-                               ("scheduler", "internal/scheduler")):
+                               ("scheduler", "internal/scheduler"),
+                               ("cmd_proxy", "cmd/proxy")):
         match = re.search(rf"(?m)^\s*flake_{package}='([^']*)'$", script)
         if not match:
             errors.append(f"scripts/check.sh: flake sweep for {directory} is missing")
@@ -352,6 +353,7 @@ def flake_sweep_errors(script: str) -> list[str]:
     for command in (
         'python3 -B -m tests.go test -race -count=5 -run "$flake_proxy" ./internal/proxy',
         'python3 -B -m tests.go test -race -count=5 -run "$flake_scheduler" ./internal/scheduler',
+        'python3 -B -m tests.go test -race -count=5 -run "$flake_cmd_proxy" ./cmd/proxy',
     ):
         if missing_commands(script, (command,)):
             errors.append("scripts/check.sh: flake sweep must keep the command line " + command)

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -556,42 +557,42 @@ func TestReplaceHoldRejectsOverlapAndMissing(t *testing.T) {
 }
 
 func TestAddHoldWakesCapWaiter(t *testing.T) {
-	s := New(Options{})
-	ctx := context.Background()
-	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	held := make(chan struct{})
-	go func() {
-		r, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{
-			Client: "c",
-			OnHold: func() { close(held) },
-		})
+	synctest.Test(t, func(t *testing.T) {
+		s := New(Options{})
+		ctx := context.Background()
+		rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 		if err != nil {
-			t.Error(err)
-			return
+			t.Fatal(err)
 		}
-		r(0)
-	}()
-	deadline := time.Now().Add(time.Second)
-	for s.Stats().Queued < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if s.Stats().Queued != 1 {
-		t.Fatalf("queued = %d, want 1", s.Stats().Queued)
-	}
-	time.Sleep(20 * time.Millisecond) // enter the non-hold select
-	if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-held:
-	case <-time.After(time.Second):
-		t.Fatal("OnHold never ran - AddHold lost wakeup on cap waiter")
-	}
-	s.RemoveHold("h1")
-	rel(0)
+		held := make(chan struct{})
+		go func() {
+			r, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{
+				Client: "c",
+				OnHold: func() { close(held) },
+			})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			r(0)
+		}()
+		// Wait returns once every bubble goroutine is durably blocked, so the
+		// waiter is provably inside its select rather than merely enqueued.
+		synctest.Wait()
+		if s.Stats().Queued != 1 {
+			t.Fatalf("queued = %d, want 1", s.Stats().Queued)
+		}
+		if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Clients: []string{"c"}}}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-held:
+		case <-time.After(time.Second):
+			t.Fatal("OnHold never ran - AddHold lost wakeup on cap waiter")
+		}
+		s.RemoveHold("h1")
+		rel(0)
+	})
 }
 
 // TestReplaceHoldWakesCapWaiter is the edit-then-update path: a waiter is
@@ -599,48 +600,48 @@ func TestAddHoldWakesCapWaiter(t *testing.T) {
 // existing pause so it newly matches. drain skips them (blocked) - OnHold
 // must still run so the dashboard does not keep them as "streaming".
 func TestReplaceHoldWakesCapWaiter(t *testing.T) {
-	s := New(Options{})
-	ctx := context.Background()
-	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"other.land"}}}); err != nil {
-		t.Fatal(err)
-	}
-	held := make(chan struct{})
-	go func() {
-		r, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{
-			Client: "c", Provider: "gamma.example",
-			OnHold: func() { close(held) },
-		})
+	synctest.Test(t, func(t *testing.T) {
+		s := New(Options{})
+		ctx := context.Background()
+		rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 		if err != nil {
-			t.Error(err)
-			return
+			t.Fatal(err)
 		}
-		r(0)
-	}()
-	deadline := time.Now().Add(time.Second)
-	for s.Stats().Queued < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if s.Stats().Queued != 1 {
-		t.Fatalf("queued = %d, want 1", s.Stats().Queued)
-	}
-	time.Sleep(20 * time.Millisecond) // enter the non-hold select
-	if err := s.ReplaceHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"gamma.example"}}}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-held:
-	case <-time.After(time.Second):
-		t.Fatal("OnHold never ran - ReplaceHold lost wakeup on cap waiter")
-	}
-	if s.HoldsTarget(PolicyTarget{Client: "c", Provider: "beta.example"}) {
-		t.Fatal("replace widened hold past the named provider")
-	}
-	s.RemoveHold("h1")
-	rel(0)
+		if err := s.AddHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"other.land"}}}); err != nil {
+			t.Fatal(err)
+		}
+		held := make(chan struct{})
+		go func() {
+			r, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{
+				Client: "c", Provider: "gamma.example",
+				OnHold: func() { close(held) },
+			})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			r(0)
+		}()
+		// Wait returns once the waiter is durably blocked in its select, which
+		// is the state ReplaceHold must wake.
+		synctest.Wait()
+		if s.Stats().Queued != 1 {
+			t.Fatalf("queued = %d, want 1", s.Stats().Queued)
+		}
+		if err := s.ReplaceHold(Hold{ID: "h1", Scope: LimitScope{Providers: []string{"gamma.example"}}}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-held:
+		case <-time.After(time.Second):
+			t.Fatal("OnHold never ran - ReplaceHold lost wakeup on cap waiter")
+		}
+		if s.HoldsTarget(PolicyTarget{Client: "c", Provider: "beta.example"}) {
+			t.Fatal("replace widened hold past the named provider")
+		}
+		s.RemoveHold("h1")
+		rel(0)
+	})
 }
 
 func TestReplaceHoldOnHoldDuringOnWait(t *testing.T) {

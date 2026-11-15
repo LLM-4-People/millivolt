@@ -105,9 +105,11 @@ case "$mode" in
     # no longer exists in its package. Extend this list when a fixed sleep is
     # replaced by a condition wait and the test keeps a timing contract.
     flake_proxy='^(TestConsecutiveFailuresDoubleBackoff|TestRecoveredRequestResetsBackoff|TestConsecutiveExhausted429sDoubleBackoff|TestExhaustedRetriesPaceNextFirstSend|TestRetryAfterNotClampedToMaxBackoff|TestShortRetryAfterDoesNotResetAttemptBackoff|TestQuota429OnLastAttemptDoesNotPace|TestQuota429DoesNotPaceSibling|TestQuota429MaxRetriesZeroDoesNotPace|TestQuotaPauseRetryHonorsRetryAfterAndOperatorRelease)$'
-    flake_scheduler='^(TestRateLimitPacing|TestAdaptiveBackoff|TestBackoffForShortHintKeepsGrowing|TestBackoffForHonorsLongRetryAfter|TestBackoffForCapsPathologicalHint|TestWaitSendRetryAfterRemainingAcrossPause|TestWaitSendRetryAfterRemainingAfterShortPause|TestBackoffForDoesNotTripGroup|TestFailSendDoublesRequestBackoff|TestFailSendOwnClearsAttemptBackoff|TestQuotaGatePacingGrowsOnProbeFailuresAndHonorsRetryAfter|TestMixedFacetCloseKeepsTheQuotaProbePaced)$'
+    flake_scheduler='^(TestRateLimitPacing|TestAdaptiveBackoff|TestBackoffForShortHintKeepsGrowing|TestBackoffForHonorsLongRetryAfter|TestBackoffForCapsPathologicalHint|TestWaitSendRetryAfterRemainingAcrossPause|TestWaitSendRetryAfterRemainingAfterShortPause|TestBackoffForDoesNotTripGroup|TestFailSendDoublesRequestBackoff|TestFailSendOwnClearsAttemptBackoff|TestQuotaGatePacingGrowsOnProbeFailuresAndHonorsRetryAfter|TestMixedFacetCloseKeepsTheQuotaProbePaced|TestAddHoldWakesCapWaiter|TestReplaceHoldWakesCapWaiter)$'
+    flake_cmd_proxy='^(TestReloadPublishesNewConfigObject)$'
     python3 -B -m tests.go test -race -count=5 -run "$flake_proxy" ./internal/proxy
     python3 -B -m tests.go test -race -count=5 -run "$flake_scheduler" ./internal/scheduler
+    python3 -B -m tests.go test -race -count=5 -run "$flake_cmd_proxy" ./cmd/proxy
     ;;
   go)
     (( $# >= 2 )) || die "$usage"
