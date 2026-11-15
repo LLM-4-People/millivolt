@@ -54,6 +54,14 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		if csp := w.Header().Get("Content-Security-Policy"); csp != "frame-ancestors 'none'" {
 			t.Errorf("%s: Content-Security-Policy = %q, want frame-ancestors 'none'", name, csp)
 		}
+		// One owner writes the transport fence, so the sniffing and referrer
+		// guards travel with every denial shape here too.
+		if nosniff := w.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", name, nosniff)
+		}
+		if rp := w.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+			t.Errorf("%s: Referrer-Policy = %q, want no-referrer", name, rp)
+		}
 		if wantBody != "" && w.Body.String() != wantBody {
 			t.Errorf("%s: body = %q, want %q", name, w.Body.String(), wantBody)
 		}
@@ -179,6 +187,20 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		}
 		if got := crossOrigin.Header.Get("Content-Security-Policy"); got != "frame-ancestors 'none'" {
 			t.Errorf("cross-origin denial CSP = %q, want frame-ancestors 'none'", got)
+		}
+		// The transport fence is one gate-level owner, so the sniffing and
+		// referrer guards hold on this denial and on the admitted answer above
+		// without either handler writing them.
+		for name, header := range map[string]string{
+			"X-Content-Type-Options": "nosniff",
+			"Referrer-Policy":        "no-referrer",
+		} {
+			if got := crossOrigin.Header.Get(name); got != header {
+				t.Errorf("cross-origin denial %s = %q, want %q", name, got, header)
+			}
+			if got := response.Header.Get(name); got != header {
+				t.Errorf("admitted handshake %s = %q, want %q", name, got, header)
+			}
 		}
 		if got := crossOrigin.Header.Get("Content-Type"); got != "text/plain; charset=utf-8" {
 			t.Errorf("cross-origin denial Content-Type = %q, want the shared denial transport", got)

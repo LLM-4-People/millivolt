@@ -551,6 +551,8 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		// decoded and escaped views so an encoded-slash look-alike can
 		// never ride it.
 		if r.URL.Path == "/session" && r.URL.EscapedPath() == "/session" {
+			// The handshake is operator traffic whichever way it answers.
+			writeOperatorHeaders(w)
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -563,9 +565,15 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		// of an owned namespace outright.
 		decoded := strings.ReplaceAll(r.URL.Path, `\`, "/")
 		if !gatedPath(decoded) && !gatedPath(stdlibpath.Clean(decoded)) {
+			// Inference keeps its own transport headers: nothing operator-side
+			// applies to a proxied provider response.
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Every operator response - the login page, a JSON or SSE denial, an
+		// admitted document - carries the one transport fence, set before any
+		// further branch so no handler has to remember it.
+		writeOperatorHeaders(w)
 		// An encoded path separator makes a namespace look-alike the mux
 		// cannot route to its reserved subtree, so it would be forwarded to
 		// inference. The owned namespace is reserved absolutely: refuse it
@@ -589,7 +597,6 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		// credential admitted it: the gate is the one owner so a handler cannot
 		// forget it, and a cookie-authenticated /metrics/query or pprof response
 		// is no more cacheable than its Bearer twin.
-		w.Header().Set("Cache-Control", "no-store")
 		// A verified credential is admission, not a guess: both the session
 		// cookie and a correct Bearer pass before the throttle and clear the
 		// budget, so a lockout can never lock the operator out of their own
@@ -665,16 +672,28 @@ const lockoutMessage = "too many rejected credentials; try again later"
 // operator credential is configured.
 const operatorPlaneDisabledMsg = "operator plane is disabled: set " + mcp.ProxyTokenEnv + " to enable it"
 
-// denyOperator is the single denial writer for the operator plane: it owns
-// the Cache-Control: no-store and frame-ancestors CSP denial headers and the
-// flat JSON error body (adminjson.WriteError), so every denial - method
-// gate, unarmed plane, malformed handshake, lockout, missing credential -
-// carries the same no-store, unframeable shape. Extra headers stay at the
-// call sites that own them: Allow at the method gate, Retry-After inside
-// denyLockedOut, WWW-Authenticate inside denyBearer.
-func denyOperator(w http.ResponseWriter, status int, msg string) {
+// writeOperatorHeaders is the one owner of every operator response's transport
+// hardening. Operator bodies are HTML pages or JSON errors sniffed from their
+// bytes, and the dashboard URL fragment is the explorer's own state, so no
+// referrer leaves for it. It is idempotent, and both the request gate (for
+// every operator route it admits or refuses) and the handlers that can be
+// driven directly call it, so the four values exist once.
+func writeOperatorHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+}
+
+// denyOperator is the single denial writer for the operator plane: it applies
+// the shared transport headers and the flat JSON error body
+// (adminjson.WriteError), so every denial - method gate, unarmed plane,
+// malformed handshake, lockout, missing credential - carries the same
+// no-store, unframeable, unsniffable shape. Extra headers stay at the call
+// sites that own them: Allow at the method gate, Retry-After inside
+// denyLockedOut, WWW-Authenticate inside denyBearer.
+func denyOperator(w http.ResponseWriter, status int, msg string) {
+	writeOperatorHeaders(w)
 	adminjson.WriteError(w, status, msg)
 }
 
@@ -783,7 +802,7 @@ func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Requ
 	// candidate is throttled; an empty request is a plain 401.
 	if presented && g.valid(credential) {
 		g.limiter.success(ip)
-		w.Header().Set("Cache-Control", "no-store")
+		writeOperatorHeaders(w)
 		cookie, err := g.mintSessionCookie(r)
 		if err != nil {
 			// The handshake's whole purpose is the cookie: without it the
@@ -814,8 +833,7 @@ func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Requ
 	if form {
 		// The HTML login-page rejection keeps its own body (the page, not a
 		// JSON error) but the same denial headers as denyOperator.
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		writeOperatorHeaders(w)
 		w.WriteHeader(http.StatusUnauthorized)
 		if presented {
 			_, _ = w.Write([]byte(loginPageRejectedHTML))
@@ -954,8 +972,7 @@ func loginPage(notice string) string {
 // carries the form is no-store, unframeable and typed alike. The status stays a
 // property of the caller: 401 for the ask, 429 while the source is locked out.
 func serveLoginPage(w http.ResponseWriter, status int, notice string) {
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	writeOperatorHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(loginPage(notice)))
