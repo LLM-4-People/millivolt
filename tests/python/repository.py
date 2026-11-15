@@ -864,6 +864,35 @@ class PublishedContracts(unittest.TestCase):
         operations = self.read("docs/operations.md")
         self.assertIn("X-Forwarded-Proto", operations)
 
+    def test_stdlib_log_is_limited_to_fatal_sites(self):
+        # internal/logging owns the one logging pipeline. Only the two boot
+        # sites that must abort the process before the pipeline exists may
+        # import the standard logger, and only for Fatal/Fatalf; a stray
+        # log.Printf elsewhere would bypass the shared schema and redaction.
+        allowed = {"cmd/proxy/main.go", "cmd/proxy/operator.go", "internal/logging/logging.go"}
+        import_block = re.compile(r'(?ms)^import\s*(\((.*?)^\)|"[^"]*")')
+        log_import = re.compile(r'(?m)^\s*(?:[A-Za-z_]\w*\s+)?"log"\s*$')
+
+        def imports_log(text):
+            for block in import_block.finditer(text):
+                if log_import.search(block.group(2) or block.group(1)):
+                    return True
+            return False
+
+        found = {}
+        for root in ("cmd", "internal"):
+            for path in sorted((check.ROOT / root).rglob("*.go")):
+                name = path.relative_to(check.ROOT).as_posix()
+                text = path.read_text()
+                if imports_log(text):
+                    found[name] = text
+        self.assertEqual(set(found), allowed)
+        for name in allowed - {"internal/logging/logging.go"}:
+            self.assertRegex(found[name], r"\blog\.Fatalf?\(")
+            # The Fatal allowance is the whole allowance: no Printf smuggled in.
+            self.assertLessEqual(set(re.findall(r"\blog\.([A-Za-z]+)\(", found[name])),
+                                 {"Fatal", "Fatalf"}, name)
+
     def test_adapters_pin_round8_contracts(self):
         adapters = re.sub(r"\s+", " ", self.read("docs/adapters.md"))
         for phrase in (
