@@ -525,6 +525,18 @@ function reportProblem(label, err) {
   console.error(label + ':', detail);
 }
 
+// skipToMain is the skip link's activation. The link keeps href="#main" for
+// the browser's own affordances, but the press must not write the hash: every
+// hash the router sees is parsed as explorer scope, so "#main" reads as an
+// unknown dimension and would drop the operator's filters. <main> carries the
+// tabindex=-1 focus target instead.
+function skipToMain(event) {
+  const main = $('main');
+  if (!main) return;
+  if (event) event.preventDefault();
+  main.focus();
+}
+
 // keyModified reports whether a key event belongs to the browser or the OS
 // rather than to a widget's own navigation: Alt+Left is Back, Cmd+Up is the top
 // of the document, Ctrl+Home is the same. A roving handler that preventDefaults
