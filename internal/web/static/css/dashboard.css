@@ -309,7 +309,7 @@
   .btn-accent:not(:disabled) { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
   .btn-accent:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--bg); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
   .btn:disabled, .btn:disabled:hover {
-    opacity: .45; cursor: default; color: var(--muted);
+    opacity: .6; cursor: default; color: var(--muted);
     border-color: var(--border2); background: var(--panel2); box-shadow: none;
   }
   .storm-banner {
@@ -696,7 +696,7 @@
   .mn-item:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .mn-item[aria-checked="false"] { color: var(--muted); }
   .mn-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
-  .mn-item[disabled] { opacity: .45; cursor: default; }
+  .mn-item[disabled] { opacity: .6; cursor: default; }
   .mn-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .mn-chip {
     display: inline-flex; align-items: center; justify-content: center; min-height: 26px;
@@ -710,7 +710,7 @@
     color: var(--text); border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
-  .mn-chip:disabled { opacity: .45; cursor: default; }
+  .mn-chip:disabled { opacity: .6; cursor: default; }
   .mn-chip:disabled:hover { color: var(--muted); border-color: var(--border2); background: var(--panel2); }
   .mn-note { font-size: 10px; color: var(--muted); line-height: 1.5; }
   .mn-ceiling { font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 2px; }

@@ -297,7 +297,7 @@ Quiet machine controls: small mono labels, a raised panel fill, a hairline borde
 - **Base:** raised fill (`panel-raised`), hairline border (`hairline-strong`), muted ink; hover moves ink to primary and the border to Signal Blue with a 3px halo.
 - **Accent:** Signal Blue fill with case-colored ink and 600 weight; hover uses Signal Blue Hover. Reserved for the one commit action on a surface, such as `apply limit`, `hold traffic`, `start capture`, `download`, `apply` or `restart now`.
 - **Danger:** two weights, a 16% tint fill for a repeatable scoped action and a solid Fault Coral fill for the one irreversible action on a surface. A confirmation dialog pairs a neutral Cancel with the solid weight.
-- **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 45% opacity with the neutral skin.
+- **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 60% opacity with the neutral skin.
 
 ### Menu Panel
 The shared `.mn` foundation the timeframe control and generated choice menus use, and the box the operator console extends: one titled head, one grouped body and an optional action foot. Placement, sheet conversion, dismissal and focus are JS-owned; the box is the same whether it is anchored or a bottom sheet. The theme tray keeps the older header-panel box.
