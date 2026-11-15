@@ -733,7 +733,7 @@ module.exports = async function delegatedActions(H) {
         ]) {
           sw.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[now]));}};
           check('Yesterday uses calendar subtraction across DST '+now,
-            sw.dayDividerLabel({start:yesterday})==='YESTERDAY' && sw.dayDividerLabel({start:older})!=='YESTERDAY');
+            sw.dayDividerLabel({start:yesterday})==='yesterday' && sw.dayDividerLabel({start:older})!=='yesterday');
         }
       } finally {sw.Date=OriginalDate;if(oldTZ===undefined)delete process.env.TZ;else process.env.TZ=oldTZ;}
     } finally {sw.close();}

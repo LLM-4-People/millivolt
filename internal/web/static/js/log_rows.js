@@ -37,10 +37,10 @@ function dayDividerLabel(r) {
   if (!t) return '';
   const d = new Date(t);
   const now = new Date();
-  if (sameLocalDay(d, now)) return 'TODAY';
+  if (sameLocalDay(d, now)) return 'today';
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (sameLocalDay(d, yesterday)) return 'YESTERDAY';
+  if (sameLocalDay(d, yesterday)) return 'yesterday';
   let label = CAL_DAYS[d.getDay()].short + ' · ' + CAL_MONTHS[d.getMonth()] + ' ' + d.getDate();
   if (d.getFullYear() !== now.getFullYear()) label += ' ' + d.getFullYear();
   return label;
