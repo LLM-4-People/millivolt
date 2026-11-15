@@ -20,6 +20,7 @@ from urllib.parse import unquote, urlsplit
 
 from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
                                 markdown_engine, performance_headline, render_fragment, toc_html)
+from scripts.perf_docs import check as performance_drift_errors
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
                            site_palette_errors, token_drift_errors)
@@ -163,13 +164,16 @@ def brand_image_errors() -> list[str]:
 
 
 PERFORMANCE_SECTIONS = (
-    "method",
     "artifact-and-idle-footprint",
+    "method",
     "fast-response-throughput",
+    "sustained-capacity",
     "streaming-concurrency",
+    "streaming-throughput",
     "durable-writer-and-overload",
     "storage-and-retained-projection",
     "query-and-metadata-paths",
+    "implementation-benchmarks",
     "reproduce",
     "limitations",
 )
@@ -187,12 +191,15 @@ def performance_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str
     for section in PERFORMANCE_SECTIONS:
         if f'id="{section}"' not in text:
             errors.append(f"performance page is missing section #{section}")
-    if text.count("<table>") < 8:
-        errors.append(f"performance page has {text.count('<table>')} tables, want at least 8")
+    if text.count("<table>") < 12:
+        errors.append(f"performance page has {text.count('<table>')} tables, want at least 12")
     normalized = re.sub(r"\s+", " ", text)
-    for phrase in ("2026-10-20 UTC", "not deployment guarantees", "Reproduce"):
+    for phrase in ("not deployment guarantees", "generated from the result bundle", "Reproduce"):
         if phrase not in normalized:
             errors.append(f"performance page is missing {phrase!r}")
+    # The page is generated, not edited: a bundle or page change that is not
+    # rendered together fails here instead of publishing a stale number.
+    errors.extend(performance_drift_errors(ROOT))
     landing = page_texts.get(site / "index.html", "")
     try:
         headline = performance_headline()

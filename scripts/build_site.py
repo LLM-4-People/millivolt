@@ -43,6 +43,7 @@ GITHUB_TREE = f"{GITHUB_REPOSITORY}/tree/{GITHUB_BRANCH}/"
 GITHUB_EDIT = f"{GITHUB_REPOSITORY}/edit/{GITHUB_BRANCH}/"
 
 sys.path.insert(0, str(ROOT))
+from scripts.perf_docs import DataError, landing_metrics  # noqa: E402
 from tests.repository_check import heading_slug  # noqa: E402
 from tests.support import root_custom_properties  # noqa: E402
 
@@ -765,48 +766,16 @@ def render_base(values: dict[str, str]) -> str:
 
 
 def performance_headline() -> dict[str, str]:
-    """Read the landing's four headline values from the canonical measured page.
+    """The landing's four headline values, from the measured result bundle.
 
-    The performance page owns every published number. Parsing labelled table
-    rows keeps the landing cards from becoming a second source; a renamed or
-    removed row fails the build instead of silently drifting.
-
-    Each value is escaped here because these cells are the one doc-derived text
-    that does not travel through `sanitize_content`: the landing page is built
-    from the template, not from `md.convert`. A table cell is author-controlled
-    Markdown text, so it must never reach the template as markup.
+    perf/results.json is the only source of published performance numbers;
+    docs/performance.md is rendered from it by scripts/perf_docs.py. Reading the
+    bundle here keeps the landing from becoming a second parser of the page.
     """
-    page = DOCS / "performance.md"
-    if not page.is_file():
-        raise BuildError("missing canonical performance page: docs/performance.md")
-    rows = {}
-    for line in page.read_text(encoding="utf-8").splitlines():
-        if not line.startswith("| "):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if cells:
-            rows.setdefault(cells[0], cells)
-    def cells(label: str) -> list[str]:
-        if label not in rows:
-            raise BuildError(f"docs/performance.md has no table row labelled {label!r}")
-        return rows[label]
-    image = cells("amd64 runtime image")
-    idle = cells("Idle process, empty SQLite")
-    fast = cells("128")
-    sustained = cells("48")
-    if len(image) < 3 or len(idle) < 3 or len(fast) < 8 or len(sustained) < 4:
-        raise BuildError("docs/performance.md table rows are missing headline cells")
-    # Display text only: strip any inline Markdown/HTML the cell carries, then
-    # escape what remains.
-    def display(cell: str) -> str:
-        return html.escape(strip_html(cell))
-
-    return {
-        "perf_image": display(image[2]),
-        "perf_idle": display(idle[2]),
-        "perf_loaded": display(fast[7]),
-        "perf_rps": display(sustained[3]),
-    }
+    try:
+        return landing_metrics(ROOT)
+    except DataError as exc:
+        raise BuildError(f"cannot read the performance bundle: {exc}") from exc
 
 
 def render_landing(*, version: str, base_url: str, theme_color: str) -> str:

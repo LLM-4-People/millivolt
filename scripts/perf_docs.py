@@ -336,7 +336,7 @@ def render(bundle: dict) -> str:
 
     dirty = ""
     if method.get("dirty"):
-        dirty = ("\n> **Measurement note:** the working tree had uncommitted changes during this "
+        dirty = ("\n\n> **Measurement note:** the working tree had uncommitted changes during this "
                  "run. Rerun `scripts/perf.sh docs` on a clean commit before publishing.\n")
 
     fast_note = (

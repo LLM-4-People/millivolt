@@ -19,6 +19,23 @@ from ..support import (PALETTE_OWNER, RETIRED_TOKENS, SITE_STYLESHEET, _template
 
 
 class RepositoryChecks(unittest.TestCase):
+    def test_measured_benchmark_numbers_live_only_in_the_generated_page(self):
+        """A benchmark name beside a measured unit is a hand-copied result.
+
+        docs/performance.md is rendered from perf/results.json and checked
+        byte-for-byte. A design note may name the benchmark that protects a
+        path, but the number belongs in the generated page.
+        """
+        measured = re.compile(r"\b\d[\d,.]*\s*(?:ns|us|µs|ms|s|B/op|allocs(?:/op)?|MB|MiB)\b")
+        offenders = []
+        for path in sorted((check.ROOT / "docs").glob("*.md")):
+            if path.name == "performance.md":
+                continue
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "`Benchmark" in line and measured.search(line):
+                    offenders.append(f"{path.relative_to(check.ROOT)}:{number}")
+        self.assertEqual([], offenders, "measured benchmark numbers belong in docs/performance.md")
+
     def test_css_control_predicate_covers_every_control_shape(self):
         # The tap-target gate is only as good as its ability to recognize a
         # control. A selector it cannot see is a 20px target nobody notices, so
