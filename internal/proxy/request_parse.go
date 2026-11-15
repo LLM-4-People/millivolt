@@ -79,7 +79,7 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview, bound bool, 
 			// (hostileTokenCap reads rec.ReqMaxTokens): a type error anywhere
 			// else in the parameters block - including tool parameters carried
 			// as raw JSON by the Anthropic translator - must not blind that
-			// check. Recover the cap alone with applyTokenCaps' minimal decode
+			// check. Recover the cap alone with scanTokenCaps' minimal decode
 			// of the same body, applying the same max_completion_tokens-wins
 			// precedence as the clean merge below (a cap pair that still does
 			// not decode leaves the record's cap untouched).

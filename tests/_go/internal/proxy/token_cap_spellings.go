@@ -133,7 +133,7 @@ func TestApplyTokenCapsRawSpellings(t *testing.T) {
 	} {
 		t.Run(tc.payload, func(t *testing.T) {
 			rec := &metrics.Record{}
-			applyTokenCaps([]byte(tc.payload), rec)
+			scanTokenCaps([]byte(tc.payload)).apply(rec)
 			switch {
 			case tc.want == nil && rec.ReqMaxTokens != nil:
 				t.Fatalf("cap = %d, want absent", *rec.ReqMaxTokens)

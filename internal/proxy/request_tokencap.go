@@ -23,24 +23,17 @@ func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 	return maxOutput
 }
 
-// applyTokenCaps stamps the effective token ceiling onto the record through
+// apply stamps the effective token ceiling onto the record through
 // MergeTokenCaps' precedence (max_completion_tokens over max_tokens over
-// max_output_tokens; none present stamps nil). The occurrence scan rejects a
-// duplicate cap spelling, and a malformed spelling leaves the ceiling unset
-// here; ServeHTTP's tokenCapViolation rejects either before the request can
-// proceed. A caller that already holds a scan applies it directly, so the
-// preflighted and rewritten bodies are scanned once each.
-func applyTokenCaps(body []byte, rec *metrics.Record) {
-	scanTokenCaps(body).apply(rec)
-}
-
-// apply stamps the effective token ceiling from an already computed occurrence
-// scan, so a preflighted body is not scanned a second time. A rewritten body
-// restamps from its own scan, so the hostile-cap boundary, the scheduler
-// reservation and the recorded request parameters all describe the bytes
-// actually sent upstream; a caps decode that still fails (the client's own cap
-// field carried a non-number) keeps the first decode's value rather than
-// fabricating one.
+// max_output_tokens; none present stamps nil) from an already computed
+// occurrence scan, so a preflighted body is not scanned a second time. The
+// occurrence scan rejects a duplicate cap spelling, and a malformed spelling
+// leaves the ceiling unset here; ServeHTTP's tokenCapViolation rejects either
+// before the request can proceed. A rewritten body restamps from its own scan,
+// so the hostile-cap boundary, the scheduler reservation and the recorded
+// request parameters all describe the bytes actually sent upstream; a caps
+// decode that still fails (the client's own cap field carried a non-number)
+// keeps the first decode's value rather than fabricating one.
 func (s tokenCapScan) apply(rec *metrics.Record) {
 	if s.duplicate != "" {
 		return
