@@ -621,6 +621,40 @@ def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, st
     return title, description, content, md.toc_tokens
 
 
+# Search indexes a page as its lede plus one document per h2. The split is on the
+# rendered heading, which is where the sanitizer has already closed the markup,
+# so a section's text is exactly what a reader sees between two headings.
+SEARCH_SECTION = re.compile(r'<h([23])\b[^>]*\bid="([^"]+)"[^>]*>', re.S)
+SEARCH_TEXT_MAX = 1200
+
+
+def search_sections(content: str) -> list[dict]:
+    """Split one rendered document into its sections for the search index.
+
+    A section starts at an h2 or an h3 and ends at the next heading, so its text
+    is what a reader sees under that heading and no text is indexed twice. An h3
+    carries its h2 as context, which is what the result list shows.
+    """
+    matches = list(SEARCH_SECTION.finditer(content))
+    sections: list[dict] = []
+    parent = ""
+    for index, match in enumerate(matches):
+        level, anchor = match.group(1), match.group(2)
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        chunk = content[match.end():end]
+        heading_html, _, body = chunk.partition("</h" + level + ">")
+        heading = strip_html(heading_html).rstrip("#\u00b6 ").strip()
+        if level == "2":
+            parent = heading
+        sections.append({
+            "heading": heading,
+            "id": anchor,
+            "text": plain_text(body)[:SEARCH_TEXT_MAX],
+            "context": "" if level == "2" else parent,
+        })
+    return sections
+
+
 def toc_html(tokens: list[dict]) -> str:
     """Render a nested table of contents from markdown toc tokens."""
 
@@ -910,7 +944,11 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
             for node in tokens
             if int(node.get("level", 0)) in (2, 3)
         ],
-        "text": plain_text(content)[:5000],
+        # The lede is what the page says before its first section; the sections
+        # themselves carry the reference text, so a long page is indexed whole
+        # instead of being cut at one fixed character count.
+        "text": plain_text(SEARCH_SECTION.split(content)[0])[:SEARCH_TEXT_MAX],
+        "sections": search_sections(content),
     }
 
 

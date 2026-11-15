@@ -251,7 +251,7 @@
         docs.push({
           title: section.heading,
           url: entry.url + "#" + section.id,
-          context: entry.title,
+          context: section.context ? entry.title + " / " + section.context : entry.title,
           body: section.text,
         });
       }

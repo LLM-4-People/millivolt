@@ -45,6 +45,7 @@ class PageParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.h1 = 0
         self.ids: set[str] = set()
+        self.heading_ids: list[str] = []
         self.links: list[tuple[str, str]] = []
         self.images: list[dict[str, str]] = []
         self.scripts: list[str] = []
@@ -57,6 +58,10 @@ class PageParser(HTMLParser):
         values = {key: value or "" for key, value in attrs}
         if "id" in values:
             self.ids.add(values["id"])
+            if tag in ("h2", "h3") and values["id"] != "search-title":
+                # search-title is the dialog's own heading in page chrome, not
+                # article content, so the index rightly does not carry it.
+                self.heading_ids.append(values["id"])
         if tag == "h1":
             self.h1 += 1
         if tag == "a" and "href" in values:
@@ -595,6 +600,28 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
     operations = page_texts.get(site / "docs/operations.html", "")
     if 'class="callout callout-warning"' not in operations:
         errors.append("docs/operations.html: the exposure warning is not a callout")
+
+    # Search indexes sections, not whole pages: a long reference page must be
+    # reachable at every heading, and a section link must land on a real anchor.
+    try:
+        index = json.loads((site / "search.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        errors.append(f"search.json is unreadable: {exc}")
+        index = []
+    for entry in index:
+        page = site / entry["url"]
+        if not page.exists():
+            errors.append(f"search.json names a missing page: {entry['url']}")
+            continue
+        ids = parsed[page].ids if page in parsed else set()
+        for section in entry.get("sections", []):
+            if section["id"] not in ids:
+                errors.append(f"search.json: {entry['url']} has no anchor #{section['id']}")
+                break
+        indexed = [section["id"] for section in entry.get("sections", [])]
+        if indexed != parsed[page].heading_ids:
+            errors.append(f"search.json: {entry['url']} indexes {len(indexed)} of "
+                          f"{len(parsed[page].heading_ids)} headings, or in a different order")
 
     base_template = (ROOT / "site-src/templates/base.html").read_text(encoding="utf-8")
     literal = re.search(r"#[0-9a-fA-F]{3,8}", base_template)
