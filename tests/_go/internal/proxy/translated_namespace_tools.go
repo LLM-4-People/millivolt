@@ -80,3 +80,34 @@ func TestTranslatedNamespaceTools(t *testing.T) {
 		t.Fatalf("client call lost its namespace: %+v", got.Output[0])
 	}
 }
+
+const namespaceProxyChatStream = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"mcp__context7__query_docs","arguments":"{\"q\":\"auth\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+`
+
+// TestTranslatedNamespaceStreamTools covers the stream path's request-scoped
+// wiring: the same map reaches the streaming encoder, so a streamed call names
+// its group as well.
+func TestTranslatedNamespaceStreamTools(t *testing.T) {
+	up := newFixtureUpstream(t, "text/event-stream", 200, namespaceProxyChatStream)
+	cfg := config.Default()
+	s := New(cfg, metrics.Noop{})
+	s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+	body := strings.Replace(namespaceProxyRequest, `"stream":false`, `"stream":true`, 1)
+	w := proxyRequest(t, s, "/v1/responses", "openai", body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+	wire := w.Body.String()
+	if !strings.Contains(wire, `"namespace":"mcp__context7"`) {
+		t.Fatalf("streamed call lost its namespace: %s", wire)
+	}
+	if !strings.Contains(wire, `"name":"query_docs"`) {
+		t.Fatalf("streamed call lost its declared name: %s", wire)
+	}
+}

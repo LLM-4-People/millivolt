@@ -133,15 +133,46 @@ func TestResponsesNamespaceStreamCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate stream: %v", err)
 	}
-	wire := buf.String()
-	if !strings.Contains(wire, `"namespace":"mcp__context7"`) {
-		t.Fatalf("streamed call lost its namespace: %s", wire)
+	// Every item shape the client can dispatch from is checked on its own: a
+	// single satisfied Contains would pass with one shape still broken.
+	type callItem struct {
+		Type      string `json:"type"`
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
 	}
-	if strings.Contains(wire, `"name":"mcp__context7__query_docs"`) {
-		t.Fatalf("streamed call kept the flat name: %s", wire)
+	var shapes []callItem
+	for _, line := range strings.Split(buf.String(), "\n") {
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var event struct {
+			Type     string   `json:"type"`
+			Item     callItem `json:"item"`
+			Response struct {
+				Output []callItem `json:"output"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+		switch event.Type {
+		case "response.output_item.added", "response.output_item.done":
+			shapes = append(shapes, event.Item)
+		case "response.completed":
+			shapes = append(shapes, event.Response.Output...)
+		}
 	}
-	if !strings.Contains(wire, `"name":"query_docs"`) {
-		t.Fatalf("streamed call lost its declared name: %s", wire)
+	if len(shapes) != 3 {
+		t.Fatalf("expected the added, done and terminal items, got %d: %s", len(shapes), buf.String())
+	}
+	for _, shape := range shapes {
+		if shape.Type != "function_call" {
+			t.Fatalf("item type = %q", shape.Type)
+		}
+		if shape.Name != "query_docs" || shape.Namespace != "mcp__context7" {
+			t.Fatalf("item lost its declared identity: %+v", shape)
+		}
 	}
 }
 
@@ -176,8 +207,32 @@ func TestResponsesNamespaceFlatNameCollisions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("long pair was rejected: %v", err)
 	}
-	if name := longReq.Tools[0].ModelName(); !openAIIdentifierPattern.MatchString(name) {
-		t.Fatalf("truncated wire name leaves the Chat class (%d): %q", len(name), name)
+	longName := longReq.Tools[0].ModelName()
+	if !openAIIdentifierPattern.MatchString(longName) {
+		t.Fatalf("truncated wire name leaves the Chat class (%d): %q", len(longName), longName)
+	}
+
+	// Two long pairs must stay distinct, and the spelling must be stable across
+	// decodes so a recorded conversation replays to the same tool.
+	twin := strings.Repeat("t", 40) + "x"
+	twoBody := `{"model":"m","input":"hi","tools":[` +
+		`{"type":"namespace","name":"` + long + `","tools":[{"type":"function","name":"` + longTool + `","parameters":{}}]},` +
+		`{"type":"namespace","name":"` + long + `","tools":[{"type":"function","name":"` + twin + `","parameters":{}}]}]}`
+	twoReq, err := DecodeResponsesRequest([]byte(twoBody))
+	if err != nil {
+		t.Fatalf("long twins were rejected: %v", err)
+	}
+	if len(twoReq.Tools) != 2 || twoReq.Tools[0].ModelName() == twoReq.Tools[1].ModelName() {
+		t.Fatalf("long pairs collapsed: %+v", twoReq.Tools)
+	}
+	again, err := DecodeResponsesRequest([]byte(twoBody))
+	if err != nil {
+		t.Fatalf("long twins were rejected on replay: %v", err)
+	}
+	for i := range twoReq.Tools {
+		if twoReq.Tools[i].ModelName() != again.Tools[i].ModelName() {
+			t.Fatalf("long name is not stable: %q vs %q", twoReq.Tools[i].ModelName(), again.Tools[i].ModelName())
+		}
 	}
 }
 
