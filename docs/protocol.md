@@ -66,7 +66,7 @@ Routing validation and request construction live in
 | --- | --- |
 | `X-Proxy-Base-URL` | Absolute HTTP(S) upstream base; no userinfo, query or fragment, including a bare trailing `?` or `#` (a percent-encoded `%23` remains path data). |
 | `X-Proxy-Key` | Upstream key; takes precedence over `Authorization`. Without it, a Bearer credential or the supplied Authorization value is used. No credential is also allowed. |
-| `X-Proxy-Auth-Header` | Key's upstream header; defaults to `Authorization`. |
+| `X-Proxy-Auth-Header` | Key's upstream header; defaults to `Authorization`. The chosen name joins the credential class for that request even when its own spelling looks harmless (`X-My-Gate`): it is redacted from retained headers and skipped by request overrides like a real credential. |
 | `X-Proxy-Auth-Prefix` | Prefix before the key; defaults to `Bearer `. A present empty header selects no prefix. |
 | `X-Proxy-Path` | HTTP relay: replace the incoming path before joining it to the base URL. Cursor uses its [native path rule](adapters.md#cursor-connect-bridge); model discovery replaces its default models endpoint. |
 | `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Model discovery uses it for the upstream discovery call; Cursor ignores it. |
