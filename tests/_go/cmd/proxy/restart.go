@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -897,4 +898,158 @@ func TestRestartBuildNamesAnUnwritableTempDir(t *testing.T) {
 	if !strings.Contains(msg, missing) || !strings.Contains(msg, "writable process temp directory") {
 		t.Fatalf("build error = %q, want the temp directory and the requirement named", msg)
 	}
+}
+
+// restartRunFixture wires a real listener/server to a fake go toolchain, so
+// run() can be driven through every failure branch without compiling.
+func restartRunFixture(t *testing.T, body string, flush func(context.Context) error) (*restarter, string) {
+	t.Helper()
+	goBin := filepath.Join(t.TempDir(), "fake-go")
+	script := `#!/bin/sh
+out=
+while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then out=$2; fi; shift; done
+if [ "$MILLIVOLT_TEST_BUILD_FAIL" = 1 ]; then echo "fixture build error" >&2; exit 1; fi
+printf '%s' "$MILLIVOLT_TEST_BUILD_BODY" > "$out"
+chmod +x "$out"
+`
+	if err := os.WriteFile(goBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MILLIVOLT_TEST_BUILD_BODY", body)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	server := &http.Server{Handler: handler}
+	go server.Serve(ln)
+	t.Cleanup(func() { server.Close() })
+	rs := newRestarter(&restartDeps{
+		listener:     ln,
+		server:       server,
+		cloneServer:  func() *http.Server { return &http.Server{Handler: handler} },
+		closeFeeds:   func() {},
+		flushStore:   flush,
+		drainTimeout: func() time.Duration { return time.Second },
+		pidFile:      filepath.Join(t.TempDir(), "proxy.pid"),
+	})
+	rs.mu.Lock()
+	rs.root, rs.goBin = t.TempDir(), goBin
+	rs.mu.Unlock()
+	return rs, ln.Addr().String()
+}
+
+// drainRestartPhases collects the live phase stream until the run retires.
+// The watcher channel is filled by setPhase/publish (buffered, nonblocking),
+// so no fast transition is missed the way a poll would miss it.
+func drainRestartPhases(t *testing.T, rs *restarter, ch chan map[string]any) []string {
+	t.Helper()
+	var phases []string
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("phase stream closed before idle; saw %v", phases)
+			}
+			phase, _ := ev["phase"].(string)
+			phases = append(phases, phase)
+			if phase == "idle" {
+				rs.removeWatcher(ch)
+				return phases
+			}
+		case <-deadline:
+			t.Fatalf("restart never retired; saw %v", phases)
+		}
+	}
+}
+
+func restartServes(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + addr)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("the old server stopped serving")
+}
+
+// TestRestartRunChoreography drives run() through its failure branches: a build
+// failure never commits and keeps the old server, a spawn failure commits then
+// resumes it, and a panic in the flush is recovered into the same resume path.
+// Each ends idle with the error, an ordered phase history and the handoff fence
+// released.
+func TestRestartRunChoreography(t *testing.T) {
+	t.Run("build failure leaves the old server serving", func(t *testing.T) {
+		rs, addr := restartRunFixture(t, "", func(context.Context) error { return nil })
+		restartServes(t, addr)
+		t.Setenv("MILLIVOLT_TEST_BUILD_FAIL", "1")
+		ch := make(chan map[string]any, 64)
+		rs.addWatcher(ch)
+		if ok, why := rs.request(); !ok {
+			t.Fatalf("request refused: %s", why)
+		}
+		phases := drainRestartPhases(t, rs, ch)
+		if !strings.Contains(rs.status()["error"].(string), "fixture build error") {
+			t.Fatalf("error = %v, want the build failure", rs.status()["error"])
+		}
+		if rs.committed() {
+			t.Fatal("a build failure must not commit the handoff")
+		}
+		restartServes(t, addr)
+		if phases[0] != "building" || phases[len(phases)-1] != "idle" {
+			t.Fatalf("phases = %v, want building..idle", phases)
+		}
+	})
+
+	t.Run("spawn failure commits and resumes", func(t *testing.T) {
+		// A mode-755 file that is not a program makes Start itself fail.
+		rs, addr := restartRunFixture(t, "not a program", func(context.Context) error { return nil })
+		t.Setenv("MILLIVOLT_TEST_BUILD_FAIL", "")
+		ch := make(chan map[string]any, 64)
+		rs.addWatcher(ch)
+		if ok, why := rs.request(); !ok {
+			t.Fatalf("request refused: %s", why)
+		}
+		phases := drainRestartPhases(t, rs, ch)
+		if !strings.Contains(rs.status()["error"].(string), "spawn") {
+			t.Fatalf("error = %v, want the spawn failure", rs.status()["error"])
+		}
+		if rs.committed() {
+			t.Fatal("a resumed run must release the handoff fence")
+		}
+		restartServes(t, addr)
+		want := []string{"building", "draining", "flushing", "handing_off", "idle"}
+		if strings.Join(phases, ">") != strings.Join(want, ">") {
+			t.Fatalf("phases = %v, want %v", phases, want)
+		}
+	})
+
+	t.Run("a flush panic is recovered into the resume path", func(t *testing.T) {
+		rs, addr := restartRunFixture(t, "", func(context.Context) error { panic("fixture flush panic") })
+		t.Setenv("MILLIVOLT_TEST_BUILD_FAIL", "")
+		ch := make(chan map[string]any, 64)
+		rs.addWatcher(ch)
+		if ok, why := rs.request(); !ok {
+			t.Fatalf("request refused: %s", why)
+		}
+		phases := drainRestartPhases(t, rs, ch)
+		if !strings.Contains(rs.status()["error"].(string), "panic") {
+			t.Fatalf("error = %v, want the recovered panic", rs.status()["error"])
+		}
+		if rs.committed() {
+			t.Fatal("a recovered panic must release the handoff fence")
+		}
+		restartServes(t, addr)
+		if !slices.Contains(phases, "flushing") || phases[len(phases)-1] != "idle" {
+			t.Fatalf("phases = %v, want the flush failed then idle", phases)
+		}
+	})
 }
