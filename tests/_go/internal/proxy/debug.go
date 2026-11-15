@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -975,5 +976,43 @@ func TestHandleDebugCaptureDownloadNamesArtifact(t *testing.T) {
 		if err != nil || string(raw) != tc.payload {
 			t.Errorf("%s: gunzipped artifact = %q err=%v, want the stored payload", tc.id, raw, err)
 		}
+	}
+}
+
+// TestDebugScopeListIsCapped pins the write-owner cap: a scope document past
+// nameSetMax is persisted as the deterministic capped set, so the snapshot and
+// the per-request linear match stay bounded.
+func TestDebugScopeListIsCapped(t *testing.T) {
+	p := newStoredTestProxy(t, metrics.Noop{})
+	names := make([]string, nameSetMax+100)
+	for i := range names {
+		names[i] = fmt.Sprintf("client-%05d", i)
+	}
+	body, err := json.Marshal(map[string]any{"enabled": true, "clients": names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body %s", rr.Code, rr.Body.Bytes())
+	}
+	var snapshot struct {
+		Sessions []struct {
+			Clients []string `json:"clients"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(snapshot.Sessions))
+	}
+	clients := snapshot.Sessions[0].Clients
+	if len(clients) != nameSetMax {
+		t.Fatalf("stored clients = %d, want the %d cap", len(clients), nameSetMax)
+	}
+	if clients[0] != "client-00000" {
+		t.Fatalf("first stored client = %q, want the sorted head", clients[0])
 	}
 }

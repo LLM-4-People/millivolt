@@ -730,6 +730,11 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 	writeOperatorState(w, s.PauseSnapshot(), nil)
 }
 
+// sanitizeNameList trims, deduplicates and sorts one operator-supplied name
+// list. The result is capped at nameSetMax: the lists are persisted operator
+// state matched linearly per request, so an unbounded document would grow the
+// snapshot and the per-request scan together. Sorting first makes the retained
+// subset deterministic.
 func sanitizeNameList(in []string) []string {
 	if len(in) == 0 {
 		return nil
@@ -741,7 +746,11 @@ func sanitizeNameList(in []string) []string {
 			seen[c] = struct{}{}
 		}
 	}
-	return slices.Sorted(maps.Keys(seen))
+	out := slices.Sorted(maps.Keys(seen))
+	if len(out) > nameSetMax {
+		out = out[:nameSetMax]
+	}
+	return out
 }
 
 func toSchedHold(h persistedPause) scheduler.Hold {
