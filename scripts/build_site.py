@@ -756,7 +756,6 @@ def base_values(
         "version": html.escape(version),
         "nav_overview": ' aria-current="page"' if active == "overview" else "",
         "nav_docs": ' aria-current="page"' if active == "docs" else "",
-        "nav_dashboard": ' aria-current="page"' if active == "dashboard" else "",
     }
 
 
@@ -896,7 +895,10 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
         '<path d="m4 6 4 4 4-4"/></svg>'
         "</summary>"
-        f'<nav class="docs-nav-inner" aria-label="Documentation">{nav_links(page.output)}</nav>'
+        '<button class="docs-nav-collapse" type="button" aria-expanded="true" '
+        'aria-controls="docs-nav-list">Collapse menu</button>'
+        f'<nav class="docs-nav-inner" id="docs-nav-list" aria-label="Documentation">'
+        f"{nav_links(page.output)}</nav>"
         "</details>"
         '<details class="toc" open>'
         '<summary class="toc-summary">On this page'
@@ -907,6 +909,8 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         + "</div></details>"
         '<main id="main" class="doc-main">'
         '<div class="read-progress" aria-hidden="true"></div>'
+        '<button class="docs-nav-reveal" type="button" aria-expanded="false" '
+        'aria-controls="docs-nav-list">Show menu</button>'
         + crumbs
         + '<article class="doc-content">'
         + content
@@ -933,7 +937,7 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
         body=doc_body,
         body_class="docs",
         theme_color=theme_color,
-        active="dashboard" if page.output == "docs/dashboard.html" else "docs",
+        active="docs",
     )
     return render_base(values), {
         "title": title,

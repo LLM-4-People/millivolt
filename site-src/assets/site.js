@@ -62,6 +62,31 @@
     }
   }
 
+  // The desktop rail collapses to give the article the full shell width, and
+  // the choice survives a reload. The reveal button lives in the article so it
+  // is reachable by keyboard from the top of the page.
+  const collapse = document.querySelector(".docs-nav-collapse");
+  const reveal = document.querySelector(".docs-nav-reveal");
+  if (collapse && reveal) {
+    const key = "millivolt.docsNav";
+    const apply = (collapsed) => {
+      document.documentElement.classList.toggle("nav-collapsed", collapsed);
+      collapse.setAttribute("aria-expanded", String(!collapsed));
+      reveal.setAttribute("aria-expanded", String(!collapsed));
+    };
+    let stored = false;
+    try { stored = window.localStorage.getItem(key) === "collapsed"; } catch { stored = false; }
+    apply(stored);
+    const set = (collapsed) => {
+      apply(collapsed);
+      try { window.localStorage.setItem(key, collapsed ? "collapsed" : "open"); } catch { /* private mode */ }
+      if (collapsed) reveal.focus();
+      else collapse.focus();
+    };
+    collapse.addEventListener("click", () => set(true));
+    reveal.addEventListener("click", () => set(false));
+  }
+
   const progress = document.querySelector(".read-progress");
   if (progress) {
     let queued = false;
