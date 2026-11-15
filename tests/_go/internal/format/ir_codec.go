@@ -1057,7 +1057,7 @@ func TestChatWarnsOnUnrepresentableFields(t *testing.T) {
 	}
 }
 
-func TestCodecRejectsNonFunctionTool(t *testing.T) {
+func TestCodecResolvesProviderToolTypes(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {
 		t.Fatal("chat non-function tool was accepted")
@@ -1067,8 +1067,8 @@ func TestCodecRejectsNonFunctionTool(t *testing.T) {
 		t.Fatal("anthropic provider tool was accepted")
 	}
 	// A Responses client declares provider-executed tools it may never call
-	// through this proxy (Codex always sends web_search). The known types are
-	// dropped with a warning so the remaining function tools still translate.
+	// through this proxy. A known type is dropped with a warning so the
+	// remaining function tools still translate.
 	responses := `{"model":"m","input":"hi","tools":[{"type":"web_search"}]}`
 	req, err := DecodeResponsesRequest([]byte(responses))
 	if err != nil {
