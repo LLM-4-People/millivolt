@@ -146,6 +146,13 @@ IPs retain their authority/port, and nonregistrable hostnames remain hostnames.
 Optional provider aliases apply afterward. There is no supported
 `X-Proxy-Provider` override.
 
+`Host` is the one name with a different mechanism rather than a different
+precedence: it is accepted in a provider `headers` map and written to the
+request's host field, not its header map, because `net/http` sends the former
+and ignores the latter. A configured host, port included, is the authority the
+upstream sees on both paths above. The explicit `X-Proxy-Headers` map and an
+`X-Proxy-Auth-Header` still refuse `Host`, and no request override may set it.
+
 ## URL and auth examples
 
 For the HTTP relay, a base ending in `/v1` and request path

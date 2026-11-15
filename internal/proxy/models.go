@@ -244,7 +244,7 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 		s.setCursorIdentity(req, t, key)
 		req.Header.Set("Content-Type", "application/proto")
 	} else {
-		s.applyProviderHeaders(req.Header, t.provider)
+		s.applyProviderHeaders(req, t.provider)
 		stripTransportModeHeaders(req.Header)
 	}
 	resp, err := s.httpClient().Do(req)

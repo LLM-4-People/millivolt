@@ -646,7 +646,7 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 // override (its ServeHTTP branch returns before the resolution point), so
 // discovery keeps its own header contract.
 func (s *Server) setCursorIdentity(req *http.Request, t *target, key string) {
-	s.applyProviderHeaders(req.Header, t.provider)
+	s.applyProviderHeaders(req, t.provider)
 	applyOverrideHeaders(req.Header, t.override, t.authHeader)
 	stripTransportModeHeaders(req.Header)
 	req.Header.Set("Connect-Protocol-Version", "1")

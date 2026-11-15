@@ -237,6 +237,48 @@ func TestCursorHeadersFromProviderConfig(t *testing.T) {
 	resp.Body.Close()
 }
 
+// A configured Host is special: net/http sends req.Host, never a Header map
+// entry, so the mapping must move it there. Both the chat relay and model
+// discovery apply the same owner; a client's own Host (the proxy's address)
+// must never win over the configured target host.
+func TestProviderHeadersHostReachesTheWire(t *testing.T) {
+	var hosts []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hosts = append(hosts, r.Host)
+		if r.Header.Get("Host") != "" {
+			t.Errorf("Host stayed in the header map (%q); net/http would ignore it", r.Header.Get("Host"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"id":"m-1","object":"model"}]}`))
+	}))
+	defer upstream.Close()
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderOverride{
+		upstreamLabel(upstream.URL): {Headers: map[string]string{
+			"Host":       "upstream.example:8443",
+			"X-Cli-Mode": "v1",
+		}},
+	}
+	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Host = "proxy.example"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(hosts) != 1 {
+		t.Fatalf("captured %d upstream requests, want 1", len(hosts))
+	}
+	if got := hosts[0]; got != "upstream.example:8443" {
+		t.Fatalf("upstream Host = %q, want the configured value with its port", got)
+	}
+}
+
 // The shipped OpenCode Zen profile must key exactly the label a real zen base
 // URL derives, and its client identity must reach the upstream: static
 // headers verbatim, the per-request id templates expanded into the CLI's
