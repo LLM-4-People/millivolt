@@ -653,17 +653,6 @@ button.oc-chip[aria-pressed="true"]::before {
 }
 .oc-banner .oc-link { color: inherit; }
 .oc-banner .oc-link:hover { color: var(--text); }
-/* ---------- overview readout ----------
-   The page band's recipe at the console's narrow track: four cells, the same
-   leading tick and tick baseline, the value one display step down so a real
-   figure fits 470px. */
-.oc-sec .oc-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 10px; }
-.oc-sec .oc-kpis .kpi { padding: 7px 9px 11px 11px; }
-.oc-sec .oc-kpis .kpi h2 { margin-bottom: 4px; font-size: 8.5px; letter-spacing: .08em; }
-.oc-sec .oc-kpis .kpi .val { font-size: 17px; }
-.oc-sec .oc-kpis .kpi .sub2 { margin-top: 3px; font-size: 9.5px; }
-.oc-sec .oc-kpis + .oc-label { margin-top: 12px; }
-
 /* ---------- overview: one row per rule in force ---------- */
 /* The overview is the same reading as a rule row: kind, scope, then the
    budget. Clicking a row opens the section that owns the rule. The inset and

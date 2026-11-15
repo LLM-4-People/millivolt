@@ -402,26 +402,16 @@ module.exports = async function operatorMenus(H) {
       check('the overview empty state does not promise unrestricted flow',
         emptySays('overview').includes('still apply') &&
         !emptySays('overview').includes('flow unrestricted'));
-      // The overview opens with the same four facts the page band carries, in
-      // the same readout recipe, so an operator reading the policy register
-      // first sees the traffic it acts on. Only a real failure flags the tick.
-      w.eval('kpiAgg = { requests: 2000, errors: 0, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
-      w.openOperatorConsole('overview');
-      const heads = qa('#oc-pane .oc-kpis .kpi h2').map(h => h.textContent);
-      check('the overview opens with the four traffic facts in the band recipe (' + heads.join('/') + ' ' + (d.querySelector('#oc-pane .oc-kpis .kpi .val')||{textContent:''}).textContent + ')',
-        JSON.stringify(heads) === JSON.stringify(['Requests', 'In-flight', 'Error rate', 'Total cost']) &&
-        qa('#oc-pane .oc-kpis .kpi .val')[0].textContent === '2K' &&
-        !d.querySelector('#oc-pane .oc-kpis .kpi.k-err'));
-      // The console is narrower than the page band, so each fact's sub line
-      // must stay short enough for the narrowest cell: the scope lives in the
-      // section line, and a full sentence stays in the tooltip.
-      check('the overview sub facts stay inside one narrow cell',
-        qa('#oc-pane .oc-kpis .kpi .sub2').every(el => el.textContent.length <= 12));
+      // The page band already opens with requests, in-flight, error rate and
+      // cost; repeating them inside the console made the same four numbers
+      // appear twice on one screen. The overview opens with the policy
+      // register and the queue instead.
       w.eval('kpiAgg = { requests: 2000, errors: 4, in_flight: 0, cost: 1.25, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null }');
       w.openOperatorConsole('overview');
-      check('the overview error tile flags only a real failure (' + (qa('#oc-pane .oc-kpis .kpi.k-err .val')[0]||{textContent:'none'}).textContent + ')',
-        !!d.querySelector('#oc-pane .oc-kpis .kpi.k-err') &&
-        qa('#oc-pane .oc-kpis .kpi.k-err .val')[0].textContent === '0.2%');
+      check('the overview does not repeat the page traffic band',
+        !q('#oc-pane .oc-kpis') &&
+        !qa('#oc-pane .kpi').length &&
+        !!text('#oc-pane .oc-ov-list'));
       w.eval('kpiAgg = null');
       w.closeOperatorConsole();
     }

@@ -82,23 +82,6 @@ function ocRenderOverview() {
     : ocEmptyHTML('Nothing is in force.',
       "No limit caps these requests, no hold parks them, no capture records them. The admission queue and each provider's own rate limits still apply.");
   const restart = restartInProgress() ? `<div class="oc-banner">Restart in progress. <button type="button" class="oc-link" data-oc-section="system">view steps</button></div>` : '';
-  // The four facts an operator checks before touching a rule - volume, what is
-  // moving, how much failed, what it cost - open the section in the page's own
-  // readout recipe. The console only carries these numbers in its overview:
-  // the sections and the head line carry the policy.
-  const k = kpiNow();
-  const requests = k.requests || 0;
-  const errors = k.errors || 0;
-  const flight = kpiInFlight();
-  const readout = `<div class="kpis oc-kpis">` +
-    `<div class="kpi"><h2>Requests</h2><div class="val">${fmt(requests)}</div><div class="sub2">all tracked</div></div>` +
-    `<div class="kpi k-flight"><h2>In-flight</h2><div class="val">${fmt(flight)}</div>` +
-    `<div class="sub2">${queued ? fmt(queued) + ' parked' : 'none parked'}</div></div>` +
-    `<div class="kpi${errors ? ' k-err' : ''}"><h2>Error rate</h2><div class="val">${pct(errors, requests)}</div>` +
-    `<div class="sub2" title="${errors ? fmt(errors) + ' of ' + fmt(requests) + ' requests' : 'no errors'}">${errors ? fmt(errors) : 'none'}</div></div>` +
-    `<div class="kpi k-cost"><h2>Total cost</h2><div class="val">${fmtMoney(k.cost || 0)}</div>` +
-    `<div class="sub2">est USD</div></div>` +
-    `</div>`;
   // The counts live in the head line and on the section chips, so the body
   // opens with the rules themselves. The queue appears only when something is
   // actually parked: an empty queue is not a task.
@@ -124,7 +107,6 @@ function ocRenderOverview() {
       `</div>` : '') + `</div>` : '';
   return `<div class="oc-sec">` +
     restart +
-    readout +
     (rows.length ? `<div class="oc-label">in force</div>` : '') +
     `<div class="oc-ov-list">${list}</div>` +
     queue +
