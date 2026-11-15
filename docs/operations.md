@@ -98,16 +98,16 @@ unitless numbers with the unit in the schema label when it is not obvious.
 
 | Settings category | Configuration area |
 | --- | --- |
-| Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
-| Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
+| Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. A dashboard rebuild and restart is confirmed first and only one runs at a time. |
+| Request | Upload bound, tool-call history bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. Starting a capture stores bodies; the MCP tool therefore requires its `confirm` phrase, and stopping every session is confirmed separately. |
 | Upstream | Response-header deadline, connection pools, model-discovery byte/page/entry budgets, translated-response body cap, upstream response-header cap and SSE event/hold bounds. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
 | Format translation | Native-adapter defaults, the cross-protocol [translation loss policy](adapters.md#cross-protocol-translation), streamed tool-call bounds, and Cursor parked-run lifetime and heartbeat. |
-| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
-| Backup | Size cap for one Settings backup download or restore upload. |
+| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). Each delete is confirmed in the console, and over MCP requires the exact phrase plus the preview token issued for that filter. |
+| Backup | Size cap for one Settings backup download or restore upload. A restore inspects first and the apply is confirmed. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
 | Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
 | Models | Ordered model-name grouping rules and their preview. |

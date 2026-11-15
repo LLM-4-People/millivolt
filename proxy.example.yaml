@@ -752,9 +752,9 @@ storage_query_max_rows: 10000
 
 # ---- Backup ----
 # Download or restore a self-checked archive of the saved config, the SQLite history, or
-# both. Restore inspects first: merge keeps live defaults and live request ids; replace
-# loads and validates the backup, writes canonical YAML, and preserves CLI-overridden
-# listen and db_path.
+# both. Restore inspects first and the apply is confirmed. Merge keeps live defaults and
+# live request ids; replace loads and validates the backup, writes canonical YAML, and
+# preserves CLI-overridden listen and db_path.
 # Maximum size of one Settings backup download or restore upload. Larger archives are
 # refused. Downloads and restores stream through private staging files; this is the
 # admit/reject ceiling, not a heap guarantee.
