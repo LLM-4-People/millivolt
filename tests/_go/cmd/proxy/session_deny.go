@@ -207,3 +207,66 @@ func TestSessionCookieNonceUsesTheDeclaredLength(t *testing.T) {
 		t.Fatal("a freshly minted cookie does not verify")
 	}
 }
+
+// TestValidSessionCookieClearsTheFailureBudget pins the documented "a verified
+// credential is admission": a correct session cookie must clear the throttle
+// entry, exactly like a correct Bearer, so an armed lockout cannot survive a
+// working session. Two rows cover the two halves: the cookie is admitted and
+// the budget resets.
+func TestValidSessionCookieClearsTheFailureBudget(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+	gate := newOperatorGate(token)
+	_, handler := newOperatorMux(gate, config.Default())
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	// The httptest server sets RemoteAddr itself, so the key is the loopback
+	// peer the two sides actually use.
+	const ip = "127.0.0.1"
+	cookie, err := gate.mintSessionCookie(httptest.NewRequest(http.MethodGet, "/", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Four wrong guesses, one short of the lockout.
+	for range authFailureThreshold {
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/metrics/bootstrap", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer wrong")
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	gate.limiter.mu.Lock()
+	before := gate.limiter.entries[ip].failures
+	gate.limiter.mu.Unlock()
+	if before != authFailureThreshold {
+		t.Fatalf("tracked failures = %d, want %d", before, authFailureThreshold)
+	}
+	// A valid cookie now clears the entry.
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/metrics/bootstrap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.RemoteAddr = ip + ":5000"
+	req.AddCookie(cookie)
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// /metrics/bootstrap is gated but unregistered here, so the reserved
+	// namespace answers 404 once the gate has admitted the request.
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("cookie-authenticated request = %d, want the reserved 404 (admitted)", resp.StatusCode)
+	}
+	gate.limiter.mu.Lock()
+	_, held := gate.limiter.entries[ip]
+	gate.limiter.mu.Unlock()
+	if held {
+		t.Fatal("a verified session cookie left the failure budget armed")
+	}
+}

@@ -550,6 +550,11 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		// budget, so a lockout can never lock the operator out of their own
 		// dashboard while still throttling every wrong candidate.
 		if cookie, err := r.Cookie(sessionCookieName); err == nil && gate.validSession(cookie) {
+			// A verified cookie is proof exactly like a Bearer: clear the
+			// budget, or the comment above ("both ... clear the budget") is
+			// false and an operator holding a valid session keeps counting
+			// down a lockout armed by someone else on the same address.
+			gate.limiter.success(ip)
 			sameOrigin.ServeHTTP(w, r)
 			return
 		}
