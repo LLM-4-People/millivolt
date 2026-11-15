@@ -127,10 +127,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					})
 				} else if rerr != nil {
 					// The provider's error document could not be read within
-					// the whole-document bound. Fail closed with a real
-					// gateway status instead of asserting the upstream status
-					// over a partial or missing envelope.
-					status = http.StatusBadGateway
+					// the whole-document bound. A 429 is flow control decided
+					// by the status alone, so it keeps the status and the
+					// rate-limit series even without an envelope; every other
+					// status fails closed with a real gateway status instead
+					// of asserting the upstream status over a partial or
+					// missing envelope.
+					status = resp.StatusCode
+					if status != http.StatusTooManyRequests {
+						status = http.StatusBadGateway
+					}
 					rec.StatusCode = status
 					if rec.ErrorType == "" {
 						rec.ErrorType = metrics.TypeUpstreamError

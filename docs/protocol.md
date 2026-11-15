@@ -316,6 +316,12 @@ response is already known to have failed; the success paths keep treating
 those same bodies as non-errors, so a 2xx completion carrying a top-level
 `message` is never mistaken for a failure.
 
+An error body that cannot be read at all does not erase what the status already
+decided. A `429` keeps both its status and the rate-limit series, because the
+status alone is flow control; other statuses fail closed to a `502`, and a
+provider-decided type survives a later body-read or translation failure instead
+of being replaced by the proxy's `stream_read_error`.
+
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion

@@ -508,6 +508,15 @@ func IsLocalErrorType(t string) bool {
 	return proxyClasses[t] || t == TypeUpstreamUnreachable
 }
 
+// IsProviderErrorType reports whether an error type is the provider's own
+// decision rather than a proxy mint. A later failure of a different kind (a
+// body read, a translation) may add detail but must not overwrite it: the
+// provider already classified the outcome, and the health series follows the
+// provider's class. An empty type is not a decision and stays replaceable.
+func IsProviderErrorType(t string) bool {
+	return t != "" && !IsLocalErrorType(t)
+}
+
 func localClass(typ, code string) (ErrorClass, bool) {
 	if proxyClasses[typ] || proxyClasses[code] {
 		// queue_drained is a retryable capacity answer, not a proxy fault: the

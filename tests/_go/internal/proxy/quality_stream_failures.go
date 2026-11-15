@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -214,6 +215,75 @@ func TestNonStreamSpoolReadErrorStamps502(t *testing.T) {
 	if !rec.IsError() || rec.StatusCode != http.StatusBadGateway || rec.ErrorType != "stream_read_error" {
 		t.Fatalf("record = status %d type %q error=%v, want 502/stream_read_error",
 			rec.StatusCode, rec.ErrorType, rec.IsError())
+	}
+}
+
+// TestMarkStreamErrKeepsAProviderType pins C4 at the classification owner: a
+// failed body read must not overwrite the type the provider already decided,
+// because that erases the provider's class and series entry. No type and a
+// proxy-minted type stay replaceable.
+func TestMarkStreamErrKeepsAProviderType(t *testing.T) {
+	err := errors.New("unexpected EOF")
+	provider := &metrics.Record{StatusCode: http.StatusTooManyRequests, ErrorType: "rate_limit_error", ErrorMsg: "slow down"}
+	markStreamErr(context.Background(), provider, err)
+	if provider.ErrorType != "rate_limit_error" || provider.ErrorMsg != "slow down" {
+		t.Fatalf("provider class erased: %+v", provider)
+	}
+	local := &metrics.Record{StatusCode: http.StatusBadGateway, ErrorType: "transform_error", ErrorMsg: "bad transform"}
+	markStreamErr(context.Background(), local, err)
+	if local.ErrorType != errStreamRead || local.ErrorMsg != err.Error() {
+		t.Fatalf("local class not replaced: %+v", local)
+	}
+	empty := &metrics.Record{StatusCode: http.StatusBadGateway}
+	markStreamErr(context.Background(), empty, err)
+	if empty.ErrorType != errStreamRead || empty.ErrorMsg != err.Error() {
+		t.Fatalf("empty class not stamped: %+v", empty)
+	}
+}
+
+// TestTranslatedTruncated429KeepsTheRateLimitSeries pins C4 end to end: a 429
+// whose error body cannot be read used to fail closed to a 502, leaving the
+// rate-limit series. The status alone decides flow control, so it stays 429.
+func TestTranslatedTruncated429KeepsTheRateLimitSeries(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"slow down"}}`))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler)
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	// No HTTP retry budget: the truncated 429 is surfaced on its first send.
+	cfg := config.Default()
+	cfg.MaxRetries = 0
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	// Anthropic inbound translated to the OpenAI upstream: the translated
+	// error path is the one that used to rewrite the status.
+	status, body := func() (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages",
+			strings.NewReader(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer sk-k")
+		req.Header.Set("X-Proxy-Format", "openai")
+		req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(raw)
+	}()
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want the upstream 429 (body %s)", status, body)
+	}
+	rec := waitForRecord(t, buf, 1)[0]
+	if rec.StatusCode != http.StatusTooManyRequests || !rec.HasRateLimit() {
+		t.Fatalf("record = status %d rate-limited %v, want the 429 series kept", rec.StatusCode, rec.HasRateLimit())
 	}
 }
 
