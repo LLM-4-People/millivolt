@@ -485,13 +485,16 @@ benchmark; do not weaken one mode's admission checks to accommodate the other.
 
 The published tables, method and limitations live in
 [performance and resource usage](docs/performance.md). That page is the single
-source for measured numbers; do not copy them into other documentation.
+source for measured numbers; do not copy them into other documentation and do
+not edit the page by hand. It is rendered from `perf/results.json`, and
+`tests/python/site.py` fails when the two disagree.
 
 `scripts/perf.sh` owns a repeatable local measurement run without touching the
 main instance. It starts fresh private instances on a disposable port and stops
 them through `scripts/dev.sh`:
 
 ```sh
+scripts/perf.sh docs      # every published measurement, bundle and page
 scripts/perf.sh bench     # isolated Go benchmarks
 scripts/perf.sh stress    # private fast and streaming ramps
 scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
@@ -499,6 +502,12 @@ scripts/perf.sh sustained # five-minute fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
 scripts/perf.sh all       # image, bench, then stress
 ```
+
+`docs` refuses a dirty tree, runs the complete documented set, writes
+`perf/results.json`, and regenerates `docs/performance.md`. Commit the bundle
+and the page together. Never hand-edit either one; a missing stage, failed
+response or unbalanced durable result aborts the run instead of publishing a
+partial page.
 
 For request, SSE-event, response-byte and output-token rates, use the
 `streaming` mode. It derives those rates from responses the client accepted
@@ -513,8 +522,11 @@ go run ./cmd/stress -target http://127.0.0.1:8081 -concurrency 1,8,32,128 -durat
 
 The harness does not manage or reconfigure the proxy. It uses a local synthetic
 upstream and checks exact bytes, durable rows/tokens/cost and the same-process
-storage-drop delta. A drop is a failed stage even if every HTTP request succeeded.
-Read `go run ./cmd/stress -h` for workload/safety controls.
+storage-drop delta. A drop is a failed stage even if every HTTP request
+succeeded, unless the run asks for an overload observation with
+`-allow-drops`; that mode still requires `durable + dropped = successful
+requests` and still aborts on a response failure. Read
+`go run ./cmd/stress -h` for workload/safety controls.
 The ramp retains its cumulative fixture history across measured stages, then
 removes only its unique client records after measurements finish. Cleanup has
 its own bounded wait even after cancellation and revalidates private process,
