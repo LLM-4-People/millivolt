@@ -23,7 +23,7 @@ func (a *Analyzer) TailTerminates(line []byte) bool {
 	if !ok {
 		return false
 	}
-	if isDonePayload(payload) {
+	if DonePayload(payload) {
 		return a.DoneTerminates()
 	}
 	var keys frameKeys

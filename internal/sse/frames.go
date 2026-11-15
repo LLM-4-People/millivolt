@@ -94,12 +94,13 @@ func ErrorEnvelope(id, typ string, code any, msg string) (json.RawMessage, error
 // event may still name itself on a later line - and is never a DoneLine.
 func DoneLine(line []byte) bool {
 	payload, ok := DataPayload(line)
-	return ok && isDonePayload(payload)
+	return ok && DonePayload(payload)
 }
 
-// isDonePayload reports whether one data payload is the [DONE] sentinel,
-// tolerating a trailing CR.
-func isDonePayload(payload []byte) bool {
+// DonePayload reports whether one data payload is the [DONE] sentinel,
+// tolerating a trailing CR. It is the one owner of the sentinel spelling, for
+// callers that hold a payload without its SSE framing.
+func DonePayload(payload []byte) bool {
 	return string(bytes.TrimRight(payload, "\r")) == "[DONE]"
 }
 

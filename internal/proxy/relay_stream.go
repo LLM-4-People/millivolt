@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -119,25 +120,75 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		return code != "" && !a.HasInBandError() && !rec.ClientDisconnected &&
 			a.ChatLike() && !holdAborted
 	}
-	// appendHeld frames one complete line into the withheld region. A second
-	// data line in the same event would concatenate onto the first payload
-	// (the SSE client joins data lines with a newline), so start a new event
-	// before it. A field line stays with the data line it introduces.
+	// dataHead is the joined data payload of the event currently on the wire:
+	// every data line since the last blank boundary, still held or already
+	// flushed. SSE joins the data lines of one event with a newline, so a
+	// synthetic separator before a further data line is only correct once the
+	// head is already one whole document. A pretty-printed terminal event
+	// (several data lines making one JSON document) must continue its own
+	// event; a second single-line event must not concatenate onto the first.
+	// headFull marks a head past the source-line bound: it is truncated, so it
+	// can no longer prove a complete document and the lines join verbatim.
+	var dataHead []byte
+	var headFull bool
+	// noteDataHead records one complete client-visible line. A blank line
+	// closes the event and clears the head; a field line is not payload.
+	noteDataHead := func(line []byte) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			dataHead = dataHead[:0]
+			headFull = false
+			return
+		}
+		payload, isData := sse.DataPayload(line)
+		if !isData {
+			return
+		}
+		if headFull {
+			return
+		}
+		if len(dataHead) > 0 {
+			dataHead = append(dataHead, '\n')
+		}
+		if len(dataHead)+len(payload) > eventMax {
+			headFull = true
+			return
+		}
+		dataHead = append(dataHead, payload...)
+	}
+	// separateBefore is the one separator predicate: a data line gets a
+	// synthetic blank boundary only when the current head is already a
+	// complete document (valid JSON) or the line is the [DONE] sentinel.
+	// Otherwise it is a continuation line of a multi-line payload. A separator
+	// retires the completed head, so the next note starts the new event
+	// instead of accumulating a second document onto the old one.
+	separateBefore := func(line []byte) bool {
+		payload, isData := sse.DataPayload(line)
+		if !isData {
+			return false
+		}
+		// An empty head means a blank boundary just closed the event, so the
+		// separator is already there - including before [DONE], which only
+		// needs one when it is joined onto an open event.
+		if headFull || len(dataHead) == 0 {
+			return false
+		}
+		if !sse.DonePayload(payload) && !json.Valid(bytes.TrimSpace(dataHead)) {
+			return false
+		}
+		dataHead = dataHead[:0]
+		headFull = false
+		return true
+	}
+	// appendHeld frames one complete line into the withheld region, starting a
+	// new event first when the head already carries a complete document. A
+	// field line stays with the data line it introduces.
 	appendHeld := func(line []byte) {
-		if _, isData := sse.DataPayload(line); isData && endsWithUnframedDataLine(hold) {
+		if separateBefore(line) {
 			hold = append(hold, '\n')
 		}
+		noteDataHead(line)
 		hold = append(hold, line...)
 		hold = append(hold, '\n')
-	}
-	// lastLineIsData reports whether the next data line would join an open
-	// event's existing data line, whether that line is still buffered in out
-	// or was already flushed to the client.
-	lastLineIsData := func() bool {
-		if out.Len() > 0 {
-			return endsWithUnframedDataLine(out.Bytes())
-		}
-		return wireDataOpen
 	}
 	// clientGone records a write-detected abort: the disconnect stamps the 499
 	// and the analyzer fills the record unconditionally, so an aborted stream
@@ -188,6 +239,8 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		out.Reset()
 		hold = hold[:0]
+		dataHead = dataHead[:0]
+		headFull = false
 		holding = false
 		if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
 			clientGone()
@@ -343,6 +396,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			}
 			event = append(event, eventBody...)
 			holding = true
+			for _, line := range bytes.Split(event, []byte("\n")) {
+				noteDataHead(line)
+			}
 			hold = append(hold, event...)
 			eventName = eventName[:0]
 			eventBody = eventBody[:0]
@@ -363,6 +419,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// still sees the complete event exactly once.
 		if len(data) > 0 {
 			a.FeedEvent("", data, now)
+		}
+		for _, line := range bytes.Split(eventBody, []byte("\n")) {
+			noteDataHead(line)
 		}
 		out.Write(eventBody)
 		eventName = eventName[:0]
@@ -391,6 +450,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		raw := make([]byte, 0, len(eventName)+len(eventBody))
 		raw = append(raw, eventName...)
 		raw = append(raw, eventBody...)
+		for _, line := range bytes.Split(raw, []byte("\n")) {
+			noteDataHead(line)
+		}
 		out.Write(raw)
 		pendingName = string(sse.EventName(eventName))
 		eventHasData = true
@@ -531,9 +593,6 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// line already flushed in out is its own event; separate
 					// it before the held event starts.
 					holding = true
-					if lastLineIsData() {
-						hold = append(hold, '\n')
-					}
 					appendHeld(line)
 					if sse.DoneLine(line) && a.DoneTerminates() {
 						hold = append(hold, '\n')
@@ -585,6 +644,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
 						return rescueUpstreamError
 					}
+					if separateBefore(line) {
+						out.WriteByte('\n')
+					}
+					noteDataHead(line)
 					out.Write(line)
 					out.WriteByte('\n')
 				}
@@ -674,19 +737,21 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 							hold = append(hold, '\n')
 						}
 						hold = append(hold, '\n')
-					} else if len(hold) == 0 && lastLineIsData() {
+					} else if len(hold) == 0 && separateBefore(tail) {
 						// The content line was already flushed into its own
 						// event. Start the held tail with a separator; a plain
 						// if followed by the boundary block would add a third
 						// newline.
 						hold = append(hold, '\n')
 					}
+					noteDataHead(tail)
 					hold = append(hold, tail...)
 					hold = append(hold, '\n', '\n')
 				} else {
-					if _, isData := sse.DataPayload(tail); isData && lastLineIsData() {
+					if separateBefore(tail) {
 						out.WriteByte('\n')
 					}
+					noteDataHead(tail)
 					out.Write(tail)
 				}
 				tail = nil

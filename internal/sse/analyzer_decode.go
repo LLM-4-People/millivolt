@@ -48,7 +48,7 @@ func TerminalLine(line []byte) bool {
 	if !ok {
 		return false
 	}
-	if isDonePayload(payload) || responsesTerminalEvent(responseEventType(payload)) {
+	if DonePayload(payload) || responsesTerminalEvent(responseEventType(payload)) {
 		return true
 	}
 	// Anthropic Messages closes with message_stop. A content string that

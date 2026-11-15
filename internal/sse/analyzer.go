@@ -305,7 +305,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// through to the normal JSON scan. Only the Chat-completions family (and
 	// the unknown-protocol fallback) treats the sentinel as its terminator;
 	// Responses and Anthropic Messages have their own terminal events.
-	if isDonePayload(payload) {
+	if DonePayload(payload) {
 		if a.DoneTerminates() {
 			a.terminatorSeen = true
 		}
@@ -329,7 +329,7 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 	if len(data) == 0 {
 		return
 	}
-	if isDonePayload(data) {
+	if DonePayload(data) {
 		if a.DoneTerminates() {
 			a.terminatorSeen = true
 		}

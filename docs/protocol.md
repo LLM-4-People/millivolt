@@ -325,7 +325,13 @@ of being replaced by the proxy's `stream_read_error`.
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion
-with an error. Non-streaming quality retries may make another upstream request;
+with an error. Relay framing follows SSE's own join rule: the data lines of one
+event are joined with a newline, so a multi-line (pretty-printed) payload stays
+one event and a synthetic blank separator is inserted only when the event's
+joined data is already one complete JSON document, or before the `[DONE]`
+sentinel. Two single-line events a provider sent without a separator therefore
+stay two events instead of merging into an unparseable payload.
+Non-streaming quality retries may make another upstream request;
 the adopted attempt's response is spooled under the fixed 1 MiB quality buffer
 before the client status line commits, so the retry is delivered as one
 ordinary response with no post-commit keepalive gap or partial payload. A
