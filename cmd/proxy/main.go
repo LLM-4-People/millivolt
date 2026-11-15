@@ -211,7 +211,9 @@ func main() {
 	}
 	logDroppedConfigKeys(*configPath, skipped)
 	recordReloadStatus(true, "", skipped, nil)
-	applyCLIOverrides(cfg)
+	if err := applyCLIOverrides(cfg); err != nil {
+		log.Fatalf("config: %v", err)
+	}
 	// The soft runtime memory limit is startup-only by design: it must be
 	// active before the startup projection preload allocates its burst. A
 	// zero config value leaves an operator GOMEMLIMIT untouched and otherwise
@@ -770,7 +772,12 @@ func reloadHandler() http.HandlerFunc {
 	}
 }
 
-func applyCLIOverrides(cfg *config.Config) {
+// applyCLIOverrides applies the startup flags that beat the file, then
+// validates the effective document. The loader already validated the file
+// before these overrides, so an override that is only invalid on its own would
+// otherwise reach the listener or the store unchecked. This is the one function
+// that applies the overrides, so no call site can forget the revalidation.
+func applyCLIOverrides(cfg *config.Config) error {
 	if liveListenOverride != "" {
 		cfg.Listen = liveListenOverride
 	}
@@ -782,6 +789,7 @@ func applyCLIOverrides(cfg *config.Config) {
 	default:
 		cfg.DBPath = liveDBOverride
 	}
+	return cfg.Validate()
 }
 
 // reloadConfig re-reads the config file and hot-applies the reloadable subset
@@ -871,7 +879,11 @@ func reloadConfigLocked() ([]string, error) {
 		return nil, err
 	}
 	logDroppedConfigKeys(liveConfigPath, dropped)
-	applyCLIOverrides(fresh)
+	if err := applyCLIOverrides(fresh); err != nil {
+		log.Printf("config reload failed (keeping current): %v", err)
+		recordReloadStatus(false, err.Error(), dropped, nil)
+		return nil, err
+	}
 	// Compute which startup-bound fields changed (these can't move on a live
 	// process) so we can report them as restart-required. Schema().HotReload
 	// is the single source of that classification.

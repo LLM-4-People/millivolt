@@ -22,7 +22,7 @@ for fresh config volumes. Do not start Settings against the committed example.
 | Flag | Behavior |
 | --- | --- |
 | `-config PATH` | Config path; defaults to local `proxy.yaml`. Empty selects built-in defaults and disables Settings persistence. |
-| `-listen ADDRESS` | Override the configured listen address. |
+| `-listen ADDRESS` | Override the configured listen address; the effective value is validated after every override. |
 | `-db-path PATH` | Override durable storage; `none` disables it. |
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
 | `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. |
