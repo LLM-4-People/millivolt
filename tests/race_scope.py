@@ -87,6 +87,9 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "*RestartHandoff*",
         "*RestartChild*",
         "*RestartWatch*",
+        # The choreography helpers start the reload server from one goroutine
+        # and the restart run from another against the same listener.
+        "*RestartRun*",
         "*HandleRestart*",
         "*TryReload*",
         "*ReloadPublishes*",
