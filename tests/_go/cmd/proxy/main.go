@@ -1236,3 +1236,41 @@ func TestAuthLimiterLogsAFullTable(t *testing.T) {
 		t.Fatalf("table refilled and logged %d times total, want 2; log: %s", got, buf.String())
 	}
 }
+
+// TestCrossOriginCheckIsCaseInsensitive pins the host comparison: RFC 9110
+// makes the host case-insensitive, but net/http compares the Origin host with
+// r.Host byte for byte, so a case-preserving ingress or a mixed-case Host
+// refused every mutation. Both directions are covered, and a genuinely foreign
+// origin must still be refused.
+func TestCrossOriginCheckIsCaseInsensitive(t *testing.T) {
+	const token = "operator-fixture-credential"
+	for _, tc := range []struct {
+		name   string
+		host   string
+		origin string
+		want   int
+	}{
+		{"same case", "proxy.example", "https://proxy.example", http.StatusNoContent},
+		{"mixed-case host", "Proxy.Example", "https://proxy.example", http.StatusNoContent},
+		{"mixed-case origin", "proxy.example", "https://PROXY.Example", http.StatusNoContent},
+		{"mixed-case both with port", "Proxy.Example:8443", "https://proxy.EXAMPLE:8443", http.StatusNoContent},
+		{"a different host still refuses", "proxy.example", "https://foreign.example", http.StatusForbidden},
+		{"a different port still refuses", "proxy.example:8443", "https://proxy.example:9443", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := newOperatorGate(token)
+			h := protectOperatorRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}), gate)
+			r := httptest.NewRequest(http.MethodPost, "http://placeholder/metrics/bootstrap", nil)
+			r.Host = tc.host
+			r.Header.Set("Authorization", "Bearer "+token)
+			r.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body %q)", w.Code, tc.want, w.Body.String())
+			}
+		})
+	}
+}

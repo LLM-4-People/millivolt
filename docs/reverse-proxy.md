@@ -29,7 +29,8 @@ model. `location /v1` is the OpenAI-compatible inference base: preserve provider
 covers everything else, including the dashboard and operator plane (`/dash/`,
 `/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`
 and brand/PWA paths: allowlist operators, and keep `Host` plus the session
-cookie so Settings origin checks and the live feed work. The `/session`
+cookie so Settings origin checks and the live feed work; the comparison is
+case-insensitive, so a case-preserving ingress is fine. The `/session`
 handshake is open at millivolt so login works, but this location still
 allowlists it at the edge. A URL-capable MCP client uses this location with
 `/mcp` appended and the operator Bearer header: the application's MCP endpoint

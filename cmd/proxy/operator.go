@@ -497,20 +497,39 @@ func nonCanonicalPath(path string) bool {
 // sameOriginGuard is the one owner of the cross-origin control and its denial
 // shape. The stdlib Handler answers a refused request with a bare http.Error,
 // which was the single denial in the operator plane without no-store and
-// frame-ancestors. Its inspectable Check is re-run inside the deny handler: the
-// handler API carries no error, and re-running it (idempotent, no lock held
-// across the deny call) preserves the reason in the shared JSON denial instead
-// of a generic string.
+// frame-ancestors, and its handler API carries no error for a deny writer to
+// report. Driving the exported Check here keeps the control and sends the real
+// reason through the shared denial writer instead.
+//
+// The request is normalized first: net/http compares the parsed Origin host
+// with r.Host byte for byte, so a case-preserving ingress, or a browser on a
+// mixed-case Host, refused every mutation although RFC 9110 makes the host
+// case-insensitive.
 func sameOriginGuard(next http.Handler) http.Handler {
 	protection := http.NewCrossOriginProtection()
-	protection.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		msg := "cross-origin request refused"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		normalizeOriginCase(r)
 		if err := protection.Check(r); err != nil {
-			msg = err.Error()
+			denyOperator(w, http.StatusForbidden, err.Error())
+			return
 		}
-		denyOperator(w, http.StatusForbidden, msg)
-	}))
-	return protection.Handler(next)
+		next.ServeHTTP(w, r)
+	})
+}
+
+// normalizeOriginCase lowercases both sides of the origin comparison. The
+// Origin header is rewritten only from its scheme separator onward, so a
+// malformed value is left as sent and still fails closed. r.Host is a copy on
+// this request and host names are case-insensitive everywhere it is read.
+func normalizeOriginCase(r *http.Request) {
+	r.Host = strings.ToLower(r.Host)
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+	if i := strings.Index(origin, "://"); i >= 0 {
+		r.Header.Set("Origin", origin[:i+3]+strings.ToLower(origin[i+3:]))
+	}
 }
 
 func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler {
