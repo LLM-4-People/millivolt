@@ -18,7 +18,7 @@ const SURFACE_ACCENT_TOKENS = ['--bg', '--panel', '--panel2', '--rail', '--borde
 // scrim hue, so a cool Clear palette never inherits the warm Instrument soot.
 const MATERIAL_TOKENS = ['--shadow-rgb', '--veil-rgb'];
 const PALETTE_TOKENS = [...SURFACE_ACCENT_TOKENS, ...MATERIAL_TOKENS];
-const MODE_TOKENS = ['--text', '--muted', '--ok', '--warn', '--err', '--rl',
+const MODE_TOKENS = ['--text', '--muted', '--muted-off', '--ok', '--warn', '--err', '--rl',
   '--err-text', '--warn-text', '--danger-hover', '--veil', '--veil-strong',
   '--veil-soft', '--veil-rgb', '--shadow-rgb', '--neutral', '--scale-tick',
   '--scale-base', '--well-hi', '--well-lo', '--chart-grid-a'];

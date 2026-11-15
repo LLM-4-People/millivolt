@@ -12,6 +12,12 @@
     --border2: #3a342b;
     --text: #e8e4de;
     --muted: #97907e;
+    /* Faded-affordance ink. Anything painted under its own opacity (disabled
+       controls, off rows, rail miss counts) multiplies its ink by that alpha, so
+       it starts from this deeper token instead of --muted: the composite, not
+       the token, has to clear 4.5:1 and the fade at .6 is what decides it.
+       themes.css mirrors this value in the Black block and owns the Clear one. */
+    --muted-off: #e4e0d9;
     /* The default Instrument Black accent family. The matching Instrument
        Black block in themes.css repeats these values so a picker swatch can
        reset to Instrument while another palette is active. */
@@ -327,7 +333,7 @@
   .btn-accent:not(:disabled) { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
   .btn-accent:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--bg); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
   .btn:disabled, .btn:disabled:hover {
-    opacity: .6; cursor: default; color: var(--muted);
+    opacity: .6; cursor: default; color: var(--muted-off);
     border-color: var(--border2); background: var(--panel2); box-shadow: none;
   }
   .storm-banner {
@@ -720,7 +726,7 @@
   .mn-item:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   .mn-item[aria-checked="false"] { color: var(--muted); }
   .mn-check { width: 12px; flex-shrink: 0; color: var(--accent); font-weight: 650; }
-  .mn-item[disabled] { opacity: .6; cursor: default; }
+  .mn-item[disabled] { opacity: .6; cursor: default; color: var(--muted-off); }
   .mn-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .mn-chip {
     display: inline-flex; align-items: center; justify-content: center; min-height: 26px;
@@ -734,8 +740,8 @@
     color: var(--text); border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 10%, transparent);
   }
-  .mn-chip:disabled { opacity: .6; cursor: default; }
-  .mn-chip:disabled:hover { color: var(--muted); border-color: var(--border2); background: var(--panel2); }
+  .mn-chip:disabled { opacity: .6; cursor: default; color: var(--muted-off); }
+  .mn-chip:disabled:hover { color: var(--muted-off); border-color: var(--border2); background: var(--panel2); }
   .mn-note { font-size: 10px; color: var(--muted); line-height: 1.5; }
   .mn-ceiling { font-size: 10px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
   .mn-ft { padding: 10px 12px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }

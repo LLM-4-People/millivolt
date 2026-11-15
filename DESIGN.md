@@ -183,7 +183,7 @@ The palette is a warm instrument case, deliberately the inverse of the default b
 - **Hairline Warm** (#2b2620): every default 1px divider and border.
 - **Hairline Strong** (#3a342b): menu outlines, panel edges, active borders and field strokes.
 - **Instrument Ink** (#e8e4de): primary text and values.
-- **Faded Engraving** (#97907e): labels, units, secondary facts and muted copy.
+- **Faded Engraving** (#97907e): labels, units, secondary facts and muted copy. Anything painted under its own opacity (disabled controls, off rows, rail miss counts) starts from the deeper faded-ink token (`--muted-off`, #e4e0d9 on Black and #07080a on Clear) so the composite, not the token alone, clears 4.5:1 at .6 and .7.
 - **Cancelled Ash** (#a8a096): the client-cancelled outcome, distinct from muted copy and from status ink.
 
 ### Status
@@ -297,7 +297,7 @@ Quiet machine controls: small mono labels, a raised panel fill, a hairline borde
 - **Base:** raised fill (`panel-raised`), hairline border (`hairline-strong`), muted ink; hover moves ink to primary and the border to Signal Blue with a 3px halo.
 - **Accent:** Signal Blue fill with case-colored ink and 600 weight; hover uses Signal Blue Hover. Reserved for the one commit action on a surface, such as `apply limit`, `hold traffic`, `start capture`, `download`, `apply` or `restart now`.
 - **Danger:** two weights, a 16% tint fill for a repeatable scoped action and a solid Fault Coral fill for the one irreversible action on a surface. A confirmation dialog pairs a neutral Cancel with the solid weight.
-- **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 60% opacity with the neutral skin.
+- **Focus / Disabled:** 1px accent outline at 1px offset; disabled drops to 60% opacity with the neutral skin and the faded-affordance ink, whose composite still clears 4.5:1.
 
 ### Menu panel
 The shared `.mn` foundation the timeframe control and generated choice menus use, and the box the operator console extends: one titled head, one grouped body and an optional action foot. Placement, sheet conversion, dismissal and focus are JS-owned; the box is the same whether it is anchored or a bottom sheet. The theme tray keeps the older header-panel box.

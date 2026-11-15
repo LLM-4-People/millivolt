@@ -5,6 +5,10 @@ const path = require('path');
 
 const { contrast, tint } = require('./theme_check_color');
 const {
+  cssBlock,
+  cssDeclarations,
+  cssProperties,
+  cssRule,
   cssSource,
   cssTokenReference,
   mutateCSSRule,
@@ -17,7 +21,7 @@ const {
 } = require('./theme_check_palettes');
 
 function contrastChecks(context, declaredContrast) {
-  const { check, win, root, themes, modes, token, dashboardCSS, STATIC } = context;
+  const { check, win, root, themes, modes, token, dashboardCSS, themeCSS, STATIC } = context;
   // Every theme/mode pair is exercised for the same text and status roles.
   const contrastFailures = [];
   const words = {
@@ -46,6 +50,72 @@ function contrastChecks(context, declaredContrast) {
     ['accent', 15], ['accent2', 16], ['cyan', 16],
     ['ok', 16], ['warn', 16], ['err', 16], ['rl', 16],
   ];
+  // A faded affordance multiplies its own ink by a per-rule opacity, and the
+  // faintest surface/alpha pair decides readability. Each of these rules owns
+  // its ink explicitly so the ink can be the composite-safe --muted-off instead
+  // of an inherited --text or --muted that the fade pushes under AA. Parse both
+  // declarations from the stylesheet: a site cannot keep a copy here. "fade"
+  // names the rule that carries the opacity when the inked element only
+  // inherits it from its row.
+  const fadedSites = [
+    {
+      ink: ['.oc-field input:disabled', '.oc-pick input:disabled',
+        '.oc-inline input:disabled', '.oc-select:disabled'],
+    },
+    { ink: ['.oc-check:has(input:disabled)'] },
+    { ink: ['.st-rail-item.is-miss .rail-n'], fade: ['.st-rail-item.is-miss'] },
+    {
+      ink: ['.mr-row[data-mr-off="1"] .prov-arrow', '.mr-row[data-mr-off="1"] .mr-move button'],
+      fade: ['.mr-row[data-mr-off="1"]'],
+    },
+    { ink: ['.btn:disabled', '.btn:disabled:hover'] },
+    { ink: ['.mn-item[disabled]'] },
+    { ink: ['.mn-chip:disabled'] },
+    { ink: ['.mn-chip:disabled:hover'], fade: ['.mn-chip:disabled'] },
+  ];
+  const fadedSiteFailures = css => {
+    const failures = [];
+    for (const site of fadedSites) {
+      const label = site.ink.join(', ');
+      const ink = cssTokenReference(cssProperties(cssRule(css, site.ink)).get('color') || '');
+      const opacity = parseFloat(
+        cssProperties(cssRule(css, site.fade || site.ink)).get('opacity') || '');
+      if (!ink) {
+        failures.push(`${label} declares no ink; a faded rule must name --muted-off`);
+        continue;
+      }
+      if (!Number.isFinite(opacity)) {
+        failures.push(`${label} carries no opacity; the composite is unmeasured`);
+        continue;
+      }
+      for (const theme of themes) {
+        for (const mode of modes) {
+          root.dataset.theme = theme;
+          root.dataset.mode = mode;
+          const value = token(win, '--' + ink);
+          for (const surface of ['bg', 'panel', 'panel2', 'rail']) {
+            const bg = token(win, '--' + surface);
+            const ratio = contrast(tint(value, bg, opacity), bg);
+            if (!Number.isFinite(ratio) || ratio < 4.5) {
+              failures.push(`${theme}/${mode} --${ink} at ${opacity} on ${surface}: ${ratio.toFixed(2)} < 4.5`);
+            }
+          }
+        }
+      }
+    }
+    return failures;
+  };
+  const fadedFailures = fadedSiteFailures(dashboardCSS);
+  check('every faded affordance keeps its ink readable at its own opacity',
+    fadedFailures.length === 0);
+  if (fadedFailures.length) console.log(fadedFailures.slice(0, 12).join('\n'));
+  // Both mode blocks own the faded ink, because each is the fallback for an
+  // unknown stored palette inside the other mode.
+  const fadedInkOwners = modes.filter(mode =>
+    !cssDeclarations(cssBlock(themeCSS, `[data-mode="${mode}"]`)).has('--muted-off'));
+  check('both mode blocks own the faded-affordance ink', fadedInkOwners.length === 0);
+  if (fadedInkOwners.length) console.log('missing --muted-off in mode ' + fadedInkOwners.join(', '));
+
   const entitiesSource = fs.readFileSync(path.join(STATIC, 'js/entities.js'), 'utf8');
   const entityEntries = [...entitiesSource.matchAll(
     /\b([a-z]+):\s*\{ label: '[^']+',\s*color: '(#[0-9A-Fa-f]{6})'/g)];
@@ -345,6 +415,24 @@ function contrastChecks(context, declaredContrast) {
     body => body.replace(/color:\s*var\(--text\)/, 'color: var(--muted)')));
   check('muting the cancelled pill ink fails the ink contract',
     inkContractErrors(mutedCancelInk).length > 0);
+
+  // Mutation proof for the faded-affordance guard: the parsed alpha and ink of a
+  // site must feed it, not a copied pair.
+  const dimmedDisabledFade = mutateCSSRule(dashboardCSS,
+    ['.btn:disabled', '.btn:disabled:hover'],
+    body => body.replace(/opacity:\s*[0-9.]+;/, 'opacity: .35;'));
+  check('lowering a disabled fade to .35 fails the faded-affordance guard',
+    fadedSiteFailures(dimmedDisabledFade).length > 0);
+  const mutedDisabledInk = mutateCSSRule(dashboardCSS,
+    ['.btn:disabled', '.btn:disabled:hover'],
+    body => body.replace('var(--muted-off)', 'var(--muted)'));
+  check('fading --muted instead of the composite-safe ink fails the faded-affordance guard',
+    fadedSiteFailures(mutedDisabledInk).length > 0);
+  const strippedOffRowInk = mutateCSSRule(dashboardCSS,
+    ['.mr-row[data-mr-off="1"] .prov-arrow', '.mr-row[data-mr-off="1"] .mr-move button'],
+    body => body.replace(/color:\s*var\(--muted-off\);/, ''));
+  check('a faded rule without its own ink fails the faded-affordance guard',
+    fadedSiteFailures(strippedOffRowInk).length > 0);
 }
 
 module.exports = { contrastChecks };

@@ -126,6 +126,9 @@
   .st-rail-item .rail-n { min-width: 2ch; margin-left: auto; padding-left: 6px; text-align: right; }
   .st-rail-item.has-hit .rail-n { color: var(--accent); }
   .st-rail-item.is-miss { opacity: .7; }
+  /* The count keeps its own ink; the row fade alone would push --muted under
+     the floor. */
+  .st-rail-item.is-miss .rail-n { color: var(--muted-off); }
   .st-live {
     flex-shrink: 0; padding: 10px 12px 12px; border-top: 1px solid var(--border);
     font: 10px/1.45 var(--mono); color: var(--muted);
@@ -285,6 +288,10 @@
   .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; min-width: 24px; min-height: 24px; }
   .mr-move .mr-vis[aria-pressed="false"] { color: var(--text); }
   .mr-row[data-mr-off="1"] { opacity: .7; }
+  /* The row's muted marks keep their own ink: the row fade alone would push
+     --muted under the floor. */
+  .mr-row[data-mr-off="1"] .prov-arrow,
+  .mr-row[data-mr-off="1"] .mr-move button { color: var(--muted-off); }
   .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
   .mr-err:empty { display: none; }
   .mr-err[data-level="error"] { color: var(--err-text); }

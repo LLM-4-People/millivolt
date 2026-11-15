@@ -317,7 +317,7 @@
 .oc-field input:disabled,
 .oc-pick input:disabled,
 .oc-inline input:disabled,
-.oc-select:disabled { opacity: .6; cursor: not-allowed; }
+.oc-select:disabled { opacity: .6; cursor: not-allowed; color: var(--muted-off); }
 .oc-check {
   display: flex; align-items: center; gap: 7px; min-width: 0;
   color: var(--text); font: 10px/1.4 var(--mono); cursor: pointer;
@@ -325,7 +325,7 @@
 .oc-check span { min-width: 0; }
 .oc-check input[type="checkbox"] { width: 15px; height: 15px; flex: none; margin: 0; }
 .oc-check input[type="checkbox"]:focus-visible { outline: var(--focus-outline); outline-offset: 2px; }
-.oc-check:has(input:disabled) { opacity: .6; cursor: default; }
+.oc-check:has(input:disabled) { opacity: .6; cursor: default; color: var(--muted-off); }
 .oc-check:has(input:disabled) span { cursor: default; }
 
 /* ---------- chips ---------- */
