@@ -40,6 +40,7 @@ case "$mode" in
       python3 -B -O -m tests.python.release
       python3 -B -O -m tests.python.backup_db
       python3 -B -O -m tests.python.dev_scripts
+      python3 -B -O -m tests.python.promotion
       python3 -B -O -m tests.python.go
       python3 -B -O -m tests.python.shard
     }
