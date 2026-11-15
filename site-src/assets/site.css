@@ -484,7 +484,12 @@ h1 {
 .doc-content th { color: var(--text); font: 600 11px/1.4 var(--mono); letter-spacing: .04em; background: var(--panel); }
 .doc-content tbody tr:nth-child(2n) td { background: color-mix(in srgb, var(--text) 3%, transparent); }
 .doc-content td { color: var(--muted-strong); }
-.doc-content td code, .doc-content th code { overflow-wrap: anywhere; }
+/* Reference tables carry a code key in the first cell; keep the key intact and
+   let the rest of the row wrap around it. */
+.doc-content td:first-child { color: var(--muted); }
+/* A code token in a reference cell is one value; wrapping it across lines makes
+   ":8080" read as two facts. Cells wrap between tokens instead. */
+.doc-content td code, .doc-content th code { white-space: nowrap; }
 .doc-content tr:last-child td { border-bottom: 0; }
 .doc-content img { display: block; margin: 24px 0; border: 1px solid var(--border2); border-radius: 8px; background: var(--panel); }
 .doc-content hr { border: 0; border-top: 1px solid var(--border2); margin: 36px 0; }

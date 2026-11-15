@@ -92,8 +92,8 @@ func render(defaults map[string]string, flags []Flag) ([]byte, error) {
 			}
 			b.WriteString(help + "\n\n")
 		}
-		b.WriteString("| Setting key | UI label | Type | Default | Accepted values | Reload | Description |\n")
-		b.WriteString("| --- | --- | --- | --- | --- | --- | --- |\n")
+		b.WriteString("| Setting | Default | Accepted values | Reload | Description |\n")
+		b.WriteString("| --- | --- | --- | --- | --- |\n")
 		for _, field := range fields {
 			row, err := settingRow(field, defaults)
 			if err != nil {
@@ -162,7 +162,10 @@ func settingRow(field config.Field, defaults map[string]string) (string, error) 
 	if field.HotReload {
 		reload = "Hot-reloads"
 	}
-	return "| " + keyCell + " | " + label + " | " + typeCell + " | " + defaultCell +
+	// The dashboard's label rides beside the key in one cell: seven columns do
+	// not fit a reading measure, and the label is how an operator finds the
+	// field, so it cannot be dropped.
+	return "| " + keyCell + " (" + label + " · " + typeCell + ") | " + defaultCell +
 		" | " + accepted + " | " + reload + " | " + help + " |", nil
 }
 

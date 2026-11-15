@@ -17,7 +17,7 @@ that matches what you need to do.
 
 ## If you want to ...
 
-| If you want to ... | Start with ... |
+| Task | Start with |
 | --- | --- |
 | Install and send a first request | [Install and first run](install.md) |
 | Configure a setting, request override or provider alias | [Configuration](configuration.md) |
