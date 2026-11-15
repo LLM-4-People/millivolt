@@ -266,8 +266,9 @@ class DrainWaitTests(unittest.TestCase):
         stop = shell_declaration(text, "stop")
         self.assertTrue(stop, "scripts/dev.sh no longer declares stop")
         stubs = (
-            '\nPID_FILE="$1"\nCONFIG_FILE="$2"\nKILL_LOG="$3"\ncalls=0\n'
-            'is_running() { calls=$((calls + 1)); (( calls == 1 )); }\n'
+            '\nPID_FILE="$1"\nCONFIG_FILE="$2"\nKILL_LOG="$3"\n'
+            'running_pid() { cat "$PID_FILE"; }\n'
+            'is_running() { return 1; }\n'
             'not_running() { :; }\n'
             'kill() { printf \'%s\\n\' "$*" >>"$KILL_LOG"; return 1; }\n'
             'stop\n')
