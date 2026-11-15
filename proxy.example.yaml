@@ -84,7 +84,8 @@ idle_timeout: 2m
 request_body_idle_timeout: 30s
 
 # Absolute bound for reading one inbound request body after headers. Must be at least
-# request_body_idle_timeout. Applies to requests started after reload.
+# request_body_idle_timeout. The restore upload is exempt (idle bound only). Applies to
+# requests started after reload.
 # Hot-reload: yes.
 #   type: duration · range > 0s · default 10m
 request_body_read_timeout: 10m

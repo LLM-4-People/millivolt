@@ -118,7 +118,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "How long one inbound body read may wait for progress. Re-armed before every read and cleared at EOF or Close. Must not exceed request_body_read_timeout. Applies to requests started after reload.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "request_body_read_timeout", Category: "server", Label: "Request body read timeout",
-			Help: "Absolute bound for reading one inbound request body after headers. Must be at least request_body_idle_timeout. Applies to requests started after reload.",
+			Help: "Absolute bound for reading one inbound request body after headers. Must be at least request_body_idle_timeout. The restore upload is exempt (idle bound only). Applies to requests started after reload.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "response_write_timeout", Category: "server", Label: "Response write timeout",
 			Help: "Generic per-write bound for buffered responses. Streaming owners may arm a shorter bound. Must be at least sse_write_progress_timeout. Applies to requests started after reload.",

@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -226,6 +227,13 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		// body and for a client that disappears mid-upload; local staging
 		// failures stay server errors instead of being misreported as a cap.
 		var readErr *restoreUploadReadError
+		if isUploadTimeout(err) {
+			// A deadline expiry used to answer the archive-cap 413, so a slow
+			// but perfectly valid restore read as "your backup is too big".
+			audit("failed", "error", "upload timed out")
+			adminjson.WriteErrorJSON(w, http.StatusRequestTimeout, "upload timed out; resend the archive")
+			return
+		}
 		if errors.Is(err, backup.ErrTooLarge) || errors.As(err, &readErr) {
 			audit("failed", "error", "backup exceeds backup_max_bytes")
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
@@ -515,6 +523,22 @@ type restoreUploadReadError struct{ err error }
 
 func (e *restoreUploadReadError) Error() string { return e.err.Error() }
 func (e *restoreUploadReadError) Unwrap() error { return e.err }
+
+// isUploadTimeout reports whether a staging failure was the delivery deadline
+// rather than a size or transport refusal. net/http surfaces an expired read
+// deadline as os.ErrDeadlineExceeded wrapped in the connection's net.OpError;
+// a transport timeout of any other origin is the same class for this answer.
+func isUploadTimeout(err error) bool {
+	var readErr *restoreUploadReadError
+	if errors.As(err, &readErr) {
+		err = readErr.err
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 // stageRestoreUpload copies the bounded request body into one private file and
 // returns it open and rewound, with its path owned by the caller for removal.
