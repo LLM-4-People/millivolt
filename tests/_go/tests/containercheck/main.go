@@ -209,8 +209,8 @@ fi
 }
 
 func TestComposeIsolationContract(t *testing.T) {
-	const normal = `{"name":"millivolt","services":{"millivolt":{"image":"released","container_name":"millivolt","read_only":true,"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt_data"},"config":{"name":"millivolt_config"}}}`
-	const dev = `{"name":"millivolt-dev","services":{"millivolt-dev":{"image":"built","container_name":"millivolt-dev","build":{"context":"/fixture"},"pull_policy":"build","read_only":true,"ports":[{"host_ip":"127.0.0.1","published":"8081","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt-dev_data"},"config":{"name":"millivolt-dev_config"}}}`
+	const normal = `{"name":"millivolt","services":{"millivolt":{"image":"released","container_name":"millivolt","read_only":true,"mem_limit":"1073741824","pids_limit":512,"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt_data"},"config":{"name":"millivolt_config"}}}`
+	const dev = `{"name":"millivolt-dev","services":{"millivolt-dev":{"image":"built","container_name":"millivolt-dev","build":{"context":"/fixture"},"pull_policy":"build","read_only":true,"mem_limit":"1073741824","pids_limit":512,"ports":[{"host_ip":"127.0.0.1","published":"8081","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt-dev_data"},"config":{"name":"millivolt-dev_config"}}}`
 	if err := validateCompose([]byte(normal), []byte(dev)); err != nil {
 		t.Fatal(err)
 	}
@@ -221,12 +221,21 @@ func TestComposeIsolationContract(t *testing.T) {
 	if err := validateCompose([]byte(normalDerived), []byte(devDerived)); err != nil {
 		t.Fatalf("derived container name: %v", err)
 	}
+	// Some Compose versions render mem_limit as a bare number instead of a string.
+	numeric := strings.ReplaceAll(normal, `"mem_limit":"1073741824"`, `"mem_limit":1073741824`)
+	if err := validateCompose([]byte(numeric), []byte(dev)); err != nil {
+		t.Fatalf("numeric mem_limit: %v", err)
+	}
 	for _, bad := range []string{
 		strings.Replace(normal, `"read_only":true`, `"read_only":false`, 1),
 		strings.Replace(normal, "127.0.0.1", "0.0.0.0", 1),
 		strings.Replace(normal, `"type":"volume"`, `"type":"bind"`, 1),
 		strings.Replace(normal, `"target":"/config"`, `"target":"/data"`, 1),
 		strings.Replace(normal, `"image":"released"`, `"image":"released","build":{"context":"."}`, 1),
+		strings.Replace(normal, `"mem_limit":"1073741824",`, "", 1),
+		strings.Replace(normal, `"pids_limit":512,`, "", 1),
+		strings.Replace(normal, `"mem_limit":"1073741824"`, `"mem_limit":"536870912"`, 1),
+		strings.Replace(normal, `"pids_limit":512`, `"pids_limit":1024`, 1),
 		strings.Replace(normal, `"container_name":"millivolt"`, `"container_name":"global"`, 1),
 		`{"services":{}}`, `null`, `invalid`,
 	} {
@@ -237,6 +246,10 @@ func TestComposeIsolationContract(t *testing.T) {
 	for _, bad := range []string{
 		strings.Replace(dev, `"build":{"context":"/fixture"},`, "", 1),
 		strings.Replace(dev, `"pull_policy":"build"`, `"pull_policy":"always"`, 1),
+		strings.Replace(dev, `"mem_limit":"1073741824",`, "", 1),
+		strings.Replace(dev, `"pids_limit":512,`, "", 1),
+		strings.Replace(dev, `"mem_limit":"1073741824"`, `"mem_limit":"536870912"`, 1),
+		strings.Replace(dev, `"pids_limit":512`, `"pids_limit":1024`, 1),
 		strings.Replace(dev, `"published":"8081"`, `"published":"8080"`, 1),
 		strings.Replace(dev, `"name":"millivolt-dev"`, `"name":"millivolt"`, 1),
 		strings.Replace(dev, `millivolt-dev_data`, `millivolt_data`, 1),

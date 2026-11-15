@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,13 @@ const (
 )
 
 var imageID = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+
+// Runtime bounds are contract, not tuning: both Compose files pin the same
+// resolved values and changing one is a deliberate decision this check must see.
+const (
+	composeMemoryLimit = 1 << 30 // 1g, comfortably above the documented steady state.
+	composePidsLimit   = 512     // Fork/thread amplification bound.
+)
 
 func main() {
 	image := flag.String("image", "", "already-loaded local image ID")
@@ -370,6 +378,19 @@ func (d dockerCLI) checkCompose(ctx context.Context) error {
 	return validateCompose(models[0], models[1])
 }
 
+// composeBytes is a byte count: Compose renders mem_limit as a JSON string and
+// older versions as a bare number, so both are accepted.
+type composeBytes int64
+
+func (b *composeBytes) UnmarshalJSON(data []byte) error {
+	n, err := strconv.ParseInt(strings.Trim(string(data), `"`), 10, 64)
+	if err != nil {
+		return err
+	}
+	*b = composeBytes(n)
+	return nil
+}
+
 type composeModel struct {
 	Name     string `json:"name"`
 	Services map[string]struct {
@@ -380,7 +401,10 @@ type composeModel struct {
 		} `json:"build"`
 		PullPolicy string `json:"pull_policy"`
 		ReadOnly   bool   `json:"read_only"`
-		Ports      []struct {
+		// Resolved runtime bounds: Compose renders mem_limit in bytes.
+		MemLimit  composeBytes `json:"mem_limit"`
+		PidsLimit int64        `json:"pids_limit"`
+		Ports     []struct {
 			HostIP    string `json:"host_ip"`
 			Published string `json:"published"`
 			Target    int    `json:"target"`
@@ -433,6 +457,24 @@ func validateCompose(deployment, development []byte) error {
 	normalService, devService := normal.Services[normal.Name], dev.Services[dev.Name]
 	if normalService.Build != nil || devService.Build == nil || devService.Build.Context == "" || devService.PullPolicy != "build" {
 		return errors.New("only the explicit development Compose may build source")
+	}
+	// Both files declare the same resolved runtime bounds. The memory ceiling is
+	// what the runtime soft limit derives from, and pids_limit bounds fork and
+	// thread amplification, so neither may silently disappear.
+	for _, pinned := range []struct {
+		file   string
+		memory composeBytes
+		pids   int64
+	}{
+		{"deployment", normalService.MemLimit, normalService.PidsLimit},
+		{"development", devService.MemLimit, devService.PidsLimit},
+	} {
+		if pinned.memory != composeMemoryLimit {
+			return fmt.Errorf("%s Compose mem_limit = %d, want the pinned %d", pinned.file, int64(pinned.memory), int64(composeMemoryLimit))
+		}
+		if pinned.pids != composePidsLimit {
+			return fmt.Errorf("%s Compose pids_limit = %d, want the pinned %d", pinned.file, pinned.pids, int64(composePidsLimit))
+		}
 	}
 	if normal.Name == dev.Name || normalService.Image == devService.Image || normalService.Ports[0].Published == devService.Ports[0].Published || devService.Ports[0].Published == "8080" {
 		return errors.New("development Compose must isolate its project, image and published port")
