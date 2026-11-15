@@ -171,6 +171,7 @@ write owner, so a read-then-repost round trip cannot erase a credential.
 one place. Filters are `dim:id`, repeated, split on the FIRST colon, AND-ed
 across dimensions and OR-ed within one dimension. `dim` is one of `client`,
 `provider`, `model`, `conversation`, `key`, `status`, `time`, `tool`, `error`.
+`key` is the SHA-256 hash of the client key.
 
 `status` is a single selector: an exact HTTP status code (`0` to `9999`) or a
 live in-flight class (`streaming`, `paused`, `throttled`, `pending`). It is not

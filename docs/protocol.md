@@ -122,8 +122,11 @@ path prefix can be left.
 
 Client identity labels are retention-bounded before the record enters the live
 ring, analytics or durable store: classified client and language 256 bytes,
-user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
+user agent 1024 bytes, and `client_ip` 128 bytes. Longer values
 are cut on a UTF-8 boundary and end with `…`; normal labels are unchanged.
+`client_ip` records the first `X-Forwarded-For` element when that header is
+present and the socket peer otherwise; the value is diagnostic, never verified,
+and a directly reachable caller can set it.
 
 Finalized and pending record text is retention-bounded at the record boundary
 before it enters the live ring, pending view or durable store: path 1024 bytes,
