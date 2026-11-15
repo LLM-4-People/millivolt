@@ -274,6 +274,48 @@ func TestPendingSnapshotRollbackRestoresLiveDatabase(t *testing.T) {
 	}
 }
 
+// TestAdmitPendingSnapshotReadmitsThePreservedSibling pins the boot half of
+// the preserve contract: a crash after the pre-existing pending snapshot was
+// preserved and its successor published leaves the successor in the slot and
+// the queued snapshot only as a preserved sibling. When the successor is
+// rejected, the sibling is the queue entry and must be re-admitted instead of
+// aging out under the 24 h sweep.
+func TestAdmitPendingSnapshotReadmitsThePreservedSibling(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	incoming := PendingSnapshotPath(dstPath)
+	if err := os.WriteFile(incoming, packedSnapshot(t, "queued"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(dir, ".millivolt-restore-pending-queued")
+	if err := os.Link(incoming, sibling); err != nil {
+		t.Fatal(err)
+	}
+	// The successor replaces the slot by rename, the way publishSnapshot does,
+	// so the preserved name keeps the queued inode.
+	successor := filepath.Join(dir, "successor.tmp")
+	if err := os.WriteFile(successor, []byte("not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(successor, incoming); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := admitPendingSnapshot(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission == nil {
+		t.Fatal("the preserved sibling was never re-admitted")
+	}
+	defer admission.rollback()
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "queued" {
+		t.Fatalf("installed ids = %v, want the queued snapshot's [queued]", ids)
+	}
+	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
+		t.Fatal("the re-admitted sibling still exists")
+	}
+}
+
 // TestOpenRecoversInterruptedPendingSnapshot pins the boot fence: a .previous
 // sibling means an admission never committed, so the previous database is
 // restored and the staged incoming file is quarantined with its own suffix.

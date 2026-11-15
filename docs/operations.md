@@ -764,7 +764,10 @@ rejections accumulate instead of overwriting the previous one. The
 queued before the restore; it is created before the successor replaces the slot,
 so the pending queue is never empty, and a crash on either side leaves a
 recoverable snapshot instead of an orphan that the 24 hour staging sweep
-eventually deletes. A combined config and database merge
+eventually deletes. When the stage fails before the successor replaces the slot
+the restore drops the copy again, and when a boot rejects the successor the
+preserved copy is renamed back onto the slot and admitted once, so the queued
+snapshot is neither hidden nor swept. A combined config and database merge
 answers 400 when the restored config's effective `db_path` differs from the
 running store's file, because the rows would be written to a database the next
 boot does not open; merge the database separately or use database replace.

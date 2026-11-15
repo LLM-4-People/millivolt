@@ -370,7 +370,11 @@ live database, pending snapshot, rollback set, state marker and quarantined
 admission evidence are outside that registry. A rejected or interrupted pending
 file is preserved under a unique `.incoming.invalid-<token>` or
 `.incoming.invalid-interrupted-<token>` name with its sidecars, so a later
-rejection cannot overwrite earlier evidence. The attached inspect/merge and
+rejection cannot overwrite earlier evidence. A pre-existing pending snapshot is
+hard-linked aside before the successor replaces the slot: the restore drops that
+link again on its own rollback, and a boot that rejects the successor renames
+the link back onto the slot and admits it once, so the queue entry is never
+orphaned into the sweep. The attached inspect/merge and
 decoded source use the shared `SQLiteURI` with `mode=ro`, so a snapshot path
 with URI metacharacters stays literal and writes through the attached schema
 fail.

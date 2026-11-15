@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/logging"
@@ -26,11 +28,47 @@ type snapshotAdmission struct {
 // so a structurally valid but incompatible file is quarantined while the live
 // database stays untouched. Its errors are returned bare: Open owns the
 // single "pending snapshot:" label.
+//
+// A rejected successor leaves the slot empty, but a crash between preserving a
+// pre-existing pending snapshot and discarding its preserved name can leave
+// that snapshot as a private sibling. The sibling is the queue entry, so it is
+// renamed back onto the slot and admitted once instead of aging out under the
+// staging sweep.
 func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
+	a, rejected, err := admitPendingSnapshotOnce(path)
+	if err != nil {
+		return nil, err
+	}
+	if a != nil {
+		// The admitted successor supersedes the preserved sibling, which either
+		// duplicates the pre-existing slot inode or is the snapshot the
+		// successor replaces. Cleanup is best effort; the sweep can still take
+		// it.
+		removePreservedPendingSiblings(path)
+		return a, nil
+	}
+	if !rejected {
+		return nil, nil
+	}
+	sibling, err := newestPreservedPendingSibling(path)
+	if err != nil || sibling == "" {
+		return nil, err
+	}
+	if err := os.Rename(sibling, path+pendingSnapshotSuffix); err != nil {
+		return nil, fmt.Errorf("re-admit preserved pending snapshot: %w", err)
+	}
+	a, _, err = admitPendingSnapshotOnce(path)
+	return a, err
+}
+
+// admitPendingSnapshotOnce runs the admission checks and install. rejected
+// reports a quarantined slot with nothing installed, which is the only outcome
+// that may consume a preserved sibling.
+func admitPendingSnapshotOnce(path string) (a *snapshotAdmission, rejected bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), maintenanceTimeout)
 	defer cancel()
 	if err := recoverInterruptedSnapshot(path); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	incoming := path + pendingSnapshotSuffix
 	// The pending slot is one private file, not a path to follow. Check its
@@ -39,13 +77,13 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 	// without touching the live database or the symlink target.
 	if err := checkPendingSnapshotFile(incoming); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+			return nil, false, nil
 		}
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
-			return nil, err
+			return nil, false, err
 		}
 		rejectPendingSnapshot(incoming, err)
-		return nil, nil
+		return nil, true, nil
 	}
 	// A packed pending snapshot is a self-contained file. Any sidecar beside
 	// it is crash debris from an interrupted preflight, not part of the
@@ -53,30 +91,93 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 	// integrity open or, worse, replay pages from an unrelated snapshot when
 	// opened read-write. Remove the set before inspecting the main file.
 	if err := removeSnapshotSidecars(incoming); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := backup.CheckDatabaseFile(incoming); err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, false, nil
 		}
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
-			return nil, err
+			return nil, false, err
 		}
 		rejectPendingSnapshot(incoming, err)
-		return nil, nil
+		return nil, true, nil
 	}
 	if err := preflightPendingSnapshot(ctx, incoming); err != nil {
 		// An incoming file that cannot be initialized in place is no more
 		// usable than an integrity-invalid one: preserve its bytes as
 		// quarantine and keep serving the live database.
 		rejectPendingSnapshot(incoming, err)
-		return nil, nil
+		return nil, true, nil
 	}
-	a := &snapshotAdmission{path: path}
+	a = &snapshotAdmission{path: path}
 	if err := a.install(); err != nil {
+		return nil, false, err
+	}
+	return a, false, nil
+}
+
+// preservedPendingSiblings lists the crash-preserved pending snapshots beside
+// the admission slot, newest first. The preserve owner links them in place
+// before a successor can replace the slot and removes them on every resolved
+// path, so an existing one means a crash.
+func preservedPendingSiblings(path string) ([]string, error) {
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return nil, err
 	}
-	return a, nil
+	type candidate struct {
+		name string
+		mod  time.Time
+	}
+	var found []candidate
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !backup.MatchesStagingPattern(backup.RestorePendingStagingPattern, e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		found = append(found, candidate{name: filepath.Join(dir, e.Name()), mod: info.ModTime()})
+	}
+	sort.Slice(found, func(i, j int) bool {
+		if !found[i].mod.Equal(found[j].mod) {
+			return found[i].mod.After(found[j].mod)
+		}
+		return found[i].name > found[j].name
+	})
+	names := make([]string, len(found))
+	for i, c := range found {
+		names[i] = c.name
+	}
+	return names, nil
+}
+
+// newestPreservedPendingSibling returns the newest preserved pending snapshot,
+// or an empty string when none exists.
+func newestPreservedPendingSibling(path string) (string, error) {
+	names, err := preservedPendingSiblings(path)
+	if err != nil || len(names) == 0 {
+		return "", err
+	}
+	return names[0], nil
+}
+
+// removePreservedPendingSiblings drops every preserved pending snapshot after a
+// different snapshot was admitted from the slot.
+func removePreservedPendingSiblings(path string) {
+	names, err := preservedPendingSiblings(path)
+	if err != nil {
+		logging.Printf("", "storage: list preserved pending snapshots: %v", err)
+		return
+	}
+	for _, name := range names {
+		if err := removeIfExists(name); err != nil {
+			logging.Printf("", "storage: remove preserved pending snapshot %s: %v", name, err)
+		}
+	}
 }
 
 // rejectPendingSnapshot preserves a rejected incoming file and logs both the

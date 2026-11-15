@@ -927,6 +927,13 @@ func (g *restorePendingGuard) rollback() error {
 		if err := os.Rename(g.backup, g.pending); err != nil {
 			return fmt.Errorf("restore preserved pending snapshot: %w", err)
 		}
+		// A stage that failed before publish's rename leaves slot and preserved
+		// name as two links of one inode, so the rename above is a no-op. Remove
+		// the sibling either way; when it already moved, this is the ignored
+		// not-exist case.
+		if err := os.Remove(g.backup); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove preserved pending snapshot: %w", err)
+		}
 		g.backup = ""
 		return nil
 	}

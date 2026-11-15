@@ -131,6 +131,35 @@ func TestCaptureRestorePendingKeepsTheSlotPinned(t *testing.T) {
 	}
 }
 
+// TestRestorePendingRollbackRemovesThePreservedSibling pins the other rollback
+// shape: a stage that fails BEFORE publish's rename leaves the slot and the
+// preserved name as two links of one inode, so restoring the slot by rename is
+// a no-op. The sibling must still be removed, or it survives hidden behind an
+// emptied guard until the 24 h staging sweep.
+func TestRestorePendingRollbackRemovesThePreservedSibling(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	pending := storage.PendingSnapshotPath(dbPath)
+	original := []byte("queued snapshot")
+	if err := os.WriteFile(pending, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := captureRestorePending(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPreservedPending(t, dir)
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rollback left %q, %v; want the queued bytes", got, err)
+	}
+	if guard.backup != "" {
+		t.Fatalf("guard still names %q after rollback", guard.backup)
+	}
+}
+
 // TestRestoreConfigDatabaseStageFailureLeavesStateUntouched pins the H3
 // transaction order: the database stages before the config is written, so an
 // archived db_path under a missing directory answers 400 with the config file,
