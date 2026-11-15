@@ -330,7 +330,7 @@ Three guards apply together, and each alone would be insufficient:
 3. **`preview_token` must be the token `purge_preview` issued for THIS filter.**
    It is an opaque HMAC-bound token over the canonicalized filter, the count it
    authorized and an expiry, so it cannot be forged, cannot be reused for another
-   filter, and expires. A bare count could not do this: it is only a number, so
+   filter, and expires **15 minutes after issue**. A bare count could not do this: it is only a number, so
    two different filters matching the same number of rows authorized each other,
    and a count obtained from anywhere - a `query`, a guess, a preview of a
    different filter - satisfied the comparison. That was a live bypass, not a

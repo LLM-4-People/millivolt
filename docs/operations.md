@@ -1020,6 +1020,8 @@ re-validated exactly like an external request. For its irreversible call, the
 operator credential and the tool's own guards are the entire gate: an empty
 purge filter, a purge without the exact confirmation phrase, and a purge
 without the `purge_preview` token issued for that same filter are each refused.
+The preview token expires 15 minutes after it is issued, so a purge more than
+15 minutes after its preview needs a fresh one.
 It also refuses a capture session on a proxy without durable storage, and an
 unknown name in a capture scope or a throttle provider is offered the known
 values instead. The throttle provider check fails open when the proxy's
