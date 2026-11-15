@@ -10,8 +10,10 @@ observable contract.
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
+from html import unescape as html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -81,7 +83,7 @@ class PageParser(HTMLParser):
             self.title += data
 
 
-def local_target(site: Path, page: Path, url: str) -> tuple[Path | None, str]:
+def local_target(site: Path, page: Path, url: str, *, base_path: str = "/") -> tuple[Path | None, str]:
     split = urlsplit(url)
     if split.scheme or split.netloc or url.startswith(("#", "mailto:", "tel:", "data:")):
         return None, split.fragment
@@ -89,7 +91,6 @@ def local_target(site: Path, page: Path, url: str) -> tuple[Path | None, str]:
     if not path:
         return None, split.fragment
     absolute = path.startswith("/")
-    base_path = urlsplit(DEFAULT_BASE_URL).path
     if base_path != "/" and path.startswith(base_path):
         path = path[len(base_path):]
     if path.startswith("/"):
@@ -391,7 +392,8 @@ def docs_image_errors() -> list[str]:
             and rel.relative_to(ROOT / 'docs').as_posix() not in referenced]
 
 
-def check_site(site: Path) -> list[str]:
+def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
+    base_path = urlsplit(base_url).path or "/"
     errors: list[str] = docs_image_errors()
     pages = sorted(site.rglob("*.html"))
     page_texts = {page: page.read_text(encoding="utf-8") for page in pages}
@@ -417,7 +419,7 @@ def check_site(site: Path) -> list[str]:
         for key in ("description", "viewport", "og:title", "og:description", "og:image", "twitter:card"):
             if not parser.meta.get(key):
                 errors.append(f"{rel}: missing meta {key}")
-        if parser.meta.get("og:image") and not parser.meta["og:image"].startswith(DEFAULT_BASE_URL):
+        if parser.meta.get("og:image") and not parser.meta["og:image"].startswith(base_url):
             errors.append(f"{rel}: og:image is not absolute and on the default base")
         if theme_color and parser.meta.get("theme-color") != theme_color:
             errors.append(f"{rel}: theme-color {parser.meta.get('theme-color')!r} does not match "
@@ -435,7 +437,7 @@ def check_site(site: Path) -> list[str]:
                 continue
             if src.startswith(("http://", "https://", "data:")):
                 continue
-            target, _fragment = local_target(site, page, src)
+            target, _fragment = local_target(site, page, src, base_path=base_path)
             if not target or not target.exists():
                 errors.append(f"{rel}: missing image {src}")
                 continue
@@ -468,7 +470,7 @@ def check_site(site: Path) -> list[str]:
                 errors.append(f"{rel}: repository markdown link was not rewritten: {value}")
             if value.startswith("#") and value[1:] and value[1:] not in parser.ids:
                 errors.append(f"{rel}: missing same-page anchor {value}")
-            target, fragment = local_target(site, page, value)
+            target, fragment = local_target(site, page, value, base_path=base_path)
             if target is None:
                 continue
             if not target.exists():
@@ -482,14 +484,14 @@ def check_site(site: Path) -> list[str]:
             if src.startswith(("http://", "https://")):
                 errors.append(f"{rel}: external script {src}")
                 continue
-            target, _fragment = local_target(site, page, src)
+            target, _fragment = local_target(site, page, src, base_path=base_path)
             if not target or not target.exists():
                 errors.append(f"{rel}: missing script {src}")
         for href in parser.styles:
             if href.startswith(("http://", "https://")):
                 errors.append(f"{rel}: external stylesheet {href}")
                 continue
-            target, _fragment = local_target(site, page, href)
+            target, _fragment = local_target(site, page, href, base_path=base_path)
             if not target or not target.exists():
                 errors.append(f"{rel}: missing stylesheet {href}")
         styles = [Path(urlsplit(href).path).name for href in parser.styles]
@@ -519,7 +521,6 @@ def check_site(site: Path) -> list[str]:
     errors.extend(brand_image_errors())
 
     not_found = page_texts.get(site / "404.html", "")
-    base_path = urlsplit(DEFAULT_BASE_URL).path
     if 'name="robots" content="noindex,follow"' not in not_found:
         errors.append("404.html must be noindex,follow")
     if 'rel="canonical"' in not_found:
@@ -530,21 +531,33 @@ def check_site(site: Path) -> list[str]:
     for name in ("docs/index.html", "docs/dashboard.html", "docs/operations.html",
                  "contributing.html", "security.html", "404.html", "search.json",
                  "sitemap.xml", "robots.txt", "assets/tokens.css", "assets/site.css",
-                 "assets/site.js", "assets/og.png", "CNAME"):
+                 "assets/site.js", "assets/og.png"):
         if not (site / name).exists():
             errors.append(f"missing generated file: {name}")
-    # The artifact's CNAME is the custom-domain claim GitHub Pages honours; a
-    # deployment that loses it drops the site back to the github.io subpath.
-    cname_path = site / "CNAME"
-    if cname_path.exists():
-        domain = urlsplit(DEFAULT_BASE_URL).hostname or ""
-        if cname_path.read_text(encoding="utf-8").strip() != domain:
-            errors.append(f"CNAME {cname_path.read_text(encoding='utf-8').strip()!r} "
-                          f"does not name the canonical host {domain!r}")
+    # One published origin: the metadata a crawler reads names the base URL, so
+    # a build cannot half-migrate to a custom domain or leak a fork's origin
+    # into canonical, social or sitemap output. Ordinary outbound links to the
+    # repository are expected and stay untouched.
     for page in pages:
-        if "llm-4-people.github.io" in page_texts[page]:
-            errors.append(f"{page.relative_to(site).as_posix()}: absolute URL still names the "
-                          "github.io origin instead of the custom domain")
+        rel = page.relative_to(site).as_posix()
+        for key in ("og:url", "og:image", "twitter:image"):
+            value = parsed[page].meta.get(key, "")
+            if value and not value.startswith(base_url):
+                errors.append(f"{rel}: {key} {value!r} is not on the published base {base_url}")
+        canonical = re.search(r'<link rel="canonical" href="([^"]+)"',
+                              page_texts[page])
+        if canonical and not html_unescape(canonical.group(1)).startswith(base_url):
+            errors.append(f"{rel}: canonical {canonical.group(1)!r} is not on the published base")
+    published_host = urlsplit(base_url).hostname or ""
+    sitemap = (site / "sitemap.xml").read_text(encoding="utf-8")
+    for loc in re.findall(r"<loc>([^<]+)</loc>", sitemap):
+        if not loc.startswith(base_url):
+            errors.append(f"sitemap.xml: {loc!r} is not on the published base")
+            break
+    robots = (site / "robots.txt").read_text(encoding="utf-8")
+    for found in re.findall(r"^Sitemap: https?://([A-Za-z0-9.-]+)", robots, re.M):
+        if found != published_host:
+            errors.append(f"robots.txt: sitemap names {found} instead of the published host")
 
     tokens_path = site / "assets/tokens.css"
     if tokens_path.exists():
@@ -626,17 +639,21 @@ def check_site(site: Path) -> list[str]:
 
 
 def main() -> int:
+    # The workflow builds for the live Pages base, so the checker validates the
+    # same origin it publishes: a subpath deployment and a custom domain fail
+    # on different things.
+    base_url = os.environ.get("SITE_URL", DEFAULT_BASE_URL)
     with tempfile.TemporaryDirectory(prefix="millivolt-site-") as temp:
         site = Path(temp) / "site"
         try:
-            outputs = build_site(site)
+            outputs = build_site(site, base_url=base_url)
         except Exception as exc:  # noqa: BLE001 - the build error is the result
             print(f"site: build failed: {exc}")
             return 1
         if len(outputs) < 12:
             print(f"site: expected at least 12 outputs, got {len(outputs)}")
             return 1
-        errors = check_site(site)
+        errors = check_site(site, base_url=base_url)
     if errors:
         for error in errors:
             print("site: " + error)

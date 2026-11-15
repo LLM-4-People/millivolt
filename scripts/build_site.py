@@ -36,9 +36,6 @@ TEMPLATES = SITE_SRC / "templates"
 # origin; the repository default is the one the site is published at.
 CUSTOM_DOMAIN = "millivolt.llm4people.dev"
 DEFAULT_BASE_URL = f"https://{CUSTOM_DOMAIN}/"
-# A GitHub-hosted Pages origin serves from a subpath and owns no custom domain,
-# so only a build whose origin is a real domain may claim one with CNAME.
-GITHUB_PAGES_SUFFIX = ".github.io"
 GITHUB_REPOSITORY = "https://github.com/LLM-4-People/millivolt"
 GITHUB_BRANCH = "main"
 GITHUB_BLOB = f"{GITHUB_REPOSITORY}/blob/{GITHUB_BRANCH}/"
@@ -1100,27 +1097,12 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         json.dumps(search_index, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    # GitHub Pages serves the artifact's CNAME as the custom-domain claim, and a
-    # deployment without it drops the domain back to the github.io path. The
-    # base URL is the single owner: the host it names is the host the site
-    # answers on, and a github.io origin (fork, preview, pre-domain build)
-    # claims nothing.
-    if domain := site_cname(base_url):
-        (output / "CNAME").write_text(domain + "\n", encoding="utf-8")
     write_sitemap(
         output,
         base_url,
         ["index.html"] + [page.output for page in pages] + ["404.html"],
     )
     return ["index.html"] + [page.output for page in pages] + ["404.html"]
-
-
-def site_cname(base_url: str) -> str | None:
-    """Return the custom domain the artifact should claim, if any."""
-    host = urlsplit(base_url).hostname or ""
-    if not host or host.endswith(GITHUB_PAGES_SUFFIX):
-        return None
-    return host
 
 
 class BuildError(RuntimeError):
@@ -1136,6 +1118,17 @@ def main(argv: list[str] | None = None) -> int:
         help="public site URL used for canonical and social metadata",
     )
     args = parser.parse_args(argv)
+    # The domain has one owner outside this repository: the Pages setting. Warn
+    # when a build for the live site disagrees with the committed default, which
+    # is what a half-finished domain migration looks like from here.
+    live = os.environ.get("SITE_URL")
+    if live and urlsplit(live).hostname != urlsplit(DEFAULT_BASE_URL).hostname:
+        print(
+            f"build_site: building for {urlsplit(live).hostname}, but the repository "
+            f"default is {urlsplit(DEFAULT_BASE_URL).hostname}; set the Pages custom "
+            "domain to match, or the published metadata will name the wrong origin",
+            file=sys.stderr,
+        )
     try:
         outputs = build_site(Path(args.output), base_url=args.base_url)
     except BuildError as exc:
