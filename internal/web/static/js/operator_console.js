@@ -874,14 +874,15 @@ function ocRenderHead() {
   setText(live, text);
 }
 
-// The section strip is one horizontal chip row at every width, so the tablist
-// announces a horizontal orientation everywhere and arrows move left and
-// right. menu.js owns placement only; it does not change the rail's axis.
-const OC_RAIL_ORIENTATION = 'horizontal';
-
+// The announced axis follows the painted one: a wide viewport paints one
+// scrolling row (horizontal), the narrow grid stacks three columns over two
+// rows (vertical, because Up/Down cross rows there). A constant announcement
+// promised Left/Right only while the grid's second row was on screen. menu.js
+// owns placement only; it does not change the rail's axis.
 function ocSyncRailOrientation() {
   const rail = $('oc-rail');
-  if (rail) rail.setAttribute('aria-orientation', OC_RAIL_ORIENTATION);
+  if (!rail) return;
+  rail.setAttribute('aria-orientation', ocRailColumns(rail) > 1 ? 'vertical' : 'horizontal');
 }
 
 // ocSyncRailOverflow marks whether the section strip has more to show. A
@@ -1925,8 +1926,7 @@ document.addEventListener('keydown', event => {
 });
 
 // ARROW_KEYS is the four rail directions. Left/Right move along a row and
-// Up/Down across rows; the strip is one row, so there both axes are the same
-// step.
+// Up/Down across rows; on the single-row strip both are the same step.
 const ARROW_KEYS = { ArrowLeft: 1, ArrowRight: 1, ArrowUp: 1, ArrowDown: 1 };
 
 // ocRailColumns is the number of cells the rail paints per visual row. Above
