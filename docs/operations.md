@@ -1578,7 +1578,10 @@ not happen when the sheet opens. A selected filter makes a read-only
 batch into the read view, so a just-finalized request cannot read as empty.
 That barrier is bounded by the query timeout: a wedged writer lets the preview
 answer from the committed snapshot instead of spinning the sheet forever, and
-the delete's transactional re-check stays the guard. A
+the delete's transactional re-check stays the guard. Neither the caller's
+deadline nor a client cancel fails the preview, even when it expires before the
+barrier does: each step runs detached on its own query budget, so a short
+dashboard deadline answers the same as an unbounded one. A
 ring-only deployment removes through the boundary the count saw, so a record
 that finalizes during the delete stays behind instead of disappearing
 uncounted. Current traffic can still change the count

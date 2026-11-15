@@ -306,26 +306,35 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, reviewed *int64,
 // batch into the committed snapshot: the confirmation the operator sends back
 // travels with this count, so a batch the writer accepted but has not flushed
 // yet would otherwise make the delete transaction refuse exactly the
-// population the preview showed. The barrier runs detached from a caller
-// deadline, on one query budget, and an expired barrier falls through to the
-// count: a wedged writer (holding the sole connection) never resolves it, and
-// the delete's own transactional re-check covers the stale preview.
+// population the preview showed. Both preview steps run detached from the
+// caller's deadline and cancellation, each bounded by one query budget, and an
+// expired barrier falls through to the count: a wedged writer (holding the sole
+// connection) never resolves it, a short caller deadline never fails the
+// preview, and the delete's own transactional re-check covers the stale preview.
 func (s *Store) CountWhere(ctx context.Context, f PurgeFilter) (int64, error) {
 	if err := f.Validate(); err != nil {
 		return 0, err
 	}
-	barrierCtx, barrierCancel := s.withQueryTimeout(context.WithoutCancel(ctx))
+	// One detached base for the whole preview: neither step may inherit the
+	// caller's deadline or cancellation, because the answer is still available
+	// from the committed snapshot and the delete re-checks the population. A
+	// client cancel therefore behaves like a very short caller deadline.
+	base := context.WithoutCancel(ctx)
+	barrierCtx, barrierCancel := s.withQueryTimeout(base)
 	err := s.flushWithin(barrierCtx)
 	expired := barrierCtx.Err() != nil
 	barrierCancel()
 	if err != nil && !expired {
 		return 0, err
 	}
-	q, args := buildCountQuery(f)
-	ctx, cancel := s.withQueryTimeout(ctx)
+	// A wedged writer spends the barrier's whole budget, so the count cannot
+	// reuse that deadline: it keeps a bounded step of its own on the same
+	// detached base, and the caller deadline never cuts either step.
+	countCtx, cancel := s.withQueryTimeout(base)
 	defer cancel()
+	q, args := buildCountQuery(f)
 	var n int64
-	err = s.rdb.QueryRowContext(ctx, q, args...).Scan(&n)
+	err = s.rdb.QueryRowContext(countCtx, q, args...).Scan(&n)
 	return n, err
 }
 
