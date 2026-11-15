@@ -416,7 +416,11 @@ const captureSensitivity = "this document contains request and response BODIES. 
 // document is sized before it is decoded, so an oversized capture is withheld
 // with an explicit marker instead of being returned as a broken fragment.
 func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) (*AuditCaptureGetOutput, error) {
-	if strings.TrimSpace(in.RecordID) == "" {
+	// Trim once: the capture route accepts a padded id, so the lookup and the
+	// echoed record_id must both carry the trimmed spelling rather than making
+	// a copy-pasted id look different from the one that matched.
+	recordID := strings.TrimSpace(in.RecordID)
+	if recordID == "" {
 		return nil, fmt.Errorf("record_id is required: it is a request record id from audit_captures_list, not a session id")
 	}
 	limit, err := resolveLimit("max_bytes", in.MaxBytes, s.limits.CaptureBytes, 1, 0)
@@ -424,12 +428,12 @@ func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) 
 		return nil, err
 	}
 	values := url.Values{}
-	values.Set("id", in.RecordID)
+	values.Set("id", recordID)
 	raw, err := s.client.getRaw(ctx, http.MethodGet, RouteDebugCapture, values)
 	if err != nil {
 		return nil, err
 	}
-	out := &AuditCaptureGetOutput{RecordID: in.RecordID, StoredBytes: len(raw), Sensitive: captureSensitivity}
+	out := &AuditCaptureGetOutput{RecordID: recordID, StoredBytes: len(raw), Sensitive: captureSensitivity}
 	if len(raw) > limit {
 		out.Truncation = Truncation{
 			Shown: 0, Total: len(raw), Truncated: true,
