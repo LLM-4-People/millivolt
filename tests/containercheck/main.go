@@ -255,9 +255,13 @@ func check(image string) error {
 		}
 		if phase == "seed" {
 			// The distroless image has no shell or curl: the binary probes
-			// its own unauthenticated /healthz for Docker HEALTHCHECK.
+			// its own unauthenticated liveness and readiness routes (the
+			// Dockerfile HEALTHCHECK and the Compose readiness probe).
 			if _, err := command(ctx, "exec", container, "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-healthcheck"); err != nil {
 				return fmt.Errorf("healthcheck probe: %w", err)
+			}
+			if _, err := command(ctx, "exec", container, "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-readycheck"); err != nil {
+				return fmt.Errorf("readycheck probe: %w", err)
 			}
 			version, err := command(ctx, "exec", container, "/millivolt", "-version")
 			if err != nil {

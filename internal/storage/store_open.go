@@ -203,7 +203,10 @@ type Store struct {
 	pendingPurge atomic.Pointer[purgeCommand] // one command owner; publication under sendMu
 	purgeWake    chan struct{}
 
-	drops atomic.Uint64
+	// health owns the durable pipeline's counters: cause-labelled drops,
+	// failed flushes and the last successful commit. Atomic inside, so the hot
+	// overload path never takes a lock.
+	health health
 	// debug sidecar accounting: the writer connection serializes physical
 	// writes, debugMu makes the byte counter and the SQL that changes it one
 	// atomic pair across request-goroutine saves and the writer's expiry.

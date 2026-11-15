@@ -37,6 +37,14 @@ services:
         max-size: "10m"
         max-file: "3"
     stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
+    # Same readiness probe as the deployment Compose: healthy means the
+    # durable pipeline can persist, not merely that the process answers.
+    healthcheck:
+      test: ["CMD", "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-readycheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
 volumes:
   data:

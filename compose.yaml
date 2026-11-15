@@ -41,6 +41,16 @@ services:
     # SIGTERM cancels streams. Allow time beyond shutdown_timeout for SQLite
     # draining; this grace is configurable, not a lossless shutdown guarantee.
     stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
+    # Readiness, not liveness: the image's HEALTHCHECK stays the liveness
+    # contract (/healthz), while Compose reports healthy only when the durable
+    # write pipeline can persist (/readyz). start_period covers the boot
+    # history scan.
+    healthcheck:
+      test: ["CMD", "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-readycheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
 
 volumes:
   data:

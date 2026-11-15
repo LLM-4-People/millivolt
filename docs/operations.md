@@ -4,9 +4,10 @@ Read the [security boundary](../SECURITY.md) before exposing the listener.
 The whole embedded dashboard is protected: every dashboard, `/metrics/*`,
 `/admin/*` and `/mcp` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential
 and is denied while it is not configured. At the application gate, only the
-unauthenticated `/healthz` liveness probe, the `POST /session` login handshake,
-origin-root brand/PWA files and transparent inference stay open; see the
-canonical [operator access](#operator-access) list.
+unauthenticated `/healthz` liveness and `/readyz` readiness probes, the
+`POST /session` login handshake, origin-root brand/PWA files and transparent
+inference stay open; see the canonical [operator access](#operator-access)
+list.
 
 ## Configuration and CLI
 
@@ -26,6 +27,7 @@ for fresh config volumes. Do not start Settings against the committed example.
 | `-db-path PATH` | Override durable storage; `none` disables it. |
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
 | `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. A named config that cannot be read fails the probe instead of falling back to defaults; only an empty `-config` probes the built-in defaults. |
+| `-readycheck` | Probe `GET /readyz` the same way and exit nonzero when the durable pipeline is not ready. Used by the Compose readiness probe; mutually exclusive with `-healthcheck`. |
 | `-print-config` | Print neutral built-in default YAML. |
 | `-print-example-config` | Print the deployment example, including its enabled compatibility profiles and the opencode sub-conversation tracking exemplar. |
 | `-version` | Print JSON build identity. |
@@ -423,7 +425,34 @@ a ceiling under 80 MiB is ignored by the runtime and leaves only the hard OOM
 kill. `pids_limit` bounds process and thread amplification, not goroutines.
 The image carries a Dockerfile `HEALTHCHECK` that probes the unauthenticated
 `/healthz` through the binary's `-healthcheck` mode, so `docker compose ps`
-reports health without any operator credential.
+reports health without any operator credential. Both Compose files replace that
+probe with the readiness check below, which is strictly stronger.
+
+Liveness (`/healthz`) answers "the process is up and serving HTTP". Readiness
+(`/readyz`) additionally answers "this instance can persist": it fails with
+`503` and a reason when the durable writer is wedged (a non-empty write queue
+with no successful flush for four flush intervals, at least 30 seconds) or when
+any durable flush has failed since boot. Readiness stays red after the first
+failed flush even once writes recover, because a lost batch is worth an
+operator's attention; restart or investigate. With durable storage disabled both
+routes answer `200`, since there is no pipeline to wedge.
+
+The Compose files use `-readycheck` as the service healthcheck, so
+`docker compose ps` reports `healthy` only for an instance that can persist.
+Point an external load balancer or orchestrator at `/readyz` for the same
+signal; both probe routes are unauthenticated and answer the exact body
+`{"ok":true}` on success.
+
+Storage state is also scrapeable at `/metrics/prometheus` (behind the operator
+credential) as `llm_proxy_storage_enabled`,
+`llm_proxy_storage_queue_depth`, `llm_proxy_storage_queue_capacity`,
+`llm_proxy_storage_dropped_total{cause}` (`overflow`, `after_close`, `panic`,
+`flush_failed`), `llm_proxy_storage_flush_failed_total`,
+`llm_proxy_storage_last_flush_timestamp_seconds` and
+`llm_proxy_storage_wedged`. The block is rendered on every scrape, outside the
+memoized request aggregate, so queue and drop movement shows up immediately.
+Alert on `llm_proxy_storage_wedged`, on a rising `flush_failed` counter, and on
+`overflow` drops that are not explained by a burst.
 
 ```sh
 # Start or adopt a newly pulled image while preserving volumes.
@@ -921,6 +950,7 @@ both.
 | Route | Action / important contract |
 | --- | --- |
 | `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. |
+| `GET /readyz` | Unauthenticated readiness probe. `200` when the durable pipeline can persist; `503` with a reason when the writer is wedged or a flush failed since boot. Compose uses it through `-readycheck`. |
 | `GET /favicon.ico` | Unauthenticated ICO brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
 | `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-*.png` | Ungated SVG/PNG icons for tabs, home screens and the web app manifest. |
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
@@ -1005,8 +1035,8 @@ route. This is the canonical open-path list; [Security](../SECURITY.md) and the
 [reverse-proxy guide](reverse-proxy.md) summarize it instead of maintaining a
 second list.
 
-- Open: `GET /healthz`, the `POST /session` login handshake (the one open
-  operator route), origin-root brand/PWA files (`/favicon.ico`, icons,
+- Open: `GET /healthz`, `GET /readyz`, the `POST /session` login handshake (the
+  one open operator route), origin-root brand/PWA files (`/favicon.ico`, icons,
   `/manifest.webmanifest`, `/sw.js`) and transparent inference. Provider
   credentials ride the same header name and are never inspected by the gate.
 - Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
@@ -1082,7 +1112,8 @@ notice slot, because the form is the only route back to a credential and `POST
 
 With the variable unset or empty the deny-all state holds: the whole dashboard
 returns 403, the open `POST /session` handshake cannot mint a cookie, and only
-`/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
+`/healthz` and `/readyz`, brand/PWA files and inference respond. A nonempty
+value shorter than 16
 or longer than 512 bytes fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart

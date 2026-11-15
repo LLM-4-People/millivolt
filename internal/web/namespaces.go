@@ -35,6 +35,7 @@ var namespaces = []ReservedNamespace{
 	{Root: "/index.html", Gated: true, Live: true},
 	// Open probes and assets: ungated, and still never cached.
 	{Root: "/healthz", Live: true},
+	{Root: "/readyz", Live: true},
 	{Root: "/models", Live: true},
 	{Root: "/sw.js", Live: true},
 	// Operator plane. Every unregistered spelling is reserved.

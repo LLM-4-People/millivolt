@@ -284,7 +284,7 @@ func TestHandlePrometheusServesCachedBodyUntilRingChanges(t *testing.T) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet, "/metrics/prometheus", nil)
 		w := httptest.NewRecorder()
-		HandlePrometheus(w, req, buf)
+		HandlePrometheus(w, req, buf, nil)
 		if got, want := w.Code, http.StatusOK; got != want {
 			t.Fatalf("status = %d, want %d\n%s", got, want, w.Body.String())
 		}

@@ -253,6 +253,20 @@ whole-event drop rule.
 under one short producer fence. SQLite is the durable authority; enqueue overflow
 and failed batches remain visible best-effort losses.
 
+`internal/storage/health.go` is the one owner of that loss accounting and of the
+pipeline's liveness. Every discard is counted under exactly one cause
+(`overflow`, `after_close`, `panic`, `flush_failed`); `Dropped()` sums them for
+the dashboard counter, and the exposition renders each cause so alerting can
+separate overload from shutdown, a panic and a failing database. The same owner
+stamps every flush attempt, so `/readyz` can tell a stalled writer (a non-empty
+queue with no successful flush for four flush intervals, floored at 30 seconds)
+from a merely idle one, and keeps a failed flush sticky. `/healthz` stays the
+liveness contract; readiness is the stronger answer a scheduler needs.
+`tests/_go/internal/storage/health.go` pins the cause split, the wedge/ready
+transition and the disabled-store answer, and
+`tests/_go/internal/metrics/prometheus_extra.go` pins that the storage block is
+rendered per scrape rather than from the ring-revision memo.
+
 The one writer owns transactions and incremental totals. Its insertion plan
 binds arbitrary values, using exact zero/empty literals only for absent scalar
 work, and preserves existing conflict/rollback semantics. Record columns,
@@ -401,7 +415,8 @@ are filled at serve time and the ring snapshot itself is never retained.
 The unwritten set stays ring-derived. A record can be missing from the durable
 store while never having been queued: an enqueue that overflowed the writer
 channel and a batch whose insert failed are both dropped by design and counted
-only in `Dropped()`. The writer queue is therefore not a superset of "possibly
+by cause in the storage health owner; `Dropped()` sums the causes for the
+dashboard counter. The writer queue is therefore not a superset of "possibly
 not yet durable", and only the written-id set can say which ring rows are
 already durable, so the O(ring) probe under `aggMu` is the exact dedupe
 boundary. One cold fold measures 0.23-0.37 ms at the default 10,000-record ring

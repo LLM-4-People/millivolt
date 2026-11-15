@@ -3,10 +3,10 @@
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
 The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
 credential; there is no tenant isolation and no per-user identity. At the
-application gate, only the unauthenticated `/healthz` probe, the `POST /session`
-login handshake, origin-root brand/PWA files and transparent inference stay
-open, so a load balancer can health-check the service without holding the
-credential and a browser can reach the login handshake. The canonical
+application gate, only the unauthenticated `/healthz` and `/readyz` probes, the
+`POST /session` login handshake, origin-root brand/PWA files and transparent
+inference stay open, so a load balancer can health-check the service without
+holding the credential and a browser can reach the login handshake. The canonical
 open-path list is in [operator access](operations.md#operator-access); this
 guide only adds the ingress boundary. Read [Security](../SECURITY.md) first.
 
@@ -27,8 +27,8 @@ The sample splits two prefix locations because they do not share an access
 model. `location /v1` is the OpenAI-compatible inference base: preserve provider
 `Authorization` and routing headers, and allowlist API clients. `location /`
 covers everything else, including the dashboard and operator plane (`/dash/`,
-`/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`
-and brand/PWA paths: allowlist operators, and keep `Host` plus the session
+`/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`,
+`/readyz` and brand/PWA paths: allowlist operators, and keep `Host` plus the session
 cookie so Settings origin checks and the live feed work; the comparison is
 case-insensitive, so a case-preserving ingress is fine. The `/session`
 handshake is open at millivolt so login works, but this location still

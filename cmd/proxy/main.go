@@ -188,6 +188,7 @@ func main() {
 	// with its own pid on boot.
 	pidFile := flag.String("pid-file", "", "write the process pid to this file after boot")
 	healthcheck := flag.Bool("healthcheck", false, "probe GET /healthz on the configured listen address and exit nonzero on failure (Docker HEALTHCHECK); loads config read-only")
+	readycheck := flag.Bool("readycheck", false, "probe GET /readyz on the configured listen address and exit nonzero when storage is not ready (Compose readiness); loads config read-only")
 	flag.Parse()
 	// Boot-time globals the healthcheck and reload helpers share. Set before
 	// any mode that reads configuration.
@@ -226,8 +227,14 @@ func main() {
 		return
 	}
 	// Docker HEALTHCHECK mode: probe and exit; nothing below runs.
+	if *healthcheck && *readycheck {
+		log.Fatal("-healthcheck and -readycheck are mutually exclusive")
+	}
 	if *healthcheck {
 		os.Exit(runHealthcheck())
+	}
+	if *readycheck {
+		os.Exit(runReadycheck())
 	}
 
 	cfg, skipped, err := config.LoadFileRepair(*configPath)
@@ -342,15 +349,21 @@ func main() {
 	gate := newOperatorGate(mustOperatorToken())
 
 	mux, handler := newOperatorMux(gate, cfg)
-	// The liveness probe is the one open server route besides inference:
+	// Liveness and readiness are the open server routes besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
-	// credential. Depth (storage, feeds) stays on the gated dashboard.
+	// credential. /healthz owns process liveness; /readyz adds the durable
+	// pipeline (a wedged writer or a failed flush). Depth (feeds, dashboard)
+	// stays on the gated surfaces.
 	mux.HandleFunc(string(mcp.RouteHealthz), handleHealthz)
+	mux.Handle(string(mcp.RouteReadyz), handleReadyz(store.Ready))
 	// The SSE feed is not gzipped (it flushes event-by-event; every other
 	// dashboard route is buffered text and compresses).
 	mux.Handle("/metrics/live/stream", http.HandlerFunc(buf.HandleStream))
 	mux.Handle(string(mcp.RoutePrometheus), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		metrics.HandlePrometheus(w, r, buf)
+		// The storage block renders per scrape: queue depth and drops move
+		// without a finalized record, so the ring-revision memo must not
+		// freeze them.
+		metrics.HandlePrometheus(w, r, buf, store.WritePrometheus)
 	}))
 	// Dashboard aggregates: every non-table metric surface is computed here
 	// against all requests since inception (durable store + un-flushed ring

@@ -28,10 +28,10 @@ import (
 )
 
 // TestOperatorPlaneBoundary is the deny-by-default regression for the whole
-// dashboard gate: only /healthz, brand/PWA files and the inference catch-all
-// pass without the credential, every dashboard/metrics/admin route needs it
-// (Bearer or the session cookie the gate mints), the unauthenticated HTML
-// entrypoint gets the login page, same-origin mutation checks stay armed
+// dashboard gate: only /healthz, /readyz, brand/PWA files and the inference
+// catch-all pass without the credential, every dashboard/metrics/admin route
+// needs it (Bearer or the session cookie the gate mints), the unauthenticated
+// HTML entrypoint gets the login page, same-origin mutation checks stay armed
 // behind the credential, and an unconfigured credential denies the whole plane.
 func TestOperatorPlaneBoundary(t *testing.T) {
 	const token = "operator-fixture-credential"
@@ -41,6 +41,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h := protectOperatorRequests(next, newOperatorGate(token))
 		requests := []*http.Request{
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/healthz", nil),
+			httptest.NewRequest(http.MethodGet, "http://proxy.example/readyz", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/v1/models", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/anything/else/for/upstream", nil),
@@ -228,10 +229,10 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 				t.Errorf("%s %s while disabled: status=%d want=403", r.Method, r.URL.Path, w.Code)
 			}
 		}
-		// The liveness probe and the inference catch-all stay open while the
+		// The probe routes and the inference catch-all stay open while the
 		// plane is disabled; the session handshake hands off to its own
 		// handler, which denies an unarmed plane (asserted below).
-		for _, target := range []string{"/healthz", "/favicon.ico", "/v1/chat/completions", "/session"} {
+		for _, target := range []string{"/healthz", "/readyz", "/favicon.ico", "/v1/chat/completions", "/session"} {
 			r := httptest.NewRequest(http.MethodPost, "http://proxy.example"+target, nil)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)

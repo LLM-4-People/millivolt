@@ -38,6 +38,7 @@ type Route string
 
 const (
 	RouteHealthz      Route = "/healthz"
+	RouteReadyz       Route = "/readyz"
 	RouteQuery        Route = "/metrics/query"
 	RouteExplorer     Route = "/metrics/agg/explorer"
 	RouteChart        Route = "/metrics/agg/chart"

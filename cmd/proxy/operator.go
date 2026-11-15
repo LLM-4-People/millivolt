@@ -29,8 +29,8 @@ import (
 // The operator plane is the whole embedded dashboard, standardized as the
 // gated route set below: dashboard HTML/assets, every /metrics/* surface and
 // every /admin/* action require the operator credential. Open surfaces are
-// the /healthz liveness probe (Docker healthchecks and load balancers cannot
-// carry the credential), origin-root brand/PWA files (/favicon.ico,
+// the /healthz liveness and /readyz readiness probes (probes cannot carry the
+// credential), origin-root brand/PWA files (/favicon.ico,
 // /favicon.svg, icons, /manifest.webmanifest, /sw.js; browsers fetch them
 // without Authorization and they carry no dashboard data), and transparent
 // inference (the mux catch-all; provider credentials ride the same header
@@ -160,8 +160,8 @@ func (g *operatorGate) valid(presented string) bool {
 // /dash and /mcp are millivolt-owned, so a look-alike path can never reach the
 // inference catch-all. The canonical table lives in internal/web, which also
 // generates the mux reservations and the service-worker live list, so the three
-// cannot disagree. Everything else (registered /healthz, brand/PWA files and
-// the catch-all) passes untouched.
+// cannot disagree. Everything else (registered /healthz, /readyz, brand/PWA
+// files and the catch-all) passes untouched.
 func gatedPath(path string) bool { return web.Gated(path) }
 
 // mcpNamespace reports the millivolt-owned /mcp namespace, normalized the same
@@ -973,7 +973,7 @@ var (
 // handleHealthz is GET /healthz: the unauthenticated liveness probe for
 // Docker HEALTHCHECK and load balancers. It reports only that the process is
 // up and serving HTTP on this listener; storage depth lives on the
-// /metrics/prometheus and dashboard surfaces.
+// /metrics/prometheus and dashboard surfaces. Readiness is /readyz.
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -985,4 +985,31 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+// handleReadyz is GET /readyz: the unauthenticated readiness probe. Liveness
+// and readiness differ: an instance whose writer goroutine is wedged, or whose
+// durable flush failed since boot, still answers HTTP and monitoring, but a
+// scheduler should stop sending it traffic. The failing answer carries the
+// reason for the operator; a probe only needs the status. ready is
+// (*storage.Store).Ready, which is nil-safe, so a disabled store (nothing to
+// wedge) answers ready.
+func handleReadyz(ready func() (bool, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			w.Header().Set("Cache-Control", "no-store")
+			adminjson.WriteErrorJSON(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		if ok, reason := ready(); !ok {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "reason": reason})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}
 }

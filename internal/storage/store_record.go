@@ -48,7 +48,7 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 	// send-on-closed-channel impossible, so a panic here would be a real bug.
 	defer func() {
 		if recover() != nil {
-			s.incrDrops()
+			s.drop(DropPanic)
 		}
 	}()
 	// Bound exactly once at the shared publication fence. The ring path's
@@ -67,29 +67,37 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 		metrics.RetainRecord(r)
 	}
 	if s.shut {
-		s.incrDrops()
+		s.drop(DropAfterClose)
 		return
 	}
 	select {
 	case s.ch <- queuedRecord{record: r, seq: s.accepted + 1}:
 		s.accepted++
 	case <-s.done:
-		s.incrDrops()
+		s.drop(DropAfterClose)
 	default:
 		// Drop on overflow to protect the hot path. This is intentional:
 		// the ring buffer already holds the most recent records in memory.
-		s.incrDrops()
+		s.drop(DropOverflow)
 	}
 }
 
-func (s *Store) incrDrops() {
+func (s *Store) drop(cause string) {
 	// Atomic: the overload path must not serialize producers on a mutex
 	// exactly when records are already being lost.
-	s.drops.Add(1)
+	s.health.drop(cause)
 }
 
-// Dropped returns the number of records dropped due to a full write channel.
-func (s *Store) Dropped() uint64 { return s.drops.Load() }
+// Dropped returns every record dropped from the durable pipeline, whatever the
+// cause (overflow, a post-Close arrival, a recovered panic or a failed batch).
+// Health().Drops splits the same total by cause.
+func (s *Store) Dropped() uint64 {
+	var total uint64
+	for i := range s.health.drops {
+		total += s.health.drops[i].Load()
+	}
+	return total
+}
 
 func (s *Store) writer() {
 	defer func() { close(s.writerDone); s.wg.Done() }()
@@ -99,17 +107,16 @@ func (s *Store) writer() {
 			return nil
 		}
 		err := s.insertBatch(batch)
+		s.health.recordFlush(err, time.Now())
 		if err != nil {
 			if s.writerErr == nil {
 				s.writerErr = err
 			}
 			log.Printf("storage: insert batch: %v", err)
 			// Count flush failures as drops so durable-write loss is visible
-			// alongside channel-overflow drops (metrics are best-effort, but
+			// alongside the producer-side causes (metrics are best-effort, but
 			// never silently lost).
-			for range batch {
-				s.incrDrops()
-			}
+			s.health.dropN(DropFlushFailed, len(batch))
 		}
 		clear(batch)
 		batch = batch[:0]

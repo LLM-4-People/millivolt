@@ -39,7 +39,7 @@ func TestPrometheusColdFoldAllocationCeiling(t *testing.T) {
 		for b.Loop() {
 			buf.Record(cold)
 			w.Body.Reset()
-			HandlePrometheus(w, req, buf)
+			HandlePrometheus(w, req, buf, nil)
 			if w.Code != http.StatusOK {
 				b.Fatalf("GET /metrics/prometheus = %d, want 200", w.Code)
 			}

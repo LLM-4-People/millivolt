@@ -189,9 +189,9 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
     # Cond-var wait/send, storm backoff, holds and leases. Cheap enough to run
     # the complete package under race.
     f"{MODULE}/internal/scheduler": ("*",),
-    # Store.Record/PublishLive/Clear fences, the writer goroutine, and
-    # concurrent purge, restore and snapshot work. Schema, query and
-    # migration-only tests are plain.
+    # Store.Record/PublishLive/Clear fences, the writer goroutine, the health
+    # counters the writer and producers share, and concurrent purge, restore
+    # and snapshot work. Schema, query and migration-only tests are plain.
     f"{MODULE}/internal/storage": (
         "*Concurrent*",
         "*Fence*",
@@ -203,6 +203,8 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         "*Writer*",
         "*Flush*",
         "*DataVersion*",
+        "*Health*",
+        "*Ready*",
     ),
     # Projection publisher, chart aggregation, pooled buffers, stream handlers,
     # single-flight folds, and the lineage payload read lease. Allocation-only
