@@ -243,10 +243,13 @@ document.addEventListener('click', e => {
   const path = e.composedPath();
   const inside = selector => path.some(node => node.matches?.(selector));
   // A modal dialog is its own surface: a press inside the operator
-  // confirmation or the storm details must not dismiss the panel that opened
-  // it. Both render outside the header and the console.
+  // confirmation, the storm details or the settings sheet must not dismiss the
+  // panel that opened it. They render outside the header and the console, and a
+  // close from inside the sheet can reopen the console in the same click, which
+  // this later listener would otherwise close straight back.
   if (!inside('.menu-wrap') && !inside('#operator-console') && !inside('#btn-controls') &&
-      !inside('.operator-dialog') && !inside('.storm-dialog')) closeHeaderMenus();
+      !inside('.operator-dialog') && !inside('.storm-dialog') &&
+      !inside('.st-sheet')) closeHeaderMenus();
   if (!inside('#hdr-actions') && !inside('#btn-nav') && !inside('#operator-console')) closeNavMenu();
   if (!inside('.xp-rail-col')) closeDimMenu();
   if (!inside('#chart-metrics')) setMetricsMenuOpen(false);

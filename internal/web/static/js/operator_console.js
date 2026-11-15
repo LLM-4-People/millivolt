@@ -603,10 +603,15 @@ function ocOwns(node) {
 // would land the operator back in the header with their section gone; this
 // hands the console back instead. One caller (the console handler) writes it
 // and the sheet's close consumes it, so a Settings open from anywhere else
-// still returns to the visible header control.
+// still returns to the visible header control. The origin belongs to that one
+// sheet session: a force close (a preempting prompt) forgets it, because the
+// session it described is over.
 let ocSettingsOrigin = '';
 function ocRememberSettingsOrigin() {
   ocSettingsOrigin = ocMounted ? ocSection : '';
+}
+function ocForgetSettingsOrigin() {
+  ocSettingsOrigin = '';
 }
 function ocRestoreSettingsOrigin() {
   const section = ocSettingsOrigin;

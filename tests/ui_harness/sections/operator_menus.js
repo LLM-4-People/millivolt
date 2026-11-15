@@ -495,11 +495,27 @@ module.exports = async function operatorMenus(H) {
       consoleSettings.click();
       check('the console Settings button opens the sheet and closes the console',
         !d.getElementById('settings-sheet').hidden && shell.hidden);
-      w.closeSettings();
+      // Through the real close button: the click bubbles past the document
+      // listeners, so a surface that reopens the console here must survive the
+      // later outside-press dismissal.
+      d.getElementById('btn-settings-close').click();
       check('closing that sheet reopens the console on the section it left',
         d.getElementById('settings-sheet').hidden && !shell.hidden &&
         w.eval('ocSection') === 'system');
       w.closeOperatorConsole();
+      // A force close ends the sheet session, so the origin it remembered must
+      // not leak into a later sheet opened from the header: that one returns to
+      // the header control, not to a console the operator never opened.
+      w.openOperatorConsole('system');
+      d.querySelector('#oc-pane [data-oc-settings]').click();
+      check('the console Settings button opens the sheet again',
+        !d.getElementById('settings-sheet').hidden && shell.hidden);
+      w.eval('settingsClose(true)');
+      w.eval('openSettings()');
+      w.closeSettings();
+      check('a force-closed sheet leaves no origin for the next header opening',
+        d.getElementById('settings-sheet').hidden && shell.hidden);
+      if (!shell.hidden) w.closeOperatorConsole();
     }
 
     // ---- 3. the rail is a real tablist ----

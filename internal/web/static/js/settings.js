@@ -136,6 +136,11 @@ function settingsClose(force) {
   if (s) { s.classList.remove('open'); closeModal(s); }
   if (v) v.classList.remove('open');
   settingsExpanded(false);
+  if (force) {
+    // A force close (a preempting prompt) ends this sheet session, so the
+    // console origin it may carry must not leak into the next header opening.
+    if (typeof ocForgetSettingsOrigin === 'function') ocForgetSettingsOrigin();
+  }
   if (wasOpen && !force) {
     // A sheet opened from the operator console goes back there, to the section
     // it came from. Otherwise the Settings opener lives inside the Actions
