@@ -278,7 +278,10 @@ func EncodeResponse(p ir.Protocol, resp *ir.Response) ([]byte, error) {
 }
 
 // TranslateResponseBetween converts one non-streaming response body between
-// two protocols.
+// two protocols. It carries no request context, so a namespace group a
+// Responses request declared cannot be named again on a returned call; a caller
+// that needs that uses TranslateResponseBetweenIR with
+// ResponseOptions.ToolNames.
 func TranslateResponseBetween(inbound, outbound ir.Protocol, body []byte) ([]byte, ir.Warnings, error) {
 	out, _, warnings, err := TranslateResponseBetweenIR(inbound, outbound, body, nil, ResponseOptions{})
 	return out, warnings, err

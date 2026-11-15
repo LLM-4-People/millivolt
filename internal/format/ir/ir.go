@@ -267,8 +267,10 @@ type Tool struct {
 	Parameters   json.RawMessage `json:"parameters,omitempty"`
 	Strict       *bool           `json:"strict,omitempty"`
 	CacheControl *CacheControl   `json:"cache_control,omitempty"`
-	// Type is "function" for ordinary tools. Provider-specific tool types are
-	// rejected by cross-protocol encoders.
+	// Type is "function" for ordinary tools. A request decoder resolves a
+	// provider-specific wire type before the IR: a namespace becomes its
+	// members and an unrepresentable tool is dropped or rejected, so an
+	// encoder never sees one.
 	Type string `json:"type,omitempty"`
 }
 

@@ -701,6 +701,9 @@ func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error
 			if strings.TrimSpace(t.Name) == "" {
 				return nil, nil, fmt.Errorf("%s: namespace name is required", field)
 			}
+			if !toolNamePartPattern.MatchString(t.Name) {
+				return nil, nil, fmt.Errorf("%s: namespace name %q does not match ^[a-zA-Z0-9_-]+$", field, boundedEcho(t.Name))
+			}
 			for j, member := range t.Tools {
 				memberField := fmt.Sprintf("%s %q member %d", field, t.Name, j)
 				if member.Type != "" && member.Type != "function" {

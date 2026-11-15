@@ -54,6 +54,12 @@ var droppableProviderTools = map[string]bool{
 	"custom": true,
 }
 
+// toolNamePartPattern is the class both halves of a flattened name must already
+// carry. A target's own class check then never sees a semicolon or a space, and
+// every validated name is one byte per character, so the length bound below is
+// the same in bytes and characters.
+var toolNamePartPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
 // toolNameSeparator joins a Responses namespace and its tool name into the flat
 // spelling a target without namespace support receives. Two underscores keep
 // the result inside the Chat function-name class, and the namer below resolves
@@ -66,7 +72,9 @@ const toolNameSeparator = "__"
 const toolNameMax = 64
 
 // toolNameHashLen is the number of hex characters appended to a truncated flat
-// name, sized to make a collision between two distinct pairs negligible.
+// name. Uniqueness comes from the namer's suffix, not from the digest: the
+// digest only keeps the truncated spelling stable and hard to group by, so two
+// long pairs do not all collapse onto one readable prefix.
 const toolNameHashLen = 8
 
 // flatToolName is the preferred flat spelling for one namespace pair. A pair
@@ -172,6 +180,9 @@ func (n *toolNamer) assign(namespace, name string) string {
 		if got == identity {
 			return base
 		}
+		// A colliding base can only come from a pair that flattens to the same
+		// string, so the loop terminates after a handful of iterations; the
+		// suffix keeps the candidate inside the class.
 		for i := 2; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
 			candidate := base
