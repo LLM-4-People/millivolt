@@ -18,6 +18,12 @@ services:
       - data:/data
       - config:/config
     read_only: true
+    # Resource bounds. The memory ceiling is what the runtime's own soft limit
+    # derives from (80% of a detected cgroup ceiling, see go_memory_limit), so
+    # it must stay comfortably above the documented steady state; the process
+    # cap bounds fork/thread amplification. Both are inputs, not server config.
+    mem_limit: ${MILLIVOLT_MEM_LIMIT:-1g}
+    pids_limit: ${MILLIVOLT_PIDS_LIMIT:-512}
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
     cap_drop:

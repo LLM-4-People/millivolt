@@ -389,7 +389,8 @@ docker compose -f compose.dev.yaml down
 The development project keeps its containers and named volumes separate from a
 normal deployment, including when `COMPOSE_PROJECT_NAME` is set outside the
 checkout. Its `MILLIVOLT_DEV_PORT` and `MILLIVOLT_DEV_IMAGE` inputs are defined
-only there. Choose an unused development port if `scripts/dev.sh` is already
+only there, and it shares the deployment Compose's `MILLIVOLT_MEM_LIMIT` and
+`MILLIVOLT_PIDS_LIMIT` bounds. Choose an unused development port if `scripts/dev.sh` is already
 running.
 
 Rerun the same `up --build` command after source changes. The resulting runtime

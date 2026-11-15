@@ -404,11 +404,21 @@ Keep the same Compose project name to reuse its named volumes. The normal file
 names the project `millivolt`; an explicit `-p` overrides it. The deployment
 inputs are `MILLIVOLT_IMAGE` (image reference),
 `MILLIVOLT_PORT` (loopback host port), `MILLIVOLT_OPERATOR_TOKEN` (the
-operator credential, forwarded into the container environment only), and
+operator credential, forwarded into the container environment only),
 `MILLIVOLT_STOP_GRACE_PERIOD` (container
-stop grace). Their defaults live in [compose.yaml](../compose.yaml), not server
+stop grace), `MILLIVOLT_MEM_LIMIT` (container memory ceiling, default `1g`) and
+`MILLIVOLT_PIDS_LIMIT` (process/thread ceiling, default `512`). Their defaults
+live in [compose.yaml](../compose.yaml), not server
 configuration. Supply them consistently through the environment or an ignored
 local `.env` file. `docker compose config` shows the resolved deployment.
+
+The memory ceiling is also the source of the runtime's own soft limit: with
+`go_memory_limit` at its `0B` default, a detected finite cgroup ceiling at or
+above 80 MiB becomes a soft limit at 80% of itself, so the container bound
+reaches the Go runtime instead of leaving it unbounded. Raise the ceiling with
+`history_size`, request buffers, concurrency or observed identity cardinality;
+a ceiling under 80 MiB is ignored by the runtime and leaves only the hard OOM
+kill. `pids_limit` bounds process and thread amplification, not goroutines.
 The image carries a Dockerfile `HEALTHCHECK` that probes the unauthenticated
 `/healthz` through the binary's `-healthcheck` mode, so `docker compose ps`
 reports health without any operator credential.

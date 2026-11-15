@@ -18,6 +18,10 @@ services:
       - data:/data
       - config:/config
     read_only: true
+    # Same resource bounds as the deployment Compose: a runaway development
+    # session must not take the host down either.
+    mem_limit: ${MILLIVOLT_MEM_LIMIT:-1g}
+    pids_limit: ${MILLIVOLT_PIDS_LIMIT:-512}
     tmpfs:
       - /tmp:rw,nosuid,nodev,noexec,size=16m
     cap_drop:
