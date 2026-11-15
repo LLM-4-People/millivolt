@@ -1811,17 +1811,14 @@ document.addEventListener('keydown', event => {
     return;
   }
   // The rail is a real tablist: arrows, Home and End move selection and
-  // focus together. The strip is horizontal, so both axes are accepted; Tab
-  // still reaches the active tab and the pane in order.
+  // focus together. Tab still reaches the active tab and the pane in order.
   //
   // Modified keys stay with the browser: without this guard Alt+Left/Right
   // (Back and Forward) switched console section instead, because preventDefault
   // on a roving handler cancels the browser's own binding.
   if (keyModified(event)) return;
-  const step = (event.key === 'ArrowDown' || event.key === 'ArrowRight') ? 1
-    : (event.key === 'ArrowUp' || event.key === 'ArrowLeft') ? -1 : 0;
   const jump = event.key === 'Home' || event.key === 'End';
-  if (!step && !jump) return;
+  if (!jump && !ARROW_KEYS[event.key]) return;
   const tab = document.activeElement?.closest?.('.oc-rail-item');
   if (!tab || !ocShell()?.contains(tab)) return;
   const tabs = [...ocShell().querySelectorAll('.oc-rail-item')];
@@ -1830,10 +1827,46 @@ document.addEventListener('keydown', event => {
   const at = tabs.indexOf(tab);
   const next = jump
     ? tabs[event.key === 'Home' ? 0 : tabs.length - 1]
-    : tabs[(at + step + tabs.length) % tabs.length];
+    : ocRailNeighbour(tabs, at, event.key);
   ocSelectSection(next.dataset.ocSection);
   ocShell()?.querySelector(`[data-oc-key="rail-${next.dataset.ocSection}"]`)?.focus();
 });
+
+// ARROW_KEYS is the four rail directions. Left/Right move along a row and
+// Up/Down across rows; the strip is one row, so there both axes are the same
+// step.
+const ARROW_KEYS = { ArrowLeft: 1, ArrowRight: 1, ArrowUp: 1, ArrowDown: 1 };
+
+// ocRailColumns is the number of cells the rail paints per visual row. Above
+// 560px it is a single scrolling strip; at 560px and below it is a
+// three-column grid so all six sections stay on screen. A purely horizontal
+// arrow handler left the second row unreachable by keyboard, so the handler
+// follows whichever axis is actually painted.
+function ocRailColumns(rail) {
+  if (!rail || getComputedStyle(rail).display !== 'grid') return 1;
+  const cols = getComputedStyle(rail).gridTemplateColumns.split(' ').filter(Boolean).length;
+  return cols || 1;
+}
+
+// ocRailNeighbour resolves one arrow to the neighbouring cell on the axis the
+// rail is actually laid out on. A strip wraps around; a grid keeps Left/Right
+// inside its row and Up/Down inside its column, so the order Home and End jump
+// through is the only linear reading in that layout.
+function ocRailNeighbour(tabs, at, key) {
+  const cols = ocRailColumns(tabs[at].closest('.oc-rail'));
+  if (cols < 2) {
+    const step = (key === 'ArrowDown' || key === 'ArrowRight') ? 1 : -1;
+    return tabs[(at + step + tabs.length) % tabs.length];
+  }
+  const row = Math.floor(at / cols), col = at % cols;
+  let nextRow = row, nextCol = col;
+  if (key === 'ArrowRight') nextCol = Math.min(col + 1, cols - 1);
+  else if (key === 'ArrowLeft') nextCol = Math.max(col - 1, 0);
+  else if (key === 'ArrowDown') nextRow = row + 1;
+  else nextRow = row - 1;
+  const idx = nextRow * cols + nextCol;
+  return idx >= 0 && idx < tabs.length ? tabs[idx] : tabs[at];
+}
 
 // ocClosePicker closes the one open dimension picker and returns focus to the
 // chip that opened it. It reports whether anything closed, so Escape can fall

@@ -534,6 +534,40 @@ module.exports = async function operatorMenus(H) {
       now = stateNow();
       check('ArrowDown on the last tab wraps to the first section',
         now.section === 'overview' && now.focus === 'overview');
+      // At 560px and below the same tablist paints as a three-column grid
+      // (operator_console.js OC_RAIL_COLUMNS via CSS). The arrows then follow
+      // the rows and columns the operator can see instead of the flat order:
+      // no vertical key could reach the second row before.
+      {
+        const savedCols = w.ocRailColumns;
+        w.ocRailColumns = () => 3;
+        try {
+          press('Home');
+          press('ArrowDown');
+          now = stateNow();
+          check('in the grid, ArrowDown moves one row down the same column',
+            now.section === 'capture' && now.focus === 'capture');
+          press('ArrowDown');
+          now = stateNow();
+          check('in the grid, ArrowDown past the last row stays put',
+            now.section === 'capture' && now.focus === 'capture');
+          press('ArrowUp');
+          press('ArrowRight');
+          now = stateNow();
+          check('in the grid, ArrowRight moves along the row', now.section === 'limits');
+          press('End');
+          press('ArrowLeft');
+          now = stateNow();
+          check('in the grid, ArrowLeft stops at the row start', now.section === 'export');
+          // Leave the section where the flat flow left it, and drop the export
+          // draft so a count fetched on real handlers here cannot pre-empt the
+          // export suite's own stubbed count.
+          press('Home');
+          w.eval('ocDrafts.export = null');
+        } finally {
+          w.ocRailColumns = savedCols;
+        }
+      }
       // A roving handler that claims arrows must leave the browser's own
       // bindings alone. Alt+Left/Right are Back and Forward, and the rail
       // silently used them to switch section because it preventDefaulted a key
@@ -1707,7 +1741,7 @@ module.exports = async function operatorMenus(H) {
       };
       w.openOperatorConsole('export');
       try {
-        check('all history previews the same record count as a filter',
+        check('all history previews the same record count as a filter (' + text('#oc-export-receipt') + '|' + countCalls + ')',
           await settleUntil(() => text('#oc-export-receipt') === '7 records · JSON, gzip', 3000) &&
           countBody && countBody.filter.provider === '' && !d.getElementById('oc-export-download').disabled &&
           countCalls >= 1);
