@@ -480,6 +480,12 @@ func (l *authLimiter) success(ip string) {
 // segment. A single trailing separator is canonical for a subtree route
 // (/metrics/pprof/), so it is preserved rather than stripped.
 func nonCanonicalPath(path string) bool {
+	// A doubled LEADING separator is never canonical: the mux cleans it and
+	// answers a redirect, which is the one extra hop the gate promises never to
+	// hand an unauthenticated caller.
+	if strings.HasPrefix(path, "//") {
+		return true
+	}
 	clean := strings.TrimSuffix(path, "/")
 	if clean == "" {
 		clean = "/"
@@ -576,9 +582,11 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		// inference. The owned namespace is reserved absolutely: refuse it
 		// here, at the single gate, before the plane state or any credential
 		// is consulted. A raw backslash is caught too, because EscapedPath
-		// re-encodes it to %5C. A duplicated slash or dot segment is refused
-		// for the same reason: it is a non-canonical spelling of the same
-		// namespace, and the mux would redirect instead of denying.
+		// re-encodes it to %5C. A duplicated separator (leading or interior)
+		// or dot segment is refused for the same reason: it is a
+		// non-canonical spelling of the same namespace, and the mux would
+		// redirect instead of denying - the redirect an unauthenticated caller
+		// then follows is exactly what the gate exists to remove.
 		if encodedSeparator(r.URL.EscapedPath()) || nonCanonicalPath(decoded) {
 			denyOperator(w, http.StatusNotFound, "reserved operator namespace")
 			return

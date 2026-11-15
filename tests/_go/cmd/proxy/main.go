@@ -1274,3 +1274,64 @@ func TestCrossOriginCheckIsCaseInsensitive(t *testing.T) {
 		})
 	}
 }
+
+// TestDoubleSlashSpellingsAreRefused pins the one gap in the non-canonical
+// refusal: "//" passed the canonical test, so the gate admitted it and the mux
+// then answered a 301, which is exactly the unauthenticated redirect the gate
+// promises not to take. Every duplicated-separator spelling of an owned
+// namespace must be refused 404 instead, while the single trailing separator
+// that IS canonical for a subtree route stays admitted.
+func TestNonCanonicalPathTable(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/", false},
+		{"/index.html", false},
+		{"/metrics/bootstrap", false},
+		{"/metrics/", false},
+		{"/metrics/pprof/", false},
+		{"/admin/config", false},
+		{"//metrics/pprof", true},
+		{"//metrics/pprof/", true},
+		{"//", true},
+		{"//index.html", true},
+		{"/metrics//pprof", true},
+		{"/metrics//", true},
+		{"/./metrics", true},
+		{"/metrics/.", true},
+		{"/metrics/..", true},
+	} {
+		if got := nonCanonicalPath(tc.path); got != tc.want {
+			t.Errorf("nonCanonicalPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestDoubleSlashIsRefusedNotRedirected pins the same rule through the real
+// gate: a doubled leading separator answers the reserved 404 with no Location
+// header, so a caller never has to follow a redirect to learn the namespace
+// exists.
+func TestDoubleSlashIsRefusedNotRedirected(t *testing.T) {
+	const token = "operator-fixture-credential"
+	gate := newOperatorGate(token)
+	_, handler := newOperatorMux(gate, config.Default())
+	for _, tc := range []struct{ path, credential string }{
+		{"//", ""},
+		{"//metrics/bootstrap", token},
+		{"//metrics/bootstrap", ""},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "http://proxy.example"+tc.path, nil)
+		if tc.credential != "" {
+			r.Header.Set("Authorization", "Bearer "+tc.credential)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("GET %s: status = %d, want the reserved 404", tc.path, w.Code)
+		}
+		if location := w.Header().Get("Location"); location != "" {
+			t.Errorf("GET %s: Location = %q, want no redirect", tc.path, location)
+		}
+	}
+}

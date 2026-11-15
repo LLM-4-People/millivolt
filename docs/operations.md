@@ -1031,7 +1031,8 @@ login page on navigation.
 Unregistered `/admin/*`, `/session/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
 answer 404 and are never forwarded upstream. The gate also refuses 404 when an
 owned-namespace path is written with a percent-encoded separator (`%2f` or
-`%5c`, any hex case): the mux cannot route it to the reserved subtree, so it
+`%5c`, any hex case), a duplicated separator (leading or interior) or a dot
+segment: the mux cannot route it to the reserved subtree unchanged, so it
 would otherwise fall through to inference. A double-encoded separator
 (`%252f`) is not a reserved-namespace spelling: it decodes to a literal `%2f`
 inside one segment, matches no reserved route, and is ordinary inference
