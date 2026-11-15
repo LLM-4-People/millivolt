@@ -181,12 +181,12 @@
   .brand:hover h1, .brand:focus-visible h1 { color: var(--accent); }
   .brand:focus-visible { outline: var(--focus-outline); outline-offset: 3px; border-radius: 6px; }
   /* The mark: a probe trace crossing a graduated scale - the millivolt
-     instrument reading the stream. A soft glowing well, no hard gem tile. */
+     instrument reading the stream. A flat well and a hairline plate, no
+     radial backdrop and no glow: the trace itself is the lit part. */
   .brand-logo {
     width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
-    background: radial-gradient(130% 130% at 30% 22%, var(--well-hi) 0%, var(--well-lo) 70%);
+    background: var(--well-hi); border: 1px solid var(--border2);
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent2) 28%, transparent) inset, 0 4px 16px color-mix(in srgb, var(--accent2) 28%, transparent);
   }
   .brand-logo svg { display: block; }
   header h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; font-family: var(--mono); }

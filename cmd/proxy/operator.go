@@ -886,9 +886,8 @@ form {
 .brand { display: flex; align-items: center; gap: 11px; margin: 0 0 14px; }
 .logo {
   width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
-  background: radial-gradient(130% 130% at 30% 22%, #2a2440 0%, #1b1826 70%);
+  background: #2a2440; border: 1px solid #3a342b;
   display: grid; place-items: center;
-  box-shadow: 0 0 0 1px rgba(177,140,255,.28) inset, 0 4px 16px rgba(177,140,255,.28);
 }
 h1 { margin: 0; font: 650 15px/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace; letter-spacing: -.01em; }
 p { color: #97907e; margin: 0 0 16px; font-size: 13px; }
