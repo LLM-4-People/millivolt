@@ -43,6 +43,13 @@ module.exports = async function renderLive(H) {
     })();
     check('the actions column pins to the right edge and the opener is a real target (' + actionProbe + ')',
       actionProbe === 'sticky,0px,sticky,0px,26px,26px');
+    // Every row repeats the same glyph, so the name has to say which request it
+    // opens: the time and the identity make eleven openers distinguishable.
+    const openerLabels = [...d.querySelectorAll('#tbl-requests .log-open')]
+      .map(button => button.getAttribute('aria-label') || '');
+    check('every request opener names its own request by time and identity (' + openerLabels.length + ' openers)',
+      openerLabels.length > 1 && new Set(openerLabels).size === openerLabels.length &&
+      openerLabels.every(label => /^Open request details for \d.* \S+ · \S+ · \S+ \(\w{6}\)$/.test(label)));
     // The pinned cell repaints with its row in the row's other states, and the
     // opener takes the touch target on a coarse pointer or a narrow viewport
     // (jsdom resolves neither media query, so the source order is pinned).

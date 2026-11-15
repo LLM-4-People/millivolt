@@ -240,9 +240,9 @@ module.exports = async function selectionDrawer(H) {
     const sub = () => d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="1"]');
     check('the retry-sub rows carry their attempt index', !!sub() && !sub().hidden);
     const subRow = sub();
-    check('a retry-sub row is announced as a pressable control naming its attempt',
+    check('a retry-sub row is announced as a pressable control naming its attempt, time, status and message',
       !!subRow && subRow.getAttribute('role') === 'button' && subRow.tabIndex === 0 &&
-      subRow.getAttribute('aria-label') === 'open attempt 2 of rate_limit');
+      /^open attempt 2 of rate_limit at \d[^ ]* [AP]M - /.test(subRow.getAttribute('aria-label') || ''));
     check('a retry sub-row spans the full request column count',
       !!subRow && [...subRow.cells].reduce((sum, cell) => sum + cell.colSpan, 0) === w.eval('REQ_COLS'));
     if (subRow) subRow.click();

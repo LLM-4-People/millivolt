@@ -225,6 +225,16 @@ function reqIdentityText(r) {
   return `${clientLabel(r && r.client) || '?'} · ${(r && r.provider) || '?'} · ${canonicalModel(r && r.model) || '-'}`;
 }
 
+// openerLabel names one row's opener. Every row repeats the same glyph, so a
+// bare "Open request details" left eleven identical controls in the table. The
+// time and identity say which request it is; the id tail separates rows that
+// share a second and a client/model (ids share their time prefix, so the tail
+// is the distinguishing end).
+function openerLabel(r) {
+  return `Open request details for ${new Date(r.start).toLocaleTimeString()} ${reqIdentityText(r)}` +
+    ` (${String(r.id || '').slice(-6)})`;
+}
+
 // retryAttempts returns the absorbed retry attempts paired with their index in
 // the record's attempts array. An in-band entry records the upstream status a
 // committed keepalive 200 could not relay; it is health evidence, not a retry,
@@ -263,6 +273,7 @@ function reqRow(r, sepLabel) {
     // (cursor's parked turn reports an estimated prompt), but a plain 0 is
     // "not counted yet", never a real number - show a bare … like every
     // other not-yet-known cell.
+    const openLabel = openerLabel(r);
     return `<tr class="exp-row live-row" data-id="${escapeHtml(r.id)}">
       <td style="color:var(--muted)" title="${escapeHtml(new Date(r.start).toLocaleString())}">${new Date(r.start).toLocaleTimeString()}</td>
       <td>${liveStatusCell(r)}${liveRetry}</td>
@@ -277,7 +288,7 @@ function reqRow(r, sepLabel) {
       <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
       <td>-</td>
       <td>-</td>
-      <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
+      <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="${escapeHtml(openLabel)}">›</button></td>
     </tr>`;
   }
   // Retry badge: show the actual status that was retried (not a hardcoded
@@ -318,7 +329,7 @@ function reqRow(r, sepLabel) {
     <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
     <td style="color:${r.queue_wait_ms ? 'var(--warn)' : 'var(--muted)'}" title="${r.queue_wait_ms ? escapeHtml(fmtDur(r.queue_wait_ms)) : ''}">${r.queue_wait_ms ? fmtDur(r.queue_wait_ms) : '-'}</td>
     <td title="estimated cost ${escapeHtml(costText)}">${costText}</td>
-    <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
+    <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="${escapeHtml(openerLabel(r))}">›</button></td>
   </tr>`;
   // One collapsed sub-row per absorbed attempt (hidden until the badge toggle).
   // Sub-rows are clickable: data-attempt carries the attempt index, so a
@@ -334,7 +345,7 @@ function reqRow(r, sepLabel) {
     // The sub-row is a keyboard stop as well as a click target, so it is
     // announced as the control it is; the row's own cells stay the reading,
     // and the name states the attempt and its outcome.
-    return `<tr class="retry-sub exp-row" role="button" aria-label="open attempt ${pos + 1} of ${escapeHtml(label)}" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" tabindex="0" hidden>
+    return `<tr class="retry-sub exp-row" role="button" aria-label="${escapeHtml(`open attempt ${pos + 1} of ${label} at ${when} - ${a.error_msg || a.error_type || '-'}`)}" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${pos + 1})" tabindex="0" hidden>
       <td>${when}</td>
       <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${pos + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
       <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}"><span class="retry-sub-text">${escapeHtml(a.error_msg || '-')}</span></td>
