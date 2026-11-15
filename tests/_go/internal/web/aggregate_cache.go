@@ -224,23 +224,26 @@ func TestAggregateMemoSnapshotRulesAndMidScanMutation(t *testing.T) {
 			buf := metrics.NewBuffer(8)
 			buf.Record(cacheRecord("first", now.Add(-time.Minute)))
 			api := NewAggAPI(buf, nil, time.Second)
-			calls := 0
-			api.ModelCanon = func() config.ModelCanon {
-				calls++
-				if calls == 2 {
-					buf.Record(cacheRecord("racing", now.Add(-time.Minute)))
-				}
-				return config.ModelCanon{}
-			}
+			api.ModelCanon = func() config.ModelCanon { return config.ModelCanon{} }
+			// The key is taken before the cold fold, so a record committed from
+			// the cold hook is a mid-scan mutation the publish recheck must see.
+			api.testHooks = &aggregateTestHooks{cold: func() {
+				buf.Record(cacheRecord("racing", now.Add(-time.Minute)))
+			}}
+			// The fold already saw the racing record (the hook runs before it),
+			// but the key was taken before, so its payload must not become a
+			// reusable entry under the old revision.
 			if surface == "chart" {
 				p, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
-				if err != nil || cacheChartRequests(p) != 1 || api.chartMemo.entry != nil {
-					t.Fatalf("racing chart was memoized: %+v, %v", p, err)
+				if err != nil || cacheChartRequests(p) != 2 || api.chartMemo.entry != nil {
+					t.Fatalf("racing chart = %d requests, memoized=%v, err=%v",
+						cacheChartRequests(p), api.chartMemo.entry != nil, err)
 				}
 			} else {
 				p, err := api.explorer(t.Context(), "model", nil, "")
-				if err != nil || p.Total != 1 || api.explorerMemo.entry != nil {
-					t.Fatalf("racing explorer was memoized: %+v, %v", p, err)
+				if err != nil || p.Total != 2 || api.explorerMemo.entry != nil {
+					t.Fatalf("racing explorer = %d requests, memoized=%v, err=%v",
+						p.Total, api.explorerMemo.entry != nil, err)
 				}
 			}
 		})
@@ -250,18 +253,20 @@ func TestAggregateMemoSnapshotRulesAndMidScanMutation(t *testing.T) {
 	buf.Record(cacheRecord("a", now))
 	buf.PublishLive("begin", cacheRecord("pending", now))
 	api := NewAggAPI(buf, nil, time.Second)
-	calls := 0
+	lower := false
 	api.ModelCanon = func() config.ModelCanon {
-		calls++
-		if calls == 1 {
+		if !lower {
 			return config.ModelCanon{}
 		}
 		return config.ModelCanon{Rules: []config.ModelRule{{Mode: config.ModelRuleLower}}}
 	}
 	e, err := api.explorer(t.Context(), "model", nil, "")
-	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "MODEL-A" || e.Total != 2 || api.explorerMemo.entry != nil {
+	// The fold and its key share one rules snapshot, so the result is the
+	// pre-change canonicalization and may be memoized under that key.
+	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "MODEL-A" || e.Total != 2 || api.explorerMemo.entry == nil {
 		t.Fatalf("one fold mixed canonicalization snapshots: %+v, %v", e, err)
 	}
+	lower = true
 	e, err = api.explorer(t.Context(), "model", nil, "")
 	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "model-a" || api.explorerMemo.entry == nil {
 		t.Fatalf("new canonicalization was not applied: %+v, %v", e, err)

@@ -164,9 +164,12 @@ func (a *AggAPI) aggregateKey(ctx context.Context, params, canon string, include
 }
 
 // A mutation during the scan is ordinary snapshot skew, but its result must
-// not become a reusable entry under either the old or the new revision.
-func (a *AggAPI) aggregateUnchanged(ctx context.Context, key aggregateKey, includePending bool) bool {
-	now, ok := a.aggregateKey(ctx, key.params, modelCanonIdentity(a.modelCanon()), includePending)
+// not become a reusable entry under either the old or the new revision. The
+// caller passes the compiled identity its fold already used, so the recheck
+// costs no second config read and no rule-set marshal: the key's canon already
+// pins the rules for every later request.
+func (a *AggAPI) aggregateUnchanged(ctx context.Context, key aggregateKey, identity string, includePending bool) bool {
+	now, ok := a.aggregateKey(ctx, key.params, identity, includePending)
 	return ok && now == key
 }
 
@@ -308,7 +311,7 @@ func (a *AggAPI) chartCold(ctx context.Context, mcz *modelCanonizer, key aggrega
 		// An All minimum clamped to now despite matching future-dated rows
 		// may change as the clock catches them. Such unusual windows are not
 		// memoized.
-		return a.storeChartResult(ctx, key, cacheable, rawFrom < now || empty,
+		return a.storeChartResult(ctx, mcz, key, cacheable, rawFrom < now || empty,
 			chartMemoPayload{payload: p, rawFrom: rawFrom, empty: empty})
 	}
 	rawFrom := now - int64(winMin)*60000
@@ -326,7 +329,7 @@ func (a *AggAPI) chartCold(ctx context.Context, mcz *modelCanonizer, key aggrega
 		return chartPayload{}, err
 	}
 	p := fold.payload(now)
-	return a.storeChartResult(ctx, key, cacheable, true, chartMemoPayload{payload: p, rawFrom: rawFrom, empty: chartEmpty(p)})
+	return a.storeChartResult(ctx, mcz, key, cacheable, true, chartMemoPayload{payload: p, rawFrom: rawFrom, empty: chartEmpty(p)})
 }
 
 // chartRangeCold runs one uncached explicit-range fold. Geometry follows the
@@ -343,7 +346,7 @@ func (a *AggAPI) chartRangeCold(ctx context.Context, mcz *modelCanonizer, key ag
 	if err := a.streamWindow(ctx, from, mcz, func(p *projectionData) { fold.prepare(p, mcz) }, fold.fold, freeze); err != nil {
 		return chartPayload{}, err
 	}
-	return a.storeChartResult(ctx, key, cacheable, true, chartMemoPayload{payload: fold.payload(now)})
+	return a.storeChartResult(ctx, mcz, key, cacheable, true, chartMemoPayload{payload: fold.payload(now)})
 }
 
 // storeChartResult publishes a completed chart only when the data revision is
@@ -351,8 +354,8 @@ func (a *AggAPI) chartRangeCold(ctx context.Context, mcz *modelCanonizer, key ag
 // become; publish is the caller's stability verdict (an All window clamped to
 // a future minimum moves as the clock catches the future rows and is never
 // retained). The caller computes the payload outside the projection lease.
-func (a *AggAPI) storeChartResult(ctx context.Context, key aggregateKey, cacheable, publish bool, memo chartMemoPayload) (chartPayload, error) {
-	if cacheable && publish && a.aggregateUnchanged(ctx, key, false) {
+func (a *AggAPI) storeChartResult(ctx context.Context, mcz *modelCanonizer, key aggregateKey, cacheable, publish bool, memo chartMemoPayload) (chartPayload, error) {
+	if cacheable && publish && a.aggregateUnchanged(ctx, key, mcz.identity, false) {
 		a.chartMemo.put(key, memo)
 	}
 	if err := ctx.Err(); err != nil {
@@ -419,7 +422,7 @@ func (a *AggAPI) explorerCold(ctx context.Context, mcz *modelCanonizer, key aggr
 	}); err != nil {
 		return explorerPayload{}, err
 	}
-	if cacheable && a.aggregateUnchanged(ctx, key, true) {
+	if cacheable && a.aggregateUnchanged(ctx, key, mcz.identity, true) {
 		a.explorerMemo.put(key, p)
 	}
 	if err := ctx.Err(); err != nil {

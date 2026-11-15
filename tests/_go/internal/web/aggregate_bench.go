@@ -546,3 +546,39 @@ func BenchmarkAggregateUncached(b *testing.B) {
 		}
 	})
 }
+
+var benchmarkAggregateUnchanged bool
+
+// BenchmarkAggregateUnchanged measures the publish-time stability recheck at the
+// 64-rule maximum. The recheck must not re-read the config or re-marshal the
+// rule set: the caller hands it the identity its fold already used, so only the
+// revisions (and, with a store, the data version) are compared.
+func BenchmarkAggregateUnchanged(b *testing.B) {
+	rules := make([]config.ModelRule, 64)
+	for i := range rules {
+		rules[i] = config.ModelRule{Mode: config.ModelRuleLower}
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), nil, time.Second)
+	api.ModelCanon = func() config.ModelCanon { return config.ModelCanon{Rules: rules} }
+	mcz := api.canonizer()
+	ctx := b.Context()
+	key, ok := api.aggregateKey(ctx, "view=15", mcz.identity, false)
+	if !ok {
+		b.Fatal("uncacheable key")
+	}
+	b.Run("identity_marshal", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_ = modelCanonIdentity(api.modelCanon())
+		}
+	})
+	b.Run("unchanged", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			benchmarkAggregateUnchanged = api.aggregateUnchanged(ctx, key, mcz.identity, false)
+		}
+		if !benchmarkAggregateUnchanged {
+			b.Fatal("an unchanged revision reported a change")
+		}
+	})
+}
