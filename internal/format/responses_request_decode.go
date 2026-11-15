@@ -714,6 +714,16 @@ func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error
 				if err != nil {
 					return nil, nil, err
 				}
+				// A namespace description carries the server's instructions and
+				// has no field of its own on a flat function, so it leads the
+				// member description instead of being lost.
+				if group := strings.TrimSpace(t.Description); group != "" {
+					if memberText := strings.TrimSpace(tool.Description); memberText != "" {
+						tool.Description = group + "\n\n" + memberText
+					} else {
+						tool.Description = group
+					}
+				}
 				warns = append(warns, w...)
 				out = append(out, tool)
 			}

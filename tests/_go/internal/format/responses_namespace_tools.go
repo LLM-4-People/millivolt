@@ -57,6 +57,9 @@ func TestResponsesNamespaceToolsFlatten(t *testing.T) {
 	if wire != "mcp__context7__query_docs" {
 		t.Fatalf("flat wire name = %q", wire)
 	}
+	if !strings.Contains(member.Description, "docs server") || !strings.Contains(member.Description, "query") {
+		t.Fatalf("group and member descriptions were not folded: %q", member.Description)
+	}
 	if !openAIIdentifierPattern.MatchString(wire) {
 		t.Fatalf("flat wire name leaves the Chat name class: %q", wire)
 	}
