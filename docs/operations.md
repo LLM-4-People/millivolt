@@ -766,10 +766,13 @@ rejections accumulate instead of overwriting the previous one. The
 queued before the restore; it is created before the successor replaces the slot,
 so the pending queue is never empty, and a crash on either side leaves a
 recoverable snapshot instead of an orphan that the 24 hour staging sweep
-eventually deletes. When the stage fails before the successor replaces the slot
-the restore drops the copy again, and when a boot rejects the successor the
-preserved copy is renamed back onto the slot and admitted once, so the queued
-snapshot is neither hidden nor swept. A combined config and database merge
+eventually deletes. A volume without hard links (exFAT, vfat, and several FUSE
+or SMB mounts) rejects `link(2)`; there the slot is moved aside instead, still
+without copying the snapshot bytes, and a crash leaves only the preserved
+sibling, which boot re-admits. When the stage fails before the successor
+replaces the slot the restore drops the copy again, and when a boot finds a
+rejected successor or an empty slot it renames the preserved copy back onto the
+slot and admits once, so the queued snapshot is neither hidden nor swept. A combined config and database merge
 answers 400 when the restored config's effective `db_path` differs from the
 running store's file, because the rows would be written to a database the next
 boot does not open; merge the database separately or use database replace.

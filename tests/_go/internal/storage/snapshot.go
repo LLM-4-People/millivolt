@@ -316,6 +316,33 @@ func TestAdmitPendingSnapshotReadmitsThePreservedSibling(t *testing.T) {
 	}
 }
 
+// TestAdmitPendingSnapshotReadmitsASiblingWithAnEmptySlot is the preserve
+// fallback's crash window: when link(2) is unavailable the slot is moved aside,
+// so a crash before the successor publishes leaves the sibling and no slot. The
+// sibling is still the queue entry and is re-admitted.
+func TestAdmitPendingSnapshotReadmitsASiblingWithAnEmptySlot(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	sibling := filepath.Join(dir, ".millivolt-restore-pending-queued")
+	if err := os.WriteFile(sibling, packedSnapshot(t, "queued"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := admitPendingSnapshot(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission == nil {
+		t.Fatal("the preserved sibling beside an empty slot was never re-admitted")
+	}
+	defer admission.rollback()
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "queued" {
+		t.Fatalf("installed ids = %v, want the preserved snapshot's [queued]", ids)
+	}
+	if _, err := os.Stat(sibling); !os.IsNotExist(err) {
+		t.Fatal("the re-admitted sibling still exists")
+	}
+}
+
 // TestOpenRecoversInterruptedPendingSnapshot pins the boot fence: a .previous
 // sibling means an admission never committed, so the previous database is
 // restored and the staged incoming file is quarantined with its own suffix.

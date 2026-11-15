@@ -852,6 +852,11 @@ type restorePendingGuard struct {
 	backup  string
 }
 
+// restorePendingLinkHook is a test seam for os.Link: production is nil, so the
+// hard-link preserve owner runs unchanged. A test substitutes a failing link to
+// exercise volumes without hard links.
+var restorePendingLinkHook func(oldname, newname string) error
+
 // captureRestorePending preserves a pre-existing pending snapshot so a failed
 // config phase can restore it byte-for-byte instead of deleting it, and so a
 // crash cannot lose it either. The preserved copy is a hard link made BEFORE
@@ -893,9 +898,24 @@ func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 	// name points at the same inode, so the stage rename below is the only
 	// transition and a crash on either side still leaves a queued snapshot.
 	// The snapshot-sized bytes are never copied.
-	if err := os.Link(pending, backup); err != nil {
-		_ = os.Remove(backup)
-		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+	//
+	// A volume without hard links (exFAT/vfat, several FUSE and SMB mounts)
+	// rejects link(2). Fall back to moving the slot aside, which duplicates no
+	// bytes: the queue is briefly empty until the successor publishes, and a
+	// crash there leaves the preserved sibling for the boot re-admission.
+	link := os.Link
+	if restorePendingLinkHook != nil {
+		link = restorePendingLinkHook
+	}
+	if err := link(pending, backup); err != nil {
+		if errors.Is(err, fs.ErrExist) || errors.Is(err, fs.ErrNotExist) {
+			_ = os.Remove(backup)
+			return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+		}
+		if rerr := os.Rename(pending, backup); rerr != nil {
+			_ = os.Remove(backup)
+			return nil, fmt.Errorf("preserve pending snapshot: %w", errors.Join(err, rerr))
+		}
 	}
 	g.backup = backup
 	return g, nil

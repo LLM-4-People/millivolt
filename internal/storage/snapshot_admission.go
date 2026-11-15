@@ -35,7 +35,7 @@ type snapshotAdmission struct {
 // renamed back onto the slot and admitted once instead of aging out under the
 // staging sweep.
 func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
-	a, rejected, err := admitPendingSnapshotOnce(path)
+	a, err := admitPendingSnapshotOnce(path)
 	if err != nil {
 		return nil, err
 	}
@@ -47,9 +47,15 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		removePreservedPendingSiblings(path)
 		return a, nil
 	}
-	if !rejected {
+	if _, err := os.Lstat(path + pendingSnapshotSuffix); err == nil {
+		// A slot that survived the checks needs nothing else.
 		return nil, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
+	// The slot is empty. Either its successor was just rejected, or a preserve
+	// fallback moved the queue entry aside and a crash followed. A preserved
+	// sibling is the queue entry in both shapes.
 	sibling, err := newestPreservedPendingSibling(path)
 	if err != nil || sibling == "" {
 		return nil, err
@@ -57,18 +63,17 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 	if err := os.Rename(sibling, path+pendingSnapshotSuffix); err != nil {
 		return nil, fmt.Errorf("re-admit preserved pending snapshot: %w", err)
 	}
-	a, _, err = admitPendingSnapshotOnce(path)
-	return a, err
+	return admitPendingSnapshotOnce(path)
 }
 
-// admitPendingSnapshotOnce runs the admission checks and install. rejected
-// reports a quarantined slot with nothing installed, which is the only outcome
-// that may consume a preserved sibling.
-func admitPendingSnapshotOnce(path string) (a *snapshotAdmission, rejected bool, err error) {
+// admitPendingSnapshotOnce runs one admission pass: the checks, the quarantine
+// of a rejected slot, and the install of an accepted one. A nil admission
+// without an error means the slot is empty.
+func admitPendingSnapshotOnce(path string) (a *snapshotAdmission, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), maintenanceTimeout)
 	defer cancel()
 	if err := recoverInterruptedSnapshot(path); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	incoming := path + pendingSnapshotSuffix
 	// The pending slot is one private file, not a path to follow. Check its
@@ -77,13 +82,13 @@ func admitPendingSnapshotOnce(path string) (a *snapshotAdmission, rejected bool,
 	// without touching the live database or the symlink target.
 	if err := checkPendingSnapshotFile(incoming); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, false, nil
+			return nil, nil
 		}
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
-			return nil, false, err
+			return nil, err
 		}
 		rejectPendingSnapshot(incoming, err)
-		return nil, true, nil
+		return nil, nil
 	}
 	// A packed pending snapshot is a self-contained file. Any sidecar beside
 	// it is crash debris from an interrupted preflight, not part of the
@@ -91,30 +96,30 @@ func admitPendingSnapshotOnce(path string) (a *snapshotAdmission, rejected bool,
 	// integrity open or, worse, replay pages from an unrelated snapshot when
 	// opened read-write. Remove the set before inspecting the main file.
 	if err := removeSnapshotSidecars(incoming); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if err := backup.CheckDatabaseFile(incoming); err != nil {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			return nil, nil
 		}
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
-			return nil, false, err
+			return nil, err
 		}
 		rejectPendingSnapshot(incoming, err)
-		return nil, true, nil
+		return nil, nil
 	}
 	if err := preflightPendingSnapshot(ctx, incoming); err != nil {
 		// An incoming file that cannot be initialized in place is no more
 		// usable than an integrity-invalid one: preserve its bytes as
 		// quarantine and keep serving the live database.
 		rejectPendingSnapshot(incoming, err)
-		return nil, true, nil
+		return nil, nil
 	}
 	a = &snapshotAdmission{path: path}
 	if err := a.install(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return a, false, nil
+	return a, nil
 }
 
 // preservedPendingSiblings lists the crash-preserved pending snapshots beside
@@ -125,6 +130,11 @@ func preservedPendingSiblings(path string) ([]string, error) {
 	dir := filepath.Dir(path)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// No database directory yet: no sibling can exist, and Open owns the
+			// missing-directory diagnostic.
+			return nil, nil
+		}
 		return nil, err
 	}
 	type candidate struct {

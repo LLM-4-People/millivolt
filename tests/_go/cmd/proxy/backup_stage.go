@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
@@ -157,6 +158,39 @@ func TestRestorePendingRollbackRemovesThePreservedSibling(t *testing.T) {
 	}
 	if guard.backup != "" {
 		t.Fatalf("guard still names %q after rollback", guard.backup)
+	}
+}
+
+// TestCaptureRestorePendingFallsBackWithoutHardLinks pins the removable-volume
+// case: link(2) is unavailable on exFAT/vfat and on several FUSE and SMB
+// mounts. A replace restore must still stage, so an unavailable link falls back
+// to moving the slot aside, which the guard's rollback and the boot
+// re-admission both handle.
+func TestCaptureRestorePendingFallsBackWithoutHardLinks(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	pending := storage.PendingSnapshotPath(dbPath)
+	original := []byte("queued snapshot")
+	if err := os.WriteFile(pending, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := restorePendingLinkHook
+	restorePendingLinkHook = func(string, string) error { return syscall.EPERM }
+	defer func() { restorePendingLinkHook = previous }()
+
+	guard, err := captureRestorePending(dbPath)
+	if err != nil {
+		t.Fatalf("restore refused on a volume without hard links: %v", err)
+	}
+	if _, err := os.Lstat(pending); !os.IsNotExist(err) {
+		t.Fatal("the fallback must move the slot aside, not copy it")
+	}
+	if err := guard.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	assertNoPreservedPending(t, dir)
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rollback left %q, %v; want the queued bytes", got, err)
 	}
 }
 
