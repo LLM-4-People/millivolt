@@ -254,7 +254,7 @@ func (h Health) WritePrometheus(w io.Writer) {
 	} else {
 		fmt.Fprintf(w, "llm_proxy_storage_last_flush_timestamp_seconds %d\n", h.LastFlush.Unix())
 	}
-	fmt.Fprintf(w, "# HELP llm_proxy_storage_wedged The write queue is non-empty with no successful flush inside the wedge window.\n")
+	fmt.Fprintf(w, "# HELP llm_proxy_storage_wedged The durable queue holds work older than the wedge window: the oldest record, or the last successful flush, passed it.\n")
 	fmt.Fprintf(w, "# TYPE llm_proxy_storage_wedged gauge\n")
 	fmt.Fprintf(w, "llm_proxy_storage_wedged %d\n", boolGauge(h.Wedged))
 }
