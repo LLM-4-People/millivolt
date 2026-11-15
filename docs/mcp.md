@@ -148,8 +148,11 @@ they never leave the process and the gate re-validates the forwarded Bearer.
 
 `set_throttle` takes `provider` and any of `concurrency`,
 `requests`/`request_window`, `tokens`/`token_window`, `anti_burst` and
-`ramp_duration`; omitted dimensions keep their value, and `clear: true` drops
-the whole policy. `clear` cannot be combined with a dimension. The proxy owns
+`ramp_duration`; omitted dimensions keep their value. A count needs its own
+window only when the policy stores none for that dimension, a count of `0`
+clears the dimension with its window, and a window without a count is refused
+unless a count is already stored. `clear: true` drops the whole policy and
+cannot be combined with a dimension. The proxy owns
 the duration grammar and band and refuses an explicit on-ramp without an
 active limit. This tool addresses one provider and has no selector or schedule
 fields. Scoped selectors and recurring schedules are available through the HTTP
