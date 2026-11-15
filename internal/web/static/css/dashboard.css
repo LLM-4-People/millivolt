@@ -656,7 +656,9 @@
     .theme-mode-opt, .theme-ft .btn { min-height: var(--tap); }
   }
   @media (pointer: coarse) and (min-width: 801px) {
-    #btn-theme { min-width: var(--tap); width: var(--tap); height: var(--tap); }
+    /* The header triggers that stay in the rail keep the touch target at any
+       width, not only inside the narrow-viewport flyout. */
+    #btn-theme, #btn-settings { min-width: var(--tap); width: var(--tap); height: var(--tap); }
   }
   @media (max-height: 760px) {
     /* The comparator and hint would push the palette or footer out of a short
