@@ -467,7 +467,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                 await frames();
                 const shortCols = measure();
                 const shortIdentity = readIdentity();
-                const shortCell = body.querySelector('tr.exp-row td:nth-child(2)');
+                const shortCell = body.querySelector('tr.exp-row td:nth-child(3)');
                 const shortTitle = shortCell ? shortCell.getAttribute('title') : '';
                 const modelLabel = body.querySelector('.req-model .ent-lb');
                 const modelLabelTitle = modelLabel ? modelLabel.getAttribute('title') : '';
@@ -487,7 +487,7 @@ async def chart_checks(page, screenshot, results, layout_checks):
                     offset: modelOutline.outlineOffset,
                 } : {};
                 if (modelLink) modelLink.blur();
-                const shortFloor = REQ_FLOORS[1];
+                const shortFloor = REQ_FLOORS[2];
                 // A wider identity must grow the column through the
                 // same probe the live path uses.
                 const longHtml = reqRow(longRec, null);
@@ -495,11 +495,11 @@ async def chart_checks(page, screenshot, results, layout_checks):
                 await frames();
                 const longCols = measure();
                 const longIdentity = readIdentity();
-                const longCell = body.querySelector('tr.exp-row td:nth-child(2)');
+                const longCell = body.querySelector('tr.exp-row td:nth-child(3)');
                 const longTitle = longCell ? longCell.getAttribute('title') : '';
                 reqMeasureRows([longHtml]);
                 applyReqFloors(box);
-                const longFloor = REQ_FLOORS[1];
+                const longFloor = REQ_FLOORS[2];
                 // Back to the short row: the learned floor must
                 // hold the wider column, never shrink it.
                 body.innerHTML = shortHtml;
@@ -513,14 +513,16 @@ async def chart_checks(page, screenshot, results, layout_checks):
                 result = {
                     reqCols: REQ_COLS,
                     headerColumns: shortCols.length,
+                    identityHeader: table.querySelectorAll('thead th')[2]
+                        ? table.querySelectorAll('thead th')[2].textContent.trim() : '',
                     bodyColumns: body.querySelector('tr.exp-row')
                         ? body.querySelector('tr.exp-row').cells.length : 0,
                     layout: getComputedStyle(table).tableLayout,
                     colgroups: table.querySelectorAll('colgroup').length,
                     floorCount: shortCols.filter(col => col.minWidth > 0).length,
-                    shortIdentityWidth: shortCols[1].width,
-                    longIdentityWidth: longCols[1].width,
-                    heldIdentityWidth: heldCols[1].width,
+                    shortIdentityWidth: shortCols[2].width,
+                    longIdentityWidth: longCols[2].width,
+                    heldIdentityWidth: heldCols[2].width,
                     shortFloor, longFloor,
                     shortIdentity, longIdentity, heldIdentity,
                     shortTitle, longTitle,
@@ -581,6 +583,9 @@ async def chart_checks(page, screenshot, results, layout_checks):
         }""")
         require(state['reqCols'] == 14 and state['headerColumns'] == 14 and
                 state['bodyColumns'] == 14, state)
+        # The identity cell and its floor are read by index, so the column
+        # vocabulary must confirm where that index lands.
+        require(state['identityHeader'] == 'client · provider · model', state)
         require(state['layout'] == 'auto' and state['colgroups'] == 0, state)
         require(state['floorCount'] == 14, state)
         require(state['longIdentityWidth'] > state['shortIdentityWidth'] + 1, state)

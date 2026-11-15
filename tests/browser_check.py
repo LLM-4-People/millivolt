@@ -164,6 +164,7 @@ async def check(base, screenshot):
                     const table = box.querySelector('table');
                     return {
                         clientWidth: box.clientWidth,
+                        offsetWidth: box.offsetWidth,
                         scrollWidth: box.scrollWidth,
                         tableWidth: table ? Math.round(table.getBoundingClientRect().width) : 0,
                         layout: table ? getComputedStyle(table).tableLayout : '',

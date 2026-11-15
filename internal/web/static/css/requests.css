@@ -118,6 +118,10 @@
   #tbl-requests th:last-child,
   #tbl-requests tr.exp-row:not(.retry-sub) td:last-child {
     position: sticky; right: 0; z-index: 1;
+    /* The opener cell is a fixed square, so its padding only needs to separate
+       the edge; 4px keeps the pinned column from pushing a full desktop table
+       into a horizontal scroll. */
+    padding-inline: 4px;
     background: var(--panel);
     box-shadow: inset 1px 0 0 var(--border);
   }
