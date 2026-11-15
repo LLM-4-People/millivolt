@@ -126,7 +126,13 @@
     transition-duration: .16s; transition-timing-function: ease;
   }
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    /* The near-zero duration only settles an animation that runs once; an
+       infinite one would keep restarting, so the iteration count is pinned
+       too and the reduced frame is the animation's end state. */
+    *, *::before, *::after {
+      transition-duration: .01ms !important; animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+    }
   }
   body {
     margin: 0; background:
