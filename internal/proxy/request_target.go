@@ -15,18 +15,6 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// joinUpstreamURL is the string form of upstreamURL's path join for callers
-// that do not need query handling. It keeps the documented convenience: a base
-// ending in the request path's first segment does not duplicate it. An
-// unparsable base falls back to plain concatenation, as before.
-func joinUpstreamURL(baseURL, path string) string {
-	u, err := upstreamURL(baseURL, path, "", "")
-	if err != nil {
-		return strings.TrimRight(baseURL, "/") + path
-	}
-	return u.String()
-}
-
 // upstreamURL builds the request target structurally. The path is already an
 // escaped path (client request or validated X-Proxy-Path) and is never
 // re-parsed as part of a concatenated URL, so an encoded ? or # cannot become

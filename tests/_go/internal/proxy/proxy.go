@@ -17,7 +17,10 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-func TestJoinUpstreamURL(t *testing.T) {
+// TestUpstreamURL pins the base-join contract of the one target builder: the
+// request path never duplicates a base path's last segment, and exactly one
+// leading separator is consumed.
+func TestUpstreamURL(t *testing.T) {
 	cases := []struct{ base, path, want string }{
 		// The footgun: base already ends in /v1 and the request path starts with
 		// /v1 → must not duplicate.
@@ -35,8 +38,12 @@ func TestJoinUpstreamURL(t *testing.T) {
 		{"https://host.com", "/", "https://host.com/"},
 	}
 	for _, c := range cases {
-		if got := joinUpstreamURL(c.base, c.path); got != c.want {
-			t.Errorf("joinUpstreamURL(%q, %q) = %q, want %q", c.base, c.path, got, c.want)
+		u, err := upstreamURL(c.base, c.path, "", "")
+		if err != nil {
+			t.Fatalf("upstreamURL(%q, %q): %v", c.base, c.path, err)
+		}
+		if got := u.String(); got != c.want {
+			t.Errorf("upstreamURL(%q, %q) = %q, want %q", c.base, c.path, got, c.want)
 		}
 	}
 }
