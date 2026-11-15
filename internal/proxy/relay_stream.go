@@ -895,10 +895,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 // is already one complete JSON document. separateBefore runs for every data
 // line, so re-validating the whole head each time is quadratic in the line
 // count; the scan instead costs linear time over each new payload and keeps a
-// constant-size state: structural depth, open string, and escape (a raw quote
-// inside a string value must not look like a document boundary). It replaces
-// the earlier json.Valid call, whose verdict it reaches for a closed document
-// and for a bare scalar, without its per-line rescan.
+// constant-size state: structural depth, open string, escape (a raw quote
+// inside a string value must not look like a document boundary) and the scalar
+// recognizer. It replaces the earlier json.Valid call, whose verdict it reaches
+// for a closed document and for a bare scalar, without its per-line rescan.
 type headScan struct {
 	depth    int
 	inString bool
@@ -912,6 +912,154 @@ type headScan struct {
 	// ',' or ':' is still a member fragment, not a document, however balanced
 	// its brackets are.
 	last byte
+	// scalar recognizes the only two JSON value families that carry no
+	// bracket or quote: the true/false/null literals and numbers. A starter
+	// byte alone is not enough ("the cat" and "3 apples" begin like a
+	// literal and a number), so the family is matched byte by byte and any
+	// mismatch parks the head as non-JSON for good.
+	scalar scalarScan
+}
+
+// numState tracks how far the bytes after a number's starter still match the
+// JSON number grammar. Only numZero, numInt, numFrac and numExpDigits may end
+// the head; every other state is a prefix.
+type numState uint8
+
+const (
+	numNone      numState = iota
+	numSign               // '-' seen alone
+	numZero               // the integer part is exactly '0'
+	numInt                // nonzero integer digits
+	numDot                // '.' after the integer part
+	numFrac               // fraction digits
+	numExp                // 'e' or 'E'
+	numExpSign            // exponent sign
+	numExpDigits          // exponent digits
+	numBad                // the bytes left the grammar
+)
+
+// scalarScan is the incremental recognizer for a scalar head. A JSON scalar has
+// no interior whitespace: a space after an accepted prefix seals it, so any
+// later significant byte makes the head prose, while trailing whitespace keeps
+// the verdict.
+type scalarScan struct {
+	// kind is the family the head started as; scalarNone for other starters.
+	kind scalarKind
+	// lit is the unmatched remainder of the expected literal, empty once the
+	// literal is whole.
+	lit string
+	// num is the number grammar state; numNone for a literal head.
+	num numState
+	// sealed marks whitespace seen inside the scalar.
+	sealed bool
+	// bad marks a byte that left every accepted form.
+	bad bool
+}
+
+type scalarKind uint8
+
+const (
+	scalarNone scalarKind = iota
+	scalarLiteral
+	scalarNumber
+)
+
+// on reports whether the head is a literal or number, so the other structural
+// states must stay untouched.
+func (s *scalarScan) on() bool { return s.kind != scalarNone }
+
+// feed consumes one significant byte of the scalar.
+func (s *scalarScan) feed(c byte) {
+	if s.bad {
+		return
+	}
+	if s.sealed {
+		s.bad = true
+		return
+	}
+	if s.lit != "" {
+		if c != s.lit[0] {
+			s.bad = true
+			return
+		}
+		s.lit = s.lit[1:]
+		return
+	}
+	if s.num != numNone {
+		s.num = s.num.step(c)
+		return
+	}
+	s.bad = true
+}
+
+// step advances the number grammar; an unlisted byte leaves it for good.
+func (n numState) step(c byte) numState {
+	digit := c >= '0' && c <= '9'
+	switch n {
+	case numSign:
+		if c == '0' {
+			return numZero
+		}
+		if digit {
+			return numInt
+		}
+	case numZero:
+		switch c {
+		case '.':
+			return numDot
+		case 'e', 'E':
+			return numExp
+		}
+	case numInt:
+		if digit {
+			return numInt
+		}
+		switch c {
+		case '.':
+			return numDot
+		case 'e', 'E':
+			return numExp
+		}
+	case numDot:
+		if digit {
+			return numFrac
+		}
+	case numFrac:
+		if digit {
+			return numFrac
+		}
+		if c == 'e' || c == 'E' {
+			return numExp
+		}
+	case numExp:
+		if digit {
+			return numExpDigits
+		}
+		if c == '+' || c == '-' {
+			return numExpSign
+		}
+	case numExpSign:
+		if digit {
+			return numExpDigits
+		}
+	case numExpDigits:
+		if digit {
+			return numExpDigits
+		}
+	}
+	return numBad
+}
+
+// accepting reports whether the scalar seen so far is one whole value: a
+// complete literal, or a number in a state that may end.
+func (s *scalarScan) accepting() bool {
+	if s.bad {
+		return false
+	}
+	if s.kind == scalarLiteral {
+		return s.lit == ""
+	}
+	return s.num == numZero || s.num == numInt || s.num == numFrac || s.num == numExpDigits
 }
 
 // add feeds the bytes of one complete data payload.
@@ -932,24 +1080,48 @@ func (h *headScan) add(b []byte) {
 			h.last = c
 			continue
 		}
-		if h.starter == 0 && !isJSONSpace(c) {
-			h.starter = c
-		}
-		switch c {
-		case '"':
-			h.inString = true
-			h.content = true
-		case '{', '[':
-			h.depth++
-			h.content = true
-		case '}', ']':
-			if h.depth > 0 {
-				h.depth--
+		if isJSONSpace(c) {
+			if h.scalar.on() {
+				h.scalar.sealed = true
 			}
-		case ' ', '\t', '\r', '\n':
 			continue
-		default:
+		}
+		if h.starter == 0 {
+			h.starter = c
 			h.content = true
+			switch c {
+			case '"':
+				h.inString = true
+			case '{', '[':
+				h.depth++
+			case 't':
+				h.scalar.kind, h.scalar.lit = scalarLiteral, "rue"
+			case 'f':
+				h.scalar.kind, h.scalar.lit = scalarLiteral, "alse"
+			case 'n':
+				h.scalar.kind, h.scalar.lit = scalarLiteral, "ull"
+			case '0':
+				h.scalar.kind, h.scalar.num = scalarNumber, numZero
+			case '-':
+				h.scalar.kind, h.scalar.num = scalarNumber, numSign
+			default:
+				if c >= '1' && c <= '9' {
+					h.scalar.kind, h.scalar.num = scalarNumber, numInt
+				}
+			}
+		} else if h.scalar.on() {
+			h.scalar.feed(c)
+		} else {
+			switch c {
+			case '"':
+				h.inString = true
+			case '{', '[':
+				h.depth++
+			case '}', ']':
+				if h.depth > 0 {
+					h.depth--
+				}
+			}
 		}
 		h.last = c
 	}
@@ -975,10 +1147,18 @@ func jsonStarter(b byte) bool {
 // and a final significant byte that ends a value rather than a member
 // separator. A mismatched bracket pair still counts as closed, which
 // over-separates rather than joining two documents into one payload a parser
-// would drop. A plain-text head (any other starter byte) answers false, the
-// same verdict json.Valid reaches, so its lines stay one event.
+// would drop. A scalar head must be the whole literal or number it started as,
+// so "the cat" and "3 apples" stay open; a plain-text head (any other starter
+// byte) answers false. Both are the same verdict json.Valid reaches, so their
+// lines stay one event.
 func (h *headScan) complete() bool {
-	return h.content && jsonStarter(h.starter) && h.depth == 0 && !h.inString && h.last != ',' && h.last != ':'
+	if h.starter == 0 || !jsonStarter(h.starter) || !h.content || h.depth != 0 || h.inString {
+		return false
+	}
+	if h.scalar.on() {
+		return h.scalar.accepting()
+	}
+	return h.last != ',' && h.last != ':'
 }
 
 // emitDegenerateResponses replaces a withheld Responses terminal region with a
