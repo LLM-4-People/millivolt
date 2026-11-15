@@ -568,7 +568,7 @@ function renderDrawer() {
     const status = a.status_code ? String(a.status_code) : 'transport';
     const ident = ` · attempt ${retryOrdinal(r, drawerAttempt)} of ${retryAttempts(r).length} · ${status}`
       + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
-    $('drawer-title').innerHTML = `<button type="button" class="btn drawer-back" id="drawer-back" onclick="drawerBackToRequest()" title="back to request" data-focus-key="drawer-back">‹ request</button>` +
+    $('drawer-title').innerHTML = `<button type="button" class="btn drawer-back" id="drawer-back" data-drawer-back title="back to request" data-focus-key="drawer-back">‹ request</button>` +
       `<span class="d-title-text" title="${escapeHtml(base + ident)}">${escapeHtml(base + ident)}</span>`;
     body.innerHTML = scopeNote + formatAttemptDetail(r, drawerAttempt);
   } else {
@@ -602,6 +602,12 @@ function drawerCopyRecord() {
 // attempt index opens that attempt in the request's drawer; one without an
 // index (deny by default) opens the request itself. Delegated on the drawer
 // body so re-renders never drop the handler; keyboard-activatable too.
+// The back affordance is rebuilt with every title render, so it is not in the
+// shell's id table: one delegated listener on the drawer owns it.
+$('drawer').addEventListener('click', e => {
+  if (e.target.closest('[data-drawer-back]')) drawerBackToRequest();
+});
+
 function openAttemptLink(el) {
   if (el.dataset.attempt !== undefined) openDrawerAttempt(el.dataset.openReq, el.dataset.attempt);
   else openDrawer(el.dataset.openReq);

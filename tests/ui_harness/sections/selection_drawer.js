@@ -305,7 +305,7 @@ module.exports = async function selectionDrawer(H) {
     if (sub0) sub0.click();
     check('a fresh open from a sub-row click lands in attempt mode',
       d.getElementById('drawer').classList.contains('open') && title().includes('attempt 1 of 3'));
-    d.querySelector('#drawer .nav-btns button[onclick="drawerNav(1)"]').click();
+    d.getElementById('drawer-next').click();
     check('drawerNav clears the attempt mode',
       !title().includes('attempt') && attemptSel() === null &&
         bodyText().includes('sel-live') && bodyText().includes('999ms'));

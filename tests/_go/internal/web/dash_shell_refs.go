@@ -45,13 +45,34 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 	}
 	html := rec.Body.String()
 	headEnd := strings.Index(html, "</head>")
+	// Exactly one external script is deliberately blocking: the pre-paint theme
+	// guard runs after the stylesheets and before the body paints, and a static
+	// script is what lets script-src fall to 'self'. Every other dashboard
+	// script downloads early and executes deferred, in order.
+	prePaint := regexp.MustCompile(`<script src="` + regexp.QuoteMeta(DashPrefix) + `js/theme_boot\.js[^"]*"></script>`)
+	if len(prePaint.FindAllStringIndex(html, -1)) != 1 {
+		t.Error("index.html must load exactly one blocking script, js/theme_boot.js")
+	}
 	for _, script := range regexp.MustCompile(`<script[^>]+src="[^"]+"[^>]*></script>`).FindAllStringIndex(html, -1) {
-		if script[1] > headEnd || !strings.Contains(html[script[0]:script[1]], " defer ") {
+		if script[1] > headEnd {
+			t.Error("external dashboard scripts must live in the head")
+		}
+		if strings.Contains(html[script[0]:script[1]], "js/theme_boot.js") {
+			continue
+		}
+		if !strings.Contains(html[script[0]:script[1]], " defer ") {
 			t.Error("external dashboard scripts must download early, with ordered deferred execution")
 		}
 	}
-	if strings.Contains(html, "<script>\n// ---------- state ----------") {
-		t.Error("index.html still inlines the app script - split failed")
+	// No executable inline script survives: the data block is not one.
+	for _, tag := range regexp.MustCompile(`<script[^>]*>`).FindAllString(html, -1) {
+		if strings.Contains(tag, " src=") || strings.Contains(tag, "application/json") {
+			continue
+		}
+		t.Errorf("index.html carries an inline script tag: %s", tag)
+	}
+	if guardAt, lastStyle := prePaint.FindStringIndex(html), strings.LastIndex(html, `rel="stylesheet"`); guardAt == nil || guardAt[0] < lastStyle {
+		t.Error("the pre-paint guard must run after every stylesheet so the palette tokens resolve")
 	}
 
 	rels := dashRefsFromIndex(html)

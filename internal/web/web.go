@@ -297,7 +297,18 @@ func etagMatches(header, etag string) bool {
 }
 
 // dashboardCSP is the single owner of the dashboard document's policy.
-const dashboardCSP = "frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'self'"
+//
+// The document carries no inline script: the pre-paint theme guard is
+// js/theme_boot.js and every shell control is bound by js/bind_static.js, so
+// script-src is 'self'. The two inline style attributes (theme preview bar
+// heights) still need the attribute allowance on style-src, and img-src names
+// the one remote host the provider favicons come from. Everything else is
+// denied by default: no plugins, no framing, no base or form retargeting, and
+// no referrer for the explorer's location hash.
+const dashboardCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' https://www.google.com data:; connect-src 'self'; font-src 'self'; " +
+	"worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; object-src 'none'; " +
+	"base-uri 'none'; form-action 'self'"
 
 // Handler serves the cached dashboard shell with the canonical bootstrap
 // payload already present, avoiding a post-script round trip before first
@@ -317,9 +328,7 @@ func Handler(agg *AggAPI) http.Handler {
 		w.Header().Set("Cache-Control", "private, no-store")
 		// The shell is the one document that can host operator data, so it
 		// carries the whole policy: no framing, no plugins, no base/form
-		// retargeting, and no referrer for the explorer's location hash. The
-		// dashboard still uses authored inline handlers, so script-src is not
-		// claimed here; these directives hold today.
+		// retargeting, and no referrer for the explorer's location hash.
 		w.Header().Set("Content-Security-Policy", dashboardCSP)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")

@@ -596,6 +596,23 @@ module.exports = async function renderLive(H) {
       !/\bk-err\b/.test(erring.split('|')[0]) && /\bk-err\b/.test(erring.split('|')[1]));
   }
 
+  // The document carries no inline handler, which is what lets the policy
+  // claim script-src 'self': every shell control is in one id table, and each
+  // of those ids exists.
+  {
+    const html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    check('the shell carries no inline handlers',
+      !/\son(?:click|input|change|keydown)=/.test(html));
+    const table = w.eval('STATIC_BINDINGS');
+    check('every bound control exists and every handler is a function',
+      Object.keys(table).length >= 15 &&
+      Object.entries(table).every(([id, events]) =>
+        !!d.getElementById(id) && Object.values(events).every(fn => typeof fn === 'function')));
+    check('the pre-paint guard is a static script after the stylesheets',
+      html.indexOf('js/theme_boot.js') > html.lastIndexOf('rel="stylesheet"') &&
+      !/<script>\n/.test(html));
+  }
+
   // Two "Requests" headings were one heading too many, and a disclosure that
   // only expands a panel is not a menu. The band names the measure, the theme
   // trigger announces the dialog it opens, and the flyout is a named group.

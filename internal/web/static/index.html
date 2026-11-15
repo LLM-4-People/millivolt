@@ -25,34 +25,7 @@
 <link rel="stylesheet" href="/dash/css/console.css?v=__DASHBOARD_VERSION__">
 <!-- BEGIN vendored uPlot v1.6.32 CSS (MIT - https://github.com/leeoniya/uPlot) -->
 <link rel="stylesheet" href="/dash/vendor/uplot.css?v=__DASHBOARD_VERSION__">
-<script>
-// Apply the stored theme and surface before the first paint, after the
-// stylesheets so computed palette tokens are available. The meta tag above
-// owns the key; js/theme.js owns the registry, writes and validation. This
-// guard only removes the flash of the default pair and publishes the resolved
-// rail to the browser chrome. The eight ids mirror THEMES in js/theme.js and
-// theme_check pins both sets.
-try {
-  var key = document.querySelector('meta[name="theme-storage-key"]');
-  var raw = key ? localStorage.getItem(key.content) : '';
-  if (raw) {
-    var saved = raw;
-    try { saved = JSON.parse(raw); } catch (e) {}
-    if (typeof saved === 'string') saved = { theme: saved };
-    if (saved && typeof saved === 'object') {
-      if (typeof saved.theme === 'string' && /^(instrument|slate|midnight|nord|forest|rose|ember|contrast)$/.test(saved.theme)) {
-        document.documentElement.dataset.theme = saved.theme;
-      }
-      if (saved.mode === 'clear' || saved.mode === 'black') {
-        document.documentElement.dataset.mode = saved.mode;
-      }
-    }
-  }
-  var themeMeta = document.querySelector('meta[name="theme-color"]');
-  var rail = getComputedStyle(document.documentElement).getPropertyValue('--rail').trim();
-  if (themeMeta && rail) themeMeta.setAttribute('content', rail);
-} catch (e) {}
-</script>
+<script src="/dash/js/theme_boot.js?v=__DASHBOARD_VERSION__"></script>
 <!-- BEGIN vendored uPlot v1.6.32 (MIT - https://github.com/leeoniya/uPlot).
      Vendored IIFE build (25k gz): exposes window.uPlot; canvas 2D, zero deps.
      jsdom safety: the IIFE itself runs under jsdom (so a bare typeof guard is
@@ -98,9 +71,13 @@ try {
 <script defer src="/dash/js/explorer.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/live.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/theme.js?v=__DASHBOARD_VERSION__"></script>
+<!-- The one id -> handler table for the shell's authored controls; loaded last
+     so every eager handler exists and so the document carries no inline
+     script (the policy can then claim script-src 'self'). -->
+<script defer src="/dash/js/bind_static.js?v=__DASHBOARD_VERSION__"></script>
 </head>
 <body>
-<a class="skip-link" href="#main" onclick="skipToMain(event)">skip to content</a>
+<a class="skip-link" id="skip-link" href="#main">skip to content</a>
 <header>
   <a class="brand" href="https://github.com/LLM-4-People/millivolt" target="_blank" rel="noopener noreferrer" title="source on GitHub">
     <div class="brand-logo" aria-hidden="true">
@@ -123,19 +100,19 @@ try {
     <h1>millivolt</h1>
   </a>
   <span class="sub">· precision instrument on the wire</span>
-  <button class="btn op-readout-btn" id="btn-controls" type="button" onclick="toggleOperatorConsole(event)" aria-haspopup="dialog" aria-controls="operator-console" aria-expanded="false" aria-label="operator console" title="Operator console" data-state="steady">
+  <button class="btn op-readout-btn" id="btn-controls" type="button" aria-haspopup="dialog" aria-controls="operator-console" aria-expanded="false" aria-label="operator console" title="Operator console" data-state="steady">
     <span class="op-readout" id="op-readout" data-state="steady">
       <span class="op-readout-dot" id="op-readout-dot" aria-hidden="true"></span>
       <span class="op-readout-state" id="op-readout-state">steady</span>
     </span>
     <svg class="hdr-ico op-readout-chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.6 6.3 8 9.7l3.4-3.4"/></svg>
   </button>
-  <button class="btn" id="btn-nav" type="button" onclick="toggleNavMenu(event)" aria-controls="hdr-actions" aria-expanded="false" aria-label="Actions" title="Actions">
+  <button class="btn" id="btn-nav" type="button" aria-controls="hdr-actions" aria-expanded="false" aria-label="Actions" title="Actions">
     <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>
   </button>
   <div class="refresh-controls" id="hdr-actions" role="group" aria-label="Header actions">
     <div class="menu-wrap">
-      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" onkeydown="themeTriggerKey(event)" aria-haspopup="dialog" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+      <button class="btn" id="btn-theme" type="button" aria-haspopup="dialog" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path class="theme-ico-fill" d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
         <span class="hdr-btn-label">Theme</span>
       </button>
@@ -179,12 +156,12 @@ try {
         <div class="theme-list" id="theme-list" role="radiogroup" aria-orientation="vertical" aria-labelledby="theme-palette-hd"></div>
         <p class="theme-hintbar">Arrows preview. Click or press Enter to apply. Esc closes.</p>
         <div class="theme-ft">
-          <button class="btn" type="button" id="theme-reset" onclick="resetTheme()" title="Restore Instrument Black">Reset</button>
-          <button class="btn" type="button" id="theme-close" onclick="closeThemeMenu()">Close</button>
+          <button class="btn" type="button" id="theme-reset" title="Restore Instrument Black">Reset</button>
+          <button class="btn" type="button" id="theme-close">Close</button>
         </div>
       </div>
     </div>
-    <button class="btn" id="btn-settings" type="button" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-controls="settings-sheet" aria-expanded="false" aria-label="Settings" title="Settings">
+    <button class="btn" id="btn-settings" type="button" aria-haspopup="dialog" aria-controls="settings-sheet" aria-expanded="false" aria-label="Settings" title="Settings">
       <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4"/><circle cx="8" cy="8" r="1.5"/><path d="M8 2.6v1.5M8 11.9v1.5M2.6 8h1.5M11.9 8h1.5M4.05 4.05l1.05 1.05M10.9 10.9l1.05 1.05M11.95 4.05l-1.05 1.05M5.1 10.9l-1.05 1.05"/></svg>
       <span class="hdr-btn-label">Settings</span>
     </button>
@@ -285,12 +262,12 @@ try {
   </div>
 </div>
 
-<div class="st-veil" id="settings-veil" onclick="closeSettings()"></div>
+<div class="st-veil" id="settings-veil"></div>
 <section class="st-sheet" id="settings-sheet" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="settings-title">
   <div class="st-hd">
     <h3 id="settings-title">Settings</h3>
-    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" oninput="filterSettings()" aria-label="find a setting" aria-controls="settings-fields" aria-describedby="settings-pane-hd">
-    <button class="btn" type="button" id="btn-settings-close" onclick="closeSettings()" aria-label="close settings">✕<span class="d-key" aria-hidden="true">esc</span></button>
+    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" aria-label="find a setting" aria-controls="settings-fields" aria-describedby="settings-pane-hd">
+    <button class="btn" type="button" id="btn-settings-close" aria-label="close settings">✕<span class="d-key" aria-hidden="true">esc</span></button>
   </div>
   <div class="st-body">
     <div class="st-side">
@@ -305,22 +282,22 @@ try {
   <div class="st-ft">
     <span class="st-status" id="settings-count" role="status" aria-live="polite" aria-atomic="true"></span>
     <div class="st-actions">
-      <button class="btn" type="button" id="btn-settings-revert" onclick="revertSettings()" disabled>Revert</button>
-      <button class="btn btn-accent" type="button" id="btn-settings-apply" onclick="applySettings()" disabled>Apply</button>
+      <button class="btn" type="button" id="btn-settings-revert" disabled>Revert</button>
+      <button class="btn btn-accent" type="button" id="btn-settings-apply" disabled>Apply</button>
     </div>
   </div>
 </section>
 
-<div class="drawer-veil" id="drawer-veil" onclick="closeDrawer()"></div>
+<div class="drawer-veil" id="drawer-veil"></div>
 <aside class="drawer" id="drawer" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
   <div class="drawer-hd">
     <h3 id="drawer-title">request</h3>
     <div class="nav-btns">
-      <button class="btn" type="button" id="drawer-prev" onclick="drawerNav(-1)" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
-      <button class="btn" type="button" id="drawer-next" onclick="drawerNav(1)" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
+      <button class="btn" type="button" id="drawer-prev" aria-label="previous request (newer)" title="previous (newer)" data-focus-key="nav-prev">‹</button>
+      <button class="btn" type="button" id="drawer-next" aria-label="next request (older)" title="next (older)" data-focus-key="nav-next">›</button>
     </div>
-    <button class="btn drawer-tool" type="button" onclick="drawerCopyRecord()" aria-label="copy request JSON" title="copy request JSON" data-focus-key="copy-record">JSON</button>
-    <button class="btn" type="button" onclick="closeDrawer()" aria-label="close request detail (escape)" title="close (escape)" data-focus-key="close">✕<span class="d-key" aria-hidden="true">esc</span></button>
+    <button class="btn drawer-tool" type="button" id="drawer-copy" aria-label="copy request JSON" title="copy request JSON" data-focus-key="copy-record">JSON</button>
+    <button class="btn" type="button" id="drawer-close" aria-label="close request detail (escape)" title="close (escape)" data-focus-key="close">✕<span class="d-key" aria-hidden="true">esc</span></button>
   </div>
   <div class="drawer-body" id="drawer-body"></div>
 </aside>
