@@ -263,10 +263,9 @@ function ocEmptyHTML(title, body) {
 
 // ocSectionEmpty is the one rule for a section's empty state: it describes a
 // policy with no rules, and an open draft is already the answer to "what does
-// this section do now". Only the limits section honoured that, so pause and
-// capture printed "No holds." / "No captures running." underneath a live form,
-// where the pane's pinned action row cut across the sentence. Each section
-// still owns its own words; the frame comes from ocEmptyHTML.
+// this section do now". Each section still owns its own words; the frame comes
+// from ocEmptyHTML. The result is resolved markup or the empty string, and the
+// section hands it to ocSectionHTML as `empty`.
 function ocSectionEmpty(kind, total, title, body) {
   if (total || ocComposing(kind)) return '';
   return ocEmptyHTML(title, body);
@@ -288,7 +287,11 @@ const OC_SECTION_OF_KIND = { limit: 'limits', pause: 'pause', capture: 'capture'
 //
 // The rows arrive already built and carrying the text they render, because the
 // filter searches what the operator can read rather than a re-derived
-// predicate. The words stay with the section that owns them.
+// predicate. The words stay with the section that owns them. `sec.empty` is
+// the section's already-resolved empty frame (ocSectionEmpty), so it is
+// inserted as markup - it used to be handed back to ocSectionEmpty a second
+// time, which escaped the frame into raw markup and appended an `undefined`
+// body.
 function ocSectionHTML(sec) {
   const section = OC_SECTION_OF_KIND[sec.kind] || sec.kind;
   const shown = ocFilterRows(section, sec.entries);
@@ -298,7 +301,7 @@ function ocSectionHTML(sec) {
     `<div class="oc-sec-head"><p class="oc-sub">${escapeHtml(sec.sub)}</p>${actions}</div>` +
     (sec.composer || '') +
     ocListFilterHTML(section, sec.total) +
-    (rows || ocSectionEmpty(sec.kind, sec.total, sec.empty)) +
+    (rows || sec.empty) +
     ocListEmptyNote(section, shown.length, sec.total) +
     `</div>`;
 }
