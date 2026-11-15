@@ -436,11 +436,19 @@ func rankPercentilesStats[T ~int64 | ~float64](order []metricSample[T], membersh
 
 // rankPercentilesStatsMerge is rankPercentilesStats over an exact two-run order.
 func rankPercentilesStatsMerge[T ~int64 | ~float64](base, pending []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64, []*float64) {
-	return rankPercentilesCore(base, pending, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
+	return rankPercentilesStatsVisit(base, pending, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
 		if uint64(row) < uint64(len(membership)) {
 			emit(membership[row])
 		}
-	}, true)
+	})
+}
+
+// rankPercentilesStatsVisit is rankPercentilesStats over a caller-supplied row
+// visitor, for a membership list that is not indexed by the absolute row (the
+// chart's window-relative span). The traversal and the stats rules are shared
+// with the slice form.
+func rankPercentilesStatsVisit[T ~int64 | ~float64](base, pending []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(uint8))) ([][]*float64, []*float64, []*float64) {
+	return rankPercentilesCore(base, pending, counts, extraValues, extraBuckets, visit, true)
 }
 
 type metricAccumulator struct {

@@ -76,8 +76,14 @@ type chartFold struct {
 	ttftBucket []uint8
 	tpsBucket  []uint8
 	decBucket  []uint8
-	membership []uint8
-	order      metricOrderSource
+	// membership holds one byte of bucket membership per durable row, indexed
+	// from membershipBase (the first durable row the fold accepted). A bounded
+	// window only grows it over its own row span, so a 15-minute view costs its
+	// rows and not the whole retained history.
+	membership     []uint8
+	membershipBase uint32
+	rowCount       int
+	order          metricOrderSource
 	// orderSource is the projection's metric view, retained only while the
 	// read lease is held. freezeOrder selects either source after the fold
 	// knows whether the recent tail can answer the window.
@@ -121,7 +127,9 @@ func (f *chartFold) prepareBound(p *projectionData) {
 	if p.hasStart {
 		f.dataFrom = p.minStart
 	}
-	f.membership = make([]uint8, len(p.rows))
+	// membership is sized by the first accepted row, not here: prepareBound
+	// cannot know which row the window's block skip will accept.
+	f.rowCount = len(p.rows)
 	f.orderSource = &p.metrics
 	f.recentFrom = p.metrics.recentFrom
 }
@@ -212,7 +220,19 @@ func (f *chartFold) fold(c *contrib) error {
 		}
 	}
 	if c.rowIndex > 0 {
-		f.membership[c.rowIndex-1] = uint8(idx + 1)
+		row := c.rowIndex - 1
+		if !f.hasMember {
+			// The first accepted row anchors the window-relative index and sizes
+			// the list once: the visit is ascending, so the only rows that can
+			// still arrive are the projection rows from here to the newest. That
+			// is the window's own span, not the whole retained history.
+			f.membershipBase = row
+			f.membership = make([]uint8, f.rowCount-int(row))
+		}
+		if index := row - f.membershipBase; int(index) >= len(f.membership) {
+			f.membership = append(f.membership, make([]uint8, int(index)+1-len(f.membership))...)
+		}
+		f.membership[row-f.membershipBase] = uint8(idx + 1)
 		if !f.hasMember || c.rowIndex < f.minMemberRow {
 			f.minMemberRow, f.hasMember = c.rowIndex, true
 		}
@@ -253,9 +273,20 @@ func (f *chartFold) payload(now int64) chartPayload {
 	if f.recentCovers() {
 		order = f.recent
 	}
-	ttft, periodTTFT, ttftStat := rankPercentilesStatsMerge(order.base.ttft, order.pending.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
-	tps, periodTPS, tpsStat := rankPercentilesStatsMerge(order.base.tps, order.pending.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
-	dec, periodDec := rankPercentilesMerge(order.base.dec, order.pending.dec, f.membership, decCounts, f.extraDec, f.decBucket)
+	// One row visitor for all three metric walks: a sample row indexes the
+	// window-relative membership, and a row before the first accepted durable
+	// row (or past the recorded span) contributes nothing.
+	visit := func(row uint32, emit func(uint8)) {
+		if row < f.membershipBase {
+			return
+		}
+		if index := row - f.membershipBase; uint64(index) < uint64(len(f.membership)) {
+			emit(f.membership[index])
+		}
+	}
+	ttft, periodTTFT, ttftStat := rankPercentilesStatsVisit(order.base.ttft, order.pending.ttft, ttftCounts, f.extraTTFT, f.ttftBucket, visit)
+	tps, periodTPS, tpsStat := rankPercentilesStatsVisit(order.base.tps, order.pending.tps, tpsCounts, f.extraTPS, f.tpsBucket, visit)
+	dec, periodDec, _ := rankPercentilesStatsVisit(order.base.dec, order.pending.dec, decCounts, f.extraDec, f.decBucket, visit)
 	for i, b := range f.buckets {
 		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, RL: b.rl, In: b.in, Out: b.out,
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
