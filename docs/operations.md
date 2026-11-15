@@ -888,7 +888,11 @@ handlers, flushes storage, then hands the socket to a ready child. A flush
 failure aborts and resumes the old process. A drain timeout still flushes and
 hands off: the in-flight requests are cut, but everything finalized before them
 is durable before the child opens the database. The flush has its own bound
-rather than sharing the drain window. Parked native-adapter runs
+rather than sharing the drain window. The handoff also takes the config
+transaction lock for its whole flush fence, so a start while a reload, Settings
+save or backup restore is running is refused with `409` naming the operation
+instead of queueing behind it; the fence itself is bounded by
+`restart_drain_timeout` plus the flush bound. Parked native-adapter runs
 are process-local and do not survive a successful restart.
 
 Ordinary SIGINT/SIGTERM shutdown is different: it cancels active stream contexts,
@@ -919,7 +923,7 @@ both.
 | `POST /session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. Lives outside `/admin` so an external authentication layer can front the admin plane without gating millivolt's own login. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. GET returns provider header values verbatim, because the settings sheet must round-trip them on save; redaction applies to the model-visible `config_get` tool and the operator CLI instead (see [cli](cli.md) and [mcp](mcp.md)), where `--reveal` is the opt-in. Posting a redacted document back is safe: a credential header whose value is the marker keeps the loaded secret, while a posted real value replaces it. The same applies to `set_config`, so a model can read and re-post without erasing credentials. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
-| `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
+| `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected, and so is a start while a config transaction (reload, Settings save, backup restore) holds the reload lock: `409` names the operation. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. GET reports `queued` (admission and send-gate waiters, the populations an operator drain can release) and `storm_waiters` (requests parked by the storm/quota gate before admission, which only the gate opening or a quota resume frees). |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |

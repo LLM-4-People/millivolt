@@ -788,3 +788,40 @@ func TestRestartPanicLogsTheStack(t *testing.T) {
 		t.Fatalf("panic logged without a stack: %s", logged)
 	}
 }
+
+// TestRestartRefusedWhileAConfigOperationHoldsTheReloadLock pins O4: the
+// handoff later takes reloadMu for its flush fence, so a held reload
+// transaction made the flush wait unboundedly. The start is refused up front
+// with 409 naming the operation, and the run is not begun.
+func TestRestartRefusedWhileAConfigOperationHoldsTheReloadLock(t *testing.T) {
+	rs := newRestarter(&restartDeps{
+		cloneServer:  func() *http.Server { return nil },
+		closeFeeds:   func() {},
+		flushStore:   func(context.Context) error { return nil },
+		drainTimeout: func() time.Duration { return time.Second },
+	})
+	// The test environment holds the reload lock like a Settings save would.
+	reloadMu.Lock()
+	rec := httptest.NewRecorder()
+	rs.handleRestart(rec, httptest.NewRequest(http.MethodPost, "/admin/restart", nil))
+	if rec.Code != http.StatusConflict {
+		reloadMu.Unlock()
+		t.Fatalf("POST while the reload lock is held = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "config operation is in progress") {
+		reloadMu.Unlock()
+		t.Fatalf("refusal does not name the operation: %s", rec.Body.String())
+	}
+	if phase := rs.status()["phase"]; phase != "idle" {
+		reloadMu.Unlock()
+		t.Fatalf("phase after the refusal = %v, want idle", phase)
+	}
+	reloadMu.Unlock()
+
+	// Released: the same request is accepted.
+	rec = httptest.NewRecorder()
+	rs.handleRestart(rec, httptest.NewRequest(http.MethodPost, "/admin/restart", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST after release = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+}

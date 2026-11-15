@@ -362,6 +362,18 @@ func (rs *restarter) request() (bool, string) {
 		rs.mu.Unlock()
 		return false, "restart already " + phaseName(rs.phase)
 	}
+	// The handoff later takes the reload lock for its whole store-flush fence,
+	// and a config transaction (reload, Settings save, backup restore) holds it
+	// for its own duration. Taking it here as a probe refuses the restart up
+	// front with the operation named, instead of letting the flush block
+	// unboundedly on it behind restartFlushTimeout. reloadMu -> rs.mu is the
+	// existing order (the handoff fence reads handoffDone under the lock), so
+	// the non-blocking probe cannot invert it.
+	if !reloadMu.TryLock() {
+		rs.mu.Unlock()
+		return false, "a config operation is in progress (reload, Settings save or backup restore)"
+	}
+	reloadMu.Unlock()
 	rs.phase = restartBuilding
 	rs.phaseAt = time.Now()
 	rs.errMsg = ""
