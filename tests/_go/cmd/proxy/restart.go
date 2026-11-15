@@ -32,7 +32,7 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return 90 * time.Second },
 	})
 	rs.mu.Lock()
@@ -69,14 +69,13 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 		t.Fatalf("drain window = %+v, want the wired 90s bound and a live elapsed value", doc)
 	}
 	// budget_ms is the sum the dashboard polls against, so the client never
-	// mirrors the build and ready bounds as its own literals.
-	if want := (restartBuildTimeout + 90*time.Second + restartReadyTimeout).Milliseconds(); doc.BudgetMs != want {
-		t.Fatalf("budget_ms = %d, want %d (build + drain + ready)", doc.BudgetMs, want)
+	// mirrors the build, flush and ready bounds as its own literals.
+	if want := (restartBuildTimeout + 90*time.Second + restartFlushTimeout + restartReadyTimeout).Milliseconds(); doc.BudgetMs != want {
+		t.Fatalf("budget_ms = %d, want %d (build + drain + flush + ready)", doc.BudgetMs, want)
 	}
 }
 
-// TestRestartChoreographyBoundsPinned pins the two internal choreography
-// bounds. The dashboard does not mirror them: statusLocked publishes their sum
+// TestRestartChoreographyBoundsPinned pins the internal choreography bounds. The dashboard does not mirror them: statusLocked publishes their sum
 // as budget_ms, so these values exist in exactly one language.
 func TestRestartChoreographyBoundsPinned(t *testing.T) {
 	if restartBuildTimeout != 5*time.Minute {
@@ -84,6 +83,9 @@ func TestRestartChoreographyBoundsPinned(t *testing.T) {
 	}
 	if restartReadyTimeout != 5*time.Minute {
 		t.Errorf("restartReadyTimeout = %v, want 5 minutes", restartReadyTimeout)
+	}
+	if restartFlushTimeout != 30*time.Second {
+		t.Errorf("restartFlushTimeout = %v, want 30 seconds", restartFlushTimeout)
 	}
 	if got := config.Default().RestartDrainTimeout; got != 10*time.Minute {
 		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes", got)
@@ -324,7 +326,7 @@ func TestHandleRestartGuards(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
 	// Wrong method → 405 with Allow (RFC 9110), never a fall-through.
@@ -387,7 +389,7 @@ func TestFailAndResumeTwiceKeepsRestarterUsable(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
 	for i := 1; i <= 2; i++ {
@@ -422,7 +424,7 @@ func TestRestartWatchFlagStrictQuery(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
 	for _, tc := range []struct{ name, query, want string }{
@@ -495,15 +497,23 @@ func TestPrepareHandoffRequiresDrainAndFlushSuccess(t *testing.T) {
 	}()
 	<-entered
 	flushed := false
-	rs := newRestarter(&restartDeps{server: srv.Config, flushStore: func() error { flushed = true; return errors.New("disk failure") }})
+	var flushErr error
+	rs := newRestarter(&restartDeps{server: srv.Config, flushStore: func(context.Context) error {
+		flushed = true
+		return flushErr
+	}})
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := rs.prepareHandoff(ctx); !errors.Is(err, context.Canceled) || flushed {
-		t.Errorf("failed drain passed flush fence: err=%v flushed=%v", err, flushed)
+	// The flush is the durability barrier, so a drain that never completed
+	// still flushes; the canceled drain itself stays a handoff failure.
+	if err := rs.prepareHandoff(ctx); !errors.Is(err, context.Canceled) || !flushed {
+		t.Errorf("failed drain skipped the flush or passed the handoff fence: err=%v flushed=%v", err, flushed)
 	}
 	close(release)
 	<-done
 	srv.Close()
+	flushed = false
+	flushErr = errors.New("disk failure")
 	if err := rs.prepareHandoff(t.Context()); err == nil || !flushed {
 		t.Errorf("failed flush passed handoff fence: err=%v flushed=%v", err, flushed)
 	}
@@ -552,7 +562,7 @@ func TestRestartWatchStreamsPhases(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return 90 * time.Second },
 	})
 	srv := httptest.NewServer(http.HandlerFunc(rs.handleRestart))
@@ -637,7 +647,7 @@ func TestRestartWatchStreamsPhases(t *testing.T) {
 
 func TestRestartProgressStopsAfterDependencyPanic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		rs := newRestarter(&restartDeps{server: &http.Server{}, flushStore: func() error { panic("test flush panic") }})
+		rs := newRestarter(&restartDeps{server: &http.Server{}, flushStore: func(context.Context) error { panic("test flush panic") }})
 		ch := make(chan map[string]any, 16)
 		rs.addWatcher(ch)
 		defer rs.removeWatcher(ch)
@@ -666,7 +676,7 @@ func TestRestartWatchUnaffectedByShutdown(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
 		closeFeeds:   func() {},
-		flushStore:   func() error { return nil },
+		flushStore:   func(context.Context) error { return nil },
 		drainTimeout: func() time.Duration { return 30 * time.Second },
 	})
 	srv := httptest.NewServer(http.HandlerFunc(rs.handleRestart))
@@ -693,4 +703,57 @@ func TestRestartWatchUnaffectedByShutdown(t *testing.T) {
 	}
 	// The stream is still functional afterwards: phases keep flowing.
 	rs.setPhase(restartBuilding, "")
+}
+
+// TestHandoffSurvivesExpiredDrain pins the drain/handoff split: a drain window
+// that expires with a request still in flight is not a failed restart. The
+// flush runs under its own fresh bound and the handoff continues.
+func TestHandoffSurvivesExpiredDrain(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+	}))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := srv.Client().Get(srv.URL)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	<-entered
+	var flushCtxErr error
+	rs := newRestarter(&restartDeps{server: srv.Config, flushStore: func(ctx context.Context) error {
+		flushCtxErr = ctx.Err()
+		return nil
+	}})
+	if err := rs.prepareWithProgress(20 * time.Millisecond); err != nil {
+		t.Fatalf("expired drain aborted the handoff: %v", err)
+	}
+	if flushCtxErr != nil {
+		t.Fatalf("flush ran under the spent drain context: %v", flushCtxErr)
+	}
+	if rs.status()["phase"] != "flushing" {
+		t.Fatalf("phase after the flush = %v", rs.status()["phase"])
+	}
+	close(release)
+	<-done
+	srv.Close()
+}
+
+// TestRestartBudgetIncludesFlushBound pins budget_ms as the whole choreography
+// bound: a client polling toward it must not give up during a legal flush.
+func TestRestartBudgetIncludesFlushBound(t *testing.T) {
+	drain := 20 * time.Second
+	rs := newRestarter(&restartDeps{
+		cloneServer:  func() *http.Server { return nil },
+		closeFeeds:   func() {},
+		flushStore:   func(context.Context) error { return nil },
+		drainTimeout: func() time.Duration { return drain },
+	})
+	want := (restartBuildTimeout + drain + restartFlushTimeout + restartReadyTimeout).Milliseconds()
+	if got := rs.status()["budget_ms"]; got != want {
+		t.Fatalf("budget_ms = %v, want %d (build + drain + flush + ready)", got, want)
+	}
 }

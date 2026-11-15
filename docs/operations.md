@@ -849,8 +849,11 @@ fields require restart.
 Rebuild & restart requires Go on PATH and the original source tree available at
 its compiled-in path. Moved/trimpath builds may report it unavailable. It builds
 first, stops acceptance while retaining the listening socket, drains active
-handlers, flushes storage, then hands the socket to a ready child. Drain timeout
-or flush failure aborts and resumes the old process. Parked native-adapter runs
+handlers, flushes storage, then hands the socket to a ready child. A flush
+failure aborts and resumes the old process. A drain timeout still flushes and
+hands off: the in-flight requests are cut, but everything finalized before them
+is durable before the child opens the database. The flush has its own bound
+rather than sharing the drain window. Parked native-adapter runs
 are process-local and do not survive a successful restart.
 
 Ordinary SIGINT/SIGTERM shutdown is different: it cancels active stream contexts,

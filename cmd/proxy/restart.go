@@ -56,6 +56,11 @@ const (
 	// a crashed child closes the pipe immediately, so this deadline only
 	// bounds a hung boot, not a slow-but-healthy one.
 	restartReadyTimeout = 5 * time.Minute
+	// The durability barrier's own bound. The flush runs after the drain, so
+	// its context cannot be the (often already spent) drain deadline; a flush
+	// that overruns it aborts the handoff instead of holding the child back
+	// forever. Large write backlogs make this slower than a query timeout.
+	restartFlushTimeout = 30 * time.Second
 )
 
 // FD-handoff env keys. ExtraFiles start at fd 3: fd 3 is the listening
@@ -117,7 +122,10 @@ type restartDeps struct {
 	// and base context - used only by the failed-handoff resume path.
 	cloneServer func() *http.Server
 	closeFeeds  func()
-	flushStore  func() error
+	// flushStore is the durability barrier. It runs under its own bounded
+	// context (restartFlushTimeout), not the drain window, so a drain that
+	// spent its whole budget cannot cut the flush short.
+	flushStore func(context.Context) error
 	// drainTimeout reads the live config snapshot (restart_drain_timeout
 	// hot-reloads). 0 = wait indefinitely.
 	drainTimeout func() time.Duration
@@ -325,13 +333,14 @@ func (rs *restarter) statusLocked() map[string]any {
 		st["drain_timeout_ms"] = drain.Milliseconds()
 		// budget_ms is the only deadline any client needs: the whole
 		// choreography bound, or 0 when the drain is unbounded. Publishing the
-		// sum here means the dashboard does not mirror restartBuildTimeout and
-		// restartReadyTimeout as literals across the language boundary; the
-		// server that enforces the two bounds is the only place they exist.
+		// sum here means the dashboard does not mirror restartBuildTimeout,
+		// restartFlushTimeout and restartReadyTimeout as literals across the
+		// language boundary; the server that enforces the bounds is the only
+		// place they exist.
 		if drain <= 0 {
 			st["budget_ms"] = int64(0)
 		} else {
-			st["budget_ms"] = (restartBuildTimeout + drain + restartReadyTimeout).Milliseconds()
+			st["budget_ms"] = (restartBuildTimeout + drain + restartFlushTimeout + restartReadyTimeout).Milliseconds()
 		}
 	}
 	if rs.phase == restartDraining && !rs.phaseAt.IsZero() {
@@ -388,13 +397,25 @@ func (rs *restarter) drain(ctx context.Context) error {
 	return nil
 }
 
+// prepareHandoff is the commit-point sequence: stop in-flight work, then make
+// everything already finalized durable. The two steps have separate bounds. An
+// expired drain still flushes and hands off - the in-flight requests are cut,
+// not the durability of everything before them - while the flush gets its own
+// context because the drain deadline is usually spent by the time it returns.
 func (rs *restarter) prepareHandoff(ctx context.Context) error {
-	if err := rs.drain(ctx); err != nil {
-		return fmt.Errorf("drain failed; restart aborted: %w", err)
-	}
+	drainErr := rs.drain(ctx)
 	rs.setPhase(restartFlushing, "")
-	if err := rs.deps.flushStore(); err != nil {
+	flushCtx, cancel := context.WithTimeout(context.Background(), restartFlushTimeout)
+	defer cancel()
+	if err := rs.deps.flushStore(flushCtx); err != nil {
 		return fmt.Errorf("metrics flush failed; restart aborted: %w", err)
+	}
+	if drainErr != nil {
+		if errors.Is(drainErr, context.DeadlineExceeded) {
+			log.Printf("restart: drain window expired with requests still in flight; handed off after a clean flush")
+			return nil
+		}
+		return fmt.Errorf("drain failed; restart aborted: %w", drainErr)
 	}
 	return nil
 }

@@ -62,9 +62,9 @@ const RESTART_STEPS = [
 
 // The poll fallback's cadence. There is deliberately no budget constant here:
 // the status document publishes budget_ms, the whole choreography bound, from
-// the binary that enforces its three parts (restartBuildTimeout,
+// the binary that enforces its parts (restartBuildTimeout, restartFlushTimeout,
 // restartReadyTimeout and the configured restart_drain_timeout). Mirroring
-// those as literals put the same three durations in two languages, where the
+// those as literals put the same durations in two languages, where the
 // copy could silently disagree with the value the server actually applied.
 //
 // budget_ms 0 means the operator configured restart_drain_timeout: 0, which

@@ -478,7 +478,7 @@ func main() {
 			return newHTTPServer(handler, readHeaderTimeout, idleTimeout, deadlinePolicyFn, srvCtx)
 		},
 		closeFeeds: buf.CloseFeeds,
-		flushStore: func() error {
+		flushStore: func(ctx context.Context) error {
 			// The flush is the durability barrier: no config reload may
 			// start or commit after it, or a provider-alias rename or
 			// operator persistence could write the store after the child
@@ -487,14 +487,25 @@ func main() {
 			// when serving resumes.
 			fenceReloadsForHandoff(rst)
 			if proxySrv != nil {
-				if err := proxySrv.FlushThrottles(context.Background()); err != nil {
+				if err := proxySrv.FlushThrottles(ctx); err != nil {
 					return fmt.Errorf("throttle flush: %w", err)
 				}
 			}
 			if store == nil {
 				return nil
 			}
-			return store.Flush()
+			// Store.Flush drains the write channel and does not take a
+			// context; race it so the handoff bound still holds. A timed-out
+			// flush leaves its goroutine writing, which is harmless because
+			// the store stays open on the aborted handoff.
+			flushed := make(chan error, 1)
+			go func() { flushed <- store.Flush() }()
+			select {
+			case err := <-flushed:
+				return err
+			case <-ctx.Done():
+				return fmt.Errorf("store flush: %w", ctx.Err())
+			}
 		},
 		drainTimeout: func() time.Duration {
 			liveMu.Lock()

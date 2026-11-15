@@ -606,7 +606,7 @@ module.exports = async function w16Mirrors(H) {
       }
 
       // The restart deadline comes from the server's budget_ms, published by
-      // the binary that enforces its three parts. The client keeps no mirrored
+      // the binary that enforces its parts. The client keeps no mirrored
       // copy of those durations, and RESTART_STEPS follows the server's
       // phaseRank order.
       check('the restart client keeps no mirrored choreography budget',
