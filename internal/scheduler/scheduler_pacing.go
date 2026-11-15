@@ -174,6 +174,14 @@ func ClampRetryHint(d time.Duration) time.Duration {
 	}
 }
 
+// backoffState reads a group's stored attempt- and request-level backoff under
+// its lock, so diagnostics share one accessor instead of reaching the fields.
+func (g *group) backoffState() (attempt, request time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.backoff, g.requestBackoff
+}
+
 // BackoffFor computes the pacing delay after a retryable failure. Adaptive
 // exponential backoff always grows (base_backoff, cap max_backoff). A
 // provider Retry-After / rate-limit-reset is a floor: the wait is the

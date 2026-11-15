@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +314,70 @@ func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
 			}
 			if fresh := backupparams.RestoreQueryKeys(); set.name == "RestoreQueryKeys" && fresh[0] == "mutated" {
 				t.Errorf("%s returns shared state; a caller can widen the accepted grammar", set.name)
+			}
+		}
+	}
+}
+
+// TestBackupGatesReadTheOwnerKeySet pins that both mutating handlers pass
+// their owner set instead of a literal copy. With a copy in place an added key
+// is gated by nobody and the route silently ignores it again. The source is
+// parsed rather than grepped so a comment cannot satisfy the assertion.
+func TestBackupGatesReadTheOwnerKeySet(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "backup.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse backup.go: %v", err)
+	}
+	handlers := map[string]*ast.FuncDecl{}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok {
+			handlers[fn.Name.Name] = fn
+		}
+	}
+	ownerSet := func(arg ast.Expr, owner string) bool {
+		call, ok := arg.(*ast.CallExpr)
+		if !ok || len(call.Args) != 0 {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && pkg.Name == "backupparams" && sel.Sel.Name == owner
+	}
+	for _, tc := range []struct{ handler, owner string }{
+		{"handleBackup", "BackupQueryKeys"},
+		{"handleRestore", "RestoreQueryKeys"},
+	} {
+		fn := handlers[tc.handler]
+		if fn == nil {
+			t.Fatalf("%s not found; the pin proves nothing", tc.handler)
+		}
+		seen := map[string]bool{}
+		ast.Inspect(fn, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			name := sel.Sel.Name
+			if name != "DuplicateQueryKey" && name != "UnknownQueryKey" {
+				return true
+			}
+			seen[name] = true
+			if len(call.Args) == 0 || !ownerSet(call.Args[len(call.Args)-1], tc.owner) {
+				t.Errorf("%s: %s does not pass backupparams.%s(); a key added to the owner will not reach this gate", tc.handler, name, tc.owner)
+			}
+			return true
+		})
+		for _, name := range []string{"DuplicateQueryKey", "UnknownQueryKey"} {
+			if !seen[name] {
+				t.Errorf("%s: %s gate not found", tc.handler, name)
 			}
 		}
 	}
