@@ -449,6 +449,12 @@ runs outside that harness on purpose:
   and asserts they are excluded while every returned id has an unexpired
   sidecar and is the exact spelling `audit_capture_get` can fetch.
 
+This page is mechanically pinned by `tests/python/mcp_docs.py`: the tool table
+must match the `addTool` registrations, every "<n> tools" mention must match
+that count, every route the client owns must appear in the
+[operations route table](operations.md#operator-and-data-routes), and this page
+may name no operator path the client does not own.
+
 The live integration test starts a private instance through
 [scripts/dev.sh](../scripts/dev.sh) on a port and scratch database of its own, so
 concurrent runs do not share a port or database, drives the tools through a real MCP session,
