@@ -202,14 +202,21 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	// Decode the staged descriptor, never its path: the bytes validated are
-	// then exactly the bytes this handler wrote.
-	arch, err := backup.DecodeFileReader(decodeDir, uploadFile, decodeDatabase)
+	// then exactly the bytes this handler wrote. The decode is held to the same
+	// backup_max_bytes ceiling as the upload: a compressed body well under the
+	// cap can expand far past it, and the pending snapshot must not be
+	// published larger than the operator configured.
+	arch, err := backup.DecodeFileReader(decodeDir, uploadFile, decodeDatabase, cap)
 	if err != nil {
 		// Without a live store there is no volume for a decoded database
 		// member; keep the endpoint's existing storage-disabled answer while a
 		// config-only archive above still decodes and applies.
 		if errors.Is(err, backup.ErrSnapshotStaging) {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
+			return
+		}
+		if errors.Is(err, backup.ErrPayloadTooLarge) {
+			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup payload exceeds backup_max_bytes")
 			return
 		}
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())

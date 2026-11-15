@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -133,6 +134,53 @@ func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); !os.IsNotExist(err) {
 		t.Fatal("invalid archive staged a database snapshot")
+	}
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreRejectsAnOverCapPayload pins the endpoint ceiling: an upload well
+// under backup_max_bytes whose decoded payload is not answers 413 in the
+// upload's wording family and stages no pending snapshot.
+func TestRestoreRejectsAnOverCapPayload(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	// A 2 MiB compressible capture grows the snapshot far past the 1 MiB cap
+	// while the encoded upload stays far under it.
+	store.Record(&metrics.Record{ID: "over-cap-payload", Provider: "neutral.example", StatusCode: 200, Debug: true})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := store.SaveDebugCapture(t.Context(), "over-cap-payload", "cap-test",
+		now.UnixMilli(), now.Add(time.Hour).UnixMilli(), bytes.Repeat([]byte("x"), 2<<20)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) >= config.BackupMaxBytesMin {
+		t.Fatalf("fixture upload is %d bytes, not under the %d cap", len(raw), config.BackupMaxBytesMin)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveCfg.BackupMaxBytes = config.BackupMaxBytesMin
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d body %s, want 413", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "backup payload exceeds backup_max_bytes") {
+		t.Fatalf("body %q does not name the cap", rr.Body.String())
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); !os.IsNotExist(err) {
+		t.Fatal("an over-cap payload staged a pending snapshot")
 	}
 	assertNoRestoreStaging(t, dir)
 }

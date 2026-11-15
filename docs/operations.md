@@ -642,9 +642,10 @@ zstd frame, member framing and config `Validate()` before applying anything.
 A selected database member is decoded into its private staging file first,
 then must pass `PRAGMA integrity_check`; only that checked file is published
 as the pending snapshot, which restore then preflights for admission before
-the config member is written. Decode refuses an uncompressed payload larger than the
-Schema maximum for `backup_max_bytes`, so a small compressed file cannot expand
-without bound. Download lists how many live settings differ from default and how
+the config member is written. Decode holds the uncompressed payload to the same `backup_max_bytes` ceiling as
+the upload (and to the Schema maximum, whichever is lower), so a small
+compressed file cannot expand past what the operator configured; an over-cap
+payload answers 413 with the upload's wording and stages no pending snapshot. Download lists how many live settings differ from default and how
 many stored requests would be packed. Picking a file first inspects the
 archive: created time, size, member sizes, each config key as default vs
 modified vs the live file, and the database request span when a live store can
@@ -678,9 +679,11 @@ the attached snapshot rejects writes, while the live database stays writable
 for the merge, and no restart is required. Its request rows, debug sidecars and
 since-inception totals commit as one transaction, so a failed totals write
 leaves no partial merge behind. Truncated or bit-flipped files are rejected.
-The `backup_max_bytes` setting is the archive ceiling; encoding enforces it
-while the stream is written, so an over-cap archive is removed instead of
-partially served, and an over-cap upload answers 413 before decoding.
+The `backup_max_bytes` setting is the encoded-archive and the decoded-payload
+ceiling alike; encoding enforces it while the stream is written, so an over-cap
+archive is removed instead of partially served, an over-cap upload answers 413
+before decoding, and a decoded payload over it answers 413 before staging a
+snapshot.
 
 Restore phases are ordered, not atomic. The database member runs first: a
 replace stages the decoded file and preflights it with the same schema,
