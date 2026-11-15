@@ -91,6 +91,26 @@ class RepositoryChecks(unittest.TestCase):
         self.assertEqual(["docs/same.md:1", "docs/wrapped.md:1", "site-src/templates/landing.html:1"],
                          found)
 
+    def test_documented_console_sections_match_the_rail(self):
+        """The rail's section list is code; two documents restate it.
+
+        The count and the names are published as documentation, so a seventh
+        section or a rename must change the prose instead of leaving a reader
+        looking for a chip that is not there.
+        """
+        source = (check.ROOT / "internal/web/static/js/operator_console.js").read_text(encoding="utf-8")
+        block = re.search(r"const OC_SECTIONS = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(block, "operator_console.js no longer declares OC_SECTIONS")
+        ids = re.findall(r"id:\s*'([a-z-]+)'", block.group(1))
+        self.assertTrue(ids, "OC_SECTIONS has no ids")
+        count = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six",
+                 7: "seven", 8: "eight", 9: "nine"}[len(ids)]
+        dashboard = re.sub(r"\s+", " ", (check.ROOT / "docs/dashboard.md").read_text(encoding="utf-8"))
+        self.assertIn(f"rail names {count} sections: {', '.join(ids[:-1])} and {ids[-1]}.",
+                      dashboard)
+        design = re.sub(r"\s+", " ", (check.ROOT / "DESIGN.md").read_text(encoding="utf-8"))
+        self.assertIn(f"{count} lowercase sections ({', '.join(ids)})", design)
+
     def test_vendored_uplot_version_matches_its_notice(self):
         """The notice is a hand-written copy of the vendored version.
 
