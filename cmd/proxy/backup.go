@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/atomicfile"
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	backupparams "github.com/LLM-4-People/millivolt/internal/backup/params"
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -827,9 +828,11 @@ func rollbackRestoreConfig(plan *restoreConfigPlan, cause error) error {
 }
 
 // restoreConfigFile atomically replaces path with the captured pre-restore
-// bytes, or removes it when the restore created it. It is the rollback owner,
-// not a second config writer: the prepared document still goes through
-// config.WriteFile.
+// bytes, or removes it when the restore created it. It publishes through the
+// same atomic writer as the forward config owner, which follows a symlinked
+// path to its target: a plain rename at the link path would replace the link
+// with a regular file while the linked target kept the restored document, and
+// the next boot would read the stale bytes.
 func restoreConfigFile(path string, raw []byte, mode os.FileMode, exists bool) error {
 	if !exists {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -837,25 +840,7 @@ func restoreConfigFile(path string, raw []byte, mode os.FileMode, exists bool) e
 		}
 		return nil
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-restore-*")
-	if err != nil {
-		return err
-	}
-	staged := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(staged)
-	}()
-	if err := tmp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(raw); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(staged, path)
+	return atomicfile.WriteFile(path, raw, mode)
 }
 
 // restorePendingGuard owns a pre-existing admission slot while a replace

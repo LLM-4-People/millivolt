@@ -160,6 +160,39 @@ func TestRestorePendingRollbackRemovesThePreservedSibling(t *testing.T) {
 	}
 }
 
+// TestRestoreConfigRollbackKeepsASymlinkedConfigALink pins H28: the rollback
+// must publish like the forward writer. A plain temp-and-rename replaced the
+// config symlink with a regular file holding the pre-restore bytes while the
+// linked target kept the restored document, so the next boot read stale bytes.
+func TestRestoreConfigRollbackKeepsASymlinkedConfigALink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(target, []byte("old: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "proxy.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreConfigFile(link, []byte("previous: 2\n"), 0o600, true); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("rollback replaced the config symlink with a regular file")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "previous: 2\n" {
+		t.Fatalf("link target = %q, want the restored rollback bytes", got)
+	}
+}
+
 // TestRestoreConfigDatabaseStageFailureLeavesStateUntouched pins the H3
 // transaction order: the database stages before the config is written, so an
 // archived db_path under a missing directory answers 400 with the config file,

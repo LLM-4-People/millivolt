@@ -531,7 +531,9 @@ with correct ownership.
 
 Settings saves by creating a temporary file beside the resolved config and
 atomically renaming it; a symlinked config path is followed to its final
-target, so the link stays in place and the target receives the document. A
+target, so the link stays in place and the target receives the document. The
+restore rollback publishes through the same writer, so a failed restore of a
+symlinked config keeps the link too. A
 read-only mount, or a bind mount of only the config file, cannot
 support that save contract. Mount the whole writable directory, or deliberately
 use read-only configuration and update it outside the dashboard. Do not mount
