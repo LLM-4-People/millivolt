@@ -230,15 +230,22 @@ func killWithSS(port int, listeners map[string]struct{}, grace time.Duration) bo
 }
 
 func extractPID(s string) string {
-	i := strings.Index(s, "pid=")
-	if i < 0 {
-		return ""
+	const marker = "pid="
+	for offset := 0; ; {
+		start := strings.Index(s[offset:], marker)
+		if start < 0 {
+			return ""
+		}
+		start += offset + len(marker)
+		if end := strings.IndexByte(s[start:], ','); end > 0 {
+			if pid := s[start : start+end]; pid != "" {
+				if _, err := strconv.Atoi(pid); err == nil {
+					return pid
+				}
+			}
+		}
+		offset = start
 	}
-	j := strings.Index(s[i+4:], ",")
-	if j < 0 {
-		return ""
-	}
-	return s[i+4 : i+4+j]
 }
 
 // killIfProxy kills each PID that is another instance of this exact binary,

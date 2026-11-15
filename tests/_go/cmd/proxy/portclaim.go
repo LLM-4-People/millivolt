@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -245,5 +247,124 @@ func TestProcessAliveTreatsZombieAsDead(t *testing.T) {
 	_ = cmd.Wait()
 	if processAlive(pid) {
 		t.Error("a reaped pid reports alive")
+	}
+}
+
+// claimChild starts this test binary (or a copy of it) as a listener on addr
+// and returns once it answers. The copy is a different executable file, so
+// the identity gate must leave it alone.
+func claimChild(t *testing.T, binary, addr string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(binary, "-test.run=^TestClaimPortReclaimsStaleSameBinaryOwner$")
+	cmd.Env = append(os.Environ(), "MILLIVOLT_TEST_PORTCLAIM_ADDR="+addr)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start claim child: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return cmd
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	t.Fatalf("claim child never listened: %s", stderr.String())
+	return nil
+}
+
+// TestClaimPortReclaimsStaleSameBinaryOwner pins the whole reclaimer against a
+// live keep-alive child: a listener running this exact binary is signalled and
+// the port is rebound, a listener running a copied binary is left alive and the
+// claim reports the conflict, and the ss parser accepts only a numeric
+// "pid=NNN," field.
+func TestClaimPortReclaimsStaleSameBinaryOwner(t *testing.T) {
+	if addr := os.Getenv("MILLIVOLT_TEST_PORTCLAIM_ADDR"); addr != "" {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			os.Exit(2)
+		}
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				conn.Close()
+			}
+		}()
+		select {} // the accept goroutine keeps the runtime awake
+	}
+
+	myExe, err := os.Executable()
+	if err != nil {
+		t.Skipf("no executable path: %v", err)
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
+
+	t.Run("same binary is reclaimed", func(t *testing.T) {
+		child := claimChild(t, myExe, addr)
+		ln, err := claimPort(addr, 5*time.Second)
+		if err != nil {
+			_ = child.Process.Kill()
+			t.Fatalf("claimPort = %v, want the stale listener reclaimed", err)
+		}
+		ln.Close()
+		// The child is a plain listener with no handler, so SIGTERM terminates
+		// it: Wait reports the signal as an error, and the signal itself is the
+		// proof the reclaimer used the graceful stop rather than SIGKILL.
+		err = child.Wait()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGTERM {
+			t.Fatalf("reclaimed child did not exit on SIGTERM: %v", err)
+		}
+	})
+
+	if residual := listenerInodes(portFromAddr(addr)); len(residual) != 0 {
+		t.Fatalf("port %s still has a listener after the reclaim", addr)
+	}
+
+	t.Run("another binary is left alive", func(t *testing.T) {
+		copied := filepath.Join(t.TempDir(), "other-binary")
+		data, err := os.ReadFile(myExe)
+		if err != nil {
+			t.Fatalf("read own binary: %v", err)
+		}
+		if err := os.WriteFile(copied, data, 0o755); err != nil {
+			t.Fatalf("copy own binary: %v", err)
+		}
+		child := claimChild(t, copied, addr)
+		t.Cleanup(func() {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		})
+		if ln, err := claimPort(addr, time.Second); err == nil {
+			ln.Close()
+			t.Fatal("claimPort rebound through another binary; want the conflict reported")
+		}
+		if !processAlive(child.Process.Pid) {
+			t.Fatal("the other binary was killed; want it left alive")
+		}
+	})
+
+	for _, row := range []struct {
+		in   string
+		want string
+	}{
+		{`users:(("proxy",pid=1234,fd=7))`, "1234"},
+		{`users:(("a",pid=1,fd=3),("b",pid=99,fd=4))`, "1"},
+		{`pid=1234`, ""}, // no comma terminator
+		{`pid=,`, ""},    // empty field
+		{`pid=abc,`, ""}, // not numeric
+		{`pid=12a,`, ""}, // partly numeric
+		{`no field at all`, ""},
+	} {
+		if got := extractPID(row.in); got != row.want {
+			t.Errorf("extractPID(%q) = %q, want %q", row.in, got, row.want)
+		}
 	}
 }
