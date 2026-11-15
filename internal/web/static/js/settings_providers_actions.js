@@ -28,9 +28,12 @@ function addAliasRow(row) {
 // list is filled by syncProvMenuList, which excludes providers already added.
 function providersAddHTML() {
   return `<span class="prov-top"><button type="button" class="btn" data-prov-menu-toggle aria-haspopup="menu" aria-expanded="false">+ add provider</button>` +
-    `<span class="prov-menu" hidden role="menu">` +
+    `<span class="prov-menu" hidden role="menu" aria-label="add provider">` +
     `<span class="prov-menu-list"></span>` +
-    `<span class="prov-menu-custom"><input class="prov-new-label" placeholder="custom label - e.g. nano-gpt.com" aria-label="custom provider label"><button type="button" class="btn prov-addbtn" data-prov-add aria-label="add provider">+</button></span>` +
+    /* The menu holds one free-text field, which is not a menuitem: the group
+       names it so the row is announced as a field of this menu rather than a
+       second, nameless list. */
+    `<span class="prov-menu-custom" role="group" aria-label="custom provider"><input class="prov-new-label" placeholder="custom label - e.g. nano-gpt.com" aria-label="custom provider label"><button type="button" class="btn prov-addbtn" data-prov-add aria-label="add provider">+</button></span>` +
     `</span></span>`;
 }
 
