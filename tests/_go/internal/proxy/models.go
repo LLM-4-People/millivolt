@@ -297,6 +297,59 @@ func TestModelsRefusedUpstreamSurfacesAPIErrorEnvelope(t *testing.T) {
 	}
 }
 
+// TestModelsDiscoveryKeepsTheModelsEndpointUnderTranslation pins R1-1: a
+// translated request must not carry the translator's inference path into
+// discovery. Both inference endpoints are POST-only upstream, so addressing
+// them with the GET discovery call fails; only an explicit X-Proxy-Path
+// override replaces the models endpoint.
+func TestModelsDiscoveryKeepsTheModelsEndpointUnderTranslation(t *testing.T) {
+	cases := []struct{ name, in, out, override, wantPath string }{
+		{"anthropic-in-openai-out", "anthropic", "openai", "", "/v1/models"},
+		{"openai-in-anthropic-out", "openai", "anthropic", "", "/v1/models"},
+		{"explicit-path-still-wins", "anthropic", "openai", "/custom/models", "/custom/models"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMethod, gotPath string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotMethod, gotPath = r.Method, r.URL.Path
+				if r.Method != http.MethodGet || r.URL.Path == "" || strings.HasPrefix(r.URL.Path, "/v1/chat") ||
+					strings.HasPrefix(r.URL.Path, "/v1/messages") {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				w.Write([]byte(`{"object":"list","data":[{"id":"m"}]}`))
+			}))
+			t.Cleanup(upstream.Close)
+			srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+			t.Cleanup(srv.Close)
+
+			req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+			req.Header.Set("X-Proxy-In-Format", tc.in)
+			req.Header.Set("X-Proxy-Format", tc.out)
+			if tc.override != "" {
+				req.Header.Set("X-Proxy-Path", tc.override)
+			}
+			req.Header.Set("Authorization", "Bearer sk-test")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("discovery status = %d (upstream saw %s %q)", resp.StatusCode, gotMethod, gotPath)
+			}
+			if gotMethod != http.MethodGet || gotPath != tc.wantPath {
+				t.Fatalf("upstream saw %s %q, want GET %q", gotMethod, gotPath, tc.wantPath)
+			}
+		})
+	}
+}
+
 // TestModelsDiscoveryHonorsPathAndQuery pins H11: the discovery fetch goes
 // through the same target builder as a relayed request, so X-Proxy-Path selects
 // the upstream endpoint and X-Proxy-Query rides the query instead of discovery

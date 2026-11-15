@@ -218,6 +218,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 			return nil, fmt.Errorf("invalid %s header", hdrPath)
 		}
 		t.path = p
+		t.pathSet = true
 	}
 	if q := strings.TrimSpace(r.Header.Get(hdrQuery)); q != "" {
 		if !validProxyQueryHeader(q) {

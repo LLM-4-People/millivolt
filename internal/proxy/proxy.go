@@ -124,10 +124,14 @@ type target struct {
 	authHeader string
 	authPrefix string
 	path       string
-	query      string
-	provider   string
-	timeout    time.Duration
-	format     string
+	// pathSet records that the client supplied X-Proxy-Path. The translator
+	// also fills path with the outbound inference endpoint, which is not a
+	// discovery endpoint, so discovery must honor path only when it is set.
+	pathSet  bool
+	query    string
+	provider string
+	timeout  time.Duration
+	format   string
 	// inbound is the client's wire protocol (path-derived or overridden);
 	// outbound is the protocol selected by X-Proxy-Format. translate is true
 	// only when both are known and differ.

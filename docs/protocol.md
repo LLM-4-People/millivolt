@@ -631,9 +631,12 @@ budget cannot hold its metadata source. The rendered list is bounded by
 so literal `<`, `>`, and `&` keep their wire size. A rendered list past that
 derived bound fails closed before any response bytes are written.
 
-Discovery ignores `X-Proxy-Path`, `X-Proxy-Query` and the incoming query. HTTP
-discovery constructs `/v1/models` using the shared base join; Anthropic pagination
-constructs its own query. Cursor uses its native unary model service. A primary
+Discovery addresses the format's own models endpoint regardless of translation:
+`/v1/models` on the shared base join, Anthropic's pagination query, or Cursor's
+native unary model service. The translator's inference path is not reused
+because both inference endpoints are POST-only upstream. An explicit
+`X-Proxy-Path` or `X-Proxy-Query` still replaces the endpoint and query, while
+the incoming request query is not forwarded. A primary
 upstream non-200 response, including a redirect, becomes a 502 discovery error.
 Discovery authenticates with the resolved target auth header and prefix, the
 same construction as a relayed request, and has no protocol-specific fallback:

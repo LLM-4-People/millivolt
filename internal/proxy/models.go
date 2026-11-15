@@ -120,10 +120,16 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 // modelsUpstreamURL builds one discovery URL through the same target owner as
 // a relayed request: X-Proxy-Path replaces the format's default discovery
 // endpoint and X-Proxy-Query rides as the query, while an absent override keeps
-// the base-relative default. The client's own query is empty on a discovery
-// call, so only the header override can set one.
+// the base-relative default. The translator's own inference path is ignored:
+// both inference endpoints are POST-only upstream, so a discovery GET would
+// fail there. The client's own query is empty on a discovery call, so only the
+// header override can set one.
 func modelsUpstreamURL(t *target, defaultPath string) (*url.URL, error) {
-	return upstreamURL(t.baseURL, upstreamPath(t.path, defaultPath), t.query, "")
+	path := ""
+	if t.pathSet {
+		path = t.path
+	}
+	return upstreamURL(t.baseURL, upstreamPath(path, defaultPath), t.query, "")
 }
 
 // serveOpenAIModels fetches an OpenAI-compatible upstream's /v1/models and
