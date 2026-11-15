@@ -883,6 +883,11 @@ fields require restart.
 
 Rebuild & restart requires Go on PATH and the original source tree available at
 its compiled-in path. Moved/trimpath builds may report it unavailable. It builds
+the working tree exactly as it is: uncommitted, unstaged and untracked files are
+compiled, so a restart is not a review gate and a dirty tree ships as-is. The
+rebuilt binary is written into the process temp directory, which must be
+writable (`TMPDIR`, or `/tmp` when unset); an unusable directory is refused with
+that directory named rather than as a build fault. The choreography builds
 first, stops acceptance while retaining the listening socket, drains active
 handlers, flushes storage, then hands the socket to a ready child. A flush
 failure aborts and resumes the old process. A drain timeout still flushes and

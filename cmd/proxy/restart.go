@@ -558,6 +558,11 @@ func (rs *restarter) prepareWithProgress(drainTo time.Duration) error {
 // build compiles ./cmd/proxy from the module root into a fresh temp binary.
 // The running binary is never touched, so a failed build leaves the proxy
 // untouched (the same fail-fast rule scripts/dev.sh applies).
+//
+// Two contracts ride here and are stated in the operations guide: the rebuild
+// compiles the working tree exactly as it is (uncommitted and untracked files
+// included, so a restart is not a review gate), and it writes the fresh binary
+// into the process temp directory, which must be writable.
 func (rs *restarter) build() (string, error) {
 	if rs.root == "" {
 		return "", fmt.Errorf("restart unavailable: %s", rs.rootWhy)
@@ -565,9 +570,13 @@ func (rs *restarter) build() (string, error) {
 	if rs.goBin == "" {
 		return "", errors.New("restart unavailable: go toolchain not found on PATH")
 	}
-	f, err := os.CreateTemp("", "millivolt-rebuild-*.bin")
+	tempDir := os.TempDir()
+	f, err := os.CreateTemp(tempDir, "millivolt-rebuild-*.bin")
 	if err != nil {
-		return "", fmt.Errorf("temp binary: %w", err)
+		// A read-only or missing TMPDIR used to surface as a bare "temp
+		// binary: ..." beside a successful compile, which reads like a build
+		// fault. Name the directory and the requirement instead.
+		return "", fmt.Errorf("temp binary in %s: %w (the rebuild needs a writable process temp directory; set TMPDIR)", tempDir, err)
 	}
 	path := f.Name()
 	f.Close()

@@ -869,3 +869,32 @@ func TestNoPIDFileIsNotAnError(t *testing.T) {
 	rs := newRestarter(&restartDeps{server: &http.Server{}, cloneServer: func() *http.Server { return &http.Server{} }, closeFeeds: func() {}})
 	rs.refreshPIDFile()
 }
+
+// TestRestartBuildNamesAnUnwritableTempDir pins O14: the rebuild writes its
+// output into the process temp directory, and an unusable TMPDIR used to
+// surface as a bare temp-error beside a successful compile, which reads like a
+// build fault. The reason must name the directory and the requirement.
+func TestRestartBuildNamesAnUnwritableTempDir(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "absent-tmpdir")
+	t.Setenv("TMPDIR", missing)
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("no go toolchain")
+	}
+	root, why := findModuleRoot()
+	if root == "" {
+		t.Skipf("no module root: %s", why)
+	}
+	rs := newRestarter(&restartDeps{})
+	rs.mu.Lock()
+	rs.root, rs.goBin = root, goBin
+	rs.mu.Unlock()
+	_, err = rs.build()
+	if err == nil {
+		t.Fatal("build succeeded with an absent TMPDIR")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, missing) || !strings.Contains(msg, "writable process temp directory") {
+		t.Fatalf("build error = %q, want the temp directory and the requirement named", msg)
+	}
+}
