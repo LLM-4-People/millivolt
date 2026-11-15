@@ -112,6 +112,25 @@
      live row finalizes or a shorter value replaces the widest one. */
   #tbl-requests table { table-layout: auto; }
   #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
+  /* The row opener is the one control in the log and the table is wider than a
+     phone: the actions column pins to the right edge, over the scrolled cells,
+     so the way into a request survives every horizontal scroll. */
+  #tbl-requests th:last-child,
+  #tbl-requests td:last-child {
+    position: sticky; right: 0; z-index: 1;
+    background: var(--panel);
+    box-shadow: inset 1px 0 0 var(--border);
+  }
+  #tbl-requests tr:hover td:last-child { background: var(--panel2); }
+  /* A 26px square holds the chevron: the opener was a 6x17 glyph and a phone
+     could not hit it. The whole row stays clickable behind it. */
+  .log-open {
+    width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid transparent; border-radius: 5px; color: var(--muted);
+    font-size: 15px; line-height: 1;
+  }
+  .log-open:hover { color: var(--text); border-color: var(--border2); background: var(--panel2); }
+  .log-open:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   /* The identity cell keeps every badge at its natural width: the column floor
      was measured from the full one-line client · provider · model, so no badge
      is capped or wrapped. A card narrower than the learned columns scrolls

@@ -11,7 +11,9 @@ module.exports = async function renderLive(H) {
     const cols = [...d.querySelectorAll('#tbl-requests colgroup col')];
     const ths = [...d.querySelectorAll('#tbl-requests thead th')];
     const labels = ths.map(th => th.textContent);
-    const expectedLabels = ['time', 'client · provider · model', 'status', 'ttft', 'tps',
+    // Status precedes the identity column: the outcome has to survive the
+    // first sideways scroll on a phone, and the identity is the widest cell.
+    const expectedLabels = ['time', 'status', 'client · provider · model', 'ttft', 'tps',
       'in/out', 'cache', 'tools', 'finish', 'dur', 'turns', 'queued', 'cost', ''];
     const firstCell = d.querySelector('#tbl-requests tr.exp-row td');
     check('the request table column contract is literal',
@@ -29,6 +31,18 @@ module.exports = async function renderLive(H) {
     })());
     check('the actions header has an accessible name',
       ths[13]?.getAttribute('aria-label') === 'Request actions');
+    // The opener is the only control in the table, so it must not scroll out
+    // of reach and must not be a glyph-sized target.
+    const actionProbe = (() => {
+      const btn = d.querySelector('#tbl-requests tr.exp-row:not(.retry-sub) .log-open');
+      const lastTd = btn && btn.closest('td:last-child');
+      if (!btn) return false;
+      const css = w.getComputedStyle;
+      return [css(ths[13]).position, css(ths[13]).right, css(lastTd).position,
+        css(lastTd).right, css(btn).width, css(btn).height].join(',');
+    })();
+    check('the actions column pins to the right edge and the opener is a real target (' + actionProbe + ')',
+      actionProbe === 'sticky,0px,sticky,0px,26px,26px');
     check('an actionable status pill is a button, not a pointer-only span', (() => {
       const rec = {client: 'c', provider: 'p', model: 'm', status_code: 0, live: true,
         paused: true, throttled: false, stream: true, debug: true};

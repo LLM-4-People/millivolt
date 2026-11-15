@@ -265,8 +265,8 @@ function reqRow(r, sepLabel) {
     // other not-yet-known cell.
     return `<tr class="exp-row live-row" data-id="${escapeHtml(r.id)}">
       <td style="color:var(--muted)" title="${escapeHtml(new Date(r.start).toLocaleString())}">${new Date(r.start).toLocaleTimeString()}</td>
-      <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
       <td>${liveStatusCell(r)}${liveRetry}</td>
+      <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
       <td title="${r.ttft_ms ? escapeHtml(fmtDur(r.ttft_ms)) : ''}">${r.ttft_ms ? fmtDur(r.ttft_ms) : '…'}</td>
       <td>-</td>
       <td>${inTok ? fmt(inTok) + '/…' : '…'}</td>
@@ -277,7 +277,7 @@ function reqRow(r, sepLabel) {
       <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
       <td>-</td>
       <td>-</td>
-      <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
+      <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
     </tr>`;
   }
   // Retry badge: show the actual status that was retried (not a hardcoded
@@ -306,8 +306,8 @@ function reqRow(r, sepLabel) {
   const costText = fmtMoney(r.cost);
   const main = `<tr class="exp-row ${drawerId===r.id ? 'expanding' : ''}" data-id="${escapeHtml(r.id)}">
     <td style="color:var(--muted)" title="${escapeHtml(start.toLocaleString())}">${timeText}</td>
-    <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
+    <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td title="${escapeHtml(fmtTTFT(r.ttft_ms))}">${fmtTTFT(r.ttft_ms)}</td>
     <td title="${escapeHtml(r.gen_tps ? tpsText + ' tok/s' : '')}">${tpsText}</td>
     <td title="${escapeHtml(inOutTitle)}">${inOutText}</td>
@@ -318,7 +318,7 @@ function reqRow(r, sepLabel) {
     <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
     <td style="color:${r.queue_wait_ms ? 'var(--warn)' : 'var(--muted)'}" title="${r.queue_wait_ms ? escapeHtml(fmtDur(r.queue_wait_ms)) : ''}">${r.queue_wait_ms ? fmtDur(r.queue_wait_ms) : '-'}</td>
     <td title="estimated cost ${escapeHtml(costText)}">${costText}</td>
-    <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
+    <td><button type="button" class="hold-edit log-open" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
   </tr>`;
   // One collapsed sub-row per absorbed attempt (hidden until the badge toggle).
   // Sub-rows are clickable: data-attempt carries the attempt index, so a
@@ -347,10 +347,13 @@ function reqRow(r, sepLabel) {
 // Columns are content-sized, not assigned pixel widths: REQ_FLOORS records the
 // widest value each column has needed this session, so REQ_COLS (the day
 // divider and retry sub-row span) can never drift from the header.
+// Status sits before the identity: the outcome is the question the log answers
+// first, and the identity column is the widest one, so a phone that has to
+// scroll sideways would otherwise lose the outcome before the first screen.
 const REQ_COLUMNS = [
   ['time'],
-  ['client · provider · model'],
   ['status'],
+  ['client · provider · model'],
   ['ttft'],
   ['tps'],
   ['in/out'],
