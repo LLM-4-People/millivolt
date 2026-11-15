@@ -43,6 +43,17 @@ module.exports = async function renderLive(H) {
     })();
     check('the actions column pins to the right edge and the opener is a real target (' + actionProbe + ')',
       actionProbe === 'sticky,0px,sticky,0px,26px,26px');
+    // The pinned cell repaints with its row in the row's other states, and the
+    // opener takes the touch target on a coarse pointer or a narrow viewport
+    // (jsdom resolves neither media query, so the source order is pinned).
+    const reqCSS = fs.readFileSync(path.join(STATIC, 'css/requests.css'), 'utf8');
+    const repaint = /#tbl-requests tr:hover td:last-child,\s*#tbl-requests tr:focus-within td:last-child,\s*#tbl-requests tr\.exp-row\.expanding td:last-child \{ background: var\(--panel2\); \}/.test(reqCSS);
+    check('the pinned cell repaints with its row on hover, focus and the open row',
+      repaint && /#tbl-requests tr\.exp-row:not\(\.retry-sub\) td:last-child \{\s*position: sticky/.test(reqCSS));
+    const coarseBlock = reqCSS.indexOf('.log-open { width: var(--tap); height: var(--tap); font-size: 17px; }');
+    check('the opener reaches the touch target on a coarse pointer or narrow viewport',
+      coarseBlock > reqCSS.indexOf('width: 26px; height: 26px') &&
+      reqCSS.lastIndexOf('@media (max-width: 800px), (hover: none), (pointer: coarse)', coarseBlock) > 0);
     check('an actionable status pill is a button, not a pointer-only span', (() => {
       const rec = {client: 'c', provider: 'p', model: 'm', status_code: 0, live: true,
         paused: true, throttled: false, stream: true, debug: true};
