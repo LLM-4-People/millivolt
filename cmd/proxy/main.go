@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -37,8 +38,12 @@ import (
 // boot snapshot); liveProxy is the running proxy server; liveConfigPath is
 // the -config flag value.
 var (
-	liveMu             sync.Mutex
-	reloadMu           sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
+	liveMu   sync.Mutex
+	reloadMu sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
+	// restoreHolders counts restores owning or waiting for reloadMu. A restore
+	// may hold it across a whole streaming upload, so save and reload use the
+	// count to refuse with 409 instead of blocking unboundedly on it.
+	restoreHolders     atomic.Int32
 	liveCfg            *config.Config
 	bootCfg            *config.Config // immutable process-bound settings
 	liveProxy          *proxy.Server
@@ -782,10 +787,11 @@ func adminConfigHandler() *config.Handler {
 		// Settings POST holds Handler.mu then reloadMu (Serialize), so its
 		// read/validate/write/reload cannot interleave with a backup restore
 		// (which holds reloadMu alone) or another reload trigger. Persist is
-		// the locked variant because this handler already holds reloadMu.
-		Serialize: func() func() {
-			reloadMu.Lock()
-			return reloadMu.Unlock
+		// the locked variant because this handler already holds reloadMu. A
+		// restore's transaction spans its whole upload, so a save answers 409
+		// instead of blocking on it.
+		Serialize: func() (func(), bool) {
+			return lockReloadTransaction()
 		},
 		Persist:      reloadConfigLocked,
 		Backup:       backupStatus,
@@ -806,7 +812,11 @@ func reloadHandler() http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		skipped, dropped, err := reloadConfigWithDropped()
+		skipped, dropped, busy, err := reloadConfigWithDropped()
+		if busy {
+			adminjson.WriteError(w, http.StatusConflict, "a restore is running; retry the reload when it finishes")
+			return
+		}
 		if err != nil {
 			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
@@ -860,11 +870,46 @@ func reloadConfig() ([]string, error) {
 // concurrent reload cannot swap the status slot between the apply and the
 // response. dropped_keys names only unknown/obsolete debris (invalid values
 // fail the reload); it is never silently omitted from a success response.
-func reloadConfigWithDropped() (skipped, dropped []string, err error) {
-	reloadMu.Lock()
-	defer reloadMu.Unlock()
+// busy reports a restore holding the lock: its transaction can span a whole
+// streaming upload, so the caller refuses instead of blocking on it.
+func reloadConfigWithDropped() (skipped, dropped []string, busy bool, err error) {
+	unlock, busy := lockReloadTransaction()
+	if busy {
+		return nil, nil, true, nil
+	}
+	defer unlock()
 	skipped, err = reloadConfigLocked()
-	return skipped, lastReloadDropped(), err
+	return skipped, lastReloadDropped(), false, err
+}
+
+// lockRestoreTransaction serializes one restore against every other config
+// transaction and marks the transaction as restore-owned until the returned
+// unlock runs. A restore holds the lock across a streaming upload and a
+// database-sized stage, so save and reload refuse during that window instead of
+// waiting for it.
+func lockRestoreTransaction() (unlock func()) {
+	restoreHolders.Add(1)
+	reloadMu.Lock()
+	return func() {
+		reloadMu.Unlock()
+		restoreHolders.Add(-1)
+	}
+}
+
+// lockReloadTransaction takes reloadMu for an operator save or reload. A
+// restore owning or queued for it answers busy instead of blocking; any other
+// holder (a reload, a handoff fence) is waited for as before. The count is
+// raised before the restore takes the lock, so a failed attempt observes it,
+// and it spans a queued second restore rather than only the holder.
+func lockReloadTransaction() (unlock func(), busy bool) {
+	if reloadMu.TryLock() {
+		return reloadMu.Unlock, false
+	}
+	if restoreHolders.Load() > 0 {
+		return nil, true
+	}
+	reloadMu.Lock()
+	return reloadMu.Unlock, false
 }
 
 // tryReloadConfig is the signal-loop variant of reloadConfig. It never waits

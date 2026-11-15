@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -191,6 +194,84 @@ func TestCaptureRestorePendingFallsBackWithoutHardLinks(t *testing.T) {
 	assertNoPreservedPending(t, dir)
 	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
 		t.Fatalf("rollback left %q, %v; want the queued bytes", got, err)
+	}
+}
+
+// blockingRestoreBody blocks the first read until release closes, so a test can
+// observe the restore's upload window.
+type blockingRestoreBody struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingRestoreBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *blockingRestoreBody) Close() error { return nil }
+
+// TestRestoreUploadRefusesSaveAndReloadInsteadOfBlocking pins the lock contract
+// of the restore transaction: the upload is exempt from the read timeout and
+// may stream for as long as the client keeps trickling, and the transaction
+// holds reloadMu across it. A Settings save or /admin/reload must therefore
+// refuse with 409 in that window instead of hanging on the lock for the whole
+// upload.
+func TestRestoreUploadRefusesSaveAndReloadInsteadOfBlocking(t *testing.T) {
+	liveReloadFixture(t)
+	if err := os.WriteFile(liveConfigPath, []byte("max_retries: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := &blockingRestoreBody{entered: make(chan struct{}), release: make(chan struct{})}
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=0", body)
+	done := make(chan int, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		handleRestore(rr, req)
+		done <- rr.Code
+	}()
+	select {
+	case <-body.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never started reading the upload")
+	}
+	// A blocked call would hang the whole package run, so each call gets its
+	// own deadline.
+	status := func(name string, serve func(*httptest.ResponseRecorder)) int {
+		t.Helper()
+		code := make(chan int, 1)
+		go func() {
+			rr := httptest.NewRecorder()
+			serve(rr)
+			code <- rr.Code
+		}()
+		select {
+		case got := <-code:
+			return got
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s blocked behind the upload", name)
+			return 0
+		}
+	}
+	if got := status("reload", func(rr *httptest.ResponseRecorder) {
+		reloadHandler()(rr, httptest.NewRequest(http.MethodPost, "/admin/reload", nil))
+	}); got != http.StatusConflict {
+		t.Fatalf("/admin/reload during an upload = %d, want 409", got)
+	}
+	h := adminConfigHandler()
+	if got := status("save", func(rr *httptest.ResponseRecorder) {
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/config",
+			strings.NewReader(`{"values":{},"revision":"r"}`)))
+	}); got != http.StatusConflict {
+		t.Fatalf("settings save during an upload = %d, want 409", got)
+	}
+	close(body.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restore did not finish after the upload")
 	}
 }
 

@@ -218,8 +218,8 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// reload transaction over the decode reuses the one ownership mechanism
 	// that already serializes every apply phase. Inspect is serialized too
 	// because it stages and integrity-checks the same members.
-	reloadMu.Lock()
-	defer reloadMu.Unlock()
+	unlock := lockRestoreTransaction()
+	defer unlock()
 	body := http.MaxBytesReader(w, r.Body, cap)
 	defer body.Close()
 	uploadFile, err := stageRestoreUpload(uploadDir, body, cap)
@@ -1052,8 +1052,7 @@ func restoreDatabase(ctx context.Context, path, mode string) (restart bool, err 
 	// HTTP restore phase, so they take the same serialization lock before
 	// reading the live config or staging anything. The caller must not already
 	// hold reloadMu.
-	reloadMu.Lock()
-	defer reloadMu.Unlock()
+	defer lockRestoreTransaction()()
 	liveMu.Lock()
 	dbPath := ""
 	if liveCfg != nil {

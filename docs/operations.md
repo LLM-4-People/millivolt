@@ -939,7 +939,10 @@ rather than sharing the drain window. The handoff also takes the config
 transaction lock for its whole flush fence, so a start while a reload, Settings
 save or backup restore is running is refused with `409` naming the operation
 instead of queueing behind it; the fence itself is bounded by
-`restart_drain_timeout` plus the flush bound. Parked native-adapter runs
+`restart_drain_timeout` plus the flush bound. A restore holds that lock across
+its streaming upload, so `POST /admin/reload` and a Settings save answer `409`
+while one is in flight rather than waiting for a client-paced upload to finish.
+Parked native-adapter runs
 are process-local and do not survive a successful restart.
 
 Ordinary SIGINT/SIGTERM shutdown is different: it cancels active stream contexts,
@@ -969,8 +972,8 @@ both.
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
 | `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; cache-first only for a `/dash/` URL carrying exactly the stamped version, network-first with cache fallback for unversioned or stale `/dash/` URLs and brand paths. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Its never-cache list is generated at load from the same canonical namespace table that drives the gate and the reserved routes, so the three cannot drift; it never intercepts `/`, `/index.html`, `/healthz`, `/readyz`, `/models`, `/sw.js`, `/admin/*`, `/session/*`, `/metrics/*`, `/mcp/*` or `/v1`. |
 | `POST /session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. Lives outside `/admin` so an external authentication layer can front the admin plane without gating millivolt's own login. |
-| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. GET returns provider header values verbatim, because the settings sheet must round-trip them on save; redaction applies to the model-visible `config_get` tool and the operator CLI instead (see [cli](cli.md) and [mcp](mcp.md)), where `--reveal` is the opt-in. Posting a redacted document back is safe: a credential header whose value is the marker keeps the loaded secret, while a posted real value replaces it. The same applies to `set_config`, so a model can read and re-post without erasing credentials. |
-| `POST /admin/reload` | Re-read config and report restart-required keys. |
+| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409, and so does a save while a restore holds the config transaction (its upload is client-paced). Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. GET returns provider header values verbatim, because the settings sheet must round-trip them on save; redaction applies to the model-visible `config_get` tool and the operator CLI instead (see [cli](cli.md) and [mcp](mcp.md)), where `--reveal` is the opt-in. Posting a redacted document back is safe: a credential header whose value is the marker keeps the loaded secret, while a posted real value replaces it. The same applies to `set_config`, so a model can read and re-post without erasing credentials. |
+| `POST /admin/reload` | Re-read config and report restart-required keys. Answers 409 while a restore holds the config transaction. |
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected, and so is a start while a config transaction (reload, Settings save, backup restore) holds the reload lock: `409` names the operation. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. GET reports `queued` (admission and send-gate waiters, the populations an operator drain can release) and `storm_waiters` (requests parked by the storm/quota gate before admission, which only the gate opening or a quota resume frees). |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
