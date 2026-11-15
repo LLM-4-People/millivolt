@@ -54,8 +54,11 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 	retried := false
 	// ordinary counts only transient absorb attempts (429/5xx/transport).
 	// Quota-pause re-sends park for an account condition, not a transient
-	// failure, and must never exhaust the transient budget.
+	// failure, and must never exhaust the transient budget. They get their own
+	// overall deadline instead: no budget bounds them, so a provider that keeps
+	// answering 429 would re-send until the client leaves.
 	ordinary := 0
+	quotaDeadline := time.Time{}
 	end := func(failed bool) {
 		if failed {
 			// Exhausted retryable: double request backoff, keep one probe.
@@ -212,6 +215,20 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 				rec.ErrorType = ""
 				rec.ErrorMsg = ""
 				s.publishUpdate(rec)
+				// The first park starts the overall quota wait; storm_max_wait
+				// is the configured request wait, and expiry ends the loop with
+				// the storm error the queue sink already renders as the
+				// canonical retryable 429, so the client learns the wait is over
+				// instead of hanging on a gate that never opens.
+				if quotaDeadline.IsZero() {
+					if wait := s.cfg().StormMaxWait; wait > 0 {
+						quotaDeadline = time.Now().Add(wait)
+					}
+				}
+				if !quotaDeadline.IsZero() && !time.Now().Before(quotaDeadline) {
+					end(false)
+					return nil, nil, scheduler.ErrStormMaxWait
+				}
 				retried = true
 				continue
 			}

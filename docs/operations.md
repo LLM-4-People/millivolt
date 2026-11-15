@@ -1370,7 +1370,11 @@ provider pin through the same commit owner as a manual pause so the provider
 stays offered in the scope pickers. A quota 429 never
 arms the rate-limit pacing trip (the rate-limit health series still counts the
 429 itself), and quota re-sends never burn the transient
-`max_retries` budget. The retry gate is in-memory - a restart drops it and
+`max_retries` budget. They are bounded by `storm_max_wait` instead, measured
+from the request's first park: when it expires the client receives the
+canonical retryable `error storm protection: ...` 429 rather than waiting on a
+gate that never opens, and the provider stays parked for the next request.
+The retry gate is in-memory - a restart drops it and
 the provider's next durable quota 429 re-arms it - while manual-mode holds
 persist like every operator pause. In-band occurrences (the same envelope
 inside a 200 stream) arm the pause the same way; that request already

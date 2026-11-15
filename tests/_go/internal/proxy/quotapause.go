@@ -688,3 +688,47 @@ func TestQuotaPauseOffKeepsVerbatimSurface(t *testing.T) {
 		t.Fatal("unarmed quota 429 opened a gate or hold")
 	}
 }
+
+// TestQuotaPauseResendStopsAtStormMaxWait pins the overall bound on a quota
+// re-send loop. A quota re-send burns no max_retries budget, so a provider
+// that keeps answering the durable quota 429 used to re-send forever and hold
+// the client indefinitely. The loop must end at storm_max_wait with the storm
+// error the queue sink renders as the canonical retryable 429, so the client
+// learns the wait is over.
+func TestQuotaPauseResendStopsAtStormMaxWait(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		// No Retry-After: the recovery cooldown (storm_initial_backoff) owns
+		// the cadence, so probes keep cycling instead of one long wait, and the
+		// loop bound - not an admission wait - is what ends the request.
+		w.WriteHeader(http.StatusTooManyRequests)
+		io.WriteString(w, quotaBody)
+	}))
+	defer up.Close()
+	cfg := quotaPauseTestConfig(config.QuotaPauseRetry)
+	cfg.StormMaxWait = 300 * time.Millisecond
+	cfg.MaxRetries = 5 // ignored by quota re-sends
+	s := New(cfg, metrics.NewBuffer(10))
+	start := time.Now()
+	w := stormRequest(t, s, up.URL, "model-a", "key-a")
+	elapsed := time.Since(start)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want the retryable 429; body %s", w.Code, w.Body)
+	}
+	if !strings.Contains(w.Body.String(), scheduler.ErrStormMaxWait.Error()) {
+		t.Fatalf("body = %s, want the storm max-wait error", w.Body)
+	}
+	// The wait must be the bound, not an incidental retry budget: generous
+	// lower and upper margins keep it stable under load.
+	if elapsed < 100*time.Millisecond || elapsed > 3*time.Second {
+		t.Fatalf("expired after %v, want about the 300ms bound", elapsed)
+	}
+	if calls.Load() < 2 {
+		t.Fatalf("upstream calls = %d, want the re-send to have been attempted", calls.Load())
+	}
+	// The provider stays parked for the next request; only this request ended.
+	if _, ok := quotaStormRow(s); !ok {
+		t.Fatal("the provider gate closed with the request")
+	}
+}
