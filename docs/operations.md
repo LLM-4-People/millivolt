@@ -1169,8 +1169,9 @@ and the snapshot a new-clients hold compares against) are bounded at 4096 names
 per dimension. Client labels and model ids come from the request, so they are
 evictable: past the cap the least recently observed name makes room for the
 newest, so a client that keeps sending requests outlives a burst of one-shot
-labels that arrived after it. Names an operator documents - a hold scope or a
-debug session - are pinned and are never evicted by later traffic, so a flood
+labels that arrived after it. Names an operator documents - a hold scope, a debug session, a limit policy
+(including one installed from a request's `X-Limit-*` headers or restored at
+boot) - are pinned and are never evicted by later traffic, so a flood
 of distinct labels cannot hide the client you scoped a hold to. Pins are
 derived from the documents that exist, not accumulated: resuming a hold or
 ending a debug session releases its names back to ordinary eviction. When a

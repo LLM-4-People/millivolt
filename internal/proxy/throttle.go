@@ -207,6 +207,9 @@ func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 		ts = append(ts, t)
 	}
 	s.scheduler.RestoreThrottles(ts)
+	// A restored policy scopes its names before any traffic, so pin them now
+	// instead of waiting for the next operator write.
+	s.syncNamePins()
 	if len(ts) > 0 {
 		logging.Printf("", "throttle restored (%d provider caps)", len(ts))
 	}
@@ -416,7 +419,11 @@ func (s *Server) updateThrottleFromHeaders(provider string, update func(schedule
 	if !changed {
 		return nil
 	}
+	// The provider is a live operator-document scope, so it must be pinned,
+	// not only observed: an observed name is evictable from the bounded
+	// vocabulary while the header limit still scopes it.
 	s.pause.providers.add(provider)
+	s.syncNamePins()
 	s.markThrottleDirty()
 	return nil
 }

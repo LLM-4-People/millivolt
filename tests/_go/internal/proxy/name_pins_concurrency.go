@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -76,6 +78,69 @@ func TestNamePinsStaleDerivationCannotLandLast(t *testing.T) {
 	}
 }
 
+// TestHeaderLimitPinsItsProvider: a header limit is a live operator document
+// scoped to its provider, so the provider must be pinned, not merely observed.
+// An observed name is evictable from the bounded vocabulary, and losing it
+// drops the provider from the pickers while the limit still scopes it.
+func TestHeaderLimitPinsItsProvider(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	const provider = "hdr-provider"
+	if err := p.updateThrottleFromHeaders(provider, func(cur scheduler.Throttle) scheduler.Throttle {
+		cur.Limit.Concurrency = 2
+		return cur
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(pinnedNames(&p.pause.providers), provider) {
+		t.Fatalf("the header limit did not pin its provider: %v", pinnedNames(&p.pause.providers))
+	}
+	for i := range nameSetMax + 16 {
+		// The same call a finalized request makes for every new name.
+		p.pause.providers.add(fmt.Sprintf("observed-%05d.example", i))
+	}
+	if !slices.Contains(p.pause.providers.list(), provider) {
+		t.Fatal("a live limit's provider was evicted from the picker")
+	}
+
+	// An unchanged re-send of the same patch keeps the pin too.
+	if err := p.updateThrottleFromHeaders(provider, func(cur scheduler.Throttle) scheduler.Throttle {
+		cur.Limit.Concurrency = 2
+		return cur
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(pinnedNames(&p.pause.providers), provider) {
+		t.Fatalf("an unchanged header patch dropped the pin: %v", pinnedNames(&p.pause.providers))
+	}
+}
+
+// staticThrottlePersist restores one fixed document.
+type staticThrottlePersist struct{ raw []byte }
+
+func (*staticThrottlePersist) SaveThrottle(context.Context, []byte) error { return nil }
+func (p *staticThrottlePersist) LoadThrottle(context.Context) ([]byte, error) {
+	return p.raw, nil
+}
+
+// TestRestoredThrottlePinsItsProvider is the boot twin: a policy restored from
+// the store scopes its provider before any traffic, so its name must be pinned
+// there too instead of waiting for the next operator write.
+func TestRestoredThrottlePinsItsProvider(t *testing.T) {
+	raw, err := json.Marshal(persistedThrottleDoc{Version: 1, Throttles: []persistedThrottle{
+		{Provider: "restored-provider", Concurrency: 2},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(config.Default(), metrics.Noop{})
+	p.restoreThrottlePolicies(&staticThrottlePersist{raw: raw})
+	if !slices.Contains(pinnedNames(&p.pause.providers), "restored-provider") {
+		t.Fatalf("a restored policy did not pin its provider: %v", pinnedNames(&p.pause.providers))
+	}
+}
+
+// stale writer: every round's own sync is raced by a goroutine re-deriving
+// pins from an older roster.
 // TestNamePinsSurviveConcurrentRosterChurn runs remove/add rounds against a
 // stale writer: every round's own sync is raced by a goroutine re-deriving
 // pins from an older roster.
