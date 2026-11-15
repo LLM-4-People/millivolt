@@ -597,7 +597,7 @@ Run the shared checks before relying on a release. Confirm the hosted container
 build and smoke tests succeed, then check the package visibility and anonymous
 pull. Do not report a release/image as available merely because validation or a
 local build passed. Image usage and persistence limits live in
-[operations](docs/operations.md#versions-and-images). The gate clears inherited
+[operations](docs/containers.md#versions-and-images). The gate clears inherited
 Git routing/configuration variables before checking
 source identity, so another worktree or external ignore policy cannot satisfy
 the release checks accidentally.

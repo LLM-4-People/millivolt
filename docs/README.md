@@ -26,14 +26,14 @@ that matches what you need to do.
 - [Reverse proxy](reverse-proxy.md) - protected ingress, credentials, and NGINX.
 - [MCP server](mcp.md) - the 22-tool operator API for LLM-driven analysis.
 - [Operator CLI](cli.md) - a human command-line client over the same operator routes.
-- [Container operation](operations.md#containers) - image selection, volumes, backups, and shutdown.
+- [Container operation](containers.md#containers) - image selection, volumes, backups, and shutdown.
 
 ## Reference
 
 - [Operations](operations.md) - configuration, persistence, routes, storage, performance, and limits.
 - [Performance and resource usage](performance.md) - current measured tables, method, commands, and limitations.
 - [Architecture](architecture.md) - ownership, invariants, and where each behavior lives.
-- [Versions and images](operations.md#versions-and-images) - version identity, promotion, tags, and verification.
+- [Versions and images](containers.md#versions-and-images) - version identity, promotion, tags, and verification.
 
 ## Project
 

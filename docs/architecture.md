@@ -61,7 +61,7 @@ directly, because a testing push has no promotion proof to wait for. The
 `main-testing-first` ruleset adds the pull-request and merge-commit requirements
 with no bypass actors.
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
-checklist; [operations](operations.md#versions-and-images) owns the published
+checklist; [operations](containers.md#versions-and-images) owns the published
 tag contract.
 
 ## Request and scheduling path
