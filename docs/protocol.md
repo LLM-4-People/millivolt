@@ -287,7 +287,23 @@ still failed, in the error rate), and labeled `rate_limit` instead of
 carries `X-Proxy-Error-Class: <class>` and a class-derived
 `X-Should-Retry: true|false` before the status line commits (the body is
 never rewritten; relayed errors stay verbatim), while
-`suppress_client_retries` still wins with a flat `false`. Two settings extend
+`suppress_client_retries` still wins with a flat `false`. The directive is the
+class's own retry verdict, not a re-reading of the status:
+
+| Class | `X-Should-Retry` | Why |
+| --- | --- | --- |
+| `rate_limit` | `true` | transient flow control at any status |
+| `unavailable` | `true` | transient capacity or server failure |
+| `unreachable` | `true` | transport failed with no usable response, including a fresh send whose peer closed the socket |
+| `timeout` | `true` | the send or read deadline fired |
+| `content` | `false` | a 2xx with nothing usable; retried on the quality/thinking budgets instead |
+| `quota` | `false` | waiting does not clear it; `quota_pause_mode` owns the reaction |
+| `client_error` | `false` | the caller's own fault |
+| `proxy` | `false` | millivolt's own failure |
+| `canceled` | `false` | the local client left |
+| `upstream` | `false` | unclassified upstream failure, final by default |
+
+Two settings extend
 the built-in vocabularies with gateway-specific spellings, additively:
 `rate_limit_error_classes` and `quota_error_classes` (plus the existing
 `retryable_error_classes` for in-band transient errors). Entries are matched
@@ -461,11 +477,14 @@ rate-limit state and the redacted response headers. A provider-side request id
 therefore matches to the exact upstream attempt that produced it, including
 failures the client never saw. Transport failures have no HTTP response, so
 their attempt entries leave those fields empty. An in-band 429 is the one
-exception: when a keepalive already committed the client's success 200, the
-upstream status cannot replace it, so the record keeps
-`{status_code:429,at,in_band:true}` to preserve the distinct rate-limit signal.
-It carries no retry or error detail, is not counted as a retry, and is excluded
-from retry disclosures and error enumerations. Recovered upstream failures can
+attempt entry that carries the in-band flag: when a keepalive already committed
+the client's success 200, the upstream status cannot replace it, so the record
+keeps `{status_code:429,at,in_band:true}` to preserve the distinct rate-limit
+signal. Only a 429 mints one; any other in-band provider error stamps the
+record's own type and status instead, and a failed body read behind the commit
+keeps the provider-decided type rather than replacing it. The entry carries no
+retry or error detail, is not counted as a retry, and is excluded from retry
+disclosures and error enumerations. Recovered upstream failures can
 count as errors even when the final status succeeds. A final, retried or
 in-band 429 is a separate affected-request signal.
 A client that disconnects before a final outcome is recorded as status 499
