@@ -61,6 +61,7 @@ func TestDataPayload(t *testing.T) {
 		{"data: ", "", true},
 		{"data:", "", true},
 		{"data", "", true},      // bare field line: valid, empty payload
+		{"data\r", "\r", true},  // its CRLF line ending reads like the prefixed twin's
 		{"d", "", false},        // never match on a lone 'd'
 		{"event: x", "", false}, // non-data lines are not payloads
 		{"", "", false},
@@ -75,6 +76,14 @@ func TestDataPayload(t *testing.T) {
 	// multi-line event contributes an empty line instead of being dropped.
 	if got := string(EventData([]byte("data: {\"a\":\ndata\ndata: 1}"))); got != "{\"a\":\n\n1}" {
 		t.Fatalf("EventData with a bare data line = %q", got)
+	}
+	// A CRLF stream must read the bare field exactly like its prefixed twin:
+	// the \r is the line ending, not payload, so both spellings leave the same
+	// empty segment instead of the bare one vanishing from the event.
+	for _, field := range []string{"data:", "data"} {
+		if got := string(EventData([]byte("data: {\"a\":1}\r\n" + field + "\r\n\r\n"))); got != "{\"a\":1}\r\n\r" {
+			t.Errorf("EventData with %q = %q, want the prefixed twin's bytes", field, got)
+		}
 	}
 }
 

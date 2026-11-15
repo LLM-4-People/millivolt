@@ -172,18 +172,24 @@ func EventData(raw []byte) []byte {
 
 // DataPayload extracts the payload of one raw SSE line: ok is false when the
 // line is not a data field, otherwise payload is the bytes after the full
-// "data:" prefix (never just a leading 'd') with one optional leading space
-// consumed. The bare "data" spelling is a valid field with an empty payload.
-// Trailing \r tolerance stays with the terminal marker comparisons; ordinary
+// "data" field name (never just a leading 'd') with the separator colon and
+// one optional leading space consumed. The bare "data" spelling is a valid
+// field with no payload; a line-ending \r stays in the payload exactly as it
+// does for the prefixed spelling, so a CRLF stream reads both alike. Trailing
+// \r tolerance otherwise stays with the terminal marker comparisons; ordinary
 // payloads keep their bytes verbatim.
 func DataPayload(line []byte) (payload []byte, ok bool) {
-	if bytes.Equal(line, []byte("data")) {
-		return nil, true
-	}
-	if !bytes.HasPrefix(line, []byte("data:")) {
+	if !bytes.HasPrefix(line, []byte("data")) {
 		return nil, false
 	}
-	payload = line[len("data:"):]
+	rest := line[len("data"):]
+	if len(rest) == 0 || bytes.Equal(rest, []byte("\r")) {
+		return rest, true
+	}
+	if rest[0] != ':' {
+		return nil, false
+	}
+	payload = rest[1:]
 	if len(payload) > 0 && payload[0] == ' ' {
 		payload = payload[1:]
 	}
