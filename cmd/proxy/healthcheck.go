@@ -1,9 +1,7 @@
 package main
 
 import (
-	"errors"
 	"io"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -28,11 +26,14 @@ const healthcheckTimeout = 3 * time.Second
 func runHealthcheck() int {
 	cfg, _, err := config.LoadFileStrict(liveConfigPath)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.Printf("healthcheck: config: %v", err)
-			return 1
-		}
-		cfg = config.Default()
+		// Fail closed on a named config that cannot be read. Substituting the
+		// built-in defaults would probe the default listener and green-light a
+		// container whose real document is gone or broken - the defaults name
+		// a port this deployment may not use. Only an empty -config reaches
+		// the built-in defaults, and LoadFileStrict already answers those
+		// without an error.
+		log.Printf("healthcheck: config %q: %v", liveConfigPath, err)
+		return 1
 	}
 	applyCLIOverrides(cfg)
 	host, port, err := net.SplitHostPort(cfg.Listen)

@@ -25,7 +25,7 @@ for fresh config volumes. Do not start Settings against the committed example.
 | `-listen ADDRESS` | Override the configured listen address; the effective value is validated after every override. |
 | `-db-path PATH` | Override durable storage; `none` disables it. |
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
-| `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. |
+| `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. A named config that cannot be read fails the probe instead of falling back to defaults; only an empty `-config` probes the built-in defaults. |
 | `-print-config` | Print neutral built-in default YAML. |
 | `-print-example-config` | Print the deployment example, including its enabled compatibility profiles and the opencode sub-conversation tracking exemplar. |
 | `-version` | Print JSON build identity. |
@@ -47,12 +47,14 @@ defaults; both `(unparseable yaml)` and `<key> (salvaged)` are reported in the
 boot log and `last_reload`. A named key with no usable value, or a salvaged
 value the config rejects, fails startup with the original file still in place.
 Reload rejects an invalid document without rewriting it.
-Settings, healthcheck and restore merge treat a missing file as defaults, while
+Settings and restore merge treat a missing file as defaults, while
 an invalid or unreadable document fails closed and is reported instead of
-substituting a default. Backup capture is stricter: a missing config file is an
+substituting a default. Healthcheck is stricter: a named file that cannot be
+read fails the probe, and only an empty `-config` reaches the built-in
+defaults. Backup capture is stricter: a missing config file is an
 error because there is nothing to archive. Settings POST still rejects invalid
 inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck loads
-the file read-only and never rewrites it.
+whatever file it is given read-only and never rewrites it.
 
 To regenerate the public example after changing its canonical owners:
 
