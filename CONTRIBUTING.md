@@ -298,6 +298,14 @@ CI's source-and-unit step is the default core suite:
 scripts/check.sh
 ```
 
+A run may not start while a code-scanning finding is unresolved.
+`scripts/security_gate.py` reads `code-scanning/alerts?state=open` from the
+repository API in the `unit` job and again in `publish` before the version tag
+is created. Fix the finding, or record a dismissal with a reason that explains
+why the code is correct; a dismissed alert is not open, and the security page
+keeps that reason beside the location. An API the gate cannot read fails
+closed rather than passing.
+
 CI sets `GOTOOLCHAIN=local`, so the host Go must match the `go` version in
 `go.mod`. On a host with an older base Go, install Go 1.27.2 or select the
 matching toolchain before running the gate; `GOTOOLCHAIN=local` alone cannot
