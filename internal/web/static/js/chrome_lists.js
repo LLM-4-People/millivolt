@@ -433,6 +433,13 @@ function refreshFooterState() {
         why: 'The startup history scan failed, so since-inception totals only count rows committed since this process started.',
       },
       {
+        // A dropped stream is a health fact like the others. When a hold or a
+        // capture owns the words, offline had nowhere to land at all.
+        on: !streamLive && (holding || debugging),
+        words: ' · offline',
+        why: 'The live event stream is down, so the held or captured state beside this is the last update received. The page reconnects on its own.',
+      },
+      {
         on: pauseState.restore_degraded === true || throttleState.restore_degraded === true,
         words: ' · state degraded',
         why: 'A saved hold or limit document could not be read at startup, so rules saved before this restart are not in force. Check the pause and limits sections before relying on them.',

@@ -370,7 +370,7 @@ function runBackupDownload() {
       const n = backupBytes(blob.size);
       settingsStatus(n ? 'downloaded ' + n : 'backup downloaded', 'ok');
     })
-    .catch(err => settingsStatus(String(err.message || err)))
+    .catch(err => settingsStatus(String(err.message || err), 'error'))
     .finally(() => backupSetBusy(false));
 }
 
@@ -393,7 +393,7 @@ function runBackupRestore(ev) {
     settingsStatus('review then apply', 'ok');
   }).catch(err => {
     if (req !== backupReq) return;
-    settingsStatus(String(err.message || err));
+    settingsStatus(String(err.message || err), 'error');
   }).finally(() => {
     if (input) input.value = '';
     if (req === backupReq && !backupInspect) backupSetBusy(false);
@@ -435,7 +435,9 @@ function runBackupApply() {
     if (req !== backupReq) return;
     backupSetBusy(false);
     paintBackupPane();
-    settingsStatus(String(err.message || err));
+    // A failed restore is an error, not an informational line: the status
+    // line's tone is the only thing that tells the two apart.
+    settingsStatus(String(err.message || err), 'error');
   });
 }
 

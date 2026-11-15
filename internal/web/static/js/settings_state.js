@@ -534,7 +534,7 @@ function applySettings() {
   let values;
   try { values = collectSettingsValues(true); }
   catch (err) {
-    settingsStatus(String(err.message || err));
+    settingsStatus(String(err.message || err), 'error');
     if (err.input) {
       const wrap = err.input.closest && err.input.closest('.ro-wrap');
       const gate = wrap ? validateRequestOverridesDraft(wrap) : null;
@@ -689,7 +689,7 @@ async function purgeMetrics(body) {
     await Promise.all([bootstrap, aggregates]);
     return true;
   } catch (err) {
-    settingsStatus(String(err.message || fail));
+    settingsStatus(String(err.message || fail), 'error');
     return false;
   } finally {
     _purgeBusy = false;

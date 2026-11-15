@@ -598,6 +598,18 @@ module.exports = async function modelCanon(H) {
       calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1') && !c.u.includes('config=1')));
     check('restore refreshes settings even when a database restart is pending',
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
+    // A failed restore must read as an error, not as an informational line:
+    // the status tone is the only difference between "restored" and "did not".
+    w.fetch = (url, opts) => String(url).includes('/admin/restore')
+      ? Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'restore blew up' }) })
+      : originalFetch(url, opts);
+    w.eval("backupInspect = { file: new Blob(['x']), data: { config: { present: true }, database: { present: false } } };");
+    d.getElementById('backup-include-config').checked = true;
+    d.getElementById('backup-include-config').dispatchEvent(new w.Event('change', { bubbles: true }));
+    w.runBackupApply();
+    await settleUntil(() => /restore blew up/.test(d.getElementById('settings-count').textContent));
+    check('a failed restore paints the settings status as an error',
+      d.getElementById('settings-count').dataset.tone === 'error');
     w.fetch = originalFetch;
     w.HTMLAnchorElement.prototype.click = origClick;
     // A store-less preview carries the database member but marks it

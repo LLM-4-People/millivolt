@@ -175,6 +175,23 @@ module.exports = async function delegatedActions(H) {
       sw.applyBootstrapState({...state, storage: {enabled: true, dropped: 0}});
       check('a clean storage signal renders no degraded footnote',
         !sd.getElementById('f-state').textContent.includes('totals degraded') && !sd.getElementById('f-state').title);
+      // A dropped stream is a health fact, and a hold or a capture owns the
+      // words that would otherwise say "live": offline must still land.
+      {
+        const footer = sd.getElementById('f-state');
+        sw.applyPauseState({ok: true, paused: true, holds: [{id: 'offline-hold', all: true}],
+          clients: [], providers: [], known_clients: [], known_providers: [], until: null,
+          queued: 0, storm_waiters: 0, default_max_queued: 0});
+        sw.setFooterLive(false);
+        check('a dropped stream names offline even while a hold owns the footer',
+          footer.textContent.includes('offline') && footer.title.includes('event stream is down'));
+        sw.setFooterLive(true);
+        check('the offline footnote clears on reconnect',
+          !footer.textContent.includes('offline'));
+        sw.applyPauseState({ok: true, paused: false, holds: [], clients: [], providers: [],
+          known_clients: [], known_providers: [], until: null, queued: 0,
+          storm_waiters: 0, default_max_queued: 0});
+      }
       // A degraded operator-state restore is the twin of a degraded boot scan:
       // a durable hold or cap document existed and could not be read, so rules
       // saved before the restart are not in force. It must read apart from
