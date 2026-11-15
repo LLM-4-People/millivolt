@@ -362,6 +362,8 @@ func defaultPort(scheme string) string {
 // on that host. A plain prefix match silently widened the operator's intent:
 // an entry for http://10.0.0.5 also reached :9200. Path prefixes remain
 // supported: an entry may name a path and admits that path and its children.
+// Only the escaped path is compared; a query on either side neither widens nor
+// narrows the match.
 func allowed(base string, prefixes []string) bool {
 	baseAuth, baseRest := baseAuthority(base)
 	for _, prefix := range prefixes {
@@ -370,8 +372,7 @@ func allowed(base string, prefixes []string) bool {
 			continue
 		}
 		if prefixRest == "" || baseRest == prefixRest ||
-			strings.HasPrefix(baseRest, prefixRest+"/") ||
-			strings.HasPrefix(baseRest, prefixRest+"?") {
+			strings.HasPrefix(baseRest, prefixRest+"/") {
 			return true
 		}
 	}

@@ -1102,6 +1102,8 @@ func TestAllowedBaseURLAuthorityMatch(t *testing.T) {
 		{"path prefix admits itself", "https://api.example.com/v1", "https://api.example.com/v1", true},
 		{"path prefix rejects a sibling", "https://api.example.com/v1", "https://api.example.com/v2", false},
 		{"path prefix rejects a longer segment", "https://api.example.com/v1", "https://api.example.com/v10", false},
+		{"a base query does not widen the path", "https://api.example.com/v1", "https://api.example.com/v1?x=1", true},
+		{"a base query does not narrow the path", "https://api.example.com/v1?x=1", "https://api.example.com/v1?x=2", true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
