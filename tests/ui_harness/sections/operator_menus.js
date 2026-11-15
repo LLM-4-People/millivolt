@@ -2232,9 +2232,14 @@ module.exports = async function operatorMenus(H) {
             !!after && after === before &&
             text('#oc-pane .oc-banner[role="alert"] span') === 'rule rejected');
         }
+        // A scheduled repaint can replace the pane between the query and the
+        // press, which detaches the node and swallows the delegated click on a
+        // loaded runner. Settle on the painted banner first, then press, then
+        // settle on the outcome the product owns.
+        await settleUntil(() => !!q('#oc-pane .oc-banner[role="alert"]'));
         click('#oc-pane [data-oc-error-dismiss]');
         check('dismissing the banner clears the stored error',
-          !q('#oc-pane .oc-banner') && w.eval('ocError') === '');
+          await settleUntil(() => !q('#oc-pane .oc-banner') && w.eval('ocError') === ''));
       } finally {
         w.fetch = savedFetch;
       }
