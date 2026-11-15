@@ -111,6 +111,14 @@ bytes must be spelled the same on both sides). A path prefix is compared on the
 escaped path, so percent-encoding that decodes the same is still different
 bytes.
 
+The joined upstream path is not cleaned either. `.` and `..` segments from
+`X-Proxy-Path` or the incoming path travel verbatim, and an upstream that
+normalizes request paths resolves them after the proxy has already allowed the
+base. `X-Proxy-Path: /../../admin` under an entry for `http://host/v1` is sent
+as `/v1/../../admin` and reaches `/admin` at such an upstream, outside the
+allowlisted path prefix. The authority stays allowlisted either way; only the
+path prefix can be left.
+
 
 Client identity labels are retention-bounded before the record enters the live
 ring, analytics or durable store: classified client and language 256 bytes,
