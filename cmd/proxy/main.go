@@ -148,6 +148,25 @@ func newOperatorMux(gate *operatorGate, boot *config.Config) (*http.ServeMux, ht
 	return mux, handler
 }
 
+// processDrain is the process-wide drain every fatal boot or resume path runs
+// before exiting, so buffered metrics are not discarded by a bare os.Exit. main
+// installs the single drainStore closure once the store and proxy exist; a nil
+// value (a failure before they do) simply exits. It is a variable rather than a
+// dependency because inheritedListener runs before the restarter is built.
+var processDrain func()
+
+// fatalDrain is the one fatal exit for the boot and resume paths that run after
+// the store exists. log.Fatalf exits immediately and skips the write-channel
+// drain and final flush, so a resumed-but-unusable process would drop every
+// buffered record; this drains first and keeps Fatalf's exit status.
+func fatalDrain(format string, args ...any) {
+	log.Printf(format, args...)
+	if processDrain != nil {
+		processDrain()
+	}
+	os.Exit(1)
+}
+
 func main() {
 	configPath := flag.String("config", "proxy.yaml", "path to config file (empty for built-in defaults)")
 	printConfig := flag.Bool("print-config", false, "print documented built-in defaults as YAML and exit without loading configuration")
@@ -417,6 +436,27 @@ func main() {
 	}
 	log.Printf("millivolt listening on %s  db=%s", cfg.Listen, dbDesc)
 
+	// drainStore is the shared close before every loop exit (serve failure,
+	// clean return, signal shutdown): stop the throttle writer and flush its
+	// latest policy, then drain the write channel and final flush. log.Printf -
+	// never Fatalf - so a close failure still lets the exit path run. It is
+	// defined before the listener so the fatal boot and resume paths, which
+	// would otherwise os.Exit straight past the drain, can publish it here
+	// (see fatalDrain).
+	drainStore := func() {
+		if proxySrv != nil {
+			if err := proxySrv.CloseThrottlePersist(context.Background()); err != nil {
+				log.Printf("throttle persist close: %v", err)
+			}
+		}
+		if store != nil {
+			if err := store.Close(); err != nil {
+				log.Printf("storage close: %v", err)
+			}
+		}
+	}
+	processDrain = drainStore
+
 	// Claim the port, killing any stale proxy instance holding it - unless
 	// this process was started by a restart handoff, which passes the live
 	// listening socket instead (claimPort must be bypassed then: the draining
@@ -543,23 +583,6 @@ func main() {
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-
-	// drainStore is the shared close before every loop exit (serve failure,
-	// clean return, signal shutdown): stop the throttle writer and flush its
-	// latest policy, then drain the write channel and final flush. log.Printf -
-	// never Fatalf - so a close failure still lets the exit path run.
-	drainStore := func() {
-		if proxySrv != nil {
-			if err := proxySrv.CloseThrottlePersist(context.Background()); err != nil {
-				log.Printf("throttle persist close: %v", err)
-			}
-		}
-		if store != nil {
-			if err := store.Close(); err != nil {
-				log.Printf("storage close: %v", err)
-			}
-		}
-	}
 
 	// Loop so SIGHUP reloads config without exiting; SIGINT/SIGTERM break out to
 	// a graceful shutdown. A serve error exits immediately (store drained first).

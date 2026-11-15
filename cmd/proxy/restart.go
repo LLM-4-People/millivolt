@@ -628,7 +628,7 @@ func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
 					// The resumed server is the process's only listener; a
 					// mid-life death must not leave a silent zombie - die
 					// loudly so the operator restarts manually.
-					log.Fatalf("restart: resumed server failed: %v", serr)
+					fatalDrain("restart: resumed server failed: %v", serr)
 				}
 			}()
 			log.Printf("restart: serving resumed on the inherited socket")
@@ -637,7 +637,7 @@ func (rs *restarter) failAndResume(err error, listenFile *os.File, bin string) {
 	if resumeErr != nil {
 		// Nothing further can be done here - the process is alive but cannot
 		// accept; say so loudly and let the operator restart it manually.
-		log.Fatalf("restart: %v; resume failed: %v - manual restart required", err, resumeErr)
+		fatalDrain("restart: %v; resume failed: %v - manual restart required", err, resumeErr)
 	}
 	rs.finishFailure(err)
 	log.Printf("restart: FAILED: %v (proxy resumed; no requests lost)", err)
@@ -823,12 +823,12 @@ func inheritedListener() (net.Listener, bool) {
 	}
 	fd, err := strconv.Atoi(v)
 	if err != nil {
-		log.Fatalf("restart: invalid %s=%q", envListenFD, v)
+		fatalDrain("restart: invalid %s=%q", envListenFD, v)
 	}
 	f := os.NewFile(uintptr(fd), "inherited-listen")
 	ln, err := net.FileListener(f)
 	if err != nil {
-		log.Fatalf("restart: inherited listener: %v", err)
+		fatalDrain("restart: inherited listener: %v", err)
 	}
 	f.Close() // FileListener owns a duplicate; do not leak the inherited FD.
 	log.Printf("restart: inherited listening socket (fd %d); claimPort bypassed", fd)
