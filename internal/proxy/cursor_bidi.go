@@ -39,9 +39,6 @@ import (
 // (half-open parked streams). Not SSE keepalive (that's SSEKeepaliveInterval).
 const cursorH2PingTimeout = 15 * time.Second
 
-// errEchoMax bounds an upstream error body echoed into a 502 message.
-const errEchoMax = 512
-
 // cursorClientFor returns the shared full-duplex HTTP/2 client used for Cursor
 // Run calls, building it on first use. It mirrors the main upstream client's
 // pool/timeout tunables where they apply, but uses an x/net/http2.Transport so
@@ -1294,11 +1291,8 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 		providerformat.CursorModelEntries(models, s.cfg().CursorDefaultContextWindow))
 }
 
-// truncateForErr bounds an upstream error body echoed into a 502 message.
+// truncateForErr bounds an upstream error body echoed into a 502 message
+// through the shared client-facing error bound.
 func truncateForErr(b []byte) string {
-	s := string(b)
-	if len(s) > errEchoMax {
-		s = s[:errEchoMax] + "…"
-	}
-	return s
+	return metrics.TruncateError(string(b))
 }

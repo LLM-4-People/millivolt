@@ -58,28 +58,37 @@ func TestCursorErrorTypeBounded(t *testing.T) {
 
 func TestProtocolErrorSinksBoundProviderFields(t *testing.T) {
 	long := strings.Repeat("E", 60_000)
+	// The message is provider-controlled too; the marker makes the retained
+	// prefix distinguishable from the padding tail.
+	longMsg := "MARKER" + strings.Repeat("M", 60_000)
 	for _, inbound := range []ir.Protocol{ir.Chat, ir.Anthropic, ir.Responses} {
 		t.Run(string(inbound)+"/http", func(t *testing.T) {
 			w := httptestResponseWriter()
-			writeProtocolHTTPErrorCodeHdr(w, inbound, http.StatusBadRequest, long, long, "bad", nil)
-			if w.body.Len() >= 1024 {
+			writeProtocolHTTPErrorCodeHdr(w, inbound, http.StatusBadRequest, long, long, longMsg, nil)
+			if w.body.Len() >= 8*1024 {
 				t.Fatalf("HTTP error body = %d bytes, want the bounded envelope", w.body.Len())
 			}
 			if strings.Contains(w.body.String(), long[:1024]) {
 				t.Fatal("HTTP error body carries the unbounded provider tuple")
 			}
+			if !strings.Contains(w.body.String(), "MARKER") || strings.Contains(w.body.String(), longMsg[:2048]) {
+				t.Fatalf("HTTP error body = %d bytes, want the bounded message prefix", w.body.Len())
+			}
 		})
 		t.Run(string(inbound)+"/in-band", func(t *testing.T) {
 			var buf bytes.Buffer
 			rec := &metrics.Record{}
-			if err := writeProtocolStreamError(&buf, rec, inbound, "id", "m", long, long, "bad"); err != nil {
+			if err := writeProtocolStreamError(&buf, rec, inbound, "id", "m", long, long, longMsg); err != nil {
 				t.Fatal(err)
 			}
-			if buf.Len() >= 4096 {
+			if buf.Len() >= 16*1024 {
 				t.Fatalf("in-band error frames = %d bytes, want the bounded tuple", buf.Len())
 			}
 			if strings.Contains(buf.String(), long[:1024]) {
 				t.Fatal("in-band error frames carry the unbounded provider tuple")
+			}
+			if !strings.Contains(buf.String(), "MARKER") || strings.Contains(buf.String(), longMsg[:2048]) {
+				t.Fatalf("in-band error frames = %d bytes, want the bounded message prefix", buf.Len())
 			}
 		})
 	}

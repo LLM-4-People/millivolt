@@ -530,14 +530,30 @@ func (r *Record) HasRateLimit() bool {
 // previews exist only when capture_body_preview is enabled.
 const PreviewMaxBytes = 120
 
-// TruncatePreview is the single canonical preview truncation: it caps s at
-// PreviewMaxBytes, backing off to a rune boundary so the ellipsis never
-// follows a split multi-byte UTF-8 sequence.
+// ErrorMessageMaxBytes bounds one client-facing error message: a provider
+// message carried into an error frame or JSON error body. It is deliberately
+// longer than a content preview so an upstream diagnosis stays usable, and
+// still short of a whole body echoed into the record.
+const ErrorMessageMaxBytes = 1024
+
+// TruncatePreview is the single canonical preview truncation.
 func TruncatePreview(s string) string {
-	if len(s) <= PreviewMaxBytes {
+	return truncateCapped(s, PreviewMaxBytes)
+}
+
+// TruncateError is the client-facing error message truncation: the same
+// rune-boundary rule at the error bound.
+func TruncateError(s string) string {
+	return truncateCapped(s, ErrorMessageMaxBytes)
+}
+
+// truncateCapped caps s at limit, backing off to a rune boundary so the
+// ellipsis never follows a split multi-byte UTF-8 sequence.
+func truncateCapped(s string, limit int) string {
+	if len(s) <= limit {
 		return s
 	}
-	return truncateUTF8(s, PreviewMaxBytes)
+	return truncateUTF8(s, limit)
 }
 
 // HasErrorKey reports whether b contains a top-level-candidate "error" key,
