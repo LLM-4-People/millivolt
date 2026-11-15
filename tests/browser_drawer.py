@@ -55,7 +55,7 @@ async def drawer_checks(page, results):
     await page.set_viewport_size({'width': 1440, 'height': 1000})
     async with paused_ambient(page):
         fixture = await page.evaluate(INJECT)
-    await page.wait_for_function("drawerId === 'drawer-browser-fixture' && document.getElementById('drawer').classList.contains('open')")
+    await page.wait_for_function("() => drawerId === 'drawer-browser-fixture' && document.getElementById('drawer').classList.contains('open')")
 
     desktop = await page.evaluate("""() => {
         const drawer = document.getElementById('drawer');

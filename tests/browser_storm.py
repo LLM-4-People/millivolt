@@ -42,8 +42,8 @@ async def storm_checks(page, errors, checks):
         trigger = page.locator('#storm-banner button').first
         await trigger.focus()
         await page.keyboard.press('Enter')
-        await page.wait_for_function('!document.querySelector("#storm-dialog").hidden')
-        await page.wait_for_function('document.activeElement?.dataset.operator === "storm-close"')
+        await page.wait_for_function('() => !document.querySelector("#storm-dialog").hidden')
+        await page.wait_for_function('() => document.activeElement?.dataset.operator === "storm-close"')
         details = await page.evaluate('''() => {
             const dialog=document.querySelector('#storm-dialog');
             const facts=Object.fromEntries([...dialog.querySelectorAll('dt')].map(node=>[node.textContent,node.nextElementSibling.textContent]));
@@ -69,7 +69,7 @@ async def storm_checks(page, errors, checks):
         await page.keyboard.press('Escape')
         require(await page.evaluate('document.querySelector("#storm-dialog").hidden && document.activeElement===document.querySelector("#storm-banner button")'), 'incident Escape did not restore trigger focus')
         await trigger.click()
-        await page.wait_for_function('document.activeElement?.dataset.operator === "storm-close"')
+        await page.wait_for_function('() => document.activeElement?.dataset.operator === "storm-close"')
         await page.evaluate('applyStormState({...browserStormFixture,storms:[]})')
         require(await page.locator('#storm-dialog').is_visible(), 'incident resolved by unexpectedly closing focused dialog')
         require('no longer active' in await page.locator('#storm-dialog').inner_text(), 'incident retained stale recovery counts')

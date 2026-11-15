@@ -31,12 +31,13 @@ async def log_checks(page, results):
                 provider: 'provider-with-a-very-long-tenant-and-region-label',
                 model: 'neutral-model-with-a-very-long-suffix'};
             const headerFloor = () => parseFloat(
-                box.querySelector('thead th:nth-child(2)')?.style.minWidth) || 0;
+                box.querySelector('thead th:nth-child(3)')?.style.minWidth) || 0;
             const identity = id => {
                 const row = box.querySelector('tr.exp-row[data-id="' + id + '"]');
-                return {width: row?.cells[1]?.getBoundingClientRect().width || 0,
-                        floor: REQ_FLOORS[1], headerFloor: headerFloor(),
-                        text: row?.cells[1]?.textContent.trim() || ''};
+                return {width: row?.cells[2]?.getBoundingClientRect().width || 0,
+                        floor: REQ_FLOORS[2], headerFloor: headerFloor(),
+                        header: box.querySelector('thead th:nth-child(3)')?.textContent.trim() || '',
+                        text: row?.cells[2]?.textContent.trim() || ''};
             };
             try {
                 REQ_FLOORS.fill(0);
@@ -73,6 +74,10 @@ async def log_checks(page, results):
                 await frames();
             }
         }""")
+    # The identity lives at index 2 (status moved ahead of it), so the
+    # vocabulary must confirm the index before any width is read.
+    require(incremental_width['short']['header'] == 'client · provider · model',
+            incremental_width)
     for before, after in (('short', 'replaced'), ('insertBase', 'inserted')):
         require(incremental_width[after]['floor'] >
                 incremental_width[before]['floor'] + 1, incremental_width)

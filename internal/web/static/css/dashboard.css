@@ -501,7 +501,7 @@
      every common value fits its track (the widest, the in/out/cached
      triple at the band's 13px, needs 150px + 16px padding per tile); the
      log keeps the rest. */
-    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
+    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); flex: 1 1 280px; min-height: auto; margin-bottom: 0; }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
        and let main take what remains - otherwise header + 100vh main overflows
        by exactly the header height. */

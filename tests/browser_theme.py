@@ -807,7 +807,7 @@ async def theme_checks(page, browser, base, errors, results, route_handler):
         touch_page = await touch_context.new_page()
         touch_page.on('pageerror', lambda error: errors.append(str(error)))
         await touch_page.goto(base + '/', wait_until='domcontentloaded')
-        await touch_page.wait_for_function('chartAgg && explorerAgg && lastData')
+        await touch_page.wait_for_function('() => chartAgg && explorerAgg && lastData')
         await touch_page.click('#btn-nav')
         await touch_page.click('#btn-theme')
         touch_state = await touch_page.evaluate("""() => {

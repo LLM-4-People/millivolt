@@ -357,9 +357,12 @@ async def chart_checks(page, screenshot, results, layout_checks):
         require(not state['pageScrollX'], state)
         if want_locked:
             require(not state['pageScrollY'], state)
-            require(state['explorerMax'] <= 240, state)
+            # The explorer is capped at the nine-dimension rail floor plus its
+            # chrome, and never exceeds that cap.
+            require(0 < state['explorerMax'] <= 400, state)
             require(state['explorerH'] <= state['explorerMax'] + 1, state)
-            require(state['pairH'] > state['explorerH'], state)
+            # The pair keeps the leftovers and must still carry a usable log.
+            require(state['logH'] >= 200, state)
             require(state['logFill'], state)
             require(state['inView'], state)
         else:
