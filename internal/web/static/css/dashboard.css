@@ -378,7 +378,7 @@
   main { padding: 20px 28px; width: 100%; }
 
   .hold-edit { color: inherit; font: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
-  .hold-edit:disabled { cursor: default; opacity: .5; }
+  .hold-edit:disabled { cursor: default; opacity: .7; }
   .hold-edit:focus-visible { outline: var(--focus-outline); outline-offset: 3px; }
   .storage-warning { color: var(--warn); }
   /* KPI band: an instrument readout strip, not a deck of cards. One continuous
