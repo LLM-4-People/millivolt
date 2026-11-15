@@ -34,11 +34,38 @@
   });
 
   const docsNav = document.querySelector(".docs-nav");
-  if (docsNav) {
-    const mobile = window.matchMedia("(max-width: 900px)");
-    const syncDocsNav = () => { docsNav.open = !mobile.matches; };
-    syncDocsNav();
-    mobile.addEventListener("change", syncDocsNav);
+  const toc = document.querySelector(".toc");
+  if (docsNav || toc) {
+    // Both rails are disclosures: always open while they are side rails, closed
+    // while they are inline panels above the article, so a phone lands on the
+    // page title instead of a 30-item list.
+    const wide = window.matchMedia("(max-width: 1080px)");
+    const syncRails = () => {
+      if (docsNav) docsNav.open = !wide.matches;
+      if (toc) toc.open = !wide.matches;
+    };
+    syncRails();
+    wide.addEventListener("change", syncRails);
+  }
+
+  const progress = document.querySelector(".read-progress");
+  if (progress) {
+    let queued = false;
+    const paint = () => {
+      queued = false;
+      const doc = document.documentElement;
+      const span = doc.scrollHeight - doc.clientHeight;
+      const ratio = span > 0 ? Math.min(1, Math.max(0, doc.scrollTop / span)) : 0;
+      progress.style.transform = `scaleX(${ratio})`;
+    };
+    const schedule = () => {
+      if (queued) return;
+      queued = true;
+      window.requestAnimationFrame(paint);
+    };
+    paint();
+    document.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
   }
 
   // The landing page's console miniature is a real tablist, so a visitor can
@@ -147,12 +174,24 @@
     const observer = new IntersectionObserver((entries) => {
       entries.forEach((entry) => {
         if (!entry.isIntersecting) return;
-        tocLinks.forEach((link) => link.classList.remove("active"));
+        tocLinks.forEach((link) => {
+          link.classList.remove("active");
+          link.removeAttribute("aria-current");
+        });
         const link = byId.get(entry.target.id);
-        if (link) link.classList.add("active");
+        if (link) {
+          link.classList.add("active");
+          link.setAttribute("aria-current", "location");
+        }
       });
     }, { rootMargin: "-100px 0px -70% 0px", threshold: 0 });
     headings.forEach((heading) => observer.observe(heading));
+    // Before any scroll, name where the reader is: the first section, unless a
+    // fragment already points at one.
+    const initial = tocLinks.find((link) => "#" + link.getAttribute("href").slice(1) === window.location.hash)
+      || tocLinks[0];
+    initial.classList.add("active");
+    initial.setAttribute("aria-current", "location");
   }
 
   const dialog = document.getElementById("search-dialog");

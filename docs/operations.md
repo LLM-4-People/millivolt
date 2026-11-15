@@ -1,6 +1,8 @@
 # Operations
 
-Read the [security boundary](../SECURITY.md) before exposing the listener.
+> [!WARNING]
+> Read the [security boundary](../SECURITY.md) before exposing the listener.
+
 The whole embedded dashboard is protected: every dashboard, `/metrics/*`,
 `/admin/*` and `/mcp` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential
 and is denied while it is not configured. At the application gate, only the

@@ -74,43 +74,49 @@ ROOT_PAGE_MAP = {
     "CONTRIBUTING.md": "contributing.html",
     "SECURITY.md": "security.html",
     "LICENSE": "license.html",
+    "SUPPORT.md": "support.html",
     "THIRD_PARTY_NOTICES.md": "third-party.html",
     "docs/README.md": "docs/index.html",
 }
 
 NAV_GROUPS = (
     (
-        "Get started",
+        "Start",
         (
             ("Documentation", "docs/index.html", "docs/README.md"),
             ("Quickstart", "index.html#quickstart", None),
-            ("Dashboard", "docs/dashboard.html", "docs/dashboard.md"),
-            ("Protocol", "docs/protocol.html", "docs/protocol.md"),
+            ("Dashboard tour", "docs/dashboard.html", "docs/dashboard.md"),
+            ("Protocol and clients", "docs/protocol.html", "docs/protocol.md"),
         ),
     ),
     (
-        "Guides",
+        "Integrate",
         (
             ("Adapters", "docs/adapters.html", "docs/adapters.md"),
-            ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
             ("MCP server", "docs/mcp.html", "docs/mcp.md"),
             ("Operator CLI", "docs/cli.html", "docs/cli.md"),
+        ),
+    ),
+    (
+        "Operate",
+        (
+            ("Operations", "docs/operations.html", "docs/operations.md"),
+            ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
+            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Security", "security.html", "SECURITY.md"),
         ),
     ),
     (
-        "Reference",
+        "Extend",
         (
-            ("Operations", "docs/operations.html", "docs/operations.md"),
-            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Architecture", "docs/architecture.html", "docs/architecture.md"),
+            ("Contributing", "contributing.html", "CONTRIBUTING.md"),
         ),
     ),
     (
         "Project",
         (
-            ("Contributing", "contributing.html", "CONTRIBUTING.md"),
-            ("Support", "https://github.com/LLM-4-People/millivolt/blob/main/SUPPORT.md", None),
+            ("Support", "support.html", "SUPPORT.md"),
             ("License", "license.html", "LICENSE"),
             ("Third-party notices", "third-party.html", "THIRD_PARTY_NOTICES.md"),
         ),
@@ -352,6 +358,15 @@ def nav_links(current_output: str) -> str:
     return "".join(blocks)
 
 
+def nav_group_of(output: str) -> str:
+    """Return the nav group a page belongs to, for its breadcrumb."""
+    for label, entries in NAV_GROUPS:
+        for _text, target, _source in entries:
+            if target.split("#", 1)[0] == output:
+                return label
+    return "Docs"
+
+
 def flatten_nav() -> list[tuple[str, str, str]]:
     pages: list[tuple[str, str, str]] = []
     for _label, entries in NAV_GROUPS:
@@ -522,6 +537,44 @@ def markdown_engine() -> markdown.Markdown:
     )
 
 
+# GitHub alert syntax: a blockquote whose first paragraph opens with
+# `[!KIND]`. The set is closed because each kind maps to one label and one
+# icon; an unknown marker stays a plain blockquote rather than inventing a
+# callout nobody styled.
+CALLOUT_KINDS = {
+    "NOTE": ("Note", '<circle cx="7" cy="7" r="5.4"/><path d="M7 6.5v4"/><circle cx="7" cy="4.3" r=".7" fill="currentColor" stroke="none"/>'),
+    "TIP": ("Tip", '<path d="M4.6 10.4a4 4 0 1 1 4.8 0v1.4H4.6z"/><path d="M6 13.4h2"/>'),
+    "IMPORTANT": ("Important", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+    "WARNING": ("Warning", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+    "CAUTION": ("Caution", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
+}
+CALLOUT_BLOCK = re.compile(
+    r"<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*?)</p>(.*?)</blockquote>",
+    re.S,
+)
+
+
+def render_callouts(content: str) -> str:
+    """Turn GitHub alert blockquotes into the docs callout vocabulary.
+
+    Runs after sanitizing and link rewriting, so the blockquote and its inner
+    content are already final and this only wraps them in build-owned markup.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        kind = match.group(1)
+        label, icon = CALLOUT_KINDS[kind]
+        body = match.group(2) + match.group(3)
+        return (
+            f'<aside class="callout callout-{kind.lower()}" role="note">'
+            f'<p class="callout-label"><svg class="callout-icon" viewBox="0 0 14 14" '
+            f'aria-hidden="true">{icon}</svg>{label}</p>'
+            f"<p>{body}</p></aside>"
+        )
+
+    return CALLOUT_BLOCK.sub(replace, content)
+
+
 def render_fragment(
     md: markdown.Markdown, text: str, source: Path, output: str, site_root: Path
 ) -> str:
@@ -537,6 +590,7 @@ def render_fragment(
     content = sanitize_content(content)
     content = rewrite_content_urls(content, source, output)
     content = enhance_images_with_root(content, output, site_root)
+    content = render_callouts(content)
     return content
 
 
@@ -777,32 +831,51 @@ def render_doc(page: Page, *, version: str, base_url: str, theme_color: str, sit
     source_key = page.source.relative_to(ROOT).as_posix()
     edit_url = GITHUB_EDIT + source_key
     source_url = GITHUB_BLOB + source_key
+    group = nav_group_of(page.output)
+    crumbs = "" if page.output == "docs/index.html" else (
+        '<nav class="crumbs" aria-label="Breadcrumb">'
+        f'<a href="{attr_escape(page_relative("docs/index.html", page.output))}">Docs</a>'
+        '<span class="crumb-sep" aria-hidden="true">/</span>'
+        f'<span class="crumb-group">{html.escape(group)}</span>'
+        "</nav>"
+    )
     doc_body = (
         '<div class="wrap docs-shell">'
         '<details class="docs-nav" open>'
-        '<summary class="docs-nav-summary">Documentation menu</summary>'
+        '<summary class="docs-nav-summary">'
+        '<span class="docs-nav-summary-text">'
+        f'<span class="docs-nav-group">{html.escape(group)}</span>'
+        f'<span class="docs-nav-page">{html.escape(title)}</span>'
+        "</span>"
+        '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
+        '<path d="m4 6 4 4 4-4"/></svg>'
+        "</summary>"
         f'<nav class="docs-nav-inner" aria-label="Documentation">{nav_links(page.output)}</nav>'
         "</details>"
+        '<details class="toc">'
+        '<summary class="toc-summary">On this page'
+        '<svg class="docs-nav-chevron" viewBox="0 0 16 16" aria-hidden="true">'
+        '<path d="m4 6 4 4 4-4"/></svg></summary>'
+        '<div class="toc-sticky"><p class="toc-title">On this page</p>'
+        + toc_html(tokens)
+        + "</div></details>"
         '<main id="main" class="doc-main">'
-        '<div class="doc-meta"><span class="mono-label">'
-        + ("project" if page.kind == "project" else "documentation")
-        + '</span><span class="doc-links"><a href="'
-        + attr_escape(source_url)
-        + '" target="_blank" rel="noopener noreferrer">view source</a><a href="'
-        + attr_escape(edit_url)
-        + '" target="_blank" rel="noopener noreferrer">edit this page</a></span></div>'
-        '<article class="doc-content">'
+        '<div class="read-progress" aria-hidden="true"></div>'
+        + crumbs
+        + '<article class="doc-content">'
         + content
         + "</article>"
+        '<footer class="doc-footer">'
+        '<div class="doc-links"><a href="'
+        + attr_escape(source_url)
+        + '" target="_blank" rel="noopener noreferrer">View source</a><a href="'
+        + attr_escape(edit_url)
+        + '" target="_blank" rel="noopener noreferrer">Edit this page</a></div>'
         '<nav class="page-nav" aria-label="Documentation pages">'
         + previous_html
         + following_html
-        + "</nav>"
+        + "</nav></footer>"
         "</main>"
-        "<aside class=\"toc\" aria-label=\"On this page\">"
-        '<div class="toc-sticky"><span class="mono-label">On this page</span>'
-        + toc_html(tokens)
-        + "</div></aside>"
         "</div>"
     )
     values = base_values(
@@ -975,6 +1048,7 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
                 "CONTRIBUTING.md",
                 "SECURITY.md",
                 "LICENSE",
+                "SUPPORT.md",
                 "THIRD_PARTY_NOTICES.md",
             } else "doc"
             pages.append(page_for_source(source, kind=kind))
