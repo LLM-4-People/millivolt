@@ -328,11 +328,10 @@ func (c control) clearClients(ctx context.Context, tags []string, sample time.Du
 		if err := verify(ctx); err != nil {
 			return err
 		}
-		// The administrative filter's client field is an exact match. Encode a
-		// nonempty object, never an empty body (which means all history).
-		body, err := json.Marshal(struct {
-			Client string `json:"client"`
-		}{tag})
+		// The administrative predicate travels under "filter" in the published
+		// wire shape (mcp.PurgeFilterInput owns it); an empty body would mean
+		// all history. The client field is an exact match.
+		body, err := json.Marshal(mcp.PurgeFilterInput{Client: tag}.Body(nil))
 		if err != nil {
 			return err
 		}
@@ -346,12 +345,14 @@ func (c control) clearClients(ctx context.Context, tags []string, sample time.Du
 		if err != nil {
 			return err
 		}
+		// The success document is the store's PurgeResult; it carries no "ok".
 		var result struct {
-			OK bool `json:"ok"`
+			Deleted       int64 `json:"deleted"`
+			BufferRemoved int   `json:"buffer_removed"`
 		}
 		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || decodeErr != nil || !result.OK {
+		if resp.StatusCode != http.StatusOK || decodeErr != nil {
 			return fmt.Errorf("fixture cleanup failed for %s (HTTP %d)", tag, resp.StatusCode)
 		}
 	}

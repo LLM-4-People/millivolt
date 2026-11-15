@@ -313,13 +313,19 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 					if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
 						t.Error("cleanup must use a JSON POST")
 					}
-					var filter map[string]string
-					if err := json.NewDecoder(r.Body).Decode(&filter); err != nil || len(filter) != 1 || filter["client"] == "" {
-						t.Errorf("cleanup broadened its filter: %v, %v", filter, err)
+					// The published wire shape: the predicate under "filter" and the
+					// store's PurgeResult back, no "ok" key.
+					var document struct {
+						Filter   map[string]string `json:"filter"`
+						Reviewed *int64            `json:"reviewed_count"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&document); err != nil ||
+						len(document.Filter) != 1 || document.Filter["client"] == "" {
+						t.Errorf("cleanup broadened its filter: %+v, %v", document, err)
 						w.WriteHeader(http.StatusBadRequest)
 						return
 					}
-					tag := filter["client"]
+					tag := document.Filter["client"]
 					if _, ok := records[tag]; !ok {
 						t.Errorf("cleanup selected an unowned client: %q", tag)
 					}
@@ -329,11 +335,11 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 					purged = append(purged, tag)
 					if mode == "cleanup failure" {
 						w.WriteHeader(http.StatusServiceUnavailable)
-						_, _ = io.WriteString(w, `{"ok":false}`)
+						_, _ = io.WriteString(w, `{"error":"storage unavailable"}`)
 						return
 					}
 					delete(records, tag)
-					_, _ = io.WriteString(w, `{"ok":true}`)
+					_, _ = io.WriteString(w, `{"deleted":1,"buffer_removed":1}`)
 				default:
 					t.Errorf("unexpected fixture endpoint: %s", r.URL.Path)
 					w.WriteHeader(http.StatusNotFound)
