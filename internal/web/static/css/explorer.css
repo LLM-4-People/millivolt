@@ -55,7 +55,7 @@
   /* The rail scrolls internally within the fixed explorer box: min-height:0
      lets it shrink below its content height, and overflow-y:auto scrolls the
      dimension list instead of clipping the last item (Error) at the bottom. */
-  .xp-rail { display: flex; flex-direction: column; gap: 4px; min-height: 284px; overflow-y: auto; scrollbar-width: thin; }
+  .xp-rail { display: flex; flex-direction: column; gap: 4px; min-height: 300px; overflow-y: auto; scrollbar-width: thin; }
   /* The internal-scroll surfaces share one slim overlay scrollbar (5px
      thumb, muted border tone, softly rounded); grouped so the feel cannot
      drift between rails, the gallery, and the shared .scroll helper. The
