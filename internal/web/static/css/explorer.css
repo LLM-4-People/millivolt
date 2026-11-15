@@ -30,12 +30,12 @@
   .xp-chip .chip-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
   .xp-chip .chip-x:focus-visible { outline: var(--focus-outline); outline-offset: 1px; }
   /* A chip is a dense token, but its cross is the only way out of one filter
-     on touch. The chip and the cross keep a real target there. */
+     on touch. The cross takes the full touch target and the chip's height
+     follows from it. */
   @media (max-width: 800px), (hover: none), (pointer: coarse) {
-    .xp-chip { min-height: var(--tap); }
     .xp-chip .chip-x {
       display: inline-flex; align-items: center; justify-content: center;
-      min-width: 32px; min-height: 32px; padding: 0;
+      min-width: var(--tap); min-height: var(--tap); align-self: stretch; padding: 0;
     }
   }
   .xp-clear { margin-left: auto; }

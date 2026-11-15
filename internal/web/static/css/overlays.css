@@ -41,6 +41,14 @@
   .drawer-hd .btn { padding: 4px 8px; border-radius: 7px; }
   .drawer-hd .drawer-back { flex: none; padding: 3px 7px; font-size: 10px; }
   .drawer-hd .drawer-tool { flex: none; font-size: 9.5px; letter-spacing: .04em; padding: 5px 7px; }
+  /* The drawer header is the way through and out of a request on a phone:
+     navigation, copy and close keep the full target there instead of the
+     dense 28px icon box. */
+  @media (hover: none), (pointer: coarse) {
+    .drawer-hd .nav-btns { gap: 4px; }
+    .drawer-hd .nav-btns .btn { width: var(--tap); height: var(--tap); }
+    .drawer-hd .btn { min-height: var(--tap); }
+  }
   .d-key { margin-left: 4px; font-size: 9px; color: var(--muted); }
   .drawer-body {
     overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
