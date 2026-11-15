@@ -79,6 +79,58 @@ func assertNoPreservedPending(t *testing.T, dir string) {
 	}
 }
 
+// TestCaptureRestorePendingKeepsTheSlotPinned pins D1: the preserved copy is a
+// hard link made before anything replaces the slot, so a crash inside the
+// stage window can never leave a queue that is both empty and recoverable only
+// from an expiring staging orphan. Rollback still restores the queued bytes.
+func TestCaptureRestorePendingKeepsTheSlotPinned(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	pending := storage.PendingSnapshotPath(dbPath)
+	original := []byte("queued snapshot")
+	if err := os.WriteFile(pending, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := captureRestorePending(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Base(guard.backup), ".millivolt-restore-pending-") {
+		t.Fatalf("preserved name = %q, want the registered staging pattern", guard.backup)
+	}
+	// The slot is still the queued snapshot (not renamed away) and the
+	// preserved name is the same inode, so either name survives a crash.
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("slot during the stage = %q, %v; want the queued bytes", got, err)
+	}
+	slotInfo, err := os.Stat(pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preservedInfo, err := os.Stat(guard.backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(slotInfo, preservedInfo) {
+		t.Fatal("the preserved name is a second copy, not a hard link to the queued snapshot")
+	}
+	// The stage publishes its successor by rename over the slot; a rollback
+	// must bring the preserved bytes back.
+	successor := filepath.Join(dir, "successor.tmp")
+	if err := os.WriteFile(successor, []byte("successor"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(successor, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := guard.rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(pending); err != nil || !bytes.Equal(got, original) {
+		t.Fatalf("rollback restored %q, %v; want the queued bytes", got, err)
+	}
+}
+
 // TestRestoreConfigDatabaseStageFailureLeavesStateUntouched pins the H3
 // transaction order: the database stages before the config is written, so an
 // archived db_path under a missing directory answers 400 with the config file,

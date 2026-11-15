@@ -702,9 +702,14 @@ successful live merge has no rollback: if the later config phase fails, the
 merged rows stay applied. A crash between the database and config phases is
 likewise not atomic; the pending snapshot or completed merge can be durable
 while the config file still has its previous bytes. Preserved `.incoming`,
-`.previous`, and `.snapshot-state` files next to `db_path` are boot-recovery
-evidence and may need operator inspection after such a crash; do not remove them
-while a restore may have been in flight. A combined config and database merge
+`.previous`, `.snapshot-state`, and `.millivolt-restore-pending-*` files next to
+`db_path` are boot-recovery evidence and may need operator inspection after such
+a crash; do not remove them while a restore may have been in flight. The
+`.millivolt-restore-pending-*` copy is a hard link to the snapshot that was
+queued before the restore; it is created before the successor replaces the slot,
+so the pending queue is never empty, and a crash on either side leaves a
+recoverable snapshot instead of an orphan that the 24 hour staging sweep
+eventually deletes. A combined config and database merge
 answers 400 when the restored config's effective `db_path` differs from the
 running store's file, because the rows would be written to a database the next
 boot does not open; merge the database separately or use database replace.

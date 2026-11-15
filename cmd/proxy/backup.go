@@ -789,9 +789,13 @@ type restorePendingGuard struct {
 	backup  string
 }
 
-// captureRestorePending moves a pre-existing pending snapshot aside so a failed
-// config phase can restore it byte-for-byte instead of deleting it. No pending
-// file means the guard only owns removing its newly staged successor.
+// captureRestorePending preserves a pre-existing pending snapshot so a failed
+// config phase can restore it byte-for-byte instead of deleting it, and so a
+// crash cannot lose it either. The preserved copy is a hard link made BEFORE
+// the successor replaces the slot: both names then exist for the whole stage,
+// where a rename-aside-then-stage window left the queue empty and a crash in
+// that window let the orphan expire in the 24 h sweep. No pending file means
+// the guard only owns removing its newly staged successor.
 func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 	// The configured db_path may be a symlink. Staging and boot admission
 	// resolve it, so the preserved pending slot must be the same real-file
@@ -818,7 +822,15 @@ func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 		_ = os.Remove(backup)
 		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
 	}
-	if err := os.Rename(pending, backup); err != nil {
+	// CreateTemp reserved a unique name; link needs the name free.
+	if err := os.Remove(backup); err != nil {
+		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+	}
+	// Link rather than rename: the slot keeps its file while the preserved
+	// name points at the same inode, so the stage rename below is the only
+	// transition and a crash on either side still leaves a queued snapshot.
+	// The snapshot-sized bytes are never copied.
+	if err := os.Link(pending, backup); err != nil {
 		_ = os.Remove(backup)
 		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
 	}
@@ -827,8 +839,8 @@ func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 }
 
 // rollback restores the pre-existing pending snapshot, or removes the newly
-// staged one when the slot was empty. The new file is replaced by rename when
-// an old snapshot exists, so no failure window deletes the preserved bytes.
+// staged one when the slot was empty. The preserved inode is moved back by
+// rename when an old snapshot exists, so no failure window deletes it.
 func (g *restorePendingGuard) rollback() error {
 	if g == nil {
 		return nil
@@ -849,8 +861,9 @@ func (g *restorePendingGuard) rollback() error {
 	return nil
 }
 
-// discard releases the preserved copy after every later restore phase has
-// succeeded. The new pending snapshot stays in the admission slot.
+// discard drops the preserved name after every later restore phase has
+// succeeded; the inode stays reachable through the admission slot, so the
+// snapshot itself is not removed.
 func (g *restorePendingGuard) discard() {
 	if g == nil || g.backup == "" {
 		return
