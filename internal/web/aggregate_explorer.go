@@ -60,7 +60,13 @@ type scopePayload struct {
 }
 
 type entAcc struct {
-	id                uint32
+	id uint32
+	// slot is this group's row-membership ordinal, 1..explorerGroupBudget for a
+	// tracked group and the reserved value for the synthetic other card.
+	// Dictionary ids are dimension-wide positions that can sit millions above
+	// the budget, so projected rows store the slot instead and the membership
+	// arrays stay 16-bit.
+	slot              uint16
 	name              string
 	n                 int
 	cost              float64
@@ -110,13 +116,14 @@ var scopeDimBits = func() map[string]uint32 {
 func scopeDimBit(dim string) uint32 { return scopeDimBits[dim] }
 
 // A row may belong to multiple groups, including repeated tool/error
-// occurrences. Spans index one flat membership list without per-row slices.
+// occurrences. Spans index one flat membership list without per-row slices;
+// both lists store the group's compact slot, not its dictionary id.
 type explorerMemberSpan struct{ start, count uint32 }
 
 // explorerSelectedGroup pairs one returned card's dictionary id with its
 // percentile bucket (rank+1). A zero bucket marks an empty open-addressed slot.
 type explorerSelectedGroup struct {
-	id     uint32
+	slot   uint16
 	bucket uint8
 }
 
@@ -138,43 +145,41 @@ const (
 	explorerHighHash      = 2654435761 // Knuth multiplicative hash
 )
 
-// explorerHighSlot is the deterministic initial slot for one high id.
-func explorerHighSlot(id uint32) int {
-	return int((id * explorerHighHash) & (explorerHighSelection - 1))
+// explorerHighSlot is the deterministic initial slot for one high ordinal.
+func explorerHighSlot(slot uint16) int {
+	return int((uint32(slot) * explorerHighHash) & (explorerHighSelection - 1))
 }
 
 // explorerSelectedGroups is one payload request's compact selected-group
-// lookup, built from the returned top cards only. Dictionary ids are
-// dimension-wide positions that can sit far above the card count, so the
-// previous dense []uint8 sized by maxGroupID allocated kilobytes to megabytes
-// per request to represent at most xpNodeCap entries. Low ids stay in the fixed
-// dense table; high ids use one fixed-capacity open-addressed table, so both
-// lookups are constant-time probes without allocation or maxGroupID scaling.
-// Selections are never carried across requests.
+// lookup, built from the returned top cards only. Group slots are dense from 1,
+// so the fixed dense table serves ordinary cardinals and the fixed-capacity
+// open-addressed table serves slots past it: both lookups are constant-time
+// probes with no allocation and no scaling with the dictionary. Selections are
+// never carried across requests.
 type explorerSelectedGroups struct {
 	dense [explorerDenseSelection]uint8
 	high  [explorerHighSelection]explorerSelectedGroup
 }
 
 // newExplorerSelectedGroups ranks no groups of its own: the payload has already
-// capped top at xpNodeCap, and duplicate ids cannot occur because top holds one
-// entry per group map key. Every selected id populates exactly one table.
+// capped top at xpNodeCap, and duplicate slots cannot occur because top holds one
+// entry per group map key. Every selected group populates exactly one table.
 func newExplorerSelectedGroups(top []*entAcc) explorerSelectedGroups {
 	var s explorerSelectedGroups
 	for i, g := range top {
 		bucket := uint8(i + 1)
-		if g.id < explorerDenseSelection {
-			s.dense[g.id] = bucket
+		if g.slot < explorerDenseSelection {
+			s.dense[g.slot] = bucket
 			continue
 		}
-		slot := explorerHighSlot(g.id)
+		slot := explorerHighSlot(g.slot)
 		for probes := 0; probes < explorerHighSelection; probes++ {
 			entry := &s.high[slot]
 			if entry.bucket == 0 {
-				*entry = explorerSelectedGroup{id: g.id, bucket: bucket}
+				*entry = explorerSelectedGroup{slot: g.slot, bucket: bucket}
 				break
 			}
-			if entry.id == g.id {
+			if entry.slot == g.slot {
 				entry.bucket = bucket
 				break
 			}
@@ -184,24 +189,24 @@ func newExplorerSelectedGroups(top []*entAcc) explorerSelectedGroups {
 	return s
 }
 
-// bucket returns the group's percentile bucket, or zero when the id is not one
-// of the returned cards. Low ids are one array load; high ids probe the fixed
-// table until their exact id or an empty slot. The loop is bounded, so a missing
-// id can never spin even if the capacity invariant were broken.
-func (s *explorerSelectedGroups) bucket(id uint32) uint8 {
-	if id < explorerDenseSelection {
-		return s.dense[id]
+// bucket returns the group's percentile bucket, or zero when the slot is not one
+// of the returned cards. A dense slot is one array load; a high slot probes the
+// fixed table until its exact slot or an empty entry. The loop is bounded, so a
+// missing slot can never spin even if the capacity invariant were broken.
+func (s *explorerSelectedGroups) bucket(slot uint16) uint8 {
+	if slot < explorerDenseSelection {
+		return s.dense[slot]
 	}
-	slot := explorerHighSlot(id)
+	at := explorerHighSlot(slot)
 	for probes := 0; probes < explorerHighSelection; probes++ {
-		entry := &s.high[slot]
+		entry := &s.high[at]
 		if entry.bucket == 0 {
 			return 0
 		}
-		if entry.id == id {
+		if entry.slot == slot {
 			return entry.bucket
 		}
-		slot = (slot + 1) & (explorerHighSelection - 1)
+		at = (at + 1) & (explorerHighSelection - 1)
 	}
 	return 0
 }
@@ -229,12 +234,12 @@ type explorerFold struct {
 	overflow bool
 	order    metricOrderSource
 	rowCount int
-	// Single-valued dimensions store one group id per projected row (4 bytes).
-	// Only tool/error need the flat multi-membership list + spans.
-	singleMember []uint32
+	// Single-valued dimensions store one group slot per projected row (2
+	// bytes). Only tool/error need the flat multi-membership list + spans.
+	singleMember []uint16
 	multiMember  bool
 	memberSpans  []explorerMemberSpan
-	members      []uint32
+	members      []uint16
 	pendingIDs   map[string]struct{}
 	seen         map[string]struct{}
 	total        int64
@@ -260,7 +265,7 @@ func newExplorerFold(dim, statusCode string, allFS []scopeFilter) *explorerFold 
 	e := &explorerFold{
 		dim: dim, statusCode: statusCode, allFS: allFS, grpFS: grpFS,
 		groups: make(map[uint32]*entAcc),
-		other:  entAcc{id: explorerOtherID, name: explorerOtherName},
+		other:  entAcc{id: explorerOtherID, name: explorerOtherName, slot: explorerGroupBudget + 1},
 		seen:   make(map[string]struct{}),
 	}
 	// Unprepared folds (direct fixtures) still need a names source for the
@@ -446,7 +451,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 			e.overflow = true
 			g = &e.other
 		} else {
-			g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey)}
+			// len(groups) is the next free ordinal; the other card reserves the
+			// past-budget slot, so a slot is always unique and non-zero.
+			g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey), slot: uint16(len(e.groups) + 1)}
 			e.groups[dimKey] = g
 		}
 	}
@@ -510,9 +517,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 			// every explorer request allocated a span and a membership slot
 			// per projected row even for these.
 			if e.singleMember == nil {
-				e.singleMember = make([]uint32, e.rowCount)
+				e.singleMember = make([]uint16, e.rowCount)
 			}
-			e.singleMember[c.rowIndex-1] = g.id
+			e.singleMember[c.rowIndex-1] = g.slot
 		} else {
 			if e.memberSpans == nil {
 				e.memberSpans = make([]explorerMemberSpan, e.rowCount)
@@ -522,7 +529,7 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 				span.start = uint32(len(e.members))
 			}
 			span.count++
-			e.members = append(e.members, g.id)
+			e.members = append(e.members, g.slot)
 		}
 	}
 	// Durable samples stay in immutable metric order. Only raw ring/pending
@@ -592,8 +599,8 @@ func (e *explorerFold) rankedGroups() []*entAcc {
 // selectedVisitor maps projection rows to compact selected-group buckets for
 // the metric rank visitors. Multi-valued dimensions walk the row's occurrence
 // span and emit one bucket per selected occurrence in source order, preserving
-// duplicate tool/error multiplicity; single-valued dimensions keep one group id
-// per row. Unselected ids emit nothing.
+// duplicate tool/error multiplicity; single-valued dimensions keep one group
+// slot per row. Unselected slots emit nothing.
 func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(row uint32, emit func(uint8)) {
 	if e.multiMember {
 		return func(row uint32, emit func(uint8)) {
@@ -601,8 +608,8 @@ func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(ro
 				return
 			}
 			span := e.memberSpans[row]
-			for _, id := range e.members[span.start : span.start+span.count] {
-				if bucket := selected.bucket(id); bucket != 0 {
+			for _, slot := range e.members[span.start : span.start+span.count] {
+				if bucket := selected.bucket(slot); bucket != 0 {
 					emit(bucket)
 				}
 			}

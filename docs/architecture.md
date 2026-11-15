@@ -415,7 +415,10 @@ bounded regardless of history. The card carries an explicit `synthetic` wire mar
 no filter key, so a real value sharing its display label keeps its own exact,
 selectable card. The card ranking remains exact among tracked values, with
 `other` competing by its aggregate count, and overflow memberships map to the
-reserved other id so their percentile samples still select correctly. Rail
+reserved other slot so their percentile samples still select correctly. Rows
+store the group's 16-bit membership slot, not its dimension-wide dictionary id,
+so the per-row table is two bytes and the selected-card lookup is a bounded
+probe instead of a max-id-sized array. Rail
 distinct-value counts, scope totals and conversation summaries remain
 whole-history values and are not derived from the truncated group set.
 Selected groups use the same exact rank reader as chart buckets,

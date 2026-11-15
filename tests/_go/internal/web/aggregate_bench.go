@@ -103,6 +103,25 @@ func BenchmarkAggregateFold(b *testing.B) {
 			_ = f.payload()
 		}
 	})
+	// The tool dimension is the multi-membership shape: it keeps one flat
+	// occurrence list instead of one slot per row. The fixture adds one tool
+	// name to a copy so the shared rows stay unchanged.
+	b.Run("explorer_tool", func(b *testing.B) {
+		withTools := make([]contrib, len(rows))
+		copy(withTools, rows)
+		for i := range withTools {
+			withTools[i].toolsL = []string{"fixture-tool"}
+		}
+		b.ReportAllocs()
+		for b.Loop() {
+			f := newExplorerFold("tool", "", nil)
+			f.prepare(p, nil)
+			for i := range withTools {
+				_ = f.fold(&withTools[i])
+			}
+			_ = f.payload()
+		}
+	})
 	// A bounded chart window must touch only the blocks whose newest row is
 	// inside the window; the visitor owns that skip.
 	b.Run("chart_window", func(b *testing.B) {

@@ -47,7 +47,8 @@ const (
 	// ranking. This is an internal guardrail, not a tunable.
 	explorerGroupBudget = 8192
 	// explorerOtherID reserves a dictionary slot that no real dimension value
-	// can occupy, so overflow memberships can still select the synthetic card
+	// can occupy, and the other card reserves the membership slot just past the
+	// group budget, so overflow memberships still select the synthetic card
 	// without colliding with an unset (zero) membership. The wire marks that
 	// card with synthetic:true; its display name is not a filter value.
 	// Internal only.
