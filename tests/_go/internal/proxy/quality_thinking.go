@@ -130,6 +130,64 @@ func TestStreamThinkingStopRescued(t *testing.T) {
 	}
 }
 
+// TestStreamThinkingRescueAnswered429StampsACommitted200 pins C3: when the
+// rescue re-send answers 429, the client already holds the committed success
+// 200, so the record must describe that 200 (and keep the 429 as the distinct
+// rate-limit evidence) instead of overwriting it with the retry's status. A
+// recorded 429 reads as flow control and would leave the delivered turn filed
+// under the wrong status.
+func TestStreamThinkingRescueAnswered429StampsACommitted200(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(thinkingRoleFrame + thinkingFrame + thinkingStopFrames))
+			w.(http.Flusher).Flush()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down"}}`))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	// No HTTP retry budget: the 429 surfaces on the rescue re-send itself.
+	cfg := config.Default()
+	cfg.MaxRetries = 0
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != http.StatusOK {
+		t.Fatalf("client status = %d, want the committed 200", status)
+	}
+	if !strings.Contains(got, "slow down") {
+		t.Fatalf("the in-band frame must carry the re-send's 429 detail: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.StatusCode != http.StatusOK {
+		t.Fatalf("record status = %d, want the 200 the client holds", rec.StatusCode)
+	}
+	if rec.ErrorType != "rate_limit_error" || !rec.IsError() {
+		t.Fatalf("the in-band rate limit must stay the recorded failure: type=%q err=%v", rec.ErrorType, rec.IsError())
+	}
+	if !rec.HasRateLimit() {
+		t.Fatalf("the 429 must survive as rate-limit evidence: %+v", rec.Attempts)
+	}
+	var inBand bool
+	for _, at := range rec.Attempts {
+		if at.InBand && at.StatusCode == http.StatusTooManyRequests {
+			inBand = true
+		}
+	}
+	if !inBand {
+		t.Fatalf("the committed 429 must be retained as an in-band attempt: %+v", rec.Attempts)
+	}
+}
+
 // TestStreamThinkingStopExhaustedSurfacesProviderError: with the thinking
 // budget disabled (thinking_retries: 0), a reasoning-only stop surfaces the
 // withheld terminal region's replacement in-band, and the record classifies

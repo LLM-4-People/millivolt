@@ -253,8 +253,12 @@ func TestStreamRetryUpstreamErrorSurfacesCaptured(t *testing.T) {
 	}
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]
-	if rec.StatusCode != 429 || !rec.HasRateLimit() || rec.IsError() {
-		t.Fatalf("record must classify as rate-limited, not error: %+v", rec)
+	// The client holds the committed 200, so the record describes that status;
+	// the re-send's 429 survives as the rate-limit evidence (an in-band
+	// attempt) and an in-band rate-limit failure is still a failure of the
+	// turn, exactly like the non-streaming committed-status twin.
+	if rec.StatusCode != http.StatusOK || !rec.HasRateLimit() || !rec.IsError() {
+		t.Fatalf("record must describe the committed 200 and flag the in-band rate limit: %+v", rec)
 	}
 	if rec.ErrorType != "rate_limit_error" || !strings.Contains(rec.ErrorMsg, "slow down") {
 		t.Fatalf("record must capture the re-send's error body: %+v", rec)
@@ -262,8 +266,11 @@ func TestStreamRetryUpstreamErrorSurfacesCaptured(t *testing.T) {
 	if rec.ProviderRequestID != "req-second" {
 		t.Fatalf("record must carry the re-send's provider metadata, got request id %q", rec.ProviderRequestID)
 	}
-	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].StatusCode != 200 {
-		t.Fatalf("absorbed attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	if rec.Retries != 1 || len(rec.Attempts) != 2 || rec.Attempts[0].StatusCode != 200 {
+		t.Fatalf("absorbed and in-band attempts not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+	if last := rec.Attempts[1]; !last.InBand || last.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("the committed 429 must be the in-band attempt: %+v", rec.Attempts)
 	}
 }
 

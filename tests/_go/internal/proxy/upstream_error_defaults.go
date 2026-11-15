@@ -7,10 +7,11 @@ package proxy
 // shared owner's default (api_error plus "upstream HTTP <status>"), never a
 // surface-local hand-rolled string. The cursor rejection additionally records
 // the defaults (writeClientError stamps empty record fields); the committed-SSE
-// surface keeps the defaults view-only, with the record holding the decided
-// status and empty error fields. A pacer that has not committed upstream
-// headers relays the real upstream status instead; that path is covered by
-// TestSlowUpstreamJSONErrorKeepsStatus and TestSlowNonSSEBodyHasNoKeepalive.
+// surface records the defaulted type as the turn's failure class while the
+// committed 200 stays the status the client saw. A pacer that has not
+// committed upstream headers relays the real upstream status instead; that
+// path is covered by TestSlowUpstreamJSONErrorKeepsStatus and
+// TestSlowNonSSEBodyHasNoKeepalive.
 
 import (
 	"encoding/json"
@@ -108,9 +109,11 @@ func TestUpstreamErrorDefaultsSurfaces(t *testing.T) {
 		if n := calls.Load(); n != 2 {
 			t.Fatalf("upstream calls = %d, want 2 (truncated absorbed + erroring re-send)", n)
 		}
+		// The client holds the committed 200, so the record describes it; the
+		// defaulted type is still the turn's failure class.
 		rec := waitForRecord(t, buf, 1)[0]
-		if rec.StatusCode != 500 || rec.ErrorType != "" || rec.ErrorMsg != "" {
-			t.Fatalf("record must keep the decided 500 with empty error fields (defaults are view-only): %+v", rec)
+		if rec.StatusCode != http.StatusOK || rec.ErrorType != "api_error" || rec.ErrorMsg != "upstream HTTP 500" || !rec.IsError() {
+			t.Fatalf("record must keep the committed 200 and the defaulted failure class: %+v", rec)
 		}
 	})
 }

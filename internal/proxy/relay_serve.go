@@ -672,9 +672,19 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		if resp.StatusCode >= 400 {
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
-			// committed-SSE contract), never as raw JSON on the stream.
+			// committed-SSE contract), never as raw JSON on the stream. The
+			// status line the client holds is the success 200, so the
+			// committed-status owner records that status (and keeps an
+			// upstream 429 as the distinct rate-limit attempt) instead of
+			// leaving the re-send's 429 on a delivered 200.
 			s.captureErrorFromResponse(ctx, resp, rec)
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
+			// The envelope's type and message are the record's failure class
+			// too (the non-streaming twin stamps the same owners): the client
+			// holds the 200, so without them the failed turn would read as
+			// healthy.
+			rec.ErrorType, rec.ErrorMsg = typ, msg
+			stampCommittedErrorStatus(rec, resp.StatusCode)
 			if werr := writeProtocolStreamError(w, rec, t.inbound, rec.ID, rec.Model, typ, "", msg); werr != nil {
 				markClientGone(rec)
 			}
