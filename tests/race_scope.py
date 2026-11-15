@@ -108,8 +108,13 @@ PACKAGE_SELECTORS: dict[str, tuple[str, ...]] = {
         # the same process table from its own goroutine.
         "*ClaimPort*",
         # The staged restore uploads from a goroutine while the handler holds
-        # reloadMu and asserts the fence stays closed.
+        # reloadMu and asserts the fence stays closed; the refusal twin races
+        # save and reload against that same held fence, and the ring purge test
+        # finalizes a matching record from a goroutine between the count
+        # boundary and the removal.
         "*RestoreHolds*",
+        "*RestoreUploadRefuses*",
+        "*PurgeRingRemoval*",
     ),
     # The stress client owns worker goroutines and atomics; the whole package
     # is small and is serialized by the fixed-port lock.
