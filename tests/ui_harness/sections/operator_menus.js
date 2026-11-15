@@ -735,7 +735,7 @@ module.exports = async function operatorMenus(H) {
           text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope').includes('key abcdef12…'));
         check('the applied limit row names its budgets and schedule',
           text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-budget') ===
-            '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00-06:00');
+            '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00–06:00');
         check('the change ledger records the add with the same scope wording',
           text('#oc-change').startsWith('added limit for ' + scopePhrase) &&
           text('#oc-change').includes('3 in flight') && text('#oc-change').includes('1K tokens / 1m'));
