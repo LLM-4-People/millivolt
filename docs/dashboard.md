@@ -478,11 +478,10 @@ there instead of duplicating them.
 
 Static captures of the operator console publish to `docs/images/console/` from
 the same authorized history workflow as the rest of the gallery. The retired
-menu screenshots were removed with the menus they pictured; git history keeps
-them. These captures are the neutral starting state of each section: no draft
-is committed, no rule is selected and no filter is armed.
-
-![Console overview with the request, in-flight, error and cost readout](images/console/overview.png)
+menu screenshots were removed with the menus they pictured, and the overview
+capture was retired with the traffic band it pictured; git history keeps them.
+The remaining captures are the neutral starting state of the sections they
+cover: no draft is committed, no rule is selected and no filter is armed.
 
 ![Limits section with no policy set](images/console/limits.png)
 
