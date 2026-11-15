@@ -188,12 +188,16 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 		req.Tools = tools
 		req.Warnings = append(req.Warnings, warns...)
 	}
-	if tc, err := decodeResponsesToolChoice(in.ToolChoice); err != nil {
+	// The flat spelling is one request-wide decision, so it is assigned before
+	// a history call or a named choice resolves against it.
+	assigned := assignToolNames(req.Tools)
+	resolve := func(namespace, name string) string { return resolveToolName(assigned, namespace, name) }
+	if tc, err := decodeResponsesToolChoice(in.ToolChoice, resolve); err != nil {
 		return nil, err
 	} else if tc != nil {
 		req.ToolChoice = tc
 	}
-	msgs, warns, err := decodeResponsesInput(in.Input)
+	msgs, warns, err := decodeResponsesInput(in.Input, resolve)
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +209,11 @@ func DecodeResponsesRequest(body []byte) (*ir.Request, error) {
 	return req, nil
 }
 
-func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error) {
+// toolNameResolver maps a declared namespace pair to the flat spelling the
+// outbound target received.
+type toolNameResolver func(namespace, name string) string
+
+func decodeResponsesInput(raw json.RawMessage, resolve toolNameResolver) ([]ir.Message, ir.Warnings, error) {
 	if len(raw) == 0 {
 		// The Responses reference marks input optional. An absent field means
 		// no messages; the target encoders then decide from instructions (a
@@ -319,9 +327,15 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 				out = append(out, ir.Message{Role: role, Content: blocks})
 			}
 		case "function_call":
+			// A replayed namespaced call must address the exact spelling the
+			// request assigned that pair, not the preferred one.
+			declared := item.Name
 			call, w, err := decodeResponsesFunctionCall(item, false, ids)
 			if err != nil {
 				return nil, nil, fmt.Errorf("responses input item %d: %w", i, err)
+			}
+			if item.Namespace != "" && resolve != nil {
+				call.Name = resolve(item.Namespace, declared)
 			}
 			warns = append(warns, w...)
 			appendAssistant(ir.Block{Type: ir.BlockToolCall, ToolCall: call})
@@ -582,15 +596,13 @@ func decodeResponsesFunctionCall(item responsesWireItem, requireEvidence bool, i
 
 // decodeResponsesTools decodes declared tools. A namespace group is flattened
 // into its member functions, each carrying the group name so the inbound
-// encoder can name the namespace again, and the namer owns one unique flat
-// spelling per pair for the outbound wire.
+// encoder can name the namespace again. The flat spelling is assigned once for
+// the whole request by assignToolNames, after every array is known.
 func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error) {
 	var (
 		out   []ir.Tool
 		warns ir.Warnings
 	)
-	namer := newToolNamer()
-	total := 0
 	for i, t := range in {
 		field := fmt.Sprintf("responses tool %d", i)
 		switch t.Type {
@@ -600,15 +612,10 @@ func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error
 				return nil, nil, err
 			}
 			warns = append(warns, w...)
-			tool.WireName = namer.claim(tool.Name)
 			out = append(out, tool)
 		case "namespace":
 			if strings.TrimSpace(t.Name) == "" {
 				return nil, nil, fmt.Errorf("%s: namespace name is required", field)
-			}
-			total += len(t.Tools)
-			if total > WireCollectionMax {
-				return nil, nil, fmt.Errorf("responses namespace members exceed %d items", WireCollectionMax)
 			}
 			for j, member := range t.Tools {
 				memberField := fmt.Sprintf("%s %q member %d", field, t.Name, j)
@@ -624,7 +631,6 @@ func decodeResponsesTools(in []responsesWireTool) ([]ir.Tool, ir.Warnings, error
 					return nil, nil, err
 				}
 				warns = append(warns, w...)
-				tool.WireName = namer.assign(t.Name, tool.Name)
 				out = append(out, tool)
 			}
 		default:
@@ -675,7 +681,7 @@ func decodeResponsesFunctionTool(t responsesWireTool, field, namespace string) (
 	}, warns, nil
 }
 
-func decodeResponsesToolChoice(raw json.RawMessage) (*ir.ToolChoice, error) {
+func decodeResponsesToolChoice(raw json.RawMessage, resolve toolNameResolver) (*ir.ToolChoice, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		return nil, nil
 	}
@@ -700,7 +706,11 @@ func decodeResponsesToolChoice(raw json.RawMessage) (*ir.ToolChoice, error) {
 		return nil, fmt.Errorf("responses tool_choice: %w", err)
 	}
 	if obj.Type == "function" && obj.Name != "" {
-		return &ir.ToolChoice{Mode: ir.ToolChoiceTool, Name: flatToolName(obj.Namespace, obj.Name)}, nil
+		name := obj.Name
+		if obj.Namespace != "" && resolve != nil {
+			name = resolve(obj.Namespace, obj.Name)
+		}
+		return &ir.ToolChoice{Mode: ir.ToolChoiceTool, Name: name}, nil
 	}
 	return nil, fmt.Errorf("unsupported responses tool_choice type %q", obj.Type)
 }

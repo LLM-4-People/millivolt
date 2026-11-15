@@ -178,6 +178,57 @@ func TestResponsesNamespaceFlatNameCollisions(t *testing.T) {
 	}
 }
 
+// TestResponsesNamespaceNeverDisplacesPlainTool verifies a namespace pair never
+// takes a plain tool's spelling, in either declaration order, and that a named
+// choice and a replayed call resolve to the pair's real suffix.
+func TestResponsesNamespaceNeverDisplacesPlainTool(t *testing.T) {
+	plain := `{"type":"function","name":"a__b__c","parameters":{}}`
+	group := `{"type":"namespace","name":"a__b","tools":[{"type":"function","name":"c","parameters":{}}]}`
+	for name, tools := range map[string]string{
+		"plain first": plain + "," + group,
+		"pair first":  group + "," + plain,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"model":"m","input":[` +
+				`{"type":"function_call","call_id":"call_1","name":"c","namespace":"a__b","arguments":"{}"}],` +
+				`"tool_choice":{"type":"function","name":"c","namespace":"a__b"},` +
+				`"tools":[` + tools + `]}`
+			req, err := DecodeResponsesRequest([]byte(body))
+			if err != nil {
+				t.Fatalf("request was rejected: %v", err)
+			}
+			plainWire, pairWire := "", ""
+			for _, tool := range req.Tools {
+				if tool.Namespace == "" {
+					plainWire = tool.ModelName()
+				} else {
+					pairWire = tool.ModelName()
+				}
+			}
+			if plainWire != "a__b__c" {
+				t.Fatalf("plain tool wire name = %q", plainWire)
+			}
+			if pairWire != "a__b__c_2" {
+				t.Fatalf("pair wire name = %q, want the suffix so it cannot displace the plain tool", pairWire)
+			}
+			if req.ToolChoice == nil || req.ToolChoice.Name != "a__b__c_2" {
+				t.Fatalf("tool choice = %+v, want the pair's suffix", req.ToolChoice)
+			}
+			var call *ir.ToolCall
+			for _, message := range req.Messages {
+				for _, block := range message.Content {
+					if block.Type == ir.BlockToolCall {
+						call = block.ToolCall
+					}
+				}
+			}
+			if call == nil || call.Name != "a__b__c_2" {
+				t.Fatalf("history call = %+v, want the pair's suffix", call)
+			}
+		})
+	}
+}
+
 // TestResponsesNamespaceHistoryCall verifies a replayed namespaced call decodes
 // to the flat spelling, so a Chat target history validates.
 func TestResponsesNamespaceHistoryCall(t *testing.T) {

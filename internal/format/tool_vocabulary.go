@@ -117,6 +117,44 @@ func (n *toolNamer) claim(name string) string {
 	return name
 }
 
+// toolIdentity keys one declared tool by its namespace and declared name.
+func toolIdentity(namespace, name string) string { return namespace + "\x00" + name }
+
+// assignToolNames owns the flat spelling of every declared tool in a request.
+// Plain tools keep their declared name and are claimed first, so a namespace
+// pair that flattens to the same string always takes the suffix no matter which
+// array declared it. The returned map resolves the same pair later, for a named
+// tool choice or a replayed namespaced call, to the exact spelling the model
+// saw; a pair the request did not declare falls back to flatToolName.
+func assignToolNames(tools []ir.Tool) map[string]string {
+	namer := newToolNamer()
+	for _, tool := range tools {
+		if tool.Namespace == "" {
+			namer.claim(tool.Name)
+		}
+	}
+	assigned := make(map[string]string, len(tools))
+	for i := range tools {
+		tool := &tools[i]
+		if tool.Namespace == "" {
+			tool.WireName = tool.Name
+			continue
+		}
+		tool.WireName = namer.assign(tool.Namespace, tool.Name)
+		assigned[toolIdentity(tool.Namespace, tool.Name)] = tool.WireName
+	}
+	return assigned
+}
+
+// resolveToolName returns the declared pair's assigned spelling, or the
+// preferred flat spelling when this request declared no such pair.
+func resolveToolName(assigned map[string]string, namespace, name string) string {
+	if wire, ok := assigned[toolIdentity(namespace, name)]; ok {
+		return wire
+	}
+	return flatToolName(namespace, name)
+}
+
 // assign returns the unique flat name for one pair. identity identifies the
 // pair so a repeat of the same pair returns its first assignment instead of
 // taking a new suffix.
