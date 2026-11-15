@@ -135,6 +135,46 @@ func TestRejectedParameterErrorsStillAudit(t *testing.T) {
 	}
 }
 
+// TestMethodRefusalsStillAudit pins the method gate inside the audit owner: a
+// wrong-method call on a destructive route is a terminal outcome too, so it
+// leaves one line naming the refusal instead of vanishing above the closure.
+func TestMethodRefusalsStillAudit(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	logMux := http.NewServeMux()
+	registerLogRoutes(logMux, metrics.NewBuffer(4), nil)
+	backupMux := http.NewServeMux()
+	registerBackupRoutes(backupMux)
+	for _, tc := range []struct {
+		name, action, allowed string
+		mux                   *http.ServeMux
+		method, target        string
+	}{
+		{"purge", "purge", http.MethodPost, logMux, http.MethodGet, "/admin/purge"},
+		{"backup", "backup", http.MethodGet, backupMux, http.MethodPost, "/admin/backup"},
+		{"restore", "restore", http.MethodPost, backupMux, http.MethodGet, "/admin/restore"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf.Reset()
+			rr := httptest.NewRecorder()
+			tc.mux.ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, nil))
+			if rr.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405", rr.Code)
+			}
+			if got := rr.Header().Get("Allow"); got != tc.allowed {
+				t.Fatalf("Allow = %q, want %q", got, tc.allowed)
+			}
+			out := buf.String()
+			line := "audit: " + tc.action + ` outcome="failed"`
+			if strings.Count(out, "audit: ") != 1 || !strings.Contains(out, line) ||
+				!strings.Contains(out, `error="`) || !strings.Contains(out, tc.method) {
+				t.Fatalf("audit output %q, want one %q line naming the refused %s", out, line, tc.method)
+			}
+		})
+	}
+}
+
 // TestDescribeMembers pins the archive selection rendering, including both
 // sides of the combined case.
 func TestDescribeMembers(t *testing.T) {

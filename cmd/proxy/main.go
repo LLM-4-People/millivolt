@@ -64,14 +64,16 @@ var (
 
 // rejectUnless is the RFC 9110 method gate for mux handlers in this
 // file. Mux patterns stay unmethoded so a wrong-method request cannot
-// fall through to the LLM proxy; Allow lists the one supported method.
-func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
+// fall through to the LLM proxy; Allow lists the one supported method. The
+// returned reason is the audit twin of the answer body, so a refusal and its
+// audit line can never word themselves differently.
+func rejectUnless(w http.ResponseWriter, r *http.Request, method string) (refusal string) {
 	if r.Method == method {
-		return true
+		return ""
 	}
 	w.Header().Set("Allow", method)
 	adminjson.WriteError(w, http.StatusMethodNotAllowed, method+" only")
-	return false
+	return method + " only (request was " + r.Method + ")"
 }
 
 // newHTTPServer builds the proxy's http.Server: the caller-supplied request
@@ -820,7 +822,7 @@ func adminConfigHandler() *config.Handler {
 // flag pointer is main-local; the two are equal for the process lifetime.
 func reloadHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !rejectUnless(w, r, http.MethodPost) {
+		if refusal := rejectUnless(w, r, http.MethodPost); refusal != "" {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

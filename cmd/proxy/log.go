@@ -152,7 +152,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 	// gates the whole namespace, read surfaces included.
 	mux.HandleFunc(string(mcp.RouteQuery), store.HandleQuery)
 	mux.HandleFunc("/metrics/export", func(w http.ResponseWriter, r *http.Request) {
-		if !rejectUnless(w, r, http.MethodGet) {
+		if refusal := rejectUnless(w, r, http.MethodGet); refusal != "" {
 			return
 		}
 		q, err := adminjson.StrictQuery(r)
@@ -211,9 +211,6 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 	// (gatedPath gates /metrics too), so the split is action vs read, never
 	// open-read vs gated.
 	mux.HandleFunc(string(mcp.RoutePurge), func(w http.ResponseWriter, r *http.Request) {
-		if !rejectUnless(w, r, http.MethodPost) {
-			return
-		}
 		// The audit owner sits above every gate: each terminal outcome writes
 		// one line, including a refusal that never reached the selection. The
 		// filter stays "unparsed" until the body supplies one.
@@ -229,6 +226,10 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		fail := func(err error) {
 			auditLog("purge", "outcome", "failed", "filter", filterText(),
 				"reviewed", reviewedText(reviewed), "error", err.Error())
+		}
+		if refusal := rejectUnless(w, r, http.MethodPost); refusal != "" {
+			fail(errors.New(refusal))
+			return
 		}
 		if err := purgeQueryError(r); err != nil {
 			fail(err)
@@ -305,7 +306,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		_ = json.NewEncoder(w).Encode(purgeResponse{Deleted: result.Deleted, BufferRemoved: result.BufferRemoved})
 	})
 	mux.HandleFunc(string(mcp.RoutePurgeCount), func(w http.ResponseWriter, r *http.Request) {
-		if !rejectUnless(w, r, http.MethodPost) {
+		if refusal := rejectUnless(w, r, http.MethodPost); refusal != "" {
 			return
 		}
 		if err := purgeQueryError(r); err != nil {

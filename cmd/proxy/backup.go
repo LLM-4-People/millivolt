@@ -40,14 +40,15 @@ const (
 )
 
 func handleBackup(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnless(w, r, http.MethodGet) {
-		return
-	}
 	// The audit owner sits above every gate: each terminal outcome writes one
 	// line, including a refusal that never reached the member selection.
 	members := "unparsed"
 	fail := func(why string) {
 		auditLog("backup", "outcome", "failed", "members", members, "error", why)
+	}
+	if refusal := rejectUnless(w, r, http.MethodGet); refusal != "" {
+		fail(refusal)
+		return
 	}
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {
@@ -134,9 +135,6 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRestore(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnless(w, r, http.MethodPost) {
-		return
-	}
 	// One audit owner for the whole transaction, above every gate: each
 	// terminal outcome names the members, modes and inspect flag that were
 	// actually requested, so a lost response is diagnosable and a retry can be
@@ -151,6 +149,10 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	fail := func(err error) {
 		audit("failed", "error", err.Error())
+	}
+	if refusal := rejectUnless(w, r, http.MethodPost); refusal != "" {
+		fail(errors.New(refusal))
+		return
 	}
 	q, err := adminjson.StrictQuery(r)
 	if err != nil {

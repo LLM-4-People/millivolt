@@ -1597,10 +1597,10 @@ selection (`filter="all"` for a bodyless full delete, `filter="unparsed"` while
 the body or query has not been accepted, and `members="unparsed"` likewise for
 a backup/restore), the previewed count when
 one was supplied, and the committed `deleted` / `buffer_removed` counts, or the
-error. Even a rejection at the query grammar, before the selection exists,
-leaves a line. Each value is quoted with Go string escaping, so a label carrying
-a newline or a quote stays one token on one physical line. A lost or truncated
-response therefore stays diagnosable, and a
+error. Even a rejection at the method gate or the query grammar, before the
+selection exists, leaves a line. Each value is quoted with Go string escaping,
+so a label carrying a newline or a quote stays one token on one physical line. A
+lost or truncated response therefore stays diagnosable, and a
 retry can be compared against what was actually attempted. These lines are the
 destructive-action trail; they are not a general request log.
 
