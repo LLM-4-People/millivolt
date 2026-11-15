@@ -573,6 +573,29 @@ def check_site(site: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
             (SITE_STYLESHEET, site_css_path.read_text(encoding="utf-8")),
         ]))
 
+    # The reading shell is a contract, not a coat of paint: every docs page
+    # carries a breadcrumb (except the docs home), a page footer with at least
+    # one neighbour, and an open contents rail that the script collapses only
+    # when it becomes an inline panel.
+    for page in pages:
+        rel = page.relative_to(site).as_posix()
+        if not rel.startswith("docs/") or rel == "docs/index.html":
+            continue
+        text = page_texts[page]
+        if '<nav class="crumbs"' not in text:
+            errors.append(f"{rel}: docs page has no breadcrumb")
+        if 'class="page-nav"' not in text or "page-nav-link" not in text:
+            errors.append(f"{rel}: docs page has no previous/next footer")
+        if '<details class="toc" open>' not in text:
+            errors.append(f"{rel}: contents rail is not open in the markup")
+        if 'mono-label">documentation' in text:
+            errors.append(f"{rel}: the retired eyebrow still precedes the title")
+        if '<details class="docs-nav" open>' not in text:
+            errors.append(f"{rel}: docs menu is not a labelled disclosure")
+    operations = page_texts.get(site / "docs/operations.html", "")
+    if 'class="callout callout-warning"' not in operations:
+        errors.append("docs/operations.html: the exposure warning is not a callout")
+
     base_template = (ROOT / "site-src/templates/base.html").read_text(encoding="utf-8")
     literal = re.search(r"#[0-9a-fA-F]{3,8}", base_template)
     if literal:
