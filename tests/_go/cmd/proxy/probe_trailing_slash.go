@@ -10,10 +10,10 @@ import (
 
 // TestProbeNamespaceReservesItsSubtree pins R1-16: a probe whose path a
 // monitoring tool spells with a trailing slash must reach millivolt's own
-// answer, not the inference catch-all's 400. The probe roots are open (a
-// scraper carries no operator credential), are registered through the same
-// namespace table as the operator plane, and their subtrees answer the
-// reserved 404, so every spelling stays on the owned surface.
+// answer, never the inference catch-all. The probe roots are open (a scraper
+// carries no operator credential), are registered through the same namespace
+// table as the operator plane, and their subtrees answer the reserved 404, so
+// every spelling stays on the owned surface.
 func TestProbeNamespaceReservesItsSubtree(t *testing.T) {
 	gate := newOperatorGate("probe-credential")
 	mux, handler := newOperatorMux(gate, config.Default())
