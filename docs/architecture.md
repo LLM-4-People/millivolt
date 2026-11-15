@@ -425,11 +425,14 @@ also produces the occurrence-weighted avg/min/max in the same traversal, so a
 metric order is no longer walked separately for stats. The all-history order is
 a compacted immutable base plus a bounded value-sorted pending delta (16,384
 samples): a catch-up append folds only its new samples, so it stays
-O(delta log delta) regardless of history, and reaching the bound folds
-base+pending once. Chart and explorer walk the two runs through one merge
-iterator, so a fresh view allocates no history-sized copy; a materialized merge
-stays cached per published snapshot only for consumers that need a slice. A
-full rebuild replaces the base and clears pending. A retained
+O(delta log delta) regardless of history, and reaching the bound arms one
+background fold that runs off the request and publishes the merged base under a
+one-assignment write. Readers keep the current base and pending until then, so
+an interrupted fold only leaves the published order in place. Chart and explorer
+walk the two runs through one merge iterator, so a fresh view allocates no
+history-sized copy; a materialized merge stays cached per published snapshot
+only for consumers that need a slice. A full rebuild replaces the base, clears
+pending and discards a fold that has not published yet. A retained
 last-65,536-row order serves bounded chart windows whose earliest in-window
 durable row is inside that tail. It uses the same compacted base plus bounded
 pending delta design and its own per-snapshot view holder, so a sub-threshold

@@ -408,9 +408,16 @@ func (p *historyProjection) buildProjectionOnce(ctx context.Context, store *stor
 		data.lineage.resolve()
 	}
 	data.metrics.append(data.rows, previousRows)
+	// Arm the threshold fold before publishing, so the copy that becomes live
+	// carries the flag; compactMetrics publishes the merged base after this
+	// refresh has been handed back, never inside it.
+	compacting := data.metrics.needsCompaction()
 	data.cursor, data.version, data.classRevision = next, version, classRev
 	p.data = data
 	p.finishBuildLocked(done)
+	if compacting {
+		go p.compactMetrics()
+	}
 	return false, nil
 }
 
@@ -456,6 +463,45 @@ func (p *historyProjection) finishBuild(done chan struct{}) {
 	p.mu.Lock()
 	p.finishBuildLocked(done)
 	p.mu.Unlock()
+}
+
+// compactMetrics folds the pending metric delta into one immutable base once a
+// refresh crossed metricOrderPendingSamples. It runs off the request path: the
+// published base and pending stay readable for every reader throughout, the
+// merge itself holds no lock, and only the finished result is published under
+// the write lock in one assignment. A fold whose base was replaced meanwhile is
+// discarded and retried against the live snapshot, and a shutdown that
+// interrupts a fold leaves the published order exactly as it was.
+func (p *historyProjection) compactMetrics() {
+	for {
+		p.mu.Lock()
+		m := &p.data.metrics
+		if m.pending.sampleCount() < metricOrderPendingSamples {
+			m.compacting = false
+			p.mu.Unlock()
+			return
+		}
+		base, pending := m.base, m.pending
+		// Everything the fold merges is exactly the snapshot's pending rows, so
+		// its own highest row bounds what the publish may drop. Appends that
+		// land during the merge hold higher rows and stay pending.
+		covered := pending.maxRow()
+		p.mu.Unlock()
+
+		merged := mergeMetricOrderSets(base, pending)
+
+		p.mu.Lock()
+		m = &p.data.metrics
+		if !sameMetricOrders(m.base, base) {
+			// A replacement build published another base; fold that one.
+			p.mu.Unlock()
+			continue
+		}
+		m.base = merged
+		m.pending = m.pending.keepFrom(covered)
+		m.view = &metricOrderView{}
+		p.mu.Unlock()
+	}
 }
 
 func (p *historyProjection) finishBuildLocked(done chan struct{}) {

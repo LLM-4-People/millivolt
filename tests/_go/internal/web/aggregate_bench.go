@@ -225,9 +225,38 @@ func BenchmarkProjectionMetricAppend(b *testing.B) {
 			}
 		})
 	}
+	// append_cross_* is the read path: the append that pushes pending over the
+	// threshold, which now only folds the delta and arms the background merge.
 	for _, history := range []int{100_000, 1_000_000} {
-		b.Run(fmt.Sprintf("compact_%d", history), func(b *testing.B) {
+		b.Run(fmt.Sprintf("append_cross_%d", history), func(b *testing.B) {
 			benchmarkProjectionCompaction(b, history)
+		})
+	}
+}
+
+// BenchmarkProjectionMetricCompact times the background fold itself, off any
+// request: one merge of the threshold-sized pending delta into the base.
+func BenchmarkProjectionMetricCompact(b *testing.B) {
+	for _, history := range []int{100_000, 1_000_000} {
+		b.Run(fmt.Sprintf("history_%d", history), func(b *testing.B) {
+			pendingRows := (metricOrderPendingSamples - 1) / 3
+			rows := benchmarkMetricRows(history + pendingRows + 8)
+			var p historyProjection
+			p.data.metrics.append(rows[:history], 0)
+			// One row past the bound leaves the delta foldable.
+			p.data.metrics.append(rows[:history+pendingRows+1], history)
+			armed := p.data.metrics
+			if armed.pending.sampleCount() < metricOrderPendingSamples {
+				b.Fatalf("pending = %d, want at least %d", armed.pending.sampleCount(), metricOrderPendingSamples)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				p.mu.Lock()
+				p.data.metrics = armed
+				p.mu.Unlock()
+				p.compactMetrics()
+			}
+			benchmarkProjectionMetrics = p.data.metrics
 		})
 	}
 }

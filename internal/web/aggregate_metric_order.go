@@ -24,10 +24,11 @@ const (
 	recentMetricRebuildRows = 16384
 	// metricOrderPendingSamples bounds the uncompacted all-history and
 	// recent-tail deltas. A sub-threshold append copies at most this many
-	// samples however long the retained history is; reaching the bound folds
-	// base+pending into one new immutable base. 16384 samples cap the extra
-	// pending memory at roughly 256 KiB, while making the O(history) fold rare
-	// instead of per append.
+	// samples however long the retained history is; reaching the bound arms one
+	// background fold of base+pending into a new immutable base, published after
+	// the refresh instead of inside it. 16384 samples cap the extra pending
+	// memory at roughly 256 KiB, while making the O(history) fold rare instead
+	// of per append.
 	metricOrderPendingSamples = 16384
 )
 
@@ -127,6 +128,80 @@ type projectionMetrics struct {
 	recentView    *metricOrderView
 	recentFrom    int
 	recentBuiltAt int
+	// compacting is set while one background fold of pending into base is in
+	// flight, so a burst of appends arms only one compactor.
+	compacting bool
+}
+
+// needsCompaction reports whether the pending delta crossed the fold threshold
+// and arms compacting for the caller. It runs under the projection write lock.
+func (m *projectionMetrics) needsCompaction() bool {
+	if m.compacting || m.pending.sampleCount() < metricOrderPendingSamples {
+		return false
+	}
+	m.compacting = true
+	return true
+}
+
+// sameMetricOrders reports whether two published orders are the same slices, so
+// a completed fold can tell whether the base it merged is still the live one.
+func sameMetricOrders(a, b metricOrders) bool {
+	return sameSamples(a.ttft, b.ttft) && sameSamples(a.tps, b.tps) && sameSamples(a.dec, b.dec)
+}
+
+func sameSamples[T ~int64 | ~float64](a, b []metricSample[T]) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+// maxRow returns one past the highest sample row, the row count the fold
+// covered. Samples are keyed by projection row, so this is exact even when the
+// caller tracks no separate row count.
+func (o metricOrders) maxRow() uint32 {
+	highest := uint32(0)
+	for _, samples := range [][]metricSample[int64]{o.ttft, o.dec} {
+		for _, sample := range samples {
+			if sample.row+1 > highest {
+				highest = sample.row + 1
+			}
+		}
+	}
+	for _, sample := range o.tps {
+		if sample.row+1 > highest {
+			highest = sample.row + 1
+		}
+	}
+	return highest
+}
+
+// keepFrom returns the samples whose row is at least from, preserving the
+// ascending value order. A completed fold uses it to drop exactly the samples it
+// already merged into the new base. The input stays untouched: published
+// slices are immutable, so the result is a fresh slice whenever anything drops.
+func (o metricOrders) keepFrom(from uint32) metricOrders {
+	return metricOrders{
+		ttft: keepSamplesFrom(o.ttft, from),
+		tps:  keepSamplesFrom(o.tps, from),
+		dec:  keepSamplesFrom(o.dec, from),
+	}
+}
+
+func keepSamplesFrom[T ~int64 | ~float64](samples []metricSample[T], from uint32) []metricSample[T] {
+	dropped := 0
+	for _, sample := range samples {
+		if sample.row < from {
+			dropped++
+		}
+	}
+	if dropped == 0 {
+		return samples
+	}
+	kept := make([]metricSample[T], 0, len(samples)-dropped)
+	for _, sample := range samples {
+		if sample.row >= from {
+			kept = append(kept, sample)
+		}
+	}
+	return kept
 }
 
 // allOrderSource returns the exact ascending all-history source of base+pending.
@@ -219,7 +294,9 @@ func collectMetricOrders(rows []contrib, from int) metricOrders {
 // append sorts only new rows and folds them into the bounded pending delta.
 // Previously published slices are never changed, including their spare
 // capacity. from == 0 is a full rebuild: it replaces the base with every
-// sample and clears pending.
+// sample and clears pending. A delta append never folds the pending delta into
+// the base itself; the caller arms compactMetrics for that, so the fold runs
+// after the refresh has been published instead of inside it.
 func (m *projectionMetrics) append(rows []contrib, from int) {
 	if from >= len(rows) {
 		return
@@ -236,10 +313,6 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 		m.recentBuiltAt = 0
 	} else {
 		m.pending.mergeSorted(added)
-		if m.pending.sampleCount() >= metricOrderPendingSamples {
-			m.base.mergeSorted(m.pending)
-			m.pending = metricOrders{}
-		}
 	}
 	// Any base or pending change retires the cached merge. Snapshot copies
 	// keep the old holder and its immutable slices.
