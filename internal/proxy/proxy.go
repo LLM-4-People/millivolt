@@ -688,19 +688,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		overrideBody = nil
 	}
 	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
+	// One occurrence scan of the client body owns the token-ceiling trust
+	// boundary for both checks below. The rewrite path re-scans the bytes it
+	// produced, so the record restamp and both checks describe what is sent.
+	caps := scanTokenCaps(body)
 	if rewriteBody {
 		// The rewrite decodes into a map and re-marshals, which collapses
 		// duplicate cap members to one. Run the occurrence scan on the
 		// pre-rewrite bytes so the documented duplicate rejection cannot be
 		// lost before the cap check below sees the rewritten body.
-		if reason := tokenCapViolation(body, nil); reason != "" {
+		if reason := caps.violation(nil); reason != "" {
 			writeHostileTokenCap(w, t.inbound, reason)
 			return
 		}
 		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes), t.inbound); why == "" {
 			body = rewritten
 			if changed {
-				restampReqMaxTokens(body, rec)
+				caps = scanTokenCaps(body)
+				caps.apply(rec)
 			}
 		} else {
 			// Name the requesting feature(s) by what fired, so a
@@ -728,7 +733,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The Chat and Responses cap spellings are different wire families; a
 	// body carrying both is ambiguous and must not let decode precedence pick
 	// the recorded ceiling.
-	if conflictingTokenCapSpellings(body) {
+	if caps.mixesSpellings() {
 		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
 			"max_output_tokens cannot be combined with max_tokens or max_completion_tokens")
 		return
@@ -742,7 +747,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if reason := tokenCapViolation(body, rec); reason != "" {
+	if reason := caps.violation(rec); reason != "" {
 		writeHostileTokenCap(w, t.inbound, reason)
 		return
 	}

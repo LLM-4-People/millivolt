@@ -3,7 +3,6 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -29,18 +28,27 @@ func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
 // max_output_tokens; none present stamps nil). The occurrence scan rejects a
 // duplicate cap spelling, and a malformed spelling leaves the ceiling unset
 // here; ServeHTTP's tokenCapViolation rejects either before the request can
-// proceed. Both cap re-reads share it: restampReqMaxTokens re-reads a rewritten
-// body, and parseLLMRequest re-reads a body whose parameter block failed its
-// strict decode.
+// proceed. A caller that already holds a scan applies it directly, so the
+// preflighted and rewritten bodies are scanned once each.
 func applyTokenCaps(body []byte, rec *metrics.Record) {
-	caps, err := scanTokenCaps(body)
-	if err != nil {
+	scanTokenCaps(body).apply(rec)
+}
+
+// apply stamps the effective token ceiling from an already computed occurrence
+// scan, so a preflighted body is not scanned a second time. A rewritten body
+// restamps from its own scan, so the hostile-cap boundary, the scheduler
+// reservation and the recorded request parameters all describe the bytes
+// actually sent upstream; a caps decode that still fails (the client's own cap
+// field carried a non-number) keeps the first decode's value rather than
+// fabricating one.
+func (s tokenCapScan) apply(rec *metrics.Record) {
+	if s.duplicate != "" {
 		return
 	}
 	rec.ReqMaxTokens = resolveRequestTokenCap(
-		tokenCapOptional(caps.MaxCompTokens, "max_completion_tokens"),
-		tokenCapOptional(caps.MaxTokens, "max_tokens"),
-		tokenCapOptional(caps.MaxOutputTokens, "max_output_tokens"),
+		tokenCapOptional(s.caps.MaxCompTokens, "max_completion_tokens"),
+		tokenCapOptional(s.caps.MaxTokens, "max_tokens"),
+		tokenCapOptional(s.caps.MaxOutputTokens, "max_output_tokens"),
 	)
 }
 
@@ -53,17 +61,6 @@ func tokenCapOptional(raw json.RawMessage, field string) *int {
 		return nil
 	}
 	return v
-}
-
-// restampReqMaxTokens re-reads the effective token ceiling from a rewritten
-// body onto the record, so the hostile-cap boundary, the scheduler
-// reservation and the recorded request parameters all describe the bytes
-// actually sent upstream. Shares the max_completion_tokens-wins precedence
-// with the first decode; a caps decode that still fails (the client's own
-// cap field carried a non-number) keeps the first decode's value rather
-// than fabricating one.
-func restampReqMaxTokens(body []byte, rec *metrics.Record) {
-	applyTokenCaps(body, rec)
 }
 
 // maxRequestOutputTokens bounds a client-supplied max_tokens /
@@ -94,6 +91,54 @@ type tokenCapMembers struct {
 	MaxOutputTokens json.RawMessage `json:"max_output_tokens"`
 }
 
+// tokenCapNames names one spellings-array slot in scan order, so the duplicate
+// rejection and the value validation read one list.
+var tokenCapNames = [3]string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+
+// tokenCapScan is one occurrence scan of a body's token-ceiling spellings. seen
+// tracks the spellings already recorded; duplicate names the first spelling
+// that appeared twice, which drops every recorded value so the scan result is
+// exactly the pre-rejection state.
+type tokenCapScan struct {
+	caps      tokenCapMembers
+	seen      [3]bool
+	duplicate string
+}
+
+// capture records one spelling occurrence. seen and caps are the scan state, so
+// every occurrence scan - the standalone walk and the preflight's shared
+// top-level walk - applies the duplicate rule identically.
+func (s *tokenCapScan) capture(slot int, raw json.RawMessage) {
+	if s.duplicate != "" {
+		return
+	}
+	if s.seen[slot] {
+		s.duplicate = tokenCapNames[slot]
+		s.caps = tokenCapMembers{}
+		return
+	}
+	s.seen[slot] = true
+	switch slot {
+	case 0:
+		s.caps.MaxTokens = raw
+	case 1:
+		s.caps.MaxCompTokens = raw
+	case 2:
+		s.caps.MaxOutputTokens = raw
+	}
+}
+
+// tokenCapSlot reports the spellings-array slot a top-level key names, or -1.
+// encoding/json matches members case-insensitively, so the comparison folds.
+func tokenCapSlot(key requestKey) int {
+	for slot, name := range tokenCapNames {
+		if key.equal(name) {
+			return slot
+		}
+	}
+	return -1
+}
+
 // tokenCapPresent reports whether a raw cap member was supplied. JSON null is
 // the schema's explicit absent value.
 func tokenCapPresent(raw json.RawMessage) bool {
@@ -103,60 +148,42 @@ func tokenCapPresent(raw json.RawMessage) bool {
 
 // scanTokenCaps walks the top-level object once and collects the first raw
 // value of each accepted token-ceiling spelling. A second occurrence of any
-// member that folds to a cap name fails instead of letting the record and
+// member that folds to a cap name is recorded instead of letting the record and
 // reservation validate one value while the relay sends every occurrence
 // upstream. Invalid JSON returns an empty scan so the existing passthrough
 // path is preserved.
-func scanTokenCaps(body []byte) (tokenCapMembers, error) {
-	var caps tokenCapMembers
-	var seen [3]bool
+func scanTokenCaps(body []byte) tokenCapScan {
+	var scan tokenCapScan
 	i := metrics.SkipSpace(body, 0)
 	if i >= len(body) || body[i] != '{' {
-		return caps, nil
+		return scan
 	}
 	i = metrics.SkipSpace(body, i+1)
 	for i < len(body) && body[i] != '}' {
 		keyStart := i
 		end := skipJSONString(body, i)
 		if end < 0 {
-			return tokenCapMembers{}, nil
+			return tokenCapScan{}
 		}
 		key, ok := decodeRequestKey(body[keyStart:end])
 		if !ok {
-			return tokenCapMembers{}, nil
+			return tokenCapScan{}
 		}
 		i = metrics.SkipSpace(body, end)
 		if i >= len(body) || body[i] != ':' {
-			return tokenCapMembers{}, nil
+			return tokenCapScan{}
 		}
 		i = metrics.SkipSpace(body, i+1)
 		if i >= len(body) {
-			return tokenCapMembers{}, nil
+			return tokenCapScan{}
 		}
 		valueStart := i
 		next := skipJSONValue(body, i)
 		if next < 0 {
-			return tokenCapMembers{}, nil
+			return tokenCapScan{}
 		}
-		switch {
-		case key.equal("max_tokens"):
-			if seen[0] {
-				return tokenCapMembers{}, errors.New("max_tokens appears more than once")
-			}
-			seen[0] = true
-			caps.MaxTokens = json.RawMessage(body[valueStart:next])
-		case key.equal("max_completion_tokens"):
-			if seen[1] {
-				return tokenCapMembers{}, errors.New("max_completion_tokens appears more than once")
-			}
-			seen[1] = true
-			caps.MaxCompTokens = json.RawMessage(body[valueStart:next])
-		case key.equal("max_output_tokens"):
-			if seen[2] {
-				return tokenCapMembers{}, errors.New("max_output_tokens appears more than once")
-			}
-			seen[2] = true
-			caps.MaxOutputTokens = json.RawMessage(body[valueStart:next])
+		if slot := tokenCapSlot(key); slot >= 0 {
+			scan.capture(slot, json.RawMessage(body[valueStart:next]))
 		}
 		i = metrics.SkipSpace(body, next)
 		if i < len(body) && body[i] == ',' {
@@ -166,9 +193,9 @@ func scanTokenCaps(body []byte) (tokenCapMembers, error) {
 		if i < len(body) && body[i] == '}' {
 			break
 		}
-		return tokenCapMembers{}, nil
+		return tokenCapScan{}
 	}
-	return caps, nil
+	return scan
 }
 
 // tokenCapValue validates one raw token-ceiling member. An absent or JSON null
@@ -198,12 +225,17 @@ func tokenCapValue(raw json.RawMessage, field string) (*int, error) {
 // both would make the recorded ceiling depend on decode precedence rather than
 // the client's wire.
 func conflictingTokenCapSpellings(body []byte) bool {
-	caps, err := scanTokenCaps(body)
-	if err != nil {
+	return scanTokenCaps(body).mixesSpellings()
+}
+
+// mixesSpellings reports a mixed-spelling scan result. A duplicate makes the
+// scan unusable, matching the standalone helper's previous contract.
+func (s tokenCapScan) mixesSpellings() bool {
+	if s.duplicate != "" {
 		return false
 	}
-	return tokenCapPresent(caps.MaxOutputTokens) &&
-		(tokenCapPresent(caps.MaxTokens) || tokenCapPresent(caps.MaxCompTokens))
+	return tokenCapPresent(s.caps.MaxOutputTokens) &&
+		(tokenCapPresent(s.caps.MaxTokens) || tokenCapPresent(s.caps.MaxCompTokens))
 }
 
 // tokenCapViolation returns the client-facing 400 reason for the first token
@@ -215,17 +247,22 @@ func conflictingTokenCapSpellings(body []byte) bool {
 // because it carries the client's actual field names; the record's effective
 // ceiling is a fallback for a body whose cap fields did not decode.
 func tokenCapViolation(body []byte, rec *metrics.Record) string {
-	caps, err := scanTokenCaps(body)
-	if err != nil {
-		return err.Error()
+	return scanTokenCaps(body).violation(rec)
+}
+
+// violation is tokenCapViolation over an already computed occurrence scan. The
+// duplicate reason comes first because a duplicate drops the recorded values.
+func (s tokenCapScan) violation(rec *metrics.Record) string {
+	if s.duplicate != "" {
+		return s.duplicate + " appears more than once"
 	}
 	for _, cap := range []struct {
 		name string
 		raw  json.RawMessage
 	}{
-		{"max_completion_tokens", caps.MaxCompTokens},
-		{"max_tokens", caps.MaxTokens},
-		{"max_output_tokens", caps.MaxOutputTokens},
+		{tokenCapNames[1], s.caps.MaxCompTokens},
+		{tokenCapNames[0], s.caps.MaxTokens},
+		{tokenCapNames[2], s.caps.MaxOutputTokens},
 	} {
 		if _, err := tokenCapValue(cap.raw, cap.name); err != nil {
 			return err.Error()

@@ -8,93 +8,172 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-// countRequestMessagesContentParts counts the aggregate content-part array
-// lengths over the message objects of the messages array at start, including
-// every duplicate content occurrence in a message. budget is the remaining
-// aggregate allowance; a count above it means the aggregate bound is exceeded.
-// Non-object elements and non-array content contribute zero, matching the
-// typed decoder's shape tolerance. ok is false on malformed input so the
-// document keeps its passthrough behavior.
-func countRequestMessagesContentParts(data []byte, start, budget int) (int, bool) {
+// requestMessagesCount is the result of one walk over a messages array. over
+// names the bound the walk crossed - "messages", "content parts" or "tool
+// calls" - so the caller words the shared rejection; ok is false on malformed
+// input. partsOver stops the walk because the aggregate content-part bound is
+// the first rejection the former separate walks reported, and callsOver only
+// defers the report to the end of the array so a later content overflow still
+// wins exactly as it did when the content walk ran first.
+type requestMessagesCount struct {
+	elements  int
+	parts     int
+	calls     int
+	next      int
+	over      string
+	partsOver bool
+	callsOver bool
+	ok        bool
+}
+
+// countRequestMessagesNested is the single walk over the messages array at
+// start. It counts the array elements and, per message object, the content-part
+// array lengths, the tool_calls members and the deprecated function_call. It
+// replaces a separate array count plus one walk per counted collection, so a
+// message's text is scanned once rather than three times. Every duplicate
+// occurrence is charged because each one reaches a decoder. elementMax,
+// partBudget and callBudget are the remaining allowances; a count above one of
+// them sets over and stops the walk. Non-object elements and non-array values
+// contribute zero, matching the typed decoder's shape tolerance. ok is false on
+// malformed input so the document keeps its passthrough behavior.
+func countRequestMessagesNested(data []byte, start, elementMax, partBudget, callBudget int) requestMessagesCount {
+	var out requestMessagesCount
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) || data[i] != '[' {
-		return 0, true
+		out.next = skipJSONValue(data, i)
+		out.ok = out.next >= 0
+		return out
 	}
 	i = metrics.SkipSpace(data, i+1)
-	total := 0
 	for i < len(data) && data[i] != ']' {
-		n, next, ok := countRequestMessageContentParts(data, i, budget-total)
-		if !ok {
-			return 0, false
+		message := countRequestMessageNested(data, i, partBudget-out.parts, callBudget-out.calls)
+		if !message.ok {
+			return requestMessagesCount{}
 		}
-		if n > budget-total {
-			return total + n, true
+		out.elements++
+		out.parts += message.parts
+		out.calls += message.calls
+		out.callsOver = out.callsOver || message.callsOver
+		switch {
+		case out.elements > elementMax:
+			out.over = "messages"
+			out.ok = true
+			return out
+		case message.partsOver:
+			out.over = "content parts"
+			out.ok = true
+			return out
 		}
-		total += n
-		i = metrics.SkipSpace(data, next)
+		i = metrics.SkipSpace(data, message.next)
 		if i < len(data) && data[i] == ',' {
 			i = metrics.SkipSpace(data, i+1)
 			if i >= len(data) || data[i] == ']' {
-				return 0, false
+				return requestMessagesCount{}
 			}
 			continue
 		}
 		if i < len(data) && data[i] == ']' {
 			break
 		}
-		return 0, false
+		return requestMessagesCount{}
 	}
 	if i >= len(data) || data[i] != ']' {
-		return 0, false
+		return requestMessagesCount{}
 	}
-	return total, true
+	out.next, out.ok = i+1, true
+	if out.callsOver {
+		out.over = "tool calls"
+	}
+	return out
 }
 
-// countRequestMessageContentParts counts one message object's content arrays.
-// Duplicate content members each reach requestContent.UnmarshalJSON before
-// encoding/json's last-wins field assignment, so every occurrence is charged
-// against the budget; only a non-array occurrence contributes zero. Counting
-// stops at the first occurrence that crosses the remaining budget, so the
-// rejection costs one bounded prefix scan.
-func countRequestMessageContentParts(data []byte, start, budget int) (int, int, bool) {
+// countRequestMessageNested counts one message object's content-part arrays and
+// tool-call members in one pass over its members. Duplicate content and
+// tool_calls members each reach requestContent.UnmarshalJSON and a typed call
+// slice before encoding/json's last-wins field assignment, so every occurrence
+// is charged against the budget; a non-array content or tool_calls value
+// contributes zero. A content overflow stops the walk (partsOver); a tool-call
+// overflow only marks the result, so a content member after it is still counted
+// and keeps the content rejection's precedence.
+func countRequestMessageNested(data []byte, start, partBudget, callBudget int) requestMessagesCount {
+	var out requestMessagesCount
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) {
-		return 0, 0, false
+		return out
 	}
 	if data[i] != '{' {
-		next := metrics.SkipJSONValue(data, i)
-		return 0, next, next >= 0
+		out.next = skipJSONValue(data, i)
+		out.ok = out.next >= 0
+		return out
 	}
 	i = metrics.SkipSpace(data, i+1)
-	parts := 0
 	for i < len(data) && data[i] != '}' {
 		end := skipJSONString(data, i)
 		if end < 0 {
-			return 0, 0, false
+			return requestMessagesCount{}
 		}
 		key := data[i:end]
 		i = metrics.SkipSpace(data, end)
 		if i >= len(data) || data[i] != ':' {
-			return 0, 0, false
+			return requestMessagesCount{}
 		}
 		i = metrics.SkipSpace(data, i+1)
 		if i >= len(data) {
-			return 0, 0, false
+			return requestMessagesCount{}
 		}
-		if requestKeyEqual(key, "content") {
-			n, next, ok := metrics.CountJSONArrayBytes(data, i, budget-parts)
+		switch {
+		case requestKeyEqual(key, "content"):
+			n, next, ok := metrics.CountJSONArrayBytes(data, i, partBudget-out.parts)
 			if !ok {
-				return 0, 0, false
+				return requestMessagesCount{}
 			}
-			parts += n
-			if parts > budget {
-				return parts, 0, true
+			out.parts += n
+			if out.parts > partBudget {
+				out.partsOver, out.ok = true, true
+				return out
 			}
 			i = next
-		} else {
+		case requestKeyEqual(key, "tool_calls"):
+			// The remaining call budget may already be exhausted, so the bound
+			// clamps at zero: the array is still walked, but counting can stop
+			// at the first member.
+			limit := max(callBudget-out.calls, 0)
+			n, next, ok := metrics.CountJSONArrayBytes(data, i, limit)
+			if !ok {
+				return requestMessagesCount{}
+			}
+			out.calls += n
+			if out.calls > callBudget {
+				out.callsOver = true
+			}
+			if n > limit {
+				// The bounded count stopped at the member that proved the
+				// overflow, so its index is not the array end. Skip the rest of
+				// the array to keep walking the message and its later members.
+				if next = skipJSONValue(data, i); next < 0 {
+					return requestMessagesCount{}
+				}
+			}
+			i = next
+		case requestKeyEqual(key, "function_call"):
+			// The deprecated one-call shape materializes a typed call like a
+			// tool_calls member. A non-null value counts even if malformed,
+			// because the decode still allocates it before rejecting the body.
 			next := skipJSONValue(data, i)
 			if next < 0 {
-				return 0, 0, false
+				return requestMessagesCount{}
+			}
+			if !bytes.Equal(bytes.TrimSpace(data[i:next]), []byte("null")) {
+				out.calls++
+				if out.calls > callBudget {
+					out.callsOver = true
+				}
+			}
+			i = next
+		default:
+			next := skipJSONValue(data, i)
+			if next < 0 {
+				return requestMessagesCount{}
 			}
 			i = next
 		}
@@ -106,12 +185,13 @@ func countRequestMessageContentParts(data []byte, start, budget int) (int, int, 
 		if i < len(data) && data[i] == '}' {
 			break
 		}
-		return 0, 0, false
+		return requestMessagesCount{}
 	}
 	if i >= len(data) || data[i] != '}' {
-		return 0, 0, false
+		return requestMessagesCount{}
 	}
-	return parts, i + 1, true
+	out.next, out.ok = i+1, true
+	return out
 }
 
 // countResponsesInputNested counts the aggregate content-part and annotation
@@ -345,126 +425,6 @@ func countResponsesPartAnnotations(data []byte, start, budget int) (total, next 
 		return 0, 0, false, false
 	}
 	return total, i + 1, false, true
-}
-
-// countRequestMessagesToolCalls counts the aggregate tool_calls array members
-// over the message objects of the messages array at start. budget is the
-// remaining aggregate allowance; a count above it means the aggregate bound is
-// exceeded. Non-object elements and non-array values contribute zero, matching
-// the typed decoder's shape tolerance. ok is false on malformed input so the
-// document keeps its passthrough behavior.
-func countRequestMessagesToolCalls(data []byte, start, budget int) (int, bool) {
-	i := metrics.SkipSpace(data, start)
-	if i >= len(data) || data[i] != '[' {
-		return 0, true
-	}
-	i = metrics.SkipSpace(data, i+1)
-	total := 0
-	for i < len(data) && data[i] != ']' {
-		n, next, ok := countRequestMessageToolCalls(data, i, budget-total)
-		if !ok {
-			return 0, false
-		}
-		if n > budget-total {
-			return total + n, true
-		}
-		total += n
-		i = metrics.SkipSpace(data, next)
-		if i < len(data) && data[i] == ',' {
-			i = metrics.SkipSpace(data, i+1)
-			if i >= len(data) || data[i] == ']' {
-				return 0, false
-			}
-			continue
-		}
-		if i < len(data) && data[i] == ']' {
-			break
-		}
-		return 0, false
-	}
-	if i >= len(data) || data[i] != ']' {
-		return 0, false
-	}
-	return total, true
-}
-
-// countRequestMessageToolCalls counts one message object's tool_calls array
-// members. Every occurrence accumulates: encoding/json decodes each duplicate
-// tool_calls member into a fresh typed slice before the field's last-wins
-// assignment, so each one allocates even though only the final slice survives.
-// Once the budget is crossed, counting stops and the over-count is returned so
-// the caller rejects before any translation decoder materializes the calls.
-func countRequestMessageToolCalls(data []byte, start, budget int) (int, int, bool) {
-	i := metrics.SkipSpace(data, start)
-	if i >= len(data) {
-		return 0, 0, false
-	}
-	if data[i] != '{' {
-		next := metrics.SkipJSONValue(data, i)
-		return 0, next, next >= 0
-	}
-	i = metrics.SkipSpace(data, i+1)
-	total := 0
-	for i < len(data) && data[i] != '}' {
-		end := skipJSONString(data, i)
-		if end < 0 {
-			return 0, 0, false
-		}
-		key := data[i:end]
-		i = metrics.SkipSpace(data, end)
-		if i >= len(data) || data[i] != ':' {
-			return 0, 0, false
-		}
-		i = metrics.SkipSpace(data, i+1)
-		if i >= len(data) {
-			return 0, 0, false
-		}
-		if requestKeyEqual(key, "tool_calls") {
-			n, next, ok := metrics.CountJSONArrayBytes(data, i, budget-total)
-			if !ok {
-				return 0, 0, false
-			}
-			total += n
-			if total > budget {
-				return total, 0, true
-			}
-			i = next
-		} else if requestKeyEqual(key, "function_call") {
-			// The deprecated one-call shape materializes a typed call like a
-			// tool_calls member. A non-null value counts even if malformed,
-			// because the decode still allocates it before rejecting the body.
-			next := metrics.SkipJSONValue(data, i)
-			if next < 0 {
-				return 0, 0, false
-			}
-			if !bytes.Equal(bytes.TrimSpace(data[i:next]), []byte("null")) {
-				total++
-				if total > budget {
-					return total, 0, true
-				}
-			}
-			i = next
-		} else {
-			next := metrics.SkipJSONValue(data, i)
-			if next < 0 {
-				return 0, 0, false
-			}
-			i = next
-		}
-		i = metrics.SkipSpace(data, i)
-		if i < len(data) && data[i] == ',' {
-			i = metrics.SkipSpace(data, i+1)
-			continue
-		}
-		if i < len(data) && data[i] == '}' {
-			break
-		}
-		return 0, 0, false
-	}
-	if i >= len(data) || data[i] != '}' {
-		return 0, 0, false
-	}
-	return total, i + 1, true
 }
 
 func asciiKeyEqual(raw []byte, name string) bool {

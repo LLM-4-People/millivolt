@@ -390,10 +390,15 @@ const requestAnnotationArrayMax = metrics.ContentPartMax
 // records only the keys it sees; escaped and non-ASCII keys decode once per
 // member and that result feeds both the distinct set and field comparisons.
 // cfg is the live server snapshot, the single owner of every configured bound.
-func boundRequestMetadata(body []byte, cfg *config.Config) error {
+// caps receives the token-ceiling occurrences the same top-level walk visits, so
+// the caller's cap stamp and trust-boundary check do not need a second walk of
+// the body. A malformed document leaves caps untouched (its zero value), which
+// matches what a standalone scan of invalid JSON reports.
+func boundRequestMetadata(body []byte, cfg *config.Config, caps *tokenCapScan) error {
 	if cfg == nil || cfg.RequestToolCallsMax < 1 {
 		return fmt.Errorf("request tool calls: invalid bound")
 	}
+	var captured tokenCapScan
 	i := metrics.SkipSpace(body, 0)
 	if i >= len(body) || body[i] != '{' {
 		return nil
@@ -464,35 +469,32 @@ func boundRequestMetadata(body []byte, cfg *config.Config) error {
 		if i >= len(body) {
 			return nil
 		}
+		if slot := tokenCapSlot(key); slot >= 0 {
+			next := skipJSONValue(body, i)
+			if next < 0 {
+				return nil
+			}
+			captured.capture(slot, body[i:next])
+		}
 		collection := key.collection()
 		switch collection {
 		case "messages":
-			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
-			if !ok {
+			counted := countRequestMessagesNested(body, i, requestMetadataMaxElements,
+				requestContentPartsMax-contentParts, cfg.RequestToolCallsMax-toolCalls)
+			if !counted.ok {
 				return nil
 			}
-			if n > requestMetadataMaxElements {
+			contentParts += counted.parts
+			toolCalls += counted.calls
+			switch counted.over {
+			case "messages":
 				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", collection, requestMetadataMaxElements))
+			case "content parts":
+				return requestMetadataOverflow(body, fmt.Errorf("request content parts exceed %d", requestContentPartsMax))
+			case "tool calls":
+				return requestMetadataOverflow(body, fmt.Errorf("request tool calls exceed %d", cfg.RequestToolCallsMax))
 			}
-			if n > 0 {
-				parts, ok := countRequestMessagesContentParts(body, i, requestContentPartsMax-contentParts)
-				if !ok {
-					return nil
-				}
-				if parts > requestContentPartsMax-contentParts {
-					return requestMetadataOverflow(body, fmt.Errorf("request content parts exceed %d", requestContentPartsMax))
-				}
-				contentParts += parts
-				calls, ok := countRequestMessagesToolCalls(body, i, cfg.RequestToolCallsMax-toolCalls)
-				if !ok {
-					return nil
-				}
-				if calls > cfg.RequestToolCallsMax-toolCalls {
-					return requestMetadataOverflow(body, fmt.Errorf("request tool calls exceed %d", cfg.RequestToolCallsMax))
-				}
-				toolCalls += calls
-			}
-			i = next
+			i = counted.next
 		case "tools", "functions", "modalities":
 			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
 			if !ok {
@@ -665,6 +667,7 @@ func boundRequestMetadata(body []byte, cfg *config.Config) error {
 		!metrics.ObjectWithinLimit(body[streamOptionsStart:streamOptionsEnd], requestMetadataMaxElements) {
 		return requestMetadataOverflow(body, fmt.Errorf("request stream_options exceeds %d members", requestMetadataMaxElements))
 	}
+	*caps = captured
 	return nil
 }
 

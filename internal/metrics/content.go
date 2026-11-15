@@ -170,27 +170,31 @@ func SkipJSONValue(data []byte, i int) int {
 }
 
 // skipJSONString returns the index just past the closing quote of the JSON
-// string opening at i, or -1 when the string is unterminated. The common
-// unescaped body is one IndexByte search; only a string that actually contains
-// a backslash falls back to the escape-aware byte loop.
+// string opening at i, or -1 when the string is unterminated. Every candidate
+// quote is one IndexByte search and its escape parity is read from the
+// backslash run immediately before it, so escaped content is one forward pass
+// instead of a restart from the string start at each escape.
 func SkipJSONString(data []byte, i int) int {
 	if i >= len(data) || data[i] != '"' {
 		return -1
 	}
-	rest := data[i+1:]
-	if j := bytes.IndexByte(rest, '"'); j >= 0 && bytes.IndexByte(rest[:j], '\\') < 0 {
-		return i + 1 + j + 1
-	}
 	i++
 	for i < len(data) {
-		if data[i] == '\\' {
-			i += 2
-			continue
+		j := bytes.IndexByte(data[i:], '"')
+		if j < 0 {
+			return -1
 		}
-		if data[i] == '"' {
-			return i + 1
+		quote := i + j
+		// An odd backslash run escapes the quote, so the string continues.
+		// Runs are short and every byte belongs to exactly one count.
+		backslashes := 0
+		for k := quote - 1; k >= i && data[k] == '\\'; k-- {
+			backslashes++
 		}
-		i++
+		if backslashes%2 == 0 {
+			return quote + 1
+		}
+		i = quote + 1
 	}
 	return -1
 }
