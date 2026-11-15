@@ -26,6 +26,7 @@ func TestAbsorbHTTPRetryBoundsTheAttemptLog(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.MaxRetries = 3
+	cfg.StormMaxRetries = 0 // the ordinary budget alone bounds this case
 	s := New(cfg, metrics.Noop{})
 	rec := &metrics.Record{}
 	for i := range 10 {
@@ -43,6 +44,7 @@ func TestAbsorbHTTPRetryBoundsTheAttemptLog(t *testing.T) {
 
 	zero := config.Default()
 	zero.MaxRetries = 0
+	zero.StormMaxRetries = 0
 	s = New(zero, metrics.Noop{})
 	rec = &metrics.Record{}
 	s.absorbHTTPRetry(rec, resp(), []byte(`{"error":{"message":"only"}}`), "", metrics.ClassQuota)

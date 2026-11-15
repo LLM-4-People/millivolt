@@ -421,8 +421,9 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 // retry hint (parseRetryAfter) and the attempt-log entry (status, bounded
 // error-body envelope via parseErrorBody, hint milliseconds, the response's
 // upstream metadata via captureUpstreamMeta), appended with the retry
-// counter (bounded to the newest max_retries entries). Returns the hint - the
-// pacing floor for the caller's Trip and RetryAfterMs stamp. The bounded body read, per-send cleanup, record
+// counter (bounded to the newest max_retries + storm_max_retries entries).
+// Returns the hint - the pacing floor for the caller's Trip and RetryAfterMs
+// stamp. The bounded body read, per-send cleanup, record
 // stamps and publish order stay per-transport: the generic relay interplays
 // with the durable-quota 429 peek and clears stale error fields after its
 // publish; the cursor driver closes its duplex pipe and stamps before
@@ -451,10 +452,12 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 	// A durable quota wait re-sends without ever burning max_retries, so the
 	// attempt log needs its own bound or it grows for the whole pause. Keep the
 	// newest entries: the tail is the history that explains the wait. The
-	// configured max_retries is the bound, and one entry always survives so a
-	// zero budget still records the re-send it absorbed. This is the one owner;
-	// the in-band 429 stamp adds at most one more entry afterwards.
-	if bound := max(s.cfg().MaxRetries, 1); len(rec.Attempts) > bound {
+	// bound is the sum of the two configured attempt budgets, max_retries and
+	// storm_max_retries, and one entry always survives so a zero budget still
+	// records the re-send it absorbed. This is the one owner; the in-band 429
+	// stamp adds at most one more entry afterwards.
+	cfg := s.cfg()
+	if bound := max(cfg.MaxRetries+cfg.StormMaxRetries, 1); len(rec.Attempts) > bound {
 		rec.Attempts = append(rec.Attempts[:0], rec.Attempts[len(rec.Attempts)-bound:]...)
 	}
 	rec.Retries++
