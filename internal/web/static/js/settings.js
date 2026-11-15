@@ -137,9 +137,12 @@ function settingsClose(force) {
   if (v) v.classList.remove('open');
   settingsExpanded(false);
   if (wasOpen && !force) {
-    // The Settings opener lives inside the Actions flyout, which closed
-    // before the modal opened; closeModal's stored element is now hidden and
-    // cannot receive focus. Return to the visible header control instead.
+    // A sheet opened from the operator console goes back there, to the section
+    // it came from. Otherwise the Settings opener lives inside the Actions
+    // flyout, which closed before the modal opened; closeModal's stored
+    // element is now hidden and cannot receive focus, so the visible header
+    // control is the focus home.
+    if (typeof ocRestoreSettingsOrigin === 'function' && ocRestoreSettingsOrigin()) return;
     visibleHeaderControl()?.focus();
   }
 }

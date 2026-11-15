@@ -465,6 +465,18 @@ module.exports = async function operatorMenus(H) {
         d.getElementById('settings-sheet').hidden && !shell.hidden &&
         shell.contains(d.activeElement));
       w.closeOperatorConsole();
+      // A sheet opened FROM the console goes back to that console section when
+      // it closes, instead of dropping the operator into the header.
+      w.openOperatorConsole('system');
+      const consoleSettings = d.querySelector('#oc-pane [data-oc-settings]');
+      consoleSettings.click();
+      check('the console Settings button opens the sheet and closes the console',
+        !d.getElementById('settings-sheet').hidden && shell.hidden);
+      w.closeSettings();
+      check('closing that sheet reopens the console on the section it left',
+        d.getElementById('settings-sheet').hidden && !shell.hidden &&
+        w.eval('ocSection') === 'system');
+      w.closeOperatorConsole();
     }
 
     // ---- 3. the rail is a real tablist ----

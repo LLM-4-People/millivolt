@@ -506,6 +506,24 @@ function ocOwns(node) {
   return !!(node && shell && shell.contains(node));
 }
 
+// A Settings sheet opened from the console remembers the workspace it came
+// from. The sheet is a modal and closes the console, so an ordinary close
+// would land the operator back in the header with their section gone; this
+// hands the console back instead. One caller (the console handler) writes it
+// and the sheet's close consumes it, so a Settings open from anywhere else
+// still returns to the visible header control.
+let ocSettingsOrigin = '';
+function ocRememberSettingsOrigin() {
+  ocSettingsOrigin = ocMounted ? ocSection : '';
+}
+function ocRestoreSettingsOrigin() {
+  const section = ocSettingsOrigin;
+  ocSettingsOrigin = '';
+  if (!section) return false;
+  openOperatorConsole(section);
+  return true;
+}
+
 // ocSyncTriggerName repaints the readout's accessible name after the console
 // opens or closes, because the name states the action the trigger performs
 // now. menu.js owns aria-expanded; this only follows it.
@@ -1616,6 +1634,7 @@ const OC_ACTION_HANDLERS = [
     // A warning that names one setting carries the category, so the sheet
     // opens on the pane that holds it instead of its first pane.
     const category = target.dataset.ocSettings || '';
+    ocRememberSettingsOrigin();
     closeOperatorConsole();
     if (category && typeof openSettingsAt === 'function') openSettingsAt(category);
     else toggleSettings();
