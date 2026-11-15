@@ -929,6 +929,10 @@ type headScan struct {
 	inString bool
 	escape   bool
 	content  bool
+	// starter is the first significant byte of the head: only a JSON value
+	// begins with one, so a plain-text head never proves complete and its data
+	// lines always join.
+	starter byte
 	// last is the last significant byte outside whitespace: a head ending in
 	// ',' or ':' is still a member fragment, not a document, however balanced
 	// its brackets are.
@@ -953,6 +957,9 @@ func (h *headScan) add(b []byte) {
 			h.last = c
 			continue
 		}
+		if h.starter == 0 && !isJSONSpace(c) {
+			h.starter = c
+		}
 		switch c {
 		case '"':
 			h.inString = true
@@ -973,13 +980,30 @@ func (h *headScan) add(b []byte) {
 	}
 }
 
-// complete reports whether the head ends as one closed document: content seen,
-// no open string, every structural bracket closed, and a final significant byte
-// that ends a value rather than a member separator. A mismatched bracket pair
-// still counts as closed, which over-separates rather than joining two
-// documents into one payload a parser would drop.
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+}
+
+// jsonStarter reports whether b can begin a JSON value: an object or array
+// opener, a number's sign or first digit, a string quote, or the first letter
+// of the true/false/null literals.
+func jsonStarter(b byte) bool {
+	switch b {
+	case '{', '[', '-', '"', 't', 'f', 'n':
+		return true
+	}
+	return b >= '0' && b <= '9'
+}
+
+// complete reports whether the head ends as one closed document: content seen
+// behind a JSON starter byte, no open string, every structural bracket closed,
+// and a final significant byte that ends a value rather than a member
+// separator. A mismatched bracket pair still counts as closed, which
+// over-separates rather than joining two documents into one payload a parser
+// would drop. A plain-text head (any other starter byte) answers false, the
+// same verdict json.Valid reaches, so its lines stay one event.
 func (h *headScan) complete() bool {
-	return h.content && h.depth == 0 && !h.inString && h.last != ',' && h.last != ':'
+	return h.content && jsonStarter(h.starter) && h.depth == 0 && !h.inString && h.last != ',' && h.last != ':'
 }
 
 // emitDegenerateResponses replaces a withheld Responses terminal region with a
