@@ -878,11 +878,11 @@ merged promotion PR does.
 
 | Image tag | Meaning |
 | --- | --- |
-| `main` | Moving production image for the released current `main` revision; updated by non-prerelease versioned releases from a merged promotion PR, a delivered main push or a release tag. A prerelease does not move it. |
+| `main` | Moving production image for the released current `main` revision; updated by a non-prerelease versioned release cut from a merged promotion PR or a delivered main push. A prerelease does not move it, and a manually pushed release tag does not either. |
 | `testing` | Moving development image after a successful testing-branch push; never a release. Its OCI version label reports the embedded `VERSION`, which can lag the latest release. |
-| `sha-<full commit>` | Release tag for the exact cut revision built and published; the version bump is part of the reviewed promotion merge, so this is a main commit. Testing pushes do not publish it. |
+| `sha-<full commit>` | Release tag for the exact cut revision built and published; the version bump is part of the reviewed promotion merge, so this is a main commit. Testing pushes do not publish it, while a manually pushed tag publishes it for the tagged revision. |
 | Version from `VERSION` | Created by the matching `v`-prefixed release tag on the promotion merge commit, or by a manually pushed tag. |
-| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a merged promotion PR, a main push or a tag. Prereleases and testing pushes do not update it. |
+| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a merged promotion PR, a main push or a manually pushed tag. Prereleases and testing pushes do not update it. A tag push moves the version, `sha-` and `latest` tags only; `main` stays where the last main-branch release put it. |
 
 Release builds request an SBOM and max-mode provenance. The image and its
 attestations are published before the tag and release are updated; the workflow
