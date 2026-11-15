@@ -726,7 +726,8 @@ storage_write_chan_cap: 8192
 #   type: int · range >= 1 · default 256
 storage_batch_cap: 256
 
-# Partial-batch flush cadence. Must be > 0 (a zero ticker panics). Restart required.
+# Partial-batch flush cadence. Must be > 0 (a zero ticker panics). The readiness wedge
+# window is four intervals clamped to 30s..2m. Restart required.
 # Hot-reload: NO (restart required).
 #   type: duration · range > 0s · default 500ms
 storage_flush_interval: 500ms

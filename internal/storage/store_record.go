@@ -11,6 +11,8 @@ import (
 type queuedRecord struct {
 	record *metrics.Record
 	seq    uint64
+	// queued is the producer's arrival time, the age the wedge verdict reads.
+	queued time.Time
 }
 
 // Recorder couples the live ring and durable enqueue at their shared, short
@@ -71,7 +73,7 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 		return
 	}
 	select {
-	case s.ch <- queuedRecord{record: r, seq: s.accepted + 1}:
+	case s.ch <- queuedRecord{record: r, seq: s.accepted + 1, queued: time.Now()}:
 		s.accepted++
 	case <-s.done:
 		s.drop(DropAfterClose)
@@ -107,6 +109,13 @@ func (s *Store) writer() {
 			return nil
 		}
 		err := s.insertBatch(batch)
+		// The batch is durable (or lost) and differs no longer. Retire it before
+		// publishing the flush stamp, so a reader that sees the fresh stamp also
+		// sees the settled count, and clear the age clock when nothing waits.
+		s.health.settled(len(batch))
+		if err == nil && len(s.ch) == 0 {
+			s.health.queuedDrained()
+		}
 		s.health.recordFlush(err, time.Now())
 		if err != nil {
 			if s.writerErr == nil {
@@ -125,6 +134,7 @@ func (s *Store) writer() {
 	var consumed uint64
 	appendRecord := func(r queuedRecord) error {
 		consumed = r.seq
+		s.health.inFlight.Add(1)
 		batch = append(batch, r.record)
 		if len(batch) >= cap(batch) {
 			return flush()
@@ -156,6 +166,7 @@ func (s *Store) writer() {
 				firstErr = errors.New("storage: closed before purge boundary")
 				break
 			}
+			s.health.noteQueued(r.queued)
 			if err := appendRecord(r); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -177,6 +188,8 @@ func (s *Store) writer() {
 		return usedHeld, writeErr
 	}
 	accept := func(r queuedRecord) error {
+		// The arrived record now ages the queue for the wedge verdict.
+		s.health.noteQueued(r.queued)
 		used, err := servicePurge(&r)
 		if used {
 			return err
@@ -236,9 +249,9 @@ func (s *Store) writer() {
 			s.continueDebugExpire()
 			s.continueWALCheckpoint()
 		case <-s.done:
-			// Shutdown: Close closes s.ch right after s.done, so range drains
-			// every buffered record - including any a producer raced in after
-			// the done check - before the final flush.
+			// Shutdown: Close closes s.ch right after s.done, so this drain
+			// takes every buffered record - including any a producer raced in
+			// after the done check - before the final flush.
 			for r := range s.ch {
 				accept(r)
 			}

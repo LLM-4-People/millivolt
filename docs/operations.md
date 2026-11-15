@@ -435,12 +435,15 @@ probe with the readiness check below, which is strictly stronger.
 
 Liveness (`/healthz`) answers "the process is up and serving HTTP". Readiness
 (`/readyz`) additionally answers "this instance can persist": it fails with
-`503` and a reason when the durable writer is wedged (a non-empty write queue
-with no successful flush for four flush intervals, at least 30 seconds) or when
-any durable flush has failed since boot. Readiness stays red after the first
-failed flush even once writes recover, because a lost batch is worth an
-operator's attention; restart or investigate. With durable storage disabled both
-routes answer `200`, since there is no pipeline to wedge.
+`503` and a reason when the durable writer is wedged: a non-empty write queue
+whose oldest record, or last successful flush, is older than the wedge window.
+The window is four flush intervals, clamped to at least 30 seconds and at most
+two minutes, so a long configured interval cannot postpone the verdict for
+hours. Readiness also fails when any durable flush has failed since boot.
+Readiness stays red after the first failed flush even once writes recover,
+because a lost batch is worth an operator's attention; restart or investigate.
+With durable storage disabled both routes answer `200`, since there is no
+pipeline to wedge.
 
 The Compose files use `-readycheck` as the service healthcheck, so
 `docker compose ps` reports `healthy` only for an instance that can persist.

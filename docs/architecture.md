@@ -267,10 +267,13 @@ pipeline's liveness. Every discard is counted under exactly one cause
 (`overflow`, `after_close`, `panic`, `flush_failed`); `Dropped()` sums them for
 the dashboard counter, and the exposition renders each cause so alerting can
 separate overload from shutdown, a panic and a failing database. The same owner
-stamps every flush attempt, so `/readyz` can tell a stalled writer (a non-empty
-queue with no successful flush for four flush intervals, floored at 30 seconds)
-from a merely idle one, and keeps a failed flush sticky. `/healthz` stays the
-liveness contract; readiness is the stronger answer a scheduler needs.
+publishes the oldest queued record's arrival and stamps every flush attempt, so
+`/readyz` can tell a stalled writer from a merely idle one: a non-empty queue
+whose oldest record, or last successful flush, is older than the wedge window
+(four flush intervals clamped to 30 seconds and 2 minutes) reads wedged. The
+window is clamped so an hourly cadence cannot hide a stuck writer for hours. A
+failed flush stays sticky. `/healthz` stays the liveness contract; readiness is
+the stronger answer a scheduler needs.
 `tests/_go/internal/storage/health.go` pins the cause split, the wedge/ready
 transition and the disabled-store answer, and
 `tests/_go/internal/metrics/prometheus_extra.go` pins that the storage block is

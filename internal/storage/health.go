@@ -33,6 +33,25 @@ var dropCauses = [...]string{DropOverflow, DropAfterClose, DropPanic, DropFlushF
 // keeps a very short interval from flapping.
 const wedgeWindowFloor = 30 * time.Second
 
+// wedgeWindowCeiling bounds the live window from above. Four intervals alone
+// would let an hourly flush cadence hide a stuck writer for four hours while
+// the queue already overflowed; two minutes keeps the verdict tied to seconds
+// even under a long configured interval.
+const wedgeWindowCeiling = 2 * time.Minute
+
+// wedgeWindow resolves the configured interval into the live window: four
+// intervals, clamped to the floor and the ceiling.
+func wedgeWindow(flushInterval time.Duration) time.Duration {
+	window := 4 * flushInterval
+	if window < wedgeWindowFloor {
+		return wedgeWindowFloor
+	}
+	if window > wedgeWindowCeiling {
+		return wedgeWindowCeiling
+	}
+	return window
+}
+
 // health is the one owner of the durable pipeline's health counters. It is
 // separate from Store so the accounting rules live in one place and the writer
 // cannot forget a cause.
@@ -41,6 +60,13 @@ type health struct {
 	failed atomic.Uint64
 	// lastFlushUnixNano is zero until the first successful commit.
 	lastFlushUnixNano atomic.Int64
+	// oldestQueuedUnixNano is the arrival time of the oldest record the writer
+	// has received but not yet committed, zero once the queue is drained. Only
+	// the writer publishes it, so producers cannot race the clear.
+	oldestQueuedUnixNano atomic.Int64
+	// inFlight counts records the writer has received and not yet committed.
+	// The channel length alone misses a record blocked in the current commit.
+	inFlight atomic.Int64
 }
 
 func (h *health) drop(cause string) { h.dropN(cause, 1) }
@@ -66,6 +92,28 @@ func (h *health) recordFlush(err error, at time.Time) {
 	h.lastFlushUnixNano.Store(at.UnixNano())
 }
 
+// noteQueued ages the oldest backlogged record. Only the writer calls it, so
+// the minimum of everything it has received is the true queue head; a drained
+// queue clears the stamp again.
+func (h *health) noteQueued(at time.Time) {
+	ns := at.UnixNano()
+	if cur := h.oldestQueuedUnixNano.Load(); cur != 0 && cur <= ns {
+		return
+	}
+	h.oldestQueuedUnixNano.Store(ns)
+}
+
+// queuedDrained clears the queue-age clock once nothing is left to commit.
+func (h *health) queuedDrained() { h.oldestQueuedUnixNano.Store(0) }
+
+// settled books n records leaving the queue, whether they committed or were
+// dropped by a failed batch, so the outstanding count follows the real work.
+func (h *health) settled(n int) {
+	if n > 0 {
+		h.inFlight.Add(-int64(n))
+	}
+}
+
 func causeIndex(cause string) int {
 	for i, c := range dropCauses {
 		if c == cause {
@@ -84,6 +132,9 @@ type Health struct {
 	// QueueDepth/QueueCapacity are the current buffered records and the bound.
 	QueueDepth    int
 	QueueCapacity int
+	// Outstanding counts the queued records plus the ones the writer has
+	// received and not yet committed; it is what the wedge gate reads.
+	Outstanding int
 	// Drops counts discarded records by cause since boot.
 	Drops map[string]uint64
 	// FailedFlushes counts failed commits since boot; it is sticky, so a
@@ -91,8 +142,9 @@ type Health struct {
 	FailedFlushes uint64
 	// LastFlush is the last successful commit, zero if none succeeded.
 	LastFlush time.Time
-	// Wedged reports a non-empty queue with no successful flush inside the
-	// wedge window: the writer goroutine is stuck or gone.
+	// Wedged reports a non-empty queue that made no progress inside the wedge
+	// window: the oldest record has waited that long, or no flush succeeded in
+	// it. The writer goroutine is stuck or gone.
 	Wedged bool
 }
 
@@ -110,6 +162,7 @@ func (s *Store) Health() Health {
 	h.Enabled = true
 	h.QueueCapacity = cap(s.ch)
 	h.QueueDepth = len(s.ch)
+	h.Outstanding = h.QueueDepth + int(s.health.inFlight.Load())
 	h.FailedFlushes = s.health.failed.Load()
 	for i, cause := range dropCauses {
 		h.Drops[cause] = s.health.drops[i].Load()
@@ -117,8 +170,12 @@ func (s *Store) Health() Health {
 	if ns := s.health.lastFlushUnixNano.Load(); ns != 0 {
 		h.LastFlush = time.Unix(0, ns)
 	}
-	window := max(4*s.opts.FlushInterval, wedgeWindowFloor)
-	h.Wedged = h.QueueDepth > 0 && (h.LastFlush.IsZero() || now.Sub(h.LastFlush) > window)
+	window := wedgeWindow(s.opts.FlushInterval)
+	queuedOld := false
+	if ns := s.health.oldestQueuedUnixNano.Load(); ns != 0 {
+		queuedOld = now.Sub(time.Unix(0, ns)) > window
+	}
+	h.Wedged = h.Outstanding > 0 && (queuedOld || h.LastFlush.IsZero() || now.Sub(h.LastFlush) > window)
 	return h
 }
 
@@ -133,8 +190,12 @@ func (s *Store) Ready() (bool, string) {
 		return false, fmt.Sprintf("%d durable flush(es) failed since boot", h.FailedFlushes)
 	}
 	if h.Wedged {
-		return false, fmt.Sprintf("write queue holds %d of %d records with no successful flush since %s",
-			h.QueueDepth, h.QueueCapacity, h.LastFlush.UTC().Format(time.RFC3339))
+		since := "boot"
+		if !h.LastFlush.IsZero() {
+			since = h.LastFlush.UTC().Format(time.RFC3339)
+		}
+		return false, fmt.Sprintf("%d durable record(s) outstanding (%d queued of %d) with no progress since %s",
+			h.Outstanding, h.QueueDepth, h.QueueCapacity, since)
 	}
 	return true, ""
 }

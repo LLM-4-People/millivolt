@@ -381,7 +381,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Max records per SQLite transaction. Cannot exceed the write channel cap. Restart required.",
 			Kind: KindInt, HotReload: false, Min: num(1)},
 		{Key: "storage_flush_interval", Category: "storage", Label: "Flush interval",
-			Help: "Partial-batch flush cadence. Must be > 0 (a zero ticker panics). Restart required.",
+			Help: "Partial-batch flush cadence. Must be > 0 (a zero ticker panics). The readiness wedge window is four intervals clamped to 30s..2m. Restart required.",
 			Kind: KindDuration, HotReload: false},
 		{Key: "storage_query_timeout", Category: "storage", Label: "Query timeout",
 			Help: "Bounds dashboard SELECT queries. Must be > 0. Open and AggAPI bind at start (restart required); pause/throttle persist reads the live snapshot.",
