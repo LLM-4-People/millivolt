@@ -19,6 +19,9 @@ let explorerAgg = null;
 // view; anything else falls back to an honest loading/failure state instead
 // of painting another scope's cards.
 let explorerFailure = null;
+// explorerFailureMsg is the last scan's rejection text, carried into the
+// failure state so the operator reads the reason instead of a dead end.
+let explorerFailureMsg = '';
 let _pendingRevision = -1; // server lifecycle revision, scoped to the accepted feed
 
 // EMPTY_KPI is the pre-aggregation KPI document: the same wire key set the
@@ -226,7 +229,10 @@ function fetchExplorer(mode = 'reuse') {
   // inception (the filter set is a scoping signal, never a client record set).
   return explorerRequest(q, (accept, signal) => {
     operatorJson('/metrics/agg/explorer?' + q, {signal})
-      .then(p => accept(p, true)).catch(() => accept(null, false));
+      .then(p => accept(p, true)).catch(err => {
+        explorerFailureMsg = String((err && err.message) || err || '').trim();
+        accept(null, false);
+      });
   }, p => {
     // Hash state can change before its navigation event dispatches.
     if (q !== explorerReq()) { fetchExplorer(); return; }
@@ -252,7 +258,8 @@ function fetchExplorer(mode = 'reuse') {
 // renders a failure message while the dashboard tick retries.
 function markExplorerFailure(scope, dim) {
   explorerAgg = null;
-  explorerFailure = {scopeKey: scope, dim};
+  explorerFailure = {scopeKey: scope, dim, reason: explorerFailureMsg};
+  explorerFailureMsg = '';
   renderExplorer();
   updateScopeLine();
 }

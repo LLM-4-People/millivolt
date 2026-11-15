@@ -23,6 +23,8 @@ function updateLogStats(d) {
   // The retry owner keeps trying on its own; the status line stays honest
   // until a page lands or the window resets.
   if (logFetchFailed) el.textContent += ' · history unavailable';
+  // The terminal row states the same paging condition after the last record.
+  renderLogEnd();
 }
 
 // logWindowSameSet reports whether logHTML's id set is exactly the visible
@@ -237,6 +239,31 @@ function appendOlderLogRows(recs) {
 // logCap() rows). First paint is dash_log_rows; scrolling grows it.
 // This is the full rebuild (navigation/first paint/full resync); live events
 // use renderRequestsIncremental instead. It also seeds the logHTML map so the
+// logScopePhrase names the active narrowing in the operator's words: the exact
+// status selector and each explorer filter. It returns '' for the global view,
+// which is what the empty state branches on.
+function logScopePhrase() {
+  const bits = [];
+  if (filters.status) bits.push('status ' + filters.status);
+  for (const f of explorerFilters()) bits.push(entityType(f.dim).label.toLowerCase() + ' ' + dimLabel(f.dim, f.id));
+  return bits.join(' · ');
+}
+
+// logEmptyHTML is the log's one empty state, in the console's bold-lead frame.
+// An empty list has two different answers - a filter hides traffic that exists,
+// or the scope simply has none yet - so the consequence and the way out follow
+// the actual cause, and the active filter is named.
+function logEmptyHTML() {
+  const scope = logScopePhrase();
+  if (scope) {
+    return ocEmptyHTML('No request matches the active filter.',
+      'The log is narrowed to ' + escapeHtml(scope) + ', and nothing in the stored window matches it. ' +
+      '<button type="button" class="oc-link" data-log-clear>clear the filter</button> to see the log again.');
+  }
+  return ocEmptyHTML('No requests in this window yet.',
+    'Nothing has crossed the proxy since the ring was last reset. New requests land here as they complete.');
+}
+
 // incremental path can diff against what is actually in the DOM.
 function renderRequests(recs) {
   recs = mergeLogArchive(recs);
@@ -249,7 +276,7 @@ function renderRequests(recs) {
   // (nav / filter / resync), even when the window HTML matches first paint.
   delete lastRender['tbl-requests'];
   if (!recent.length) {
-    updateSection('tbl-requests', '<div class="empty">no matching requests</div>');
+    updateSection('tbl-requests', `<div class="empty">${logEmptyHTML()}</div>`);
     restoreFocus(focus);
     // An empty scope (its records predate the ring - a provider not used in a
     // while) must still probe the store: nothing will ever scroll here, so the
@@ -268,6 +295,7 @@ function renderRequests(recs) {
   // first paint already carries every floor this rebuild needs.
   reqMeasureRows(rows);
   updateSection('tbl-requests', `<table>${reqThead()}<tbody>${rows.join('')}</tbody></table>`);
+  renderLogEnd();
   restoreFocus(focus);
   scheduleLogFill();
 }
@@ -321,6 +349,14 @@ $('tbl-requests').addEventListener('click', e => {
 // The drawer paints the same live pills in its status row; a pressed pill must
 // act there too, not only in the log.
 $('drawer').addEventListener('click', activatePillEdit);
+
+// The log's empty state offers the way back to a full list: the status
+// selector and the explorer filters are cleared through their own owners.
+$('tbl-requests').addEventListener('click', e => {
+  if (!e.target.closest('[data-log-clear]')) return;
+  if (filters.status) { $('f-status').value = ''; doFilter(); }
+  if (explorerState().filters.length) navigateTo([]);
+});
 
 // An attempt sub-row is a row, not a control, so it needs the keyboard press
 // that a row cannot get from the browser. The main rows already carry the

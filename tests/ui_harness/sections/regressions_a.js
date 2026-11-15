@@ -386,9 +386,9 @@ module.exports = async function regressionsA(H) {
           d.getElementById('chart-totals').textContent.includes('chart unavailable') &&
           d.getElementById('chart-context').textContent.includes('chart unavailable') &&
           !d.getElementById('chart-totals').textContent.includes('40'));
-        check('the released post-purge explorer paints the new empty scope',
+        check('the released post-purge explorer paints the empty scope with its cause',
           w.eval('explorerAgg && explorerAgg.scope.matches === 0') &&
-          /no provider values yet/.test(d.getElementById('xp-gallery').textContent) &&
+          /nothing matches the active filter/.test(d.getElementById('xp-gallery').textContent) &&
           !d.getElementById('xp-gallery').textContent.includes('ghost') &&
           d.getElementById('f-scope').textContent.startsWith('0 of '));
         check('purge completion is reported only after the forced resync settles',

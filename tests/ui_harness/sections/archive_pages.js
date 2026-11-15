@@ -102,6 +102,13 @@ module.exports = async function archivePages(H) {
       await settleUntil(() => calls === 1 && !w.eval('logFetching') && w.eval('logFetchFailed'));
       check('a failed older-page fetch shows history unavailable',
         d.getElementById('f-stats').textContent.includes('history unavailable'));
+      // The list itself says where it stops and offers the way on; the status
+      // line alone leaves a dead end at the bottom of the table.
+      const endRow = () => d.querySelector('#tbl-requests tfoot.log-end');
+      check('the failed tail states the gap and offers a retry',
+        !!endRow() && /older history did not load/.test(endRow().textContent) &&
+        endRow().querySelector('[data-log-retry]') &&
+        endRow().parentElement.lastElementChild === endRow().parentElement.querySelector('tbody')?.nextElementSibling);
 
       let retries = 0;
       while (retryCallbacks.length && retries < 10) {
@@ -115,7 +122,8 @@ module.exports = async function archivePages(H) {
         calls === 4 && retries === w.eval('LOG_RETRY_LIMIT') &&
         retryCallbacks.length === 0 && w.eval('logFailures') > w.eval('LOG_RETRY_LIMIT'));
       check('the exhausted retry budget keeps the visible failure state',
-        d.getElementById('f-stats').textContent.includes('history unavailable'));
+        d.getElementById('f-stats').textContent.includes('history unavailable') &&
+        /older history did not load/.test(endRow()?.textContent || ''));
 
       failing = false;
       w.fetchOlderLog(); // a user scroll after the budget may try again
@@ -123,7 +131,23 @@ module.exports = async function archivePages(H) {
         !w.eval('logFetching') && rows().some(tr => tr.dataset.id === 'retry-ok'));
       check('a user-triggered retry after the budget appends rows and clears the failure line',
         !d.getElementById('f-stats').textContent.includes('history unavailable') &&
-        !w.eval('logFetchFailed') && w.eval('logFailures') === 0);
+        !w.eval('logFetchFailed') && w.eval('logFailures') === 0 &&
+        endRow()?.dataset.kind === 'end' && /end of stored history/.test(endRow().textContent));
+      // The operator's own retry is the pressed control, not a function call.
+      failing = true;
+      w.eval('logExhausted = false');
+      calls = 0;
+      w.fetchOlderLog();
+      await settleUntil(() => calls === 1 && !w.eval('logFetching') && w.eval('logFetchFailed'));
+      const retryBtn = d.querySelector('#tbl-requests [data-log-retry]');
+      check('the failed tail offers a pressed retry', !!retryBtn);
+      calls = 0;
+      retryBtn?.click();
+      await settleUntil(() => calls === 1 && !w.eval('logFetching'));
+      check('the terminal row retry asks again by itself',
+        calls === 1 && w.eval('logFailures') === 1);
+      failing = false;
+      w.eval('logExhausted = true');
     } finally {
       w.setTimeout = originalTimeout;
       w.fetch = saved.fetch;
@@ -165,6 +189,13 @@ module.exports = async function archivePages(H) {
   check('purge resync bootstrap is cursor-less (no since/feed)',
     state.bootURL.includes('/metrics/bootstrap') && !state.bootURL.includes('since=') && !state.bootURL.includes('feed='));
   check('the empty post-purge snapshot IS the wipe render', rows().length === 0);
+  // An empty log names its cause: a wiped window is not a filtered one, and it
+  // offers no clear action because clearing would change nothing.
+  const emptyCopy = () => d.getElementById('tbl-requests').textContent;
+  check('the empty window says no traffic landed, not that a filter hides it',
+    /No requests in this window yet/.test(emptyCopy()) &&
+    !/active filter/.test(emptyCopy()) &&
+    !d.querySelector('#tbl-requests [data-log-clear]'));
   check('purge resets the log window state', w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0 &&
     w.eval('_logArchiveIndex') === null && w.eval('_logLiveIndex') === null);
   check('the settings purge reports completion through the sheet status',
@@ -177,6 +208,18 @@ module.exports = async function archivePages(H) {
   w.eval("fetchBootstrap('full')");
   await settleUntil(() => rows().length === 60);
   check('post-purge resync restores the fresh snapshot', rows().length === 60);
+  // A narrowed window that matches nothing names the filter and offers a way
+  // out; the clear control goes through the scope owner and restores the list.
+  w.navigateTo([{ dim: 'provider', id: 'ghost-provider.example' }]);
+  await settleUntil(() => /active filter/.test(d.getElementById('tbl-requests').textContent));
+  check('the narrowed empty window names the filter and offers the clear (' + d.getElementById('tbl-requests').textContent.slice(0,120) + ')',
+    /No request matches the active filter/.test(d.getElementById('tbl-requests').textContent) &&
+    /provider ghost-provider/.test(d.getElementById('tbl-requests').textContent) &&
+    !!d.querySelector('#tbl-requests [data-log-clear]'));
+  d.querySelector('#tbl-requests [data-log-clear]').click();
+  await settleUntil(() => rows().length === 60);
+  check('the empty-window clear restores the full list', rows().length === 60 &&
+    !w.eval('explorerState().filters.length'));
   // 10b's wrapper records ANY bootstrap URL, so the page's 5s tick stays
   // stopped through the whole purge-resync window: a tick resume landing
   // after the purge's cursor-less resync overwrites bootURL with since/feed

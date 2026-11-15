@@ -214,6 +214,12 @@
      in the cell title and the request drawer. */
   .retry-sub-text { display: inline-block; max-width: 72ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 
+  /* The terminal row closes the list: the log states its own end, or that the
+     older page failed, instead of simply stopping. */
+  tr.log-end td { border-bottom: 0; padding: 10px 10px 12px; text-align: center; white-space: normal; }
+  .log-end-note .oc-empty { padding: 0; text-align: center; font-size: 10.5px; }
+  .log-end-note .oc-empty strong { color: var(--text); }
+
   /* Day dividers - the request log nests by local calendar day. Each divider
      is a major graduation on the instrument scale: a dated chip riding the
      same feathered tick strip as the header/footer rails, pinned below the

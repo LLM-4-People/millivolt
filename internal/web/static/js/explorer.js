@@ -412,12 +412,28 @@ function renderGallery(st) {
     const failed = explorerFailure && explorerFailure.scopeKey === scopeKey &&
       explorerFailure.dim === st.activeDim;
     if (failed) _galleryFocus = null;
-    if (updateSection('xp-gallery', `<div class="empty">${failed ? 'breakdown unavailable' : 'loading breakdown…'}</div>`)) restoreFocus(focus);
+    // A failure keeps its reason and the way out: the tick retries on its own,
+    // but an automatic-only retry is a dead end when it keeps failing.
+    const body = failed
+      ? ocEmptyHTML('breakdown unavailable.',
+        escapeHtml(explorerFailure.reason ? explorerFailure.reason + '. ' : 'The scan did not answer. ') +
+        '<button type="button" class="oc-link" data-xp-retry>retry</button> the breakdown.')
+      : ocEmptyHTML('loading breakdown…', 'Counting the values of this dimension across the scope.');
+    if (updateSection('xp-gallery', `<div class="empty">${body}</div>`)) restoreFocus(focus);
     return;
   }
   if (!payload.groups || !payload.groups.length) {
     _galleryFocus = null;
-    if (updateSection('xp-gallery', `<div class="empty">no ${entityType(st.activeDim).label.toLowerCase()} values yet</div>`)) restoreFocus(focus);
+    // No values has two causes, exactly like the log: a filter that matches
+    // nothing, or a scope with no traffic in it at all.
+    const scope = logScopePhrase();
+    const body = scope
+      ? ocEmptyHTML('nothing matches the active filter.',
+        'The breakdown is scoped by ' + escapeHtml(scope) + '. ' +
+        '<button type="button" class="oc-link" data-xp-clear>clear all filters</button> to see every value.')
+      : ocEmptyHTML('no ' + entityType(st.activeDim).label.toLowerCase() + ' values yet.',
+        'Nothing in the stored history carries this dimension. Traffic appears here as it lands.');
+    if (updateSection('xp-gallery', `<div class="empty">${body}</div>`)) restoreFocus(focus);
     return;
   }
   const cards = payload.groups.map(e => xpNodeCard(st, e, payload)).join('');
@@ -670,6 +686,8 @@ $('explorer').addEventListener('click', e => {
   const st = explorerState();
   const clear = e.target.closest('[data-xp-clear]');
   if (clear) { _scopeFocus = scopeFocusToken(clear); navigateTo([]); return; }
+  // A failed breakdown scan: ask again now instead of waiting for the tick.
+  if (e.target.closest('[data-xp-retry]')) { fetchExplorer('invalidate'); return; }
   const chipX = e.target.closest('.chip-x[data-chip-dim]');
   if (chipX) {
     _scopeFocus = scopeFocusToken(chipX);
