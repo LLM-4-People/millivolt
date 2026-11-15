@@ -1501,6 +1501,14 @@ set with 409 instead of deleting unpredicted rows. The filter selections reset e
 refills, so a stale invisible filter never arms a destructive default.
 Both actions are irreversible without a backup.
 
+Every purge, backup and restore writes one audit line to the process log with
+its terminal outcome, before the response is written: the action, the rendered
+selection (`filter="all"` for a bodyless full delete), the previewed count when
+one was supplied, and the committed `deleted` / `buffer_removed` counts, or the
+error. A lost or truncated response therefore stays diagnosable, and a retry can
+be compared against what was actually attempted. These lines are the
+destructive-action trail; they are not a general request log.
+
 Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
 beyond the console's common choices. See the shared

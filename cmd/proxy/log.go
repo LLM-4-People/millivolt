@@ -271,18 +271,26 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 		if errors.Is(err, storage.ErrPurgeCountChanged) {
+			auditLog("purge", "outcome", "refused", "filter", describeFilter(filter),
+				"reviewed", reviewedText(reviewed), "error", err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusConflict,
 				"the row set changed since the preview; preview again and confirm the new count")
 			return
 		}
 		if err != nil {
-			log.Printf("purge failed: %v", err)
+			// The failure line is written before the response, so a lost or
+			// truncated response is still diagnosable and a retry can be
+			// compared against what was actually attempted.
+			auditLog("purge", "outcome", "failed", "filter", describeFilter(filter),
+				"reviewed", reviewedText(reviewed), "error", err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		// One line, same wording family as the failure path, so a purge is
 		// reconstructable after the response is gone.
-		log.Printf("purge: deleted %d durable rows, removed %d live records", result.Deleted, result.BufferRemoved)
+		auditLog("purge", "outcome", "ok", "filter", describeFilter(filter),
+			"reviewed", reviewedText(reviewed), "deleted", result.Deleted,
+			"buffer_removed", result.BufferRemoved)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(purgeResponse{Deleted: result.Deleted, BufferRemoved: result.BufferRemoved})
 	})

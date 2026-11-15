@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -128,6 +129,43 @@ func (f PurgeFilter) IsEmpty() bool {
 	return f.Provider == "" && f.Model == "" && f.Client == "" &&
 		f.ConversationID == "" && f.ErrorType == "" && f.StatusCode == 0 &&
 		!f.HasError && !f.HasDebug && f.BeforeMs == 0 && f.AfterMs == 0
+}
+
+// Describe renders the filter as one stable comma-separated token list for
+// audit lines: zero values are omitted, so what an operator selected is
+// reconstructable without decoding a JSON body that no longer exists. An empty
+// filter is the full deletion and reads "all".
+func (f PurgeFilter) Describe() string {
+	parts := make([]string, 0, 10)
+	add := func(key, value string) {
+		if value != "" {
+			parts = append(parts, key+"="+value)
+		}
+	}
+	add("provider", f.Provider)
+	add("model", f.Model)
+	add("client", f.Client)
+	add("conversation_id", f.ConversationID)
+	add("error_type", f.ErrorType)
+	if f.StatusCode != 0 {
+		add("status_code", strconv.Itoa(f.StatusCode))
+	}
+	if f.HasError {
+		add("has_error", "1")
+	}
+	if f.HasDebug {
+		add("debug", "1")
+	}
+	if f.BeforeMs != 0 {
+		add("before_ms", strconv.FormatInt(f.BeforeMs, 10))
+	}
+	if f.AfterMs != 0 {
+		add("after_ms", strconv.FormatInt(f.AfterMs, 10))
+	}
+	if len(parts) == 0 {
+		return "all"
+	}
+	return strings.Join(parts, ",")
 }
 
 // build assembles the parameterized WHERE clause + args for the filter. Only

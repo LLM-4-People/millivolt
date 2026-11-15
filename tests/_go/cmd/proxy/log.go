@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -664,4 +666,49 @@ func TestLogExportAbortsIncompleteHTTPDownload(t *testing.T) {
 		}
 	}()
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics/export", nil))
+}
+
+// TestPurgeWritesOneAuditLinePerOutcome pins the destructive-action audit: a
+// purge reports its selection and committed counts on success, its selection
+// and error on failure, and both before the response so a lost response is
+// still diagnosable (H19). The stale-count refusal logs its own outcome.
+func TestPurgeWritesOneAuditLinePerOutcome(t *testing.T) {
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	mux, b, s := logRoutesForTest(t, true)
+	recorder := s.Recorder(b)
+	recorder.Record(&metrics.Record{ID: "audit-a", Provider: "target", StatusCode: 200, Start: time.Now()})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Stale reviewed count: refused, and the committed population is reported.
+	stale := httptest.NewRecorder()
+	mux.ServeHTTP(stale, httptest.NewRequest(http.MethodPost, "/admin/purge",
+		strings.NewReader(`{"filter":{"provider":"target"},"reviewed_count":9}`)))
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale purge = %d %s", stale.Code, stale.Body.String())
+	}
+	if got := strings.Count(logged.String(), `audit: purge outcome="refused" filter="provider=target" reviewed="9"`); got != 1 {
+		t.Fatalf("refusal audit lines = %d in %q", got, logged.String())
+	}
+	// A matching purge reports the committed counts.
+	ok := httptest.NewRecorder()
+	mux.ServeHTTP(ok, httptest.NewRequest(http.MethodPost, "/admin/purge",
+		strings.NewReader(`{"filter":{"provider":"target"},"reviewed_count":1}`)))
+	if ok.Code != http.StatusOK {
+		t.Fatalf("purge = %d %s", ok.Code, ok.Body.String())
+	}
+	if !strings.Contains(logged.String(), `audit: purge outcome="ok" filter="provider=target" reviewed="1" deleted="1" buffer_removed="1"`) {
+		t.Fatalf("success audit line missing from %q", logged.String())
+	}
+	// The bodyless full deletion names the selection "all".
+	full := httptest.NewRecorder()
+	mux.ServeHTTP(full, httptest.NewRequest(http.MethodPost, "/admin/purge", nil))
+	if full.Code != http.StatusOK {
+		t.Fatalf("full purge = %d %s", full.Code, full.Body.String())
+	}
+	if !strings.Contains(logged.String(), `audit: purge outcome="ok" filter="all"`) {
+		t.Fatalf("full-delete audit line missing from %q", logged.String())
+	}
 }

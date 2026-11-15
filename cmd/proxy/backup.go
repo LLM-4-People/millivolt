@@ -63,8 +63,13 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	members := describeMembers(wantConfig, wantDB)
+	fail := func(why string) {
+		auditLog("backup", "outcome", "failed", "members", members, "error", why)
+	}
 	arch, cleanup, err := buildBackup(r.Context(), wantConfig, wantDB)
 	if err != nil {
+		fail(err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -79,15 +84,18 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// the download never retains a second full archive copy in memory.
 	stageDir, ok := stageDirOr400(w, wantDB)
 	if !ok {
+		fail("staging directory unavailable")
 		return
 	}
 	path, size, err := backup.EncodeFile(stageDir, arch, backupCap())
 	if err != nil {
 		if errors.Is(err, backup.ErrTooLarge) {
+			fail("backup exceeds backup_max_bytes")
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 			return
 		}
 		log.Printf("backup: encode failed: %v", err)
+		fail("encode: " + err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -98,6 +106,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	f, err := os.Open(path)
 	if err != nil {
 		log.Printf("backup: open encoded archive: %v", err)
+		fail("open archive: " + err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -106,9 +115,19 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// UTC stamp>.mvb), disposition, content type and no-store.
 	proxy.WriteArtifactHeaders(w, "backup", "mvb", "application/octet-stream", time.Now(), "")
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	// Success is recorded before the body streams: a client that disconnects
+	// mid-download still leaves the fact that the archive was built and how
+	// large it was.
+	auditLog("backup", "outcome", "ok", "members", members, "bytes", size)
 	if _, err := io.Copy(w, f); err != nil {
 		log.Printf("backup: download failed: %v", err)
 	}
+}
+
+// auditRestoreRejected reports a restore refused before its members and modes
+// could be parsed, so even the earliest rejection leaves an audit line.
+func auditRestoreRejected(err error) {
+	auditLog("restore", "outcome", "failed", "members", "unparsed", "error", err.Error())
 }
 
 func handleRestore(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +154,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	inspect, err := queryFlag(q, backupparams.ParamInspect)
 	if err != nil {
+		auditRestoreRejected(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())
 		return
 	}
@@ -145,15 +165,26 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	configMode, err := parseRestoreMode(q, backupparams.ParamConfigMode)
 	if err != nil {
+		auditRestoreRejected(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	dbMode, err := parseRestoreMode(q, backupparams.ParamDatabaseMode)
 	if err != nil {
+		auditRestoreRejected(err)
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	cap := backupCap()
+	// One audit owner for the whole transaction: every terminal outcome names
+	// the members, modes and inspect flag that were actually requested, so a
+	// lost response is diagnosable and a retry can be compared.
+	members := describeMembers(wantConfig, wantDB)
+	audit := func(outcome string, extra ...any) {
+		fields := []any{"outcome", outcome, "members", members,
+			"config_mode", configMode, "database_mode", dbMode, "inspect", inspect}
+		auditLog("restore", append(fields, extra...)...)
+	}
 	// The upload is streamed into one private file, never read whole into heap.
 	// A database archive stages that file on the live database's volume so the
 	// compressed upload follows the same capacity contract as the decoded
@@ -173,6 +204,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// database still fails closed below when no volume exists.
 	decodeDatabase := storeAvailable && (wantDB || inspect)
 	if wantDB && !inspect && !storeAvailable {
+		audit("failed", "error", storage.ErrStorageDisabled.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
 		return
 	}
@@ -195,10 +227,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		// failures stay server errors instead of being misreported as a cap.
 		var readErr *restoreUploadReadError
 		if errors.Is(err, backup.ErrTooLarge) || errors.As(err, &readErr) {
+			audit("failed", "error", "backup exceeds backup_max_bytes")
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 			return
 		}
 		log.Printf("restore: stage upload: %v", err)
+		audit("failed", "error", "stage upload: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -222,13 +256,16 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		// member; keep the endpoint's existing storage-disabled answer while a
 		// config-only archive above still decodes and applies.
 		if errors.Is(err, backup.ErrSnapshotStaging) {
+			audit("failed", "error", storage.ErrStorageDisabled.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
 			return
 		}
 		if errors.Is(err, backup.ErrPayloadTooLarge) {
+			audit("failed", "error", "backup payload exceeds backup_max_bytes")
 			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup payload exceeds backup_max_bytes")
 			return
 		}
+		audit("failed", "error", "decode: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -246,6 +283,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// A file-backed database member is integrity-checked in place, so the
 	// legacy staging-directory argument is empty.
 	if err := backup.ValidateSelected("", arch, decodeDatabase); err != nil {
+		audit("failed", "error", "validate: "+err.Error())
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -254,10 +292,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wantConfig && len(arch.Config) == 0 {
+		audit("failed", "error", "archive has no config member")
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no config member")
 		return
 	}
 	if wantDB && len(arch.Database) == 0 && arch.DatabasePath == "" {
+		audit("failed", "error", "archive has no database member")
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no database member")
 		return
 	}
@@ -281,6 +321,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if wantConfig {
 		plan, err := prepareRestoreConfig(arch.Config, configMode)
 		if err != nil {
+			audit("failed", "error", "config: "+err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -308,12 +349,14 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			// config would make the next boot open a different file and strand
 			// those rows. Reject it before a config byte or row changes.
 			if err := validateRestoreMergePath(configPlan, store); err != nil {
+				audit("failed", "error", "merge path: "+err.Error())
 				adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		}
 		needRestart, guard, err := applyRestoreDatabase(r.Context(), dbPath, arch.DatabasePath, dbMode, store)
 		if err != nil {
+			audit("failed", "error", "database: "+err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -327,6 +370,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 					err = fmt.Errorf("%w; %v", err, rbErr)
 				}
 			}
+			audit("failed", "error", "config apply: "+err.Error())
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -341,6 +385,11 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	// ok is the operator action plane's shared success marker (the dashboard
 	// trusts the HTTP status; the restore tests pin it,
 	// tests/_go/cmd/proxy/backup_restore_stage.go).
+	restartText := strings.Join(restart, ",")
+	if restartText == "" {
+		restartText = "none"
+	}
+	audit("ok", "restart_required", restartText)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "restart_required": restart})
 }
