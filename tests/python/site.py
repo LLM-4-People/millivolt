@@ -530,9 +530,21 @@ def check_site(site: Path) -> list[str]:
     for name in ("docs/index.html", "docs/dashboard.html", "docs/operations.html",
                  "contributing.html", "security.html", "404.html", "search.json",
                  "sitemap.xml", "robots.txt", "assets/tokens.css", "assets/site.css",
-                 "assets/site.js", "assets/og.png"):
+                 "assets/site.js", "assets/og.png", "CNAME"):
         if not (site / name).exists():
             errors.append(f"missing generated file: {name}")
+    # The artifact's CNAME is the custom-domain claim GitHub Pages honours; a
+    # deployment that loses it drops the site back to the github.io subpath.
+    cname_path = site / "CNAME"
+    if cname_path.exists():
+        domain = urlsplit(DEFAULT_BASE_URL).hostname or ""
+        if cname_path.read_text(encoding="utf-8").strip() != domain:
+            errors.append(f"CNAME {cname_path.read_text(encoding='utf-8').strip()!r} "
+                          f"does not name the canonical host {domain!r}")
+    for page in pages:
+        if "llm-4-people.github.io" in page_texts[page]:
+            errors.append(f"{page.relative_to(site).as_posix()}: absolute URL still names the "
+                          "github.io origin instead of the custom domain")
 
     tokens_path = site / "assets/tokens.css"
     if tokens_path.exists():

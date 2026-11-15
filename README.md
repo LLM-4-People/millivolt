@@ -24,7 +24,7 @@ a small team.
 
 [![Checks and images](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml?query=branch%3Amain)
 
-[Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://llm-4-people.github.io/millivolt/) ·
+[Quickstart](#quickstart) · [Documentation](docs/README.md) · [Docs site](https://millivolt.llm4people.dev/) ·
 [Dashboard guide](docs/dashboard.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
 
 <sub>Pre-1.0 · Linux · MIT · single operator or small team. The 0.x series can change configuration and API details between releases.</sub>

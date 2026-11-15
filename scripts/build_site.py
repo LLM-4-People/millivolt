@@ -31,7 +31,14 @@ from markdown.extensions.toc import TocExtension
 ROOT = Path(__file__).resolve().parent.parent
 SITE_SRC = ROOT / "site-src"
 TEMPLATES = SITE_SRC / "templates"
-DEFAULT_BASE_URL = "https://llm-4-people.github.io/millivolt/"
+# The published site's canonical origin. The Pages workflow passes the live base
+# URL from `actions/configure-pages`, so a preview or a fork builds with its own
+# origin; the repository default is the one the site is published at.
+CUSTOM_DOMAIN = "millivolt.llm4people.dev"
+DEFAULT_BASE_URL = f"https://{CUSTOM_DOMAIN}/"
+# A GitHub-hosted Pages origin serves from a subpath and owns no custom domain,
+# so only a build whose origin is a real domain may claim one with CNAME.
+GITHUB_PAGES_SUFFIX = ".github.io"
 GITHUB_REPOSITORY = "https://github.com/LLM-4-People/millivolt"
 GITHUB_BRANCH = "main"
 GITHUB_BLOB = f"{GITHUB_REPOSITORY}/blob/{GITHUB_BRANCH}/"
@@ -1005,12 +1012,27 @@ def build_site(output: Path, *, base_url: str = DEFAULT_BASE_URL) -> list[str]:
         json.dumps(search_index, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    # GitHub Pages serves the artifact's CNAME as the custom-domain claim, and a
+    # deployment without it drops the domain back to the github.io path. The
+    # base URL is the single owner: the host it names is the host the site
+    # answers on, and a github.io origin (fork, preview, pre-domain build)
+    # claims nothing.
+    if domain := site_cname(base_url):
+        (output / "CNAME").write_text(domain + "\n", encoding="utf-8")
     write_sitemap(
         output,
         base_url,
         ["index.html"] + [page.output for page in pages] + ["404.html"],
     )
     return ["index.html"] + [page.output for page in pages] + ["404.html"]
+
+
+def site_cname(base_url: str) -> str | None:
+    """Return the custom domain the artifact should claim, if any."""
+    host = urlsplit(base_url).hostname or ""
+    if not host or host.endswith(GITHUB_PAGES_SUFFIX):
+        return None
+    return host
 
 
 class BuildError(RuntimeError):

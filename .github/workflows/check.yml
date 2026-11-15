@@ -1238,11 +1238,11 @@ jobs:
             org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
             org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}
             org.opencontainers.image.source=https://github.com/LLM-4-People/millivolt
-            org.opencontainers.image.documentation=https://llm-4-people.github.io/millivolt/
+            org.opencontainers.image.documentation=https://millivolt.llm4people.dev/
             org.opencontainers.image.licenses=MIT
           annotations: |
             org.opencontainers.image.description=Self-hosted OpenAI-compatible inference proxy with a live dashboard, SQLite history, and routing controls.
-            org.opencontainers.image.documentation=https://llm-4-people.github.io/millivolt/
+            org.opencontainers.image.documentation=https://millivolt.llm4people.dev/
         env:
           # The package page reads the multi-arch index annotation.
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index,manifest
