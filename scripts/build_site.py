@@ -551,6 +551,12 @@ CALLOUT_KINDS = {
     "WARNING": ("Warning", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
     "CAUTION": ("Caution", '<path d="M7 1.9 13 12H1z"/><path d="M7 5.6v3.3"/><circle cx="7" cy="10.7" r=".6" fill="currentColor" stroke="none"/>'),
 }
+# Raw-Markdown form of the same alerts, used when a page's description is
+# derived before rendering. The blockquote's own continuation lines go with the
+# marker, so a warning never becomes the page summary.
+CALLOUT_SOURCE = re.compile(
+    r"^>\s*\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][^\n]*(?:\n>.*)*\n*", re.M
+)
 CALLOUT_BLOCK = re.compile(
     r"<blockquote>\s*<p>\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*?)</p>(.*?)</blockquote>",
     re.S,
@@ -607,7 +613,11 @@ def render_markdown(source: Path, output: str, site_root: Path) -> tuple[str, st
     title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
     md = markdown_engine()
     content = render_fragment(md, text, source, output, site_root)
-    first_paragraph = PARAGRAPH.search(content)
+    # A page lede describes the page, not the warning that leads it. Callouts
+    # are build-owned asides and are skipped so a page whose first blocks are
+    # `[!WARNING]` still gets a real description for search and social cards.
+    described = re.sub(r'<aside class="callout.*?</aside>', "", content, flags=re.S)
+    first_paragraph = PARAGRAPH.search(described)
     description = plain_text(first_paragraph.group(1)) if first_paragraph else title
     description = summarize(description)
     return title, description, content, md.toc_tokens
@@ -649,7 +659,8 @@ def page_for_source(source: Path, *, kind: str) -> Page:
         text = source.read_text(encoding="utf-8")
         heading = HEADING.search(text)
         title = strip_html(heading.group(1)) if heading else source.stem.replace("-", " ").title()
-        paragraph = PARAGRAPH.search(markdown.markdown(text, extensions=["extra"]))
+        described = CALLOUT_SOURCE.sub("", text)
+        paragraph = PARAGRAPH.search(markdown.markdown(described, extensions=["extra"]))
         description = plain_text(paragraph.group(1)) if paragraph else title
         description = summarize(description)
     return Page(source=source, output=output, title=title, description=description, kind=kind)

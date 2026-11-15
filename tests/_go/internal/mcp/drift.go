@@ -830,7 +830,6 @@ func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
 	for _, doc := range []struct{ label, path string }{
 		{"README.md", filepath.Join("..", "..", "README.md")},
 		{"docs/mcp.md", filepath.Join("..", "..", "docs", "mcp.md")},
-		{"docs/operations.md", filepath.Join("..", "..", "docs", "operations.md")},
 		{"readme-spec.svg", filepath.Join("..", "..", "docs", "images", "brand", "readme-spec.svg")},
 		{"readme-spec-mobile.svg", filepath.Join("..", "..", "docs", "images", "brand", "readme-spec-mobile.svg")},
 	} {
@@ -879,20 +878,19 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 			band[1], band[2], OperatorTokenMinLen, OperatorTokenMaxLen)
 	}
 
-	// The operator-access section of docs/operations.md repeats the same boot
-	// band by hand; the sentence wraps across a line, so the derived phrase
-	// spans whitespace. It is pinned to the same owner as the guide sentence
-	// above.
-	operations, err := os.ReadFile(filepath.Join("..", "..", "docs", "operations.md"))
+	// The operator-access section of docs/routes.md repeats the same boot band by
+	// hand; the sentence wraps across a line, so the derived phrase spans
+	// whitespace. It is pinned to the same owner as the guide sentence above.
+	operations, err := os.ReadFile(filepath.Join("..", "..", "docs", "routes.md"))
 	if err != nil {
 		t.Fatalf("read the operations guide: %v", err)
 	}
 	operationsBand := regexp.MustCompile(`shorter than (\d+)\s+or longer than (\d+) bytes fails the boot`).FindStringSubmatch(string(operations))
 	if operationsBand == nil {
-		t.Fatal("docs/operations.md must state the operator boot token band")
+		t.Fatal("docs/routes.md must state the operator boot token band")
 	}
 	if operationsBand[1] != strconv.Itoa(OperatorTokenMinLen) || operationsBand[2] != strconv.Itoa(OperatorTokenMaxLen) {
-		t.Fatalf("docs/operations.md states the boot token band %s to %s, the owner is %d to %d",
+		t.Fatalf("docs/routes.md states the boot token band %s to %s, the owner is %d to %d",
 			operationsBand[1], operationsBand[2], OperatorTokenMinLen, OperatorTokenMaxLen)
 	}
 

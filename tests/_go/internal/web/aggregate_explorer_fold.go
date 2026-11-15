@@ -923,13 +923,13 @@ func TestExplorerDistinctGroupsStayBounded(t *testing.T) {
 // TestExplorerGroupBudgetExceedsNodeCap keeps the bounded top-card ranking
 // meaningful: an overflow bucket only ever aggregates values that could not
 // have appeared as cards themselves. It also pins the budget published in
-// docs/operations.md so that contract and the owner cannot drift apart.
+// docs/routes.md so that contract and the owner cannot drift apart.
 func TestExplorerGroupBudgetExceedsNodeCap(t *testing.T) {
 	if explorerGroupBudget < xpNodeCap {
 		t.Fatalf("explorerGroupBudget = %d, want at least xpNodeCap %d", explorerGroupBudget, xpNodeCap)
 	}
 	if explorerGroupBudget != 8192 {
-		t.Fatalf("explorerGroupBudget = %d, want the 8192 documented in docs/operations.md", explorerGroupBudget)
+		t.Fatalf("explorerGroupBudget = %d, want the 8192 documented in docs/routes.md", explorerGroupBudget)
 	}
 }
 
