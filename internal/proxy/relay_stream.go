@@ -195,38 +195,13 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		hold = append(hold, line...)
 		hold = append(hold, '\n')
 	}
-	// abortOutcome stamps the aborted attempt's own outcome. A disconnect is
-	// not health: the delivery shape (a clean EOF that beat the transport's
-	// cancellation, a failed client write, an upstream read error) must not
-	// decide the class, so a truncated turn keeps the failure the analyzer
-	// already observed. Only a provider's own in-band error keeps its class.
-	abortOutcome := func() {
-		if code := a.OutcomeCode(); code != "" && !a.HasInBandError() {
-			rec.ErrorType = sse.TypeUpstreamError
-			rec.ErrorCode = code
-			rec.ErrorMsg = metrics.DegenerateMessage(code)
-		}
-	}
-	// clientGone records a write-detected abort: the disconnect stamps the 499
-	// and the analyzer fills the record unconditionally, so an aborted stream
-	// keeps the finish reason, usage, cost and any in-band outcome it had
-	// already observed - the same accounting its 200 twin gets - instead of
-	// landing as an all-zero 499. Every caller returns immediately, so the
-	// fill runs at most once, and markClientGone leaves a decided 4xx/5xx
-	// status alone. abortOutcome is the one owner of the abort's failure
-	// class, shared with the read-error path.
-	clientGone := func() {
-		markClientGone(rec)
-		fillRecord(&a, rec)
-		abortOutcome()
-	}
 	writeOut := func() bool {
 		if out.Len() == 0 {
 			return true
 		}
 		o := out.Bytes()
 		if _, werr := writeCounted(w, rec, o); werr != nil {
-			clientGone()
+			clientGone(&a, rec)
 			return false
 		}
 		wireDataOpen = endsWithUnframedDataLine(o)
@@ -252,7 +227,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		if len(o) > 0 {
 			if _, werr := writeCounted(w, rec, o); werr != nil {
-				clientGone()
+				clientGone(&a, rec)
 				return false
 			}
 		}
@@ -261,7 +236,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		resetHead()
 		holding = false
 		if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
-			clientGone()
+			clientGone(&a, rec)
 			return false
 		}
 		wireDataOpen = false
@@ -293,7 +268,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// abort away as a clean 200. clientGone also stamps the class the
 			// analyzer decided: the same 499 must not read as healthy just
 			// because a truncation arrived with the abort.
-			clientGone()
+			clientGone(&a, rec)
 			return false
 		}
 		code := a.OutcomeCode()
@@ -331,7 +306,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// still part of the verbatim stream.
 			if len(hold) > 0 {
 				if _, werr := writeCounted(w, rec, hold); werr != nil {
-					clientGone()
+					clientGone(&a, rec)
 					return false
 				}
 				wireDataOpen = endsWithUnframedDataLine(hold)
@@ -368,7 +343,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				hold = append(hold, '\n')
 			}
 			if _, werr := writeCounted(w, rec, hold); werr != nil {
-				clientGone()
+				clientGone(&a, rec)
 				return false
 			}
 			wireDataOpen = endsWithUnframedDataLine(hold)
@@ -381,7 +356,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// wrote their own boundary above.
 		if code == "" && wireDataOpen {
 			if _, werr := writeCounted(w, rec, []byte("\n")); werr != nil {
-				clientGone()
+				clientGone(&a, rec)
 				return false
 			}
 			wireDataOpen = false
@@ -676,7 +651,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
 					if _, werr := writeCounted(w, rec, hold); werr != nil {
-						clientGone()
+						clientGone(&a, rec)
 						return rescueNone
 					}
 					wireDataOpen = endsWithUnframedDataLine(hold)
@@ -824,7 +799,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// A canceled local context took markStreamErr's disconnect
 					// path: classify the aborted attempt by the outcome it
 					// reached, exactly like the other abort shapes.
-					abortOutcome()
+					abortOutcome(&a, rec)
 				}
 				if tailTerminates {
 					holding = true
@@ -832,7 +807,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				releaseTail()
 				if holding {
 					if _, werr := writeCounted(w, rec, hold); werr != nil {
-						clientGone()
+						clientGone(&a, rec)
 						return rescueNone
 					}
 					wireDataOpen = endsWithUnframedDataLine(hold)
