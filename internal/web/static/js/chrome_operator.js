@@ -171,10 +171,14 @@ function askOperatorToken() {
       // instead of only repainting above it.
       note.textContent = 'That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
       note.setAttribute('data-err', '');
+      // An alert while the field holds focus; the neutral sentence is a static
+      // hint, so the role goes away with the reason.
+      note.setAttribute('role', 'alert');
       input.setAttribute('aria-invalid', 'true');
     } else {
       note.textContent = OPERATOR_DIALOG_NOTE;
       note.removeAttribute('data-err');
+      note.removeAttribute('role');
       input.removeAttribute('aria-invalid');
     }
     // The dialog owns its promise. If anything else closes it (another modal

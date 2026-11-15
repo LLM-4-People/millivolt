@@ -262,6 +262,11 @@
   .prov-add input, .prov-add select { flex: 1; min-width: 0; }
   .prov-add input { border-style: dashed; }
   .prov-add .prov-addbtn { padding: 4px 11px; flex-shrink: 0; font-size: 11px; }
+  /* A provider field's inline reason: under its row, across every track of the
+     row grid, and on its own line inside a flex add row. The ink and the
+     empty state are the shared .st-error pair. */
+  .prov-reason { grid-column: 1 / -1; flex: 0 0 100%; }
+  .prov-add:has(.prov-reason), .prov-hd:has(.prov-reason) { flex-wrap: wrap; }
   /* Model rules editor: the six-slot row (mode | from | → | to | ◉▲▼ | ✕)
      widens .prov-urow's grid; the preview row shares it. Below it live the
      inline validation slot (grid-span), the step trace, the real-traffic

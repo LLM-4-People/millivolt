@@ -209,6 +209,21 @@ module.exports = async function mcpCategory(H) {
     check('incomplete existing mapping rows remain in the draft for server validation',
       Object.hasOwn(w.collectSettingsValues().providers['epsilon.example'].usage_keys, 'input_tokens') &&
       w.collectSettingsValues().provider_aliases['old.example'] === '');
+    // A rejected provider field names its reason in a described element, not
+    // in title alone, and the slot goes away with the error.
+    const headerName = d.querySelector('[data-kind="providers"] .prov-add-h .sp-hname');
+    headerName.value = 'bad name';
+    headerName.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const reasonId = headerName.getAttribute('aria-describedby');
+    const reasonEl = reasonId && d.getElementById(reasonId);
+    check('a rejected provider header name exposes its reason as a description',
+      headerName.getAttribute('aria-invalid') === 'true' && !!reasonEl &&
+      /valid HTTP header name/.test(reasonEl.textContent));
+    headerName.value = 'X-Test';
+    headerName.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('a corrected provider header name drops its reason slot',
+      !headerName.hasAttribute('aria-describedby') && !d.getElementById(reasonId) &&
+      !headerName.hasAttribute('aria-invalid'));
     w.fetch = originalFetch;
     w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');

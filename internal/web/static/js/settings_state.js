@@ -46,6 +46,35 @@ function settingsGateFocus(card, selectors) {
   return null;
 }
 
+// provFieldReason is the provider editor's inline reason slot. A rejected
+// field used to carry its reason in `title` alone, which a keyboard operator
+// only meets by hovering: the reason gets a real element under the row, wired
+// as the field's description, and the element is dropped again when the field
+// validates. It is created on demand because the rows are rebuilt wholesale.
+// The request-overrides cards own the descriptions inside themselves, so this
+// slot stays out of that editor.
+let provFieldSeq = 0;
+function provFieldReason(input, reason) {
+  if (input.closest('.ro-wrap')) return;
+  let err = input._provReason;
+  if (!reason) {
+    if (err) { err.remove(); input._provReason = null; }
+    input.removeAttribute('aria-describedby');
+    return;
+  }
+  if (!err) {
+    if (!input.id) input.id = 'prov-field-' + (++provFieldSeq);
+    err = document.createElement('div');
+    err.className = 'st-error prov-reason';
+    err.id = input.id + '-reason';
+    err.setAttribute('aria-live', 'polite');
+    input._provReason = err;
+    input.after(err);
+  }
+  setText(err, reason);
+  input.setAttribute('aria-describedby', err.id);
+}
+
 function wireSettingsDelegation() {
   const box = settingsFields();
   if (!box || box.dataset.provWired) return;
@@ -110,8 +139,15 @@ function wireSettingsDelegation() {
         else if (e.target.classList.contains('sp-hname')) { bad = !PROV_HEADER_RE.test(v); reason = 'use a valid HTTP header name'; }
       }
       e.target.classList.toggle('prov-bad', bad);
-      if (bad) { e.target.title = reason; e.target.setAttribute('aria-invalid', 'true'); }
-      else { e.target.removeAttribute('title'); e.target.removeAttribute('aria-invalid'); }
+      if (bad) {
+        e.target.title = reason;
+        e.target.setAttribute('aria-invalid', 'true');
+        provFieldReason(e.target, reason);
+      } else {
+        e.target.removeAttribute('title');
+        e.target.removeAttribute('aria-invalid');
+        provFieldReason(e.target, '');
+      }
     }
     const mrMode = e.target.classList && e.target.classList.contains('mr-mode') ? e.target.closest('.mr-row') : null;
     if (mrMode) {
