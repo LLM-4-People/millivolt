@@ -292,6 +292,94 @@ const OC_SECTION_OF_KIND = { limit: 'limits', pause: 'pause', capture: 'capture'
 // inserted as markup - it used to be handed back to ocSectionEmpty a second
 // time, which escaped the frame into raw markup and appended an `undefined`
 // body.
+// OC_RULE_KINDS is the one table over the three stored rule kinds: how to find
+// the live rule, how to re-copy it into a draft, the response noun and the
+// admin route's kind. The stale-edit guard, its reload action and the gone
+// state all read it, so a fourth policy section joins one table instead of
+// three parallel branches. The entries are lazy because limits and holds load
+// after this module.
+const OC_RULE_KINDS = {
+  // `ready` gates the gone verdict: a rejected or not-yet-arrived snapshot
+  // carries an empty list, which is not evidence that the rule was removed.
+  // `signature` is only the rule's editable body: a poll that moves the live
+  // counters (in flight, queued, remaining) changes nothing the draft holds.
+  limit: { api: 'throttle', noun: 'limit', ready: () => throttleState.ok !== false, find: id => ocLimitById(id),
+    from: rule => ocLimitDraftFromPolicy(rule),
+    signature: p => JSON.stringify([p.scope, p.schedule, p.concurrency, p.requests, p.request_window, p.tokens, p.token_window, p.anti_burst, p.ramp_duration]) },
+  pause: { api: 'pause', noun: 'hold', ready: () => pauseState.ok !== false, find: id => liveHolds().find(h => h.id === id),
+    from: rule => ocPauseDraftFromHold(rule),
+    signature: h => JSON.stringify([h.all, h.new, ocScopeFromPolicy({ scope: h }), h.duration, h.max_queued]) },
+  capture: { api: 'debug', noun: 'capture', ready: () => debugState.ok !== false, find: id => liveDebugSessions().find(s => s.id === id),
+    from: rule => ocCaptureDraftFromSession(rule),
+    signature: s => JSON.stringify([ocScopeFromPolicy({ scope: s }), s.duration]) },
+};
+const OC_API_KIND = Object.fromEntries(Object.entries(OC_RULE_KINDS).map(([kind, spec]) => [spec.api, kind]));
+
+// ocSyncDraftFreshness compares an open edit with the rule it was copied from:
+// a snapshot that changed the rule marks the draft stale, one that removed it
+// marks it gone. The baseline is the JSON the draft opened against, so the
+// check is one string compare per open draft.
+function ocSyncDraftFreshness() {
+  for (const [kind, spec] of Object.entries(OC_RULE_KINDS)) {
+    const draft = ocDrafts[kind];
+    if (!draft || !draft.id || draft.gone || draft.stale || !spec.ready()) continue;
+    const live = spec.find(draft.id);
+    if (!live) { draft.gone = true; continue; }
+    const signature = spec.signature(live);
+    if (draft.baseline == null) { draft.baseline = signature; continue; }
+    if (draft.baseline !== signature) draft.stale = true;
+  }
+}
+
+// ocDraftStaleHTML is the banner over an open edit whose stored rule moved or
+// vanished under it. Saving would silently overwrite someone else's change, or
+// 404 against a rule that no longer exists.
+function ocDraftStaleHTML(kind) {
+  const draft = ocDrafts[kind];
+  if (!draft || !draft.id) return '';
+  if (draft.gone) {
+    return `<div class="oc-banner" role="alert"><strong>This ${escapeHtml(OC_RULE_KINDS[kind].noun)} is no longer in force.</strong> ` +
+      `Saving would fail against its old id. <button type="button" class="oc-link" data-oc-save-new>save as new</button> to recreate it from this draft.</div>`;
+  }
+  if (!draft.stale) return '';
+  return `<div class="oc-banner" role="status"><strong>This ${escapeHtml(OC_RULE_KINDS[kind].noun)} changed on the server while you were editing.</strong> ` +
+    `Saving now overwrites that change. <button type="button" class="oc-link" data-oc-reload-rule>reload rule</button> or ` +
+    `<button type="button" class="oc-link" data-oc-save-new>save as new</button>.</div>`;
+}
+
+// ocReloadDraft replaces the open draft with a fresh copy of the live rule.
+function ocReloadDraft(kind) {
+  const draft = ocDrafts[kind];
+  if (!draft || !draft.id) return;
+  const live = OC_RULE_KINDS[kind].find(draft.id);
+  if (!live) { draft.gone = true; ocRender(); return; }
+  ocDrafts[kind] = OC_RULE_KINDS[kind].from(live);
+  ocRender();
+}
+
+// ocSaveDraftAsNew drops the stored id so the next save creates a rule. The
+// edited values stay: they are the reason to save at all.
+function ocSaveDraftAsNew(kind) {
+  const draft = ocDrafts[kind];
+  if (!draft) return;
+  draft.id = '';
+  draft.stale = false;
+  draft.gone = false;
+  draft.baseline = null;
+  ocRender();
+}
+
+// ocMarkRuleGone flags an open edit whose rule the server no longer has after a
+// write, so the composer offers save-as-new instead of repeating the 404.
+function ocMarkRuleGone(api) {
+  const kind = OC_API_KIND[api];
+  const draft = kind && ocDrafts[kind];
+  if (!draft || !draft.id) return false;
+  draft.gone = true;
+  if (ocMounted) ocRender();
+  return true;
+}
+
 function ocSectionHTML(sec) {
   const section = OC_SECTION_OF_KIND[sec.kind] || sec.kind;
   const shown = ocFilterRows(section, sec.entries);
@@ -299,6 +387,7 @@ function ocSectionHTML(sec) {
   const actions = sec.actions ? `<div class="oc-head-actions">${sec.actions}</div>` : '';
   return `<div class="oc-sec">` +
     `<div class="oc-sec-head"><p class="oc-sub">${escapeHtml(sec.sub)}</p>${actions}</div>` +
+    ocDraftStaleHTML(sec.kind) +
     (sec.composer || '') +
     ocListFilterHTML(section, sec.total) +
     (rows || sec.empty) +
@@ -714,6 +803,7 @@ function ocRender() {
   const shell = ocShell();
   if (!shell || !ocMounted) return;
   const saved = ocFocusKey();
+  ocSyncDraftFreshness();
   const paneBefore = $('oc-pane');
   // A pick rebuilds the pane, and the pane is the console's one scroll
   // region. Without carrying scrollTop across, selecting a second value from a
@@ -1536,6 +1626,8 @@ const OC_ACTION_HANDLERS = [
   ['data-oc-error-dismiss', () => ocOperatorErrorClear()],
   ['data-oc-close', () => closeOperatorConsole(true)],
   ['data-oc-cancel', () => { ocClearComposer(); ocRender(); }],
+  ['data-oc-reload-rule', () => ocReloadDraft(ocView.kind)],
+  ['data-oc-save-new', () => ocSaveDraftAsNew(ocView.kind)],
   ['data-oc-new', target => {
     const kind = target.dataset.ocNew;
     if (kind === 'limit') ocOpenLimitComposer('');

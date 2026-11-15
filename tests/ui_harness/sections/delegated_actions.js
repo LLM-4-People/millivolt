@@ -500,8 +500,10 @@ module.exports = async function delegatedActions(H) {
         await settleUntil(() => sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]')
           ?.querySelector('.oc-rule-live').textContent.includes('5 of 20 requests left')));
       sw.eval("ocOperatorErrorClear()");
+      // Only the rejection is dismissed: an open edit of a rule the poll just
+      // moved keeps its own (informational) stale banner.
       check('dismissing the rejection banner leaves the confirmed rule in place',
-        !sd.querySelector('#oc-pane .oc-banner') &&
+        !sd.querySelector('#oc-pane .oc-banner[data-tone="err"]') &&
         !!sd.querySelector('#oc-pane [data-oc-rule="hostile-limit"]'));
 
       // The anti-burst pair rides the same composer Apply: a stored ramp

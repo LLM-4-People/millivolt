@@ -856,6 +856,45 @@ module.exports = async function operatorMenus(H) {
       check('an edit composer offers the save action', text('#oc-lim-apply') === 'save limit' &&
         !d.getElementById('oc-lim-apply').disabled);
 
+      // A policy that changed on the server while the form was open is
+      // invisible until save overwrites it. The draft says so and offers the
+      // two honest ways out instead of a silent clobber.
+      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [{...policy, concurrency: 9}]});
+      w.ocRender();
+      check('a server-side change under an open edit raises the stale banner',
+        !!q('#oc-pane .oc-banner[role="status"]') &&
+        /changed on the server/.test(text('#oc-pane .oc-banner')) &&
+        !!q('#oc-pane [data-oc-reload-rule]') && !!q('#oc-pane [data-oc-save-new]'));
+      click('#oc-pane [data-oc-reload-rule]');
+      check('reload rule takes the server copy and clears the banner',
+        d.querySelector('#oc-pane [data-oc-field="concurrency"]').value === '9' &&
+        !q('#oc-pane .oc-banner'));
+      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [{...policy, concurrency: 11}]});
+      w.ocRender();
+      input('#oc-pane [data-oc-field="concurrency"]', '7');
+      click('#oc-pane [data-oc-save-new]');
+      check('save as new drops the stored id and keeps the drafted values',
+        w.eval('ocDrafts.limit.id') === '' && !/editing limit/.test(text('#oc-pane .oc-compose-hd')) &&
+        d.querySelector('#oc-pane [data-oc-field="concurrency"]').value === '7' &&
+        !q('#oc-pane .oc-banner'));
+      // A rule removed under the edit answers 404; that is the same fact and
+      // takes the same way out, not a repeated failure line.
+      w.applyThrottleState({ok: true, active: true, known_providers: ['prov-a'], throttles: [policy]});
+      click('#oc-pane [data-oc-edit="limit"][data-oc-id="pol-edit"]');
+      const savedLimitFetch = w.fetch;
+      w.fetch = async (url, options) => String(url).includes('/admin/throttle')
+        ? {ok: false, status: 404, json: async () => ({error: 'that limit is no longer in force'})}
+        : savedLimitFetch(url, options);
+      try {
+        click('#oc-lim-apply');
+        await settleUntil(() => /no longer in force/.test(text('#oc-pane .oc-banner')));
+        check('a 404 on save marks the draft gone and offers save as new',
+          q('#oc-pane .oc-banner[role="alert"]')?.textContent.includes('no longer in force') &&
+          q('#oc-pane .oc-banner [data-oc-save-new]'));
+      } finally {
+        w.fetch = savedLimitFetch;
+      }
+
       // Copy is the follow-up path: the same scope and schedule, no budgets,
       // and no id, so the write creates a second rule instead of editing the
       // first. Retyping four dimensions was the most expensive task here.

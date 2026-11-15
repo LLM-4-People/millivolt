@@ -114,6 +114,10 @@ async function operatorErrorBody(r, fallback) {
   try { msg = (await r.json()).error || msg; } catch (e) {}
   const err = new Error(msg);
   err.operatorBody = true;
+  // The status rides along: a 404 on a stored rule means the rule was removed
+  // under the edit, which the console answers with save-as-new rather than a
+  // repeated failure.
+  err.status = r.status;
   throw err;
 }
 
@@ -301,6 +305,7 @@ async function mutateOperator(kind, body, after) {
     // not changed as well as why.
     const message = String(err.message || fail);
     operatorError(kind, err.operatorBody ? message : fail + ' - ' + message);
+    if (err.status === 404 && typeof ocMarkRuleGone === 'function') ocMarkRuleGone(kind);
   } finally {
     gate.busy = false;
     ++gate.revision;
