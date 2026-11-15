@@ -186,8 +186,12 @@ def publish_images(staging, output):
 
 async def history_route(route, base, errors):
     # Documentation capture cannot submit inference or operator mutations.
-    if route.request.method not in ('GET', 'HEAD'):
-        errors.append('documentation capture attempted a non-read request')
+    # The purge count preview is the one read-only POST: the console's export
+    # receipt asks for it whenever an export draft changes.
+    read_post = route.request.method == 'POST' and \
+        route.request.url.split('?', 1)[0].endswith('/admin/purge/count')
+    if route.request.method not in ('GET', 'HEAD') and not read_post:
+        errors.append(f'documentation capture attempted a non-read request: {route.request.method} {route.request.url}')
         await route.abort()
         return
     path = urlsplit(route.request.url).path
@@ -195,12 +199,13 @@ async def history_route(route, base, errors):
     # upstream. Only dashboard resources and the reads used by this workflow
     # are admitted. The shared guard still enforces origin/redirect/SSE rules.
     if path not in ('/', '/favicon.ico', '/admin/config', '/admin/restart',
+                    '/admin/purge/count',
                     '/metrics/bootstrap', '/metrics/agg/chart', '/metrics/agg/explorer',
                     '/metrics/agg/log', '/metrics/live/stream') and not (
             path.startswith('/dash/') and path.endswith(('.js', '.css'))
             and all(part not in ('', '.', '..') for part in path[1:].split('/'))
             and '%' not in path and '\\' not in path):
-        errors.append('documentation capture attempted a non-dashboard resource')
+        errors.append(f'documentation capture attempted a non-dashboard resource: {path}')
         await route.abort()
         return
     await guards.browser_route(route, base, errors)
@@ -256,9 +261,10 @@ async def capture_history(args):
                 await pick_chart_control(page, '#chart-window', 'all')
                 await ready('provider')
                 await capture_image(page, staging / 'overview/dashboard.png')
-                # The natural-height desktop layout leaves room for the full
-                # dimension rail in focused explorer captures.
-                await page.set_viewport_size({'width': 1440, 'height': 900})
+                # The rail scrolls inside a box capped by the viewport, so the
+                # capture viewport must be tall enough for all nine dimensions
+                # to be visible at once rather than clipped after four.
+                await page.set_viewport_size({'width': 1440, 'height': 1180})
                 await ready('provider')
                 await capture_image(page, staging / 'explorer/providers.png', '#explorer')
 
@@ -287,6 +293,22 @@ async def capture_history(args):
                         'request-table capture would clip columns')
                 await capture_image(page, staging / 'requests/table.png', '.grid-pair > .card:last-child')
                 await page.set_viewport_size({'width': 1180, 'height': 850})
+                # The newest rows may carry no usage or timing (aborted and
+                # retried turns); the detail capture needs a finalized row
+                # that has both. Page the archive until one is visible
+                # instead of pinning a fixture position.
+                for _ in range(30):
+                    if await page.evaluate('''() => logVisible().some(r => !r.live && !r.debug &&
+                        r.usage?.output_tokens > 0 && r.ttft_ms > 0)'''):
+                        break
+                    await page.evaluate('''() => {
+                        const table = document.getElementById('tbl-requests');
+                        table.scrollTop = table.scrollHeight;
+                        table.dispatchEvent(new Event('scroll'));
+                    }''')
+                    await page.wait_for_timeout(300)
+                await page.wait_for_function('''() => logVisible().some(r => !r.live && !r.debug &&
+                    r.usage?.output_tokens > 0 && r.ttft_ms > 0)''', timeout=30000)
                 request_id = await page.evaluate('''() => {
                     const candidates = logVisible().filter(r => !r.live && !r.debug &&
                         r.usage?.output_tokens > 0 && r.ttft_ms > 0);
@@ -331,6 +353,10 @@ async def capture_history(args):
                         require(await page.evaluate('''() =>
                             ocDrafts.export && ocDrafts.export.mode === 'all' '''),
                                 'documentation export section must start on all history')
+                        # The count is a read-only POST issued after a debounce;
+                        # capture the settled receipt, not "counting...".
+                        await page.wait_for_function('''() => ocDrafts.export &&
+                            !ocDrafts.export.counting''', timeout=15000)
                     if kind == 'system':
                         await page.wait_for_function('() => typeof restartServerState.available === "boolean"')
                     await ready('model')
