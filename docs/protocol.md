@@ -30,7 +30,7 @@ does an explicit format equal to the client protocol. Without a configured
 request rewrite, a passthrough request's body bytes are relayed unchanged;
 configured request overrides, a sub-conversation strip or ensured tools can
 still rewrite the upstream body (see
-[request overrides](operations.md#request-overrides)). `X-Proxy-In-Format`
+[request overrides](configuration.md#request-overrides)). `X-Proxy-In-Format`
 overrides the protocol named by the path, so an
 otherwise unknown path is translated when that header names the inbound wire;
 without the override, paths outside the three known endpoints are never
@@ -469,7 +469,7 @@ rather than a universal rejection.
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 Before relay or translation, the upstream request is subject to the configured
-`request_overrides` (see [request overrides](operations.md#request-overrides)):
+`request_overrides` (see [request overrides](configuration.md#request-overrides)):
 matching rules set, replace or remove upstream headers as the last header
 stage, and their body fields set `max_tokens` / `max_completion_tokens` on
 Chat Completions or Anthropic client bodies before translation, whatever the
@@ -695,7 +695,7 @@ fields accept it. An absent or dropped identity is never a client
 error. A tracked identity never declares a parent: `X-Proxy-Parent-Session`
 still requires its explicit session pair, and the session wins identity. The
 identity rules, name grammar, caps and the settings surface live in
-[operations](operations.md#sub-conversation-tracking).
+[configuration](configuration.md#sub-conversation-tracking).
 
 ### Declaring a parent
 

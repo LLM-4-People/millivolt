@@ -1,7 +1,8 @@
 # Containers and data
 
 This page covers the image, Compose operation, persistent volumes, backups,
-versions and the restart lifecycle.
+versions and the restart lifecycle. The settings surface is in
+[configuration](configuration.md).
 
 > [!WARNING]
 > This is an offline backup: stop callers first, allow active work to finish,
