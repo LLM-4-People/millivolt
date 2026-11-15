@@ -15,7 +15,17 @@ module.exports = async function modelCanon(H) {
     ['glm-5.3', 'glm-5-3'], ['glm-5-3', 'glm-5-3'], ['GLM-5.3', 'glm-5-3'],
     ['moonshotai/kimi-k3', 'kimi-k3'], ['moonshotai/kimi-k3:nube', 'kimi-k3'],
     ['z-ai/glm-5.3-flash:crofai', 'glm-5-3-flash'],
-    ['deepseek-v4-pro-0813', 'deepseek-v4-pro-0813'],
+    ['deploy-ai/deepseek-ai/deepseek-v4.1-flash-1017', 'deepseek-v4-1-flash'],
+    ['deepseek-v4-pro-0813', 'deepseek-v4-pro'],
+    ['deepseek-v4.1-flash-fast', 'deepseek-v4-1-flash'],
+    ['deepseek-v4.1-flash-fast-fp4', 'deepseek-v4-1-flash'],
+    ['deepseek-v4.1-flash-value', 'deepseek-v4-1-flash'],
+    ['step-5-preview-free', 'step-5'],
+    ['glm-5.3-flash', 'glm-5-3-flash'],
+    ['deepseek-v4.1-flash-1017-abliterated', 'deepseek-v4-1-flash-1017-abliterated'],
+    ['Qwen/Qwen2.5-72B-Instruct-GPTQ-Int4', 'qwen2-5-72b-instruct'],
+    ['cursor-grok-4.6-xhigh-fast', 'cursor-grok-4-6'],
+    ['grok-4-fast', 'grok-4'],
     ['glm-5.3-fp4', 'glm-5-3'], ['glm-5.3-nvfp4', 'glm-5-3'], ['GLM-5.3-NXFP4', 'glm-5-3'],
     ['llama-3.3-70b-int8', 'llama-3-3-70b'], ['qwen2.5-72b-q4_k_m', 'qwen2-5-72b'],
     ['gemma-3-27b', 'gemma-3-27b'],
@@ -82,9 +92,9 @@ module.exports = async function modelCanon(H) {
   // both sides through the cursor base name (debug.go modelIn).
   check('canonicalModel mirrors config.ApplyModelRules (default pipeline)',
     canonCases.every(([raw, want]) => w.canonicalModel(raw) === want));
-  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-pro-0813', to: 'deepseek-v4-pro'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-pro-0813': 'deepseek-v4-pro'}), true);
+  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-1-flash-1017-abliterated', to: 'deepseek-v4-1-flash'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-1-flash-1017-abliterated': 'deepseek-v4-1-flash'}), true);
   check('an exact rule merges what the generic pipeline cannot',
-    w.canonicalModel('deepseek-v4-pro-0813') === 'deepseek-v4-pro' &&
+    w.canonicalModel('deepseek-v4-1-flash-1017-abliterated') === 'deepseek-v4-1-flash' &&
     w.eval("canonicalModel('GLM-5.3')") === 'glm-5-3');
   w.applyModelCanon(modelFixture(), true);
   check('an empty rule pipeline = identity grouping', w.canonicalModel('GLM-5.3') === 'GLM-5.3' && w.canonicalModel(' glm-5.3 ') === 'glm-5.3');
@@ -107,9 +117,9 @@ module.exports = async function modelCanon(H) {
   // The capture picker re-groups through the SAME rules: with an exact rule
   // live, the two deepseek spellings fold into one canonical group, but each
   // raw variant stays selectable so the wire keeps the exact spelling.
-  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-pro-0813', to: 'deepseek-v4-pro'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-pro-0813': 'deepseek-v4-pro'}), true);
+  w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-1-flash-1017-abliterated', to: 'deepseek-v4-1-flash'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-1-flash-1017-abliterated': 'deepseek-v4-1-flash'}), true);
   {
-    w.__knownModels = ['deepseek-v4-pro', 'deepseek-v4-pro-0813', 'grok-4.6'];
+    w.__knownModels = ['deepseek-v4-1-flash', 'deepseek-v4-1-flash-1017-abliterated', 'grok-4.6'];
     w.eval('throttleState = {...throttleState, known_models: window.__knownModels}');
     w.openOperatorConsole('capture');
     await clickWait('#oc-pane [data-oc-new="capture"]');
@@ -334,15 +344,15 @@ module.exports = async function modelCanon(H) {
     const tpl = wrap.querySelector('.mr-tpl');
     const tplLabels = [...tpl.options].map(o => o.textContent).join(',');
     check('the template menu derives the five shipped rules plus the custom starters',
-      tpl.options.length === 8 && tplLabels === 'add from template…,lowercase fold,strip vendor/ prefix,strip :tag suffix,strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…),unify . and - between digits,exact merge…,custom pattern…');
+      tpl.options.length === 8 && tplLabels === 'add from template…,lowercase fold,strip vendor/ prefixes,strip :tag suffixes,strip serving decorations (quant, tier, build…),unify . and - between digits,exact merge…,custom pattern…');
     tpl.value = '1';
     tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
     const rows = [...wrap.querySelectorAll('.mr-row')];
     check('a template appends its pre-filled rule',
-      rows.length === 2 && rows[1].querySelector('.mr-from').value === '^[a-z0-9][a-z0-9._-]*/');
+      rows.length === 2 && rows[1].querySelector('.mr-from').value === '^(?:[a-z0-9][a-z0-9._-]*/)+');
     check('a shipped template carries the server doc payload, not a client copy',
       rows[1].querySelector('.mr-mode').value === 'pattern' && rows[1].querySelector('.mr-to').value === '' &&
-      JSON.stringify(w.eval('settingsDoc.defaults.model_rules[1]')) === JSON.stringify({ mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' }));
+      JSON.stringify(w.eval('settingsDoc.defaults.model_rules[1]')) === JSON.stringify({ mode: 'pattern', from: '^(?:[a-z0-9][a-z0-9._-]*/)+', to: '' }));
     wrap.querySelector('[data-mr-restore]').click();
     const defRows = [...wrap.querySelectorAll('.mr-row')];
     check('restore-defaults replaces the draft with the shipped pipeline',

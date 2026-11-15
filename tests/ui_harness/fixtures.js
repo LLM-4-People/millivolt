@@ -71,9 +71,9 @@ const mkChart = () => ({
 // reads in Settings.
 const DEF_RULES = [
   { mode: 'lower' },
-  { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' },
-  { mode: 'pattern', from: ':[a-z0-9._-]+$', to: '' },
-  { mode: 'pattern', from: '-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$', to: '' },
+  { mode: 'pattern', from: '^(?:[a-z0-9][a-z0-9._-]*/)+', to: '' },
+  { mode: 'pattern', from: '(?::[a-z0-9._-]+)+$', to: '' },
+  { mode: 'pattern', from: '(?:-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*|gptq|awq|gguf|exl2|mlx|onnx|ggml|fast|speed|value|free|preview|latest|beta|alpha|stable|experimental|thinking|reasoning|xhigh|high|medium|low|minimal|(?:\\d{4}|\\d{8})))+$', to: '' },
   { mode: 'pattern', from: '(\\d)\\.(\\d)', to: '$1-$2' },
 ];
 // Providers editor fixture: the server-owned canonical usage fields plus one

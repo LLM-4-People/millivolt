@@ -38,9 +38,9 @@ const MODEL_RULES_MAX = 64;
 // rule, labeled by position.
 const MR_SHIPPED_LABELS = [
   'lowercase fold',
-  'strip vendor/ prefix',
-  'strip :tag suffix',
-  'strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…)',
+  'strip vendor/ prefixes',
+  'strip :tag suffixes',
+  'strip serving decorations (quant, tier, build…)',
   'unify . and - between digits',
 ];
 // The custom starters: manual rows a shipped rule cannot express.

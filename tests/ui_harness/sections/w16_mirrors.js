@@ -595,7 +595,7 @@ module.exports = async function w16Mirrors(H) {
         const tpl = wrap.querySelector('.mr-tpl');
         check('template labels pair by position with a longer defaults doc',
           [...tpl.options].map(o => o.textContent).join(',') ===
-          'add from template…,lowercase fold,strip vendor/ prefix,strip :tag suffix,strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…),unify . and - between digits,shipped rule 6,exact merge…,custom pattern…');
+          'add from template…,lowercase fold,strip vendor/ prefixes,strip :tag suffixes,strip serving decorations (quant, tier, build…),unify . and - between digits,shipped rule 6,exact merge…,custom pattern…');
         tpl.value = '5';
         tpl.dispatchEvent(new sw.Event('change', {bubbles: true}));
         const rows = [...wrap.querySelectorAll('.mr-row')];

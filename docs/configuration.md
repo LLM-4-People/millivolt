@@ -180,7 +180,16 @@ out or the process restarts. Back up before an intentional history rename.
 
 `model_rules` instead controls display/grouping. The list is capped at 64 rules.
 Its ordered exact, pattern and lowercase steps keep stored model spellings
-unchanged; an empty rule list groups by those raw spellings. The Settings editor supports reordering, parking and
+unchanged; an empty rule list groups by those raw spellings. The shipped
+pipeline folds case, strips one or more leading `vendor/` namespaces and
+trailing `:tag` deployments, strips a trailing run of serving decorations, and
+unifies `.` with `-` between digits. A decoration is what a provider adds
+around the same weights: a quantization or serving format, a service tier
+(`-fast`, `-speed`, `-value`), a release channel (`-preview`, `-latest`), or a
+build stamp (`-1017`). Model tiers (`-flash`, `-pro`, `-mini`), fine-tunes
+(`-abliterated`, `-rl`) and parameter counts stay distinct. Add an exact rule
+above the shipped pipeline to split a group, or one it cannot recognize to
+merge the spelling. The Settings editor supports reordering, parking and
 previewing rules. Raw export/delete predicates do not silently expand to a
 display group. Debug's native-model normalization is separate from these rules.
 

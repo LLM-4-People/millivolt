@@ -69,19 +69,22 @@ type ModelCanon struct {
 const ModelRulesMax = 64
 
 // DefaultModelRules is the SHIPPED pipeline - pure data, no code semantics:
-// fold case, then strip an OpenRouter-style `vendor/` namespace, strip a
-// trailing `:tag` deployment suffix, strip a trailing architecture/quant
-// suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, GGUF quants like `-q4_k_m` -
-// the same model served at a different precision groups with its base),
-// and unify `.` with `-` between digits (a dated snapshot suffix like
-// `-0813` stays distinct). Put an `exact` rule ABOVE the list to merge
-// before normalization, BELOW to merge after.
+// fold case, strip one or more leading `vendor/` namespaces, strip trailing
+// `:tag` deployments, strip a trailing run of serving decorations, and
+// unify `.` with `-` between digits. A decoration is what a provider adds
+// around the same weights: a quantization or serving format (`-fp4`,
+// `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`, `-gptq`, `-awq`, `-gguf`), a
+// service tier (`-fast`, `-speed`, `-value`), a release channel (`-preview`,
+// `-latest`, `-beta`), or a build stamp (`-1017`). Model tiers (`-flash`,
+// `-pro`, `-mini`, `-ultra`), fine-tunes (`-abliterated`, `-rl`) and
+// parameter counts stay distinct. Put an `exact` rule ABOVE the list to
+// merge before normalization, BELOW to merge after.
 func DefaultModelRules() []ModelRule {
 	return []ModelRule{
 		{Mode: ModelRuleLower},
-		{Mode: ModelRulePattern, From: `^[a-z0-9][a-z0-9._-]*/`, To: ""},
-		{Mode: ModelRulePattern, From: `:[a-z0-9._-]+$`, To: ""},
-		{Mode: ModelRulePattern, From: `-(?:[a-z]{0,2}fp\d+|bf\d+|int\d+|nf\d+|[a-z]?q\d+(?:_[0-9a-z]+)*)$`, To: ""},
+		{Mode: ModelRulePattern, From: `^(?:[a-z0-9][a-z0-9._-]*/)+`, To: ""},
+		{Mode: ModelRulePattern, From: `(?::[a-z0-9._-]+)+$`, To: ""},
+		{Mode: ModelRulePattern, From: `(?:-(?:[a-z]{0,2}fp\d+|bf\d+|int\d+|nf\d+|[a-z]?q\d+(?:_[0-9a-z]+)*|gptq|awq|gguf|exl2|mlx|onnx|ggml|fast|speed|value|free|preview|latest|beta|alpha|stable|experimental|thinking|reasoning|xhigh|high|medium|low|minimal|(?:\d{4}|\d{8})))+$`, To: ""},
 		{Mode: ModelRulePattern, From: `(\d)\.(\d)`, To: "$1-$2"},
 	}
 }
