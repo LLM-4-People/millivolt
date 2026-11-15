@@ -344,8 +344,11 @@ func TestStreamRetryTransportFailureSurfacesInBand(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 2 (one absorbed truncation + failed re-send)", n)
 	}
 	recs := waitForRecord(t, buf, 1)
-	if !recs[0].IsError() || recs[0].ErrorType != "upstream_unreachable" || recs[0].StatusCode != http.StatusBadGateway {
-		t.Fatalf("record must flag the failed re-send: %+v", recs[0])
+	// The client holds the committed 200, so the record describes that status
+	// while the failed re-send stays the error class (the 502 is wire detail,
+	// not the status the client saw).
+	if !recs[0].IsError() || recs[0].ErrorType != "upstream_unreachable" || recs[0].StatusCode != http.StatusOK {
+		t.Fatalf("record must flag the failed re-send under the committed 200: %+v", recs[0])
 	}
 }
 

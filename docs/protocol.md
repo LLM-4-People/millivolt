@@ -518,8 +518,11 @@ failures the client never saw. Transport failures have no HTTP response, so
 their attempt entries leave those fields empty. An in-band 429 is the one
 attempt entry that carries the in-band flag: when a keepalive already committed
 the client's success 200, the upstream status cannot replace it, so the record
-keeps `{status_code:429,at,in_band:true}` to preserve the distinct rate-limit
-signal. Only a 429 mints one; any other in-band provider error stamps the
+describes the committed 200 and keeps
+`{status_code:429,at,in_band:true}` to preserve the distinct rate-limit
+signal. The record likewise keeps the committed 200 for every other in-band
+failure, including a failed retry re-send whose wire status never reached the
+client. Only a 429 mints one; any other in-band provider error stamps the
 record's own type and status instead, and a failed body read behind the commit
 keeps the provider-decided type rather than replacing it. The entry carries no
 retry or error detail, is not counted as a retry, and is excluded from retry

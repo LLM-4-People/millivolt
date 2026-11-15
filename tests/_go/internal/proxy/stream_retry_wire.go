@@ -101,9 +101,9 @@ func TestStreamingRetryRedirectStaysInBand(t *testing.T) {
 		t.Fatalf("records = %d, want 1", len(recs))
 	}
 	rec := recs[0]
-	if rec.StatusCode != http.StatusFound || rec.ErrorType != "upstream_error" ||
+	if rec.StatusCode != http.StatusOK || rec.ErrorType != "upstream_error" ||
 		rec.ErrorCode != metrics.CodeTruncated || !rec.IsError() {
-		t.Fatalf("record = status %d type %q code %q error %v, want 302/upstream_error/truncated",
+		t.Fatalf("record = status %d type %q code %q error %v, want the committed 200/upstream_error/truncated",
 			rec.StatusCode, rec.ErrorType, rec.ErrorCode, rec.IsError())
 	}
 	if rec.Retries != 1 {
