@@ -265,7 +265,7 @@
   .mr-move button { background: none; border: none; color: var(--muted); cursor: pointer; padding: 2px; font-size: 9px; line-height: 1; }
   .mr-move button:hover { color: var(--accent); }
   .mr-move .mr-vis[aria-pressed="false"] { color: var(--text); }
-  .mr-row[data-mr-off="1"] { opacity: .45; }
+  .mr-row[data-mr-off="1"] { opacity: .7; }
   .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
   .mr-err:empty { display: none; }
   .mr-err[data-level="error"] { color: var(--err-text); }
