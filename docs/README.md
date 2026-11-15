@@ -21,6 +21,7 @@ that matches what you need to do.
 | --- | --- |
 | Install and send a first request | [Install and first run](install.md) |
 | Configure a setting, request override or provider alias | [Configuration](configuration.md) |
+| Look up a setting's default or a CLI flag | [Settings reference](settings.md) |
 | Expose the listener behind TLS or a network boundary | [Reverse proxy](reverse-proxy.md), [security](../SECURITY.md) |
 | Debug a 429 or a 5xx | [Routes and debugging](routes.md#error-storm-protection), [pause and limits](routes.md#pause-and-limits) |
 | Back up or restore | [Settings backup and restore](containers.md#settings-backup-and-restore), [image-only backup](containers.md#image-only-backup-and-restore), [online database backup](operations.md#storage-and-accounting) |
@@ -38,7 +39,9 @@ invariants live in [architecture](architecture.md). Project pages are
 
 ## Verification and limitations
 
-The generated [configuration example](../proxy.example.yaml) documents settings.
+The generated [settings reference](settings.md) lists every setting and proxy
+flag with its type, default, accepted values and reload behavior.
+[proxy.example.yaml](../proxy.example.yaml) is the commented deployment example.
 `internal/config` owns defaults, validation and Settings metadata; local
 `proxy.yaml` is not a public reference or a test fixture.
 

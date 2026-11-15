@@ -20,20 +20,12 @@ tracked param, strip on). It is not mutable repository state. Source
 deployments copy it to ignored local `proxy.yaml`; images bundle their own copy
 for fresh config volumes. Do not start Settings against the committed example.
 
-| Flag | Behavior |
-| --- | --- |
-| `-config PATH` | Config path; defaults to local `proxy.yaml`. Empty selects built-in defaults and disables Settings persistence. |
-| `-listen ADDRESS` | Override the configured listen address; the effective value is validated after every override. |
-| `-db-path PATH` | Override durable storage; `none` disables it. |
-| `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
-| `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. A named config that cannot be read fails the probe instead of falling back to defaults; only an empty `-config` probes the built-in defaults. |
-| `-readycheck` | Probe `GET /readyz` the same way and exit nonzero when the durable pipeline is not ready. Used by the Compose readiness probe; mutually exclusive with `-healthcheck`. |
-| `-print-config` | Print neutral built-in default YAML. |
-| `-print-example-config` | Print the deployment example, including its enabled compatibility profiles and the opencode sub-conversation tracking exemplar. |
-| `-version` | Print JSON build identity. |
-
-The three output-only flags are mutually exclusive and exit without loading local
-config, opening a database or starting runtime services.
+The proxy's flags are listed once, with their registration defaults and usage
+text, in the [settings reference](settings.md#proxy-cli-flags). The effective
+`-listen` value is validated after every override, and a handoff child rewrites
+`-pid-file` with its own pid on boot so a supervisor keeps tracking the live
+process. The three output-only flags are mutually exclusive and exit without
+loading local config, opening a database or starting runtime services.
 
 Precedence is built-in defaults, then the YAML file, then CLI overrides.
 A missing file loads defaults; verify the path rather than assuming a typo
@@ -58,10 +50,12 @@ error because there is nothing to archive. Settings POST still rejects invalid
 inputs. CLI-overridden fields cannot be saved from Settings. Healthcheck loads
 whatever file it is given read-only and never rewrites it.
 
-To regenerate the public example after changing its canonical owners:
+To regenerate the public example and the settings reference after changing
+their canonical owners:
 
 ```sh
 go run ./cmd/proxy -print-example-config > proxy.example.yaml
+go run ./cmd/docgen -write
 ```
 
 The shared checks verify generated-file consistency. Built-in defaults remain
@@ -83,13 +77,15 @@ a second complete list of defaults here.
 
 ### Finding a setting
 
-The generated example is the complete field reference: it includes defaults,
-types, ranges, units and hot-reload/restart behavior. `GET /admin/config` exposes
-the same field/category metadata alongside saved values, neutral defaults,
-CLI overrides, the process-effective snapshot and the current revision. Its
-`last_reload` section reports the most recent configuration application:
-`ok`, `error` (empty when ok), `dropped_keys`, `restart_required` and the
-unix-millisecond `at` timestamp.
+The generated [settings reference](settings.md) is the complete field list:
+every setting with its type, default, accepted values and hot-reload or restart
+behavior, grouped by the same categories as the Settings sheet.
+[proxy.example.yaml](../proxy.example.yaml) remains the commented deployment
+example. `GET /admin/config` exposes the same field/category metadata alongside
+saved values, neutral defaults, CLI overrides, the process-effective snapshot
+and the current revision. Its `last_reload` section reports the most recent
+configuration application: `ok`, `error` (empty when ok), `dropped_keys`,
+`restart_required` and the unix-millisecond `at` timestamp.
 Settings searches labels, keys and help across categories.
 Durations and byte sizes use a magnitude plus unit (`2s`, `32MiB`) in YAML and
 Settings; do not write a bare number and assume seconds. A bare integer is still

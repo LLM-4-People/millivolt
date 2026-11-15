@@ -99,6 +99,7 @@ NAV_GROUPS = (
         (
             ("Operations", "docs/operations.html", "docs/operations.md"),
             ("Configuration", "docs/configuration.html", "docs/configuration.md"),
+            ("Settings reference", "docs/settings.html", "docs/settings.md"),
             ("Containers and data", "docs/containers.html", "docs/containers.md"),
             ("Routes and debugging", "docs/routes.html", "docs/routes.md"),
             ("Reverse proxy", "docs/reverse-proxy.html", "docs/reverse-proxy.md"),
