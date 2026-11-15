@@ -441,9 +441,9 @@ than one flush interval plus a progress window. The window is four flush
 intervals clamped to at least 30 seconds and at most two minutes; the record's
 own interval is allowed on top, so a record inside its own cadence never
 convicts and a long configured interval cannot postpone the verdict by more
-than that one cadence. That cadence belongs to the record, so it holds whether
-or not the writer ever picks it up. Readiness also fails when any durable flush
-has failed since boot.
+than that one cadence. The arrival itself starts the clock, so the allowance
+holds even if the writer never picks the record up. Readiness also fails when
+any durable flush has failed since boot.
 Readiness stays red after the first failed flush even once writes recover,
 because a lost batch is worth an operator's attention; restart or investigate.
 With durable storage disabled both routes answer `200`, since there is no
