@@ -330,8 +330,8 @@ def check_job_graph(checks: dict, errors: list[str]) -> None:
          lambda workflow: named_step_in(workflow, "browser", "Check isolated browser fixtures")
          .update({"run": 'bash scripts/check.sh browser --target "http://${DEV_HOST}:${DEV_PORT}"'})),
         ("dropping the live MCP opt-in",
-         lambda workflow: named_step_in(workflow, "browser", BROWSER_STEP)
-         ["env"].pop(MCP_GATE_ENV)),
+         lambda workflow: (named_step_in(workflow, "browser", BROWSER_STEP).get("env") or {})
+         .pop(MCP_GATE_ENV, None)),
         ("renaming the image build id",
          lambda workflow: named_step_in(workflow, "container",
                                         "Build native image without publishing")
@@ -364,7 +364,7 @@ def check_job_graph(checks: dict, errors: list[str]) -> None:
         ("pushing the check image",
          lambda job: build_step(job)["with"].update({"push": True})),
         ("reading the image id from the wrong output",
-         lambda job: check_step(job)["env"].update(
+         lambda job: (check_step(job).get("env") or {}).update(
              {"IMAGE_ID": "${{ steps.build.outputs.digest }}"})),
         ("switching the build cache to mode=min",
          lambda job: build_step(job)["with"].update(
