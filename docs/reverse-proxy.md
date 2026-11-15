@@ -69,7 +69,10 @@ It preserves the external `Host`, including a nondefault port, so browser-origin
 checks on Settings and other mutations keep working. It also overwrites
 `X-Forwarded-Proto` with this server's `$scheme`, so a TLS presentation reaches
 millivolt as `https` and the session cookie carries `Secure`; a client-supplied
-value cannot spoof it.
+value cannot spoof it. Overwriting is the recommended form. If your ingress
+appends its scheme instead (`$http_x_forwarded_proto,$scheme`), the application
+still marks the request secure when any token does, so a client-supplied `http`
+in first position cannot downgrade the cookie.
 
 The sample also resolves the client address with `real_ip`:
 

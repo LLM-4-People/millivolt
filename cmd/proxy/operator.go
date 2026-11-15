@@ -220,16 +220,26 @@ func (g *operatorGate) sessionMAC(expires int64, nonce []byte) []byte {
 }
 
 // sessionCookieSecure derives the external scheme from the request. A direct
-// TLS connection is authoritative; behind an ingress that terminates TLS, the
-// first X-Forwarded-Proto token names the client scheme. Plain HTTP (the
-// default listener, including loopback development) keeps Secure false so the
-// browser still stores the cookie.
+// TLS connection is authoritative. Behind an ingress that terminates TLS the
+// forwarding header carries the client scheme; it is a comma-separated list,
+// so ANY token naming a secure scheme wins. A single trusted hop that
+// overwrites the header (the shipped NGINX example does) leaves exactly one
+// token; a hop that appends its own scheme leaves the client's first, which is
+// why a first-token test could downgrade a secure presentation and force
+// Secure off. wss counts as secure: a WebSocket presentation is TLS too. Plain
+// HTTP (the default listener, including loopback development) keeps Secure
+// false so the browser still stores the cookie.
 func sessionCookieSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	proto, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Proto"), ",")
-	return strings.EqualFold(strings.TrimSpace(proto), "https")
+	for _, proto := range strings.Split(r.Header.Get("X-Forwarded-Proto"), ",") {
+		switch strings.ToLower(strings.TrimSpace(proto)) {
+		case "https", "wss":
+			return true
+		}
+	}
+	return false
 }
 
 // sessionCookie is the one owner of every session-cookie attribute, so the

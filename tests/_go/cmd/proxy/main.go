@@ -1084,8 +1084,10 @@ func TestNewHTTPServerContract(t *testing.T) {
 // TestOperatorSessionCookieSecureFlag pins the transport-derived Secure
 // attribute: the listener itself is plain HTTP, so loopback development keeps
 // working without Secure, while a TLS request or an ingress that terminates
-// TLS and sets X-Forwarded-Proto: https gets the flag. The gate mints the
-// cookie on every authenticated request, which is the path asserted here.
+// TLS and sets X-Forwarded-Proto gets the flag. The header is a list and ANY
+// secure token wins: a proxy that appends its own scheme after the client's
+// "http" must not downgrade the cookie. wss counts as secure. The gate mints
+// the cookie on every authenticated request, which is the path asserted here.
 func TestOperatorSessionCookieSecureFlag(t *testing.T) {
 	const token = "operator-fixture-credential"
 	cases := []struct {
@@ -1099,7 +1101,10 @@ func TestOperatorSessionCookieSecureFlag(t *testing.T) {
 		{"forwarded https", "http://proxy.example/", "https", true},
 		{"forwarded https folded", "http://proxy.example/", " HTTPS ", true},
 		{"forwarded first token https", "http://proxy.example/", "https, http", true},
-		{"forwarded http", "http://proxy.example/", "http, https", false},
+		{"forwarded plain http", "http://proxy.example/", "http", false},
+		{"appended https is not downgraded", "http://proxy.example/", "http, https", true},
+		{"forwarded wss", "http://proxy.example/", "wss", true},
+		{"forwarded wss folded", "http://proxy.example/", "HTTP, WSS ", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
