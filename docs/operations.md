@@ -966,10 +966,10 @@ both.
 | `POST /admin/queue/drain` | Release parked requests without waiting for their limit, pause hold or retry window, covering both the admission queue and the send gate. Requires exactly one scope: `all:true`, `provider`, `model` or `client`. Released requests answer with a retryable 503, never a provider error; a request already exchanging bytes with the provider finishes normally. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. The body is `{"filter":{...}}`; filters are body-only, so any query key is rejected with 400 before the body is read. |
-| `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. Otherwise the body is `{"filter":{...},"reviewed_count":N}`: an empty/invalid filter is rejected, and a supplied reviewed count is counted again inside the delete transaction, refusing with 409 when the row set moved. The response is `{"deleted":N,"buffer_removed":N}`. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
+| `POST /admin/purge` | Delete matching finalized records. A genuinely bodyless POST deletes everything: that is the deliberate full-history command, it answers `200` rather than `404`, and any query key must be moved into a body instead. Otherwise the body is `{"filter":{...},"reviewed_count":N}`: an empty/invalid filter is rejected, and a supplied reviewed count is counted again inside the delete transaction, refusing with 409 when the row set moved. `status_code=0`, `debug=0` and `has_error=0` mean "no constraint" on that dimension, not a match for zero or false. The response is `{"deleted":N,"buffer_removed":N}`. Filters are body-only: any query key is rejected with 400 before the body is read, so `?provider=...` can never broaden the no-body full delete. |
 | `GET /admin/backup` | Download the self-checked `.mvb` Settings backup archive of config and/or database members. `?config=1` and `?database=1` select members, defaulting to both when no key is given; an explicit empty selection is an error. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
 | `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, the config values plus their changed-key lists against defaults and the live config, and the database request span when a live store stages the member) without applying anything. A store-less preview still reports the member's presence and decoded size with `inspectable:false` and the reason. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The upload is exempt from `request_body_read_timeout` (the idle bound still applies) and an expired read deadline answers 408. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
-| `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
+| `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. `status_code=0` and `debug=0` mean "no constraint" on that dimension. A debug capture rides as a sibling `debug_capture` member only for a row that has a stored sidecar, so debug bodies appear only while durable storage is live; a ring-only export never carries them, and debug bodies stay sensitive either way. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
@@ -1516,6 +1516,17 @@ ring holds, so a quiet proxy can still filter by what has run since it started,
 and each of them also accepts a typed value. Status is the one list-only
 dimension, because a status code is not a name anyone can type reliably. A
 debug-only export can include retained capture sidecars.
+
+A debug capture is written beside its record as a `debug_capture` member, and
+only when the row still has a stored sidecar. The artifact therefore carries
+debug bodies only while durable storage is live: a ring-record export, or a
+sidecar already reclaimed by the capture retention sweep, has the record alone.
+The bodies remain sensitive either way.
+
+The export predicate has no constraint for `status_code=0` and `debug=0`; both
+are off rather than a match for the zero status or the false flag. A
+genuinely bodyless `POST /admin/purge` deletes everything in one call, which is
+why a mistyped query key is refused instead of silently ignored.
 
 The download is always a gzip artifact named `millivolt-logs-<timestamp>.json.gz`;
 gunzip it to read the JSON array of records. Compression is applied at the
