@@ -796,31 +796,46 @@ module.exports = async function operatorMenus(H) {
           await settleUntil(() => captured !== null) && captured.url === '/admin/throttle');
         check('a full limit selector posts the exact server document',
           captured && stable(captured.body) === stable(expected) && !('id' in captured.body));
-        await settleUntil(() => text('#oc-change').startsWith('added limit for '));
-        // The ledger line and the row are painted by the same repaint, but a
-        // loaded runner can observe the ledger first; wait for the row and its
-        // scope so the assertions below never read a null node.
-        await settleUntil(() => !!text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope'));
         const scopePhrase = w.ocScopePhrase({
           providers: ['prov-a'], models: ['model-a'], clients: ['client-a'],
           keyHashes: ['abcdef123456'], conversations: ['conv-1'],
         });
+        // The ledger line and the row come from the same repaint, and a later
+        // poll repaint can replace either between two reads. Settle on the whole
+        // painted state and capture the strings in the tick the predicate
+        // holds, so a check never reads a node that has just been swapped out
+        // (or a null it dereferences).
+        let painted = null;
+        await settleUntil(() => {
+          const row = '#oc-pane .oc-rule[data-kind="limit"] ';
+          const scope = text(row + '.oc-rule-scope');
+          const budget = text(row + '.oc-rule-budget');
+          const ledger = text('#oc-change');
+          if (scope !== scopePhrase || budget === null || ledger === null) return false;
+          if (!ledger.startsWith('added limit for ')) return false;
+          painted = {scope, budget, ledger};
+          return true;
+        });
+        // Stand in for the loaded-runner timing: the poll repaint can swap the
+        // row out between the settle and the reads, which is what made CI read a
+        // null node. Dropping it here makes that window deterministic, and the
+        // captured strings must survive it.
+        w.eval("document.querySelector('#oc-pane .oc-rule[data-kind=\"limit\"]').remove()");
         // The row and the ledger must render the SAME shared phrase, and a key
         // is named once: ocScopePhrase prefixes the dimension, so the value
         // label must not prefix it again.
         check('the applied limit row reads the shared scope phrase',
-          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope') === scopePhrase &&
+          painted && painted.scope === scopePhrase &&
           ['provider prov-a', 'model model-a', 'client client-a', 'conversation conv-1']
             .every(part => scopePhrase.includes(part)));
         check('a key is named once, by its hash prefix',
           scopePhrase.includes('key abcdef12…') && !scopePhrase.includes('key key') &&
-          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-scope').includes('key abcdef12…'));
+          painted.scope.includes('key abcdef12…'));
         check('the applied limit row names its budgets and schedule',
-          text('#oc-pane .oc-rule[data-kind="limit"] .oc-rule-budget') ===
-            '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00–06:00');
+          painted.budget === '3 in flight · 10 requests / 1m · 1K tokens / 1m · SM · 22:00–06:00');
         check('the change ledger records the add with the same scope wording',
-          text('#oc-change').startsWith('added limit for ' + scopePhrase) &&
-          text('#oc-change').includes('3 in flight') && text('#oc-change').includes('1K tokens / 1m'));
+          painted.ledger.startsWith('added limit for ' + scopePhrase) &&
+          painted.ledger.includes('3 in flight') && painted.ledger.includes('1K tokens / 1m'));
       } finally {
         w.fetch = savedFetch;
       }
