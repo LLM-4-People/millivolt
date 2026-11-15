@@ -515,22 +515,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// inference client-wire override is present; every other early sink
 	// follows the client protocol.
 	envelope := envelopeProtocol(r)
-	// Reserve one request slot and charge the body budget as bytes actually
-	// arrive. Reserving the declared Content-Length up front let an idle
-	// connection hold budget it never used: eight clients declaring 32 MiB each
-	// exhausted the default 256 MiB budget and denied inference to every other
-	// client. Reserving even one read hint per socket kept a smaller version of
-	// the same lever, so the reservation starts at zero and only real bytes
-	// count.
-	reservation, ok := s.inflight.acquireBody()
+	// Reserve one request slot and charge the body hint the body owner is
+	// about to allocate. The declared Content-Length alone is not the charge:
+	// the allocation is bounded by the request cap and the read hint, and
+	// chargeRead refunds whatever the body does not need. Charging nothing let
+	// idle declarations hold uncharged heap; charging the full declaration let
+	// eight idle 32 MiB bodies exhaust the budget.
+	hint := requestBodyHint(r.ContentLength, int64(s.cfg().MaxRequestBytes))
+	reservation, ok := s.inflight.acquireBody(hint)
 	if !ok {
-		// Refuse before buffering a body: over the process-wide bound, heap is
-		// what a client would otherwise control. The directive writer above
-		// carries the no-retry header like every other error sink.
-		w.Header().Set("Retry-After", "1")
-		writeProtocolHTTPError(w, envelope, http.StatusServiceUnavailable, typeAPIError,
-			"proxy is at its in-flight request limit")
-		return
+		// The budget cannot cover the allocation. Hold the slot alone and let
+		// the body owner charge-and-refuse: it retains nothing and still
+		// settles the status by the cap/budget precedence, so a body past
+		// max_request_bytes keeps its permanent 413 instead of a 503 that
+		// invites a retry which can never fit.
+		reservation, ok = s.inflight.acquireBody(0)
+		if !ok {
+			// Refuse before buffering a body: over the process-wide bound,
+			// heap is what a client would otherwise control. The directive
+			// writer above carries the no-retry header like every other error
+			// sink.
+			w.Header().Set("Retry-After", "1")
+			writeProtocolHTTPError(w, envelope, http.StatusServiceUnavailable, typeAPIError,
+				"proxy is at its in-flight request limit")
+			return
+		}
 	}
 	defer reservation.release()
 	t, err := resolveTarget(r, s.cfg())

@@ -268,13 +268,12 @@ func TestResponseBufferBudgetHotReload(t *testing.T) {
 	}
 }
 
-// TestInflightBodyBudgetChargesBytesNotDeclarations pins the admission rule that
-// replaced up-front declaration reserving. With a 256 MiB budget and a 32 MiB
-// per-request cap, the old owner reserved each request's declared length, so
-// eight idle connections declaring 32 MiB and sending nothing consumed the whole
-// budget and every other client was refused. Reserving even one read hint per
-// socket kept a smaller version of the same lever, so admission now reserves no
-// body bytes at all and charges only what is read.
+// TestInflightBodyBudgetChargesBytesNotDeclarations pins the reservation
+// mechanics when no hint is admitted. With a 256 MiB budget and a 32 MiB
+// per-request cap, reserving each request's declared length let eight idle
+// connections declaring 32 MiB and sending nothing consume the whole budget.
+// The bounded hint (TestInflightBodyBudgetChargesTheAdmittedHint) and the
+// read-time reconciliation below keep the budget tied to the real body.
 func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 	const budget = 256 << 20
 
@@ -285,7 +284,7 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 	// is charged until bytes arrive.
 	reservations := make([]*bodyReservation, 0, 64)
 	for i := range 64 {
-		r, ok := l.acquireBody()
+		r, ok := l.acquireBody(0)
 		if !ok {
 			t.Fatalf("idle request %d was refused: an idle declaration must not consume budget", i)
 		}
@@ -295,7 +294,7 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 		t.Fatalf("charged %d bytes for 64 idle requests, want 0", got)
 	}
 	// The budget is still fully available for real traffic.
-	next, ok := l.acquireBody()
+	next, ok := l.acquireBody(0)
 	if !ok {
 		t.Fatal("a further request was refused while every idle request had sent nothing")
 	}
@@ -314,7 +313,7 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 	// the budget still refuses a body that would cross it.
 	var small inflightLimiter
 	small.set(10000, 300)
-	r, ok := small.acquireBody()
+	r, ok := small.acquireBody(0)
 	if !ok {
 		t.Fatal("initial reservation refused")
 	}
@@ -369,6 +368,83 @@ func TestInflightBodyBudgetChargesBytesNotDeclarations(t *testing.T) {
 	}
 	if got, err := io.ReadAll(fine); err != nil || fine.read != 10 || len(got) != 10 {
 		t.Fatalf("a chargeable read delivered %d bytes, read=%d err=%v", len(got), fine.read, err)
+	}
+}
+
+// TestInflightBodyBudgetChargesTheAdmittedHint pins the closed leak: the body
+// owner allocates the admitted hint as soon as the request is admitted
+// (request_body.go), so that allocation is what admission charges, bounded by
+// the request cap and the read hint. It also pins the reconciliation in both
+// directions: a short body refunds the difference, an understated declaration
+// is charged the overshoot as it grows, and everything returns on release.
+func TestInflightBodyBudgetChargesTheAdmittedHint(t *testing.T) {
+	// A declaration past the read hint charges the hint, not the declaration.
+	if got := requestBodyHint(32<<20, 4<<20); got != requestReadHintMax {
+		t.Fatalf("hint of a 32 MiB declaration = %d, want the %d read hint", got, requestReadHintMax)
+	}
+	// The cap and its overflow probe byte bound a small cap.
+	if got := requestBodyHint(2048, 1024); got != 1025 {
+		t.Fatalf("hint past the cap = %d, want 1025", got)
+	}
+	if got := requestBodyHint(100, 1<<20); got != 100 {
+		t.Fatalf("hint under the cap = %d, want 100", got)
+	}
+	// An absent or chunked declaration allocates nothing up front.
+	if got := requestBodyHint(-1, 1<<20); got != 0 {
+		t.Fatalf("chunked hint = %d, want 0", got)
+	}
+	if got := requestBodyHint(0, 1<<20); got != 0 {
+		t.Fatalf("zero-length hint = %d, want 0", got)
+	}
+
+	const budget = 1 << 20
+	var l inflightLimiter
+	l.set(10, budget)
+
+	// One 768 KiB declaration fits and holds its hint while idle; a second one
+	// no longer fits and leaks nothing.
+	first, ok := l.acquireBody(768 << 10)
+	if !ok {
+		t.Fatal("a declaration inside the budget was refused")
+	}
+	if got := l.bytes.Load(); got != 768<<10 {
+		t.Fatalf("idle charge = %d, want the 768 KiB hint", got)
+	}
+	if _, ok := l.acquireBody(768 << 10); ok {
+		t.Fatal("a second declaration past the budget was admitted")
+	}
+	if got := l.bytes.Load(); got != 768<<10 {
+		t.Fatalf("refused admission charged %d bytes, want the unchanged 768 KiB", got)
+	}
+	if got := l.cur.Load(); got != 1 {
+		t.Fatalf("refused admission leaked a request slot: cur=%d", got)
+	}
+
+	// The body turns out tiny: the unused reservation comes back as it is read.
+	if !first.chargeRead(4096) {
+		t.Fatal("a read inside the hinted allocation was refused")
+	}
+	if got := l.bytes.Load(); got != 4096 {
+		t.Fatalf("charge after a short read = %d, want 4096", got)
+	}
+	// An understated declaration is charged the overshoot instead.
+	if !first.chargeRead(8192) {
+		t.Fatal("a read past the short prefix was refused")
+	}
+	if got := l.bytes.Load(); got != 12<<10 {
+		t.Fatalf("charge after the overshoot = %d, want 12 KiB", got)
+	}
+	second, ok := l.acquireBody(768 << 10)
+	if !ok {
+		t.Fatal("the refunded budget was not reusable")
+	}
+	first.release()
+	if got := l.bytes.Load(); got != 768<<10 {
+		t.Fatalf("budget after release = %d, want only the second hint", got)
+	}
+	second.release()
+	if got := l.bytes.Load(); got != 0 {
+		t.Fatalf("budget after both releases = %d, want 0", got)
 	}
 }
 
@@ -438,14 +514,16 @@ func (b *stalledBody) Close() error { return nil }
 
 // TestInflightBudgetThroughTheHandler pins the admission rule at the level that
 // actually matters. The unit test below exercises the reservation type; this
-// one drives ServeHTTP, so it fails if the handler reserves a declared length
-// again, if it stops passing the charge function, or if the refusal stops
-// mapping to 503 with Retry-After.
+// one drives ServeHTTP, so it fails if the handler stops charging the admitted
+// hint, if it stops reconciling the charge against the real body, or if the
+// refusal stops mapping to 503 with Retry-After.
 //
-// The pre-fix handler reserved each request's declared Content-Length, so N
-// idle sockets declaring max_request_bytes each exhausted the budget and every
-// other client was refused. Here two stalled requests declare 1 MiB and send
-// nothing; a healthy request must still be admitted and succeed.
+// The pre-fix handler charged nothing at admission while the body owner
+// allocated the whole admitted hint, so idle sockets held uncharged heap:
+// thirty-two idle 1 MiB declarations allocated over 32 MiB with a zero budget
+// charge. Here one stalled declaration of 1 MiB charges the whole 1 MiB budget,
+// so the next declaration is refused until the first body proves short and its
+// unused reservation is refunded.
 func TestInflightBudgetThroughTheHandler(t *testing.T) {
 	upstream, _ := mockUpstream(t, false)
 	defer upstream.Close()
@@ -456,33 +534,79 @@ func TestInflightBudgetThroughTheHandler(t *testing.T) {
 	s := New(cfg, metrics.Noop{})
 	s.client.Store(&http.Client{Transport: rewriteTransport{target: upstream.URL}})
 
-	// Hold two requests inside admission. Each declares 1 MiB (the whole
-	// budget) and has delivered no body bytes.
-	stalled := make([]*stalledBody, 2)
-	done := make(chan struct{}, len(stalled))
-	for i := range stalled {
-		body := newStalledBody()
-		stalled[i] = body
-		r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", body)
-		r.ContentLength = 1 << 20
-		r.Header.Set("Authorization", "Bearer sk-test")
-		r.Header.Set("X-Proxy-Base-URL", upstream.URL)
-		go func() {
-			defer func() { done <- struct{}{} }()
-			s.ServeHTTP(httptest.NewRecorder(), r)
-		}()
+	// Hold one request inside admission: it declares the whole 1 MiB budget
+	// and has delivered no body bytes.
+	body := newStalledBody()
+	done := make(chan struct{})
+	r := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", body)
+	r.ContentLength = 1 << 20
+	r.Header.Set("Authorization", "Bearer sk-test")
+	r.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	go func() {
+		defer close(done)
+		s.ServeHTTP(httptest.NewRecorder(), r)
+	}()
+	select {
+	case <-body.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled request never entered the body read")
 	}
-	for i, body := range stalled {
-		select {
-		case <-body.entered:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("stalled request %d never entered the body read", i)
-		}
+	// The declaration's allocation is already made, so it is charged even
+	// though not one body byte has arrived.
+	if got := s.inflight.bytes.Load(); got != 1<<20 {
+		t.Fatalf("idle declaration charged %d bytes, want the whole 1 MiB hint", got)
+	}
+	// A second 1 MiB declaration cannot be covered while the first holds the
+	// budget. It keeps its slot and is refused retryably as soon as a chunk
+	// arrives, without the allocation being charged.
+	second := newStalledBody()
+	sr := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", second)
+	sr.ContentLength = 1 << 20
+	sr.Header.Set("Authorization", "Bearer sk-test")
+	sr.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	refused := httptest.NewRecorder()
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		s.ServeHTTP(refused, sr)
+	}()
+	select {
+	case <-second.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refused declaration never reached its body read")
+	}
+	if got := s.inflight.bytes.Load(); got != 1<<20 {
+		t.Fatalf("refused declaration charged %d bytes, want the unchanged 1 MiB", got)
+	}
+	close(second.release)
+	select {
+	case <-secondDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the refused declaration never returned")
+	}
+	if refused.Code != http.StatusServiceUnavailable || refused.Header().Get("Retry-After") != "1" ||
+		!strings.Contains(refused.Body.String(), "api_error") {
+		t.Fatalf("second declaration = %d %q %s, want a retryable 503",
+			refused.Code, refused.Header().Get("Retry-After"), refused.Body.String())
+	}
+	if got := s.inflight.bytes.Load(); got != 1<<20 {
+		t.Fatalf("budget after the refusal = %d, want the unchanged 1 MiB", got)
 	}
 
-	// Nothing has been charged, so the whole budget is available.
+	// Release the stalled request. Its tiny real body settles far below the
+	// declaration, and the difference must be refunded on release so the
+	// budget is whole again.
+	close(body.release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled request never returned")
+	}
 	if got := s.inflight.bytes.Load(); got != 0 {
-		t.Fatalf("idle declarations charged %d bytes, want 0", got)
+		t.Fatalf("body budget after release = %d, want 0", got)
+	}
+	if got := s.inflight.cur.Load(); got != 0 {
+		t.Fatalf("request slots after release = %d, want 0", got)
 	}
 	healthy := httptest.NewRecorder()
 	hr := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions",
@@ -491,26 +615,8 @@ func TestInflightBudgetThroughTheHandler(t *testing.T) {
 	hr.Header.Set("X-Proxy-Base-URL", upstream.URL)
 	s.ServeHTTP(healthy, hr)
 	if healthy.Code != http.StatusOK {
-		t.Fatalf("healthy request status = %d, want 200 while idle requests hold no budget (body %s)",
+		t.Fatalf("healthy request status = %d after the refund, want 200 (body %s)",
 			healthy.Code, healthy.Body.String())
-	}
-
-	// Release the stalled requests; every charge must be returned.
-	for _, body := range stalled {
-		close(body.release)
-	}
-	for range stalled {
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("a stalled request never returned")
-		}
-	}
-	if got := s.inflight.bytes.Load(); got != 0 {
-		t.Fatalf("body budget after release = %d, want 0", got)
-	}
-	if got := s.inflight.cur.Load(); got != 0 {
-		t.Fatalf("request slots after release = %d, want 0", got)
 	}
 
 	// A body that crosses the budget mid-upload is refused with 503 and
@@ -521,7 +627,7 @@ func TestInflightBudgetThroughTheHandler(t *testing.T) {
 	s2 := New(cfg2, metrics.Noop{})
 	s2.client.Store(&http.Client{Transport: rewriteTransport{target: upstream.URL}})
 
-	// Park the whole budget behind one live read.
+	// Park the whole budget behind one admitted declaration.
 	parked := newFillBody(int64(cfg2.MaxInflightBodyBytes))
 	parkedReq := httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", parked)
 	parkedReq.ContentLength = int64(cfg2.MaxInflightBodyBytes) + 1
@@ -537,8 +643,8 @@ func TestInflightBudgetThroughTheHandler(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("parked request never filled the budget")
 	}
-	// The charge is applied after Read returns, so wait for it rather than for
-	// the fill signal alone: filling and charging are two steps.
+	// Admission charges the hint before the first read, so this settles at
+	// once; the wait keeps a scheduling delay from flaking the assertion.
 	limit := int64(cfg2.MaxInflightBodyBytes)
 	charged := time.Now().Add(5 * time.Second)
 	for s2.inflight.bytes.Load() < limit {

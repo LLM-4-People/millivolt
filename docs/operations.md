@@ -1163,15 +1163,19 @@ from base URLs remain below both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB; admission charges the bytes actually read, so a
-declared length alone holds no budget), and `max_inflight_response_bytes` its
+body budget (default 256 MiB; admission charges the allocation hint, the
+declared length bounded by `max_request_bytes` and the read hint, and reconciles
+it against the bytes actually read, so a short body refunds the difference and a
+chunked one is charged as it arrives), and `max_inflight_response_bytes` its
 budget
 for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
 (at most 1 MiB plus one 32 KiB chunk), and model discovery. A request-slot
 refusal is answered with `503` and `Retry-After` before the body is read. The
-body budget refuses on the read that would cross it; that chunk and the rest
-of the upload are not retained. The per-request cap still owns the status: a
+body budget charges the allocation hint at admission and reconciles it against
+the bytes actually read; when the hint cannot be covered the slot is still
+taken, and the first read decides without retaining the upload. The
+per-request cap still owns the status: a
 refused request drains at most the remaining `max_request_bytes` window so an
 over-cap body answers the definitive `413` instead of a retryable `503`, while
 a body that fits the cap answers `503`. Request-body reads must make progress within
