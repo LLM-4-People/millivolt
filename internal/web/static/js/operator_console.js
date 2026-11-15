@@ -140,6 +140,7 @@ function ocRuleRowHTML(rule) {
   const id = escapeHtml(rule.id || '');
   const html = `<div class="oc-rule" data-kind="${escapeHtml(rule.kind)}" data-oc-rule="${id}"${ocRuleEditing(rule.kind, rule.id || '')}${rule.attrs || ''}>` +
     `<button type="button" class="oc-rule-main" data-oc-edit="${escapeHtml(rule.kind)}" data-oc-id="${id}" data-oc-key="rule-${id}" title="${escapeHtml(rule.title)}">` +
+    `<span class="visually-hidden">${escapeHtml(rule.kind)}</span>` +
     `<span class="oc-rule-scope">${escapeHtml(rule.scope)}</span>` +
     `<span class="oc-rule-budget">${escapeHtml(rule.budget)}</span></button>` +
     `<div class="oc-rule-side"><span class="oc-rule-live">${escapeHtml(rule.live)}</span>` +
